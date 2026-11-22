@@ -49,33 +49,6 @@ import {
 } from "../contracts/failure-stages";
 import type { D1Like, D1StatementLike } from "./types";
 
-/**
- * The producer-side stage vocabulary (AL-1 + AL-6 extension, plus `usage` —
- * frozen): `parse` = the runner's stdout failed parseReviewOutput validation
- * (deterministic model-output failure — degrade + ack path); `runner` =
- * the in-image review run itself failed (non-zero exit / exec error);
- * `sandbox` = container acquisition or an in-sandbox git/diff/numstat/input
- * step failed; `pipeline` = worker-side orchestration (level/credential/
- * config resolution, comment post, …); `usage` = the execution's
- * `usage_events` ledger insert failed and the review continued, so the row is
- * the only record of the dropped metered attempt (it carries the `reviewId`);
- * `recheck` = the recheck round produced no usable document or its own status
- * said `failed` (the round continues with unverifiable rows; the row is the
- * attribution that survives a lost container stderr); `rate-limit` = the
- * degraded-comment sweep was throttled by a GitHub secondary rate limit while
- * the review itself stood (the continuation event, never a review failure);
- * `maintenance_deferred` = a delivery the platform's maintenance window could
- * not hand back to the queue (see {@link MAINTENANCE_DEFERRED_STAGE}).
- */
-/**
- * Deliveries a message gets before the queue DLQs it: 1 initial delivery + the
- * queue's `max_retries` (wrangler.jsonc, one retry per guard rung today).
- * `tests/pipeline/queue-config-contract.test.ts` locks it to that config, so the
- * platform and this code cannot drift apart silently.
- *
- * The consumer imports it for its failed-claim stamp; the sweep derives its
- * default alert threshold from it. Kept in this leaf so neither has to load the other.
- */
 export const QUEUE_MAX_ATTEMPTS = 6;
 
 export const FAILURE_STAGES: readonly string[] = Object.freeze([
@@ -83,16 +56,8 @@ export const FAILURE_STAGES: readonly string[] = Object.freeze([
   "runner",
   "sandbox",
   "pipeline",
-  // A delivery refused before execution (the plan lacks the shared bot): no
-  // review ran, so the row stays paged AND attributed — it is in neither
-  // exclusion list.
   SHARED_BOT_ENTITLEMENT_STAGE,
-  // A delivery refused at enqueue because the month's RP ceiling is spent: a
-  // real failure on the dashboard, kept out of the global ops alert only.
   QUOTA_STAGE,
-  // A delivery the maintenance window could not defer: in neither exclusion
-  // list, and kept out of the sweep's infrastructure total by its own
-  // predicate — its separate existence signal has its own lane.
   MAINTENANCE_DEFERRED_STAGE,
   ...ATTRIBUTION_EXCLUDED_STAGES,
 ]);
@@ -177,29 +142,8 @@ export type AdmissionDropReason = (typeof ADMISSION_DROP_REASONS)[number];
 export type AdmissionDropCounts = Record<AdmissionDropReason, number>;
 
 export type FailureStore = {
-  /**
-   * Append one failure event row. Fail-loud: an off-vocabulary stage throws
-   * BEFORE any row is written (producer-side enforcement, 0009 precedent);
-   * D1 errors propagate. Callers wanting best-effort semantics wrap this in
-   * try/catch themselves (the consumer does — an insert failure must never
-   * mask the ack or the rethrow).
-   */
   record(input: ReviewFailureInput): Promise<void>;
-  /**
-   * Newest-first read face (the ops/test window scan). `created_at` has
-   * second precision (`datetime('now')`), so rowid breaks ties inside one
-   * second — the order is total and deterministic.
-   */
   listRecent(limit?: number): Promise<ReviewFailureRow[]>;
-  /**
-   * Terminal admission drops in the trailing 24h, grouped by the reason token
-   * of the drop row's prefix. One grouped READ over the rows the pipeline
-   * already writes — no new table, writer or stage; every reason is present,
-   * absent ones as 0. The `stage = 'pipeline'` + `created_at` window is served
-   * by the partial index `idx_review_failures_pipeline_created` (migration
-   * 0048), so this per-page-load read scans drop rows only, never the other
-   * stages' traffic.
-   */
   countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
 
@@ -209,28 +153,11 @@ export type FailureStore = {
  * without a verb they never call.
  */
 export type FailureStoreWithCounts = FailureStore & {
-  /**
-   * GitHub secondary-rate-limit rejections in the trailing 24h, counted by the
-   * `error` prefix every such row starts with. No stage predicate: the
-   * `rate-limit` stage's rows ARE causes of this metric, and the primary-limit
-   * prefix is different text, so a primary limit never inflates this number.
-   */
   countGithubRateLimited24h(): Promise<number>;
 };
 
-/** Default page size for listRecent when the caller does not bound it. */
 const LIST_RECENT_DEFAULT_LIMIT = 50;
 
-/**
- * Matches both `review dropped after <n> refused retries: <reason> (…)` and
- * `review dropped: comment claim restore failed: <detail>; admission refused: <reason> (…)`.
- * `%` covers the retry count or restore detail; the open paren ends the reason
- * token. New drop formats in `handleGuardHeld` must extend these LIKE predicates.
- * Built from
- * `ADMISSION_DROP_REASONS` so the union and the SQL cannot diverge (the
- * `sqlStageList` precedent). Values are compile-time literals — no input
- * reaches this text.
- */
 const admissionDropLike = (reason: AdmissionDropReason): string =>
   `(error LIKE 'review dropped after % refused retries: ${reason} (%'
     OR error LIKE 'review dropped: comment claim restore failed: %; admission refused: ${reason} (%')`;
@@ -247,11 +174,6 @@ WHERE stage = 'pipeline'
   AND (${ADMISSION_DROP_REASONS.map((reason) => admissionDropLike(reason)).join("\n    OR ")})
 GROUP BY reason`;
 
-/**
- * The secondary-rate-limit count over the same trailing 24h window as the
- * admission drops. The prefix is a bound value (it is a compile-time literal
- * with no wildcard of its own), so the query text stays constant.
- */
 const GITHUB_RATE_LIMITED_SQL = `SELECT COUNT(*) AS count
 FROM review_failures
 WHERE created_at > datetime('now', '-24 hours')

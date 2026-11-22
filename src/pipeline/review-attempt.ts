@@ -1,11 +1,3 @@
-/**
- * One review attempt's execution body. `prepareReviewAttempt` acquires the
- * container and its purpose-scoped credential, clones the PR head and resolves
- * the authoritative checkout SHA; `runReviewAttempt` writes the runner input,
- * makes the blocking paid call and collects the result documents. The queue
- * consumer still drives both — admission, dedupe, skip settlement, the Check
- * seam and publication stay there.
- */
 
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
@@ -141,11 +133,8 @@ export async function reviewAttemptSandbox(
 
 /** One attempt's activation state, as the provisioning row records it. */
 export type AttemptActivation = {
-  /** The container id the claim minted; null on a row written before it existed. */
   sandboxId: string | null;
-  /** The guarded transition that precedes every start has been won. */
   activated: boolean;
-  /** A successor took this attempt's PR: nothing may start again. */
   revoked: boolean;
 };
 
@@ -252,21 +241,6 @@ export async function discardReviewAttempt(
   return sandbox.destroyMarked(attemptMarker(attemptId), retention);
 }
 
-/**
- * The attempt's own row: the only authority to provision its container, the
- * fence in front of the paid step, and the record that the paid step's result
- * is durable. `migrations/0082_review_launches.sql` enforces the identity, the
- * forward-only state machine and the coupling of `persisted` to a stored
- * result; every transition below is ONE conditional statement whose
- * `meta.changes` is the only success signal, so the row — not the caller —
- * decides whether an attempt may provision, launch or record completion.
- *
- * The INSERT is the first-provisioning claim: only the entry whose INSERT
- * created the row may start a container for this attempt. A later entry finds
- * the row held and may never stamp a replacement as the original — not even
- * after a crash before the marker write, which is why the marker is proven,
- * never re-claimed, from the second entry on.
- */
 const CLAIM_ATTEMPT_SQL = `
 INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation, sandbox_id, activated_ms)
 VALUES (?, 'provisioned', ?, ?, ?, ?, ?)
@@ -275,12 +249,6 @@ ON CONFLICT (attempt_id) DO NOTHING
 
 
 
-/**
- * Fill the frozen IDENTITY once — key AND generation — for a delivery that had
- * no head at creation. The CAS is `attempt_key IS NULL`: exactly one winner, and
- * a loser means another caller froze a DIFFERENT head (a moved head), which the
- * caller must settle as skipped, never continue on.
- */
 const FREEZE_ATTEMPT_IDENTITY_SQL = `
 UPDATE review_launches SET attempt_key = ?, attempt_generation = ?
 WHERE attempt_id = ? AND attempt_key IS NULL
@@ -291,13 +259,6 @@ const READ_ATTEMPT_IDENTITY_SQL = `SELECT attempt_key, attempt_generation FROM r
 /** One attempt's frozen Check identity: the key and the generation it belongs to. */
 export type AttemptIdentity = { key: string; generation: number };
 
-/**
- * The paid-step fence, taken in the statement that is ABOUT TO SEND the exec:
- * `provisioned` → `launched` only. A row already launched (a replay, a retry,
- * a restart) changes nothing, so no second paid call can start; a row that is
- * still `provisioned` when the exec is about to run means the earlier work
- * (mint, input write) never reached it and the attempt remains releasable.
- */
 const CLAIM_LAUNCH_SQL = `
 UPDATE review_launches
 SET state = 'launched', launched_at_ms = ?
@@ -383,12 +344,6 @@ SET state = 'failed', failed_at_ms = ?, result_outcome = 'failed'
 WHERE attempt_id = ? AND state = 'launched'
 `;
 
-/**
- * Destruction CLAIMS the row first: `provisioned → abandoned` in one
- * conditional statement. Only the winner (`meta.changes === 1`) may destroy; a
- * loser means a concurrent attempt moved the row to `launched`, so the
- * container may be paying and cleanup must report `unknown` instead.
- */
 const ABANDON_LAUNCH_SQL = `
 INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id)
 VALUES (?, 'abandoned', ?, ?, ?)
@@ -397,13 +352,6 @@ ON CONFLICT (attempt_id) DO UPDATE
  WHERE review_launches.state = 'provisioned'
 `;
 
-/**
- * The attempt's owed Check settlement, recorded on the ATTEMPT row and nowhere
- * else. The association is the open Check row's own `attempt_key` AND its
- * `generation` — a key alone names the attempt, so an older generation's mark
- * could match a newer row — and `check_owed_ms` is the obligation's own due
- * instant. Written only while that generation has NOT concluded.
- */
 const NOTE_CHECK_OWED_SQL = `
 UPDATE review_launches
 SET check_owed_ms = ?, check_key = ?, check_generation = ?
@@ -414,7 +362,6 @@ WHERE attempt_id = ? AND check_owed_ms IS NULL
   )
 `;
 
-/** Advance the obligation's due instant — the same backoff the Check row uses. */
 const BUMP_CHECK_OWED_SQL = `
 UPDATE review_launches
 SET check_owed_ms = ?
@@ -431,12 +378,6 @@ WHERE check_owed_ms IS NOT NULL
   AND check_generation = (SELECT c.generation FROM review_checks c WHERE c.id = ?)
 `;
 
-/**
- * Housekeeping for the marks whose conclusion already landed: a holder that
- * terminated the Check, or a clear that faulted, leaves a mark whose Check row
- * is terminal. Clearing it is idempotent and retried on EVERY pass, so the
- * obligation cannot stay set after a conclusion.
- */
 const CLEAR_CONCLUDED_CHECK_OWED_SQL = `
 UPDATE review_launches
 SET check_owed_ms = NULL, check_key = NULL, check_generation = NULL
@@ -552,12 +493,6 @@ export type ReviewLaunchState =
     }
   | { state: "failed"; claimedAtMs: number; launchedAtMs: number; failedAtMs: number; checkOwedMs: number | null }
   | { state: "abandoned"; claimedAtMs: number; abandonedAtMs: number; checkOwedMs: number | null }
-  /**
-   * A row this build cannot interpret — an unrecognised state, or a state whose
-   * coupled facts are missing. It is NEVER `null`: "no row" means nothing was
-   * ever claimed, while `unknown` means a row exists that this code must not
-   * reason about.
-   */
   | { state: "unknown"; claimedAtMs: number | null };
 
 /**
@@ -584,10 +519,6 @@ export async function claimReviewAttempt(
   db: D1Like,
   attemptId: string,
   nowMs: number,
-  /**
-   * The identity frozen at creation — key AND generation — or `null` when this
-   * delivery had no admitted claim (the freeze then happens at the checkout).
-   */
   identity: AttemptIdentity | null,
 ): Promise<"claimed" | "already-claimed"> {
   const written = await db
@@ -643,8 +574,6 @@ export async function claimReviewLaunch(
 ): Promise<LaunchClaim> {
   const written = await db.prepare(CLAIM_LAUNCH_SQL).bind(nowMs, attemptId).run();
   if (written.meta.changes === 1) return { ok: true };
-  // A zero-row claim carries no cause, so the refusal costs one read — only on
-  // the refusal path, and only to name it. It never decides anything.
   const verdict = launchVerdict(await readReviewLaunch(db, attemptId));
   switch (verdict.kind) {
     case "persisted":
@@ -655,14 +584,10 @@ export async function claimReviewLaunch(
       return { ok: false, reason: "failed" };
     case "never-claimed":
     case "never-paid":
-      // No row, or a row a concurrent caller already moved past `provisioned`.
       return { ok: false, reason: "no-claim" };
     case "owned-by-cleanup":
-      // A cleanup claimed this attempt for destruction: the paid step must not
-      // start on a container that is being removed.
       return { ok: false, reason: "no-claim" };
     case "unrecognised":
-      // A row this build cannot interpret: no launch may be taken on it.
       return { ok: false, reason: "no-claim" };
     default:
       return noLaunchState(verdict);
@@ -817,10 +742,6 @@ export async function deferCheckWithOwed(
     reason?: string;
   },
 ): Promise<boolean> {
-  // The bump goes FIRST, so a defer that then fails or loses its fence cannot
-  // leave the obligation silently un-advanced: it is compensated by clearing the
-  // mark. Neither error is swallowed — a bump fault is the caller's failed
-  // defer, and a defer fault propagates after the compensation.
   await bumpCheckOwed(db, input.checkAttemptId, input.nextAttemptMs);
   let deferred: boolean;
   try {
@@ -839,13 +760,8 @@ export async function deferCheckWithOwed(
             input.nowMs,
           );
   } catch (err) {
-    // The fence faulted after the instant moved. The obligation is KEPT: it is
-    // the only record that a Check still needs settling, and a transient fault
-    // must not drop it — the next pass retries the defer. No error is swallowed.
     throw err;
   }
-  // A lost fence moved nothing, so the mark stays too: only a conclusion (a
-  // recorded terminal or an honest give-up) may clear it.
   return deferred;
 }
 
@@ -884,10 +800,6 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
   if (row === null) return null;
   const unreadable = (): ReviewLaunchState => ({ state: "unknown", claimedAtMs: row.claimed_at_ms });
   if (!isLaunchState(row.state)) return unreadable();
-  // The coupled fact, checked in EVERY arm: a state is only readable with the
-  // outcome it stores (NULL for the non-terminal ones). The schema enforces the
-  // same coupling, so a mismatch means a row this build must not reason about
-  // — never a terminal state whose authorisation is inferred from timestamps.
   switch (row.state) {
     case "provisioned":
       return row.result_outcome !== null
@@ -903,8 +815,6 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
             checkOwedMs: row.check_owed_ms,
           };
     case "launched":
-      // No outcome on a launched row: an outcome IS the transition, so this
-      // arm is the only `unknown` and only it holds container and capacity.
       return row.launched_at_ms === null || row.result_outcome !== null
         ? unreadable()
         : {
@@ -941,21 +851,10 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
         checkOwedMs: row.check_owed_ms,
       };
     default:
-      // The switch is exhaustive over `LaunchRowState`; this arm is unreachable
-      // and exists so adding a union member without a decoder arm fails to build.
       return noLaunchState(row.state);
   }
 }
 
-/**
- * The paid step's collected result as the row stores it. `recheck.rejected` is
- * a Set in memory and a plain array on the row — the one shape that needs a
- * codec; everything else is stored and read back verbatim.
- *
- * `run.stderr` is deliberately NOT stored: it is untrusted provider text used
- * only on the failure paths, which never reach a persisted row, and keeping it
- * out of D1 keeps an unredacted stream out of the durable store.
- */
 function encodeExecution(execution: ReviewAttemptExecution): string {
   return JSON.stringify({
     run: { stdout: execution.run.stdout, exitCode: execution.run.exitCode },
@@ -971,8 +870,6 @@ function decodeExecution(attemptId: string, json: string): ReviewAttemptExecutio
   try {
     parsed = JSON.parse(json);
   } catch {
-    // Falls through to the one shape check below — an unreadable row is the
-    // same refusal as a row that does not carry a paid outcome.
   }
   const stored = parsed as
     | ((Partial<{ run: { stdout: string; exitCode: number } }> & {
@@ -988,9 +885,6 @@ function decodeExecution(attemptId: string, json: string): ReviewAttemptExecutio
   }
   return {
     run: { stdout: stored.run.stdout, stderr: "", exitCode: stored.run.exitCode },
-    // A row written by this module always carries the array; a `Set` of
-    // undefined would still be an empty set, so a truncated field degrades to
-    // "no rejected rows" rather than a throw.
     recheck:
       stored.recheck == null ? null : { ...stored.recheck, rejected: new Set(stored.recheck.rejected) },
     report: stored.report ?? null,
@@ -998,10 +892,6 @@ function decodeExecution(attemptId: string, json: string): ReviewAttemptExecutio
   };
 }
 
-/**
- * A replay's marker proof: an existing incarnation may be PROVEN, never
- * re-claimed, so the guarded read needs a command that changes nothing.
- */
 const MARKER_PROOF_COMMAND = shellCommand("true");
 
 /**
@@ -1026,11 +916,6 @@ export type ReviewAttemptProgress = {
   failureStage: FailureStage;
   secretValues: string[];
   runnerStartedAt: number | undefined;
-  /**
-   * The paid exec RETURNED (an exit status was observed). A rejection or a lost
-   * reply leaves this false: nothing then proves the child stopped, so the
-   * caller may not destroy its container.
-   */
   runnerReturned: boolean;
 };
 
@@ -1111,23 +996,8 @@ export function boundedStepTimeout(
   return left;
 }
 
-/**
- * Payload text of one bounded read, plus WHY it yielded nothing. A missing
- * flag line or overflow beyond the byte bound are both "no payload" to the
- * caller, but they are different D1 causes, so the failure is named rather
- * than collapsed into a bare null. Shared by the recheck document and status
- * reads and the diff capture — the transport is identical, only the producer
- * differs.
- */
 type BoundedRead = { text: string | null; failure: "overflow" | "unreadable" | null };
 
-/**
- * The report read's own result: the same transport, plus `absent` — the
- * command itself proved the path is not there. ONLY a read whose command
- * probes for the file may report it (see `readReportCommand`); every other
- * producer never emits that flag, so their reads cannot report it and keep
- * their meanings.
- */
 type ReportBoundedRead = { text: string | null; failure: "overflow" | "unreadable" | "absent" | null };
 
 export function parseBoundedRead(stdout: string): BoundedRead;
@@ -1137,10 +1007,8 @@ export function parseBoundedRead(stdout: string, provesAbsence = false): ReportB
   const split = out.lastIndexOf("\n");
   if (split < 0) return { text: null, failure: "unreadable" };
   const flag = out.slice(split + 1).trim();
-  // Absence is claimed only where the command PROVED it; for every other read
-  // a stray `2` keeps its old meaning (over the byte bound).
   if (provesAbsence && flag === BOUNDED_READ_ABSENT_FLAG) return { text: null, failure: "absent" };
-  if (flag !== "0") return { text: null, failure: "overflow" }; // beyond the byte bound
+  if (flag !== "0") return { text: null, failure: "overflow" };
   return { text: out.slice(0, split), failure: null };
 }
 
@@ -1164,11 +1032,6 @@ async function boundedRead(
   timeoutMs: number,
   provesAbsence = false,
 ): Promise<ReportBoundedRead> {
-  // The marker is re-proved on EVERY read, from the same container the command
-  // then runs on: a replacement between collection steps yields unknown, never
-  // a document from a container this attempt did not prepare. A rejected call
-  // is unprovable too — the reply never said whether the proof or the command
-  // failed — so it is `unknown`, not an unreadable document.
   let read: MarkedRun;
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
@@ -1177,8 +1040,6 @@ async function boundedRead(
       "the attempt container could not be proven to be this attempt's (the read itself was lost) — its result is not collected",
     );
   }
-  // No deadline rides a bounded read, so `deadline-spent` cannot happen here;
-  // if it ever did, nothing was read and the document is not collectable.
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
       "the attempt container could not be proven to be this attempt's — its result is not collected",
@@ -1188,23 +1049,12 @@ async function boundedRead(
   return provesAbsence ? parseBoundedRead(read.stdout, true) : parseBoundedRead(read.stdout);
 }
 
-/**
- * A seat-authored `reason`/`error` bounded for the D1 failure text and the log
- * field. Redaction runs FIRST: slicing first would cut a secret that straddles
- * the cap and persist its surviving fragment. `null` for a non-string field.
- */
 function boundedStatusText(value: unknown): string | null {
   return typeof value === "string"
     ? redactSecrets(value).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS)
     : null;
 }
 
-/**
- * The seat's recheck status document (`RecheckStatus`), or null when the file
- * is absent/unreadable or carries a foreign schema or HEAD. Anything but this
- * round's own status for this HEAD is no attribution at all — never a
- * fabricated outcome.
- */
 function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus | null {
   if (text === null) return null;
   try {
@@ -1213,11 +1063,6 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
     if (value["schema"] !== "mstar.recheck-status/v1" || value["headSha"] !== headSha) return null;
     const outcome = value["outcome"];
     if (outcome !== "ok" && outcome !== "skipped" && outcome !== "failed") return null;
-    // `rejected` is DERIVED from the row-id list, never read from the document:
-    // one source survives, so the two faces of the count cannot disagree in a
-    // foreign or hand-rolled status. `rejected_unnamed` has no list to derive
-    // from — it is the count of drops the gate could not name, and it is the
-    // only record of them once the seat has filtered its own document.
     const rejectedRowIds = Array.isArray(value["rejected_row_ids"])
       ? value["rejected_row_ids"].filter((id): id is string => typeof id === "string")
       : [];
@@ -1232,10 +1077,6 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
         typeof rejectedUnnamed === "number" && Number.isInteger(rejectedUnnamed) && rejectedUnnamed >= 0
           ? rejectedUnnamed
           : 0,
-      // `reason` is a CLOSED vocabulary: the per-row accounting below branches
-      // on these exact literals, so an off-vocabulary value would fall through
-      // to the wrong verdict instead of being ignored. Unrecognized → null
-      // (same as absent), never a guessed reason.
       reason: isRecheckStatusReason(value["reason"]) ? value["reason"] : null,
       error: boundedStatusText(value["error"]),
     };
@@ -1271,7 +1112,6 @@ function parseRecheckStatus(text: string | null, headSha: string): RecheckStatus
  */
 export type RecheckRead = {
   doc: RecheckDoc | null;
-  /** Why `doc` is null (absent read / overflow / validation), null when it survived. */
   docFailure: string | null;
   rejected: ReadonlySet<string>;
   anonymousRejectedRows: number;
@@ -1288,8 +1128,6 @@ async function readRecheckDoc(
     boundedRead(sandbox, marker, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
   ]);
   let doc: RecheckDoc | null = null;
-  // A zero-byte payload is the seat writing nothing: absent, not malformed.
-  // Parsing it would throw and report the round as a JSON fault instead.
   const docText = docRead.text !== null && docRead.text.trim() !== "" ? docRead.text : null;
   let docFailure: string | null =
     docRead.failure ?? (docRead.text !== null && docText === null ? "absent" : null);
@@ -1315,43 +1153,14 @@ async function readRecheckDoc(
   const status = parseRecheckStatus(statusRead.text, recheckInput.headSha);
   const sent = new Set(recheckInput.targets.map((target) => target.rowId));
   const rejected = new Set(droppedRowIds);
-  // A row the surviving document CARRIES has a real answer, so a status that
-  // also names it (the seat drops, then re-emits it) must not cost it that
-  // answer: `rejected` outranks the answered row in the reconciliation, and a
-  // row listed in both would report `invalid-output` instead of its actual
-  // assessment. Local gate drops need no such filter — a dropped row is by
-  // construction absent from `doc.results`.
   const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
   for (const rowId of status?.rejected_row_ids ?? []) {
     if (sent.has(rowId) && !answeredRowIds.has(rowId)) rejected.add(rowId);
   }
-  // The seat writes an ALREADY-FILTERED document, so the local pass above
-  // normally sees no drops at all; the status is the surviving record. Taking
-  // the larger of the two unions them without double-counting a round whose
-  // unfiltered document also reached this pass.
   const unnamedRejectedRows = Math.max(anonymousRejectedRows, status?.rejected_unnamed ?? 0);
   return { doc, docFailure, rejected, anonymousRejectedRows: unnamedRejectedRows, status };
 }
 
-/**
- * Bounded read + validation + redaction of the report seat's document: the
- * audited fixed-path read (`readReportCommand`) yields `<content>\n<flag>`;
- * anything other than a flag-0 document that passes `validateReportDoc` and is
- * bound to `expectedHeadSha` is NO report (the sections render `none`) and
- * leaves ONE warn naming which cause rejected it — a document the read PROVED
- * missing (`absent`) and a read that broke (`unreadable`) are separate names,
- * though both render `none`. Each narrative field is redacted before it can
- * reach a public body — the seat's text is model output like any other, and a
- * prompt-injected credential can hide in a PR description it quoted.
- */
-/**
- * The runner's applied-model document: WHICH `provider/model` actually served
- * the round, or null when the runner wrote none (no model served). This is a
- * projection of the runner's observation — never a derivation from the
- * configured chain, which would report what we asked for instead of what ran.
- * A broken read or document is null with one warn: losing the attribution must
- * never lose the review, and it must never invent a provider either.
- */
 async function readAppliedProvider(
   sandbox: ReviewSandbox,
   marker: string,
@@ -1367,7 +1176,6 @@ async function readAppliedProvider(
     true,
   );
   if (read.failure !== null) {
-    // `absent` is the ordinary no-model-served shape — no warn without a fault.
     if (read.failure !== "absent") {
       log.warn({ ...fields, applied_model: read.failure }, `applied-model document ${read.failure}`);
     }
@@ -1389,10 +1197,6 @@ async function readAppliedProvider(
     );
     return null;
   }
-  // The document is container-authored, like the recheck status and the report:
-  // bounded FIRST (a value over the column's bound is refused whatever it
-  // contains), then redacted, then validated to the shape the column advertises
-  // (`provider/model`) — never persisted as whatever string it carried.
   const trimmed = value.trim();
   if (trimmed.length > APPLIED_MODEL_MAX_CHARS) {
     log.warn(
@@ -1422,8 +1226,6 @@ async function readReportDoc(
 ): Promise<ReportDoc | null> {
   const read = await boundedRead(sandbox, marker, readReportCommand(), POST_RUNNER_READ_TIMEOUT_MS, true);
   if (read.failure !== null) {
-    // `absent` and `unreadable` are distinct failures of the SAME disclosure:
-    // the seat wrote no document vs. the read of it broke. Both render `none`.
     log.warn(
       { ...fields, report_doc: read.failure },
       `report document ${read.failure} — sections render none`,
@@ -1438,17 +1240,12 @@ async function readReportDoc(
   try {
     parsed = JSON.parse(read.text);
   } catch {
-    // No parse-error detail: `JSON.parse` quotes the input, and the input is
-    // seat-authored text that may carry a credential-shaped value.
     log.warn({ ...fields, report_doc: "invalid-json" }, "report document is not JSON — sections render none");
     return null;
   }
   const redact = (text: string) => redactExactSecrets(redactSecrets(text), secretValues);
   const gate = validateReportDoc(parsed);
   if (!gate.ok) {
-    // The shared gate names only the accepted shape, never the seat's own
-    // key/value text; the same shape + exact-value redaction every other log
-    // field gets is applied here too.
     const error = redact(gate.error);
     log.warn(
       { ...fields, report_doc: "invalid-document", report_doc_error: error },
@@ -1456,9 +1253,6 @@ async function readReportDoc(
     );
     return null;
   }
-  // The fixed path is shared with every earlier run in this container: a
-  // document bound to another head is that run's narrative, not this one's. A
-  // missing/invalid head never reaches here — the gate rejects it first.
   if (gate.doc.headSha !== expectedHeadSha) {
     log.warn(
       {
@@ -1481,7 +1275,6 @@ async function readReportDoc(
   };
 }
 
-/** The harness paths the in-image runner exec env carries. */
 const HARNESS_ROOT = "/opt/mstar-harness";
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
@@ -1536,17 +1329,6 @@ export function chainHeadSelector(chain: string | undefined): string | null {
   return null;
 }
 
-/**
- * The runner-input projection of one consumer config: the declaration with
- * the API keys stripped. Provider keys ride only the runner's stdin credential
- * payload (under the declaration's own provider id).
- *
- * Sizes are resolved HERE, not stored: the operator's statement wins per field
- * and the provider catalog fills a blank one. The runner has no catalog of its
- * own (the image copies package sources only), so a size left unresolved would
- * reach the synthesized models.yml as absent. A model with a fact on neither
- * side keeps the bare id entry it has always had.
- */
 function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomProviderDeclaration {
   const declaration: CustomProviderDeclaration = {
     provider_id: provider.provider_id,
@@ -1554,8 +1336,6 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
     api: provider.api,
     model_ids: [...provider.model_ids],
   };
-  // The vendor's numbers describe the MODEL, so the id alone resolves them —
-  // whatever endpoint the declaration points at.
   const catalog = catalogLimitsFor(provider.provider_id);
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of provider.model_ids) {
@@ -1569,28 +1349,15 @@ function toRunnerCustomProvider(provider: CustomProviderConsumerConfig): CustomP
     if (declared?.input !== undefined) entry.input = [...declared.input];
     if (Object.keys(entry).length > 0) meta[modelId] = entry;
   }
-  // Absent when neither the declaration nor the catalog states anything: the
-  // synthesis then emits the bare `- id:` entry it has always emitted.
   if (Object.keys(meta).length > 0) declaration.models_meta = meta;
   return declaration;
 }
 
-/**
- * Build the runner exec env: harness paths + the App's verbatim model chain.
- * It carries NO credential — provider keys ride the stdin payload
- * (`buildRunnerCredentials`), never the process environment.
- */
 function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> {
   const runnerEnv: Record<string, string> = {
     HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
     PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
   };
-  // The App's verbatim chain forwards VERBATIM (the guard only decides
-  // unset-vs-set; it never mutates the value; the runner-side selector parse
-  // trims segments). A blank chain cannot reach production — the
-  // assertAppConfigComplete gate fails the message before the guard. The
-  // precedence lives in effectiveModelChain (ONE resolution shared with the
-  // version-record put — no re-resolution split-brain).
   const { chain } = effectiveModelChain(appCfg);
   if (chain !== undefined) {
     runnerEnv.OMP_REVIEW_MODEL = chain;
@@ -1599,7 +1366,7 @@ function buildRunnerEnv(appCfg: RunnerAppConfig): Record<string, string> {
 }
 
 /**
- * Build the runner's credential transport: the versioned stdin payload
+ * safety: Build the runner's credential transport: the versioned stdin payload
  * (packages/shared/src/credential-payload) plus the exact key VALUES it carries — the
  * SEC-01 exact-redaction list. ONE resolution serves both, so the recorded
  * secret list can never drift from the keys the session actually saw.
@@ -1616,8 +1383,6 @@ function buildRunnerCredentials(
   fields?: AttemptLogFields,
   customProviders?: readonly CustomProviderConsumerConfig[],
 ): { payload: string | undefined; keyValues: string[] } {
-  // Log only when the caller supplied BOTH the sink and the identity fields
-  // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
   const pools: CredentialPools = {};
   const keyValues: string[] = [];
@@ -1669,10 +1434,6 @@ function buildRunnerCredentials(
   };
 }
 
-/**
- * Exec-env names that are configuration/paths, not credentials — the only
- * values the runner exec env carries now that keys ride the stdin payload.
- */
 const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
   "OMP_REVIEW_MODEL",
   "HARNESS_PLUGIN_ROOT",
@@ -1700,31 +1461,15 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
 /** Characters of an exec's stderr tail carried by its failure message. */
 export const STDERR_TAIL_MAX = 600;
 
-/**
- * The runner stage's failure detail. stderr is the ONLY diagnosis a non-zero
- * exit carries (exit 124 = the exec bound fired, and the run leaves 0B of
- * stdout), so a redacted tail rides the message that reaches the durable
- * review_failures row and the log line. `stdout` is counted in UTF-8 bytes,
- * never in UTF-16 units. Redaction runs BEFORE the tail cut:
- * a secret sliced in half would survive the exact-value pass.
- */
 function runnerFailureDetail(
   run: { stdout: string; stderr: string; exitCode: number },
   secretValues: readonly string[],
 ): string {
-  // review_failures.error is unbounded TEXT (migration 0010), so the bounded
-  // tail below cannot overflow the column.
   const base = `runner failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
 }
 
-/**
- * Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
- * Byte→char conversion is CHUNKED (qc3 F-303): a plain per-byte `+=` loop
- * is O(n²) and this sits in the worker hot path; 0x8000 chars per
- * `String.fromCharCode` call stays far below the engine arg-count cliff.
- */
 function toBase64Utf8(text: string): string {
   const bytes = new TextEncoder().encode(text);
   const CHUNK = 0x8000;
@@ -1735,19 +1480,6 @@ function toBase64Utf8(text: string): string {
   return btoa(binary);
 }
 
-/**
- * Run one attempt command through the guarded form: `claimed` runs it plainly
- * (this entry just provisioned the container), `already-claimed` runs it under
- * the marker gate — ONE Durable Object request that proves the incarnation and
- * acts on it, so proof and action can never straddle a replacement. A missing
- * marker, a different one or a lost guarded reply is `unknown`: nothing ran on
- * an unproven container.
- *
- * The options carry everything a paid command needs (`stdin` for the runner
- * input and the credential payload, `cwd` for the clone, `env` for the model
- * chain, `timeout` for the anchored window), so a guarded call replaces the
- * unguarded one rather than being followed by it.
- */
 async function runPreparedCommand(
   sandbox: ReviewSandbox,
   marker: string,
@@ -1760,10 +1492,6 @@ async function runPreparedCommand(
   try {
     read = await sandbox.runMarked(marker, command, opts);
   } catch (err) {
-    // A lost reply is not an answer: the guarded command may have run on some
-    // incarnation, and none is proven here. Unknown — never an ordinary
-    // failure, which a caller could settle and then destroy the marked
-    // container on. The cause rides the message so the log still names it.
     const detail = err instanceof Error ? err.message : String(err);
     throw new AttemptUnknownError(
       `the attempt container could not be proven (the guarded command's reply was lost: ${detail}) — nothing ran on a replacement`,
@@ -1775,24 +1503,11 @@ async function runPreparedCommand(
     );
   }
   if (read.kind === "deadline-spent") {
-    // The DO checked the absolute deadline again, immediately before starting
-    // the process, and refused. Nothing ran.
     throw new ExecDeadlineRefusedError(read.remainingMs);
   }
-  // The guarded form answers `{kind:"ran", …}`; callers get the exec result
-  // they would have got unguarded, so the discriminant never reaches a durable
-  // record or a comparison.
   return { stdout: read.stdout, stderr: read.stderr, exitCode: read.exitCode };
 }
 
-/**
- * Write the attempt's marker on the container this entry provisioned. Only a
- * returned `written`/`matched` continues: other bytes mean the container is not
- * this attempt's, and a REJECTED write is `unknown` — a lost reply leaves the
- * marker possibly written, so a concurrent replay can prove this container and
- * launch paid work on it. Settling this entry as a failure would then destroy a
- * container that may be paying, and a retry would mint a fresh attempt id.
- */
 async function claimAttemptMarker(
   sandbox: ReviewSandbox,
   marker: string,
@@ -1859,7 +1574,6 @@ export function checkKeyOf(payload: ReviewJobPayload, headSha: string | null): s
   });
 }
 
-/** The App/PR identity, derived without dereferencing a legacy `botRef`. */
 function scopeOfPayload(payload: ReviewJobPayload): { appId: string; installationId: number; owner: string; repo: string; pr_number: number } | undefined {
   const bot = payload.botRef as { appId?: string } | undefined;
   if (bot?.appId === undefined) return undefined;
@@ -1909,49 +1623,17 @@ export async function prepareReviewAttempt(input: {
     getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
   };
   commenter: Pick<ReviewCommenter, "getInstallationToken">;
-  /** The attempt identity: the container derives from it, and so does the marker written here. */
   attemptId: string;
-  /**
-   * The Check identity frozen at creation (key + generation). `null` for a
-   * delivery that had no admitted claim — its identity is frozen at the
-   * checkout, and the freeze CAS decides who owns the head.
-   */
   identity: AttemptIdentity | null;
   sandbox: ReviewSandbox | null;
-  /**
-   * The caller owns the container's lifetime (its finally destroys it), so it
-   * learns the handle the moment it exists — a throw after acquisition must
-   * not lose the only reference to a running container.
-   */
   onSandbox: (sandbox: ReviewSandbox) => void;
   progress: ReviewAttemptProgress;
 }): Promise<PreparedReviewAttempt> {
   const { payload, deps, commenter, attemptId, progress } = input;
   let sandbox = input.sandbox;
-  // 1. Sandbox + installation token (created lazily; destroyed by the caller).
-  // AL-6 stage window: container acquisition + every in-sandbox step below
-  // (clone/rev-parse/diff/numstat/input-write) classify "sandbox" until the
-  // runner step takes over. The installation-token mint is a GITHUB AUTH
-  // call, not a sandbox step — it stays OUTSIDE the sandbox window so a
-  // mint failure (bad App credentials, GitHub auth outage) records
-  // stage "pipeline" and is never mis-tagged as a sandbox/infra failure.
-  //
-  // The durable first-provisioning claim comes FIRST, before a container is
-  // even resolved: only the entry whose row INSERT created it may start one.
-  //
-  // A rejected claim is not an answer: the write may have landed, so this
-  // attempt may already own a provisioned container — and paid work — from an
-  // earlier entry. The outcome is `unknown`, never a retryable failure: a
-  // retried delivery mints a FRESH attempt id and could pay twice, because the
-  // fence only binds within one attempt. An unknown attempt holds its admission
-  // row to TTL instead; that is the intended trade, not a gap to "fix" back
-  // into a retry.
   let provisioning: "claimed" | "already-claimed";
   try {
     provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now(), input.identity);
-    // A row that predates this entry (a replay, or a claim seeded elsewhere) may
-    // carry no identity yet: freeze it under the SAME CAS. A loss means another
-    // caller froze a different head — a moved head — never a no-op.
     if (provisioning === "already-claimed" && input.identity !== null) {
       const existing = await readAttemptIdentity(deps.env.DB, attemptId);
       if (existing === null) {
@@ -1967,8 +1649,6 @@ export async function prepareReviewAttempt(input: {
         existing.key !== input.identity.key ||
         existing.generation !== input.identity.generation
       ) {
-        // WHOLE identity: the same pair is our own and proceeds; anything else
-        // is a foreign freeze.
         throw new MovedHeadError(attemptId, existing.key, input.identity.key);
       }
     }
@@ -1988,34 +1668,12 @@ export async function prepareReviewAttempt(input: {
   }
   const marker = attemptMarker(attemptId);
   if (provisioning === "claimed") {
-    // First provisioning: the marker is written BEFORE the checkout and every
-    // runner input. It is the one fact that later proves a collect/destroy
-    // addresses THIS attempt's live container. A container already carrying
-    // other bytes is not repaired (it belongs to someone else), and a lost
-    // reply is not an ordinary failure either: the marker may already be there,
-    // so a concurrent replay can prove this container and start paying on it
-    // (see claimAttemptMarker).
     await claimAttemptMarker(sandbox, marker, attemptId);
   } else {
-    // A replayed prepare may NOT provision: an earlier entry claimed that
-    // right, so the only accepted outcome is the incarnation it started — and
-    // every later command runs guarded on that same handle (a refused or lost
-    // guarded reply is `unknown`, never an ordinary failure). A fresh container
-    // (no marker, not running) is never stamped as the original, including
-    // after a crash before the marker write: the attempt stays unknown rather
-    // than a second container wearing its name.
     await runPreparedCommand(sandbox, marker, provisioning, MARKER_PROOF_COMMAND);
   }
   progress.failureStage = "pipeline";
-  // Purpose-scoped sandbox read grant (§7.6 / RL-6): the mint is
-  // repository-scoped read-only BY REQUEST, and the sandbox path only
-  // proceeds on the RETURNED capabilities — assertSandboxGrant fails
-  // closed on any broader grant (RL-6: the request is never presented as
-  // proof of the response).
   const token = await mintSandboxReadToken({ payload, commenter });
-  // SEC-01: seed the exact-value list with the minted token immediately —
-  // a failure before the runner env is assembled (clone/diff/input steps)
-  // still exact-redacts the token in the catch path.
   progress.secretValues = [token];
   progress.failureStage = "sandbox";
   const cmds = buildGitOpsCommands({
@@ -2026,12 +1684,6 @@ export async function prepareReviewAttempt(input: {
     diffPath: DIFF_PATH,
   });
 
-  // 2. Clone the PR head branch. Git transport auth via scoped extraheader
-  // env (bugbot A1 — git ignores GH_TOKEN, so private-repo clones failed
-  // without this; same pattern as the smoke-entry git fallback), built by
-  // the ONE `gitTransportEnv` the oversized-diff fetch also uses. GH_TOKEN
-  // stays for the gh steps below. Credentials are exec env only — never in
-  // the command string, never in the image, never in logs.
   const clone = await runPreparedCommand(sandbox, marker, provisioning, cmds.clone, {
     env: gitTransportEnv(token),
     timeout: EXEC_TIMEOUT_GIT_MS,
@@ -2040,10 +1692,6 @@ export async function prepareReviewAttempt(input: {
     throw new Error(`clone failed: exit ${clone.exitCode}, stdout ${clone.stdout.length}B`);
   }
 
-  // 3. AUTHORITATIVE sha: read the checked-out HEAD (bugbot A2). Everything
-  // downstream — idempotency key, D1 row, posted commit_id, KV state — is
-  // keyed off this sha, so diff/files/commit_id always describe the same
-  // commit and a force-push mid-flight is captured here, not drifted.
   const rev = await runPreparedCommand(sandbox, marker, provisioning, cmds.checkedOutSha, {
     timeout: EXEC_TIMEOUT_GIT_MS,
   });
@@ -2086,7 +1734,6 @@ export async function runReviewAttempt(input: {
   runnerAnchor: RunnerBudgetAnchor;
   observedChangedLines: number | null;
   progress: ReviewAttemptProgress;
-  /** The attempt identity: its container's marker is the proof collection runs on. */
   attemptId: string;
 }): Promise<ReviewAttemptExecution> {
   const {
@@ -2109,12 +1756,6 @@ export async function runReviewAttempt(input: {
     progress,
     attemptId,
   } = input;
-  // The entry gate is a READ, not the fence: a replay that finds a durable
-  // result hands it back without touching the container, and a row that already
-  // sent (or already failed) its paid call is refused here. The one-way claim is
-  // taken later, in the statement that is about to SEND the exec, so everything
-  // before it — minting, the input write — leaves the row `provisioned`, which
-  // cleanup may still release.
   let entry: LaunchVerdict;
   try {
     entry = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
@@ -2130,13 +1771,9 @@ export async function runReviewAttempt(input: {
   }
   switch (entry.kind) {
     case "persisted":
-      // The paid step ran and its result is durable, even though this entry did
-      // not run it: a replay must never claim "no paid work started".
       progress.runnerReturned = true;
       return entry.execution;
     case "never-paid":
-      // `provisioned`: everything below may proceed; the fence is claimed at
-      // the send, so a failure here leaves the row releasable.
       break;
     case "paid-unknown":
       throw new AttemptUnknownError(
@@ -2161,47 +1798,21 @@ export async function runReviewAttempt(input: {
     default:
       return noLaunchState(entry);
   }
-  // The input carries the SAME absolute deadline every post-diff step bills —
-  // the exec's own end instant, never a duration. The runner anchors its own
-  // review deadline AT it, so the write's own window and the runner's parse
-  // time both spend that deadline instead of each being added back onto it.
   const runnerInput = {
     worktreePath: CLONE_DIR,
     reconFacts,
-    // No image-declared base provider: the per-review models.yml is the
-    // App's own declarations, and built-in providers resolve from the
-    // runtime's own catalog.
     capabilityHosts: [],
-    // The absolute instant the exec below is killed at: the runner anchors
-    // its own review deadline there, so a shortened round plans synthesis
-    // inside the exec it runs under instead of the level's whole tier cap.
     outerDeadlineEpochMs: deadlineMs,
     ...(modelOverrides !== undefined ? { modelOverrides } : {}),
     ...(customProviders !== undefined
       ? { customProviders: customProviders.map(toRunnerCustomProvider) }
       : {}),
-    // §7.8: the typed recheck input rides ONLY when open rows
-    // exist — a first round with an empty lifecycle serializes
-    // byte-identically to the pre-recheck payload.
     ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
-    // The seat's ask budget: a top-level runner field, never part of the
-    // frozen recheck document.
     ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
-    // The report seat's untrusted input. Absent when gh could not answer,
-    // so no report is attempted and the sections render `none`.
     ...(prContext !== undefined ? { prContext } : {}),
   };
-  // The document rides the exec stdin pipe: as an argv string it became one
-  // argument, and a recheck round above ~98 KiB breaches Linux's 128 KiB cap.
-  // Serialization is paid BEFORE the write's one clock sample, so the armed
-  // bound and the `124` attribution below both read the instant the write
-  // actually started at — a straddling sample cannot arm the deadline's
-  // shorter remainder and then classify its kill as the step cap's.
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
   const inputWriteWindowMs = deadlineMs - Date.now();
-  // Guarded: ONE request proves the attempt's marker and writes the input in
-  // the same call, so a container replaced after prepare cannot receive the
-  // document. `stdin` rides the guarded options — no second probe.
   const writeInput = await runPreparedCommand(
     sandbox,
     attemptMarker(attemptId),
@@ -2214,20 +1825,11 @@ export async function runReviewAttempt(input: {
         EXEC_TIMEOUT_GIT_MS,
         "runner input write",
         "runner",
-        // The SAME sample both bounds the write and decides whether a `124`
-        // was that bound's: two reads could disagree across the cap/deadline
-        // crossover and retry a stop the clock already spent.
         deadlineMs - inputWriteWindowMs,
       ),
     },
   );
   if (writeInput.exitCode !== 0) {
-    // A kill under the anchored runner deadline (its remainder bound the
-    // write, not the step's own cap) is the typed stop, not a generic
-    // write error: the runner never started, so every observed counter is
-    // KNOWN — provably 0/0 seats — and the attempt acks rather than paying
-    // a queue retry for the same clock. A `124` the step's own cap fired
-    // keeps the generic path: that kill was not the frozen deadline's.
     if (writeInput.exitCode === 124 && inputWriteWindowMs <= EXEC_TIMEOUT_GIT_MS) {
       throw new BudgetExhaustedError(
         {
@@ -2246,25 +1848,9 @@ export async function runReviewAttempt(input: {
     throw new Error(`runner input write failed: exit ${writeInput.exitCode}`);
   }
 
-  // 4. In-image runner: cwd = clone dir; harness paths + the App's model
-  // chain via exec env, and the App's own provider keys via the exec STDIN
-  // credential payload (compass D, AL-24-5: per-App BYOK only, zero global
-  // fallback; key_source app|custom logging; secrets never baked into the
-  // image, never in logs, never in the process environment). The runtime
-  // runner has NO summary-degrade path: exit 0 ⇒ stdout is the
-  // engine-validated mstar.review/v1 envelope.
-  // AL-6 stage window: the review run itself — a non-zero exit or an exec
-  // exception (timeout / container error) here classifies "runner".
   progress.failureStage = "runner";
-  // SEC-01 exact-value defense: the SAME credential resolution the runner
-  // exec used is captured here (single source — no re-resolution
-  // split-brain) so the session's actual secret values can be
-  // exact-redacted from any model-echoed output below.
   const runnerEnv = buildRunnerEnv(appCfg);
   const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
-  // SEC-01 exact-value defense: the session's ACTUAL secret values (the
-  // transported provider keys + the minted installation token) — needed by
-  // the failure message below and shared by the degrade and success paths.
   progress.secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
   // SEC-01 resume (I-000685): the exact set this exec is about to hand the model
   // — the provider keys it transports plus the installation token it minted — is
@@ -2288,14 +1874,6 @@ export async function runReviewAttempt(input: {
     recheckInput !== undefined ? RECHECK_OUTPUT_PATH : undefined,
     prContext !== undefined ? REPORT_OUTPUT_PATH : undefined,
   );
-  // What that ONE absolute instant still owes, read HERE after the input
-  // write consumed its window: the write and startup spend the deadline
-  // instead of being added back onto it. A deadline the write finished is
-  // declined explicitly, never started as a 1ms exec that fails for the
-  // wrong cause. This is the EARLY refusal — it keeps the row releasable
-  // (`provisioned`) when the claim would be pointless; the authoritative
-  // bound is taken after the claim below, because the claim is a D1 round
-  // trip and its latency belongs to the attempt's clock too.
   const beforeClaimMs = deadlineMs - Date.now();
   if (beforeClaimMs <= 0) {
     throw new RoundBudgetSpent(
@@ -2303,17 +1881,10 @@ export async function runReviewAttempt(input: {
       "runner",
     );
   }
-  // THE paid-step fence, taken in the statement that is ABOUT TO SEND: a lost
-  // reply, a retried entry or a restart finds `launched` and is refused, while
-  // everything above this line leaves the row `provisioned` (releasable). The
-  // refusal is `unknown`: a failure the caller could retry would pay twice.
   let launch: LaunchClaim;
   try {
     launch = await claimReviewLaunch(deps.env.DB, attemptId, Date.now());
   } catch (err) {
-    // A rejected claim is not a zero-row claim: the write may have landed, so
-    // the attempt may already own its one paid step. Unknown, never a
-    // settleable failure — a failure the caller could retry would pay twice.
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),
       progress.secretValues,
@@ -2332,10 +1903,6 @@ export async function runReviewAttempt(input: {
       `attempt ${attemptId}: another entry owns the paid step (${launch.reason}) — refusing a second launch`,
     );
   }
-  // The typed cap stop shared by both pre-start refusals below: no paid child
-  // ran, so the record is a confirmed no-result terminal (cleanup may release)
-  // and the counters are provably 0/0 — never `unknown`, never a zero-length
-  // exec.
   const capStop = (reason: string): BudgetExhaustedError =>
     new BudgetExhaustedError(
       {
@@ -2350,60 +1917,31 @@ export async function runReviewAttempt(input: {
       },
       reason,
     );
-  // THE exec bound is taken at the LAST possible instant the WORKER can see:
-  // the claim above is a D1 write, and its round trip is part of the attempt's
-  // clock. The container repeats this check after its own queue, marker proof
-  // and RPC (the absolute instant rides the request below), so this refusal is
-  // the cheap pre-RPC one.
   const runnerTimeout = Math.max(0, deadlineMs - Date.now());
   if (runnerTimeout === 0) {
-    // We own the row now, so leaving it `launched` would be an `unknown` that
-    // holds the container and capacity forever. The paid call was never sent:
-    // record the confirmed stop and throw it.
     await recordReviewFailure(deps.env.DB, attemptId, Date.now());
     throw capStop("runner declined after the launch claim — the deadline was spent by the claim");
   }
-  // The runner started HERE: everything after this line is the paid child's
-  // window, so a throw before it is not evidence that a child ran.
   progress.runnerStartedAt = Date.now();
-  // Guarded: the paid exec is proven and executed in ONE request, so a
-  // replacement container can never receive credentials or run the review. The
-  // ABSOLUTE deadline rides that request: the DO reads the remainder right
-  // before starting the process and reserves the kill grace out of it, so the
-  // proof and the RPC cannot let the child run past the frozen instant.
   let run: { stdout: string; stderr: string; exitCode: number };
   try {
     run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
-      // The credential payload rides the exec STDIN pipe — present only when
-      // the App actually transported a key (keyless run shape = no stdin).
       ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
       deadlineEpochMs: deadlineMs,
     });
   } catch (err) {
     if (!(err instanceof ExecDeadlineRefusedError)) throw err;
-    // The container refused BEFORE starting anything: this is the same
-    // confirmed stop as the pre-RPC refusal, not a lost reply. The runner had
-    // not started, so cleanup must not treat it as unproven.
     progress.runnerStartedAt = undefined;
     await recordReviewFailure(deps.env.DB, attemptId, Date.now());
     throw capStop(
       `runner declined inside the container — the deadline was spent before the exec started (${err.remainingMs}ms left)`,
     );
   }
-  // The exec answered with an exit status: the paid child's completion is
-  // observed, not inferred. A rejection above never reaches this line.
   progress.runnerReturned = true;
   const runnerElapsedMs = Date.now() - progress.runnerStartedAt;
   if (run.exitCode === 124) {
-    // The sandbox's GNU-timeout wrapper killed the exec at the anchored
-    // instant — the runner could not print its own signal, so neither seat
-    // counts nor the stop instant are observable. `sandbox-kill` records
-    // the frozen runner budget and leaves every counter null. The persisted
-    // outcome carries only trusted budget fields plus fixed diagnostics:
-    // provider stderr is untrusted text, so it rides one redacted log line
-    // and never the durable row the outcome builds below.
     deps.log.warn(
       {
         ...fields,
@@ -2411,11 +1949,6 @@ export async function runReviewAttempt(input: {
       },
       "runner exec killed at the anchored deadline (provider stderr on this line only)",
     );
-    // The returned status is the fact; the ROW's terminal transition belongs
-    // to the settlement that also writes the durable failure row, so the row
-    // never authorises destruction before that row exists (plan Task 4b's
-    // coupled-facts rule). The settlement reads `runnerReturned` from the
-    // phase facts to know this return was observed.
     throw new BudgetExhaustedError(
       {
         kind: "budget-exhausted",
@@ -2431,27 +1964,13 @@ export async function runReviewAttempt(input: {
     );
   }
   if (run.exitCode !== 0) {
-    // A RETURNED nonzero status is an observation, but the row's transition is
-    // the settlement's: it happens once the durable failure row exists, never
-    // before (the phase facts carry `runnerReturned: true`).
     throw new Error(runnerFailureDetail(run, progress.secretValues));
   }
-  // d5-budget AC-S10-logs: one runner attempt → at least one budget line
-  // (level + runner_timeout_ms + elapsed_ms + orchestration). elapsed_ms is
-  // VISIBILITY ONLY — it never throws; the sandbox exec timeout above is
-  // the only wall-clock failure (spec 不 abort).
   deps.log.info(
     { ...fields, elapsed_ms: runnerElapsedMs },
     `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
   );
 
-  // The ONE typed terminal outcome outside the verdict envelope (spec §
-  // Exhaustion): the runner declared the round's wall clock spent and
-  // stopped review work BEFORE its own deadline fired — the signal is the
-  // outcome, not model content, so a malformed one is still a parse
-  // degrade below. It resolves before any verdict parsing and before the
-  // post-runner publication steps it made un-runnable; the single catch
-  // publishes it. failureStage stays "runner" for the row.
   const budgetSignal = parseBudgetExhaustedSignal(run.stdout);
   if (budgetSignal.ok) {
     throw new BudgetExhaustedError(
@@ -2469,53 +1988,18 @@ export async function runReviewAttempt(input: {
     );
   }
 
-  // AL-6 stage window: post-runner steps (parse has its own branch; the
-  // post/KV/put orchestration is worker-side) are "pipeline" again.
   progress.failureStage = "pipeline";
 
-  // §7.7 step 5 (cont): read the concurrent recheck seat's document AND its
-  // status through the audited fixed-path bounded reads (§7.3: Worker
-  // validates against ITS OWN trusted input — never a model echo). Anything
-  // other than a valid document is NO recheck; the round proceeds with every
-  // selected row conservatively accounted (§7.4), and the seat's status makes
-  // that loss attributable in D1. Rows the gate dropped are carried as
-  // rejected — by rowId when it had one, by position among the unanswered
-  // sent rows when it did not — so they are never mistaken for rows the seat
-  // never reached.
   const marker = attemptMarker(attemptId);
   const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, marker, recheckInput) : null;
 
-  // The report document (mstar.report/v1) rides the SAME audited bounded read
-  // and the SAME fail-closed rule: the Worker validates it against its own
-  // gate and falls back to `none` headings, or null when the seat wrote
-  // nothing. Read only when the runner was actually given `--report-out`.
   const report: ReportDoc | null =
     prContext !== undefined
       ? await readReportDoc(sandbox, marker, progress.secretValues, headSha, deps.log, fields)
       : null;
 
-  // Which provider actually served — the runner's own observation, projected
-  // here and NOWHERE derived again. null = the runner reported none (no model
-  // served), which stays null on the row; it is never replaced with the chain
-  // head, because that would report the configured first selector as if it
-  // had run.
   const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
 
-  // Result and completion are ONE statement: the row reaches `persisted` only
-  // in the write that stores the result, so completion is never recorded before
-  // the result is durable. Anything else — a row that moved, a result too large
-  // for the row, a storage fault, a lost reply — leaves the attempt `launched`
-  // and refuses to confirm: the paid outcome is not proven durable, so it is
-  // `unknown`, never a failure the caller may settle, destroy on, or retry. A
-  // rejected write is explicitly unknown: it may have landed.
-  //
-  // NO runner output crosses the persistence boundary unredacted. The exact
-  // values this session's own exec received, and every bounded transform of
-  // them, are removed HERE, on the host that holds them; the stored and the
-  // returned value are this one sanitized object, so nothing downstream can
-  // publish the raw stream either. Each retained document is redacted as its
-  // own root, with its host-written identity protected BY PATH — a forged
-  // `{"head_sha": …}` in model text is at no protected path and is redacted.
   const secretValues = progress.secretValues;
   const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");
   const recheckRedaction = redactDocument(recheck, secretValues, "recheck");

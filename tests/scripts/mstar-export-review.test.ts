@@ -60,7 +60,6 @@ describe("deriveReviewKey", () => {
   test("rejects a lone surrogate that would alias U+FFFD", () => {
     expect(() => deriveReviewKey("acme/\uD800/repo/7/abc123")).toThrow(/well-formed/);
     expect(() => deriveReviewKey("acme/\uDC00/repo/7/abc123")).toThrow(/well-formed/);
-    // note: The alias target itself stays legal and encodes as itself.
     expect(deriveReviewKey("acme/\uFFFD/repo/7/abc123")).toMatch(/^r-[0-9a-f-]+$/);
   });
 

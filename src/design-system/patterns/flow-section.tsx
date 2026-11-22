@@ -1,18 +1,3 @@
-/**
- * The detail-page section flow (r3 baseline § 5): one content plane divided
- * by hairlines, instead of a card per section.
- *
- * A page that stacks section cards gives every block the same frame, so
- * nothing reads as the page's own structure. The flow keeps the plane the page
- * already paints (`surface-page`) and separates sections with the quietest
- * hairline — no fill, no radius, no elevation. A card stays reserved for an
- * object that has to be framed: a table, a code block, an overlay.
- *
- * Sections are direct siblings on that plane; the first and last edges are
- * trimmed so the flow meets the page's own padding without a doubled gap.
- * Purely presentational — the page resolves `t()` and passes the title,
- * subtitle and body in.
- */
 import type { ReactNode } from "react";
 
 import { cn } from "../cn";
@@ -24,7 +9,6 @@ export function FlowSection({
   children,
 }: {
   title: ReactNode;
-  /** Optional one-line summary, set on the muted label step. */
   subtitle?: ReactNode;
   className?: string;
   children?: ReactNode;

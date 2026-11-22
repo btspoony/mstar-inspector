@@ -1,11 +1,3 @@
-/** note: The console's user list (spec operator-admin-surface §3.3).
- *
- * Pinned at the product seams: two users — one on the operator allowlist, one
- * holding a live support grant — with all five fields asserted, and the counts
- * proving they are resolved in SQL rather than per row (two live memberships,
- * a soft-deleted workspace that must not count, an expired grant that must not
- * count). One refusal case holds the read-only surface boundary.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -18,7 +10,6 @@ const GRANT_HOLDER = "Regular-Member";
 const STAMP = "2026-10-01T00:00:00.000Z";
 const DAY_MS = 86_400_000;
 
-// note: --- fixtures (raw writes; the route reads real SQL) ------------------------
 
 function insertUser(db: TestD1, login: string): string {
   const id = crypto.randomUUID();
@@ -47,7 +38,6 @@ function insertMember(db: TestD1, workspaceId: string, userId: string): void {
     .run(workspaceId, userId, STAMP);
 }
 
-/** note: The grant's login is lowercased on purpose: the column is NOCASE. */
 function insertGrant(
   db: TestD1,
   workspaceId: string,
@@ -108,7 +98,6 @@ async function usersByLogin(db: TestD1): Promise<Map<string, UserRow>> {
   return new Map(body.users.map((row) => [row.login, row]));
 }
 
-// note: --- the list --------------------------------------------------------------
 
 describe("GET /_internal_admin/api/users", () => {
   test("lists both users with the SQL-side counts and the env allowlist flag", async () => {
@@ -116,7 +105,6 @@ describe("GET /_internal_admin/api/users", () => {
     insertUser(db, OPERATOR);
     const holderId = insertUser(db, GRANT_HOLDER);
 
-    // invariant: Two live memberships, one in a soft-deleted workspace that must not count.
     insertWorkspace(db, "ws-live-1", null);
     insertWorkspace(db, "ws-live-2", null);
     insertWorkspace(db, "ws-deleted", STAMP);
@@ -124,8 +112,6 @@ describe("GET /_internal_admin/api/users", () => {
     insertMember(db, "ws-live-2", holderId);
     insertMember(db, "ws-deleted", holderId);
 
-    // invariant: One live grant and one lapsed grant on another workspace: only the live
-    // window counts.
     insertGrant(db, "ws-live-1", GRANT_HOLDER, at(DAY_MS));
     insertGrant(db, "ws-live-2", GRANT_HOLDER, at(-DAY_MS));
 
@@ -148,8 +134,6 @@ describe("GET /_internal_admin/api/users", () => {
   });
 
   test("counts a duplicated (workspace, operator) pair once", async () => {
-    // why: Both appends are live; the pair's window is its newest row, so the user
-    // holds one grant, not two.
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     insertUser(db, GRANT_HOLDER);

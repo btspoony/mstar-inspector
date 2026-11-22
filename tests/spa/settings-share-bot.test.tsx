@@ -1,13 +1,3 @@
-/** note: The bot page's share switch: the official workspace's manager marks its own
- * bot shared, or revokes the share — and every other caller sees nothing about
- * sharing at all.
- *
- * The visibility contract has no soft face: a non-official workspace and a
- * plain member get no section, no title, no disabled control and no copy, so
- * the absent cases are asserted on the rendered DOM, not on a prop. Both
- * directions confirm before the transition, and the request is the workspace
- * route the server owns.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -20,10 +10,6 @@ import { installDom } from "./dom";
 const locale = "en" as const;
 const WORKSPACE_REF = "acme";
 
-/** note: The path the page must PATCH, DERIVED from the worker's own route table: a
- * page that composes its own URL would otherwise keep passing its own test
- * while the request 404s against a route registered under another prefix.
- */
 function registeredScopePath(appId: string): string {
   const route = APP_ROUTES.find((row) => row.method === "patch" && row.path.endsWith("/bot/scope"));
   if (route === undefined) throw new Error("no PATCH .../bot/scope route is registered");

@@ -69,9 +69,6 @@ export function decodeCredentialPayload(raw: string): CredentialPools {
   if (rawPools === null || typeof rawPools !== "object" || Array.isArray(rawPools)) {
     throw new Error('the credential payload must carry a "pools" object');
   }
-  // why: Null-prototype dictionary: a `__proto__` pool key must become an OWN
-  // property, never silently re-target the object's prototype (that would drop
-  // a transported pool without a word — the one thing this channel must not do).
   const pools: CredentialPools = Object.create(null);
   for (const [providerId, value] of Object.entries(rawPools as Record<string, unknown>)) {
     if (providerId === "") {

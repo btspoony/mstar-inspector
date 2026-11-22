@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (motion-token sweep — every
+// shortcut: Locally revised shadcn/ui copy-in (motion-token sweep — every; removal tracked in tests/spa/tokens.test.ts.
 // duration/easing consumes --duration-*/--ease-*, transition properties
 // unchanged; a later copy-in supersede — do not regen over).
 import * as React from "react"
@@ -61,11 +61,6 @@ function SheetContent({
       <SheetPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          // Overlay face: durations ride the --duration-slow token (the
-          // dialog.tsx overlay precedent). The data-[state] animate-in/out
-          // classes remain upstream copy-in shape — they emit no CSS in
-          // Tailwind 4 core (QC round 1 F-006 truth note), so this is
-          // tokenization only, not a motion redesign.
           "fixed z-50 flex flex-col gap-4 bg-background shadow-lg transition duration-(--duration-slow) ease-(--ease-in-out) data-[state=closed]:animate-out data-[state=open]:animate-in",
           side === "right" &&
             "inset-y-0 right-0 h-full w-3/4 border-l border-(--border-default) data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right sm:max-w-sm",

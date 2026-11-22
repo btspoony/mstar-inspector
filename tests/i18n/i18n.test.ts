@@ -1,11 +1,3 @@
-/**
- * why: Unit tests: i18n dictionary parity, t() interpolation, the
- * resolveLocale decision matrix, and the shared navbar contract.
- *
- * The zh-CN type-level parity (missing key = compile error) is enforced by
- * `zhCN: Dictionary` in src/i18n/zh-CN.ts — this file adds the runtime
- * bidirectional keyof walk and the behavior tests.
- */
 import { describe, expect, test } from "bun:test";
 import { en, type Dictionary } from "../../src/i18n/en";
 import { zhCN } from "../../src/i18n/zh-CN";
@@ -13,7 +5,6 @@ import { LOCALE_COOKIE, LOCALES, resolveLocale, serializeLocaleCookie, type Loca
 import { dictionaries, isDictionaryKey, t, type DictionaryKey } from "../../src/i18n/t";
 import { NAV_ITEMS } from "../../src/i18n/nav";
 
-/** note: All leaf values as dotted paths — the runtime parity key set. */
 function collectKeys(node: Record<string, unknown>, prefix = ""): string[] {
   const out: string[] = [];
   for (const [k, v] of Object.entries(node)) {
@@ -30,8 +21,6 @@ function requestWith(headers: Record<string, string>): Request {
 
 describe("dictionary parity", () => {
   test("zh-CN satisfies the Dictionary type at compile time (missing key = error)", () => {
-    // why: The type assertion lives in src/i18n/zh-CN.ts (`zhCN: Dictionary`);
-    // this runtime check pins the same contract for the test runner.
     const zh: Dictionary = zhCN;
     expect(zh).toBeDefined();
   });
@@ -53,7 +42,6 @@ describe("dictionary parity", () => {
   test("every dictionary value is a plain string (no nested non-leaf values)", () => {
     for (const [locale, dict] of Object.entries(dictionaries) as Array<[Locale, Dictionary]>) {
       for (const key of collectKeys(dict)) {
-        // why: Keys come from the dictionary itself, so they are valid DictionaryKeys.
         expect(typeof t(locale, key as DictionaryKey), `${locale} ${key}`).toBe("string");
       }
     }
@@ -80,17 +68,10 @@ describe("t() interpolation", () => {
   });
 
   test("numeric params are stringified", () => {
-    // why: Fixture re-pointed: the old fixture notice.error.keyTooLong
-    // was an audit-dead key with no production consumer; common.time.minutesAgo
-    // exercises the same number→string substitution on a live key.
     expect(t("en", "common.time.minutesAgo", { count: 200 })).toBe("200 minutes ago");
   });
 
   test("two {placeholder} params are substituted in one value", () => {
-    // why: Two-param coverage restored: the numeric fixture
-    // above was re-pointed to a one-param key (the old
-    // notice.error.keyTooLong was audit-dead). notice.success.roleChanged is
-    // a live two-param key — the MembersPage role-change notice.
     expect(t("en", "notice.success.roleChanged", { login: "octocat", role: "admin" })).toBe(
       "octocat is now admin.",
     );
@@ -116,30 +97,22 @@ describe("resolveLocale decision matrix", () => {
     acceptLanguage?: string;
     expected: Locale;
   }> = [
-    // note: cookie wins over Accept-Language
     { name: "cookie en + AL zh → en", cookie: "en", acceptLanguage: "zh-CN,zh;q=0.9", expected: "en" },
     { name: "cookie en + AL en → en", cookie: "en", acceptLanguage: "en-US,en;q=0.9", expected: "en" },
     { name: "cookie en + AL neither → en", cookie: "en", acceptLanguage: "fr-FR,fr;q=0.9", expected: "en" },
     { name: "cookie zh_CN + AL zh → zh_CN", cookie: "zh_CN", acceptLanguage: "zh-CN,zh;q=0.9", expected: "zh_CN" },
     { name: "cookie zh_CN + AL en → zh_CN", cookie: "zh_CN", acceptLanguage: "en-US,en;q=0.9", expected: "zh_CN" },
     { name: "cookie zh_CN + AL neither → zh_CN", cookie: "zh_CN", acceptLanguage: "fr-FR,fr;q=0.9", expected: "zh_CN" },
-    // note: invalid cookie is ignored → Accept-Language decides
     { name: "cookie invalid + AL zh → zh_CN", cookie: "fr", acceptLanguage: "zh-TW,zh;q=0.9", expected: "zh_CN" },
     { name: "cookie invalid + AL en → en", cookie: "fr", acceptLanguage: "en-US,en;q=0.9", expected: "en" },
     { name: "cookie invalid + AL neither → en", cookie: "fr", acceptLanguage: "fr-FR,fr;q=0.9", expected: "en" },
-    // note: absent cookie → Accept-Language decides
     { name: "no cookie + AL zh → zh_CN", acceptLanguage: "zh-Hans-CN,zh;q=0.9,en;q=0.8", expected: "zh_CN" },
     { name: "no cookie + AL en → en", acceptLanguage: "en-US,en;q=0.9", expected: "en" },
     { name: "no cookie + AL neither → en", acceptLanguage: "fr-FR,fr;q=0.9", expected: "en" },
-    // note: no headers at all → en
     { name: "no cookie + no AL → en", expected: "en" },
-    // note: case-insensitive zh prefix
     { name: "no cookie + AL ZH-CN uppercase → zh_CN", acceptLanguage: "ZH-CN,zh;q=0.9", expected: "zh_CN" },
-    // note: first-tag-only, no q-value parsing: a later zh tag must NOT override an en primary
     { name: "no cookie + AL en-first with later zh → en", acceptLanguage: "en-US,en;q=0.9,zh-CN;q=0.8", expected: "en" },
-    // note: Inverse: a low-q zh first tag still wins — q-values are ignored.
     { name: "no cookie + AL low-q zh first still wins (no q-value parsing)", acceptLanguage: "zh-CN;q=0.1,en;q=1.0", expected: "zh_CN" },
-    // note: bare / underscore tags resolve the same as scripted zh-CN
     { name: "no cookie + AL bare zh → zh_CN", acceptLanguage: "zh", expected: "zh_CN" },
     { name: "no cookie + AL zh_CN underscore → zh_CN", acceptLanguage: "zh_CN", expected: "zh_CN" },
   ];
@@ -162,10 +135,6 @@ describe("resolveLocale decision matrix", () => {
   });
 
   test("first-tag-only: q-values are not parsed (zh;q=0.1 beats later en;q=1.0)", () => {
-    // why: Rationale lives on resolveLocale: browsers already order tags by
-    // preference, so honoring a later high-q tag would mis-locale an
-    // en-primary bilingual browser. The first listed tag wins even when
-    // its q-value is lower than a later tag's.
     expect(
       resolveLocale(requestWith({ "Accept-Language": "zh-CN;q=0.1,en;q=1.0" })),
     ).toBe("zh_CN");
@@ -215,9 +184,6 @@ describe("document title + login copy", () => {
   });
 
   test("login-page zh copy is the dictionary source for the SPA", () => {
-    // why: Card heading form lock: the concise card heading — the brand name
-    // moved to the wordmark echo above the card (nav.brand), so the title
-    // no longer carries it.
     expect(t("zh_CN", "login.heading")).toBe("登录");
     expect(t("zh_CN", "login.signIn")).toBe("使用 GitHub 登录");
     expect(t("en", "login.heading")).toBe("Sign in");
@@ -231,14 +197,11 @@ describe("App detail IA copy", () => {
     expect(t("zh_CN", "appDetail.tabSettings")).toBe("应用设置");
     expect(t("en", "appDetail.tabInstallations")).toBe("Installed");
     expect(t("zh_CN", "appDetail.tabInstallations")).toBe("已安装");
-    // why: The zero-repository state is copy, not an error, so it must exist too.
     expect(t("en", "appDetail.noRepository").length).toBeGreaterThan(0);
     expect(t("zh_CN", "appDetail.noRepository").length).toBeGreaterThan(0);
   });
 
   test("the repository surface copy exists atomically in both locales", () => {
-    // why: The nav label and every repository surface string — list, add dialog,
-    // detail tabs — live under `targets.*`; nothing is inline.
     expect(t("en", "nav.targets")).toBe("Repositories");
     expect(t("zh_CN", "nav.targets")).toBe("仓库");
     expect(t("en", "targets.heading")).toBe("Repositories");
@@ -250,13 +213,6 @@ describe("App detail IA copy", () => {
       "This App is installed, but grants no repository.",
     );
     expect(t("zh_CN", "targets.addDialog.duplicates").length).toBeGreaterThan(0);
-    // note: The stepped add flow's own three headings, and the two figures the list
-    // now bands (I-000640 / I-000642).
-    // why: `satisfies readonly DictionaryKey[]` is the compile-time half of the
-    // check: a typo, a renamed key or a deleted one is a type error at THIS
-    // line, which is what the old `key as Parameters<typeof t>[1]` cast erased.
-    // why: The runtime half proves each key RESOLVES — `lookup()` returns the key
-    // itself on a miss, so a value equal to its key is the failure signal.
     const steppedFlowKeys = [
       "targets.addDialog.stepApp",
       "targets.addDialog.stepInstall",
@@ -273,7 +229,6 @@ describe("App detail IA copy", () => {
       "targets.settings.boundAppPlanned",
     ] as const satisfies readonly DictionaryKey[];
     for (const key of steppedFlowKeys) {
-      // why: Membership first (the SPA's own guard), then resolution per locale.
       expect(isDictionaryKey(key), key).toBe(true);
       for (const locale of LOCALES) {
         const value = t(locale, key);
@@ -281,21 +236,16 @@ describe("App detail IA copy", () => {
         expect(value.length, `${locale} ${key}`).toBeGreaterThan(0);
       }
     }
-    // why: The stepped flow's load-bearing copy, pinned the way the neighbouring
-    // assertions pin theirs — so a swapped sentence fails here, not only in the
-    // rendered-surface suite.
     expect(t("en", "targets.addDialog.stepApp")).toBe("1 · App (bot)");
     expect(t("zh_CN", "targets.addDialog.stepRepos")).toBe("3 · 仓库");
     expect(t("en", "targets.filterUninstalled", { count: 3 })).toBe("Awaiting install (3)");
     expect(t("zh_CN", "targets.filterUninstalled", { count: 3 })).toBe("待安装（3）");
-    // note: The three detail tabs and the 评审配置 tab's own copy.
     expect(t("en", "targets.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
     expect(t("en", "targets.settings.heading")).toBe("Review settings");
     expect(t("zh_CN", "targets.settings.heading")).toBe("评审配置");
     expect(t("en", "targets.settings.follow")).toBe("Follow workspace defaults");
     expect(t("zh_CN", "targets.settings.following").length).toBeGreaterThan(0);
-    // why: The App detail's data tabs left this page with the surfaces themselves.
     expect(isDictionaryKey("appDetail.tabInsights")).toBe(false);
     expect(isDictionaryKey("appDetail.tabPullRequests")).toBe(false);
   });
@@ -323,17 +273,11 @@ describe("App detail IA copy", () => {
       expect(t("en", key).length, key).toBeGreaterThan(0);
       expect(t("zh_CN", key).length, key).toBeGreaterThan(0);
     }
-    // why: The identifier column must not repeat the section title it sits under:
-    // one word for both left the header indistinguishable from its heading.
     for (const locale of ["en", "zh_CN"] as const) {
       expect(t(locale, "settings.installationsId"), locale).not.toBe(
         t(locale, "settings.installations"),
       );
     }
-    // why: The settings tab is a section flow now: the two tier-group eyebrow keys
-    // and the per-row installation sentence (replaced by the table's account /
-    // installation / last-sync columns) leave with it. The availability badge
-    // and the allowlist copy leave with the allowlist surface.
     for (const key of [
       "settings.group.appInfo",
       "settings.group.configuration",
@@ -356,8 +300,6 @@ describe("App detail IA copy", () => {
   });
 
   test("the insights tab copy returns with the per-App view — window segments keep the 7/30/90 semantics", () => {
-    // why: The records page's window/repo vocabulary is reused verbatim by the
-    // per-App insights tab (the segments label the same day counts).
     expect(t("en", "insights.daysShort", { count: 7 })).toBe("7d");
     expect(t("zh_CN", "insights.daysShort", { count: 7 })).toBe("7 天");
     expect(t("en", "insights.filterRepoAll")).toBe("All");
@@ -366,7 +308,6 @@ describe("App detail IA copy", () => {
 });
 
 describe("creation chooser copy", () => {
-  /** note: Every key the chooser renders, both locales. */
   const KEYS = [
     "apps.createDialog.title",
     "apps.createDialog.description",
@@ -384,7 +325,6 @@ describe("creation chooser copy", () => {
   });
 
   test("the official-mode form's keys are removed, not aliased", () => {
-    // why: They left with their only consumer — the deleted target-creating form.
     for (const key of [
       "apps.createDialog.modeOfficial",
       "apps.createDialog.modeSelfHosted",
@@ -411,11 +351,6 @@ describe("creation chooser copy", () => {
 });
 
 describe("the shared-bot surfaces' copy", () => {
-  // why: The three key families the two shipped surfaces render: the console's
-  // official-workspace card (admin.workspaces.official*), the console's Bots
-  // page (admin.bots.*) and the bot page's share switch (botSettings.share*).
-  // The families are enumerated deliberately — deriving them from the pages
-  // would need machinery this file does not have.
   const CONSOLE_CARD_KEYS = [
     "admin.workspaces.officialTitle",
     "admin.workspaces.officialDescription",
@@ -471,8 +406,6 @@ describe("the shared-bot surfaces' copy", () => {
   ] as const satisfies readonly DictionaryKey[];
 
   test("every key the two new console surfaces use exists in both locales", () => {
-    // why: The satisfies clauses above are the compile-time half; this runtime half
-    // proves each key RESOLVES per locale - a lookup miss returns the key.
     for (const key of [...CONSOLE_CARD_KEYS, ...BOTS_PAGE_KEYS]) {
       expect(isDictionaryKey(key), key).toBe(true);
       for (const locale of LOCALES) {
@@ -493,8 +426,6 @@ describe("the shared-bot surfaces' copy", () => {
   });
 
   test("the nav label for the Bots page is registered and localized", () => {
-    // why: ADMIN_PAGES' bots entry names this key; a renamed family fails both here
-    // and in the admin-surface route tests.
     for (const locale of LOCALES) {
       const label = t(locale, "admin.nav.bots");
       expect(label).not.toBe("admin.nav.bots");

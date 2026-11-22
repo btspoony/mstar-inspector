@@ -71,18 +71,6 @@ export function familyPattern(glob: string): RegExp {
 
 const IMAGE_INPUT_PATTERNS: readonly RegExp[] = IMAGE_INPUT_FAMILIES.map(familyPattern);
 
-/**
- * why: The instruction quoted on failure, read from `AGENTS.md` § Sandbox image
- * rebuild — the section itself, not a copy. A hand copy used to live here and
- * had already drifted (it named no Dockerfile while the doc names one); the
- * section is the single source, so the printed text cannot disagree with it.
- * The bullets are the doc's, and the parity test keeps them equal to
- * `IMAGE_INPUT_FAMILIES`.
- *
- * Read on the failure path only: a passing diff must not depend on the doc's
- * shape, so drift cannot block a clean run. The CLI catches the throw and
- * reports it as an `::error::` annotation instead of a stack trace.
- */
 const AGENTS_SECTION = "## Sandbox image rebuild";
 const INSTRUCTION_START = "The review container is built from";
 const INSTRUCTION_END = "\nCheck before merging";
@@ -98,25 +86,12 @@ export function imageRebuildInstruction(): string {
   return agents.slice(start, end).trimEnd();
 }
 
-/**
- * note: A JSON object at `value`, or `undefined` for anything else — a config field
- * carries whatever the file holds, and only an object can be walked.
- */
 function objectAt(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
 }
 
-/**
- * why: Every `containers` array a deploy builds an image from, in config order: the
- * TOP LEVEL (staging) and `env.production`. A wrangler named environment does
- * not inherit resource keys, so production declares its own container block
- * with its own `dockerfile`/`build_context`/`name` — reading only the top
- * level let an `env.production`-only repoint ship unguarded. `undefined` when
- * a declared block is not an array: the caller fails closed instead of
- * trusting half a config.
- */
 function containerArrays(config: Record<string, unknown>): unknown[][] | undefined {
   const production = objectAt(objectAt(config.env)?.production);
   const arrays: unknown[][] = [];
@@ -151,7 +126,6 @@ export function readDockerfilePaths(configText: string): string[] {
   for (const container of arrays.flat()) {
     const sandbox = objectAt(objectAt(objectAt(container)?.images)?.sandbox);
     const dockerfile = sandbox?.dockerfile;
-    // why: Wrangler's `./` spelling is the repo-relative path git knows.
     if (typeof dockerfile !== "string" || dockerfile === "") continue;
     const path = dockerfile.replace(/^\.\//, "");
     if (!paths.includes(path)) paths.push(path);
@@ -257,7 +231,6 @@ export function changedFamilies(paths: string[]): string[] {
   );
 }
 
-/** note: The one machine-maintained line each Dockerfile carries. */
 const IMAGE_INPUTS_LINE = /^\s*#\s*image-inputs:\s*([0-9a-f]+)\s*$/;
 
 /** The fingerprint a Dockerfile records, or `undefined` when it records none. */
@@ -287,8 +260,6 @@ export function imageInputFingerprint(
   for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
     hash.update(`${file.path}\0${normalized(file.content)}\0`);
   }
-  // why: The container block decides which tree the Dockerfile sees and which file
-  // a deploy hashes, so it belongs to the same value as the copied sources.
   hash.update(`containers\0${normalized(containerBlock)}\0`);
   return hash.digest("hex").slice(0, 32);
 }
@@ -302,7 +273,6 @@ export function withImageInputsMarker(dockerfileText: string, fingerprint: strin
     lines[at] = line;
     return lines.join("\n");
   }
-  // why: Above every instruction: nothing a build reads moves, only the file's bytes.
   return [line, ...lines].join("\n");
 }
 
@@ -344,7 +314,6 @@ export function collectImageInputPaths(
 export function familyRoot(family: string): string {
   const segments = family.split("/");
   const wildcard = segments.findIndex((segment) => /[*?]/.test(segment));
-  // note: No wildcard: the family names one file, and that file is the root.
   const literal = wildcard < 0 ? segments : segments.slice(0, wildcard);
   return literal.join("/") === "" ? "." : literal.join("/");
 }
@@ -354,7 +323,6 @@ export function parseNameOnly(output: string): string[] {
   return output.split("\0").filter((path) => path !== "");
 }
 
-/** note: Run one git command; `undefined` when it fails (the diff is then unknown). */
 function git(args: string[], quiet = false): string | undefined {
   const proc = Bun.spawnSync(["git", ...args], { stdout: "pipe", stderr: "pipe" });
   if (proc.exitCode !== 0) {
@@ -372,7 +340,6 @@ export type GitRun = (args: string[]) => string | undefined;
 
 const gitQuiet: GitRun = (args) => git(args, true);
 
-/** note: Whether `spec` names an object in the repository (`git cat-file -e`). */
 function objectExists(spec: string, run: GitRun): boolean {
   return run(["cat-file", "-e", spec]) !== undefined;
 }
@@ -412,8 +379,6 @@ export function resolveBase(
     !local &&
     run(["fetch", "--no-tags", "--quiet", "origin", requested]) !== undefined &&
     objectExists(`${requested}^{commit}`, run);
-  // why: The named/fetched commit answers only when it lies behind HEAD: a base at
-  // HEAD or ahead of it diffs to `diff(HEAD, HEAD)` — empty, and read as a pass.
   if (
     (local || fetched) &&
     requested !== head &&
@@ -423,7 +388,6 @@ export function resolveBase(
   }
   if (ref !== undefined && ref !== "") {
     const mergeBase = run(["merge-base", "HEAD", ref])?.trim() ?? "";
-    // why: Same rule as above, on the same terms: the fallback is no exception.
     if (
       mergeBase !== "" &&
       mergeBase !== head &&
@@ -448,7 +412,6 @@ function printUsage(): void {
   );
 }
 
-/** note: `git ls-files` over the family roots: tracked plus untracked, never ignored. */
 function listImageInputPaths(roots: readonly string[]): string[] {
   const output = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...roots]);
   if (output === undefined) {
@@ -480,8 +443,6 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  // why: The paths come from the config `wrangler` itself reads, so a hand-copied
-  // Dockerfile path here can never drift from the files a deploy hashes.
   let headConfig: string;
   try {
     headConfig = readFileSync(configPath, "utf8");
@@ -500,9 +461,6 @@ if (import.meta.main) {
   }
   const dockerfileLabel = dockerfilePaths.join(" / ");
 
-  // why: The container block is part of the input set: a `build_context` or
-  // Dockerfile repoint changes the image even though no copied path did. Every
-  // other config edit (vars, queues, routes, observability) cannot.
   const headBlock = containerSignature(headConfig);
   if (headBlock === undefined) {
     console.error(
@@ -511,8 +469,6 @@ if (import.meta.main) {
     process.exit(1);
   }
 
-  // why: The tree's own answer: every copied file's path and content, enumerated
-  // from git so ignored trees (node_modules, .wrangler) never enter the hash.
   const roots = [...new Set(IMAGE_INPUT_FAMILIES.map(familyRoot))];
   let inputPaths: string[];
   try {
@@ -536,9 +492,6 @@ if (import.meta.main) {
   }
   const fingerprint = imageInputFingerprint(files, headBlock);
 
-  // why: `--write` is the repair: recompute, record it in every configured
-  // Dockerfile, and report what moved. It still fails a tree it could not
-  // fingerprint above, so it can never paper over an unreadable input.
   if (write) {
     let changed = 0;
     for (const path of dockerfilePaths) {
@@ -560,8 +513,6 @@ if (import.meta.main) {
     process.exit(0);
   }
 
-  // invariant: Every configured Dockerfile records the SAME value: a deploy hashes one of
-  // them, so a stale line in either is a stale image.
   let verdict: ImageGateVerdict | undefined;
   for (const path of dockerfilePaths) {
     let text: string;
@@ -575,12 +526,6 @@ if (import.meta.main) {
     if (!current.ok) verdict = current;
   }
   if (verdict !== undefined && !verdict.ok) {
-    // why: `--base` supplies the MESSAGE only: which families moved since the base
-    // revision. A base that cannot be resolved leaves the list empty rather
-    // than failing a verdict the fingerprint already decided — but it says so:
-    // "no family list" and "the base is gone" are different facts, and an
-    // operator who cannot see which one happened reads the empty list as
-    // "nothing changed".
     const resolved = resolveBase(base, ref, gitQuiet);
     const families = new Set<string>();
     if ("error" in resolved) {

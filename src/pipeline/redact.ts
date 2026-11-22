@@ -1,16 +1,3 @@
-/**
- * Secret redaction for model-produced text (Phase 5 B2 / SEC-02) — pure,
- * unit-tested. The review session can be prompt-injected into echoing
- * secrets (provider keys,
- * installation tokens, PEM material) into ANY model-controlled envelope
- * string — summary_md, finding title/body/category/file_path/fingerprint_hint,
- * tally chatHeader. Everything that can reach the PUBLIC PR review comment
- * or the D1 envelope passes through here first (consumer choke point,
- * applied before postReview and insertReview).
- *
- * Redaction is intentionally conservative: an over-redacted phrase in a
- * finding body is acceptable; a leaked token is not.
- */
 
 import { REDACTED, redactSecretShapes } from "../../packages/shared/src/secret-shapes";
 import type { ReviewOutput } from "../review/schema";
@@ -45,30 +32,15 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
-/** Regex metacharacters, escaped so a credential form matches literally. */
 const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
-// why: a short value's RAW form cannot be distinguished from ordinary text
-// (`mstar` inside `mstar.review/v1`), so only its exact leaf is matched. Its
-// encoded forms are specific strings and stay substring-matched below.
 const SUBSTRING_MIN_LENGTH = 8;
 
-// why: a short encoding is both a weak leak carrier and a strong false
-// positive (a 2-char base64url sits inside ordinary schema text), so only
-// encodings this long are matched as substrings; shorter ones stay exact-leaf.
 const MIN_ENCODED_SUBSTRING_LENGTH = 6;
 
 /** A retained document whose host-written identity paths are protected. */
 export type RetainedDocument = "run" | "recheck" | "report" | "text";
 
-/**
- * The identity paths, per document. Protection is STRUCTURAL — by position, not
- * by key name — because a key name is model-forgeable: through this table a
- * value under `target.head_sha` is host-written, while the same text nested
- * inside `summary_md` is model output and stays redactable.
- *
- * `*` matches any array index. A path that is absent is simply absent.
- */
 const IDENTITY_PATHS: Record<RetainedDocument, readonly (readonly string[])[]> = {
   run: [
     ["target", "head_sha"],
@@ -81,10 +53,8 @@ const IDENTITY_PATHS: Record<RetainedDocument, readonly (readonly string[])[]> =
     ["doc", "headSha"],
     ["status", "headSha"],
     ["doc", "results", "*", "rowId"],
-    // The recheck wire's evidence is one object per result, not a list.
     ["doc", "results", "*", "evidence", "sliceId"],
   ],
-  // The report wire's only host-bound field; it carries no checkKey/generation.
   report: [["headSha"]],
   text: [],
 };
@@ -98,7 +68,6 @@ export type SecretTransforms = {
   raw: string;
   urlEncoded: string;
   base64: string;
-  /** RFC 4648 §5: `-`/`_` alphabet, padding stripped. */
   base64url: string;
   hex: string;
 };
@@ -140,29 +109,16 @@ export function carriesSecretForm(text: string, secrets: readonly string[]): boo
 /** What one document redaction changed. */
 export type RedactionOutcome<T> = {
   value: T;
-  /** Occurrences replaced across every string leaf. */
   replaced: number;
 };
 
-/** Mutable counter one walk threads through its leaves. */
 type RedactionState = { replaced: number };
 
-/** How each credential form is matched against a leaf. */
 type CredentialMatcher = {
-  /** Forms matched anywhere in a leaf: every form of a long credential, and the encoded forms of a short one. */
   pattern: RegExp | null;
-  /** Short credentials' RAW form, matched only when the whole leaf is that value. */
   exact: ReadonlySet<string>;
 };
 
-/**
- * Split the credentials into the two match modes. A value at or above
- * `SUBSTRING_MIN_LENGTH` contributes every form and is matched anywhere; a
- * shorter one keeps its RAW form exact-leaf only, while its encoded forms join
- * the substring scan — those are position-specific strings, not ordinary
- * words. An encoded form shorter than `MIN_ENCODED_SUBSTRING_LENGTH` is too
- * weak to scan and stays exact-leaf too.
- */
 function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
   const forms = new Set<string>();
   const exact = new Set<string>();
@@ -171,8 +127,6 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
     const short = secret.length < SUBSTRING_MIN_LENGTH;
     if (short) exact.add(secret);
     for (const form of Object.values(secretTransforms(secret))) {
-      // why: url-encoding leaves ordinary short values unchanged; that raw
-      // spelling must not become a substring match.
       if (form === "" || (short && form === secret)) continue;
       if (form.length < MIN_ENCODED_SUBSTRING_LENGTH) {
         exact.add(form);
@@ -181,8 +135,6 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
       forms.add(form);
     }
   }
-  // A shorter form that is a substring of a longer one must not shred the
-  // longer match first.
   const ordered = [...forms].sort((left, right) => right.length - left.length);
   return { pattern: ordered.length === 0 ? null : formPattern(ordered), exact };
 }
@@ -254,17 +206,11 @@ function redactRoot(
     const parsed = parseDocument(value);
     if (parsed === undefined) return redactText(value, matcher, state);
     const redacted = redactTree(parsed, [], paths, matcher, state);
-    // Untouched document: return the original bytes, trimming included.
     return state.replaced === 0 ? value : JSON.stringify(redacted);
   }
   return redactTree(value, [], paths, matcher, state);
 }
 
-/**
- * Walk a parsed structure carrying its path. A node on a protected path is
- * returned untouched; every other string is one text leaf. `*` in a table path
- * matches an array index.
- */
 function redactTree(
   value: unknown,
   at: readonly string[],
@@ -278,7 +224,6 @@ function redactTree(
     );
     return protectedPath ? value : redactText(value, matcher, state);
   }
-  // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
   if (value instanceof Set) {
     return new Set([...value].map((item) => redactTree(item, [...at, "*"], paths, matcher, state)));
   }
@@ -296,18 +241,6 @@ function redactTree(
   return value;
 }
 
-/**
- * One leaf, in the matcher's two modes: a leaf that IS a short credential is
- * replaced whole; otherwise every substring form is scanned once — all forms
- * of a long credential, the encoded forms of a short one.
- *
- * Existing markers are BOUNDARIES, not scanned text: the leaf is split on the
- * literal marker, each segment is scanned once, and the markers are rejoined
- * verbatim. So a credential that is a substring of `[REDACTED]` (or spans its
- * edge) can never rewrite it, a model-printed marker shields nothing but
- * itself, and text the scan emitted is never re-examined — a second pass is a
- * no-op with no placeholder involved.
- */
 function redactText(text: string, matcher: CredentialMatcher, state: RedactionState): string {
   if (matcher.exact.has(text)) {
     state.replaced += 1;
@@ -329,7 +262,6 @@ function redactText(text: string, matcher: CredentialMatcher, state: RedactionSt
   return count === 0 ? text : out;
 }
 
-/** Parsed object/array of an optionally whitespace-padded JSON document. */
 function parseDocument(text: string): unknown {
   const trimmed = text.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
@@ -341,21 +273,13 @@ function parseDocument(text: string): unknown {
   }
 }
 
-/** One pattern for every form, longest first (leftmost match wins). */
 function formPattern(forms: readonly string[]): RegExp {
   const alternatives = forms.map((form) => form.replace(REGEX_METACHARACTERS, "\\$&")).join("|");
   return new RegExp(alternatives, "g");
 }
 
-/** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
 type IncompleteFact = NonNullable<ReviewOutput["incomplete"]>;
 
-/**
- * Redact one `incomplete` fact (qc2 F-001): `reason` and every `unscanned`
- * entry are model-controlled and reach the public review comment and the D1
- * envelope, so both redaction passes rewrite them. Structure is preserved —
- * entries keep their order and count, and an empty list stays empty.
- */
 const redactIncompleteFact = (
   fact: IncompleteFact,
   redact: (text: string) => string,
@@ -394,8 +318,6 @@ export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
       ...finding,
       title: redactSecrets(finding.title),
       body: redactSecrets(finding.body),
-      // Conditional spreads keep ABSENT optional fields absent (no
-      // `key: undefined` materialization on the envelope).
       ...(finding.category === undefined ? {} : { category: redactSecrets(finding.category) }),
       ...(finding.file_path == null ? {} : { file_path: redactSecrets(finding.file_path) }),
       ...(finding.fingerprint_hint === undefined

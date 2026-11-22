@@ -1,13 +1,3 @@
-/**
- * note: The `WorkflowStep` double every suite shares. The production composition is
- * driven with an in-place step: `step.do` runs its callback immediately and
- * ignores the durable-step config, because the tests own no step store. The
- * phases, handoffs, settlement and successor hand-off all stay production code.
- *
- * The workflow module is imported dynamically: it statically imports the
- * workerd-only `cloudflare:workers` builtin through the sandbox adapter, so the
- * suite's shim must be registered before this loads.
- */
 import type { WorkflowStep } from "cloudflare:workers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { AttemptStarter } from "../../src/pipeline/consumer";

@@ -17,16 +17,9 @@ import { join } from "node:path";
 import { changelogPathFor } from "./release-surfaces";
 
 export type ExtractOptions = {
-  /** note: Bare version (X.Y.Z) — same form as the section header and archive dir. */
   version: string;
   lang: "en" | "cn";
-  /** note: Base the changelog path resolves under. Default: process.cwd(). */
   root?: string;
-  /**
-   * why: Bound the emitted body. GitHub refuses a PR body over 65536 characters and
-   * a Release body over 125000; a first release carries every accumulated
-   * fragment, so an unbounded section breaks the cut instead of publishing it.
-   */
   maxChars?: number;
 };
 
@@ -115,8 +108,6 @@ function printUsage(): void {
   RELEASE_VERSION=<version> bun run scripts/extract-changelog-section.ts --lang cn`);
 }
 
-// why: Run only when executed directly — importing the module (unit tests) must
-// not read the real checkout's changelogs.
 if (import.meta.main) {
   let parsed;
   try {

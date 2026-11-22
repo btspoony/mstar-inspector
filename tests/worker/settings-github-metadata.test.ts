@@ -34,11 +34,8 @@ import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** invariant: The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
 
-// note: --- test RSA key material (the tests/dashboard/github-app-metadata.test.ts
-// face — duplicated per the tests-are-not-modules convention) ---
 
 async function generateKeyPair(): Promise<CryptoKeyPair> {
   return (await crypto.subtle.generateKey(
@@ -53,7 +50,6 @@ async function generateKeyPair(): Promise<CryptoKeyPair> {
   )) as CryptoKeyPair;
 }
 
-/** note: DER bytes → armored PEM (64-col base64, the standard wrap). */
 function toPem(der: Uint8Array, label: string): string {
   let binary = "";
   for (const byte of der) binary += String.fromCharCode(byte);
@@ -61,14 +57,12 @@ function toPem(der: Uint8Array, label: string): string {
   return `-----BEGIN ${label}-----\n${b64.match(/.{1,64}/g)!.join("\n")}\n-----END ${label}-----\n`;
 }
 
-/** A fresh PKCS#8 PEM (workerd WebCrypto's format — mints a real JWT). */
 async function pkcs8PemFixture(): Promise<string> {
   const { privateKey } = await generateKeyPair();
   const der = new Uint8Array((await crypto.subtle.exportKey("pkcs8", privateKey)) as ArrayBuffer);
   return toPem(der, "PRIVATE KEY");
 }
 
-/** note: A realistic GET /app public profile. */
 const GITHUB_PROFILE = {
   name: "Acme Inspector",
   description: "PR review bot for Acme",
@@ -77,21 +71,12 @@ const GITHUB_PROFILE = {
   owner: { avatar_url: "https://avatars.githubusercontent.com/u/1?v=4" },
 };
 
-/** note: The App icon: the SHARED derivation (no second copy of the template). */
 const APP_AVATAR_URL = appAvatarUrl(APP_ID);
 
-/** invariant: The two upstream URLs one refresh can touch (the icon is derived, never fetched). */
 const GITHUB_APP_URL = "https://api.github.com/app";
 const GITHUB_PUBLIC_APPS_URL = "https://api.github.com/apps/";
-/** note: The authoritative installation list the same refresh reconciles against. */
 const GITHUB_INSTALLATIONS_URL = "https://api.github.com/app/installations?per_page=100";
 
-/** note: One refresh = `GET /app` plus, only when the profile yields a slug, the
- * anonymous `GET /apps/{slug}` visibility probe. `probeStatus` decides the
- * visibility answer: 404 = private (the default here), 200 = public, anything
- * else (503) = inconclusive, the "keep the stored value" branch. Any other
- * upstream URL is a failure, not a silent answer.
- */
 function githubStub(profile: Record<string, unknown>, probeStatus = 404, installations: number[] = []) {
   const body = JSON.stringify(profile);
   const idList = JSON.stringify(installations.map((id) => ({ id, account: { login: `org-${id}` } })));
@@ -107,10 +92,8 @@ function githubStub(profile: Record<string, unknown>, probeStatus = 404, install
   };
 }
 
-/** note: The `GET /app` profile fetches — the probe rides the same refresh, so counts are scoped to it. */
 const appProfileCalls = (calls: FetchCall[]) => calls.filter((call) => call.url === GITHUB_APP_URL);
 
-// note: --- fetch stubbing (tests/worker/entry.test.ts precedent) ---
 
 type FetchCall = { url: string; init: RequestInit | undefined };
 
@@ -130,7 +113,6 @@ afterEach(() => {
   globalThis.fetch = origFetch;
 });
 
-// note: --- world setup (tests/worker/spa-page-apis.test.ts pattern) ---
 
 async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: string }> {
   const db = createMigratedTestD1();
@@ -171,7 +153,6 @@ function makeEnv(db: unknown, encryptionKey: string | null = TEST_KEY): Env {
 
 const cookie = (login: string) => createSessionValue(login, null, SESSION_SECRET);
 
-/** note: The manager's forced refresh — one POST, no form body. */
 async function postRefresh(login: string, env: Env): Promise<Response> {
   return worker.fetch(
     new Request(`https://worker.local/dashboard/default/api/apps/${APP_ID}/refresh-metadata`, {
@@ -211,7 +192,6 @@ const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
     )
     .get(appId) as CachedColumns;
 
-/** note: Seed a cached profile + a synced_at RELATIVE to now (the TEXT convention). */
 function seedCache(db: TestD1, appId: string, syncedAtSql: string): void {
   db.raw
     .query(
@@ -231,9 +211,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    // note: One refresh: the App-JWT profile read, then the same JWT's
-    // authoritative installation list (the reconcile leg), then the
-    // anonymous visibility probe carrying the slug that read just resolved.
     expect(calls.map((call) => call.url)).toEqual([
       GITHUB_APP_URL,
       GITHUB_INSTALLATIONS_URL,
@@ -247,11 +224,8 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(body.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
     expect(body.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(body.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    // note: The default probe answer (404) is "private", and the refresh caches it.
     expect(body.app.github_visibility).toBe("private");
 
-    // invariant: The single store writer persisted exactly the profile columns — and the
-    // machine-triggered write never churns the operator timestamp (L5).
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
     expect(row.github_description).toBe("PR review bot for Acme");
@@ -261,17 +235,12 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(row.github_visibility).toBe("private");
     expect(row.updated_at).toBe(row.created_at);
 
-    // invariant: The envelopes never leave the row (Global Constraints).
     const raw = JSON.stringify(body);
     expect(raw).not.toContain("private_key");
     expect(raw).not.toContain(pem);
   });
 
   test("TTL hit: a synced_at just inside 24h serves the cache with ZERO fetches, on both faces", async () => {
-    // invariant: A VALID PEM (not a garbage marker): the zero-fetch pin below must be
-    // load-bearing — a refresh-always regression would mint past the key
-    // check, reach the throwing stub, and fail the call-count assert (a
-    // garbage PEM would fail pre-stub and pin nothing).
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     seedCache(db, appId, "datetime('now', '-23 hours')");
@@ -294,10 +263,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
   });
 
   test("TTL hit but NULL github_slug: an unsynced row still refreshes and persists the slug", async () => {
-    // note: The migration-0036 upgrade case: 0019 already stamped
-    // github_metadata_synced_at, so the row is "fresh" while github_slug stays
-    // NULL and the bot mention is dead. Opening the settings page is the
-    // documented remedy, so it MUST fetch exactly once here.
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     seedCache(db, appId, "datetime('now', '-1 hours')");
@@ -325,7 +290,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1); // note: one refresh (the probe rides along)
+    expect(appProfileCalls(calls)).toHaveLength(1);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBe("Renamed Inspector");
     const row = cachedColumns(db, appId);
@@ -342,8 +307,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    // note: The refresh really ran and really probed: the new profile landed, so a
-    // preserved visibility cannot be a short-circuit that never fetched.
     expect(appProfileCalls(calls)).toHaveLength(1);
     expect(calls.map((call) => call.url)).toContain(`${GITHUB_PUBLIC_APPS_URL}acme-inspector`);
     const body = (await res.json()) as { app: Record<string, unknown> };
@@ -377,7 +340,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1); // invariant: one attempt, zero retries (AD-531)
+    expect(calls).toHaveLength(1);
     const body = (await res.json()) as { app: Record<string, unknown> };
     expect(body.app.github_name).toBeNull();
     expect(body.app.github_description).toBeNull();
@@ -386,17 +349,11 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(body.app.github_metadata_synced_at).toBeNull();
     const row = cachedColumns(db, appId);
     expect(row.github_metadata_synced_at).toBeNull();
-    // why: This row still caches a slug, so it has no NULL-slug re-attempt to
-    // floor: the marker stays untouched and only the profile columns are
-    // involved. The operator timestamp holds (machine write).
     expect(row.github_metadata_attempted_at).toBeNull();
     expect(row.updated_at).toBe(row.created_at);
   });
 
   test("a permanently failing upstream costs ONE fetch across two settings reads (migration 0037)", async () => {
-    // invariant: The 404/401/403 case: nothing is ever written to the profile columns, so
-    // without an attempt marker the NULL-slug rule re-fetches on every read —
-    // one `/app` call plus up to the 5 s timeout per open, for every member.
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
@@ -434,19 +391,13 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
   });
 
   test("a successful payload WITHOUT a slug stamps the attempt and does not loop", async () => {
-    // note: The degraded-payload case: the profile persists (so synced_at is fresh)
-    // while the slug stays NULL, which is the re-attempt trigger. Without the
-    // marker every read would fetch again.
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
-    // note: Neither `slug` nor a derivable html_url: both slug sources degrade.
     const { calls } = stubFetch(githubStub({ name: "Acme Inspector" }));
     const env = makeEnv(db);
 
     expect((await getSettings("mallory", env)).status).toBe(200);
-    // note: No slug → no visibility probe; the installation list still runs with
-    // the same refresh.
     expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL, GITHUB_INSTALLATIONS_URL]);
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Acme Inspector");
@@ -454,7 +405,7 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
     expect((await getSettings("hubot", env)).status).toBe(200);
-    expect(calls).toHaveLength(2); // note: the attempt marker bounds the second read
+    expect(calls).toHaveLength(2);
   });
 
   test("force ignores the attempt marker: the manager's refresh always asks GitHub", async () => {
@@ -477,7 +428,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
 
   test("envelope-level decrypt failure (Task-1 review handoff) → swallowed, 200 with the manage face intact", async () => {
     const { db, appId } = await seededWorld("this plaintext is unreachable");
-    // safety: Corrupt the stored envelope AFTER seeding — decryptSecret throws on it.
     db.raw.query("UPDATE review_bots SET private_key_enc = 'not-an-envelope' WHERE id = ?").run(appId);
     const { calls } = stubFetch(
       () => new Response(JSON.stringify(GITHUB_PROFILE), { status: 200, headers: { "content-type": "application/json" } }),
@@ -485,20 +435,18 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
 
     const res = await getSettings("mallory", makeEnv(db));
 
-    // note: Fail-open by structure: the leg's own catch-all served the cached row —
-    // the refresh never reached the network and never hit the route's 500 face.
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(0);
     const body = (await res.json()) as { can_manage: boolean; app: Record<string, unknown>; keys: unknown };
     expect(body.can_manage).toBe(true);
     expect(body.app.github_name).toBeNull();
     expect(body.app.github_metadata_synced_at).toBeNull();
-    expect(body.keys).toEqual([]); // note: the manage face rendered fully
+    expect(body.keys).toEqual([]);
     expect(JSON.stringify(body)).not.toContain("not-an-envelope");
   });
 
   test("missing DASHBOARD_ENCRYPTION_KEY → refresh skipped silently (never a 500); the manage branch keeps its existing fail-closed 500", async () => {
-    const pem = await pkcs8PemFixture(); // invariant: decryptable — only the missing key blocks the refresh
+    const pem = await pkcs8PemFixture();
     const { db } = await seededWorld(pem);
     const envNoKey = makeEnv(db, null);
     const { calls } = stubFetch(
@@ -512,8 +460,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(viewerBody.can_manage).toBe(false);
     expect(viewerBody.app.github_name).toBeNull();
 
-    // invariant: Pre-existing face, untouched by this plan (spec: the missing-key 500
-    // belongs to the manage branch only).
     const manager = await getSettings("mallory", envNoKey);
     expect(manager.status).toBe(500);
     expect(calls).toHaveLength(0);
@@ -543,12 +489,8 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     expect(viewerBody.app.github_avatar_url).toBe(APP_AVATAR_URL);
     expect(viewerBody.app.github_slug).toBe("acme-inspector");
     expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    // note: The synced-at cache means the second face triggered NO second refresh:
-    // the profile read, its installation list and its one visibility probe
-    // belong to the first face only.
     expect(appProfileCalls(calls)).toHaveLength(1);
     expect(calls).toHaveLength(3);
-    // invariant: The base-only face still carries no settings zones (pin).
     expect(viewerBody.keys).toBeUndefined();
     expect(viewerBody.provider_catalog).toBeUndefined();
   });
@@ -556,9 +498,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
   test("a real refresh reconciles installations: an absent row is stamped, a stored-removed row is cleared", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    // note: 10 = uninstalled while no delivery arrived (the reported defect);
-    // 20 = already stamped removed in a legacy second-resolution form, but
-    // GitHub lists it again: the same-second clear must still work.
     db.raw
       .prepare(
         "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
@@ -600,8 +539,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
 
     const res = await postRefresh("mallory", makeEnv(db));
 
-    // why: 200 (not the keyed 400): the metadata save succeeded, so the failed
-    // reconcile leg may not downgrade it. The row keeps its null stamp.
     expect(res.status).toBe(200);
     expect(cachedColumns(db, appId).github_name).toBe("Acme Inspector");
     const row = db.raw
@@ -615,7 +552,6 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
   test("a fresh cache is bypassed: one GET /app, the rename lands, updated_at untouched", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    // why: The read path would serve this cache untouched for another hour.
     seedCache(db, appId, "datetime('now', '-1 hours')");
     const before = cachedColumns(db, appId);
     const { calls } = stubFetch(githubStub({ ...GITHUB_PROFILE, name: "Renamed Inspector" }));
@@ -627,7 +563,6 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
     const row = cachedColumns(db, appId);
     expect(row.github_name).toBe("Renamed Inspector");
     expect(row.github_metadata_synced_at).not.toBe(before.github_metadata_synced_at);
-    // note: The forced refresh is still a machine write: the operator timestamp holds.
     expect(row.updated_at).toBe(row.created_at);
   });
 
@@ -646,8 +581,6 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
 
     const res = await postRefresh("mallory", makeEnv(db));
 
-    // invariant: An unreachable GitHub is a retryable operator condition, never a broken
-    // server: the keyed 400 lets the SPA localize the cause.
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({
       key: "settings.error.githubMetadataRefreshFailed",
@@ -679,9 +612,6 @@ describe("POST /api/apps/:appId/refresh-metadata — the manager's forced refres
 
     const res = await postRefresh("mallory", makeEnv(db, null));
 
-    // note: requireAppSettings owns the encryption-key precondition: it fails closed
-    // with 500 before the refresh core runs (the read face's silent skip is a
-    // different, deliberately fail-open contract).
     expect(res.status).toBe(500);
     expect(calls).toHaveLength(0);
     expect(cachedColumns(db, appId)).toEqual(before);

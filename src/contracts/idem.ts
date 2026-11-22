@@ -1,7 +1,3 @@
-/**
- * Idempotency key format + TTL — single source of truth (compass contracts B).
- * 04/05/06 MUST import from here; no second `idem:` literal or magic 86400.
- */
 import type { KVNamespace } from "@cloudflare/workers-types";
 
 export type IdempotencyKey = {
@@ -9,7 +5,7 @@ export type IdempotencyKey = {
   owner: string;
   repo: string;
   pr_number: number;
-  head_sha: string; // non-empty invariant; empty/null must be rejected
+  head_sha: string;
 };
 
 /** KV TTL for idempotency keys (24h). */

@@ -14,7 +14,6 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 const SHARED_SRC = join(import.meta.dir, "..", "..", "packages", "shared", "src");
 const SHARED_MANIFEST = join(SHARED_SRC, "..", "package.json");
 
-/** note: Every `.ts` file under the package source root, recursively. */
 function sharedFiles(dir: string = SHARED_SRC): string[] {
   return readdirSync(dir).flatMap((entry) => {
     const full = join(dir, entry);
@@ -25,19 +24,12 @@ function sharedFiles(dir: string = SHARED_SRC): string[] {
 
 type ImportRef = { file: string; specifier: string; typeOnly: boolean };
 
-/** note: `{ type A, type B }` — every named specifier carries the inline modifier. */
 function allSpecifiersTyped(clause: string): boolean {
   const named = clause.match(/\{([\s\S]*)\}/)?.[1];
   const specifiers = named?.split(",").map((specifier) => specifier.trim()).filter(Boolean) ?? [];
   return specifiers.length > 0 && specifiers.every((specifier) => /^type\s/.test(specifier));
 }
 
-/**
- * why: Drop `//` and block comments — the package documents its own type-only
- * imports in prose, and a `from "…"` inside that prose is not an import.
- * Scans (not regexes) so a `//` inside a specifier is never mistaken for a
- * comment.
- */
 function stripComments(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; i++) {
@@ -61,12 +53,6 @@ function stripComments(text: string): string {
   return out;
 }
 
-/**
- * why: Import/export specifiers in every spelling the package may use (static
- * import, re-export, side-effect import, dynamic import, require). Statement
- * clauses stop before a quote or `;`, so the lazy clause never spans a
- * neighbouring statement.
- */
 function importsOf(file: string): ImportRef[] {
   const source = stripComments(readFileSync(file, "utf8"));
   const refs: ImportRef[] = [];

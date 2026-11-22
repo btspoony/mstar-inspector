@@ -1,14 +1,3 @@
-/**
- * note: The attempt-scoped sandbox: identity, the marker written at prepare and the
- * sameness gate every later collect/destroy runs behind.
- *
- * Two directions are proven here. A container that still carries this
- * attempt's exact marker bytes — the same live incarnation prepare provisioned
- * — runs the collect read and is destroyed. A container that carries no
- * marker, different bytes, or no live container at all runs NOTHING and
- * destroys NOTHING, and the outcome is `unknown`: the result is neither
- * collected nor reported as a failure.
- */
 
 import { describe, expect, mock, test } from "bun:test";
 import type { ExecOutput } from "@cloudflare/workers-types";
@@ -17,8 +6,6 @@ import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 import { TEST_KEY } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-// note: The shared mock must register the workerd builtin BEFORE the sandbox adapter
-// loads, so those two modules cannot be static imports here.
 import "../helpers/cloudflare-workers-mock";
 
 const { SandboxV1, shellCommand } = await import("../../src/pipeline/sandbox");
@@ -35,7 +22,6 @@ const {
 const ATTEMPT_A = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
 const ATTEMPT_B = "9d7e1a20-33c4-4f0b-8a6d-51c9d2e7b902";
 const SHA = "a".repeat(40);
-/** note: The one post-paid authority: the paid call returned and its result is durable. */
 const RETAINED = { kind: "retained" } as const;
 
 const encoder = new TextEncoder();
@@ -44,25 +30,16 @@ function bytes(text: string): ArrayBuffer {
   return encoder.encode(text).buffer as ArrayBuffer;
 }
 
-// note: ---------------------------------------------------------------------------
-// A container double that models the ONE fact the gate reads: the marker file
-// on its own ephemeral filesystem, plus whether an incarnation is running.
-// ---------------------------------------------------------------------------
 
 type MarkerContainer = {
   running: boolean;
   marker: string | null;
   images: Record<string, string>;
   startCalls: number;
-  /** note: Shell commands the DO actually ran through the gate (not the marker traffic). */
   ran: string[];
-  /** note: Marker reads served (the proof half of a guarded operation). */
   markerReads: number;
-  /** note: A guarded exec answers by rejecting (the reply was lost). */
   execRejects: boolean;
-  /** note: When set, a command naming "slow" waits on it (a long in-flight run). */
   slow: Promise<void> | undefined;
-  /** note: Runs as the marker read is served (a handoff to a new handle). */
   onMarkerRead: (() => void) | undefined;
   destroyed: boolean;
   start(opts: unknown): void;
@@ -97,7 +74,6 @@ function makeContainer(running = false): MarkerContainer {
         stdin: null,
       });
       if (command.includes("mstar-review-attempt")) {
-        // note: Exclusive create, then the plain read the gate performs.
         if (command.includes("printf")) {
           if (container.marker !== null) return answer("", 1);
           container.marker = env["MSTAR_ATTEMPT_MARKER"] ?? "";
@@ -121,7 +97,6 @@ function makeContainer(running = false): MarkerContainer {
   return container;
 }
 
-/** note: The DO's durable storage, as the revocation flag (migration 0089) reads it. */
 function storageDouble() {
   const durable = new Map<string, unknown>();
   return { get: async (key: string) => durable.get(key), put: async (key: string, value: unknown) => void durable.set(key, value) };
@@ -136,7 +111,6 @@ function makeDo(container: MarkerContainer) {
   return new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 }
 
-/** note: The same DO with a swappable ctx container (a handoff between incarnations). */
 function makeSwappableDo(container: MarkerContainer) {
   const ctx: { container: MarkerContainer; blockConcurrencyWhile: (fn: () => Promise<unknown>) => Promise<unknown> } = {
     container,
@@ -155,11 +129,7 @@ function makeSwappableDo(container: MarkerContainer) {
   return { sandbox, ctx };
 }
 
-// note: ---------------------------------------------------------------------------
-// A sandbox double for the attempt module: the marker decision is the test's.
-// ---------------------------------------------------------------------------
 
-/** note: The attempt module's view of an attempt-owned sandbox, with the test's decision. */
 type SandboxDouble = {
   events: string[];
   claimMarker: (marker: string) => Promise<"written" | "matched" | "unknown">;
@@ -175,7 +145,6 @@ type SandboxDouble = {
 function attemptSandboxDouble(decision: {
   claim?: "written" | "matched" | "unknown";
   marked?: "ran" | "unknown";
-  /** note: The guarded call itself rejects (the reply was lost). */
   markedRejected?: boolean;
 }): SandboxDouble {
   const events: string[] = [];
@@ -239,8 +208,6 @@ describe("attempt identity", () => {
     expect(attemptSandboxId(ATTEMPT_A)).toBe(`review-${ATTEMPT_A}`);
     expect(attemptSandboxId(ATTEMPT_A)).not.toBe(attemptSandboxId(ATTEMPT_B));
 
-    // note: Exact bytes: literal prefix, the lowercase attempt id, one LF — no
-    // credential, no host, no checkout fact to read back.
     expect(attemptMarker(ATTEMPT_A)).toBe(`mstar.review-attempt/v1:${ATTEMPT_A}\n`);
     expect(attemptMarker(ATTEMPT_A)).toMatch(/^mstar\.review-attempt\/v1:[0-9a-f-]+\n$/);
     expect(attemptMarker(ATTEMPT_A.toUpperCase())).toBe(attemptMarker(ATTEMPT_A));
@@ -271,8 +238,6 @@ describe("prepare writes the marker before any checkout work", () => {
 
     expect(acquired).toEqual([`review-${ATTEMPT_A}`]);
     expect(prepared.headSha).toBe(SHA);
-    // note: The claim comes FIRST: the checkout never runs on a container that has
-    // not proven it is this attempt's.
     expect(sandbox.events[0]).toBe(`claim:${attemptMarker(ATTEMPT_A)}`);
   });
 
@@ -335,7 +300,6 @@ describe("collection refuses an unproven container", () => {
     const sandbox = attemptSandboxDouble({ marked: "unknown" });
     await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
 
-    // note: Exactly one guarded read was attempted, and it returned nothing.
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
   });
 
@@ -354,9 +318,6 @@ describe("collection refuses an unproven container", () => {
 
     expect(execution.run.exitCode).toBe(0);
     expect(execution.appliedProvider).toBeNull();
-    // note: Recheck is not requested in this round; the report needs PR context.
-    // Every sandbox action of a paid round is guarded now: the runner-input
-    // write, the paid exec, and the result-document read.
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(3);
   });
 });
@@ -386,7 +347,6 @@ describe("SandboxV1 marker gate", () => {
 
     expect(await sandbox.claimMarker(marker)).toBe("matched");
     expect(await sandbox.claimMarker(attemptMarker(ATTEMPT_B))).toBe("unknown");
-    // note: Not overwritten, not truncated: the other bytes are still there.
     expect(container.marker).toBe(marker);
   });
 
@@ -424,8 +384,6 @@ describe("SandboxV1 marker gate", () => {
     const marker = attemptMarker(ATTEMPT_A);
     expect(await sandbox.claimMarker(marker)).toBe("written");
 
-    // note: The prepared container is gone; what the name resolves to now is a new
-    // incarnation with its own empty filesystem.
     container.marker = null;
 
     expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({ kind: "unknown" });
@@ -442,7 +400,6 @@ describe("SandboxV1 marker gate", () => {
     container.execRejects = true;
 
     expect(await sandbox.runMarked(marker, shellCommand("cat result.json"))).toEqual({ kind: "unknown" });
-    // note: The proof itself succeeded; only the command's reply is unprovable.
     expect(container.markerReads).toBe(1);
   });
 
@@ -451,9 +408,6 @@ describe("SandboxV1 marker gate", () => {
     const replacement = makeContainer(true);
     original.marker = attemptMarker(ATTEMPT_A);
     const { sandbox, ctx } = makeSwappableDo(original);
-    // note: The DO's own ctx container is handed off mid-probe: a guard that re-read
-    // `this.container` after the awaited marker read would act on the
-    // replacement instead.
     original.onMarkerRead = () => {
       ctx.container = replacement;
     };
@@ -481,9 +435,7 @@ describe("SandboxV1 marker gate", () => {
     const { promise, resolve } = Promise.withResolvers<void>();
     container.slow = promise;
 
-    // note: The guarded read holds the pair (proof → its own slow command).
     const guardedRead = sandbox.runMarked(marker, shellCommand("slow-read"));
-    // note: A start-permitted run arrives mid-pair: its start must wait for it.
     const laterRun = sandbox.runCommand(shellCommand("later"));
     await Bun.sleep(0);
 
@@ -502,13 +454,10 @@ describe("SandboxV1 marker gate", () => {
     const marker = attemptMarker(ATTEMPT_A);
     container.marker = marker;
 
-    // note: No proof at all.
     expect(await sandbox.destroyMarked(marker, undefined as never)).toBe("unknown");
-    // note: An error-derived "proof" is not one of the two facts.
     expect(await sandbox.destroyMarked(marker, { kind: "failure" } as never)).toBe("unknown");
     expect(await sandbox.destroyMarked(marker, { kind: "budget" } as never)).toBe("unknown");
     expect(container.destroyed).toBe(false);
-    // note: The refused proofs never even read the marker.
     expect(container.markerReads).toBe(0);
   });
 
@@ -517,8 +466,6 @@ describe("SandboxV1 marker gate", () => {
     const sandbox = makeDo(container);
     container.marker = attemptMarker(ATTEMPT_B);
 
-    // note: A run that never reached the paid call may be destroyed — but only on
-    // THIS attempt's container, which is what the marker proves.
     expect(await sandbox.destroyMarked(attemptMarker(ATTEMPT_A), { kind: "no-paid-work" })).toBe("unknown");
     expect(container.markerReads).toBe(1);
     expect(container.destroyed).toBe(false);

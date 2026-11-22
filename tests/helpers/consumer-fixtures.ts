@@ -1,18 +1,3 @@
-/**
- * note: Fixtures shared by every consumer suite: the App-seeded D1 double, the
- * sandbox exec and log doubles, the envelope/diff fixtures and the
- * finding-lifecycle seeds the recheck cases hang off.
- *
- * Consumers, post-split: `tests/pipeline/consumer.test.ts` (the round itself)
- * and the three per-concern recheck files — `consumer-recheck-catalog`,
- * `consumer-recheck-precedence`, `consumer-recheck-status`. The runtime
- * harness (injected doubles, message/payload builders, `reset()`) lives in
- * `./consumer-harness`, which imports from here; a suite that needs a double
- * imports it from there.
- *
- * Each double reads its behavior from a caller-owned mutable STATE object, so
- * one copy serves every suite and tests still switch it per case.
- */
 import { mock } from "bun:test";
 import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -74,8 +59,6 @@ export const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 /** Fixed App id every consumer-test payload is attributed to. */
 export const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
 export const TEST_APP_PEM = fakePem("FAKE-CONSUMER-TEST-PEM");
-// note: Pre-computed secretbox envelopes for the default App row (top-level await:
-// this module is ESM and the consumer suites import it after their mocks).
 const TEST_APP_PRIVATE_KEY_ENC = await createSecretbox(TEST_KEY).encryptSecret(
   TEST_APP_PEM,
   `github_apps.private_key_enc:${TEST_APP_ID}`,
@@ -131,17 +114,9 @@ export async function createSeededTestD1(): Promise<TestD1> {
        VALUES (?, 424242, 'consumer-test-app', ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(TEST_APP_ID, TEST_APP_PRIVATE_KEY_ENC, TEST_APP_WEBHOOK_SECRET_ENC);
-  // note: Production shape (migration 0026): createApp writes the App row and its
-  // `bot_workspaces` mapping in ONE batch, so no App exists unmapped — the
-  // consumer's strict read face resolves a real App. A test that needs an
-  // orphan deletes this row explicitly.
   db.raw
     .prepare(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')`)
     .run(TEST_APP_ID);
-  // note: …and one review target: the consumer reads the depth, the gate and the
-  // business pause from it, so a targetless App is a DLQ, not a review. It is
-  // the repository the fixture PR belongs to (0067): the Check lane resolves
-  // the gate by the bot + owner/name pair the delivery carries.
   db.raw
     .prepare(
       `INSERT INTO review_targets
@@ -157,10 +132,6 @@ export async function createSeededTestD1(): Promise<TestD1> {
       TEST_REPO,
       DEFAULT_CHECK_MIN_SCORE,
     );
-  // note: The default App's per-App AI config (AL-24-5 health baseline). AWAITED
-  // so the seed completes before any caller re-seeds the same bot_id with a
-  // different chain (Rev24T6 Important-2: the fire-and-forget seed raced
-  // later awaited re-seeds — last-writer-wins could flake success paths).
   await seedAppConfig(db, TEST_APP_ID);
   return db;
 }
@@ -206,11 +177,6 @@ export function preclaimedDb(db: TestD1): D1Like {
         first: async () => null,
         all: async () => ({ results: [] }),
         run: async () => {
-          // note: The row the earlier entry left behind: this caller's insert
-          // conflicts, exactly as a replayed prepare sees it. It carries the
-          // sandbox id the CLAIM mints (bound before the activation instant) and
-          // the activation that claim won — the row is the precondition of every
-          // container handle, and a replay may address it (migration 0090/0091).
           db.raw
             .prepare(
               "INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms, sandbox_id, activated_ms) VALUES (?, 'provisioned', ?, ?, ?)",
@@ -321,15 +287,6 @@ export const VALID_DIFF = [
   "",
 ].join("\n");
 
-// note: ---------------------------------------------------------------------------
-// Sandbox exec double (spec §7.7 steps 1–8). It answers ONLY the commands
-// consumer.ts issues: anything else throws, so a new/renamed product command
-// fails the suite instead of reading as an empty success. Every expected
-// string is BUILT by the production builders from the same path constants the
-// consumer passes, so a command-shape change edits the product, not this
-// double — re-typing the strings here would turn the lockstep edit into a
-// contract assertion that never fails.
-// ---------------------------------------------------------------------------
 
 /**
  * The fixed review job every consumer suite sends. The double derives its
@@ -344,13 +301,6 @@ export const TEST_REPO = "widgets";
 export const TEST_REPO_ID = 4242;
 export const TEST_PR_NUMBER = 42;
 
-/**
- * note: The payload-derived commands the consumer WILL issue for this job, built by
- * the production builders and keyed by the command string the double sees.
- * Tests that assemble a batch inline (without `makeBatch`) still run the
- * canonical payload, so its commands are declared by default below; `makeBatch`
- * adds the commands for its own payload.
- */
 function gitOpsCommandsFor(payload: {
   owner: string;
   repo: string;
@@ -375,7 +325,6 @@ export function registerGitOpsCommands(
   for (const [command, kind] of gitOpsCommandsFor(payload)) state.gitOps.set(command, kind);
 }
 
-/** note: The canonical test job's commands, declared for every sandbox state. */
 const DEFAULT_GITOPS = gitOpsCommandsFor({
   owner: TEST_OWNER,
   repo: TEST_REPO,
@@ -394,24 +343,12 @@ export const RUNNER_CMDS: ReadonlySet<string> = new Set(
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH, REPORT_OUTPUT_PATH),
   ]),
 );
-/**
- * note: The diff capture's bounded READ half, built by the same production builder
- * the command composes — so a transport change edits the product, not this
- * double. The redirect (`gh pr diff … > file`) is the part that never changes.
- */
 const DIFF_READ = boundedFileReadCommand(DIFF_PATH, DIFF_PREFETCH_MAX_BYTES);
-/** note: The audited bounded reads, built by production code from the fixed paths. */
 const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 const REPORT_READ = readReportCommand();
-/** note: The runner's applied-model document read (same transport, its own fixed path). */
 const APPLIED_MODEL_READ = readReportCommand(APPLIED_MODEL_PATH);
 const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
-/**
- * note: The two increment commands carry per-round shas, so the double matches them
- * by the fixed head and tail the production builders emit AROUND those shas:
- * a command-shape change edits the product, never a hand-typed prefix here.
- */
 const SHA_PROBE = "0".repeat(40);
 function aroundSha(command: string): { head: string; tail: string } {
   return {
@@ -423,117 +360,67 @@ const COMPARE = aroundSha(compareGateCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, S
 const INCREMENT_DIFF = aroundSha(
   incrementDiffCommand(TEST_OWNER, TEST_REPO, SHA_PROBE, SHA_PROBE, DIFF_PATH),
 );
-/**
- * note: The oversized-diff fallback's fetch and local diff carry the merge-base
- * ANSWER, which a decline case may set to any value (a truncated reply, a
- * proxied one, `--jq`'s `null`). Match them by the fixed text the production
- * builders emit around it, so the double never builds a matcher from the very
- * value under test.
- */
 const FETCH_DEPTH_ONE = aroundSha(fetchDepthOneCommand(CLONE_DIR, SHA_PROBE));
 const LOCAL_DIFF = aroundSha(localDiffCommand(CLONE_DIR, SHA_PROBE, SHA_PROBE, DIFF_PATH));
-/**
- * note: The input write carries no per-round payload in its command any more: the
- * document travels the exec STDIN pipe, so the command is fixed and comes
- * from the production builder.
- */
 const WRITE_INPUT_PROBE = writeJsonCommand(RUNNER_INPUT_PATH);
 
 export type FakeSandboxState = {
   calls: Array<{ cmd: string; opts?: unknown }>;
-  /** note: Commands built by the production builders for the batch's payload. */
   gitOps: Map<string, keyof GitOpsCommands>;
-  /** note: Authoritative sha the checkout reports (becomes the round's HEAD). */
   resolvedSha: string;
   revParseExitCode: number;
   cloneExitCode: number;
-  /** note: The diff FILE the production command writes; the double streams it back bounded. */
   diffStdout: string;
   diffExitCode: number;
-  /** note: stderr a failing `gh pr diff` answers with (the oversized-diff wording lives here). */
   diffStderr: string;
-  /** note: The PR's base ref and the merge base the oversized-diff fallback resolves. */
   diffBaseRef: string;
   mergeBaseSha: string;
-  /**
-   * note: Exit codes of the fallback's ref resolution. A non-zero one is the exec
-   * failing (an empty string is the exec answering nothing); both stop the
-   * chain before the fetch.
-   */
   baseRefExitCode: number;
   mergeBaseExitCode: number;
-  /** note: Exit codes of the fallback's last two steps (mid-fallback failure cases). */
   fetchExitCode: number;
-  /** note: stderr a failing depth-1 fetch answers with. */
   fetchStderr: string;
   localDiffExitCode: number;
-  /**
-   * note: Raw stdout a BROKEN transport answers the bounded read with, replacing the
-   * command's own `<content>\n<flag>\n` reply (an empty one has no flag line).
-   * `null` = answer like the real command.
-   */
   diffReadStdout: string | null;
   numstatStdout: string;
   numstatExitCode: number;
-  /** note: stderr a failing numstat exec answers with (the redaction cases live here). */
   numstatStderr: string;
-  /** note: The `gh api .../compare/base...head` gate: its verdict and merge-commit count. */
   compareStatus: string;
   compareMerges: number;
   compareExitCode: number;
-  /** note: The increment round's base...head diff FILE content + its command's exit. */
   incrementDiffStdout: string;
   incrementDiffExitCode: number;
-  /** note: stderr a failing base...head capture answers with. */
   incrementDiffStderr: string;
   writeInputExitCode: number;
-  /** note: Decoded runner --input JSON written via the base64 write step. */
   writtenInputJson: string | undefined;
-  /** note: `gh pr view`/`gh issue view` answers for the report seat's PR context. */
   prBodyContent: string;
   prBodyExitCode: number;
-  /** note: Raw `gh pr view` stdout override — a reply that is not JSON at all. */
   prBodyRaw: string | null;
   issueBodies: Map<number, { title: string; body: string }>;
   issueViewExitCode: number;
-  /** note: The runner's recheck document and the `wc -c` overflow flag of its read. */
   recheckFileContent: string;
   recheckFileOverflow: string;
   recheckFileExitCode: number;
-  /** note: The seat's status document; `null` = the runner wrote none. */
   recheckStatusContent: string | null;
   recheckStatusOverflow: string;
   recheckStatusExitCode: number;
-  /** note: The runner's report document (mstar.report/v1) and its read's overflow flag. */
   reportFileContent: string;
   reportFileOverflow: string;
   reportFileExitCode: number;
   runnerStdout: string;
   runnerStderr: string;
   runnerExitCode: number;
-  /** note: Thrown from every exec instead of answering (sandbox transport failure). */
   error: Error | undefined;
-  /** note: Thrown by the paid runner exec alone: the container accepted it, the reply was lost. */
   runnerError: Error | undefined;
   destroyCalls: number;
   destroyError: Error | undefined;
-  /** note: What the marker claim answers ("written" = a fresh container). */
   markerClaim: "written" | "matched" | "unknown";
-  /** note: Thrown by the marker claim: its reply was lost, so the marker may be written. */
   markerError: Error | undefined;
-  /** note: A marked read refuses (`unknown`) instead of running its command. */
   markedUnknown: boolean;
-  /** note: Every guarded read's command, in order. */
   markedCalls: string[];
-  /** note: Thrown by the guarded read itself (its reply was lost). */
   markedError: Error | undefined;
-  /** note: 1-based guarded call the error starts at: `1` loses the proof, `2` the command after it. */
   markedErrorFromCall: number;
-  /** note: The guarded destroy refuses (`unknown`) instead of destroying. */
   destroyMarkedUnknown: boolean;
-  /** note: Runs at the FIRST sandbox command of a test (ordering probes). */
   probe: (() => void) | undefined;
-  /** note: Holds the FIRST runner exec; `reached` resolves once it is parked. */
   gate: { released: Promise<void>; markReached: () => void } | undefined;
 };
 
@@ -544,9 +431,6 @@ export function initialFakeSandboxState(): FakeSandboxState {
     resolvedSha: SHA,
     revParseExitCode: 0,
     cloneExitCode: 0,
-    // note: A HEALTHY capture by default: an empty diff next to the non-empty numstat
-    // below is a capture FAILURE, so an untouched case would silently take the
-    // context-incomplete path. Cases that need a lost capture opt in explicitly.
     diffStdout: VALID_DIFF,
     diffExitCode: 0,
     diffStderr: "gh failed",
@@ -561,8 +445,6 @@ export function initialFakeSandboxState(): FakeSandboxState {
     numstatStdout: "10\t2\tsrc/auth.ts\n5\t0\tdocs/readme.md\n",
     numstatExitCode: 0,
     numstatStderr: "",
-    // note: NON-increment by default: a case that seeds a prior review stays a
-    // full-diff round unless it opts in with `ahead`.
     compareStatus: "identical",
     compareMerges: 0,
     compareExitCode: 0,
@@ -571,9 +453,6 @@ export function initialFakeSandboxState(): FakeSandboxState {
     incrementDiffStderr: "",
     writeInputExitCode: 0,
     writtenInputJson: undefined,
-    // note: Default: gh cannot answer, so no prContext is captured and the runner
-    // gets no `--report-out` — every pre-report call sequence stays intact.
-    // A report-path case sets this to 0 and scripts `prBodyContent`.
     prBodyContent: "",
     prBodyExitCode: 1,
     prBodyRaw: null,
@@ -614,10 +493,7 @@ export function resetFakeSandboxState(state: FakeSandboxState): void {
 
 type ExecResult = { stdout: string; stderr: string; exitCode: number };
 
-/** note: The declared command set; an unlisted command is a test failure, not a pass. */
 function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): ExecResult {
-  // note: The attempt module's marker proof: a no-op that only has to succeed on the
-  // incarnation the guarded read proved, so it carries no declared gitops shape.
   if (cmd === "true") return { stdout: "", stderr: "", exitCode: 0 };
   switch (state.gitOps.get(cmd)) {
     case "clone":
@@ -625,27 +501,15 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     case "checkedOutSha":
       return { stdout: `${state.resolvedSha}\n`, stderr: "", exitCode: state.revParseExitCode };
     case "diff": {
-      // note: Production shape (`diffCommand`): gh redirects the diff into the file,
-      // then its READ HALF streams it back — first DIFF_PREFETCH_MAX_BYTES
-      // bytes, `\n`, then the `wc -c` overflow flag. DIFF_READ is built by the
-      // production builder, so a transport change edits the product, never
-      // this double. (The retired redirect-only shape carries no read half and
-      // is not a command any builder emits, so it never reaches this case.)
       if (state.diffExitCode !== 0) {
-        // note: `gh` fails the chain BEFORE the read half runs: no bounded payload
-        // can accompany a failed exit.
         return { stdout: "", stderr: state.diffStderr, exitCode: state.diffExitCode };
       }
       if (!cmd.endsWith(DIFF_READ)) {
         throw new Error(`fake sandbox: diff command without its bounded read: ${cmd}`);
       }
-      // note: The command ALWAYS terminates its reply with the flag line; only a
-      // broken transport does not, which `diffReadStdout` reproduces.
       if (state.diffReadStdout !== null) {
         return { stdout: state.diffReadStdout, stderr: "", exitCode: 0 };
       }
-      // note: `diffStdout` is the FILE content here, so returning it raw (the defect
-      // this replaced) could never exercise the transport.
       const bytes = Buffer.from(state.diffStdout);
       const head = bytes.subarray(0, DIFF_PREFETCH_MAX_BYTES).toString();
       const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
@@ -670,13 +534,8 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     }
     return { stdout: `${state.recheckFileContent}\n${state.recheckFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
-  // note: The report seat's PR context reads. The PR body is OPTIONAL (`null` = gh
-  // failed), so a case that does not script one sees the real "no context"
-  // path: no prContext, no --report-out, `none` headings.
   if (cmd === PR_BODY_READ) {
-    // note: `gh pr view` failing (non-zero exit) is the real "no PR context" path.
     if (state.prBodyExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.prBodyExitCode };
-    // note: A reply that is not JSON at all (an HTML error page, a banner).
     if (state.prBodyRaw !== null) return { stdout: state.prBodyRaw, stderr: "", exitCode: 0 };
     return { stdout: JSON.stringify({ body: state.prBodyContent }), stderr: "", exitCode: 0 };
   }
@@ -693,14 +552,9 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     if (state.recheckStatusExitCode !== 0) {
       return { stdout: "", stderr: "read failed", exitCode: state.recheckStatusExitCode };
     }
-    // note: A missing status file fails the head chain, exactly like the real one.
     if (state.recheckStatusContent === null) return { stdout: "", stderr: "no such file", exitCode: 1 };
     return { stdout: `${state.recheckStatusContent}\n${state.recheckStatusOverflow}\n`, stderr: "", exitCode: 0 };
   }
-  // note: Increment rounds: the compare verdict, then base...head replacing the diff
-  // file. Both are matched by the production builder's fixed head/tail around
-  // the per-round shas, so the double stays payload-agnostic exactly like the
-  // diff read.
   if (cmd.startsWith(COMPARE.head) && cmd.endsWith(COMPARE.tail)) {
     if (state.compareExitCode !== 0) return { stdout: "", stderr: "gh failed", exitCode: state.compareExitCode };
     return {
@@ -715,9 +569,6 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     };
   }
   if (cmd.startsWith(INCREMENT_DIFF.head) && cmd.endsWith(INCREMENT_DIFF.tail)) {
-    // note: The compare read is the same `&&` chain as the diff capture: a non-zero
-    // exit stops it BEFORE the bounded read half, so no payload accompanies the
-    // failure.
     if (state.incrementDiffExitCode !== 0) {
       return { stdout: "", stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
     }
@@ -726,10 +577,6 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     const overflow = bytes.byteLength > DIFF_PREFETCH_MAX_BYTES ? "1" : "0";
     return { stdout: `${head}\n${overflow}\n`, stderr: state.incrementDiffStderr, exitCode: state.incrementDiffExitCode };
   }
-  // note: Oversized-diff fallback (production shape): base ref → merge base →
-  // depth-1 fetch → local merge-base..head diff, whose read half is the SAME
-  // bounded transport as the gh capture. Commands are built from the live
-  // state, so a product-shape change edits the builders, never this double.
   if (cmd === pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)) {
     if (state.baseRefExitCode !== 0) {
       return { stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: state.baseRefExitCode };
@@ -755,8 +602,6 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
     return { stdout: `${head}\n${overflow}\n`, stderr: "", exitCode: 0 };
   }
   if (cmd === APPLIED_MODEL_READ) {
-    // note: The default round has no applied-model document (no model served): the
-    // read's proven-absence flag, the same shape the real command emits.
     return { stdout: "\n2\n", stderr: "", exitCode: 0 };
   }
   if (cmd === REPORT_READ) {
@@ -805,7 +650,7 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       if (state.runnerError !== undefined && RUNNER_CMDS.has(cmd)) throw state.runnerError;
       if (cmd.includes("--input") && state.gate !== undefined) {
         const gate = state.gate;
-        state.gate = undefined; // note: only the first runner exec is held
+        state.gate = undefined;
         gate.markReached();
         await gate.released;
       }
@@ -837,9 +682,6 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
   return sandbox;
 }
 
-// note: ---------------------------------------------------------------------------
-// Log sink double (injected via the consumer's optional log param).
-// ---------------------------------------------------------------------------
 
 export type TestLogLine = {
   level: "info" | "warn" | "error";
@@ -859,11 +701,6 @@ export function createTestLog(): { lines: TestLogLine[]; log: ConsumerLog } {
   };
 }
 
-// note: ---------------------------------------------------------------------------
-// Finding recheck & closure (spec §7.7 order / §7.4 conservative
-// reconciliation / §7.10 closure). Seeds only — the assertions live in the
-// suites that use them.
-// ---------------------------------------------------------------------------
 
 /** The prior round's publication row every lifecycle fixture hangs off. */
 export const PRIOR_PUB_ID = "aaaaaaaa-0000-4000-8000-000000000001";

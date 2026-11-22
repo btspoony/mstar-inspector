@@ -41,7 +41,6 @@ const ROOT = path.resolve(import.meta.dir, "..");
 const OUT_PATH = path.join(ROOT, "src/spa/styles/tokens.css");
 const SSR_OUT_PATH = path.join(ROOT, "src/dashboard/ssr-tokens.generated.ts");
 
-/** why: `:root` is the deterministic dark default; light is the stored choice only. */
 const ROOT_THEME: ThemeName = "dark";
 const LIGHT_SELECTOR = `:root[data-theme="light"]`;
 const OPS_SELECTOR = `:root[${OPS_SURFACE_ATTR}]`;
@@ -50,7 +49,6 @@ const declaration = (name: string, value: string, indent = "  "): string => `${i
 
 const transitionOwner = new Map(transitionalSteps.map((step) => [step.name as string, step.owner]));
 
-/** note: Primitives in source order; a transitional step carries its closing owner. */
 function primitiveBlock(theme: ThemeName): string[] {
   return Object.entries(tokenLayers(theme).primitive).flatMap(([name, value]) => {
     const owner = transitionOwner.get(name);
@@ -143,23 +141,10 @@ function build(): string {
   return lines.join("\n");
 }
 
-/**
- * why: The SSR face's half of the same chain: `src/dashboard/views.ts` is a
- * zero-build HTML producer that cannot import the design system (module
- * boundary, and no DOM), so it inlines a `<style>` block. This module is that
- * block's value table — resolved per theme, exactly as the stylesheet's own
- * declarations are, so the two faces cannot drift.
- *
- * Palette steps are deliberately absent. A consumer may name the semantic and
- * component layers and the invariant font stacks; a primitive colour step is
- * never a page's vocabulary.
- */
 function buildSsrTokens(): string {
   const values = Object.fromEntries(
     THEMES.map((theme) => {
       const layers = resolveTheme(theme);
-      // why: Primitives contribute the invariants (font stacks, breakpoints) only:
-      // a palette step is never a consumer's vocabulary.
       const invariants = Object.entries(layers.primitive).filter(
         ([name]) => name.startsWith("font-") || name.startsWith("breakpoint-"),
       );

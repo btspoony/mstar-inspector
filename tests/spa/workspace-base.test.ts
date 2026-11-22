@@ -1,8 +1,3 @@
-/** note: The page's workspace API base. ONE derivation from `location.pathname`:
- * a workspace-scoped shell reads that workspace's API family, every legacy
- * page keeps the `/dashboard` mount. No document location (static render,
- * tests) is the legacy base.
- */
 import { describe, expect, test } from "bun:test";
 import { RESERVED_WORKSPACE_SLUGS } from "../../src/spa/routes";
 import { apiBase } from "../../src/spa/workspace-base";
@@ -21,7 +16,6 @@ describe("apiBase", () => {
     expect(apiBase("/dashboard/apps/acme-app/settings")).toBe("/dashboard");
     expect(apiBase("/dashboard/members")).toBe("/dashboard");
     expect(apiBase("/dashboard/login")).toBe("/dashboard");
-    // note: A static asset hit is not a workspace page.
     expect(apiBase("/index.html")).toBe("/dashboard");
   });
 

@@ -68,9 +68,6 @@ import {
 import { redactSecretShapes } from "../../shared/src/secret-shapes";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../shared/src/runtime";
 
-// why: The ask's prose, its fit and its default budget are the shared wire module's
-// pure rule (the consumer fits the same rule); they stay exported here for the
-// runner's own callers.
 export { recheckAssignment, RECHECK_ASSIGNMENT_MAX_BYTES };
 
 /**
@@ -130,7 +127,6 @@ export const RECHECK_OUTPUT_SCHEMA = {
   },
 } as const;
 
-/** note: The §7.8 start margin subtracted from the outer deadline (`-5000`). */
 const RECHECK_START_MARGIN_MS = 5_000;
 
 /**
@@ -143,24 +139,8 @@ const RECHECK_START_MARGIN_MS = 5_000;
  */
 export const OUTER_RUNNER_CAP_MS: Record<ReviewLevel, number> = RUNNER_MAX_BUDGET_MS;
 
-/**
- * note: The absolute outer deadline the runner anchored for this process
- * (`anchorRecheckDeadline`); `undefined` = no anchor (direct runtime/test
- * use) — the seat then gets the tier's unanchored budget: its cap bounded by
- * the unanchored outer guard less the publication tail.
- */
 let anchoredDeadlineMs: number | undefined;
 
-/**
- * note: The review's SHARED soft clock: the start instant the runner anchored plus
- * the tier it runs at. Distinct from `anchoredDeadlineMs` above — that one is
- * the OUTER exec guard (a hard budget the recheck seat derives from), while
- * this is the tier's soft convergence target (`PR_REVIEW_TIER_BUDGETS
- * [level].wallClockMinutes`): reaching it changes nothing structurally and
- * aborts nothing, it only tells a seat how much of the review's clock is left.
- * Anchored by the SAME call as the outer deadline (one clock per review, never
- * a second origin). `undefined` = no anchor (direct runtime/test use).
- */
 let anchoredSoftStartMs: number | undefined;
 let anchoredSoftLevel: ReviewLevel | undefined;
 
@@ -181,8 +161,6 @@ let anchoredSoftLevel: ReviewLevel | undefined;
  */
 export function anchorRecheckDeadline(startMs: number, level: ReviewLevel, outerDeadlineEpochMs?: number): void {
   anchoredDeadlineMs = outerDeadlineEpochMs ?? startMs + OUTER_RUNNER_CAP_MS[level];
-  // invariant: Same instant, same call: the soft clock shares the outer deadline's origin
-  // — one anchor per review, never a second one.
   anchoredSoftStartMs = startMs;
   anchoredSoftLevel = level;
 }
@@ -214,11 +192,6 @@ export function remainingSoftMinutes(nowMs: number, level?: ReviewLevel): number
   const tier = level ?? anchoredSoftLevel ?? "default";
   const capMinutes = PR_REVIEW_TIER_BUDGETS[tier].wallClockMinutes;
   const startMs = anchoredSoftStartMs ?? nowMs;
-  // why: Exact remaining time, never quantized: whole minutes are a DISPLAY concern
-  // (a seat prompt reads in minutes), so rounding lives at the render site and
-  // this value stays a correct elapsed source. Exact at the anchor, strictly
-  // decreasing as `now` advances, and negative the moment the review is past
-  // its cap — never clamped to 0 the way the outer budget is.
   return capMinutes - (nowMs - startMs) / 60_000;
 }
 
@@ -297,20 +270,7 @@ function redactedStatusError(text: string): string {
   return redactSecretShapes(text).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
 }
 
-/**
- * note: The one attribution chain every failed recheck exit shares: the validator's
- * own text, then the child's cap reason, then its own error, then its stderr
- * tail, then its exit code. A capped child settles with `exitCode: 1` and no
- * `error`/stderr and the SDK only says `unavailable` (I-000431), so the first
- * two sources are what names the seat's wall clock instead of a bare status.
- * `""` means the child settled with no attributable evidence at all — each
- * caller then supplies its own last-resort floor, so absence of evidence is
- * never recorded as if it were the child's answer.
- */
 function recheckFailureEvidence(single: Partial<StructuredSubagentResult["result"]>): string {
-  // why: Duck-typed: a foreign settled shape must not throw out of the catch, so
-  // every field read is type-checked rather than trusted — including the exit
-  // code, which no template literal can coerce for a symbol.
   const structuredError = single.structuredOutput?.error;
   return (
     (typeof structuredError === "string" ? structuredError : "") ||
@@ -321,12 +281,6 @@ function recheckFailureEvidence(single: Partial<StructuredSubagentResult["result
   );
 }
 
-/**
- * note: The settled child result a rejection carries, when it is usable evidence:
- * only a non-null, non-array object. A foreign shape (a string, an array, a
- * null) is absence of evidence, so the catch falls back to the rejection's
- * own message instead of letting that shape erase it.
- */
 function settledChildResult(error: unknown): Partial<StructuredSubagentResult["result"]> | undefined {
   const settled = (error as { result?: unknown } | null | undefined)?.result;
   return typeof settled === "object" && settled !== null && !Array.isArray(settled)
@@ -334,20 +288,12 @@ function settledChildResult(error: unknown): Partial<StructuredSubagentResult["r
     : undefined;
 }
 
-/**
- * note: The strict-validated payload a settled result carries, when it is usable —
- * the ONE payload test the resolved and the rejected path share.
- */
 function usableRecheckData(single: Partial<StructuredSubagentResult["result"]> | undefined): unknown {
   const structured = single?.structuredOutput;
   return structured?.status === "valid" && structured.data !== undefined ? structured.data : undefined;
 }
 
-/** note: Unwrap the strict-validated structured payload of the recheck child. */
 function recheckStructuredData(single: Partial<StructuredSubagentResult["result"]>): unknown {
-  // why: The payload decides: a child that reports `error` while yielding a usable
-  // document keeps it, so `error` only supplies attribution when the payload
-  // is unusable.
   const data = usableRecheckData(single);
   if (data !== undefined) return data;
   const evidence = recheckFailureEvidence(single) || "exit unknown";
@@ -378,9 +324,6 @@ export function recheckRoundStatus(
   targetCount: number,
   headSha: string,
 ): RecheckStatus {
-  // why: A row without an identity (non-object / no usable rowId) cannot be named;
-  // it is counted in `rejected_unnamed` so the Worker can still attribute it by
-  // position among the rows it sent — the drop is never silently lost.
   const rejectedRowIds = gate.rejected
     .flatMap((row) => (row.rowId === null ? [] : [row.rowId]))
     .sort();
@@ -419,9 +362,7 @@ export async function runRecheckSeat(input: {
   input: RecheckInput;
   model: string[];
   signal: AbortSignal;
-  /** note: The operator's ask budget; absent → `RECHECK_ASSIGNMENT_MAX_BYTES`. */
   assignmentMaxBytes?: number;
-  /** why: The structured-seat runner; tests inject a fake instead of mocking the SDK. */
   runSeat?: typeof runStructuredSubagent;
 }): Promise<RecheckSeatResult> {
   const headSha = input.input.headSha;
@@ -430,14 +371,6 @@ export async function runRecheckSeat(input: {
   const nowMs = Date.now();
   const maxRuntimeMs = currentRecheckBudget(nowMs);
   if (maxRuntimeMs === 0) {
-    // why: `cause` splits the two skips that both report the closed `reason:
-    // "budget"`: this one is the transient tail (the outer deadline is
-    // already spent) and is re-evaluated on the next round, never a
-    // configuration fault the operator must fix. The status error carries the
-    // same cause so the durable document (and the failure row built from it)
-    // tells the two apart without a new wire field. Both figures are the ones
-    // the skip was decided on: what the outer deadline actually left, and the
-    // outer time the seat's minimum budget plus the publication tail needs.
     const error = redactedStatusError(
       `recheck seat skipped (tail): the review's outer deadline left ${remainingOuterMs(nowMs)}ms, ` +
         `the seat needs at least ${RECHECK_MIN_REMAINING_MS + PUBLICATION_TAIL_MS}ms`,
@@ -447,15 +380,6 @@ export async function runRecheckSeat(input: {
   }
   const ask = fitRecheckInput(input.input, assignmentMaxBytes);
   if (!ask.ok) {
-    // why: Targets + discussion alone overrun the seat's context budget: no seat
-    // could hold the ask, so dispatching would only burn the window and lose
-    // the round to an absent yield (I-000396). `budget` is the closed reason
-    // for "the seat never got room" — the consumer accounts every sent row
-    // `unverifiable`/`budget` and blames none of them. `cause: "config"` says
-    // the shortfall is in what THIS round must ask (its targets + discussion)
-    // against the configured budget, not in the clock: it is per-round, since
-    // a smaller ask can fit, and raising `review.recheck.assignment_max_bytes`
-    // is what fits an ask that keeps overrunning.
     const error = redactedStatusError(
       `recheck seat skipped (config): assignment exceeds the seat's context budget: targets + discussion need ` +
         `at least ${ask.requiredBytes} bytes, the budget is ${assignmentMaxBytes}`,
@@ -464,9 +388,6 @@ export async function runRecheckSeat(input: {
     return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "budget", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
   }
   if (ask.omittedSlices > 0) {
-    // why: The ask fits but the catalog was starved: the round still runs, so
-    // without this line a systematically tight budget shows up only as
-    // unexplained `context-incomplete` rows in the published review.
     console.error(
       JSON.stringify({ event: "recheck_fitted", omitted: ask.omittedSlices, budget: assignmentMaxBytes }),
     );
@@ -486,29 +407,13 @@ export async function runRecheckSeat(input: {
       maxRuntimeMs,
       signal: input.signal,
     });
-    // why: Validate against the catalog the seat was ASKED with, not the round's
-    // full one: a slice the fit omitted is proof the seat never received, so
-    // citing it must drop that row here rather than count it `addressed`.
     gate = validateRecheckDoc(recheckStructuredData(result.result), ask.input);
   } catch (error) {
-    // why: A by-design abort is a CONTRACT exit, not a lost round: the caller
-    // cancels this seat on review failure or when the outer deadline leaves
-    // no room (spec §7.8), so the round answered nothing because it was
-    // stopped — never because the model failed. `skipped`/`aborted` keeps the
-    // worker from writing a failure row or blaming the rows it never answered.
     if (input.signal.aborted) {
       console.error(JSON.stringify({ event: "recheck_seat_aborted", reason: "aborted" }));
       return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
     }
-    // why: The SDK rejects with `StructuredSubagentError`, whose duck-typed
-    // `{ result }` carries the settled child's yield; read it here so the
-    // never-throws path imports no SDK internals. Only a plain object counts
-    // as evidence — a foreign shape falls back to the rejection's own message
-    // rather than erasing it.
     const settled = settledChildResult(error);
-    // invariant: A valid yield is never discarded: the child finished and attached its
-    // document before a post-settle SDK step failed, so it passes the very
-    // same validation boundary (and gate-derived status) as a resolved round.
     const yielded = usableRecheckData(settled);
     if (yielded !== undefined) {
       gate = validateRecheckDoc(yielded, ask.input);

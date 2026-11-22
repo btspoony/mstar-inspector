@@ -75,7 +75,6 @@ try {
     api: "openai-completions", model_ids: ["custom-model"],
   }, "fixture-custom-key");
 
-  // why: Exercise metering independently of route implementation, including batch unwrapping.
   await meteredDb.prepare("SELECT 1").first();
   await meteredDb.prepare("SELECT 1").all();
   await meteredDb.prepare("SELECT 1").run();

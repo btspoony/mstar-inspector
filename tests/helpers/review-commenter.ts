@@ -1,11 +1,3 @@
-/**
- * why: Shared ReviewCommenter test double — one factory for the
- * consumer-flow test files. The double records every op into a caller-owned
- * array and reads its BEHAVIOR from a caller-owned mutable state object, so
- * tests reset state between cases exactly like the module-level `let` vars
- * they replace. Sandbox-read grants are minimal but compliant
- * (assertSandboxGrant passes); every other behavior is injected per test.
- */
 import { mock } from "bun:test";
 import type {
   DegradedDeleteOutcome,
@@ -26,23 +18,16 @@ export type CommenterCall = { op: string; args: unknown };
 export type FakeCommenterState = {
   token: string;
   tokenError?: Error;
-  /** note: Review-chain pre-staging plan (default: create round 1). */
   plan: UpsertPlan;
-  /** note: Degraded-chain pre-staging plan (default: create round 1). */
   degradedPlan: UpsertPlan;
-  /** note: postPreparedReview throw (send failure). */
   preparedReviewError?: Error;
-  /** note: commentId the prepared review send reports (default 101). */
   preparedReviewCommentId: number;
-  /** note: Target version rejection on the prepared review send. */
   preparedReviewReject?: boolean;
-  /** note: postPreparedDegraded throw (definitive degraded rejection). */
   preparedDegradedError?: Error;
   preparedDegradedResult: { posted: boolean; commentId: number | null };
   deleteDegradedOutcome: DegradedDeleteOutcome;
   deleteDegradedError?: Error;
   lineCommentsError?: Error;
-  /** note: postLineComments result — default: every intent captured, reviewId 55. */
   lineCommentsResult: {
     posted: { associationId: string; commentId: number; path: string; line: number }[];
     ambiguous: string[];
@@ -51,9 +36,7 @@ export type FakeCommenterState = {
   };
   discussion: Discussion;
   discussionError?: Error;
-  /** note: §7.5 discovery result for the resolution step. */
   discoverResult: DiscoveryResult;
-  /** note: §7.5 resolve result for the resolution step. */
   resolveResult: ResolveOutcome;
   resolveError?: Error;
 };
@@ -61,9 +44,6 @@ export type FakeCommenterState = {
 export function initialFakeCommenterState(): FakeCommenterState {
   return {
     token: "ghs_installation_token",
-    // why: Optional switches are listed EXPLICITLY as undefined so
-    // `Object.assign(state, initialFakeCommenterState())` in a test reset()
-    // clears previously-set behaviors (absent keys are never assigned).
     tokenError: undefined,
     plan: { action: "create", round: 1 },
     degradedPlan: { action: "create", round: 1 },
@@ -141,7 +121,6 @@ export function createFakeCommenter(state: FakeCommenterState, calls: CommenterC
       calls.push({ op: "line-comments", args: input });
       if (state.lineCommentsError) throw state.lineCommentsError;
       if (state.lineCommentsResult.posted.length === 0 && input.intents.length > 0) {
-        // note: Default capture: map every intent to a fresh comment id.
         return {
           posted: input.intents.map((intent, index) => ({
             associationId: intent.associationId,

@@ -1,12 +1,3 @@
-/** note: `/_internal_admin` — the namespace, its gate, and its registration.
- *
- * One matrix over (deployment mode × caller). The namespace must be
- * indistinguishable from an unknown path for everyone except a platform
- * operator on a `saas` deployment: same 404 body, no redirect, no `403`. The
- * allowlisted login is the SAME caller in both mode columns, so the
- * `self-hosted` column proves the refusal is registration-time rather than a
- * runtime flag inside a handler.
- */
 import { describe, expect, test } from "bun:test";
 import type { Fetcher } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
@@ -15,18 +6,12 @@ import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "admin", "gate", "secret", "32-bytes!"].join("-");
-/** note: The allowlisted login. The allowlist names it lowercase (NOCASE compare). */
 const OPERATOR = "Support-Bot";
 const OPERATOR_KEY = OPERATOR.toLowerCase();
-/** note: A signed-in account that is NOT on the allowlist. */
 const MEMBER = "regular-member";
 
 const ADMIN_HTML = `<!doctype html><html lang="en"><head><!--SPA_BOOT--><title>Morning Star — Platform operations</title></head><body>admin console</body></html>`;
 
-/** note: The deployed `dist/spa` bucket, restricted to the admin document. Any other
- * path is a miss, so a test that reaches the document through a route other
- * than the gated admin one fails instead of finding it.
- */
 function adminAssets(): Fetcher {
   return {
     fetch: async (input: Request | URL | string) => {
@@ -57,7 +42,6 @@ function envFor(mode: string): Env {
   } as unknown as Env;
 }
 
-/** note: A GET as `login`, or anonymous when `login` is null. */
 async function get(path: string, login: string | null, env: Env): Promise<Response> {
   const headers: Record<string, string> = { Accept: "text/html" };
   if (login !== null) {
@@ -112,15 +96,12 @@ describe("/_internal_admin on saas", () => {
 
   test("an allowlisted login with no users row is a 404", async () => {
     const env = envFor("saas");
-    // invariant: Same signature, but this login was never created — the allowlist alone
-    // must not authorize.
     const res = await get("/_internal_admin/api/users", "never-signed-in", env);
     expect(res.status).toBe(404);
   });
 });
 
 describe("the admin document", () => {
-  /** note: The boot the Worker injected into the document. */
   function bootOf(html: string): Record<string, unknown> {
     const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
     if (json === undefined) throw new Error("no boot in the admin document");
@@ -132,11 +113,9 @@ describe("the admin document", () => {
     const res = await get("/_internal_admin/flags", OPERATOR, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
-    // note: The namespace root is the same document (the mount's own "/" route).
     expect((await get("/_internal_admin", OPERATOR, env)).status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.login).toBe(OPERATOR);
-    // note: Minimal admin boot: none of the workspace machinery rides along.
     for (const key of ["memberships", "pendingInvites", "workspaceRef", "workspaceBoot"]) {
       expect(boot).not.toHaveProperty(key);
     }

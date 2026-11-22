@@ -1,16 +1,3 @@
-/**
- * PATCH /dashboard/<ref>/api/apps/:appId/bot/scope — the bot page's share
- * switch (contract § 8.2, member side).
- *
- * Pinned here:
- *   - the bot's owning workspace shares (row + exactly one audit row, the
- *     caller as the actor) and revokes only with `confirm: true`;
- *   - a share outside the official workspace is the store's named 409;
- *   - an unknown App is 404, a plain member is 403, and a workspace that
- *     reaches the bot only through a live target is 403 — consumption is not
- *     configuration authority;
- *   - a malformed body is the 400 shape refusal, never a 500.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -78,7 +65,6 @@ function setScope(target: TestD1, botId: string, scope: "owned" | "shared"): voi
     .run(scope, scope === "shared" ? "2026-01-05T00:00:00.000Z" : null, botId);
 }
 
-/** note: `default` is the official workspace; `ws-other` holds a target on its bot. */
 function world(): TestD1 {
   const target = createMigratedTestD1();
   insertUser(target, "dana");
@@ -91,7 +77,6 @@ function world(): TestD1 {
   seedOfficialWorkspace(target, OFFICIAL);
   seedOwnedBot(target, "bot-home", HOME_BOT, OFFICIAL);
   seedOwnedBot(target, "bot-other", OTHER_BOT, OTHER);
-  // invariant: The consuming workspace's ONLY way to the bot is its own live target.
   seedTarget(target, "bot-home", { workspaceId: OTHER, repoOwner: "acme", repoName: "widgets" });
   return target;
 }
@@ -198,8 +183,6 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
   test("revoking is NOT gated on the designation: a stale share stays revocable", async () => {
     db = world();
     setScope(db, "bot-other", "shared");
-    // note: The designation is on `default`, so `ws-other` no longer holds the
-    // official bot — its own stale share must still be revocable.
     const res = await patch(OTHER, OTHER_BOT, "erin", JSON.stringify({ scope: "owned", confirm: true }));
 
     expect(res.status).toBe(200);
@@ -220,8 +203,6 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
   test("a target on a shared bot grants no configuration authority", async () => {
     db = world();
     setScope(db, "bot-home", "shared");
-    // invariant: `erin`'s workspace reaches the default bot only through the target it
-    // created on it: using a shared bot is not configuring it.
     for (const scope of ["owned", "shared"] as const) {
       const res = await patch(OTHER, HOME_BOT, "erin", JSON.stringify({ scope, confirm: true }));
       expect(res.status, scope).toBe(403);

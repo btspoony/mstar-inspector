@@ -1,47 +1,8 @@
-/**
- * Semantic layer — names the job, not the value. Component tokens and page
- * code may reference only this layer.
- *
- * The colour vocabulary is the r3 prototype's, verbatim. Two things the
- * prototype leaves silent are decided here instead of guessed:
- *
- * - `focus-ring` — links and keyboard focus resolve to `blue-700` in both
- *   themes. The standing repo contract keeps brand cyan off every focus face
- *   (`shadcn-theme.css` re-points `--ring` here). The two-layer focus halo is
- *   composed from `focus-ring` + `surface-page`, so no shadow token is needed.
- * - the chart split — `chart-{n}` is the fill face and `chart-{n}-mark` the
- *   legend-swatch/stroke face. A full stacked bar in the mark's 700 step reads
- *   as a warning light, so fills sit one step quieter.
- *
- * Composition rule: a colour semantic references a primitive step when its
- * value equals that step in that theme; otherwise it carries the literal (a
- * literal is the approved r3 value with no surviving step — never a nearby
- * step re-snapped to fit).
- *
- * Two carve-outs, because the rule alone would misread them:
- *
- * - **Chart fills are theme-fixed literals.** D14 approved a quiet 600-step
- *   fill for every slot, and `chart-2`/`chart-4`/`chart-5`/`chart-6` have no
- *   surviving step at all. Where a fill *does* equal a surviving step in the
- *   light theme (`chart-3` = `amber-600`, the same hex in both themes), the
- *   literal is still the authority: the two values coincide, they are not
- *   linked, so a later change to that step must not move a chart fill. Only
- *   `chart-1` follows the theme, through `brand-600`.
- * - **`on-brand` is a fixed label face, not a palette reference.** It states
- *   "the label that sits on the accent fill" — ink on dark's bright cyan,
- *   white on light's deep cyan — so it carries the approved literal per theme
- *   even where a surviving step happens to hold the same value.
- */
 
 import type { ThemeName } from "./primitives";
 
-/** `var(--x)` — the only way this layer may reach a primitive. */
 const v = (name: string): string => `var(--${name})`;
 
-/**
- * Semantic values that do not vary by theme: heights, radii, spacing,
- * typography, motion.
- */
 const commonSemantics = {
   "control-h-xs": "24px",
   "control-h-sm": "32px",
@@ -133,27 +94,16 @@ export const reducedMotionDurations: Readonly<Record<string, string>> = {
   "duration-slow": "1ms",
 };
 
-/** Theme-varying semantics. `SemanticName` is derived from these keys, so the
- * light map cannot lose or gain a key without a typecheck failure. */
 const darkSemantics = {
   "surface-page": v("background-100"),
-  // Not a palette step: the shell band sits between page and raised.
   "surface-shell": "#0d1015",
   "surface-raised": "#12151b",
   "surface-card": v("background-200"),
   "surface-inset": v("gray-200"),
   "surface-overlay": v("background-300"),
 
-  // The modal veil — the page plane at 80%. A scrim is one of the few tokens
-  // that does not invert with the theme: its job is to recede what sits
-  // behind it, and on light's white plane a white veil would erase the
-  // hairline-drawn cards and leave the (equally white) card above it without
-  // separation. So both themes keep the same 80% dim and only the pole
-  // flips — dark dims to its page plane, light to the ink base its hairline
-  // ladder is already drawn from (`#101928`).
   "surface-scrim": "#0a0c10cc",
 
-  // The hairline under the palette's own alpha ladder.
   "border-subtle": "#ffffff1a",
   "border-default": v("gray-alpha-400"),
   "border-strong": v("gray-alpha-500"),
@@ -167,8 +117,6 @@ const darkSemantics = {
   "tone-neutral-border": v("gray-alpha-400"),
   "tone-neutral-fg": v("gray-900"),
   "tone-neutral-solid": v("gray-700"),
-  // Cyan's 100/300 steps are not in the D14 survivors: the approved values
-  // have no step, so the tone carries them.
   "tone-accent-bg": "#042f2e",
   "tone-accent-border": "#155e75",
   "tone-accent-fg": v("brand-700"),
@@ -186,15 +134,6 @@ const darkSemantics = {
   "tone-danger-fg": v("red-700"),
   "tone-danger-solid": v("red-700"),
 
-  // Fill faces are theme-fixed literals: the quiet 600 step the approved
-  // charts use, written as the literal per the composition rule's carve-out.
-  // `amber-600` is a surviving step with the same value in both themes, but the
-  // fill keeps its literal so it cannot follow that step later. Only chart-1
-  // follows the theme, through brand-600.
-  // `chart-5` is the second theme-split fill: dark is lifted from the shared
-  // `#2563a8` (2.900:1 on `surface-card`, 2.696:1 on `surface-inset`) to
-  // `#2d6bb0` so it clears 3:1 on all three dark surfaces while keeping the
-  // blue hue (I-000232); light keeps `#2563a8` (6.125:1 on its page white).
   "chart-1": v("brand-600"),
   "chart-2": "#16a34a",
   "chart-3": "#d97706",
@@ -208,7 +147,6 @@ const darkSemantics = {
   "chart-5-mark": v("blue-700"),
   "chart-6-mark": v("purple-700"),
 
-  // Dark wears the bright cyan face, so the primary label is ink.
   "on-brand": "#06222a",
   "focus-ring": v("blue-700"),
 
@@ -226,7 +164,6 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
   "surface-card": v("background-100"),
   "surface-inset": v("background-200"),
   "surface-overlay": v("background-300"),
-  // Same 80% dim, flipped pole — see the note on the dark value.
   "surface-scrim": "#101928cc",
 
   "border-subtle": "#1019280f",
@@ -248,20 +185,15 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
   "tone-accent-solid": v("brand-700"),
   "tone-success-bg": v("green-100"),
   "tone-success-border": v("green-300"),
-  // green-700 fails 4.5:1 on the success tint; green-800 is the one step D14
-  // keeps for exactly this pair.
   "tone-success-fg": v("green-800"),
   "tone-success-solid": v("green-700"),
   "tone-warn-bg": v("amber-100"),
-  // amber-300 is not a D14 survivor; the approved value has no step.
   "tone-warn-border": "#fde68a",
   "tone-warn-fg": v("amber-700"),
   "tone-warn-solid": v("amber-600"),
   "tone-danger-bg": v("red-100"),
-  // red-300 is not a D14 survivor; the approved value has no step.
   "tone-danger-border": "#fecaca",
   "tone-danger-fg": v("red-700"),
-  // Light danger solid may not take red-600 (D14 names amber-600 only).
   "tone-danger-solid": "#dc2626",
 
   "chart-1": v("brand-600"),

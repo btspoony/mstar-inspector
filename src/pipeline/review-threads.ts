@@ -1,75 +1,3 @@
-/**
- * Review-thread identity, discovery and resolution (spec
- * review-lifecycle §7.5 verbatim — plus the shared GraphQL capture
- * primitives and digests that §7.8's discussion capture reuses).
- *
- * Module map:
- *   - Opaque marker wire: `lineMarker` / `parseLineMarker` / batch marker /
- *     `buildLineCommentBody` / `stripInspectorMarkerSyntax` / `buildLineIntent`.
- *     Ids are canonical lowercase UUIDs preallocated by the journal
- *     (`stagePublication` payload) — no fingerprint encoding, length
- *     assumption or hint-derived content ever enters a marker, and untrusted
- *     bodies are stripped of Inspector marker syntax before a trusted marker
- *     is appended (spec §7.5 "Model/user text cannot generate these markers").
- *   - Digests: length-delimited JSON (NOT pipe concatenation) SHA-256 of
- *     `[threadId, rootCommentId, headSha, comments]` with comments sorted by
- *     `(createdAt, id)` and 7-field entries — spec §7.5 "Digest".
- *   - GraphQL rides the per-App Octokit's EXISTING `graphql()` method — no
- *     new dependency, no second client. `fullDatabaseId` (BigInt JSON string)
- *     is the only selected id bridge; `databaseId` (deprecated) is never
- *     selected. Pagination is bounded: reviewThreads ≤ 5 pages, thread
- *     conversations ≤ 2 pages, issue comments ≤ 2 pages (spec §7.5/§7.8),
- *     and a complete walk is followed by a final newest-page/count/HEAD
- *     stability recheck — drift marks the capture incomplete, never falsely
- *     complete (spec §7.5 "Re-read the final page/count and PR HEAD after
- *     pagination; instability marks incomplete").
- *   - Credential routing: exact `(bot_id, installation_id)` through
- *     `bot_installations` into the matching `review_bots` row (never a
- *     repository-wide scan), deleted/disabled rows fail closed, and the
- *     JWT-authenticated `GET /app` identity must agree with the row's
- *     `github_app_id` + nonblank slug. The expected bot identity is the
- *     authenticated slug's `<slug>[bot]` — never an unverified `viewer`
- *     surface, never a generic Bot authorship check alone.
- *   - Discovery (`discoverThread`): load the exact stored scope + publication
- *     payload and reject scope mismatch / unknown association BEFORE any API
- *     call; require the confirmed original primary publication, the expected
- *     line-review batch marker, the original review commit SHA, App-author
- *     identity, root comment marker, exact path/range (a live line equals the
- *     intent, otherwise an OWNED thread matches on its `originalLine` anchor —
- *     an `outdated` one whose live line is null, or a still-valid one GitHub
- *     re-anchored to a shifted line) and
- *     generated-body digest. A known `reviewId` must match exactly; after response loss the
- *     PR's bounded review batches are inspected and only a unique complete
- *     match to the prepared batch intent is accepted. A copied marker at
- *     another review/round/SHA, a reply containing a marker or a generic Bot
- *     author is insufficient. Incomplete pagination or multiple candidates is
- *     unknown/ambiguous, never authority. Discovered ids persist under the
- *     association's lease before resolving.
- *   - Resolution (`resolveFindingThread`): acquire the association lease;
- *     reload the row (not superseded, finding still addressed, and this exact
- *     row's verified verdict); prove root ownership/provenance; require all
- *     recorded coverage complete; fetch the current thread + issue discussion
- *     and compare HEAD, full thread digest/count and the issue digest with
- *     the snapshots actually sent — mismatch is `needs-recheck`, never a
- *     refreshed expectation. An already-resolved owned thread is then adopted
- *     as resolved; `isOutdated` is recorded but is NOT a veto. Immediately
- *     before the mutation the local lease is re-checked, then
- *     `resolveReviewThread` must return the matching thread id with
- *     `isResolved === true` before `resolved` is stored. The post-mutation
- *     read records `lateChange` honestly — GitHub has no conditional resolve
- *     CAS (spec RL-12); a late change never claims to cover the newer
- *     discussion and never unresolves a human-visible thread.
- *   - Publication fence: the gate requires the finding to still be
- *     `addressed` and the verified assessment to target this exact row — NOT
- *     `finding.last_publication_id = row.publication_id`. The rotation
- *     re-selects addressed rows whose association is still non-terminal, and
- *     the seen upsert only rewrites `last_publication_id` when a new
- *     publication reports the fingerprint again (which reopens the row, so it
- *     is no longer `addressed`); requiring the old equality would therefore
- *     block every re-selected row forever. Supersession, ownership, complete
- *     coverage and the live HEAD/thread/issue-digest fences are unchanged, so
- *     a recurrence or a human reply still fails closed.
- */
 
 import type { Coverage, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
@@ -79,15 +7,9 @@ import {
   type Scope,
   type VerifiedResolution,
 } from "../store/finding-lifecycle";
-// Marker-prefix SSOT is the leaf marker module (no duplicated literals, no
-// comment-module cycle).
 import { DEGRADED_MARKER_PREFIX, REVIEW_MARKER_PREFIX } from "./review-markers";
 
-// ---------------------------------------------------------------------------
-// Opaque marker wire (spec §7.5)
-// ---------------------------------------------------------------------------
 
-/** Canonical lowercase UUID syntax — the only ids a marker may carry. */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type LineMarker = { publicationId: string; associationId: string };
@@ -165,18 +87,14 @@ export function buildLineCommentBody(intent: Pick<LineIntent, "body" | "publicat
 
 export type BuildLineIntentInput = {
   findingRowId: string;
-  /** Preallocated publication UUID (journal payload). */
   publicationId: string;
-  /** Preallocated association UUID (journal payload — becomes the row id). */
   associationId: string;
   scope: Scope;
   originalSha: string;
   round: number;
   path: string;
   line: number;
-  /** First line of a multi-line anchor; absent/null = single-line at `line`. */
   lineStart?: number | null;
-  /** The assembled comment body — untrusted model text, redacted/clamped upstream. */
   body: string;
 };
 
@@ -187,7 +105,6 @@ export type BuildLineIntentInput = {
  * lowercase UUIDs — fail-closed before any marker can carry a non-opaque id.
  */
 export async function buildLineIntent(input: BuildLineIntentInput): Promise<LineIntent> {
-  // Validate through the marker builders (same UUID gate, no second check).
   lineMarker({ publicationId: input.publicationId, associationId: input.associationId });
   const bodySha256 = await sha256Hex(
     buildLineCommentBody({ body: input.body, publicationId: input.publicationId, associationId: input.associationId }),
@@ -207,9 +124,6 @@ export async function buildLineIntent(input: BuildLineIntentInput): Promise<Line
   };
 }
 
-// ---------------------------------------------------------------------------
-// Digests + hashing (spec §7.5 "Digest" — length-delimited JSON)
-// ---------------------------------------------------------------------------
 
 /** Lowercase hex SHA-256 of the UTF-8 input (workerd + bun compatible). */
 export async function sha256Hex(input: string): Promise<string> {
@@ -229,14 +143,12 @@ export type ThreadCommentEntry = {
   fullDatabaseId: string;
   authorType: string | null;
   authorLogin: string | null;
-  /** Authenticated provenance: this installation token authored the comment. */
   viewerDidAuthor: boolean;
   createdAt: string;
   updatedAt: string;
   body: string;
 };
 
-/** Chronological (createdAt, id) sort — presentation/digest order only. */
 function chronological(comments: ThreadCommentEntry[]): ThreadCommentEntry[] {
   return [...comments].sort((a, b) => {
     if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
@@ -275,10 +187,6 @@ export async function issueDigestOf(input: { headSha: string; comments: ThreadCo
   return sha256Hex(JSON.stringify(["issue-comments", input.headSha, commentJson(input.comments)]));
 }
 
-// ---------------------------------------------------------------------------
-// GraphQL capture primitives (spec §7.5 "Capture/query contract") — the
-// transport is the per-App Octokit's existing graphql() method.
-// ---------------------------------------------------------------------------
 
 /** Minimal graphql transport seam (the real Octokit satisfies this). */
 export type GraphqlOctokit = {
@@ -349,24 +257,19 @@ query($id: ID!, $before: String) {
 }`;
 
 export type ThreadCapture = {
-  /** null = the thread node is gone (deleted) or the response is malformed. */
   thread: {
     id: string;
     isResolved: boolean;
     isOutdated: boolean;
     path: string;
-    /** The thread's live anchor — null once the line left the diff (`outdated`). */
     line: number | null;
-    /** The thread's ORIGINAL anchor (§7.5 node query); survives an outdated line. */
     originalLine: number | null;
     prNumber: number;
     headRefOid: string;
     nameWithOwner: string;
   } | null;
-  /** Chronological comment entries (all collected pages merged). */
   comments: ThreadCommentEntry[];
   totalCount: number;
-  /** false when pagination hit the 2-page bound with an older page remaining. */
   complete: boolean;
   headRefOid: string;
 };
@@ -421,7 +324,6 @@ export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId:
   }
   let totalCount = node.comments.totalCount ?? 0;
   let complete = true;
-  // Walk backward — the first read above is page 1 of at most 2.
   let before =
     node.comments.pageInfo?.hasPreviousPage === true && node.comments.pageInfo.startCursor
       ? node.comments.pageInfo.startCursor
@@ -440,12 +342,8 @@ export async function fetchThreadConversation(octokit: GraphqlOctokit, threadId:
     }
     before = conn.pageInfo?.hasPreviousPage === true && conn.pageInfo.startCursor ? conn.pageInfo.startCursor : undefined;
   }
-  if (before !== undefined) complete = false; // 2-page bound exhausted with an older page remaining
+  if (before !== undefined) complete = false;
   if (complete) {
-    // Post-pagination stability recheck (spec §7.5/§7.8): re-read the newest
-    // page's count and the PR HEAD after the walk — the re-read nodes are
-    // discarded; it only validates. A concurrent reply/edit/HEAD move between
-    // page reads marks the capture incomplete instead of falsely complete.
     const recheck = (await octokit.graphql<{ node?: ThreadNode | null }>(THREAD_NODE_QUERY, { id: threadId })).node;
     const conn = recheck?.comments;
     if (
@@ -480,7 +378,6 @@ export type IssueCapture = {
   headRefOid: string;
   comments: ThreadCommentEntry[];
   totalCount: number;
-  /** false when pagination hit the 2-page bound OR the post-walk stability recheck drifted. */
   complete: boolean;
 };
 
@@ -564,12 +461,9 @@ export async function fetchIssueComments(
     }
   }
   if (!sawConnection) {
-    // The PR itself was missing/malformed — an unavailable capture, never empty.
     return { headRefOid: "", comments: [], totalCount: 0, complete: false };
   }
   if (complete) {
-    // Post-pagination stability recheck (spec §7.8 "a final newest-page/count
-    // recheck"): the re-read nodes are discarded; it only validates.
     const data = await octokit.graphql<{ repository?: { pullRequest?: PrNode | null } }>(ISSUE_COMMENTS_QUERY, head);
     const pr = data?.repository?.pullRequest;
     const conn = pr?.comments;
@@ -616,20 +510,15 @@ export type ReviewThreadStub = {
   isResolved: boolean;
   isOutdated: boolean;
   path: string;
-  /** The thread's live anchor — null once the line left the diff (`outdated`). */
   line: number | null;
-  /** The thread's ORIGINAL anchor (§7.5 node query); survives an outdated line. */
   originalLine: number | null;
-  /** The thread's ROOT comment (oldest, via comments(first:1)) — null when absent. */
   root: ThreadCommentEntry | null;
-  /** The root comment's owning review (GraphQL id + REST id as string). */
   rootReviewId: string | null;
   rootReviewRestId: string | null;
 };
 
 export type ReviewThreadsCapture = {
   threads: ReviewThreadStub[];
-  /** false when pagination hit the 5-page bound with more pages remaining. */
   complete: boolean;
   headRefOid: string;
 };
@@ -684,7 +573,7 @@ export async function fetchReviewThreads(
     }
     if (conn.pageInfo?.hasNextPage === true && conn.pageInfo.endCursor) {
       after = conn.pageInfo.endCursor;
-      if (page === 4) complete = false; // 5-page bound exhausted
+      if (page === 4) complete = false;
     } else {
       break;
     }
@@ -731,9 +620,6 @@ export async function fetchPrReviews(
     } | null)[] | null } | null } | null };
   }>(REVIEWS_QUERY, { owner: input.owner, name: input.repo, number: input.prNumber });
   const nodes = data?.repository?.pullRequest?.reviews?.nodes ?? [];
-  // The predicate narrows BOTH nullability and the id string-ness — the
-  // mapped stubs require a non-undefined `id` (TS cannot carry the
-  // `typeof n.id === "string"` check through a NonNullable-only predicate).
   return nodes
     .filter((n): n is NonNullable<typeof n> & { id: string } => n !== null && typeof n.id === "string")
     .map((n) => ({
@@ -746,9 +632,6 @@ export async function fetchPrReviews(
     }));
 }
 
-// ---------------------------------------------------------------------------
-// Association rows + leases (review_threads — the §7.5 resolution queue)
-// ---------------------------------------------------------------------------
 
 /** Association lease duration (spec §7.7 step-8 parity: 120s, epoch-fenced). */
 export const ASSOCIATION_LEASE_MS = 120_000;
@@ -782,17 +665,6 @@ async function loadAssociation(db: D1Like, id: string): Promise<AssociationRow |
   return db.prepare(`SELECT * FROM review_threads WHERE id = ?`).bind(id).first<AssociationRow>();
 }
 
-/**
- * Conditional epoch-fenced association lease: only a non-terminal row
- * (`pending`/`retry`) with a free or expired lease can be claimed; claiming
- * stamps holder + epoch + 120s.
- *
- * `countAttempt` (default true) decides whether this claim spends one of the
- * row's resolution attempts. An ACTUAL resolution attempt spends one; the
- * §7.5 DISCOVERY pass does not (P67-QC-005) — discovery is read-only
- * bookkeeping that binds remote ids, and charging it would let a crash
- * window burn the whole retry budget before any resolve was ever issued.
- */
 async function claimAssociationLease(
   db: D1Like,
   id: string,
@@ -827,9 +699,6 @@ async function releaseAssociationLease(db: D1Like, id: string, lease: Lease, now
     .run();
 }
 
-// ---------------------------------------------------------------------------
-// Discovery + resolution adapter (spec §7.5 verbatim)
-// ---------------------------------------------------------------------------
 
 export type ResolveOutcome =
   | { kind: "resolved"; threadId: string; adopted: boolean; outdated: boolean; lateChange: boolean }
@@ -844,33 +713,12 @@ export type DiscoveryResult =
 export type ReviewThreadsDeps = {
   db: D1Like;
   nowMs: () => number;
-  /**
-   * JWT-authenticated `GET /app` identity proof (spec §7.5): numeric id +
-   * nonblank slug of the LIVE App behind the routed credentials. Never an
-   * installation-token `viewer.login` assumption. null = identity
-   * unavailable (fail closed).
-   */
   getAppIdentity(input: { appId: string; installationId: number }): Promise<{ githubAppId: number; slug: string } | null>;
-  /**
-   * Purpose-scoped review-write client for the EXACT App+installation+
-   * repository (spec §7.6). null = no GitHub mutation (missing mapping,
-   * denial). The transport is the per-App Octokit's existing graphql().
-   */
   getOctokit(input: { appId: string; installationId: number; owner: string; repo: string }): Promise<GraphqlOctokit | null>;
 };
 
 type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: number; slug: string };
 
-/**
- * Credential routing by EXACT (bot_id, installation_id) with fail-closed
- * ambiguity (spec §7.5/§7.6): bind both durable ids through
- * `bot_installations` into the matching `review_bots` row — never scan all
- * active bots for a repository. Deleted/disabled rows, missing identity,
- * identity disagreement with the row's `github_app_id`, or a blank slug all
- * fail closed (null). Routing-query, identity-proof and mint throws are
- * caught here — callers map null to their typed outcome, so a transport
- * outage never escapes the discriminated-union contracts.
- */
 async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise<AppContext | null> {
   try {
     const row = await deps.db
@@ -889,8 +737,6 @@ async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise
     if (row.deleted_at !== null || row.status !== "active") return null;
     const identity = await deps.getAppIdentity({ appId: scope.appId, installationId: scope.installationId });
     if (identity === null) return null;
-    // Slug-vs-live-App disagreement fails closed (changed identity / spoofed
-    // credential pair); a blank slug is never a bot identity.
     if (identity.githubAppId !== row.github_app_id) return null;
     if (typeof identity.slug !== "string" || identity.slug.length === 0) return null;
     const octokit = await deps.getOctokit({
@@ -902,7 +748,7 @@ async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise
     if (octokit === null) return null;
     return { octokit, botLogin: `${identity.slug}[bot]`, githubAppId: row.github_app_id, slug: identity.slug };
   } catch {
-    return null; // identity/mint/routing failure fails closed (typed downstream)
+    return null;
   }
 }
 
@@ -916,7 +762,6 @@ function sameScope(row: AssociationRow, scope: Scope): boolean {
   );
 }
 
-/** REST reports this App as `<slug>[bot]`; GraphQL `author.login` drops the suffix. */
 const BOT_LOGIN_SUFFIX = "[bot]";
 
 /**
@@ -937,27 +782,10 @@ function isBotAuthor(entry: ThreadCommentEntry, botLogin: string): boolean {
   return entry.authorType === "Bot" && sameAppBotLogin(entry.authorLogin, botLogin);
 }
 
-/** App-author gate for review stubs (author fields, not a full entry). */
 function isBotIdentity(authorType: string | null, authorLogin: string | null, botLogin: string): boolean {
   return authorType === "Bot" && sameAppBotLogin(authorLogin, botLogin);
 }
 
-/**
- * The §7.5 "exact original path/range" anchor fence, shared by discovery's
- * candidate scan and the resolve re-check (P67-QC-002). Path always matches
- * exactly, and a live `line` equal to the intent is the strongest proof. Two
- * shapes fall back to the anchor GitHub recorded at publication time:
- *
- * - an `outdated` thread whose live `line` is null — the commented line left
- *   the diff, so `originalLine` is the only surviving anchor;
- * - a still-valid thread GitHub RE-ANCHORED to a shifted line (code above it
- *   moved) — `line` drifted while `originalLine` still names our intent.
- *
- * Every other shape fails closed (a different path, an `outdated` thread whose
- * live line disagrees, a null live line on a thread GitHub did not mark
- * outdated, or a mismatched/absent original anchor): ownership never widens to
- * arbitrary threads.
- */
 function matchesOriginalAnchor(
   thread: { path: string; line: number | null; originalLine: number | null; isOutdated: boolean },
   intent: LineIntent,
@@ -968,37 +796,16 @@ function matchesOriginalAnchor(
   return !thread.isOutdated && thread.originalLine === intent.line;
 }
 
-/**
- * Discovery + adoption of one prepared association's remote thread (spec
- * §7.5 "Discovery/adoption" verbatim). See the module docblock for the full
- * gate list. `input.reviewId === null` means the send response was lost —
- * the PR's bounded review batches are then inspected for the unique complete
- * batch match. Found ids persist under the association's lease BEFORE any
- * resolve may run.
- */
-/**
- * The §7.5 ownership/provenance LOOKUP shared by discovery and resolve: load
- * the prepared association, verify the confirmed original publication + the
- * stored intent consistency, prove the authenticated App identity, then walk
- * the bounded review-batch and thread scans for the unique complete match.
- *
- * Read-only and lease-free by design: the caller owns persistence (and
- * therefore the lease/fencing), which is what lets the resolve path use this
- * same proof when it has to bind missing remote ids itself (P67-QC-004)
- * without a nested claim on a lease it already holds.
- */
 async function lookupThreadForIntent(
   deps: ReviewThreadsDeps,
   scope: Scope,
   intent: LineIntent,
   reviewId: number | null,
 ): Promise<DiscoveryResult> {
-  // Reject scope mismatch or unknown association BEFORE any API call.
   const row = await loadAssociation(deps.db, intent.associationId);
   if (row === null || !sameScope(row, scope)) return { kind: "unknown" };
   if (row.superseded_by_publication_id !== null) return { kind: "unknown" };
 
-  // Confirmed original primary publication + stored intent consistency.
   const pub = await deps.db
     .prepare(`SELECT phase, kind, head_sha FROM review_publications WHERE id = ?`)
     .bind(row.publication_id)
@@ -1022,13 +829,9 @@ async function lookupThreadForIntent(
     return { kind: "unknown" };
   }
 
-  // Authenticated identity — fail closed before any further call.
   const ctx = await resolveAppContext(deps, scope);
   if (ctx === null) return { kind: "unknown" };
 
-  // The expected original line-review batch marker on the App-owned review.
-  // Read-path transport failures are TYPED (`unknown`), never exceptions —
-  // the caller holds no lease for this read, so there is nothing to unwind.
   let reviews: PrReviewStub[];
   try {
     reviews = await fetchPrReviews(ctx.octokit, scope);
@@ -1037,10 +840,6 @@ async function lookupThreadForIntent(
   }
   let review: PrReviewStub | null = null;
   if (reviewId !== null) {
-    // A known returned reviewId must match exactly — AND the review body
-    // must carry OUR prepared line-batch marker (spec §7.5 lists the batch
-    // marker among the unconditional adoption requirements; a review id
-    // alone never proves the body was not edited/replaced).
     const known = reviews.find((r) => r.fullDatabaseId === String(reviewId));
     if (known === undefined) {
       return { kind: "foreign" };
@@ -1050,8 +849,6 @@ async function lookupThreadForIntent(
     }
     review = known;
   } else {
-    // Response loss: the unique bot-authored review carrying OUR batch
-    // marker for THIS publication is the only acceptable batch.
     const matching = reviews.filter(
       (r) => isBotIdentity(r.authorType, r.authorLogin, ctx.botLogin) && parseLineBatchMarker(r.body)?.publicationId === intent.publicationId,
     );
@@ -1061,16 +858,14 @@ async function lookupThreadForIntent(
   if (review === null) return { kind: "unknown" };
   if (!isBotIdentity(review.authorType, review.authorLogin, ctx.botLogin)) {    return { kind: "foreign" };
   }
-  // The review must be pinned to the original commit SHA.
   if (review.commitOid !== intent.originalSha) {    return { kind: "foreign" };
   }
 
-  // Bounded thread scan; match by exact path/range + root marker + digest.
   let scan: ReviewThreadsCapture;
   try {
     scan = await fetchReviewThreads(ctx.octokit, scope);
   } catch {
-    return { kind: "unknown" }; // typed read-path failure, never an exception
+    return { kind: "unknown" };
   }
   if (!scan.complete) return { kind: "unknown" };
   let foreign = false;
@@ -1078,13 +873,12 @@ async function lookupThreadForIntent(
   for (const thread of scan.threads) {
     if (!matchesOriginalAnchor(thread, intent)) continue;
     const root = thread.root;
-    if (root === null) continue; // absent root blocks any claim
+    if (root === null) continue;
     const marker = parseLineMarker(root.body);
     if (marker === null) continue;
     if (marker.publicationId !== intent.publicationId || marker.associationId !== intent.associationId) {
-      continue; // a different association's thread — not ours to claim
+      continue;
     }
-    // A copied marker (another review/round/SHA/author/body) is insufficient.
     if (!isBotAuthor(root, ctx.botLogin)) {      foreign = true;
       continue;
     }
@@ -1122,11 +916,6 @@ export async function discoverThreadWithDeps(
   const result = await lookupThreadForIntent(deps, scope, intent, input.reviewId);
   if (result.kind !== "found") return result;
 
-  // Persist discovered review/comment/thread ids under the association's
-  // lease BEFORE resolving (spec §7.5). This is DISCOVERY, not a resolution
-  // attempt: the claim does not spend the row's ≤5-attempt resolution budget
-  // (P67-QC-005), so a crash-recovery pass that only binds ids can never
-  // consume the budget the actual resolve needs.
   const holder = `review-threads:${intent.associationId}`;
   const lease = await claimAssociationLease(deps.db, intent.associationId, holder, deps.nowMs(), false);
   if (lease === null) return { kind: "unknown" };
@@ -1141,7 +930,6 @@ export async function discoverThreadWithDeps(
   return result;
 }
 
-// --- resolution ---------------------------------------------------------------
 
 const RESOLVE_THREAD_MUTATION = `
 mutation($input: ResolveReviewThreadInput!) {
@@ -1170,19 +958,11 @@ export async function resolveFindingThreadWithDeps(
   const nowMs = deps.nowMs();
   const holder = `review-threads:${associationId}`;
 
-  // 1. Acquire the association lease.
   const lease = await claimAssociationLease(deps.db, associationId, holder, nowMs);
   if (lease === null) {
-    // A failed claim is a live competing lease OR a terminal row this module
-    // already settled. Terminal rows are typed no-ops — surfacing retry:api
-    // for a settled row would hot-loop recovery against it (the outcome
-    // contracts never leak exceptions, and a settled association is never
-    // re-resolved through re-entry).
     const current = await loadAssociation(deps.db, associationId);
     if (current !== null && sameScope(current, scope)) {
       if (current.resolution_state === "resolved") {
-        // Idempotent re-entry on a settled row: report the stored resolution
-        // (outdated is not re-derived without a fetch; lateChange is stored).
         return {
           kind: "resolved",
           threadId: current.thread_id ?? "",
@@ -1192,9 +972,6 @@ export async function resolveFindingThreadWithDeps(
         };
       }
       if (current.resolution_state === "abandoned") {
-        // The specific abandon reason is persisted only as free-text
-        // last_error; supersession is recoverable from its column. Either
-        // way the row is terminal — never resolved through re-entry.
         return {
           kind: "abandoned",
           reason: current.superseded_by_publication_id !== null ? "superseded" : "foreign",
@@ -1204,7 +981,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "retry", reason: "api" };
   }
 
-  // 2. Reload the row under the lease.
   const row = await loadAssociation(deps.db, associationId);
   if (row === null || !sameScope(row, scope)) {
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
@@ -1218,15 +994,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "abandoned", reason: "superseded" };
   }
 
-  // 3. The finding must still be addressed, and the verified assessment must
-  //    be an addressed verdict for this exact row (never an unverifiable one).
-  //    The finding's `last_publication_id` is deliberately NOT required to be
-  //    this association's publication: the rotation re-selects addressed rows
-  //    whose association is still non-terminal and the seat re-verifies them in
-  //    a real round, while the seen upsert only bumps `last_publication_id`
-  //    when a publication reports the fingerprint again (which reopens the
-  //    row). Supersession — a recurring concern — is fenced above, and a
-  //    reopened finding is not `addressed`, so nothing wider is admitted.
   const finding = await deps.db
     .prepare(`SELECT state FROM review_findings WHERE id = ?`)
     .bind(row.finding_row_id)
@@ -1241,8 +1008,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "needs-recheck", reason: "concern-unresolved" };
   }
 
-  // 4. All recorded coverage must be complete (the snapshot the reviewer
-  //    actually saw — a truncated capture never authorizes a resolve).
   if (
     verified.snapshot.coverage !== "complete" ||
     verified.snapshot.modelCoverage !== "complete" ||
@@ -1252,7 +1017,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "needs-recheck", reason: "context-incomplete" };
   }
 
-  // 5. Prove root ownership/provenance against the CURRENT remote state.
   const ctx = await resolveAppContext(deps, scope);
   if (ctx === null) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: "app identity unavailable" });
@@ -1263,31 +1027,17 @@ export async function resolveFindingThreadWithDeps(
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "stored intent unreadable" });
     return { kind: "abandoned", reason: "foreign" };
   }
-  // Crash-window recovery (§7.11.1 failure matrix: "Crash before/after
-  // resolve API → Pending association + verified snapshot → M8 retries
-  // original fences"): the row may hold its verified snapshot while the
-  // remote ids were never bound, because the enqueue is deliberately
-  // persisted BEFORE discovery. Discovery is exactly the §7.5 pass that
-  // binds them, so run it here from the STORED intent rather than
-  // returning `lookup-incomplete` forever — that outcome would consume the
-  // whole retry budget and strand the row as a terminal local-error for a
-  // crash we can repair (P67-QC-004).
   let commentId = row.comment_id;
   let threadId = row.thread_id;
   if (threadId === null || commentId === null || row.review_id === null) {
     const discovered = await lookupThreadForIntent(deps, scope, intent, null);
     if (discovered.kind !== "found") {
-      // Still unprovable (unknown/ambiguous/foreign): a TYPED retry — the
-      // row keeps its snapshot and stays due for the next pass. The lease
-      // is released through persistOutcome, never held until expiry.
       await persistOutcome(deps.db, associationId, lease, nowMs, {
         state: "retry",
         error: `thread discovery returned ${discovered.kind}`,
       });
       return { kind: "retry", reason: "lookup-incomplete" };
     }
-    // Bind the discovered ids in the SAME fencing epoch as the claim, so a
-    // concurrent resolver can never observe a half-written association.
     await deps.db
       .prepare(
         `UPDATE review_threads SET review_id = ?, comment_id = ?, thread_id = ?, updated_ms = ?
@@ -1303,8 +1053,6 @@ export async function resolveFindingThreadWithDeps(
   try {
     capture = await fetchThreadConversation(ctx.octokit, threadId);
   } catch (err) {
-    // Read-path transport failure is a TYPED retry — the lease is released
-    // through persistOutcome, never held until expiry by an escaping throw.
     const detail = err instanceof Error ? err.message : String(err);
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: `thread capture failed: ${detail}` });
     return { kind: "retry", reason: "api" };
@@ -1314,7 +1062,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "abandoned", reason: "foreign" };
   }
   const thread = capture.thread;
-  // The query's PR identity is validated, not merely accepted from the input.
   if (thread.prNumber !== scope.prNumber || thread.nameWithOwner !== `${scope.owner}/${scope.repo}`) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "thread PR identity mismatch" });
     return { kind: "abandoned", reason: "foreign" };
@@ -1323,7 +1070,7 @@ export async function resolveFindingThreadWithDeps(
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
     return { kind: "needs-recheck", reason: "context-incomplete" };
   }
-  const root = capture.comments[0] ?? null; // chronological first = root
+  const root = capture.comments[0] ?? null;
   if (root === null || root.fullDatabaseId !== String(commentId)) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "abandoned", error: "root comment mismatch" });
     return { kind: "abandoned", reason: "foreign" };
@@ -1346,8 +1093,6 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "abandoned", reason: "foreign" };
   }
 
-  // 6. HEAD + full-conversation digest/count fences against the snapshots
-  //    actually sent. Never refresh the expected digest.
   if (capture.headRefOid !== verified.snapshot.headSha) {
     await releaseAssociationLease(deps.db, associationId, lease, nowMs);
     return { kind: "needs-recheck", reason: "head-changed" };
@@ -1375,17 +1120,11 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "needs-recheck", reason: issue === null ? "context-incomplete" : "conversation-changed" };
   }
 
-  // 7. An already-resolved owned thread is ADOPTED as resolved (ownership
-  //    proof already established). `isOutdated` is recorded, not a veto —
-  //    an owned outdated thread remains eligible after a real fix.
   if (thread.isResolved) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "resolved", resolvedMs: nowMs });
     return { kind: "resolved", threadId: thread.id, adopted: true, outdated: thread.isOutdated, lateChange: false };
   }
 
-  // 8. Immediately recheck the local lease/fence, then mutate. GitHub has no
-  //    conditional resolve CAS — the check→mutation race is documented
-  //    honestly (spec RL-12 / §7.5 "Unavoidable race").
   const fresh = await loadAssociation(deps.db, associationId);
   if (
     fresh === null ||
@@ -1394,12 +1133,9 @@ export async function resolveFindingThreadWithDeps(
     fresh.lease_until_ms === null ||
     fresh.lease_until_ms <= deps.nowMs()
   ) {
-    // A lost local lease prohibits further writes/calls.
     return { kind: "retry", reason: "api" };
   }
 
-  // The declared shape mirrors the mutation's response wrapper — the value
-  // assigned from graphql() is the { resolveReviewThread: { thread } } doc.
   let mutation: { resolveReviewThread?: { thread?: { id?: string | null; isResolved?: boolean | null } | null } | null } | null = null;
   try {
     mutation = await ctx.octokit.graphql<{ resolveReviewThread?: { thread?: { id?: string | null; isResolved?: boolean | null } | null } | null }>(
@@ -1412,16 +1148,11 @@ export async function resolveFindingThreadWithDeps(
     return { kind: "retry", reason: "api" };
   }
   const mutated = mutation?.resolveReviewThread?.thread ?? null;
-  // Require matching returned ID plus isResolved === true before storing
-  // resolved (spec §7.5). Anything else is an unconfirmed mutation.
   if (mutated === null || mutated.id !== thread.id || mutated.isResolved !== true) {
     await persistOutcome(deps.db, associationId, lease, nowMs, { state: "retry", error: "resolve mutation not confirmed (id/isResolved mismatch)" });
     return { kind: "retry", reason: "api" };
   }
 
-  // 9. Post-mutation observation, once: changed HEAD/digest or a failed
-  //    post-read is recorded as `lateChange` — never claimed to cover the
-  //    newer discussion, never un-resolved.
   let lateChange = false;
   try {
     const after = await fetchThreadConversation(ctx.octokit, thread.id);
@@ -1439,7 +1170,7 @@ export async function resolveFindingThreadWithDeps(
       lateChange = true;
     }
   } catch {
-    lateChange = true; // failed post-read is an unconfirmed observation
+    lateChange = true;
   }
   await persistOutcome(deps.db, associationId, lease, nowMs, {
     state: "resolved",
@@ -1459,7 +1190,6 @@ function safeParseIntent(json: string): LineIntent | null {
   }
 }
 
-/** Persist the resolution outcome under the live lease and release it. */
 async function persistOutcome(
   db: D1Like,
   id: string,
@@ -1487,9 +1217,6 @@ async function persistOutcome(
     .run();
 }
 
-// ---------------------------------------------------------------------------
-// Factory — the §7.5 adapter wired onto the per-App commenter surface.
-// ---------------------------------------------------------------------------
 
 export function createReviewThreads(deps: ReviewThreadsDeps): {
   discoverThread: (input: { scope: Scope; intent: LineIntent; reviewId: number | null }) => Promise<DiscoveryResult>;
@@ -1501,6 +1228,4 @@ export function createReviewThreads(deps: ReviewThreadsDeps): {
   };
 }
 
-// Re-export the thread-snapshot vocabulary so the adapter wiring can build
-// VerifiedResolution values without importing two modules.
 export type { Coverage, ThreadSnapshot };

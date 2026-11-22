@@ -1,19 +1,9 @@
-/** note: ListRow — DESIGN.md `list-row`: isomorphic rows in an in-card inset with a
- * fixed slot order (identity → status → meta → actions), an omitted optional
- * slot rendering nothing.
- *
- * Static render: every slot is a prop, so the emitted markup is asserted for
- * the slot order, the rendered text and the trailing-action placement — never
- * a design-token class. The inset, hairline and row-height vocabulary lives in
- * `tests/design-system/surface-idioms.test.ts`.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ListRow, ListRowGroup } from "../../../src/spa/components/ListRow";
 import { StatusBadge } from "../../../src/design-system";
 
-/** note: A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
 const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
 
 const html = renderToStaticMarkup(
@@ -33,7 +23,6 @@ const html = renderToStaticMarkup(
   ),
 );
 
-/** note: Markup between two markers, so a slot's children are checked in place. */
 const between = (from: string, to: string) => {
   const start = html.indexOf(from);
   const end = to ? html.indexOf(to) : html.length;
@@ -70,9 +59,6 @@ describe("ListRow", () => {
     const identity = between('data-slot="list-row-identity"', 'data-slot="list-row-status"');
     expect(identity).toContain("sk-proj-…4f2a");
     expect(identity).toContain("font-mono");
-    // note: The identity column keeps its 76px floor on the legal scale spelling:
-    // `min-w-[76px]` is a bracket arbitrary value the extended guard rejects,
-    // and 19 × the 0.25rem spacing step is the same 76px.
     expect(identity).toContain("min-w-19");
   });
 
@@ -83,7 +69,6 @@ describe("ListRow", () => {
 
   test("row padding, column gap and trailing action placement", () => {
     const row = between('data-slot="list-row"', 'data-slot="list-row-identity"');
-    // invariant: A hand-derived vertical padding must never replace the row face.
     expect(row).not.toContain("py-[9px]");
     expect(row).toContain("px-3");
     expect(row).toContain("gap-3");
@@ -100,9 +85,6 @@ describe("ListRow", () => {
   });
 
   test("the actions slot separates multiple controls with the control gap", () => {
-    // invariant: The destructive action must never sit flush against the row's other
-    // control — the gap is the operator-visible spacing, pinned here
-    // because a regression renders it only in the composed providers row.
     const actions = between('data-slot="list-row-actions"', "</div>");
     expect(actions).toContain("gap-(--spacing-2)");
   });

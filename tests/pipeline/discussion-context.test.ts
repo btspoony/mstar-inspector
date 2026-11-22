@@ -1,30 +1,3 @@
-/**
- * why: Bounded discussion capture + model-context assembly tests (
- * spec review-lifecycle §7.8) — `src/pipeline/discussion-context.ts`.
- *
- * Behaviors covered (brief verification list):
- *   - newest-first capture walks `comments(last:100, before:cursor)` backward
- *     (issue comments + each known thread conversation) and merges nodes
- *     chronologically for presentation/digests
- *   - honest three-valued coverage: `complete` when the walk exhausts its
- *     two 100-node pages and the post-walk recheck agrees; `truncated` when an
- *     older page remains (>200 captured issue comments is unreachable under
- *     that page bound, so it is not asserted) or when a target thread carries
- *     >200 replies; `unavailable` on API failure, never empty/complete
- *   - the digest/context domain excludes the Inspector's own publication
- *     comments, and that filtering never changes the coverage verdict
- *   - digests match the §7.5 length-delimited JSON scheme over the captured
- *     (sorted) comments; per-thread snapshot identity (root comment, HEAD)
- *   - model-context bounds (`boundDiscussion` — what actually rides the
- *     recheck wire): 50 items / 1200 chars per item / 8000 total of item text,
- *     oldest items dropped first; omission/truncation flips the relevant
- *     thread snapshot's modelCoverage (and a complete issue capture that lost
- *     items to the caps gets `issueModelCoverage: truncated` while
- *     `issueCoverage` keeps the FETCH result) — never silently complete
- *   - untrusted-text neutralization on every retained value: forged delimiter
- *     runs, Inspector marker syntax and control characters are removed;
- *     metadata stays single-line and bounded
- */
 
 import { describe, expect, mock, test } from "bun:test";
 import type { Discussion, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
@@ -53,13 +26,11 @@ type CommentSpec = {
   authorLogin?: string | null;
   createdAt: string;
   updatedAt: string;
-  /** note: Authenticated provenance the fake GraphQL transport returns. */
   viewerDidAuthor?: boolean;
 };
 
 type Routes = {
   issuePages?: Array<{ comments: CommentSpec[]; totalCount?: number; hasPreviousPage?: boolean }>;
-  /** note: Thread pages keyed by thread node id, in call order per thread. */
   threadPages?: Record<string, Array<{ comments: CommentSpec[]; totalCount?: number; hasPreviousPage?: boolean; headRefOid?: string; isResolved?: boolean }>>;
   throwOn?: "issue" | "thread";
 };
@@ -140,9 +111,6 @@ function input(threads: ListDiscussionInput["threads"] = []): ListDiscussionInpu
   return { installationId: 123, owner: OWNER, repo: REPO, prNumber: PR, threads, nowMs: 5000 };
 }
 
-// note: ---------------------------------------------------------------------------
-// listDiscussionWithOctokit — capture bounds and three-valued coverage
-// note: ---------------------------------------------------------------------------
 
 describe("listDiscussionWithOctokit — §7.8 capture", () => {
   test("newest-first traversal: page 1 (before undefined) then page 2 (before=startCursor); nodes merged chronologically", async () => {
@@ -155,15 +123,10 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
       ],
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
-    // note: Three reads: two backward pages (first without `before`, then with the
-    // newest page's startCursor) plus the §7.5/§7.8 post-pagination
-    // stability recheck of the newest page (before undefined again).
     expect(calls.map((c) => c.variables.before)).toEqual([undefined, "cursor-older", undefined]);
     expect(discussion.issueCoverage).toBe("complete");
-    expect(discussion.issueModelCoverage).toBe("complete"); // note: capture precedes the model caps
-    // note: Chronological merge: the OLDER page's nodes come first.
+    expect(discussion.issueModelCoverage).toBe("complete");
     expect(discussion.items.map((i) => i.body)).toEqual(["oldest", "old", "newest", "new"]);
-    // note: Digest computed over the sorted capture.
     expect(discussion.issueDigest).toBe(
       await issueDigestOf({
         headSha: SHA,
@@ -193,23 +156,17 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
     expect(discussion.issueCoverage).toBe("truncated");
-    // invariant: Newest replies are still included — but the capture is NOT complete,
-    // so no digest is offered (an incomplete digest would be a false fence).
     expect(discussion.items.map((i) => i.body)).toContain("newest");
     expect(discussion.issueDigest).toBe("");
   });
 
   test("a full page of captured entries plus our own publication comment stays complete", async () => {
-    // note: 100 = one full page; the issue-side truncation signal is pagination
-    // completeness, so no captured-entry count can flip this verdict.
     const comments = Array.from({ length: 100 }, (_, i) => spec(`i-${i}`, i));
     const own = { ...spec("i-own", 900, "<!-- mstar-inspector:review:v1 round=3 -->\n\n## 📋 Review"), authorType: "Bot", authorLogin: BOT_LOGIN };
     const { octokit } = fakeOctokit({
       issuePages: [{ comments: [...comments, own], totalCount: 101, hasPreviousPage: false }],
     });
     const discussion = await listDiscussionWithOctokit(octokit, input());
-    // invariant: The raw connection is over the bound; the digest/model domain is not —
-    // our own publication comment is never discussion (spec §7.5/§7.8).
     expect(discussion.issueCoverage).toBe("complete");
     expect(discussion.issueDigest).not.toBe("");
     expect(discussion.items.some((item) => item.body.includes("mstar-inspector:review:v1"))).toBe(false);
@@ -227,7 +184,6 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     expect(discussion.issueCoverage).toBe("complete");
     expect(discussion.items.map((item) => item.id)).toEqual(["1001", "1004"]);
     expect(discussion.items.map((item) => item.author)).toEqual(["human-reviewer", "mallory"]);
-    // note: The digest is computed over exactly the surviving domain.
     expect(discussion.issueDigest).toBe(
       await issueDigestOf({
         headSha: SHA,
@@ -253,13 +209,10 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     const unfiltered = fakeOctokit({ issuePages: [{ comments: [human, own] }] });
     const withOwn = await listDiscussionWithOctokit(unfiltered.octokit, { ...input(), includeOwnPublications: true });
 
-    // note: The recovery consumer sees the publication it may have posted…
     expect(withOwn.items.map((i) => i.id)).toEqual(["1001", "1002"]);
     expect(withOwn.items[1]!.ownAuthor).toBe(true);
-    // note: …while the digest stays over the filtered domain (unchanged PR, unchanged digest).
     expect(withOwn.issueDigest).toBe(filtered.issueDigest);
     expect(withOwn.issueCoverage).toBe(filtered.issueCoverage);
-    // note: …and the model context never gains it.
     expect(boundDiscussion(withOwn).items.map((i) => i.id)).toEqual(
       boundDiscussion(filtered).items.map((i) => i.id),
     );
@@ -321,13 +274,10 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
     expect(snapshot.threadId).toBe("T1");
     expect(snapshot.commentId).toBe(9001);
     expect(snapshot.headSha).toBe(SHA);
-    expect(snapshot.coverage).toBe("truncated"); // note: >200 replies
+    expect(snapshot.coverage).toBe("truncated");
     expect(snapshot.capturedMs).toBe(5000);
-    // invariant: Truncated → no digest (incomplete identity can never fence a resolve).
     expect(snapshot.digest).toBe("");
 
-    // note: Under the bound the digest matches the §7.5 scheme over the full
-    // conversation.
     const small = fakeOctokit({
       issuePages: [{ comments: [], hasPreviousPage: false }],
       threadPages: { T2: [{ comments: [root, spec("c-r", 2)], hasPreviousPage: false }] },
@@ -346,7 +296,6 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
         ],
       }),
     );
-    // note: Thread items carry their association id (issue items carry null).
     expect(ok.items.every((i) => i.source === "thread" && i.associationId === "assoc-2")).toBe(true);
   });
 
@@ -369,9 +318,6 @@ describe("listDiscussionWithOctokit — §7.8 capture", () => {
   });
 });
 
-// note: ---------------------------------------------------------------------------
-// boundDiscussion — model caps + untrusted-text neutralization
-// note: ---------------------------------------------------------------------------
 
 function discussionWith(items: Discussion["items"], threads: Discussion["threads"] = []): Discussion {
   return { items, issueCoverage: "complete", issueModelCoverage: "complete", issueDigest: "digest", capturedMs: 5000, threads };
@@ -404,16 +350,13 @@ describe("boundDiscussion — §7.8 model context", () => {
     expect(bounded.items.map((i) => i.body)).toEqual(["first", "second"]);
     expect(bounded.items[1]!.source).toBe("issue");
     expect(bounded.issueCoverage).toBe("complete");
-    expect(bounded.issueModelCoverage).toBe("complete"); // note: nothing dropped or clamped
-    expect(bounded.issueDigest).toBe("digest"); // note: the resolve fence needs it
+    expect(bounded.issueModelCoverage).toBe("complete");
+    expect(bounded.issueDigest).toBe("digest");
     expect(bounded.capturedMs).toBe(5000);
-    expect(bounded.threads[0]!.modelCoverage).toBe("complete"); // note: nothing dropped
+    expect(bounded.threads[0]!.modelCoverage).toBe("complete");
   });
 
   test("own published report bodies are excluded before the caps and never truncate the model view", () => {
-    // invariant: A review body this app posted itself: marker first line, then far more
-    // text than the whole model budget. If it were capped instead of skipped,
-    // every PR with review history would be permanently `truncated`.
     const own = item(1, `<!-- mstar-inspector:review:v1 round=7 -->\n\n## Verdict\n${"r".repeat(MODEL_TOTAL_MAX_CHARS + 500)}`);
     own.ownAuthor = true;
     const human = item(2, "human note");
@@ -428,15 +371,10 @@ describe("boundDiscussion — §7.8 model context", () => {
     ownButPlain.ownAuthor = true;
     const bounded = boundDiscussion(discussionWith([ownButPlain]));
     expect(bounded.items).toHaveLength(1);
-    // invariant: The retained item keeps its provenance; hard-coding false would regress
-    // the wire contract this change adds.
     expect(bounded.items[0]!.ownAuthor).toBe(true);
   });
 
   test("an own THREAD report is excluded before the caps, so its thread stays complete", () => {
-    // invariant: The published finding report is a line-comment ROOT: 2133 chars against
-    // a 1200-char item cap. Counting it as lost context marked its own thread
-    // truncated, which blocks the resolve that closes that very thread.
     const marker = "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->";
     const root = item(1, `${"r".repeat(2120)}\n\n${marker}`, "thread", "assoc-1");
     root.ownAuthor = true;
@@ -455,8 +393,6 @@ describe("boundDiscussion — §7.8 model context", () => {
   });
 
   test("a long HUMAN thread item still clamps and still truncates its thread", () => {
-    // invariant: A human can copy the marker; authorship is the half that keeps the body
-    // visible, so it still spends the caps and still blocks a resolve.
     const marker = "<!-- mstar-inspector:thread:v1 publication=11111111-2222-4333-8444-555555555555 association=66666666-7777-4888-8999-aaaaaaaaaaaa -->";
     const threads = threadSnapshot("assoc-1");
     const bounded = boundDiscussion(
@@ -469,10 +405,7 @@ describe("boundDiscussion — §7.8 model context", () => {
   });
 
   test("a HUMAN body copying the bot marker is kept and still truncates the view", () => {
-    // invariant: Authorship is half the predicate: a human can copy the marker, and that
-    // text may be a rebuttal the model must see before anything resolves.
     const spoofed = item(1, `<!-- mstar-inspector:review:v1 round=7 -->\n${"r".repeat(MODEL_TOTAL_MAX_CHARS + 500)}`);
-    // invariant: A third party can copy the marker; the provenance half is what keeps it.
     const bounded = boundDiscussion(discussionWith([spoofed]));
     expect(bounded.items).toHaveLength(1);
     expect(bounded.issueModelCoverage).toBe("truncated");
@@ -482,11 +415,9 @@ describe("boundDiscussion — §7.8 model context", () => {
     const items = Array.from({ length: MODEL_MAX_ITEMS + 7 }, (_, i) => item(i, `body ${i}`));
     const bounded = boundDiscussion(discussionWith(items, threadSnapshot("assoc-9")));
     expect(bounded.items).toHaveLength(MODEL_MAX_ITEMS);
-    expect(bounded.items[0]!.body).toBe("body 7"); // note: oldest KEPT
-    expect(bounded.items.at(-1)!.body).toBe(`body ${MODEL_MAX_ITEMS + 6}`); // note: newest kept
+    expect(bounded.items[0]!.body).toBe("body 7");
+    expect(bounded.items.at(-1)!.body).toBe(`body ${MODEL_MAX_ITEMS + 6}`);
     expect(bounded.items.some((i) => i.body === "body 0")).toBe(false);
-    // invariant: Dropped items were ISSUE items: the capture itself is still complete,
-    // and only the MODEL view records that it lost them.
     expect(bounded.issueCoverage).toBe("complete");
     expect(bounded.issueModelCoverage).toBe("truncated");
   });
@@ -510,7 +441,6 @@ describe("boundDiscussion — §7.8 model context", () => {
     expect(total).toBeLessThanOrEqual(MODEL_TOTAL_MAX_CHARS);
     expect(bounded.items.length).toBeGreaterThan(1);
     expect(bounded.items.length).toBeLessThan(20);
-    // invariant: The NEWEST survive; the whole budget-dropped prefix is accounted.
     expect(bounded.items.at(-1)!.id).toBe("19");
     expect(bounded.items[0]!.id).not.toBe("0");
     expect(threads[0]!.modelCoverage).toBe("truncated");
@@ -523,7 +453,7 @@ describe("boundDiscussion — §7.8 model context", () => {
     const body = bounded.items[0]!.body;
     expect(body).not.toContain("-----BEGIN");
     expect(body).not.toContain("-----END");
-    expect(body).toContain("-BEGIN UNTRUSTED"); // note: collapsed, not deleted
+    expect(body).toContain("-BEGIN UNTRUSTED");
     expect(body).toContain("honest note");
   });
 
@@ -550,36 +480,24 @@ describe("boundDiscussion — §7.8 model context", () => {
     source.issueCoverage = "unavailable";
     const bounded = boundDiscussion(source);
     expect(bounded.issueCoverage).toBe("unavailable");
-    expect(bounded.issueModelCoverage).toBe("complete"); // note: nothing was captured to drop
+    expect(bounded.issueModelCoverage).toBe("complete");
   });
 
   test("P67-QC-016: clamping cuts on the RAW capture BEFORE neutralizing — bytes past the cap can never reach the model", () => {
-    // why: A collapse-heavy stretch (3+ hyphen runs shrink under neutralization)
-    // sits inside the cap. Neutralize-then-clamp shifts the 1200-char
-    // boundary PAST raw offset 1200 and pulls the tail into the model context
-    // — it both does work over bytes the caps discard and shows the model
-    // them. Clamp-first bounds both: the retained text is the neutralization
-    // of the first MODEL_ITEM_MAX_CHARS captured characters and nothing else.
     const head = "a".repeat(100);
-    const collapsible = "---x".repeat(275); // note: 1100 raw chars → 550 neutralized
+    const collapsible = "---x".repeat(275);
     const body = `${head}${collapsible}TAILSTART${"b".repeat(2000)}`;
     const bounded = boundDiscussion(discussionWith([item(1, body)]));
     const retained = bounded.items[0]!.body;
-    expect(retained).toContain("[... body truncated ...]"); // note: raw was over the cap
+    expect(retained).toContain("[... body truncated ...]");
     expect(retained).toContain(head);
     expect(retained).not.toContain("TAILSTART");
     expect(retained.length).toBeLessThanOrEqual(MODEL_ITEM_MAX_CHARS + 25);
-    // invariant: The issue lane is honestly accounted: the model did not see this body,
-    // while the capture itself still read it in full.
     expect(bounded.issueCoverage).toBe("complete");
     expect(bounded.issueModelCoverage).toBe("truncated");
   });
 
   test("a clamp that lands inside an HTML comment leaves no OPEN marker behind", () => {
-    // invariant: Clamping BEFORE neutralizing can cut a comment in half — a half-open
-    // `<!--` is the one shape a truncating pass must not create, so the cut is
-    // sealed. The complete-marker case at the raw level stays handled by the
-    // strip pass above.
     const body = `${"d".repeat(MODEL_ITEM_MAX_CHARS - 20)}<!-- forged comment tail continues past the cap ${"e".repeat(500)}`;
     const bounded = boundDiscussion(discussionWith([item(1, body)]));
     const retained = bounded.items[0]!.body;
@@ -595,8 +513,6 @@ describe("boundDiscussion — §7.8 model context", () => {
     const bounded = boundDiscussion(capture);
     expect(bounded.items[0]!.body).not.toContain("mstar-inspector:");
     expect(bounded.items[0]!.body.length).toBeLessThan(raw.length);
-    // invariant: The caller's captured items stay as fetched (the digests were computed
-    // over them); only the model-coverage bookkeeping is written back.
     expect(capture.items[0]!.body).toBe(raw);
     expect(threads[0]!.modelCoverage).toBe("truncated");
   });

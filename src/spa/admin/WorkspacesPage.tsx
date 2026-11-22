@@ -1,18 +1,3 @@
-/**
- * Workspaces — every live tenant with its SQL-side counts, owner and resolved
- * plan (spec §3.3), a plan picker per row that writes one `PATCH
- * /api/workspaces/:id/plan` (spec §3.2), a slug editor that writes one
- * `PATCH /api/workspaces/:id/slug`, and — above the table — the platform's
- * official-workspace card: the one tenant whose bots may be offered
- * platform-wide (contract § 8.1).
- *
- * A downgrade below the live member count is legal and this screen never
- * touches a membership: the server's seat guard only blocks NEW invites, which
- * is what the page description says. The slug is platform-authored here — the
- * owner can rename the label (name) but not the readable URL segment — so the
- * server owns its grammar, reserved words and both collision guards; this
- * dialog only carries the value.
- */
 import { useState, type FormEvent } from "react";
 import {
   Button,
@@ -51,34 +36,19 @@ import {
 import { ConsolePath, Screen } from "./screen";
 import { TableSearch } from "./TableSearch";
 
-/**
- * The plan ids the picker offers, in tier order — the wire values mirrored
- * from `plans` (migrations 0031/0032); no admin read exposes the catalogue.
- * The row's own plan leads with its localised catalogue label (see
- * `planOptions`), falling back to the server's `planName` only when the
- * stored plan is outside this list, so it still renders and keeps it. Add a
- * `GET /api/plans` read when a tier ships without a UI change.
- */
 const PLAN_IDS = ["free", "pro", "unlimited"] as const;
 
-/** Display-name dictionary keys, keyed by the wire plan id. */
 const PLAN_LABEL_KEYS: Record<(typeof PLAN_IDS)[number], DictionaryKey> = {
   free: "admin.workspaces.planFree",
   pro: "admin.workspaces.planPro",
   unlimited: "admin.workspaces.planUnlimited",
 };
 
-/** The picker's label for a catalogue plan; an unknown id renders `fallback`. */
 function planLabel(locale: Locale, planId: string, fallback: string = planId): string {
   const key = (PLAN_LABEL_KEYS as Record<string, DictionaryKey>)[planId];
   return key ? t(locale, key) : fallback;
 }
 
-/**
- * The options the picker shows: the row's own plan first (localised, falling
- * back to the server's name only for a stored plan outside `PLAN_IDS`),
- * then the rest of the catalogue with localised labels.
- */
 function planOptions(row: WorkspaceRow, locale: Locale): readonly { id: string; name: string }[] {
   return [
     { id: row.planId, name: planLabel(locale, row.planId, row.planName) },
@@ -89,38 +59,23 @@ function planOptions(row: WorkspaceRow, locale: Locale): readonly { id: string; 
   ];
 }
 
-/**
- * `<used> / <cap>` seat headroom. A NULL cap is unlimited, which is `—`; it
- * must never render as `0` (migration 0031: NULL means no limit).
- */
 function seatHeadroom(row: WorkspaceRow): string {
   return row.includedMembers === null ? "—" : `${row.memberCount} / ${row.includedMembers}`;
 }
 
-/**
- * The official workspace (contract § 8.1) — the one tenant whose bots may be
- * marked shared platform-wide. Two writes, one each: Save designates the
- * selected live workspace, Clear removes the designation. Clearing is its own
- * action because an empty save is refused by the server, and it does not touch
- * a share already granted (those stay revocable from the Bots screen).
- */
 function OfficialWorkspaceCard({
   locale,
   workspaces,
 }: {
   locale: Locale;
-  /** The page's own loaded rows — the selector's only source. */
   workspaces: readonly WorkspaceRow[];
 }) {
   const { state, reload, update } = useLoaded(readRuntime);
-  /** The operator's pick; `null` follows the stored designation. */
   const [draft, setDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<{ kind: "success" | "error"; message: string } | null>(null);
 
   const current = state.status === "ready" ? state.data.officialWorkspaceId : null;
-  // A designation pointing at a workspace this page no longer lists still
-  // reads as the stored id: the card reports what the server holds.
   const currentName = current === null ? null : (workspaces.find((row) => row.id === current)?.name ?? current);
   const selection = draft ?? current ?? workspaces[0]?.id ?? "";
 
@@ -136,7 +91,6 @@ function OfficialWorkspaceCard({
         message: t(locale, stored === null ? "admin.workspaces.officialCleared" : "admin.workspaces.officialSaved"),
       });
     } catch (error) {
-      // Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.workspaces.officialSaveFailed");
       setNotice({
         kind: "error",
@@ -235,13 +189,9 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readWorkspaces);
   const [busy, setBusy] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  /** Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
-  /** The row whose slug dialog is open, plus the value being typed. */
   const [slugTarget, setSlugTarget] = useState<WorkspaceRow | null>(null);
   const [slugDraft, setSlugDraft] = useState("");
-  /** The slug refusal belongs to the dialog, not the page: Radix's modal
-   * overlay covers the page notice while the dialog stays open. */
   const [slugRefusal, setSlugRefusal] = useState<string | null>(null);
 
   async function changePlan(target: WorkspaceRow, planId: string) {
@@ -250,11 +200,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     const previousName = target.planName;
     setBusy(target.id);
     setRefusal(null);
-    // Optimistic: a controlled picker has to show the choice while the one
-    // PATCH is in flight, and the label has to move with the id or the row's
-    // own option would keep the old name. The seat cap is the server's answer,
-    // so the accepted write re-reads instead of guessing it; a refusal puts
-    // the stored pair back.
     const apply = (id: string, name: string) =>
       update((workspaces) =>
         workspaces.map((item) => (item.id === target.id ? { ...item, planId: id, planName: name } : item)),
@@ -265,8 +210,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
       reload();
     } catch (error) {
       apply(previousId, previousName);
-      // The generic failure message stays primary; the server's own `{error}`
-      // text rides along as secondary detail, never the only copy.
       const generic = t(locale, "admin.workspaces.planChangeFailed", { name: target.name });
       setRefusal(
         error instanceof AdminWriteError
@@ -278,12 +221,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     }
   }
 
-  /**
-   * Submit the dialog's slug. The row is patched in place on success (the read
-   * endpoint's row carries `slug`), and the dialog closes; a refusal keeps it
-   * open with the server's own message as secondary detail so the operator can
-   * correct the value without retyping it.
-   */
   async function submitSlug(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const target = slugTarget;
@@ -368,8 +305,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
             <SelectValue>{planLabel(locale, row.planId, row.planName)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
-            {/* The row's own plan leads, localised; only an id outside
-                PLAN_IDS keeps the server's name. */}
             {planOptions(row, locale).map((plan) => (
               <SelectItem key={plan.id} value={plan.id}>
                 {plan.name}
@@ -416,7 +351,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.id}
                 empty={
-                  // No-match copy is only true when there were rows to match.
                   query && workspaces.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}
@@ -455,7 +389,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                   autoFocus
                 />
               </label>
-              {/* Inside the dialog: the modal overlay covers the page notice. */}
               {slugRefusal ? <PageNotice kind="error" message={slugRefusal} /> : null}
               <DialogFooter>
                 <Button type="button" variant="outline" size="sm" onClick={() => setSlugTarget(null)}>
@@ -464,8 +397,6 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
                 <Button
                   type="submit"
                   size="sm"
-                  // An unchanged draft would write a no-op UPDATE plus an audit
-                  // row with identical before/after.
                   disabled={
                     busy !== null ||
                     slugDraft.trim().length === 0 ||

@@ -31,7 +31,6 @@ export function inviteAcceptNotice(status: number, body: string): DictionaryKey 
   return "workspace.inviteAcceptFailed";
 }
 
-/** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
 
 /**
@@ -62,11 +61,8 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
   const [busy, setBusy] = useState(false);
   const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
-  // Accepting one invite joins the workspace: a full navigation lands the
-  // shell on the invited workspace, whose next document boot carries the
-  // fresh membership (the boot snapshot in memory is pre-accept).
   async function onAccept(invite: PendingInvite): Promise<void> {
-    if (acceptingId !== null) return; // in-flight guard — no double submit
+    if (acceptingId !== null) return;
     setAcceptingId(invite.inviteId);
     try {
       const { status, body } = await postForm(inviteAcceptPath(invite.workspaceRef, invite.inviteId), {});
@@ -84,7 +80,7 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
 
   async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return;
     const trimmed = name.trim();
     if (trimmed.length === 0) {
       setNotice({ kind: "error", message: t(locale, "workspace.nameRequired") });
@@ -120,17 +116,10 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
         description={t(locale, "workspace.setupDescription")}
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
-      {/* The `self-hosted` first-account line: the boot carries `emptyInstance`
-          only for the sign-in that created this instance's first account, so
-          neither `saas` nor a later sign-in may claim the instance story. */}
       {boot.emptyInstance === true ? (
         <p className="text-sm text-muted-foreground">{t(locale, "workspace.emptyInstance")}</p>
       ) : null}
       <div className="flex flex-col">
-        {/* Pending invitations are the boot-built discovery surface (MF-2):
-            an invited login meets the invites above the create form —
-            accepting joins the workspace, so creation stays only for the
-            uninvited. */}
         {boot.pendingInvites !== undefined && boot.pendingInvites.length > 0 ? (
           <FlowSection
             title={t(locale, "workspace.invitesHeading")}

@@ -1,59 +1,9 @@
-/**
- * Review Check attempt registry (spec review-lifecycle §7.1
- * second block + §7.9). One row per Check ATTEMPT; this module is the only
- * place attempt identity, lease fencing and the desired/observed split live.
- *
- * Identity (spec §7.9): `attempt_key` is the canonical JSON array of the
- * authenticated scope plus head SHA, triggeredBy and action. A fresh attempt on
- * the same key is a new GENERATION with a fresh UUID and a fresh
- * `external_id = mstar-check:v1:<uuid>:<gen>`; generations, external ids and
- * once-attached remote run ids are never recycled or cleared.
- *
- * Claim protocol (spec §7.9): ONE serialized `db.batch` inserts the next
- * generation only when no NONTERMINAL row exists for the key. The partial
- * unique index `idx_check_one_open` (migration 0021) is what actually
- * serialises concurrent claims — `(attempt_key, generation)` alone cannot,
- * because two racers each compute a different MAX+1. A racer whose insert is
- * rejected by that index REREADS the active row and returns `busy`, never its
- * own generation. The batch is a LOCAL fence, not external exactly-once (RL-12).
- *
- * Fencing (spec §7.9/§7.0): the claim INSERT carries holder, `lease_epoch = 1`
- * and `lease_until_ms` equal to the immutable execution deadline, so no
- * unowned row ever exists. Every later mutation is a conditional statement
- * requiring `(id, holder, lease_epoch, lease_until_ms)` — the exact lease
- * triple it was handed — and reports true only on `meta.changes === 1`; false
- * means the lease was lost, taken over, or the row already ended, and nothing
- * was written. Because every lease change increments the epoch, matching the
- * triple implies the caller's lease is still the live one; an optional
- * transaction clock additionally enforces `lease_until_ms > nowMs`. Recovery
- * reacquires an EXPIRED or released lease with a single epoch-incrementing
- * UPDATE — repeating the selector's full eligibility predicate — and never
- * takes a live one. The recovery lease (120s) never moves
- * `execution_deadline_ms`, and expiry always means the execution deadline.
- * `releaseCheckClaim` gives a claim back without spending an attempt (budget
- * deferral, paused not-sent work), leaving the row immediately selector-due.
- *
- * Desired versus observed: `setCheckDesired` freezes the terminal intent
- * (conclusion, bounded title/summary, publication proof link) BEFORE any remote
- * update, and is monotonic except for the one documented correction;
- * `recordCheckObservation` advances `observed` only from a remote payload whose
- * persisted identity already matches. An `unavailable` outcome flows through
- * `deferCheckRecovery`, which touches recovery status/error/backoff only —
- * never `desired`, never `observed`. Suspension is fenced to free rows, so it
- * can never clear a live holder's lease.
- *
- * Storage layer: no `src/pipeline/**` or `src/worker/**` imports, no GitHub
- * call, no clock of its own (one supplied `nowMs` per transaction, §7.0).
- */
 
 import { CHECK_WINDOW_MS } from "../review-budget";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./finding-lifecycle";
 import type { D1Like, ReviewCheckRow } from "./types";
 
-// ---------------------------------------------------------------------------
-// Suspension encoding (spec §7.6 — one grammar, shared with the M8 lane)
-// ---------------------------------------------------------------------------
 
 /**
  * The Check lane's suspension kinds. It carries the M8 set verbatim plus its
@@ -115,9 +65,6 @@ export type { SuspensionKind };
 export type { Scope } from "../../packages/shared/src/recheck-wire";
 export type { Lease, PublicationProof } from "./finding-lifecycle";
 
-// ---------------------------------------------------------------------------
-// §7.9 domain shapes (single CODE copy; spec §7.9 is the normative copy)
-// ---------------------------------------------------------------------------
 
 export type CheckDesired = "in_progress" | "success" | "neutral" | "failure";
 export type CheckObserved = "unknown" | CheckDesired;
@@ -146,7 +93,6 @@ export type CheckAttempt = {
   identity: CheckIdentity;
   lease: Lease | null;
   checkRunId: number | null;
-  /** The proof link the row already carries — the selector's copy of it. */
   publicationId: string | null;
   createState: CheckCreateState;
   desired: CheckDesired;
@@ -155,21 +101,10 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
-  /** The approved failure category frozen with the intent; NULL when none applies. */
   terminalFailureStatus: CheckFailureStatus | null;
-  /**
-   * The §7.9a correction this row still owes a deferred send (migration 0093),
-   * and the generation it targets. Both NULL means no correction is owed.
-   */
   correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
   correctionGeneration: number | null;
-  /** When the owed revision was dispatched; NULL while it provably has not left. */
   correctionDispatchedMs: number | null;
-  /**
-   * When this attempt was ADMITTED. The proof wait uses it to attribute a
-   * publication: only a journal row staged at or after this instant can be the
-   * publication this attempt set in motion.
-   */
   createdAtMs: number;
 };
 
@@ -182,11 +117,6 @@ export type CheckRemote = {
   app: { id: number } | null;
   status: string;
   conclusion: string | null;
-  /**
-   * The run's human-facing summary, or `null` when the payload carried no
-   * readable text. A conclusion alone does not prove the approved wording
-   * landed, so delivery is judged on this field (spec §7.9).
-   */
   summary: string | null;
 };
 
@@ -195,15 +125,6 @@ export type CheckConclusion = {
   desired: Exclude<CheckDesired, "in_progress">;
   title: string;
   summary: string;
-  /**
-   * The approved category this intent carries, frozen in the SAME write as the
-   * text. It names why the intent reports something the user must act on, so it
-   * is absent only where no fault is reported (a verdict, a superseded attempt,
-   * a plain skip). A paused run is the one `neutral` conclusion that carries
-   * one: `neutral` + `"paused"` is the honest outcome, not a failure. `desired`
-   * excludes `in_progress` by type, so a category can never be written for an
-   * attempt that is still waiting.
-   */
   failureStatus?: CheckFailureStatus;
 };
 
@@ -219,10 +140,6 @@ export type PublishedReview = { verdict: string; scorePct: number | null };
 export type ClaimAttemptResult =
   | { kind: "claimed"; attempt: CheckAttempt; lease: Lease }
   | { kind: "busy" | "terminal"; attempt: CheckAttempt }
-  /**
-   * No row for the key at all. Only reachable for a FROZEN-generation claim
-   * (`expect`), which never inserts: the caller has nothing to settle.
-   */
   | { kind: "absent" };
 
 /**
@@ -233,9 +150,6 @@ export type ClaimAttemptResult =
  */
 export type CheckClock = number;
 
-// ---------------------------------------------------------------------------
-// Constants (spec §7.9 / §7.11.2)
-// ---------------------------------------------------------------------------
 
 /** GitHub run name (spec §7.9: exactly this string; never per-attempt unique). */
 export const CHECK_NAME = "mstar-inspector review";
@@ -306,10 +220,8 @@ export const CHECK_SUMMARY_MAX_CHARS = 2_000;
  */
 export const CHECK_TITLE_MAX_CHARS = 120;
 
-/** Canonical lowercase UUID syntax — the only Worker-generated ids (spec §7.0). */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A nonterminal attempt is one that has not locally completed or given up. */
 const NONTERMINAL_WHERE = "terminal_ms IS NULL";
 
 /**
@@ -377,9 +289,6 @@ const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
             )
           )`;
 
-// ---------------------------------------------------------------------------
-// Identity helpers (spec §7.9)
-// ---------------------------------------------------------------------------
 
 /**
  * Canonical `attempt_key`: `JSON.stringify` of the flat attempt tuple in the
@@ -411,16 +320,8 @@ export function attemptKey(input: {
   ]);
 }
 
-/** The `MAX(generation)+1` subquery for a key (bound once per use). */
 const NEXT_GENERATION_SQL = `(SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks m WHERE m.attempt_key = ?)`;
 
-/**
- * The SQL spelling of `externalIdFor` for the row being inserted, so the
- * immutable handle is stamped by the SAME statement as the insert and no
- * untagged window opens between claim and reread. The generation subquery is
- * evaluated twice inside one statement, so both see the identical MAX+1.
- * Bound values in order: attempt id, then the attempt key.
- */
 const EXTERNAL_ID_SQL =
   `'${CHECK_EXTERNAL_ID_PREFIX}' || ? || ':' || (SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks x WHERE x.attempt_key = ?)`;
 
@@ -441,9 +342,6 @@ export function externalIdFor(attemptId: string, generation: number): string {
   return `${CHECK_EXTERNAL_ID_PREFIX}${attemptId}:${generation}`;
 }
 
-// ---------------------------------------------------------------------------
-// Row mapping
-// ---------------------------------------------------------------------------
 
 function attemptOf(row: ReviewCheckRow): CheckAttempt {
   return {
@@ -487,15 +385,6 @@ export function checkReason(text: string): string {
   return flat.length <= CHECK_ERROR_MAX_CHARS ? flat : flat.slice(0, CHECK_ERROR_MAX_CHARS);
 }
 
-/**
- * Flatten and bound frozen terminal text before it is persisted (spec §7.9).
- * A Check title/summary is PUBLIC: collapsing newlines/tabs and dropping
- * control characters keeps an injected multi-line payload from restructuring
- * the rendered Check, and the cut happens on the already-flattened string so
- * no split can re-introduce one. Redaction is the pipeline's choke point
- * (model text is redacted before it reaches this store, SEC-02); the store's
- * job is the deterministic bound — the `recoveryReason` precedent.
- */
 function boundText(text: string, max: number): string {
   const flat = text
     .replace(/[\r\n\t]+/g, " ")
@@ -504,22 +393,11 @@ function boundText(text: string, max: number): string {
   return flat.length <= max ? flat : flat.slice(0, max);
 }
 
-/** Never persist an empty title: GitHub renders it verbatim above the summary. */
 function frozenTitle(title: string): string {
   const bounded = boundText(title, CHECK_TITLE_MAX_CHARS);
   return bounded.length === 0 ? CHECK_NAME : bounded;
 }
 
-/**
- * The one fenced-mutation executor behind every post-claim write: the exact
- * lease triple from the caller's `Lease`, plus `terminal_ms IS NULL` so
- * finished history is never rewritten. An optional transaction clock adds the
- * §7.9 `lease_until_ms > now` condition and stamps `updated_ms`.
- *
- * `meta.changes === 1` is the ONLY success signal; false means the lease was
- * lost, someone else took over (epoch moved), or the row is terminal — and the
- * statement wrote nothing.
- */
 async function runFenced(
   db: D1Like,
   id: string,
@@ -527,20 +405,9 @@ async function runFenced(
   sets: string,
   values: unknown[],
   nowMs: CheckClock,
-  /**
-   * Extra state predicate a transition additionally requires, bound with
-   * `guardValues` AFTER the lease params. Every legal-transition rule belongs
-   * in the statement itself: proving legality by a read-then-write window
-   * would let a concurrent transition land in between.
-   */
   guard?: string,
   guardValues: unknown[] = [],
 ): Promise<boolean> {
-  // The live-lease fence is MANDATORY (spec §7.9/§7.0): `lease_until_ms` is
-  // bound twice — once as the exact triple match, once as the `> now`
-  // liveness test — so an expired-but-not-yet-reassigned lease cannot write.
-  // There is no unclocked variant: the clock is the caller's single supplied
-  // transaction time (§7.0), never a value this module invents.
   const result = await db
     .prepare(
       `UPDATE review_checks SET updated_ms = ?, ${sets} ` +
@@ -567,14 +434,8 @@ export type CheckOwnership = {
   observed: CheckObserved;
   desiredTitle: string | null;
   desiredSummary: string | null;
-  /** The frozen failure category, so a re-freeze of the same intent keeps it. */
   terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
-  /**
-   * The §7.9a conclusion this row still owes (migration 0093) and the
-   * generation it targets — NULL when no correction is owed. A validated
-   * response settles the debt only when it delivered THIS conclusion.
-   */
   correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
   correctionGeneration: number | null;
 };
@@ -586,9 +447,6 @@ export async function getCheckOwnership(
   lease: Lease,
   nowMs: CheckClock,
 ): Promise<CheckOwnership | null> {
-  // Clock REQUIRED: an ownership read that skipped `lease_until_ms > now`
-  // would authorise a send the spec forbids (§7.9 "remote sends require the
-  // same check") — the adapter's send fence reads through here.
   const row = await db
     .prepare(
       `SELECT * FROM review_checks
@@ -614,9 +472,6 @@ export async function getCheckOwnership(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Claim (spec §7.9)
-// ---------------------------------------------------------------------------
 
 /**
  * Fenced attempt claim. In ONE serialized batch, insert the next generation
@@ -655,21 +510,7 @@ export async function claimAttempt(
     holder: string;
     nowMs: number;
     executionDeadlineMs: number;
-    /**
-     * The DELIVERY that created this row (spec §7.9), recorded so a later skip
-     * settlement can tell its own released row from another delivery's. Absent
-     * for claims that are not the delivery attach (the consumer's admission
-     * claim, recovery) — such a row is only ever closed by the recovery lane.
-     */
     attachDeliveryId?: string;
-    /**
-     * The FROZEN generation this caller must act on. Supplied by resumed
-     * phases: the call then answers from that key's own row and NEVER runs the
-     * minting INSERT, so a generation that ends between the caller's decision
-     * and this call inserts nothing — there is no insert to lose the race
-     * against. Taking the frozen row is the fenced adoption UPDATE that
-     * follows, not this claim.
-     */
     expect?: { key: string; generation: number };
   },
 ): Promise<ClaimAttemptResult> {
@@ -690,12 +531,6 @@ export async function claimAttempt(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // A caller acting on a FROZEN generation may never mint. Verification and
-  // claim are one step here because the only claim such a caller can make is
-  // that row ITSELF: this call reads it (open → `busy`, ended or never written
-  // → `absent`) and does not execute the insert below, so the mint cannot fire
-  // for a generation that is not the open one — not even by a race, because
-  // there is no insert in flight.
   if (input.expect !== undefined) {
     const active = await db
       .prepare(`SELECT * FROM review_checks WHERE attempt_key = ? AND ${NONTERMINAL_WHERE} ORDER BY generation DESC LIMIT 1`)
@@ -705,61 +540,6 @@ export async function claimAttempt(
   }
   const attemptId = crypto.randomUUID();
 
-  // The claim is the whole race. `INSERT … SELECT` is gated on TWO facts about
-  // `attempt_key`: no NONTERMINAL row exists (a live or expired-but-open
-  // attempt belongs to its holder and to recovery, never to a new claim), and
-  // no generation of this key ended WITH a proven publication. If two claims
-  // pass the gates in the same instant, the partial unique index rejects
-  // exactly one, and because a failed statement rolls back the batch, the
-  // loser owns nothing: it surfaces through the reread below as `busy`, never
-  // as its own generation.
-  //
-  // Dedup reads PROOF, not Check observation (spec §7.9: a terminal
-  // successfully published attempt is the `terminal` answer, and the §7.9
-  // matrix makes confirmed publication authoritative even when Check side
-  // effects fail). A row can hold a positive proof link and still carry
-  // `observed = 'unknown'` — e.g. `markCheckLocalError` after a successful
-  // publication — so gating on `observed` would mint generation N+1 for a head
-  // that is durably published.
-  //
-  // `neutral` ALONE no longer blocks a claim. A skip SETTLEMENT closes its row
-  // `neutral` with no publication link, because nothing was published: retiring
-  // the head there would leave a later, ADMITTED delivery of the same head
-  // unable to run its own review (a retried guard refusal, a paused-then-resumed
-  // App) — a published review with no in-progress run and no final Check. Only a
-  // PROVEN outcome blocks: `observed = 'success'` here, plus the EXACT-proof
-  // subquery below (a link alone never suppresses a claim — an unproven, foreign
-  // or malformed link is not a publication). The new generation gets a fresh row
-  // and run id, so the remote surface shows the newest run, which is the honest
-  // one. `failure` was always retryable for the same reason.
-  //
-  // The proof test is EXACT, because suppressing a claim is itself a claim of
-  // success: a merely non-null FK would let a foreign-scope publication id, a
-  // prepared payload, or malformed JSON silently dedup a head that was never
-  // published (spec §7.9 reads proof by exact App/scope/SHA). The gate
-  // therefore requires, for the linked publication of some generation of this
-  // key:
-  //   - the journal row's own scope columns to equal the ATTEMPT's scope and
-  //     head SHA (never another App, installation, repo, PR or commit);
-  //   - the proof to be a COMPLETE closed §7.7 shape: every required
-  //     PublicationProof field present with its JSON type, the embedded
-  //     identity agreeing with the row, kind in ('review','degraded'), and
-  //     usable values (round >= 1, commentId > 0, a positive Unix-ms
-  //     confirmedMs, a 64-hex body digest). Syntactically valid but incomplete
-  //     JSON is unproven, not authoritative.
-  //     Deliberately NOT gated on `phase`: proof is recorded only on a
-  //     confirmed response, and the row legitimately moves on to `applied` (or
-  //     is `superseded` by a later round) afterwards. Those heads WERE
-  //     published, so keying on a phase the row passes through would wrongly
-  //     mint a new generation for them. An unproven row is exactly the one with
-  //     `proof_json IS NULL` — the prepared/as-yet-unconfirmed case;
-  //   - the EMBEDDED proof identity (scope + headSha + kind) to agree with the
-  //     journal row as well, so a payload whose JSON disagrees with its own row
-  //     is unproven rather than authoritative.
-  // Both a normal and a degraded proof dedup (§7.9's matrix gives confirmed
-  // degraded publication `neutral`, still a closed outcome); malformed,
-  // prepared, foreign or ambiguous proof does not, and the head stays
-  // retryable.
   const provenPublication = `(
     SELECT COUNT(*) FROM review_checks p
       JOIN review_publications pub ON pub.id = p.publication_id
@@ -845,7 +625,6 @@ export async function claimAttempt(
   try {
     await db.batch([insert]);
   } catch (error) {
-    // The designed loser path — another claimer took the key or the generation.
     if (!isUniqueViolation(error)) throw error;
   }
 
@@ -876,12 +655,6 @@ export async function claimAttempt(
   return { kind: "terminal", attempt: attemptOf(latest) };
 }
 
-/** Read one attempt by row id (null = no such row). */
-/**
- * The identity frozen on a Check row: its `attempt_key` and the generation that
- * key belongs to. This is what an attempt's launch row records at creation, so
- * no later phase has to look a generation up (a later one is another attempt's).
- */
 export async function readCheckIdentity(
   db: D1Like,
   id: string,
@@ -923,9 +696,6 @@ function isUniqueViolation(error: unknown): boolean {
   return /UNIQUE constraint failed/i.test(message);
 }
 
-// ---------------------------------------------------------------------------
-// Recovery claim (spec §7.9 / §7.11.2 step 1)
-// ---------------------------------------------------------------------------
 
 /**
  * Recovery reacquire: ONE conditional UPDATE that repeats the FULL candidate
@@ -963,11 +733,6 @@ export async function claimCheckRecovery(
   nowMs: number,
   maxAttempts: number,
 ): Promise<Lease | null> {
-  // Suspension is a CLAIM FENCE, not merely a selector filter (spec §7.6): a
-  // disabled/deleted App's rows are recoverable again only after the explicit
-  // re-enable that returns them to `pending`. Without this predicate a stale
-  // selector result — or a direct caller — could lease a suspended App's row
-  // while the App is still disabled.
   const claim = await db
     .prepare(
       `UPDATE review_checks
@@ -1020,10 +785,8 @@ export async function adoptReleasedCheckAttempt(
   db: D1Like,
   input: {
     attemptId: string;
-    /** The App these credentials authenticate as — never a foreign App's row. */
     githubAppId: number;
     holder: string;
-    /** The attempt's frozen absolute deadline (`queue send + operator cap`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -1111,14 +874,8 @@ export async function claimAttachedCheckForSettlement(
     headSha: string;
     triggeredBy: string;
     action: string;
-    /**
-     * THIS delivery's attach identity (`payload.attachDeliveryId`): the id its
-     * attach holder was written under. Absent → the delivery created no row of
-     * its own, so nothing is claimable.
-     */
     attachDeliveryId?: string;
     holder: string;
-    /** The settling invocation's execution deadline (`now + CHECK_WINDOW_MS`). */
     executionDeadlineMs: number;
     nowMs: number;
   },
@@ -1126,10 +883,6 @@ export async function claimAttachedCheckForSettlement(
   if (input.holder.length === 0) {
     throw new Error("review-checks: settlement requires a nonblank holder identity");
   }
-  // Defensive: a message enqueued before the identity existed carries none, and
-  // the predicate below could not match its row anyway (`attach_delivery_id`
-  // is NULL). The busy/terminal rule is the PREDICATE's, not this guard's: such
-  // a delivery DOES carry an id, it just has no row recording it.
   if (input.attachDeliveryId === undefined || input.attachDeliveryId === null || input.attachDeliveryId.length === 0) {
     return null;
   }
@@ -1146,13 +899,6 @@ export async function claimAttachedCheckForSettlement(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // Shared by both statements: the row must be attached, unfrozen and inside
-  // its window, and it must either be held by THIS delivery's own attach or be
-  // RELEASED **and created by** it (`attach_delivery_id`). The column is what
-  // makes the budget-expiry arm recoverable: the attach may still be running
-  // when the message is enqueued, so its row is released only later — the
-  // holder alone cannot name the creator by then. Bound order matches the
-  // UPDATE.
   const claimable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
@@ -1249,11 +995,6 @@ export async function renewCheckLease(
     )
     .bind(nowMs + CHECK_LEASE_MS, nowMs, id, lease.holder, lease.epoch, lease.untilMs, nowMs)
     .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
-  // The row THIS statement wrote — no second read can hand back a later
-  // acquisition — and it must still be the fence it was given: the epoch is
-  // unchanged (renewal is not takeover), and the window is either the old one
-  // or one fresh cap, never shorter. Anything else (including zero rows, i.e. a
-  // takeover bumped the epoch or the lease lapsed) is a refusal.
   const written = renewed.results[0];
   if (
     written === undefined ||
@@ -1365,9 +1106,6 @@ export async function releaseExpiredCheckClaim(
   return result.meta.changes === 1;
 }
 
-// ---------------------------------------------------------------------------
-// Fenced mutations (spec §7.9)
-// ---------------------------------------------------------------------------
 
 /**
  * Attach the proven remote run id under the live lease and move
@@ -1386,10 +1124,6 @@ export async function attachCheckRunId(
   if (!Number.isInteger(checkRunId) || checkRunId <= 0) {
     throw new Error(`review-checks: check_run_id must be a positive integer, got ${String(checkRunId)}`);
   }
-  // An id may only be attached to a send that was ACTUALLY attempted
-  // (`sending`/`unknown`). `not-sent` proving nothing was sent, and an
-  // already-`known` id being idempotently re-attached, are the two legal
-  // shapes — anything else would record a run this attempt never created.
   return runFenced(
     db,
     id,
@@ -1431,7 +1165,6 @@ export async function setCheckCreateState(
   nowMs: CheckClock,
 ): Promise<boolean> {
   if (state === "not-sent") {
-    // Definitive pre-send rejection: only a state that never sent may claim it.
     return runFenced(
       db,
       id,
@@ -1442,8 +1175,6 @@ export async function setCheckCreateState(
       `create_state = 'not-sent' AND check_run_id IS NULL`,
     );
   }
-  // `sending`/`unknown` record that a create was attempted — always legal, and
-  // never reachable backwards, so the row can only move toward resolution.
   return runFenced(
     db,
     id,
@@ -1606,9 +1337,6 @@ export async function setCheckDesired(
   const was = current.desired;
   const replay = was === conclusion.desired;
   if (was !== "in_progress" && !replay) {
-    // Only a failure whose CAUSE was unknown can be corrected: a frozen
-    // `cap-stop`/`budget-stop` states why this attempt ended, so a prior
-    // generation's publication cannot rewrite it (first write wins).
     const causeUnknown =
       current.terminalFailureStatus === null || current.terminalFailureStatus === "unknown-failure";
     const correction =
@@ -1628,19 +1356,12 @@ export async function setCheckDesired(
       nowMs,
     );
   }
-  // Freeze BOUNDED text: the persisted row is the only source the send reads,
-  // so an oversized or newline-injected title/summary cannot reach the public
-  // Check surface later (spec §7.9).
   const title = frozenTitle(conclusion.title);
   const summary = boundText(conclusion.summary, CHECK_SUMMARY_MAX_CHARS);
   return runFenced(
     db,
     id,
     lease,
-    // A CHANGED frozen intent supersedes the previous dispatch: the mark it
-    // left described other text, so the corrected conclusion may be sent once
-    // (spec §7.9a's late correction). An unchanged intent keeps the mark, so
-    // re-running it can never send the same update twice.
     `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             publication_id = COALESCE(?, publication_id),
             terminal_dispatch_ms = CASE WHEN desired = ? AND desired_summary = ? THEN terminal_dispatch_ms ELSE NULL END,
@@ -1716,7 +1437,6 @@ export async function markCheckQueuedBehindInflight(
     headSha: string;
     triggeredBy: string;
     action: string;
-    /** THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
     title: string;
     summary: string;
@@ -1734,17 +1454,6 @@ export async function markCheckQueuedBehindInflight(
     triggeredBy: input.triggeredBy,
     action: input.action,
   });
-  // The relabelable row: still running, attached, wanting in_progress and not
-  // suspended. Identical in both statements — the SELECT only learns the run id.
-  //
-  // The HOLDER arm is what keeps this honest: `attach_delivery_id` names the
-  // delivery that CREATED the row, not the one now using it. A second delivery
-  // for the same head can ADOPT this row (`adoptReleasedCheckAttempt` does not
-  // clear the creator column) and start the review — then the creator's next
-  // `pr-held` retry would relabel a run it does not own as "Queued". Only a
-  // RELEASED row, or one still under this delivery's OWN attach holder, may be
-  // relabelled; a `consumer:*` holder and `delivery:<other>` are refused by the
-  // same predicate, exactly as `claimAttachedCheckForSettlement` refuses them.
   const relabelable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
           AND desired = 'in_progress'
@@ -1797,10 +1506,6 @@ export async function recordTerminalizeOutcome(
   outcome: "completed" | "budget-exceeded" | "hook-failed" | "no-handle",
   elapsedMs: number | null,
 ): Promise<void> {
-  // `completed` is decided HERE, from the row, not from "the hook's promise
-  // resolved": a hook that froze nothing (fence refused) or handed the attempt
-  // to recovery resolves just as normally, and only `observed = desired` proves
-  // a terminal send landed. Those rows record `handed-off`.
   await db
     .prepare(
       `UPDATE review_checks
@@ -1835,15 +1540,6 @@ export async function recordCheckObservation(
   lease: Lease,
   remote: CheckRemote,
   nowMs: CheckClock,
-  /**
-   * The update this response validates carried a conclusion derived WITHOUT a
-   * publication proof. The Check is still terminal — the send landed — but the
-   * record asserts an UNCONFIRMED outcome, which the publication it links may
-   * later contradict (§7.9a). Such a row is closed `remote-unconfirmed`
-   * instead of `done`, which is the durable mark `reopenTerminalCorrection`
-   * consumes exactly once; every other agreeing response closes `done`. A row
-   * with no linked publication is never marked: nothing could ever correct it.
-   */
   options?: { conclusionUnproven?: boolean },
 ): Promise<boolean> {
   const owned = await getCheckOwnership(db, id, lease, nowMs);
@@ -1867,13 +1563,6 @@ export async function recordCheckObservation(
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
   const unproven =
     agrees && options?.conclusionUnproven === true && owned.publicationId !== null;
-  // An owed §7.9a correction is settled only by a validated response that
-  // DELIVERED it: the intent this row agreed on must be the owed conclusion,
-  // for the owed generation. An agreement with any other intent (the old
-  // failure, when the correction could not be decided this pass) leaves the
-  // debt standing AND the row non-terminal — a `done` row outside the
-  // `remote-unconfirmed` shape would never be reconciled again, so the debt
-  // could never retry.
   const debtSettled =
     owned.correctionDesired === null ||
     (owned.correctionDesired === owned.desired &&
@@ -1897,20 +1586,13 @@ export async function recordCheckObservation(
     [
       observed,
       remote.id,
-      // recovery_state: 'done' when this response settled the attempt, the
-      // reopenable 'remote-unconfirmed' when it settled an unproven one.
       settles && !unproven ? 1 : 0,
       settles && unproven ? 1 : 0,
-      // terminal_ms is set only by a SETTLING response.
       settles ? 1 : 0,
       nowMs ?? lease.untilMs,
-      // The dispatch intent clears only when THIS observation is the terminal
-      // it dispatched: a mere `running` read proves nothing about the request.
       agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
-      // Clear together only on a settling response; an unsettled debt keeps
-      // both its conclusion and its target generation for the next pass.
       settles ? 1 : 0,
       settles ? 1 : 0,
       settles ? 1 : 0,
@@ -1919,25 +1601,6 @@ export async function recordCheckObservation(
   );
 }
 
-/**
- * The §7.9a correction's PRECONDITION beyond the row's own marker shape — and
- * the ONE text that decides both "is it correctable now?" (the batch's
- * ordering class) and "may it be reopened?" (the transition's WHERE clause).
- * Sharing the fragment is the point: a weaker ordering predicate would put a
- * record at the head of every batch that the transition refuses every time,
- * where it could only starve the work it waits on.
- *
- * It states, from the row's own columns:
- *  - the linked publication carries a READABLE proof of itself — exactly what
- *    the lane's proof read needs to answer `read` (`proof_json` present, valid
- *    JSON, and its embedded id is that publication);
- *  - no newer unfinished generation of the same key owns the live Check;
- *  - the App pair is usable as far as D1 can tell (the §7.6 routing gate the
- *    lane applies before it reopens anything).
- *
- * Placeholder-free by design, so it can be interpolated into a `WHERE` and an
- * `ORDER BY` alike.
- */
 const CORRECTABLE_NOW_SQL = `EXISTS (
             SELECT 1 FROM review_publications pub
              WHERE pub.id = review_checks.publication_id
@@ -2115,9 +1778,6 @@ export async function parkCheckCorrection(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Recovery bookkeeping (spec §7.9 / §7.11.2 — consumed by the reconciler)
-// ---------------------------------------------------------------------------
 
 /**
  * Release the live lease and schedule the next attempt after an `unavailable`
@@ -2340,25 +2000,12 @@ export async function listReenableableCheckPairs(
       }>();
     const suspended = rows.results;
     if (suspended.length === 0) continue;
-    // The resume write flips EVERY suspended row of the pair, so the decision
-    // must hold for every one of them too: one row of an unreleasable kind (a
-    // credential suspension whose envelope is unchanged, or a row still held)
-    // keeps the whole pair suspended. A mixed-kind pair is reachable — a
-    // kill-switch hold is written per row, a credential suspension covers the
-    // pair — so an unordered single-row probe cannot speak for the rest.
     const everyRowReleasable = suspended.every((row) => {
       if (row.app_status !== "active" || row.app_deleted !== null) return false;
-      // A live holder is never yanked out from under its owner.
       if (row.holder !== null) return false;
       const kind = checkSuspensionKindOf(row.last_error);
-      // A `paused` hold (P68-QC-006) is released by exactly one event: the
-      // kill switch being lifted. No credential proof is owed.
       if (kind === "paused") return row.review_enabled !== 0;
-      // A disabled App resumes on status alone: no credential was in question.
       if (kind === "disabled") return true;
-      // Credential kinds: resume only when the CURRENT digest is readable and
-      // disagrees with the recorded one — M8's comparison, where a stored null
-      // compares unequal (F-005). An unreadable digest proves nothing.
       const recorded = suspensionCredentialOf(row.last_error);
       return candidate.currentFingerprint !== null && recorded !== candidate.currentFingerprint;
     });
@@ -2369,9 +2016,6 @@ export async function listReenableableCheckPairs(
   return resumable;
 }
 
-// ---------------------------------------------------------------------------
-// Reconcile selection (spec §7.11.2 predicate, verbatim)
-// ---------------------------------------------------------------------------
 
 /**
  * Due Check-reconcile batch (spec §7.11.2): ONE bound `nowMs` at every
@@ -2459,39 +2103,6 @@ export async function retryCheckRecovery(
   db: D1Like,
   input: { scope: Scope; attemptId: string; nowMs: number },
 ): Promise<boolean> {
-  // ONE conditional statement, not read-then-write (spec §7.9/§7.11.2 step 6).
-  // Every precondition is repeated inside the UPDATE so a concurrent
-  // terminalization, a live lease, a newer active generation or a newer
-  // observation landing between a preliminary read and the write can never be
-  // overwritten. The old shape re-read the row first and then updated
-  // `WHERE id = ?`, which could clear `terminal_ms` on a row another worker
-  // had just finished — erasing terminal history the spec requires be retained.
-  //
-  // Reopening clears the local give-up mark, because the selector only ever
-  // considers `terminal_ms IS NULL` rows: a `local-error` row that kept its
-  // mark could never be reconciled and the operator retry would be a silent
-  // no-op. Nothing else moves — generation, external id, check run id, desired,
-  // observed and the proof link are all retained, and `observed` is NOT
-  // rewritten, so this never pretends the remote run completed.
-  //
-  // A TERMINAL observation (`success`/`neutral`/`failure`) is refused: that
-  // row already carries its finished evidence and reopening it would relaunder
-  // a settled result. A NON-terminal observation — `unknown` or `in_progress`
-  // — is retryable, which is exactly the "external run still pending" state
-  // §7.11.2 step 6 names: the spec fences retry on identity, liveness and
-  // generation, and never on the observation being unrecorded. The recorded
-  // observation is preserved either way, so a retried `in_progress` row still
-  // shows the running Check it actually saw.
-  //
-  // Suspension is excluded: an operator retry must not be able to resume work
-  // for a disabled/deleted App (spec §7.6). Only the explicit App re-enable —
-  // which proves the App is live again — may return that identity to
-  // `pending`. A suspended row therefore stays put, exactly like the recovery
-  // claim fence in `claimCheckRecovery`.
-  //
-  // The "no newer active generation" precondition is a correlated EXISTS over
-  // the same key: the row being reopened must still be the newest unfinished
-  // identity for its key, so an old superseded row stays put for inspection.
   const result = await db
     .prepare(
       `UPDATE review_checks
@@ -2594,11 +2205,6 @@ export async function readInheritedReview(
   return { verdict: envelope.verdict, scorePct: tallyScore(envelope) };
 }
 
-/**
- * The envelope THIS publication carried, by exact App/scope/SHA identity (a
- * row of another attempt or another App must never decide this one). `null`
- * means the payload is unreadable, not "no review was published".
- */
 async function readPublicationReview(
   db: D1Like,
   input: { scope: Scope; headSha: string; publicationId: string },
@@ -2641,7 +2247,6 @@ function recordOf(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-/** `envelope.tally.scorePct` when it is an integer inside the schema's 0..100 domain. */
 function tallyScore(envelope: unknown): number | null {
   const tally = recordOf(recordOf(envelope)?.tally);
   if (tally === null) return null;

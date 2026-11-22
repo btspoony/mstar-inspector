@@ -1,5 +1,3 @@
-/** note: shell models per role/locale (no DOM runner in this stack).
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -34,8 +32,6 @@ describe("shell models", () => {
   });
 
   test("a plain member sees Members too (nav is not role-gated)", () => {
-    // note: The Members page is readable by every workspace member; its in-page
-    // actions carry the role gate. Nav visibility must not hide the entry.
     const sidebar = buildSidebarModel(member, "/dashboard/apps");
     expect(sidebar.items.map((item) => item.label)).toEqual([
       "Repositories",
@@ -50,7 +46,6 @@ describe("shell models", () => {
       "/dashboard/acme/members",
       "/dashboard/acme/settings",
     ]);
-    // note: The global insights page is retired: no sidebar entry renders for it.
     expect(sidebar.items.some((item) => item.href === "/dashboard/insights")).toBe(false);
   });
 
@@ -71,8 +66,6 @@ describe("shell models", () => {
     expect(navbar.languageTarget).toBe("en");
     expect(navbar.accountLabel).toBe("The Octocat (octocat)");
     expect(navbar.logoutLabel).toBe("退出登录");
-    // note: the theme toggle is pure client state rendered directly in
-    // Layout's header — the boot-derived navbar model gains no key.
     expect(Object.keys(navbar)).toEqual(["languageLabel", "languageTarget", "accountLabel", "logoutLabel"]);
   });
 
@@ -82,8 +75,6 @@ describe("shell models", () => {
   });
 
   test("the wordmark follows the workspace repository overview", () => {
-    // note: The overview is the dashboard default: a workspace page names its own
-    // overview, so the brand link never lands on the strict-mode dead end.
     expect(buildSidebarModel(member, "/dashboard/apps").brandHref).toBe("/dashboard");
     expect(buildSidebarModel(admin, "/dashboard/acme/repos").brandHref).toBe("/dashboard/acme/repos");
     expect(
@@ -149,15 +140,12 @@ describe("shell models", () => {
       "/dashboard/acme/settings",
     ]);
     expect(sidebar.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
-    // note: The App detail page under the same workspace keeps the entry current.
     const detail = buildSidebarModel(admin, "/dashboard/acme/apps/acme-app/settings");
     expect(detail.items.find((item) => item.href === "/dashboard/acme/apps")?.current).toBe(true);
     expect(detail.items.find((item) => item.href === "/dashboard/acme/members")?.current).toBe(false);
   });
 
   test("a workspace-active Members page names its own workspace from the pathname", () => {
-    // why: Members is workspace-routed, so the pathname itself names
-    // the workspace; every nav target stays inside it.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "other" }, "/dashboard/acme/members");
     expect(sidebar.brandHref).toBe("/dashboard/acme/repos");
     expect(sidebar.items.map((item) => item.href)).toEqual([
@@ -181,9 +169,6 @@ describe("shell models", () => {
   });
 
   test("the boot ref still scopes a pathname that names no workspace", () => {
-    // note: `/dashboard/apps` is the legacy page; on a strict deployment the boot's
-    // server-resolved ref (the workspace id) carries the workspace into both
-    // nav targets.
     const sidebar = buildSidebarModel({ ...admin, workspaceRef: "acme" }, "/dashboard/apps");
     expect(sidebar.brandHref).toBe("/dashboard/acme/repos");
     expect(sidebar.items.map((item) => item.href)).toEqual([
@@ -195,8 +180,6 @@ describe("shell models", () => {
   });
 
   test("with no boot ref the login's first membership supplies the id, not its slug", () => {
-    // invariant: A multi-workspace deployment injects no `workspaceRef`; the fallback must
-    // emit the row's id, the same ref every other emission site uses.
     const sidebar = buildSidebarModel(
       {
         ...admin,
@@ -224,8 +207,6 @@ describe("shell models", () => {
   });
 
   test("workspaceMembershipForRef resolves by id or slug and carries the role", () => {
-    // why: The settings page gates the name card on this row's role, so the lookup
-    // must survive both addressing forms the URL may carry.
     const boot: SpaBoot = {
       ...member,
       memberships: [{ id: "ws-1", slug: "acme", name: "Acme", role: "member", plan: "Free" }],
@@ -247,16 +228,13 @@ describe("navbar theme toggle", () => {
     expect(source).toContain('aria-label={t(boot.locale, "nav.themeToggleAria"');
     expect(source).toContain('variant="ghost"');
     expect(source).toContain("document.documentElement.dataset.theme");
-    // invariant: No reload — the flip is attribute + state only.
     expect(source).not.toContain("reload");
   });
 
   test("theme toggle is icon-only: current-mode lucide icon, no visible text label", () => {
     const source = layoutSource();
     expect(source).toContain('import { Moon, Sun } from "lucide-react"');
-    // note: The icon depicts the CURRENT mode: Moon in dark, Sun in light.
     expect(source).toContain('{theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}');
-    // note: The visible text label is gone — the aria-label carries the full semantics.
     expect(source).not.toContain('{t(boot.locale, "nav.themeToggle")}');
   });
 
@@ -303,8 +281,6 @@ describe("spaClick single-implementation source contract", () => {
   test("spaClick is defined exactly once — in src/spa/spa-click.ts", () => {
     const moduleSource = readFileSync(join(spaRoot, "spa-click.ts"), "utf8");
     expect(moduleSource).toContain("export function spaClick(");
-    // note: No other SPA file carries a spaClick definition.
-    // consolidation — per-surface copies were replaced by the shared module).
     const definitionsElsewhere: string[] = [];
     for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {
       if (file === "spa-click.ts") continue;
@@ -315,11 +291,6 @@ describe("spaClick single-implementation source contract", () => {
   });
 
   test("the three surfaces import the shared handler from the spa-click module", () => {
-    // note: Specifier as the surfaces actually use it: pages/ and components/ are
-    // one level under src/spa/, so all three import `../spa-click`.
-    // The wayfinding back link moved from SettingsView into the
-    // AppDetailPage shell, so AppDetailPage replaces SettingsPage here —
-    // SettingsPage renders no spa-nav links of its own any more.
     for (const rel of ["pages/AppsPage.tsx", "pages/AppDetailPage.tsx", "components/AppSidebar.tsx"]) {
       const source = readFileSync(join(spaRoot, rel), "utf8");
       expect(source, rel).toContain('import { spaClick } from "../spa-click"');

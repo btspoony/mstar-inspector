@@ -1,27 +1,4 @@
 #!/usr/bin/env bun
-/**
- * note: validate-release-version.ts — release gate.
- *
- * Usage:
- *   bun run release:validate -- v1.0.0
- *   GITHUB_REF_NAME=v1.0.0 bun run release:validate
- *   bun run release:validate -- --help
- *
- * Checks, failing on the first category of problem found:
- *   1. Tag shape: `vX.Y.Z` or `vX.Y.Z-<prerelease>` (shared RELEASE_VERSION_RE).
- *   2. Surface alignment: every VERSION_SURFACES entry carries exactly the
- *      requested version (the same list `prepare-release.ts` bumps, so a
- *      release can never pass a surface it failed to bump).
- *   3. Tag gate (self-heal): `git rev-parse refs/tags/v<version>` — a tag
- *      pointing at a commit other than HEAD fails (double-use of a published
- *      version); a tag already sitting on HEAD passes (re-run after the tag
- *      push converges: validate passes -> tag step skips -> Release creation
- *      proceeds).
- *
- * `src/version.ts` is a VERSION_SURFACES entry (`kind: "ts-const"`),
- * so surface alignment covers `package.json#version === APP_VERSION` through
- * the shared per-kind read in release-surfaces.ts.
- */
 import { join } from "node:path";
 import {
   RELEASE_VERSION_RE,
@@ -31,7 +8,6 @@ import {
 
 export type ValidateResult = {
   ok: boolean;
-  /** note: Every diagnostic line in check order — OK/MISSING/MISMATCH prefixes. */
   lines: string[];
 };
 
@@ -101,11 +77,6 @@ export async function validateReleaseVersion(tag: string, root: string): Promise
     }
   }
 
-  // why: Tag-exists gate with self-heal (QC A1): a rerun AFTER the tag was pushed
-  // (tag sits on current HEAD) must pass so the Release workflow converges —
-  // validate passes -> tag step skips idempotently -> Release creation
-  // proceeds. A tag pointing at any other commit is a double-use attempt and
-  // still fails closed.
   const tagCommit = resolveTagCommit(version, root);
   if (tagCommit === undefined) {
     lines.push(`OK tag: v${version} does not exist yet`);
@@ -129,8 +100,6 @@ function printUsage(): void {
   GITHUB_REF_NAME=v1.0.0 bun run release:validate`);
 }
 
-// why: Run only when executed directly — importing the module (unit tests) must
-// not run the gate against the real checkout.
 if (import.meta.main) {
   const rest = process.argv.slice(2).filter((a) => a !== "--");
   if (rest.includes("--help") || rest.includes("-h")) {

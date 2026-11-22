@@ -1,37 +1,4 @@
 #!/usr/bin/env bun
-/**
- * note: prepare-release.ts — assemble changelog fragments + bump every version
- * surface.
- *
- * Usage:
- *   bun run release:prepare                    # auto patch bump (0.1.0 -> 0.1.1)
- *   bun run release:prepare -- 1.0.0           # explicit version (bare X.Y.Z, no v prefix)
- *   bun run release:prepare -- --minor         # auto minor bump
- *   bun run release:prepare -- --allow-empty   # allow an empty .changes/unreleased/
- *   bun run release:prepare -- --help
- *
- * What it does:
- *   1. Resolves the next version: explicit arg, or auto bump derived from
- *      `package.json#version` (AD-2: never from tags — this repo starts with
- *      zero tags, and tag-derived auto would be dead before the first cut).
- *   2. Reads `.changes/unreleased/*.md` fragments, grouped by `category`.
- *   3. Inserts a `## [<version>] - <date>` section into CHANGELOG.md and
- *      CHANGELOG_CN.md under `## [Unreleased]`. CN bullets come from each
- *      fragment's `<!-- CN -->` block; a fragment without one reuses its EN
- *      bullets verbatim in the Chinese changelog.
- *   4. Bumps every VERSION_SURFACES entry (shared list — see
- *      release-surfaces.ts).
- *   5. Moves consumed fragments to `.changes/archive/<version>/`.
- *
- * Fragment format: see `.changes/README.md`. Guards: the version must match
- * RELEASE_VERSION_RE and be strictly greater than the current version
- * (compareSemver); an empty unreleased/ dir requires --allow-empty; a
- * changelog already carrying a `## [<version>]` section aborts the run
- * (fail-closed rerun idempotency).
- *
- * This script only edits the working tree. Commit + PR is the caller's job
- * (the Release prep workflow commits and opens the `release vX.Y.Z` PR).
- */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -55,9 +22,7 @@ export type PrepareOptions = {
   version?: string;
   bump: "patch" | "minor";
   allowEmpty: boolean;
-  /** note: Repo root the relative paths resolve under. Default: process.cwd(). */
   root?: string;
-  /** note: Release date (YYYY-MM-DD) in the section header. Default: today. */
   date?: string;
 };
 
@@ -101,9 +66,6 @@ function parseFrontmatter(text: string): { fm: Record<string, string>; body: str
   for (const line of fmText.split("\n")) {
     const m = line.match(/^([A-Za-z0-9 _-]+):\s*(.*)$/);
     if (m) {
-      // why: Strip a trailing inline comment (` # optional`) — the value ends at
-      // the first whitespace-preceded `#` (`.changes/README.md` examples use
-      // them; a `#` glued to the value without whitespace is kept).
       const key = m[1]?.trim() ?? "";
       fm[key] = (m[2] ?? "").trim().replace(/\s+#.*$/, "").trim();
     }
@@ -189,8 +151,6 @@ export function insertSection(changelog: string, version: string, date: string, 
   if (unreleased !== -1) {
     const lineEnd = changelog.indexOf("\n", unreleased);
     if (lineEnd === -1) {
-      // note: `## [Unreleased]` is the final line with no trailing newline — append
-      // below it instead of mis-inserting at the top of the file.
       return `${changelog}\n${section}`;
     }
     const tail = changelog.slice(lineEnd + 1).replace(/^\n/, "");
@@ -206,8 +166,6 @@ export function insertSection(changelog: string, version: string, date: string, 
 }
 
 async function readCurrentVersion(root: string): Promise<string> {
-  // why: Auto-bump derivation source is package.json#version specifically (AD-2) —
-  // the one surface every release is cut from.
   const pkg = (await Bun.file(join(root, "package.json")).json()) as { version?: string };
   if (!pkg.version) throw new Error("package.json has no version");
   return pkg.version;

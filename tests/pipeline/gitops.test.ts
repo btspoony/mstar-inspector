@@ -1,14 +1,3 @@
-/**
- * why: GitOps command builder tests (QC fix round 1 / qc2 F-001) — the
- * shell-injection surface. Every payload-derived field (owner/repo/prNumber/
- * cloneDir) must be allowlisted and single-quoted before interpolation; any
- * metacharacter fails closed with a descriptive error BEFORE a shell string
- * is built. Pure functions — no mocks, static imports.
- *
- * Wave A (bugbot A2): the clone now checks out the LIVE PR head
- * (`pull/<n>/head`) instead of a pinned sha — the authoritative sha is read
- * back with checkedOutShaCommand, so clone/diff/commit_id always agree.
- */
 
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -60,9 +49,6 @@ describe("gitops command builders", () => {
       ),
     );
     expect(checkedOutShaCommand("/workspace/repo")).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
-    // invariant: The diff is written to the numstat file AND streamed back bounded: the
-    // capture is the exec's stdout, so the file redirect alone (empty stdout)
-    // could never feed the evidence catalog.
     expect(diffCommand("acme", "widgets", 42, "/workspace/pr.diff")).toBe(
       shellCommand(
         "gh pr diff '42' --repo 'acme/widgets' > '/workspace/pr.diff' && " +
@@ -70,8 +56,6 @@ describe("gitops command builders", () => {
           `tail -c '+${DIFF_PREFETCH_MAX_BYTES + 1}' '/workspace/pr.diff' | head -c '1' | wc -c`,
       ),
     );
-    // note: the runner consumes the runtime envelope path — --level +
-    // --input reconFacts JSON; the diff feeds the numstat partition universe.
     expect(numstatCommand("/workspace/pr.diff")).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
     expect(writeJsonCommand("/workspace/review-input.json")).toBe(
       shellCommand("base64 -d > '/workspace/review-input.json'"),
@@ -98,8 +82,6 @@ describe("gitops command builders", () => {
   });
 
   test("readRecheckCommand bounds the read at RECHECK_FILE_MAX_BYTES and probes for overflow", () => {
-    // note: Fixed audited path shape: head stops the content stream at the bound,
-    // tail probes byte bound+1 → last line 1 = overflow, 0 = exact fit.
     expect(readRecheckCommand("/tmp/mstar-recheck.json")).toBe(
       shellCommand(
         `head -c '${RECHECK_FILE_MAX_BYTES}' '/tmp/mstar-recheck.json' && printf '\\n' && ` +
@@ -118,27 +100,15 @@ describe("gitops command builders", () => {
       "",
     ]) {
       expect(() => readRecheckCommand(evil)).toThrow(/unsafe bounded read path/);
-      // invariant: Same shared builder, same guard: the diff capture path is allowlisted
-      // too (it used to be interpolated with only single quotes).
       expect(() => diffCommand("acme", "widgets", 42, evil)).toThrow(/unsafe bounded read path/);
     }
   });
 
   test("every bounded read emits content + newline + newline-terminated flag (P67-QC-006)", async () => {
-    // invariant: ONE oracle over every caller of the shared bounded-read builder: the
-    // recheck document read, the status read and the diff capture (whose
-    // redirect half needs gh, so only its read half runs here). The parser and
-    // the Worker's test double both assume a NEWLINE-TERMINATED overflow flag
-    // (`wc -c` writes its own trailing newline). Running the built strings
-    // through a local POSIX shell against real files turns that assumption
-    // into evidence — no network, no GitHub. Every fixture lives under a
-    // private mkdtemp: no test writes a production path, so a crashed run can
-    // never clobber a real /tmp document.
     const dir = await mkdtemp(join(tmpdir(), "mstar-bounded-read-"));
     try {
       for (const read of [
         {
-          // note: The identity rides the filename, so each entry owns its fixture.
           name: "recheck-doc",
           maxBytes: RECHECK_FILE_MAX_BYTES,
           command: (path: string) => readRecheckCommand(path),
@@ -166,8 +136,6 @@ describe("gitops command builders", () => {
           fit: "diff --git a/src/auth.ts b/src/auth.ts\n@@ -1,2 +1,3 @@\n+a\n b\n",
         },
         {
-          // note: The report read wraps the same transport in its absence probe: an
-          // EXISTING file must still take the unchanged bounded read.
           name: "report",
           maxBytes: REPORT_FILE_MAX_BYTES,
           command: (path: string) => readReportCommand(path),
@@ -175,10 +143,6 @@ describe("gitops command builders", () => {
         },
       ]) {
         const overflowText = "b".repeat(read.maxBytes + 1);
-        // note: The bound ITSELF is still a fit: the probe starts at byte bound+1, so
-        // content of exactly maxBytes must report flag 0. An off-by-one tail
-        // (`+maxBytes`) would flag an at-bound capture as overflow and throw
-        // away text the command had already delivered in full.
         const atBoundText = "b".repeat(read.maxBytes);
         for (const { label, text, flag, content } of [
           { label: "fits", text: read.fit, flag: "0", content: read.fit },
@@ -190,10 +154,6 @@ describe("gitops command builders", () => {
           const proc = Bun.spawn(["sh", "-c", read.command(path)]);
           const stdout = await new Response(proc.stdout).text();
           expect(await proc.exited).toBe(0);
-          // note: The stream is newline-terminated and the flag is its LAST LINE;
-          // `wc -c` may left-pad the count (BSD) or not (GNU), so the parser
-          // trims. A parser that required the flag as the final BYTE — the
-          // reviewed defect — fails on every platform and on neither fixture.
           expect(stdout.endsWith("\n")).toBe(true);
           const trimmed = stdout.trimEnd();
           expect(trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim()).toBe(flag);
@@ -234,9 +194,6 @@ describe("gitops command builders", () => {
   test("incrementDiffCommand replaces the diff file only after a delivered capture, and flags an increment over the prefetch bound", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mstar-increment-"));
     try {
-      // note: A stub compare API: it records the request it was asked for, answers
-      // with the file named by GH_ANSWER_FILE, and otherwise refuses with
-      // nothing on stdout — the way the real 406 does.
       const answer = join(dir, "answer.diff");
       const argv = join(dir, "gh-argv");
       await Bun.write(
@@ -258,18 +215,11 @@ describe("gitops command builders", () => {
         return { exitCode: await proc.exited, stdout: await new Response(proc.stdout).text() };
       };
 
-      // note: REFUSED capture: the full diff this round already wrote stays intact,
-      // so a refused increment degrades to a full-diff round instead of an
-      // empty one. The delivery ORDER is what this pins: redirecting straight
-      // into `diffPath` would truncate it before the refusal lands.
       await Bun.write(diffPath, previous);
       const refused = await run({ GH_EXIT: "1" });
       expect(refused.exitCode).not.toBe(0);
       expect(await Bun.file(diffPath).text()).toBe(previous);
 
-      // note: DELIVERED capture: the increment replaces the file completely — no
-      // byte of the full diff survives — and the bounded read after it
-      // answers fit (flag 0) over the same file.
       await Bun.write(answer, increment);
       const delivered = await run({ GH_EXIT: "0", GH_ANSWER_FILE: answer });
       expect(delivered.exitCode).toBe(0);
@@ -278,10 +228,6 @@ describe("gitops command builders", () => {
       expect(lines.at(-1)!.trim()).toBe("0");
       expect(lines.slice(0, -1).join("\n")).toBe(increment);
 
-      // note: OVER-BOUND delivered capture: the SAME command answers the overflow
-      // flag "1" over an increment past the prefetch window, streaming only
-      // its first DIFF_PREFETCH_MAX_BYTES — the half of the builder that only
-      // a synthesised fixture answer covered before.
       const overBound = `${increment}${"x".repeat(DIFF_PREFETCH_MAX_BYTES)}\n`;
       await Bun.write(answer, overBound);
       const overDelivered = await run({ GH_EXIT: "0", GH_ANSWER_FILE: answer });
@@ -291,8 +237,6 @@ describe("gitops command builders", () => {
       expect(overLines.at(-1)!.trim()).toBe("1");
       expect(overLines.slice(0, -1).join("\n")).toBe(overBound.slice(0, DIFF_PREFETCH_MAX_BYTES));
 
-      // note: The three-dot form is the one `compare` reports `ahead` for, so the two
-      // steps agree by construction.
       expect(await Bun.file(argv).text()).toContain(`repos/acme/widgets/compare/${base}...${head}`);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -311,8 +255,6 @@ describe("gitops command builders", () => {
     expect(fetchDepthOneCommand("/workspace/repo", mergeBase)).toBe(
       shellCommand(`git -C '/workspace/repo' fetch --depth 1 origin '${mergeBase}'`),
     );
-    // invariant: The local capture is the SAME bounded read `diffCommand` carries — one
-    // transport, so the overflow contract cannot drift between the two.
     expect(localDiffCommand("/workspace/repo", mergeBase, head, DIFF_PATH)).toBe(
       shellCommand(
         `git -C '/workspace/repo' diff '${mergeBase}' '${head}' > '${DIFF_PATH}' && ` +
@@ -329,8 +271,6 @@ describe("gitops command builders", () => {
     ).toBe(true);
     expect(isDiffTooLarge('{"message":"too_large"}')).toBe(true);
     expect(isDiffTooLarge("GraphQL: too_large")).toBe(true);
-    // note: The status TOKEN alone is enough: GitHub rewriting the prose must not
-    // silently reopen the repeat-failure it took the fallback out of.
     expect(isDiffTooLarge("HTTP 406: Not Acceptable")).toBe(true);
     for (const other of [
       "",
@@ -338,13 +278,9 @@ describe("gitops command builders", () => {
       "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets/pulls/42)",
       "dial tcp 140.82.112.3:443: connect: connection refused",
       "error: RPC failed; curl 56 GnuTLS recv error",
-      // note: The token inside gh's trailing URL is a REPO NAME, not the ceiling:
-      // every failure of `auth_too_large` would otherwise take the fallback.
       "HTTP 401: Bad credentials (https://api.github.com/repos/acme/auth_too_large/pulls/42)",
       "HTTP 500: Server Error (https://api.github.com/repos/too_large/widgets/pulls/42)",
-      // note: …and a 406 that only appears in the URL is not the status either.
       "HTTP 404: Not Found (https://api.github.com/repos/acme/widgets/pulls/406)",
-      // note: A longer word that merely contains it is not the token either.
       "HTTP 422: too_larger request",
       "HTTP 4060: not a status",
     ]) {
@@ -357,11 +293,9 @@ describe("gitops command builders", () => {
     for (const evil of ["", "-main", "main..evil", "../../etc", "main; rm -rf /", "re lease", "main'", "`main`"]) {
       expect(() => mergeBaseCommand("acme", "widgets", evil, head)).toThrow(/unsafe base ref/);
     }
-    // note: A ref GitHub can really report is accepted (slashes and dots are branch syntax).
     expect(mergeBaseCommand("acme", "widgets", "release/1.9_hotfix", head)).toContain(
       "/compare/release/1.9_hotfix...",
     );
-    // invariant: Every sha argument keeps the hex guard.
     for (const evil of ["", "ABC", "../../etc", "b".repeat(40) + ";rm -rf /", "zzzzzzz", "b".repeat(65)]) {
       expect(() => mergeBaseCommand("acme", "widgets", "main", evil)).toThrow(/unsafe head sha/);
       expect(() => fetchDepthOneCommand("/workspace/repo", evil)).toThrow(/unsafe fetch sha/);
@@ -402,9 +336,6 @@ describe("gitops command builders", () => {
     const dir = await mkdtemp(join(tmpdir(), "mstar-report-read-"));
     try {
       const path = join(dir, "report.json");
-      // note: Nothing written: the seat produced no document. The command's own
-      // probe answers with the absent flag line and a ZERO exit, so this can
-      // never be confused with a read that failed (which exits non-zero).
       const absent = Bun.spawn(["sh", "-c", readReportCommand(path)]);
       const absentStdout = await new Response(absent.stdout).text();
       expect(await absent.exited).toBe(0);
@@ -412,9 +343,6 @@ describe("gitops command builders", () => {
       expect(lines.pop()?.trim()).toBe(BOUNDED_READ_ABSENT_FLAG);
       expect(lines.join("\n")).toBe("");
 
-      // note: A path that EXISTS but cannot be read as a file (here: a directory)
-      // keeps failing closed — no flag line, non-zero exit — so a read fault
-      // is never reported as an absence.
       const dirPath = join(dir, "as-directory");
       await mkdir(dirPath);
       const broken = Bun.spawn(["sh", "-c", readReportCommand(dirPath)], { stderr: "pipe" });
@@ -422,9 +350,6 @@ describe("gitops command builders", () => {
       expect(await new Response(broken.stdout).text()).toBe("");
       expect(await new Response(broken.stderr).text()).not.toBe("");
 
-      // invariant: Same path allowlist as the other reads: no metacharacters, absolute only.
-      // The rejection is the shared bounded-read guard's, so the assertion is the
-      // rejection itself, not the label it happens to carry.
       expect(() => readReportCommand("/tmp/a b")).toThrow(/unsafe/);
       expect(() => readReportCommand("relative/report.json")).toThrow(/unsafe/);
     } finally {
@@ -447,7 +372,6 @@ describe("gitops command builders", () => {
           "--recheck-out '/tmp/mstar-recheck.json' --report-out '/tmp/mstar-report.json'",
       ),
     );
-    // note: Report only (no recheck round): the recheck flag is simply absent.
     expect(
       runnerCommand("/opt/runner/packages/runner/src/runner.ts", "quick", "/workspace/review-input.json", undefined, "/tmp/mstar-report.json"),
     ).toBe(
@@ -480,9 +404,6 @@ describe("gitops command builders", () => {
     expect(cmds.clone).toContain("origin 'pull/7/head'");
     expect(cmds.checkedOutSha).toBe(shellCommand("git -C '/workspace/repo' rev-parse HEAD"));
     expect(cmds.diff).toContain("gh pr diff '7' --repo 'my-org.example/repo_name-2' > '/workspace/pr.diff'");
-    // invariant: The capture is the exec's STDOUT, so the wiring must also carry the
-    // bounded read — asserted through the shared builder that defines it, not
-    // as a second copy of the command string.
     expect(cmds.diff).toContain(boundedFileReadCommand("/workspace/pr.diff", DIFF_PREFETCH_MAX_BYTES));
     expect(cmds.numstat).toBe(shellCommand("git apply --numstat '/workspace/pr.diff'"));
   });

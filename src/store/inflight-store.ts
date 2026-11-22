@@ -1,54 +1,3 @@
-/**
- * In-flight review store (iteration spec review-concurrency §1) — the per-PR
- * lock and capacity reservation for one queue message (migration 0041:
- * `review_inflight`).
- *
- * One row per review in flight is BOTH the mutex and the reservation, so
- * acquisition is ONE statement (`ACQUIRE_SQL`): the conditional `INSERT …
- * SELECT … WHERE counts < caps` never reads before it writes, and D1's
- * single-writer serialization is what makes the check-and-insert atomic. The
- * caller inspects `meta.changes` (the repo's claim convention, see
- * src/store/finding-lifecycle.ts) and nothing else.
- *
- * Expiry reclaim: a plain `INSERT OR IGNORE` would refuse forever after a row
- * expired, because the PRIMARY KEY still conflicts. The upsert branch
- * (`ON CONFLICT … DO UPDATE … WHERE review_inflight.expires_at <= now`)
- * replaces an EXPIRED row in place and refuses a live one; expired rows are
- * excluded from both cap counts, so a reclaimed row never counts twice.
- *
- * Expiry is a fence, not evidence (spec §7.9). A DIFFERENT attempt may replace
- * an expired row only when the caller observed that row's attempt stopped
- * (`priorStopped`), and the write binds the observed id to the row's own
- * `attempt_id`; the same attempt may always re-acquire its own expired row
- * (a replay). So silence — a lapsed lease, a quiet Workflow, elapsed time —
- * never reassigns the PR or its capacity.
- *
- * A zero-row result carries no cause, so a refusal costs exactly one follow-up
- * read (spec §1.3 lists the four reasons). The read is diagnostic only — it
- * never decides admission; a raced read whose numbers no longer explain the
- * refusal answers `error` (defer), never `ok`. That read also returns the
- * `heldHeadSha` of the row holding the PR: a `pr-held` refusal is only benign
- * while the live review covers the same commit, and the caller cannot tell
- * without it.
- *
- * Any storage failure answers `error` (spec §1.3: a storage failure is `error`
- * and never admits). The exception itself is not dropped: it rides the result
- * as an `InflightErrorCause` so the caller's warn line and its terminal drop row
- * name the fault, which is otherwise indistinguishable from the benign
- * released-between-statements race (the same refusal code, a different problem).
- *
- * Key normalization: GitHub treats `owner`/`repo` case-insensitively, while
- * SQLite compares the PRIMARY KEY's TEXT columns case-SENSITIVELY. Both
- * functions therefore fold `owner` and `repo` to lower case at this one
- * boundary (`normalizeKey`) before binding them, so `Acme/Repo` and
- * `acme/repo` are the same lock row for the insert, the refusal read and the
- * release — the three statements that must agree for the lock to hold. No
- * caller normalizes; a second normalization site would be a second truth.
- *
- * Module boundary (the artifact-store precedent): `db` is the narrow D1 face
- * (`D1Like`); no worker/pipeline import, so this store can be unit-tested over
- * the real migration DDL.
- */
 import type { D1Like } from "./types";
 
 /**
@@ -80,14 +29,6 @@ export type InflightErrorCause =
 export type InflightAcquireResult =
   | { ok: true }
   | { ok: false; reason: "system-cap" | "workspace-cap" }
-  /**
-   * `heldHeadSha` is the sha the live row was taken for (`""` = a
-   * comment-triggered review carried none): the terminal drop record needs it
-   * to tell a duplicate of that review from a commit it never covers.
-   * `heldAttemptId`/`heldExpired` name the row itself, so a successor can ask
-   * that attempt's sandbox whether it is still running — the one observation
-   * an expired row may be replaced on.
-   */
   | { ok: false; reason: "pr-held"; heldHeadSha: string; heldAttemptId: string; heldExpired: boolean }
   | { ok: false; reason: "error"; cause: InflightErrorCause };
 
@@ -99,58 +40,19 @@ export function describeInflightError(cause: InflightErrorCause): string {
 }
 
 export type AcquireInflightOptions = {
-  /** System-wide live-row ceiling (the per-message system cap the caller read). */
   systemCap: number;
-  /** This workspace's live-row ceiling (the per-message workspace cap the caller read). */
   workspaceCap: number;
-  /** This attempt's release fence; release only deletes the row it wrote. */
   attemptId: string;
-  /** Row lifetime (seconds, must be > 0) — callers pass `reviewGuardTtlSeconds(level)`. */
   ttlSeconds: number;
-  /**
-   * The commit this attempt reviews; `null` for a comment trigger, which
-   * resolves the head in-sandbox and carries none. Stored as `""` (the
-   * `review_failures` convention) so the column stays single-valued.
-   */
   headSha: string | null;
-  /** ISO-8601 instant the acquisition is evaluated at. */
   now: string;
-  /**
-   * The PRIOR attempt whose sandbox the caller OBSERVED not running. It is the
-   * only way to reuse another attempt's expired row (spec §7.9): expiry alone
-   * never reassigns the PR or its capacity, and the write below binds this id
-   * to the row's own `attempt_id` so an observation taken for one attempt
-   * cannot replace another.
-   */
   priorStopped?: { attemptId: string };
 };
 
-/**
- * A `review_launches` row that is `launched` with NO outcome is the ONE unknown
- * paid state (migration 0082): the exec was sent and nothing says it stopped.
- * It holds the PR and its capacity PAST the lease, because a lease window is
- * not a liveness observation. The readiness predicate is repeated in the
- * acquire, both cap counts and the refusal read so all four agree on it.
- */
 const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
            WHERE l.attempt_id = r.attempt_id
              AND l.state = 'launched' AND l.result_outcome IS NULL)`;
 
-/**
- * Does this row still consume a cap slot? Live rows do; so do expired rows
- * whose attempt may STILL ACT — an expired lease says the guard lapsed, never
- * that its container stopped.
- *
- * An expired row is free on exactly TWO facts, matching the takeover rule: the
- * attempt was REVOKED (its container was observed not running, or a successor
- * won the claim over an attempt that never activated), or no provisioning row
- * exists at all — the row is the precondition of every container handle
- * (migrations 0090/0091), so its absence rules the container out. `provisioned`
- * is NOT free: the container is created before the paid call, so a provisioning
- * row with no `launched` row may be running right now.
- *
- * Binds, in order: now (unexpired side), now (expired side of the act test).
- */
 const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
           OR (r.expires_at <= ? AND EXISTS (
                 SELECT 1 FROM review_launches l
@@ -158,20 +60,6 @@ const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
                    AND l.activated_ms IS NOT NULL
                    AND l.revoked_ms IS NULL)))`;
 
-/**
- * The PR's lock and a capacity slot in ONE conditional insert.
- *
- * `meta.changes === 1` is the only success signal: it means the anchor row was
- * new (or its expired predecessor was replaced). `0` means the PR is held, a
- * cap is reached, or the row raced away — disambiguated below.
- *
- * An expired row is replaceable only TWO ways (spec §7.9): by the attempt that
- * already owns it (a replay of the same delivery), or by a successor that
- * OBSERVED the owning attempt's sandbox not running (`priorStopped`). Expiry is
- * a fence, never evidence: it only makes the row a candidate for a successor
- * that has the observation. An expired row whose paid state is UNKNOWN is not
- * replaceable at all — expiry only schedules a check, never a replacement run.
- */
 const ACQUIRE_SQL = `
 INSERT INTO review_inflight
   (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
@@ -197,14 +85,6 @@ WHERE review_inflight.expires_at <= ?
                               AND l.revoked_ms IS NULL)))
 `;
 
-/**
- * The one follow-up read a zero-row acquire owes (diagnostic only).
- *
- * The two trailing columns name the PR's row whatever its state (it is unique
- * per PR), so an expired row that the successor predicate refused can report
- * WHO holds it and let the caller ask that attempt's sandbox for the stop
- * observation.
- */
 const REFUSAL_SQL = `
 SELECT
   (SELECT COUNT(*) FROM review_inflight r
@@ -226,17 +106,10 @@ DELETE FROM review_inflight
 WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND attempt_id = ?
 `;
 
-/** ISO-8601 with milliseconds — the ONE text form `expires_at > now` compares correctly. */
 function isoInstant(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/**
- * The key as it is written and compared. GitHub's owner/repo are
- * case-insensitive; the row's PRIMARY KEY is not. Folding here — the one
- * key-building boundary — keeps insert, refusal read and release on the same
- * row for `Acme/Repo` and `acme/repo`.
- */
 function normalizeKey(key: InflightKey): InflightKey {
   return { ...key, owner: key.owner.toLowerCase(), repo: key.repo.toLowerCase() };
 }
@@ -248,11 +121,6 @@ export async function acquireInflight(
 ): Promise<InflightAcquireResult> {
   const key = normalizeKey(rawKey);
   try {
-    // Conversions live inside the try: a malformed `now` (RangeError) or a
-    // non-positive/non-finite TTL must answer `error` like any other
-    // storage-layer refusal, never escape as a throw. A TTL of zero or less
-    // would write an ALREADY-EXPIRED row: it holds no PR and reserves no
-    // slot, yet `meta.changes === 1` would report `ok` — a lock that admits.
     const nowMs = Date.parse(opts.now);
     const ttlMs = opts.ttlSeconds * 1000;
     if (!Number.isFinite(nowMs) || !Number.isFinite(ttlMs) || ttlMs <= 0) {
@@ -276,20 +144,14 @@ export async function acquireInflight(
         opts.headSha ?? "",
         now,
         expiresAt,
-        // System cap: rows that still hold a slot (see HOLDS_CAP_SQL).
         now,
         now,
         opts.systemCap,
-        // Workspace cap: the same test, scoped to the tenant.
         key.workspace_id,
         now,
         now,
         opts.workspaceCap,
-        // Reclaim guard: only an EXPIRED row may be replaced.
         now,
-        // …and only by its own attempt (a replay) or by the successor that
-        // observed THAT attempt's sandbox stopped and revoked it. `""` never
-        // matches a row.
         opts.attemptId,
         opts.priorStopped?.attemptId ?? "",
       );
@@ -304,15 +166,12 @@ export async function acquireInflight(
         key.repo,
         key.pr_number,
         now,
-        // held_head_sha: the PR's row, whatever its state.
         key.installation_id,
         key.owner,
         key.repo,
         key.pr_number,
-        // total: the same slot test the acquire bound.
         now,
         now,
-        // workspace_total.
         key.workspace_id,
         now,
         now,
@@ -336,9 +195,6 @@ export async function acquireInflight(
     if (row === null) {
       return { ok: false, reason: "error", cause: { kind: "fault", detail: "refusal read returned no row" } };
     }
-    // A row exists for this PR and the write above refused it: it is live, its
-    // paid state is unknown, or it is expired without a successor observation.
-    // All three hold the PR — nothing was admitted either way.
     if (row.held > 0 || row.held_attempt_id !== null) {
       return {
         ok: false,
@@ -350,16 +206,11 @@ export async function acquireInflight(
     }
     if (row.total >= opts.systemCap) return { ok: false, reason: "system-cap" };
     if (row.workspace_total >= opts.workspaceCap) return { ok: false, reason: "workspace-cap" };
-    // The capacity this attempt was refused on was released between the two
-    // statements. No listed reason explains it, and guessing would admit a
-    // message the insert already refused.
     return { ok: false, reason: "error", cause: { kind: "released-between-statements" } };
   } catch (err) {
     return {
       ok: false,
       reason: "error",
-      // Threaded, never swallowed: a dead binding and a raced release are the
-      // same refusal code, and only this string tells them apart downstream.
       cause: { kind: "fault", detail: err instanceof Error ? err.message : String(err) },
     };
   }

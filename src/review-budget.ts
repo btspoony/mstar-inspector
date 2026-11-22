@@ -64,7 +64,6 @@ import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../packages/shared/src/r
  */
 export type ReviewAttemptCapLogFields = {
   event: "review_attempt_cap_degraded";
-  /** Why the read degraded — the store's cause, never a re-derivation. */
   degraded_reason?: DegradedReason;
 };
 
@@ -95,12 +94,6 @@ export async function readReviewAttemptCapMs(db: DashboardD1, log: ReviewAttempt
  * the recheck document, the recheck status, the report document and the
  * applied-model document — local file reads, never a git-sized window. */
 export const POST_RUNNER_READ_TIMEOUT_MS = 30_000;
-/**
- * Post-runner read WINDOWS per round — the count the reserve bills. FOUR
- * reads occupy THREE windows: `readRecheckDoc` issues the recheck document
- * and status reads in one `Promise.all`, then the report document and the
- * applied-model document each bill their own.
- */
 const POST_RUNNER_READ_COUNT = 3;
 /** Worst case the post-runner tail owes those reads (ms). 90_000 at the current count. */
 export const POST_RUNNER_READ_BUDGET_MS = POST_RUNNER_READ_COUNT * POST_RUNNER_READ_TIMEOUT_MS;
@@ -119,7 +112,6 @@ export const CHECK_HOOK_TIMEOUT_MS = 2_000;
  * one conservative window even when a step's own bound is tighter.
  */
 export const EXEC_TIMEOUT_GIT_MS = 120_000;
-/** Slack for the untimed steps (token mint, sandbox create, comment post, D1/KV puts). */
 const GUARD_SLACK_MS = 120_000;
 
 /**
@@ -191,15 +183,6 @@ export const PUBLICATION_TAIL_MS = 60_000;
  */
 export const PER_SEAT_ALLOCATION_MS = 220_000;
 
-/**
- * The documented request floor per tier (ms): the publication tail plus one
- * allocation per dispatched seat, clamped to the tier maximum. The seat
- * counts live in `PR_REVIEW_TIER_BUDGETS` (engine: quick 1 / default 2 /
- * deep 4). A four-seat `deep` round would need 940 s, above its 646 s
- * ceiling, so it clamps and its curve has no ramp. It bounds the REQUEST,
- * never the available wall clock — a late anchor may still shrink the
- * effective window below it.
- */
 function seatPricedFloorMs(level: ReviewLevel): number {
   return Math.min(
     PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS,
@@ -223,15 +206,6 @@ export const RUNNER_BUDGET_FLOOR_MS: Record<ReviewLevel, number> = {
 export const SIZE_SATURATION_WORK_UNITS = 5_000;
 
 
-/**
- * The Check terminalize setting's supported range (ms) is owned by
- * `CHECK_TERMINALIZE_MIN`/`CHECK_TERMINALIZE_MAX` in
- * `src/dashboard/runtime-config-store.ts` — the operator-facing bounds the
- * live reader and writer share. The tier-table contract above is proved
- * against THAT range (tests/pipeline/review-budget.test.ts), so raising the
- * store's maximum past the shipped deep ceiling breaks the proof, never
- * silently widens past the table.
- */
 
 /** Runner maximum for `level` — the naming SSOT consumers log against. */
 export function runnerTimeoutMs(level: ReviewLevel): number {
@@ -254,12 +228,6 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   );
 }
 
-/**
- * Margin after the attempt's hard stop before its guard row may expire
- * (seconds): the handoff → instance-create hop that happens while the row is
- * already held. A guard that expires before the attempt's own stop would let a
- * second delivery start the same PR, so the two numbers are never independent.
- */
 const GUARD_RELEASE_MARGIN_S = 60;
 
 /**
@@ -303,52 +271,27 @@ export type ReviewBudgetInputs = {
 
 /** The derived round clock and the windows other owners bill from it. */
 export type ReviewBudget = {
-  /** The attempt's frozen absolute deadline — the hard stop of every step. */
   roundEndMs: number;
-  /** The live post-runner reserve (`224_000 + terminalizeMs` at the ledger above). */
   reserveMs: number;
-  /**
-   * `roundEndMs - reserveMs`: the absolute instant the paid runner must be
-   * finished by. Every bounded pre-runner step declines against THIS cutoff,
-   * so a round that spent its clock on the clone still keeps a real runner
-   * window instead of failing the whole tier table.
-   */
   runnerCutoffMs: number;
-  /** `runnerCutoffMs - roundStartMs`: the most preparation may ever leave the runner. */
   preparationBudgetMs: number;
-  /** This tier's shipped ceiling (ms) — the most the runner may ever request. */
   tierMaxMs: number;
-  /**
-   * Admission row TTL (seconds): must exceed the max review wall-clock —
-   * every timed sandbox command (`GUARD_TIMED_SANDBOX_STEPS` × 120s), the
-   * LEVEL's tier maximum, the whole inline-resolution budget (which runs
-   * last), plus the untimed slack — so the row can never expire mid-review
-   * and unblock a concurrent duplicate. 2292s quick, 2412s default, 2458s
-   * deep — pinned exactly by the consumer suite, so a future step addition
-   * re-breaks loudly.
-   */
   guardTtlSeconds: number;
-  /** Check execution window (ms): the platform cap, opened at each claim/adoption origin (begin's `now`), so it can outlive the invocation that opened it. */
   checkWindowMs: number;
-  /** Check attempt lease (ms): the same platform cap, from the claim's own origin. */
   checkLeaseMs: number;
 };
 
 /** A derived allocation — the only shape a paid exec may start from. */
 export type RunnerBudgetAnchor = {
   kind: "allocated";
-  /** The tier ceiling this plan requests (a future size-based caller passes a smaller request). */
   requestedBudgetMs: number;
-  /** `min(requested, cutoff - anchorMs)` — the ONE tier clamp in the whole pipeline. */
   effectiveBudgetMs: number;
-  /** `anchorMs + effectiveBudgetMs`: the instant the exec, the input write and the runner all end at. */
   execDeadlineMs: number;
 };
 
 /** A spent cutoff: the exhausted window, never a fabricated positive timeout. */
 export type RunnerBudgetRefusal = {
   kind: "exhausted";
-  /** `cutoff - anchorMs` — how far underwater the window already is (≤ 0). */
   remainingMs: number;
 };
 
@@ -360,9 +303,7 @@ export type RunnerBudgetRefusal = {
  */
 export type RunnerBudgetOversize = {
   kind: "oversized";
-  /** The request that overreached. */
   requestedBudgetMs: number;
-  /** The tier ceiling the derivation enforces. */
   tierMaxMs: number;
 };
 
@@ -375,7 +316,6 @@ export type RunnerBudgetOversize = {
  */
 export type RunnerBudgetInvalid = {
   kind: "invalid";
-  /** The request that was not a usable duration. */
   requestedBudgetMs: number;
 };
 
@@ -426,8 +366,6 @@ export function parseNumstatSize(
   provenEmpty: boolean,
 ): ReviewDiffSize | null {
   if (stdout === undefined) return null;
-  // Every complete row is newline-terminated, so the split's trailing empty
-  // segment is an artifact, not a row; every other line must parse as a row.
   const rows = stdout.split("\n");
   if (rows[rows.length - 1] === "") rows.pop();
   if (rows.length === 0) {
@@ -438,33 +376,21 @@ export function parseNumstatSize(
   let workUnits = 0;
   for (const row of rows) {
     const fields = row.split("\t");
-    // Exactly three fields: the path must exist and be non-empty even though
-    // its content is ignored, and a row that is short OR long is malformed —
-    // an extra field means the parse cannot trust what it read.
     const [adds = "", dels = "", path = ""] = fields;
     if (fields.length !== 3 || path.trim() === "") return null;
     if (adds === "-" && dels === "-") {
-      // Binary file: zero textual lines; the per-file minimum still applies.
-      // The unit must pass the same safe-total check as the textual branch —
-      // a trailing binary row may not slip an overflowing total past it.
       workUnits += 1;
       if (!Number.isSafeInteger(workUnits)) return null;
       continue;
     }
-    // Number("") and Number(" ") are 0, so a blank or whitespace count must
-    // be refused by shape, not by the numeric check below.
     if (!/^\d+$/.test(adds) || !/^\d+$/.test(dels)) return null;
     const added = Number(adds);
     const deleted = Number(dels);
-    // Digits-only text still loses exactness past 2^53-1 (or becomes
-    // Infinity): an inexact count is unknown size, never a smaller one.
     if (!Number.isSafeInteger(added) || !Number.isSafeInteger(deleted)) {
       return null;
     }
     changedLines += added + deleted;
     workUnits += Math.max(1, added + deleted);
-    // The same rule applies to the running totals: the moment either stops
-    // being a safe integer, the whole read is unknown.
     if (!Number.isSafeInteger(changedLines) || !Number.isSafeInteger(workUnits)) {
       return null;
     }
@@ -480,12 +406,7 @@ export function parseNumstatSize(
  */
 export type RunnerBudgetRequest = {
   kind: "requested";
-  /** Integer ms in [RUNNER_BUDGET_FLOOR_MS[level], tierMax]; the tier maximum when the size is unknown. */
   requestedBudgetMs: number;
-  /**
-   * The work units the request was sized from — one per textual changed
-   * line, minimum one per file — `null` when the size was unknown.
-   */
   workUnits: number | null;
 };
 

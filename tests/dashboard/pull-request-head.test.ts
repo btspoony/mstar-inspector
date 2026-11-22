@@ -1,20 +1,3 @@
-/**
- * why: PR head watermark (migration 0044):
- *   - `upsertPullRequest` keeps `head_at` as the DELIVERY watermark (the most
- *     recent stamped delivery's `pull_request.updated_at`, not the sha's
- *     arrival time) while `head_sha` never rewinds — a stamped delivery is
- *     ordered by its stamp, a stamp-less one may only fill an unknown sha;
- *   - `selectPrHead` reads `head_sha` + `head_at` as one point read on the
- *     ledger's own UNIQUE key, scoped to the App, `null` when the row is absent.
- *
- * The fixture is the real migration DDL (`createMigratedTestD1` walks
- * `migrations/`), so 0044's ALTER TABLE is what these assertions run against.
- * Stamps use the `.000Z` spelling `pullRequestRecord` emits
- * (`normalizeRfc3339` → `new Date(v).toISOString()`); the write compares them
- * as text, so the fixture spelling is the one the ledger actually holds. That
- * spelling is enforced INSIDE the write (not merely by the caller), which one
- * case below pins with a numeric-offset input.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore, type UpsertPullRequestInput } from "../../src/dashboard/apps-store";
@@ -108,8 +91,6 @@ describe("upsertPullRequest head watermark (0044)", () => {
   });
 
   test("a stamped delivery fills a pre-0044 row's unknown watermark", async () => {
-    // why: The upgrade path: a row written before 0044 has a sha but no stamp, and
-    // only the `head_at IS NULL` disjunct of the write CASE can ever fill it.
     const db = createMigratedTestD1();
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(delivery({ title: null, headSha: null }));
@@ -138,7 +119,6 @@ describe("upsertPullRequest head watermark (0044)", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    // why: A later delivery that carries only a state change (no head sha).
     await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: undefined, updatedAt: "2026-03-01T11:00:00.000Z" }),
     );
@@ -149,9 +129,6 @@ describe("upsertPullRequest head watermark (0044)", () => {
   });
 
   test("a stamp-less delivery cannot rewind a known sha", async () => {
-    // why: A pre-deploy or replayed message carries no stamp, so it cannot be
-    // ordered: it may only fill an unknown sha. The 0039 rule (the arriving
-    // sha wins) would rewrite the row back to an older commit here.
     const db = createMigratedTestD1();
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(
@@ -184,17 +161,12 @@ describe("upsertPullRequest head watermark (0044)", () => {
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
-    // why: A target with no ledger row is "unknown" — never another target's
-    // watermark.
     expect(await store.selectPrHead({ ...ADDRESS, targetId: "target-with-no-rows" })).toBeNull();
   });
 
   test("a numeric-offset stamp is rewritten to UTC inside the write, not trusted from the caller", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    // why: The column is ordered lexically, so a `+02:00` spelling stored verbatim
-    // would sort below a `Z` value five minutes older. The store normalizes,
-    // so no caller can put an unorderable stamp in the watermark.
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T12:00:00+02:00" }));
     expect((await createReviewBotsStore(db).selectPrHead(ADDRESS))?.headAt).toBe("2026-03-01T10:00:00.000Z");
   });

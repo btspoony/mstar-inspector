@@ -1,8 +1,3 @@
-/**
- * note: The PR-context capture is best-effort, but its failures are named: an
- * unattributed `none` section is indistinguishable from a PR with nothing to
- * say, and the report seat simply never runs.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
@@ -53,20 +48,13 @@ beforeEach(() => {
 
 const issueView = (issueNumber: number) => issueViewCommand(TEST_OWNER, TEST_REPO, issueNumber);
 
-/** note: The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
   return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
-/**
- * note: The prepared review body the round sent — and the round sent exactly ONE.
- * Taking the first call would let a duplicate-publication regression pass every
- * body assertion in this suite.
- */
 function preparedBody(): string {
   const prepared = h.commenterCalls.filter((call) => call.op === "post-prepared");
   expect(prepared).toHaveLength(1);
-  // note: The harness records `args` as `unknown`; this double is its only writer.
   const call = prepared[0]!.args as { body: string };
   return call.body;
 }
@@ -75,45 +63,29 @@ describe("PR-context capture", () => {
   test("near the derived-deadline boundary (capture + post-runner reads) the capture is skipped", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: gh WOULD answer; the round's clock is what forbids the read.
     h.sandbox.prBodyExitCode = 0;
     h.sandbox.prBodyContent = "Closes #7";
     const db = await createSeededTestD1();
     const reserveMs = postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
-    // note: The gate bills the DERIVED deadline (round − the post-runner reserve)
-    // and needs the capture plus the post-runner reads: 234s + 120s + 90s.
-    // 60s BELOW that boundary leaves 150s before the derived deadline — above
-    // the capture's own 120s worst case, so the capture alone would fit and
-    // the post-runner reads are what the round refuses.
     const attemptCapMs = reserveMs + PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS - 60_000;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       attemptCapMs,
     });
 
-    // note: Frozen clock: the round spends no wall time, so the remainder the gate
-    // reports is an exact quantity rather than `round remainder − real elapsed`.
     await withFrozenClock(async () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // note: Not one gh read started: the skip precedes the first exec, so a slow
-    // sandbox cannot spend the window the paid run and its post need.
     expect(h.sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER))).toBe(false);
     const warns = h.logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
     expect(warns).toHaveLength(1);
     expect(warns[0]!.fields.report_context).toBe("budget");
-    // note: The line names the DERIVED deadline it refused on, not the level's tier
-    // nor the round's own remainder: it sits exactly one post-runner reserve
-    // below the round budget, which is what puts it under the capture-plus-
-    // post-reads cost the gate bills.
     const leftMs = Number(/(\d+)ms left before the derived runner deadline/.exec(warns[0]!.msg)?.[1]);
     expect(leftMs).toBeLessThan(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS);
     expect(attemptCapMs - leftMs).toBe(reserveMs);
-    // note: And it names both costs the gate compared, not just its verdict.
     expect(warns[0]!.msg).toContain(`the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms`);
     expect(warns[0]!.msg).toContain(`the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms`);
-    // note: Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
   });
@@ -122,16 +94,11 @@ describe("PR-context capture", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.prBodyExitCode = 0;
-    // note: Four distinct refs; only the bounded number may be read.
     h.sandbox.prBodyContent = "Closes #1, fixes #2, resolves #3, references #4";
     for (const number of [1, 2, 3, 4]) {
       h.sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    // note: The gate bills the DERIVED deadline, and the LEVEL never enters that
-    // bound — each capture exec is capped at min(deadline, tier), so any level
-    // with the capture's 210s left admits it. The per-level table itself is
-    // pinned in consumer.test.ts (runnerTimeoutMs quick/default/deep).
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
@@ -139,9 +106,6 @@ describe("PR-context capture", () => {
     expect(
       h.sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)),
     ).toBe(true);
-    // note: The capture runs under its own tighter bound, not the git steps' 120s.
-    // Scoped to the capture's own commands: the post-runner reads share the
-    // same 30s value, so timing alone cannot tell them apart.
     const captureCalls = h.sandbox.calls.filter(
       (call) =>
         (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS &&
@@ -160,8 +124,6 @@ describe("PR-context capture", () => {
   test("the post-runner bounded reads carry their own 30s timeout, not the git window", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: Every post-runner read has something to answer: one open row to recheck
-    // (document + status) and a report document behind a captured PR context.
     h.sandbox.prBodyExitCode = 0;
     h.sandbox.prBodyContent = "Closes #7";
     h.sandbox.recheckFileContent = recheckDocWith({});
@@ -197,7 +159,6 @@ describe("PR-context capture", () => {
   test("a `gh pr view` failure warns once with its cause, then renders `none`", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // note: The default state: `gh pr view` exits 1, so no PR context is captured.
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -273,8 +234,6 @@ describe("PR-context capture", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.prBodyExitCode = 0;
-    // note: Four distinct refs plus a repeat of the first: only the first three
-    // distinct numbers are read, exactly PR_CONTEXT_MAX_ISSUES times.
     h.sandbox.prBodyContent = "Closes #1, fixes #2, resolves #3, references #4, refs #1";
     for (const number of [1, 2, 3, 4]) {
       h.sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });

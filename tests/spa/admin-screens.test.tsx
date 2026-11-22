@@ -1,11 +1,3 @@
-/**
- * note: The console's six screens: each screen's loading, error,
- * empty and populated states, plus the writes they own — the flag toggle, the
- * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
- *
- * Mounted in happy-dom because the states live in effects and both controls
- * are Radix widgets that only answer real events.
- */
 import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, type ReactElement } from "react";
@@ -28,7 +20,6 @@ type Respond = (request: Sent) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-/** note: The mounted screen a test drives: wire log, DOM text and the event helpers. */
 type Surface = {
   win: Window;
   container: DomElement;
@@ -41,7 +32,6 @@ type Surface = {
   close: () => Promise<void>;
 };
 
-/** note: Mount one screen with a stubbed console API and settle its first read. */
 async function mount(element: ReactElement, respond: Respond): Promise<Surface> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin");
   const sent: Sent[] = [];
@@ -59,7 +49,6 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
   await act(async () => root.render(element));
-  // note: One extra flush drains the read's own continuation (its .then setState).
   await act(async () => {});
 
   return {
@@ -67,14 +56,12 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
     container,
     sent,
     text: () => container.textContent ?? "",
-    /** note: Click a node, then drain the write and its continuation. */
     async click(node: DomElement | null) {
       await act(async () => {
         node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       await act(async () => {});
     },
-    /** note: Open a Radix Select trigger (pointerdown is what Radix listens for). */
     async openSelect(trigger: DomElement | null) {
       await act(async () => {
         trigger?.dispatchEvent(
@@ -83,7 +70,6 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
         trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
     },
-    /** note: Choose the portalled option whose text is exactly `label`. */
     async pickOption(label: string) {
       const option = [...win.document.querySelectorAll('[role="option"]')].find(
         (node) => node.textContent === label,
@@ -97,9 +83,7 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
       await act(async () => {});
       return option ?? null;
     },
-    /** note: Type into a controlled input the way React's value tracker expects. */
     async type(selector: string, value: string) {
-      // note: A Radix dialog portals outside the mount container, so fall back to the document.
       const input = container.querySelector(selector) ?? win.document.querySelector(selector);
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -119,7 +103,6 @@ async function flagsScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
   return mount(createElement(FlagsPage, { locale }), respond);
 }
 
-/** note: The duration report the runtime screen reads beside its config; empty sample. */
 const DURATION_REPORT = {
   window: { days: 30, startMs: 0, endMs: 1 },
   sampleSize: 0,
@@ -134,8 +117,6 @@ async function runtimeScreen(
   locale: "en" | "zh_CN" = "en",
   report: unknown = DURATION_REPORT,
 ): Promise<Surface> {
-  // note: The screen reads the duration report beside the runtime config; a fixture
-  // answering every URL with the config would fail that one read.
   return mount(createElement(RuntimePage, { locale }), (request) =>
     request.url.startsWith("/_internal_admin/api/runtime/duration-report")
       ? json(report)
@@ -143,28 +124,14 @@ async function runtimeScreen(
   );
 }
 
-/**
- * note: The runtime payload the workspaces page reads beside its table — the
- * official-workspace card's own read. Absent groups (check budgets, sweep, …)
- * are what an older Worker answers, so this stays the table tests' fixture too.
- */
 const RUNTIME = {
   concurrency: 2,
   min: 1,
   max: 250,
   degraded: false,
-  // note: No designation: a name on the card would leak into the page text these
-  // table tests assert on ("Acme" after a filter). The card's own tests below
-  // set the designation they need.
   officialWorkspaceId: null as string | null,
 };
 
-/**
- * note: The workspaces page reads TWO faces: the table's rows and the runtime
- * payload the official-workspace card needs. `respond` answers the table and
- * its writes; the runtime read is answered here so a table test never trips
- * over the card's own states.
- */
 async function workspacesScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Promise<Surface> {
   return mount(createElement(WorkspacesPage, { locale }), (request) =>
     request.url.endsWith("/api/runtime") ? json(RUNTIME) : respond(request),
@@ -190,10 +157,8 @@ async function usageScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
 const never = () => new Promise<Response>(() => {});
 const failed = () => new Response("boom", { status: 500 });
 
-/** note: A held-response latch: the test resolves it when the in-flight write may land. */
 type Gate = { promise: Promise<Response>; resolve: (value: Response) => void };
 
-/** note: The table row that carries `needle`, so a control is located by its row. */
 function rowContaining(surface: Surface, needle: string): DomElement | null {
   return [...surface.container.querySelectorAll("tr")].find((row) => row.textContent?.includes(needle)) ?? null;
 }
@@ -204,7 +169,6 @@ const FLAGS = [
   { key: "workspace_creation_open", enabled: false },
 ];
 
-/** note: The seats cell: column 4 of Workspace | Owner | Members | Seats | Plan | Created. */
 function seatsCell(surface: Surface, needle: string): string {
   const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
   return cells[3]?.textContent ?? "";
@@ -232,13 +196,11 @@ const WORKSPACES = [
     pendingInviteCount: 0,
     planId: "unlimited",
     planName: "Unlimited",
-    // note: NULL is no seat cap: the cell must read "—", never "5 / 0".
     includedMembers: null,
     createdAt: "2026-09-18T09:00:00.000Z",
   },
 ];
 
-/** note: Two bots in the official workspace (one shared) and one outside it. */
 const BOTS = [
   {
     botId: "bot-1",
@@ -339,7 +301,6 @@ describe("Flags screen", () => {
     expect(surface.text()).toContain("review_global");
     expect(surface.text()).toContain("signup_open");
     expect(surface.text()).toContain("workspace_creation_open");
-    // note: The spec's cancellation note belongs to review_global only.
     expect(surface.text()).toContain("Queued work is not cancelled.");
     expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     expect(
@@ -395,13 +356,11 @@ describe("Flags screen", () => {
       );
       expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
 
-      // note: Short-lived by contract: still there just before its own deadline…
       await act(async () => {
         jest.advanceTimersByTime(2999);
       });
       expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
 
-      // note: …and gone once it passes, so a stale confirmation never lies.
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
@@ -413,7 +372,6 @@ describe("Flags screen", () => {
   });
 
   test("unmounting the screen cancels the note's pending auto-clear", async () => {
-    // note: A surviving timer would call setSavedKey into an unmounted tree.
     jest.useFakeTimers();
     const surface = await flagsScreen((request) =>
       request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
@@ -427,7 +385,6 @@ describe("Flags screen", () => {
       );
       const armed = jest.getTimerCount();
       await surface.close();
-      // note: The teardown removed exactly one timer: the one this save armed.
       expect(jest.getTimerCount()).toBe(armed - 1);
     } finally {
       jest.useRealTimers();
@@ -440,7 +397,6 @@ describe("Flags screen", () => {
       await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
       const dialog = surface.win.document.querySelector('[role="alertdialog"]');
       const focused = surface.win.document.activeElement;
-      // note: A stray Enter or a blind keypress must land on the harmless control.
       expect(focused?.textContent).toBe("Cancel");
       expect(focused !== null && dialog?.contains(focused)).toBe(true);
     } finally {
@@ -574,7 +530,6 @@ describe("Runtime screen", () => {
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
       { url: "/_internal_admin/api/runtime", method: "PATCH", body: { concurrency: 40 } },
     ]);
-    // note: The accepted value replaces the stored one without a second read.
     expect((surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement).value).toBe(
       "40",
     );
@@ -601,14 +556,11 @@ describe("Runtime screen", () => {
 
     expect(surface.text()).toContain("Could not change the system concurrency.");
     expect(surface.text()).toContain("body must be { concurrency: <integer in 1..256> }");
-    // note: The rejected write leaves the stored value as it was.
     expect(surface.text()).toContain("Effective on the next review: 24.");
     await surface.close();
   });
 
   test("a degraded read warns instead of presenting the fallback as the stored cap", async () => {
-    // note: The store answered the conservative 1 because the row could not be read.
-    // Showing 1 as a normal value would invite saving a number nobody stored.
     let degraded = true;
     const surface = await runtimeScreen(() =>
       json({ concurrency: 1, min: 1, max: 256, degraded, checkBudgets: CHECK_BUDGETS }),
@@ -616,15 +568,11 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain(
       "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     );
-    // note: The form stays — a save is the only way to repair an unreadable row — but
-    // its field starts EMPTY and the "effective" line is withheld, so neither
-    // presents the fallback as the stored cap.
     const input = surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.value).toBe("");
     expect(surface.text()).not.toContain("Effective on the next review: 1.");
 
-    // note: The offered recovery is the read, and it clears the warning once it works.
     degraded = false;
     const retry = [...surface.container.querySelectorAll("button")].find(
       (button) => button.textContent === "Retry",
@@ -637,8 +585,6 @@ describe("Runtime screen", () => {
   });
 
   test("a typed value repairs a degraded read; an empty submit writes nothing", async () => {
-    // note: `data.concurrency` is the conservative fallback, not a stored value: an
-    // empty draft must never write it. A typed value is the repair path.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? json({ concurrency: 41 })
@@ -649,8 +595,6 @@ describe("Runtime screen", () => {
       (surface.container.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled,
     ).toBe(false);
 
-    // note: An untouched form submits nothing — the fallback is not a value anyone
-    // stored.
     const form = surface.container.querySelector("form")!;
     await act(async () => {
       form.dispatchEvent(new surface.win.Event("submit", { bubbles: true, cancelable: true }));
@@ -668,8 +612,6 @@ describe("Runtime screen", () => {
   });
 
   test("an older server without checkBudgets still renders the concurrency card", async () => {
-    // note: A previously deployed Worker behind this bundle: the field is absent, so
-    // the budget card is hidden and the concurrency card is untouched.
     const surface = await runtimeScreen(() =>
       json({ concurrency: 24, min: 1, max: 256, degraded: false }),
     );
@@ -680,9 +622,6 @@ describe("Runtime screen", () => {
   });
 
   test("the runtime page carries no review-depth control", async () => {
-    // note: Review depth is a per-repository default now: the runtime parameters
-    // screen must not offer a third place to set it, even when an older Worker
-    // still reports the group.
     const surface = await runtimeScreen(() =>
       json({
         ...RUNTIME,
@@ -692,7 +631,6 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector("#default-review-level")).toBeNull();
     expect(surface.text()).not.toContain("Default review depth");
     expect(surface.text()).not.toContain("Review depth");
-    // note: The rest of the page is untouched.
     expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
     expect(surface.container.querySelector("#check-terminalize-budget")).not.toBeNull();
     await surface.close();
@@ -716,7 +654,6 @@ describe("Runtime screen", () => {
 
     await surface.type("#check-terminalize-budget", "12000");
     await surface.type("#check-update-budget", "7000");
-    // note: The second form's submit button is the budget save.
     const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
     await surface.click(budgetForm.querySelector('button[type="submit"]'));
 
@@ -735,8 +672,6 @@ describe("Runtime screen", () => {
   });
 
   test("a refused budget pair reports the server's relation text inside the budget card", async () => {
-    // note: The store owns the terminalize>update rule; the card surfaces its text
-    // next to the fields that produced it, not as a page-wide banner.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
         ? new Response(
@@ -754,7 +689,6 @@ describe("Runtime screen", () => {
 
     expect(surface.text()).toContain("Could not change the check budgets.");
     expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
-    // note: The rejected write never replaced the stored pair.
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
     await surface.close();
   });
@@ -771,7 +705,6 @@ describe("Runtime screen", () => {
     await surface.type("#claim-retry-budget", "60000");
     await surface.type("#claim-attempts-budget", "5");
     await surface.type("#claim-outbox-budget", "10");
-    // note: The third form's submit button is the claim save.
     const claimForm = surface.container.querySelector("#claim-retry-budget")!.closest("form")!;
     await surface.click(claimForm.querySelector('button[type="submit"]'));
 
@@ -798,13 +731,10 @@ describe("Runtime screen", () => {
     );
     const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
     expect(field).not.toBeNull();
-    // note: The effective value is offered as the starting number…
     expect(field.value).toBe("1200000");
-    // note: …the accepted range is stated where the operator types it…
     expect(surface.container.querySelector('[data-attempt-cap="range"]')?.textContent).toContain(
       "900000–3600000 ms (15–60 minutes)",
     );
-    // note: …and the default says it is a default, never a stored value.
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
       "Effective on the next review: 1200000 ms (platform default — no value is saved).",
     );
@@ -832,7 +762,6 @@ describe("Runtime screen", () => {
         body: { attemptCap: { capMs: 2_400_000 } },
       },
     ]);
-    // note: The card adopts the stored echo and still calls it a save.
     expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe(
       "2400000",
     );
@@ -853,8 +782,6 @@ describe("Runtime screen", () => {
       if (request.method !== "PATCH") return json(capGroup());
       patches += 1;
       if (patches === 1) {
-        // note: Another operator's save lands between this request's echo and the
-        // card's re-read: the echo is stale before it is rendered.
         serverCap = 3_000_000;
         return json({ attemptCap: { capMs: 1_800_000 } });
       }
@@ -865,8 +792,6 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // note: The store wins over the 1 800 000 the request was answered with, and the
-    // disagreement is a persistent line rather than a disappearing notice.
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
       "Effective on the next review: 3000000 ms (saved value).",
     );
@@ -877,7 +802,6 @@ describe("Runtime screen", () => {
       "3000000",
     );
 
-    // note: A second save leaves the card on the second store value, not the first.
     await surface.type("#attempt-cap-ms", "2400000");
     await surface.click(form.querySelector('button[type="submit"]'));
     expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe(
@@ -907,14 +831,11 @@ describe("Runtime screen", () => {
           : { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
       });
     });
-    // note: The card starts on the default it read.
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
       "Effective on the next review: 1200000 ms (platform default — no value is saved).",
     );
     await surface.type("#attempt-cap-ms", "1800000");
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
-    // note: The PATCH promise stays open, so what renders here is the pre-reply state:
-    // the server may already have committed and been overwritten.
     await surface.click(form.querySelector('button[type="submit"]'));
 
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')?.textContent).toContain(
@@ -925,7 +846,6 @@ describe("Runtime screen", () => {
     expect(field.value).toBe("");
     expect(field.disabled).toBe(true);
 
-    // note: Releasing the reply lets the re-read answer; only then does a number return.
     stored = true;
     await act(async () => {
       releasePatch?.(json({ attemptCap: { capMs: 1_800_000 } }));
@@ -939,10 +859,6 @@ describe("Runtime screen", () => {
   });
 
   test("a definite refusal shows the value a fresh read returns, never the pre-save number", async () => {
-    // note: The field's min/max normally keeps an out-of-range number from being sent;
-    // this case pins the server-refusal path behind it. Another operator's save
-    // lands between this page's first read and the refused PATCH, so the row
-    // does NOT hold the number this page last read.
     let serverCap = 1_200_000;
     let reads = 0;
     const surface = await runtimeScreen((request) => {
@@ -963,15 +879,12 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // note: The refusal is reported, and the effective value comes from a new read —
-    // not from the number this page held before the save.
     expect(surface.text()).toContain("Could not change the maximum review duration.");
     expect(surface.text()).toContain("must be an integer in 900000..3600000 ms");
     expect(reads).toBe(2);
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
       "Effective on the next review: 3000000 ms (saved value).",
     );
-    // note: This save's fate was definite, but the row's value was not observed by it.
     expect(surface.container.querySelector('[data-attempt-cap="changed-elsewhere"]')).toBeNull();
     const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
     expect(field.disabled).toBe(false);
@@ -1000,15 +913,12 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // note: The refusal proves this write failed, not what the row holds: with no
-    // read-back, no number is shown — neither the pre-save value nor the echo.
     expect(surface.text()).toContain("Could not change the maximum review duration.");
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
     expect(surface.container.querySelector('[data-attempt-cap="unknown"]')).toBeNull();
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).not.toBeNull();
     expect(surface.container.querySelector('[data-attempt-cap="retry"]')).not.toBeNull();
 
-    // note: The retry reads the row and restores a number from that answer.
     readsFail = false;
     await surface.click(surface.container.querySelector('[data-attempt-cap="retry"]'));
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
@@ -1041,7 +951,6 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // note: The write may have landed: no number, no failure claim, editing blocked.
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).not.toBeNull();
     expect(surface.container.querySelector('[data-attempt-cap="unknown"]')?.textContent).toBe(
       "The save's outcome is unknown: the request did not answer, so it may or may not have been stored. Retry reads the stored value back; no number is shown until it does.",
@@ -1051,7 +960,6 @@ describe("Runtime screen", () => {
     const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
     expect(field.disabled).toBe(true);
 
-    // note: The store did land it: the retry reads the row and shows its value.
     stored = true;
     await surface.click(surface.container.querySelector('[data-attempt-cap="retry"]'));
     expect(surface.container.querySelector('[data-attempt-cap="unknown"]')).toBeNull();
@@ -1059,8 +967,6 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
       "Effective on the next review: 1800000 ms (saved value).",
     );
-    // note: This save's fate was unknown, so the read may not claim someone else
-    // changed the row.
     expect(surface.container.querySelector('[data-attempt-cap="changed-elsewhere"]')).toBeNull();
     expect(field.disabled).toBe(false);
     await surface.close();
@@ -1094,8 +1000,6 @@ describe("Runtime screen", () => {
     const surface = await runtimeScreen((request) => {
       if (request.method === "PATCH") return json({ attemptCap: { capMs: 1_800_000 } });
       reads += 1;
-      // note: The page's own load succeeds; every read after the save fails until
-      // the retry, so the card may not claim a number it could not confirm.
       if (reads > 1 && readsFail) return new Response("unavailable", { status: 503 });
       return json({
         ...RUNTIME,
@@ -1106,7 +1010,6 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // note: The write is acknowledged; the value is not shown and nothing is editable.
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')?.textContent).toContain(
       "A save was sent and the stored value is being confirmed.",
     );
@@ -1117,7 +1020,6 @@ describe("Runtime screen", () => {
     expect((form.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled).toBe(true);
     expect(surface.text()).toContain("Saved.");
 
-    // note: A retry that answers returns the card to the store's number.
     readsFail = false;
     await surface.click(surface.container.querySelector('[data-attempt-cap="retry"]'));
     expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
@@ -1137,8 +1039,6 @@ describe("Runtime screen", () => {
         attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: true },
       }),
     );
-    // note: Admission refuses every delivery while the row is unreadable, so no
-    // number is presented as the effective cap.
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
     expect((surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement).value).toBe("");
     expect(surface.text()).toContain("no new review is admitted until it is readable again");
@@ -1158,11 +1058,9 @@ describe("Runtime screen", () => {
         },
       }),
     );
-    // The read path refuses this row, so the card never echoes it as `on`…
     expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
       'off — untrusted (stored value "ON")',
     );
-    // …and states the answer the queue handler acts on.
     expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
       "off — deliveries are refused and nothing is created",
     );
@@ -1194,8 +1092,6 @@ describe("Runtime screen", () => {
         body: { routeWorkflow: { value: "off" } },
       },
     ]);
-    // The card adopts the server's read-back, so the repaired row no longer
-    // reads as untrusted and the effective line is what the gate answered.
     expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
       "off — saved",
     );
@@ -1213,7 +1109,6 @@ describe("Runtime screen", () => {
       runtimeReads += 1;
       return json({
         ...RUNTIME,
-        // Page load: an untrusted row. The post-save re-read: the store's word.
         routeWorkflow:
           runtimeReads === 1
             ? { mode: "off", saved: false, degraded: true, reason: "untrusted", rejected: '"ON"' }
@@ -1223,13 +1118,11 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector('[data-route-workflow="form"]')!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // The echo carried no gate answer, so the page asked the read path…
     expect(
       surface.sent.filter(
         (request) => request.method === "GET" && request.url === "/_internal_admin/api/runtime",
       ),
     ).toHaveLength(2);
-    // …and rendered THAT: the save asked for `off`, the store answered `on`.
     expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
       "on — saved",
     );
@@ -1260,7 +1153,6 @@ describe("Runtime screen", () => {
     await surface.click(form.querySelector('button[type="submit"]'));
 
     expect(surface.text()).toContain("The save could not be confirmed");
-    // The requested mode is not presented as the stored one.
     expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
       'off — untrusted (stored value "ON")',
     );
@@ -1275,7 +1167,6 @@ describe("Runtime screen", () => {
       if (runtimeReads > 1) return new Response("unavailable", { status: 503 });
       return json({ ...RUNTIME, routeWorkflow: { mode: "off", saved: true, degraded: false } });
     });
-    // Start on a known `off`, then ask for `on`.
     await surface.click(
       surface.container.querySelector('button[aria-label="Review route OFF"]'),
     );
@@ -1291,8 +1182,6 @@ describe("Runtime screen", () => {
       },
     ]);
 
-    // Neither the echo nor the re-read confirmed it, so the switch returns to
-    // the gate's answer: the control and the status line cannot disagree.
     expect(surface.text()).toContain("The save could not be confirmed");
     expect(surface.container.querySelector('button[aria-label="Review route ON"]')).toBeNull();
     const toggle = surface.container.querySelector(
@@ -1320,7 +1209,6 @@ describe("Runtime screen", () => {
         admissionDrops24h: { "pr-held": 3, "system-cap": 1, "workspace-cap": 2, error: 0 },
       }),
     );
-    // note: The card names its window, so a number is never read as "all time".
     expect(surface.text()).toContain("Admission drops (last 24 hours)");
     const rendered = Object.fromEntries(
       [...surface.container.querySelectorAll("[data-admission-drops]")].map((node) => [
@@ -1329,14 +1217,12 @@ describe("Runtime screen", () => {
       ]),
     );
     expect(rendered).toEqual({ "pr-held": "3", "system-cap": "1", "workspace-cap": "2", error: "0" });
-    // note: Every reason is labelled, not only numbered.
     for (const label of ["PR in flight", "System cap", "Workspace cap", "Storage error"]) {
       expect(surface.text()).toContain(label);
     }
     await surface.close();
   });
 
-  /** note: The queue card's read cells, keyed by their `data-queue` field. */
   function queueCells(surface: Surface): Record<string, string | null> {
     return Object.fromEntries(
       [...surface.container.querySelectorAll("[data-queue]")].map((node) => [
@@ -1379,7 +1265,6 @@ describe("Runtime screen", () => {
     );
     expect(surface.text()).toContain("GitHub secondary limits (24 h)");
     expect(queueCells(surface)["rate-limited"]).toBe("7");
-    // note: An empty queue names its own state instead of rendering an absence.
     expect(queueCells(surface).oldest).toBe("Empty");
     await surface.close();
   });
@@ -1394,7 +1279,6 @@ describe("Runtime screen", () => {
         execution: { p50Ms: 20_000, p90Ms: 30_000, maxMs: 40_000 },
         publication: { p50Ms: 8_000, p90Ms: 9_000, maxMs: 10_000 },
       },
-      // note: Five reasons, each with its own count beside the measured sample.
       excluded: { "check-open-at-settle": 3, "no-settlement-record": 4, "no-boundary": 2, unsettled: 1, "pre-prepare": 1 },
     };
     const surface = await runtimeScreen(() => json(RUNTIME), "en", report);
@@ -1405,18 +1289,12 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector('[data-duration="excluded"]')?.textContent).toBe(
       "Excluded from the percentiles: 3 with a Check not proven closed at settlement, 4 with no settlement record, 2 without a measurable boundary, 1 unsettled, 1 stopped before prepare.",
     );
-    // note: The failure tail is excluded by ruling, so the card must say so beside the
-    // counts — otherwise successful durations read as "review never fails".
-    // It follows the classifier's order: settlement owed, then the Check, then
-    // the missing result.
     expect(surface.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
       "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the queue stamp, the boundary order or the settlement record is missing, or when the attempt froze a Check that was not proven closed at settlement.",
     );
     expect(surface.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
       "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
     );
-    // note: The Check guard is conditional: an attempt that froze no Check is still
-    // measured, so the card may not imply every sample has one.
     expect(surface.container.querySelector('[data-duration="description"]')?.textContent).toBe(
       "Attempts admitted in the last 30 days. Percentiles use only intervals whose settlement instant is written and whose settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than that instant. An empty window stays empty — it never reads as a zero.",
     );
@@ -1438,9 +1316,6 @@ describe("Runtime screen", () => {
     const form = surface.container.querySelector("#duration-candidate-cap")!.closest("form")!;
     await surface.type("#duration-candidate-cap", "86400001");
 
-    // note: The route answers this with a 4xx, which would replace the whole card
-    // with a load failure. The card checks the same range, so the error sits
-    // beside the field and the distribution stays on screen.
     expect(surface.container.querySelector('[data-duration="candidate-range"]')?.textContent).toBe(
       "The analysis accepts an integer from 1 to 86400000 ms.",
     );
@@ -1449,7 +1324,6 @@ describe("Runtime screen", () => {
     expect(surface.text()).not.toContain("Could not load this page.");
     expect(surface.sent.filter((request) => request.url.includes("duration-report")).length).toBe(1);
 
-    // note: A candidate inside the range clears the error and is the one sent.
     await surface.type("#duration-candidate-cap", "60000");
     expect(surface.container.querySelector('[data-duration="candidate-range"]')).toBeNull();
     await surface.click(form.querySelector('button[type="submit"]'));
@@ -1463,8 +1337,6 @@ describe("Runtime screen", () => {
     expect(none.text()).toContain("No attempt was admitted in this window.");
     await none.close();
 
-    // note: A completed attempt whose obligation or boundary cannot be proven is
-    // EXCLUDED, not uncompleted — the sentence must say so, with the four counts.
     const report = {
       ...DURATION_REPORT,
       excluded: { "check-open-at-settle": 2, "no-settlement-record": 1, "no-boundary": 1, unsettled: 1, "pre-prepare": 0 },
@@ -1493,7 +1365,6 @@ describe("Runtime screen", () => {
     await chinese.close();
   });
 
-  /** note: The maintenance card's read cells, keyed by their `data-maintenance` field. */
   function maintenanceCells(surface: Surface): Record<string, string | null> {
     return Object.fromEntries(
       [...surface.container.querySelectorAll("[data-maintenance]")].map((node) => [
@@ -1509,8 +1380,6 @@ describe("Runtime screen", () => {
     );
     expect(surface.text()).toContain("Maintenance mode");
     expect(maintenanceCells(surface)).toEqual({ state: "Off — the platform is serving" });
-    // note: The toggle is the operator's write surface, and the reason field is inert
-    // while the platform is open (a reopen writes no reason).
     expect(surface.container.querySelector("#maintenance-reason")).not.toBeNull();
     expect(
       (surface.container.querySelector("#maintenance-reason") as unknown as HTMLInputElement).disabled,
@@ -1538,7 +1407,6 @@ describe("Runtime screen", () => {
         ? json({ maintenance: { enabled: true, reason: "repository backfill", since } })
         : json({ ...RUNTIME, maintenance: { enabled: false, reason: null, since: null } }),
     );
-    // note: The toggle opens the reason field, then the save writes the window.
     await surface.click(surface.container.querySelector('button[aria-label="Maintenance mode Off — the platform is serving"]'));
     await surface.type("#maintenance-reason", "repository backfill");
     await surface.click(
@@ -1554,11 +1422,9 @@ describe("Runtime screen", () => {
         body: { maintenance: { enabled: true, reason: "repository backfill" } },
       },
     ]);
-    // note: The accepted echo replaces the stored window without a second read.
     const cells = maintenanceCells(surface);
     expect(cells.state).toBe("On — the platform is closed");
     expect(cells.reason).toBe("repository backfill");
-    // note: The server stamps `since`; the card renders it, never the request value.
     expect(cells.since).not.toBeNull();
     expect(
       surface.sent.filter(
@@ -1606,9 +1472,7 @@ describe("Workspaces screen", () => {
     expect(acme?.textContent).toContain("3");
     expect(acme?.textContent).toContain("1 pending");
     expect(acme?.textContent).toContain("2026-10-02");
-    // note: The picker labels the tier with the catalogue's display name.
     expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Free");
-    // note: Headroom is used/cap, and an owner-less row reads "—" rather than blank.
     expect(seatsCell(surface, "Acme")).toBe("3 / 5");
     expect(rowContaining(surface, "Guild")?.textContent).toContain("—");
     await surface.close();
@@ -1616,7 +1480,6 @@ describe("Workspaces screen", () => {
 
   test("an unlimited seat cap renders as —, never 0", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
-    // note: Guild holds the NULL-cap tier at 5 members: "5 / 0" would be the defect.
     expect(seatsCell(surface, "Guild")).toBe("—");
     expect(surface.text()).not.toContain("/ 0");
     await surface.close();
@@ -1630,7 +1493,6 @@ describe("Workspaces screen", () => {
         written = true;
         return json({ workspaceId: "ws_1", planId: "pro" });
       }
-      // note: The accepted write re-reads, so the cap follows the server.
       return json({ workspaces: written ? [after] : WORKSPACES });
     });
     const row = rowContaining(surface, "Acme");
@@ -1643,7 +1505,6 @@ describe("Workspaces screen", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/plan");
     expect(patches[0]?.body).toEqual({ planId: "pro" });
-    // note: The accepted plan is what the row now shows.
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
@@ -1651,15 +1512,11 @@ describe("Workspaces screen", () => {
   test("search filters the loaded rows and shows the N / M counter", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
     expect(surface.text()).toContain("2 / 2");
-    // note: "guild" matches the name (and the slug) but not the other row.
     await surface.type('input[type="search"]', "guild");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("Guild");
-    // note: The TABLE lost the row. The page as a whole still names every workspace:
-    // the official-workspace card's selector lists them all.
     expect(surface.container.querySelector("tbody")?.textContent).not.toContain("Acme");
     expect(surface.text()).toContain("1 / 2");
-    // note: A query matching only the owner login keeps the matching row.
     await surface.type('input[type="search"]', "octocat");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("Acme");
@@ -1684,7 +1541,6 @@ describe("Workspaces screen", () => {
   test("an empty list plus a typed query keeps the page empty state", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: [] }));
     await surface.type('input[type="search"]', "zzz");
-    // note: Nothing was loaded, so the query has nothing to fail to match.
     const empty = surface.container.querySelector('[data-slot="empty-state"]');
     expect(empty?.textContent).toContain("No workspaces");
     expect(empty?.textContent).not.toContain("No matches");
@@ -1710,7 +1566,6 @@ describe("Workspaces screen", () => {
     const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
       (node) => node.textContent,
     );
-    // note: Only the unknown id falls back to the server-provided English name.
     expect(labels).toContain("Legacy Tier");
     expect(labels).toContain("专业版");
     expect(labels).toContain("无限版");
@@ -1720,13 +1575,11 @@ describe("Workspaces screen", () => {
   test("a zh_CN render localises the plan picker's catalogue labels", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
     const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
-    // note: The selected row's own plan renders the zh catalogue label, not the server's English name.
     expect(trigger?.textContent).toBe("免费版");
     await surface.openSelect(trigger);
     const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
       (node) => node.textContent,
     );
-    // note: The row's own option is the zh catalogue label; the rest of the catalogue is Chinese too.
     expect(labels).toContain("免费版");
     expect(labels).toContain("专业版");
     expect(labels).toContain("无限版");
@@ -1746,10 +1599,8 @@ describe("Workspaces screen", () => {
     await surface.pickOption("专业版");
 
     const alert = surface.container.querySelector('[role="alert"]');
-    // note: The generic zh failure is primary; the server's English `{error}` is detail only.
     expect(alert?.textContent).toContain("无法更改 Acme 的套餐。");
     expect(alert?.textContent).toContain("服务器返回：seat limit reached");
-    // note: The refused optimistic change is rolled back.
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("免费版");
     await surface.close();
   });
@@ -1770,7 +1621,6 @@ describe("Workspaces screen", () => {
       (button) => button.textContent === "Edit slug",
     );
     await surface.click(action ?? null);
-    // note: The dialog opens with the row's current slug, and opening it writes nothing.
     const input = surface.win.document.querySelector('[data-slot="dialog-content"] input') as DomElement | null;
     expect((input as unknown as HTMLInputElement | null)?.value).toBe("acme");
     expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
@@ -1787,7 +1637,6 @@ describe("Workspaces screen", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/slug");
     expect(patches[0]?.body).toEqual({ slug: "acme-hq" });
-    // note: The dialog closes and the row shows the accepted slug.
     expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).toBeNull();
     expect(rowContaining(surface, "Acme")?.textContent).toContain("acme-hq");
     await surface.close();
@@ -1804,8 +1653,6 @@ describe("Workspaces screen", () => {
       [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
         (button) => button.textContent === "Save slug",
       ) as unknown as HTMLButtonElement | undefined;
-    // note: The dialog opens prefilled, so an unchanged submit would write an audit
-    // row with identical before/after.
     expect(save()?.disabled).toBe(true);
     await surface.type('[data-slot="dialog-content"] input', "acme-hq");
     expect(save()?.disabled).toBe(false);
@@ -1834,8 +1681,6 @@ describe("Workspaces screen", () => {
 
     const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
     expect(dialog).not.toBeNull();
-    // note: The refusal must live INSIDE the dialog: the modal overlay covers the
-    // page-level notice, so a page notice is unreadable while it stays open.
     const alert = dialog?.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("无法更改 Acme 的 slug。");
     expect(alert?.textContent).toContain("服务器返回：slug is reserved");
@@ -1846,10 +1691,8 @@ describe("Workspaces screen", () => {
 });
 
 describe("Workspaces screen — official workspace card", () => {
-  /** note: The card's own read; the table keeps the file's fixtures. */
   const runtimeWith = (officialWorkspaceId: string | null) => ({ ...RUNTIME, officialWorkspaceId });
 
-  /** note: Mount the page with a stub that answers BOTH of its reads. */
   async function page(
     runtime: "ok" | "failed",
     officialWorkspaceId: string | null,
@@ -1865,7 +1708,6 @@ describe("Workspaces screen — official workspace card", () => {
     );
   }
 
-  /** note: The card's current-value node, keyed by the designation it reports. */
   const designation = (surface: Surface): string =>
     surface.container.querySelector("[data-official-workspace]")?.textContent ?? "";
 
@@ -1887,14 +1729,12 @@ describe("Workspaces screen — official workspace card", () => {
     expect(
       surface.container.querySelector('[data-official-workspace="none"]')?.textContent,
     ).toBe("Not specified");
-    // note: Clearing nothing is not an action: the server refuses an empty save.
     expect((button(surface, "Clear") as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
     await surface.close();
   });
 
   test("Save writes the selected workspace with one PATCH and updates the card", async () => {
     const surface = await page("ok", "ws_1");
-    // note: Save is inert until the selection moves off the stored designation.
     expect((button(surface, "Save") as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
 
     await surface.openSelect(surface.container.querySelector("#official-workspace"));
@@ -1923,7 +1763,6 @@ describe("Workspaces screen — official workspace card", () => {
     expect(
       surface.container.querySelector('[data-official-workspace="none"]')?.textContent,
     ).toBe("Not specified");
-    // note: The copy keeps the consequence: an existing share stays revocable.
     expect(surface.container.querySelector('[role="status"]')?.textContent).toContain(
       "Shares already granted stay revocable.",
     );
@@ -1941,7 +1780,6 @@ describe("Workspaces screen — official workspace card", () => {
     const alert = surface.container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("Could not change the official workspace.");
     expect(alert?.textContent).toContain("Server: workspace not found");
-    // note: A refusal leaves the stored designation on screen.
     expect(designation(surface)).toBe("Acme");
     await surface.close();
   });
@@ -1951,7 +1789,6 @@ describe("Workspaces screen — official workspace card", () => {
     expect(surface.container.querySelector('[role="alert"]')?.textContent).toContain(
       "Could not load the official workspace.",
     );
-    // note: The table's own read is a different face: it still renders.
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(2);
     await surface.close();
   });
@@ -1959,13 +1796,11 @@ describe("Workspaces screen — official workspace card", () => {
 
 
 describe("Bots screen", () => {
-  /** note: The row action of `needle`'s row, located by its label. */
   const rowAction = (surface: Surface, needle: string, label: string): DomElement | null =>
     [...(rowContaining(surface, needle)?.querySelectorAll("button") ?? [])].find(
       (node) => node.textContent === label,
     ) ?? null;
 
-  /** note: The dialog's confirm button — Cancel leads, so it is never the first. */
   const confirmButton = (surface: Surface): DomElement | null =>
     [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
       (node) => node.textContent === "Confirm",
@@ -1996,21 +1831,17 @@ describe("Bots screen", () => {
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(3);
 
     const shared = rowContaining(surface, "mstar-inspector");
-    // note: The bot cell is composite: the name over the GitHub App id.
     expect(shared?.textContent).toContain("app 4803300");
     expect(shared?.textContent).toContain("Acme");
-    // note: The official marker rides only the workspace that is the designation.
     expect(shared?.querySelector('[data-slot="status-badge"]')?.textContent).toBe("official");
     expect(shared?.textContent).toContain("shared");
     expect(shared?.textContent).toContain("2026-11-15 12:03");
     expect(shared?.textContent).toContain("2");
-    // note: A bot outside the designation carries the scope pill ALONE: no marker.
     expect(
       [...(rowContaining(surface, "team-a-reviewer")?.querySelectorAll('[data-slot="status-badge"]') ?? [])].map(
         (node) => node.textContent,
       ),
     ).toEqual(["owned"]);
-    // note: An owned bot shows no stamp, never an invented one.
     expect(rowContaining(surface, "acme-bot")?.textContent).toContain("—");
     await surface.close();
   });
@@ -2020,7 +1851,6 @@ describe("Bots screen", () => {
     const action = rowAction(surface, "team-a-reviewer", "Sharing unavailable");
     expect(action).not.toBeNull();
     expect((action as unknown as HTMLButtonElement).disabled).toBe(true);
-    // note: A dead control the operator cannot explain is a dead end.
     expect(rowContaining(surface, "team-a-reviewer")?.textContent).toContain(
       "Only bots in the official workspace can be shared.",
     );
@@ -2028,10 +1858,6 @@ describe("Bots screen", () => {
   });
 
   test("a share that outlived the designation stays revocable", async () => {
-    // note: The designation was re-pointed after this bot was shared. Sharing INTO
-    // the platform is refused there, but stranding the share would make it
-    // unrevocable from every console — the server allows the unshare, so the
-    // page must offer it.
     const stale = [{ ...BOTS[1]!, scope: "shared", sharedAt: "2026-11-01T09:00:00.000Z" }];
     const surface = await botsScreen(() => json({ bots: stale }));
     const action = rowAction(surface, "team-a-reviewer", "Unshare");
@@ -2048,16 +1874,13 @@ describe("Bots screen", () => {
 
     const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
     expect(dialog?.textContent).toContain("Share acme-bot platform-wide?");
-    // note: Nothing is written until the operator confirms.
     expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
     await surface.click(confirmButton(surface));
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/bots/bot-3/scope");
-    // note: A share is not destructive, so it carries no confirmation body.
     expect(patches[0]?.body).toEqual({ scope: "shared" });
-    // note: The accepted write re-reads: `sharedAt` is the server's stamp.
     expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(2);
     await surface.close();
   });
@@ -2140,10 +1963,6 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
-    // note: One accent request: the operator identity. The console's plain variant is
-    // the surface re-map, not a second tone choice at the call site, so this
-    // pill names the emphasis and no other row does. The painted pair is
-    // resolved in admin-surface.test.ts; here the call site is what shows.
     expect(surface.container.querySelectorAll('[data-tone="accent"]')).toHaveLength(1);
     expect(
       rowContaining(surface, "octocat")?.querySelector('[data-slot="status-badge"]')?.getAttribute("data-tone"),
@@ -2157,7 +1976,6 @@ describe("Users screen", () => {
     await surface.type('input[type="search"]', "yuki");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("1 / 3");
-    // note: Case-insensitive: the query matches the login in another case.
     await surface.type('input[type="search"]', "OCTO");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(rowContaining(surface, "octocat")).not.toBeNull();
@@ -2175,7 +1993,6 @@ describe("Users screen", () => {
   test("an empty list plus a typed query keeps the page empty state", async () => {
     const surface = await usersScreen(() => json({ users: [] }));
     await surface.type('input[type="search"]', "zzz");
-    // note: Nothing was loaded, so the query has nothing to fail to match.
     const empty = surface.container.querySelector('[data-slot="empty-state"]');
     expect(empty?.textContent).toContain("No users");
     expect(empty?.textContent).not.toContain("No matches");
@@ -2231,8 +2048,6 @@ describe("Support access screen", () => {
     const row = rowContaining(surface, "incident 42");
     expect(row?.textContent).toContain("ops");
     expect(row?.textContent).toContain("Acme");
-    // note: The stamp is UTC (the column is `toISOString`), so it says so — a bare
-    // `2026-10-26 09:00` reads as local time to an operator outside UTC.
     expect(row?.textContent).toContain("2026-10-26 09:00 UTC");
     await surface.close();
   });
@@ -2271,7 +2086,6 @@ describe("Support access screen", () => {
       ttlHours: 24,
     });
 
-    // note: The list is the server's answer, so the created row arrives by re-read.
     expect(rowContaining(surface, "incident 42")?.textContent).toContain("Acme");
 
     const revoke = [...surface.container.querySelectorAll("button")].find(
@@ -2369,7 +2183,6 @@ describe("Support access screen", () => {
     gates.get("/_internal_admin/api/support-grants/g1")?.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
     await act(async () => {});
     expect(rowContaining(surface, "incident 42")).toBeNull();
-    // note: Row B is still flying: its freshly rendered button stays disabled.
     expect(rowContaining(surface, "incident 43")?.querySelector("button")?.disabled).toBe(true);
 
     gates.get("/_internal_admin/api/support-grants/g2")?.resolve(json({ id: GRANT2.id, workspaceId: GRANT2.workspace_id }));
@@ -2393,7 +2206,6 @@ describe("Support access screen", () => {
   });
 });
 
-/** note: `GET /api/usage`: three live workspaces on a fixed month. */
 const USAGE = {
   month: "2026-11",
   workspaces: [
@@ -2403,7 +2215,6 @@ const USAGE = {
   ],
 };
 
-/** note: The two count cells of a usage row: Shared bot | Own bots. */
 function usageCells(surface: Surface, needle: string): [string, string] {
   const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
   return [cells[1]?.textContent ?? "", cells[2]?.textContent ?? ""];
@@ -2418,7 +2229,6 @@ describe("Usage screen", () => {
 
   test("rows carry the workspace and the two counts, zeros included", async () => {
     const surface = await usageScreen(() => json(USAGE));
-    // note: The decided columns, in order — no identity column and no total.
     expect([...surface.container.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
       "Workspace",
       "Shared bot",

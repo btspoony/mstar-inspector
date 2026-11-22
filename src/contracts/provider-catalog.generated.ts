@@ -78,46 +78,24 @@ export type ProviderTier = "builtin" | "template";
 
 /** One selectable protocol of a mixed-protocol provider. */
 export type ProviderProtocolOption = {
-  /** Custom-provider API protocol this option materializes. */
   api: string;
-  /** The endpoint this protocol serves on — the size gate matches THIS url. */
   baseUrl: string | null;
-  /** This protocol's own model vocabulary (prefill; clipped to 128 at save). */
   models: readonly string[];
 };
 
 export type ProviderCatalogEntry = {
-  /** Human-readable provider label (picker/table). */
   label: string;
-  /** builtin = allowlisted BYOK provider (pool-transported); template = metadata + prefill only. */
   tier: ProviderTier;
-  /** RETAINED mapping metadata — NOT the container injection variable. The key
-   *  rides the stdin credential payload under the provider id;
-   *  this scalar only marks builtin allowlist membership (providerEnvName).
-   *  Null for template — materialized as a custom-provider declaration. */
   envName: string | null;
-  /** Default API base URL. Template entries may carry a {account_id}
-   *  placeholder the save flow substitutes; a console-only builtin carries
-   *  its declaration's URL shape (any {placeholder} is the operator's). */
   baseUrl: string | null;
-  /** Custom-provider API protocol to materialize a template with (template
-   *  tier), or the declaration prefill of a console-only builtin: null for a
-   *  verifiable builtin, which needs no declaration. */
   api: string | null;
-  /** Representative model ids (display/prefill metadata). */
   models: readonly string[];
-  /** Provider docs URL. */
   doc: string | null;
-  /** Mixed-protocol providers only: every selectable protocol, the default
-   *  FIRST. Absent = this row has exactly one protocol (api/baseUrl/models). */
   protocols?: readonly ProviderProtocolOption[];
 };
 
 export type ProviderInfo = {
-  /** RETAINED mapping metadata — the legacy scalar name of a provider that is
-   *  on the BYOK allowlist; the key itself rides the credential payload. */
   envName: string;
-  /** Human-readable provider label for the picker/table. */
   label: string;
 };
 

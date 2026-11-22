@@ -1,26 +1,5 @@
-/**
- * note: Route recovery claims 1 and 5 — the consumer's side of the handoff.
- *
- * 1. A comment-triggered delivery whose claim was already consumed can still be
- *    recovered: a redelivery that finds an `owed`/`ambiguous` handoff must not
- *    be stopped by the consumed comment claim, and an interruption after
- *    consuming the claim but BEFORE writing the handoff must leave something
- *    the reconciler can find.
- * 5. Error classification carries proof: a `TypeError` is not evidence that a
- *    create did not land, and an "already exists" message is not evidence that
- *    the same instance exists — either find a fact that does, or treat it as
- *    unknown.
- *
- * Every case simulates the interruption (or the lying error) rather than the
- * happy path: the pre-fix code acks a stranded comment delivery, records a
- * TypeError as a definite failure, and confirms "already exists" from a string.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// note: Load shim FIRST: the consumer module statically imports ./sandbox → the
-// workerd builtin `cloudflare:workers`, which Bun's runner cannot resolve. A
-// static import would be HOISTED above the shim, so the module graph under test
-// is loaded dynamically on purpose (the same reason every suite here does).
 import "../helpers/cloudflare-workers-mock";
 
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -35,7 +14,6 @@ import {
 } from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
-/** note: The KV the recovery pass writes failed-claim stamps to (a minimal double). */
 const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { createReviewConsumer, createWorkflowInstance } = await import("../../src/pipeline/consumer");
@@ -45,7 +23,6 @@ beforeEach(() => {
   h = createConsumerHarness();
 });
 
-/** note: The payload of a comment-triggered delivery (no commit of its own). */
 function commentPayload(commentId: number): ReviewJobPayload {
   return makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: commentId });
 }
@@ -98,8 +75,6 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     const db = await createSeededTestD1();
     const payload = commentPayload(9100);
     const key = deliveryKeyOf(payload);
-    // note: The original delivery consumed the comment claim and wrote the handoff,
-    // then the host died before the instance was created.
     seedCommentClaim(db, payload, 9100, "consumed", false);
     await reserveAttemptHandoff(db as never, {
       deliveryKey: key,
@@ -111,7 +86,6 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     });
     expect((await readAttemptHandoff(db as never, key))?.state).toBe("owed");
 
-    // note: The recovery pass re-enqueues the recorded payload.
     const sent: ReviewJobPayload[] = [];
     await reconcileReviewRoute(
       {
@@ -131,7 +105,6 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     );
     await consumer(h.makeBatch(sent[0]!));
 
-    // note: The same attempt is replayed: the consumed claim is not a second claim.
     expect(route.started).toHaveLength(1);
     expect(route.started[0]!.attemptId).toBe("attempt-recovered");
     expect(h.messageAckCalls).toHaveLength(1);
@@ -172,12 +145,8 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
   test("a host killed after consuming the claim and before the handoff leaves a row the reconciler hands back", async () => {
     const db = await createSeededTestD1();
     const payload = commentPayload(9300);
-    // note: The delivery starts with a normal queued claim, exactly as the worker
-    // wrote it: nothing about the interruption is seeded.
     seedCommentClaim(db, payload, 9300, "queued", true);
 
-    // note: The host dies AT the handoff write: that insert never returns, so the
-    // invocation hangs there (its finally never runs) and is abandoned below.
     const reached = Promise.withResolvers<void>();
     const consumer = createReviewConsumer(
       await h.makeEnv({
@@ -204,16 +173,12 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     const abandoned = consumer(h.makeBatch(payload));
     abandoned.catch(() => {});
 
-    // note: Wait for the write to be attempted — no timer, the code signals it.
     await reached.promise;
 
-    // note: The state the CODE produced: the claim was consumed through the normal
-    // path, its payload kept, and no handoff row exists.
     expect(claimRow(db)).toMatchObject({ state: "consumed" });
     expect(JSON.parse(claimRow(db).payload_json!)).toEqual(payload);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_attempt_handoffs").get()).toEqual({ n: 0 });
 
-    // note: Recovery: the reconciler hands the claim back and the replay runs.
     const sent: ReviewJobPayload[] = [];
     const env = {
       DB: db as never,
@@ -229,9 +194,6 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
     expect(sent).toHaveLength(1);
     expect(claimRow(db).state).toBe("queued");
 
-    // note: The dead invocation's admission lease is still held (its finally never
-    // ran); nothing was created for it, so it expires on its TTL — modelled
-    // here as the expiry, not as a second admission beside a live row.
     db.raw.prepare("DELETE FROM review_inflight").run();
     const route = recordingStarter();
     const replay = createReviewConsumer(
@@ -257,8 +219,6 @@ describe("claim 5 — error classification carries proof", () => {
         startAttempt: (_deps, ref) =>
           createWorkflowInstance(
             {
-              // note: The catch surrounds an async call: a TypeError can be raised
-              // while processing a reply the platform already accepted.
               create: async () => {
                 throw new TypeError("Illegal invocation");
               },
@@ -273,8 +233,6 @@ describe("claim 5 — error classification carries proof", () => {
 
     await consumer(h.makeBatch(payload));
 
-    // note: Acked, never retried: the instance MAY exist. Nothing claims the create
-    // did not land — no failure row, no definite-failure settlement.
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(0);
@@ -295,7 +253,6 @@ describe("claim 5 — error classification carries proof", () => {
               create: async () => {
                 throw new Error("A Workflow instance with that ID already exists");
               },
-              // note: The message names no id, and this attempt's id is not there.
               get: async () => {
                 throw new Error("instance not found");
               },
@@ -307,8 +264,6 @@ describe("claim 5 — error classification carries proof", () => {
 
     await consumer(h.makeBatch(payload));
 
-    // note: Not recorded as created: the handoff stays recoverable instead of the
-    // delivery being acked as if an instance owned the attempt.
     expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.state).toBe("ambiguous");
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
@@ -343,8 +298,6 @@ describe("claim 5 — error classification carries proof", () => {
     await consumer(h.makeBatch(payload));
 
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
-    // note: The fact, not the message: the probe ran against the recorded attempt id
-    // and its answer recorded the create as landed.
     expect(probed).toBe(handoff?.attemptId);
     expect(handoff?.state).toBe("created");
     expect(h.messageAckCalls).toHaveLength(1);
@@ -354,8 +307,6 @@ describe("claim 5 — error classification carries proof", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const batch = h.makeBatch(payload);
-    // note: A hand-built message may carry `null`; `Number(null)` is 0, which would
-    // become a fabricated origin if the boundary did not normalize it.
     const message = batch.messages[0]!;
     const unstamped = message as unknown as { timestamp?: Date | null };
     unstamped.timestamp = null;
@@ -369,8 +320,6 @@ describe("claim 5 — error classification carries proof", () => {
     await consumer(batch);
 
     expect(route.started).toHaveLength(1);
-    // note: The cap still anchors at admission; the measured queue wait does not
-    // exist, so it stays NULL and the report excludes the attempt.
     expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.enqueuedMs).toBeNull();
   });
 });

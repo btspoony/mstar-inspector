@@ -1,5 +1,5 @@
 /**
- * Token source — the only hand-editable half of the design system.
+ * why: Token source — the only hand-editable half of the design system.
  *
  * Three layers, one direction: `primitive` holds raw values, `semantic` names
  * the jobs and references primitives, `component` composes semantics. A layer

@@ -1,42 +1,12 @@
-/**
- * Private-key PEM normalization — the lock-L1 reserved utility
- * (manifest-flow import): PKCS#1 → PKCS#8 wrapping, PKCS#8
- * pass-through, OpenSSH hard error.
- *
- * Storage口径 (lock L1): the GitHub App manifest conversion PEM is
- * stored VERBATIM (encrypted via secretbox) — no normalization happens at
- * the write side, and the retired secrets-bulk flow no longer
- * exists. PKCS#8 normalization (the only format workerd WebCrypto
- * `importKey` accepts) happens at `createReviewCommenter` construction on
- * the consumer side (src/pipeline/comment.ts — its own copy, since dashboard
- * ↛ pipeline/worker, architect decision Q2).
- *
- * Its first src/ consumer now exists: src/dashboard/github-app-metadata.ts
- * (the metadata writer) reuses `normalizePrivateKey` for the App-JWT mint. The module
- * stays reserved as the optional write-side format self-check (check-only —
- * never persists a normalized secret) and its equivalence pin against the
- * consumer copy (tests/worker/dashboard.test.ts) guards consumer-side drift.
- * Same algorithm as src/pipeline/comment.ts (the worker/diff.ts copy was
- * retired) — duplicated per the Q2 route isolation; no shared
- * module is extracted.
- */
 
-/** DER tag for a SEQUENCE (0x30). */
 const DER_SEQUENCE = 0x30;
-/** DER tag for an OCTET STRING (0x04). */
 const DER_OCTET_STRING = 0x04;
-/** DER tag for an INTEGER (0x02). */
 const DER_INTEGER = 0x02;
-/** DER tag for an OBJECT IDENTIFIER (0x06). */
 const DER_OID = 0x06;
-/** DER tag for NULL (0x05). */
 const DER_NULL = 0x05;
-/** rsaEncryption OID (1.2.840.113549.1.1.1) — the only algorithm PKCS#1 keys use. */
 const RSA_ENCRYPTION_OID = new Uint8Array([0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]);
-/** PKCS#8 version 0 (single-version, no attributes). */
 const PKCS8_VERSION_ZERO = new Uint8Array([0x00]);
 
-/** DER length encoding: short form (< 0x80) or long form (0x80 | byte count). */
 function derLength(length: number): Uint8Array {
   if (length < 0x80) {
     return new Uint8Array([length]);
@@ -50,7 +20,6 @@ function derLength(length: number): Uint8Array {
   return new Uint8Array([0x80 | bytes.length, ...bytes]);
 }
 
-/** DER TLV element: tag byte + length + body. */
 function derElement(tag: number, body: Uint8Array): Uint8Array {
   const len = derLength(body.length);
   const out = new Uint8Array(1 + len.length + body.length);
@@ -60,7 +29,6 @@ function derElement(tag: number, body: Uint8Array): Uint8Array {
   return out;
 }
 
-/** Concatenate byte arrays (DER building blocks). */
 function concatBytes(...parts: Uint8Array[]): Uint8Array {
   const total = parts.reduce((n, p) => n + p.length, 0);
   const out = new Uint8Array(total);
@@ -72,12 +40,10 @@ function concatBytes(...parts: Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** Base64 → bytes (PEM body decoding; `atob` is available in Bun and workerd). */
 function base64ToBytes(b64: string): Uint8Array {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-/** Bytes → base64 (PEM body encoding). */
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) {

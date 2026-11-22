@@ -1,10 +1,3 @@
-/**
- * safety: Credential-SHAPED test dummies, assembled at runtime: no contiguous
- * credential literal exists in test source (Mimosa gate: hardcoded-credential
- * findings), while runtime values stay byte-identical so redaction/allowlist
- * fixtures still exercise the real secret shapes. Every value is fake — this
- * file must never hold a usable credential.
- */
 
 /** OpenAI-style dummy key: `sk-<suffix>`. */
 export const sk = (suffix: string): string => "sk-" + suffix;

@@ -34,13 +34,6 @@ import {
 
 const REPO_ROOT = join(import.meta.dir, "..");
 
-/**
- * why: Backticked tokens on the BULLET lines of one prose slice — the documented
- * family list. Any backticked token counts, not a fixed prefix set: a new
- * family outside `packages/`, `sandbox-image/` or a root dotfile must not drift
- * in prose while the gate stays silent. Restricting to `- ` lines keeps a later
- * prose sentence (which names a concrete Dockerfile) out of the comparison.
- */
 function documentedFamilies(text: string, startMarker: string, endMarker: string): string[] {
   const start = text.indexOf(startMarker);
   const end = text.indexOf(endMarker, start);
@@ -53,10 +46,6 @@ function documentedFamilies(text: string, startMarker: string, endMarker: string
     .flatMap((line) => [...line.matchAll(/`([^`]+)`/g)].map((m) => m[1]!));
 }
 
-/**
- * note: The `COPY <src>…` sources of a Dockerfile. Multi-stage `COPY --from=` reads
- * from another image, not the build context, so it is not an input family.
- */
 function copySources(dockerfile: string): string[] {
   return dockerfile
     .split("\n")
@@ -90,8 +79,6 @@ describe("image input vocabulary parity", () => {
 
   test("the printed instruction is the AGENTS.md section, not a copy of it", () => {
     const agents = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
-    // why: Independent boundaries: a hand copy that drifts, or a generator that
-    // slices only a fragment of the section, misses this exact string.
     const quoted = agents
       .slice(
         agents.indexOf("The review container is built from"),
@@ -99,15 +86,10 @@ describe("image input vocabulary parity", () => {
       )
       .trimEnd();
     expect(imageRebuildInstruction()).toBe(quoted);
-    // why: The fact the retired hand copy had lost: the doc names the Dockerfile.
     expect(imageRebuildInstruction()).toContain("sandbox-image/Dockerfile");
   });
 
   test("every COPY source in the Dockerfile is covered by an input family", () => {
-    // why: The vocabulary is only complete if it covers what the image actually
-    // copies in: a new `COPY` that no family matches would change the image
-    // while the gate stayed silent. Families name paths INSIDE a directory
-    // (`X/**`), so a `COPY <dir>` is covered by the family for its contents.
     const sources = copySources(readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8"));
     expect(sources.length).toBeGreaterThan(0);
     const uncovered = sources.filter(
@@ -117,15 +99,11 @@ describe("image input vocabulary parity", () => {
   });
 
   test("the CLI's Dockerfile paths are the ones wrangler.jsonc builds, and they exist", () => {
-    // note: Both blocks declare the same file here, so the gate diffs it once — but
-    // it is derived from the config, never hardcoded.
     const configured = readDockerfilePaths(readFileSync(join(REPO_ROOT, "wrangler.jsonc"), "utf8"));
     expect(configured).toEqual(["sandbox-image/Dockerfile"]);
-    // why: Both wrangler configs agree, so the gate never diffs a file a deploy ignores.
     expect(readDockerfilePaths(readFileSync(join(REPO_ROOT, "wrangler.smoke.jsonc"), "utf8"))).toEqual(
       configured,
     );
-    // note: The configured file is the one the gate reads the fingerprint line from.
     expect(readFileSync(join(REPO_ROOT, configured[0]!), "utf8")).toContain("# image-inputs:");
   });
 
@@ -133,12 +111,9 @@ describe("image input vocabulary parity", () => {
     expect(readDockerfilePaths("{}")).toEqual([]);
     expect(readDockerfilePaths("not json")).toEqual([]);
     expect(readDockerfilePaths('{"containers":[{"images":{}}]}')).toEqual([]);
-    // note: JSONC comments are stripped before the parse.
     expect(
       readDockerfilePaths('{\n // the image\n "containers": [{"images": {"sandbox": {"dockerfile": "./a/Df"}}}]}'),
     ).toEqual(["a/Df"]);
-    // why: A named environment does not inherit `containers` (wrangler), so
-    // `env.production` declares its own Dockerfile path — the gate must read it.
     expect(
       readDockerfilePaths(
         '{"env":{"production":{"containers":[{"images":{"sandbox":{"dockerfile":"./prod/Df"}}}]}}}',
@@ -166,7 +141,6 @@ describe("imageInputFingerprint", () => {
 
   test("a path rename, a content edit and a container-block edit each move it", () => {
     const base = imageInputFingerprint([file("a.ts")], block);
-    // why: Same bytes at a new path: the deploy copies a different tree.
     expect(imageInputFingerprint([file("renamed.ts")], block)).not.toBe(base);
     expect(imageInputFingerprint([file("a.ts", "export const x = 2;\n")], block)).not.toBe(base);
     expect(imageInputFingerprint([file("a.ts")], '[{"name":"c","images":{"sandbox":{}}}]')).not.toBe(
@@ -203,7 +177,6 @@ describe("the recorded fingerprint line", () => {
   test("the committed Dockerfile records the tree it ships, and only that line mentions it", () => {
     const dockerfile = readFileSync(join(REPO_ROOT, "sandbox-image", "Dockerfile"), "utf8");
     expect(readImageInputsMarker(dockerfile)).toMatch(/^[0-9a-f]{32}$/);
-    // note: The retired convention: a human-written changelog entry per change.
     expect(dockerfile).not.toMatch(/^\s*#\s*rebuild:/m);
   });
 });
@@ -233,8 +206,6 @@ describe("image gate", () => {
     }));
 
   test("the verdict does not depend on the base diff: families are the message only", () => {
-    // why: A first push, a squashed base, an unreadable range — the fingerprint
-    // already decided, so a missing family list still fails.
     expect(evaluateImageGate("aaaa", FP).ok).toBe(false);
     expect(evaluateImageGate(FP, FP).ok).toBe(true);
   });
@@ -263,7 +234,6 @@ describe("the input set the fingerprint covers", () => {
     expect(familyRoot("packages/runner/package.json")).toBe("packages/runner/package.json");
     expect(familyRoot("sandbox-image/**")).toBe("sandbox-image");
     expect(familyRoot(".dockerignore")).toBe(".dockerignore");
-    // why: A leading wildcard has no literal prefix: the walk widens rather than miss.
     expect(familyRoot("**/*.ts")).toBe(".");
   });
 });
@@ -278,7 +248,6 @@ describe("containerSignature", () => {
     const head = config(BLOCK, '  // deploy shape\n  "vars": { "DEPLOYMENT_MODE": "self-hosted" },\n  "keep_vars": true,\n');
     const baseSignature = containerSignature(base);
     expect(baseSignature).toBeDefined();
-    // note: A JSONC comment is not a value either.
     expect(containerSignature(head)).toBe(baseSignature);
   });
 
@@ -302,8 +271,6 @@ describe("containerSignature", () => {
   });
 
   test("the env.production container block counts, not just the top level", () => {
-    // why: A named environment does not inherit `containers`, so a prod deploy
-    // builds from its own block: every image-deciding edit there is a change.
     const production = (container: string) =>
       `{\n  "env": { "production": { "containers": [${container}] } }\n}\n`;
     const baseSignature = containerSignature(production(BLOCK));
@@ -317,13 +284,11 @@ describe("containerSignature", () => {
     ]) {
       expect(containerSignature(production(changed)), changed).not.toBe(baseSignature);
     }
-    // note: A production vars-only edit is not an image change.
     expect(
       containerSignature(
         `{\n  "env": { "production": { "vars": { "DEPLOYMENT_MODE": "saas" }, "containers": [${BLOCK}] } }\n}\n`,
       ),
     ).toBe(baseSignature);
-    // note: A production block that is not an array fails closed like a top-level one.
     expect(containerSignature('{"env": {"production": {"containers": "no"}}}')).toBeUndefined();
   });
 });
@@ -341,9 +306,6 @@ describe("touchesImageInput", () => {
 
   test("matches each declared path family", () => {
     for (const path of declared) expect(touchesImageInput([path])).toBe(true);
-    // why: Each family answers on a path it derives from itself, and answers with
-    // only itself — so a pattern that stops matching, or a new family, fails
-    // here even though the array length never moved.
     for (const family of IMAGE_INPUT_FAMILIES) {
       expect(changedFamilies([family.replace("**", "sample")]), family).toEqual([family]);
     }
@@ -363,15 +325,11 @@ describe("touchesImageInput", () => {
   });
 
   test("a single `*` stays inside one path segment", () => {
-    // note: `sandbox-image/*.sh` is one level only: the shell helpers the Dockerfile
-    // copies live there, while a nested script (or the repo root) is not a
-    // member of that family.
     const family = familyPattern("sandbox-image/*.sh");
     expect(family.test("sandbox-image/entry.sh")).toBe(true);
     expect(family.test("sandbox-image/verify-cli-lock.sh")).toBe(true);
     expect(family.test("sandbox-image/nested/entry.sh")).toBe(false);
     expect(family.test("entry.sh")).toBe(false);
-    // note: `?` is one character, never the regex optional-quantifier it reads as.
     const single = familyPattern("sandbox-image/?.sh");
     expect(single.test("sandbox-image/a.sh")).toBe(true);
     expect(single.test("sandbox-image/.sh")).toBe(false);
@@ -379,7 +337,6 @@ describe("touchesImageInput", () => {
   });
 });
 
-/** note: A throwaway repo whose only commits are the ones this test writes. */
 function tempRepo(): { dir: string; git: (...args: string[]) => string } {
   const dir = mkdtempSync(join(tmpdir(), "image-gate-"));
   const git = (...args: string[]): string => {
@@ -390,10 +347,7 @@ function tempRepo(): { dir: string; git: (...args: string[]) => string } {
   git("init", "-q");
   git("config", "user.name", "test");
   git("config", "user.email", "test@example.com");
-  // why: Git's default; a global `core.quotePath=false` would otherwise hide the quoting.
   git("config", "core.quotePath", "true");
-  // why: The CLI reads the Dockerfile path from this config, so every fixture needs
-  // one — without it the run would fail on the missing config, not on the diff.
   write(
     dir,
     "wrangler.jsonc",
@@ -407,7 +361,6 @@ function write(dir: string, path: string, content = "export const x = 1;\n"): vo
   writeFileSync(join(dir, path), content);
 }
 
-/** note: The gate's actual CLI, run against `dir` for `base...HEAD`. */
 function runGate(
   dir: string,
   base: string,
@@ -436,8 +389,6 @@ describe("resolveBase", () => {
       return undefined;
     };
     expect(resolveBase(BASE, "main", run)).toEqual({ sha: BASE });
-    // why: The descendant guard is the only extra question: nothing is fetched and
-    // no merge base is sought.
     expect(calls.some(([command]) => command === "fetch")).toBe(false);
     expect(calls.some(([command, sub]) => command === "merge-base" && sub !== "--is-ancestor")).toBe(
       false,
@@ -463,7 +414,6 @@ describe("resolveBase", () => {
     const run = (args: string[]) => {
       if (args[0] === "cat-file") return "";
       if (args[0] === "rev-parse") return `${HEAD}\n`;
-      // note: HEAD is an ancestor of the requested commit: a backwards force-push.
       if (args[0] === "merge-base" && args[1] === "--is-ancestor") {
         return args[3] === BASE ? "" : undefined;
       }
@@ -482,7 +432,6 @@ describe("resolveBase", () => {
       }
       if (args[0] === "cat-file") return fetched ? "" : undefined;
       if (args[0] === "rev-parse") return `${HEAD}\n`;
-      // note: HEAD is an ancestor of the fetched commit: a backwards force-push.
       if (args[0] === "merge-base") return "";
       return undefined;
     };
@@ -498,7 +447,6 @@ describe("resolveBase", () => {
     const mergeBase = "b".repeat(40);
     const run = (args: string[]) => {
       if (args[0] === "cat-file") return undefined;
-      // note: HEAD is not an ancestor of the merge base: the base lies behind HEAD.
       if (args[0] === "merge-base" && args[1] === "--is-ancestor") return undefined;
       if (args[0] === "merge-base") return `${mergeBase}\n`;
       if (args[0] === "rev-parse") return `${HEAD}\n`;
@@ -531,7 +479,6 @@ describe("resolveBase", () => {
 describe("image gate CLI", () => {
   const script = join(import.meta.dir, "check-image-inputs.ts");
 
-  /** note: A temp repo whose image inputs are committed and whose line is current. */
   function seeded(): { dir: string; git: (...args: string[]) => string } {
     const repo = tempRepo();
     write(repo.dir, "sandbox-image/Dockerfile", "# image-inputs: 0000\nFROM scratch\n");
@@ -568,7 +515,6 @@ describe("image gate CLI", () => {
       const stale = runGate(dir, base, script);
       expect(stale.code).toBe(1);
       expect(stale.out).toContain("::error::image-inputs-stale");
-      // note: The message names the changed family and the exact repair command.
       expect(stale.out).toContain("- packages/runner/src/**");
       expect(stale.out).toContain("--write");
 
@@ -657,7 +603,6 @@ describe("image gate CLI", () => {
       write(dir, "wrangler.jsonc", config("."));
       git("add", "-A");
       git("commit", "-qm", "production image");
-      // note: Both configured files carry the same value.
       expect(runGate(dir, dir, script, "--write").code).toBe(0);
       git("add", "-A");
       git("commit", "-qm", "recorded in both");
@@ -683,13 +628,8 @@ describe("image gate CLI", () => {
       const sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
       const { code, out } = runGate(dir, sha, script);
       expect(code).toBe(1);
-      // why: The verdict is the fingerprint's, so it is unchanged by the bad base...
       expect(out).toContain("::error::image-inputs-stale");
       expect(out).toContain(`--base ${sha} --write`);
-      // why: ...and the missing base is REPORTED, naming the commit and why it could
-      // not be resolved, instead of an empty family list reading as "nothing
-      // changed". This is the assertion the previous revision could not make:
-      // it pinned the absence of an annotation the CLI never emitted.
       expect(out).toContain("::warning::image-gate-base-unresolved");
       expect(out).toContain(sha);
       expect(out).toContain("not reachable in this checkout");

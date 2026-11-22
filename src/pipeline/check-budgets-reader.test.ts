@@ -1,10 +1,3 @@
-/**
- * The pipeline's settings seam: `readCheckBudgets` / `readRecheckBacklogFill`.
- *
- * The store owns parsing, defaults and the degraded answer; these readers add
- * exactly one behaviour — ONE structured warn per degraded read, silence on
- * absent rows — and that is what these cases pin.
- */
 import { describe, expect, test } from "bun:test";
 import {
   CHECK_TERMINALIZE_DEFAULT,

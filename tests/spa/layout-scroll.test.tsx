@@ -1,9 +1,3 @@
-/** note: The dashboard shell's scroll contract, asserted on the static markup:
- *
- * The provider and inset wrappers pin the viewport (h-svh + overflow-hidden)
- * so the sidebar/navbar chrome never scrolls away, and the page content
- * wrapper is the document's sole vertical scroll container.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -34,8 +28,6 @@ const tierAt = (pathname: string, bootOverrides: Partial<SpaBoot> = {}): string 
       children: createElement("p", null, "Page"),
     }),
   );
-  // invariant: The tier IS the measure: the content wrapper resolves to exactly one
-  // max-w-[…] value, and that value is the observable.
   const match = markup.match(/max-w-\[(1200|960)px\]/);
   expect(match, `the content wrapper resolves to a measure tier at ${pathname}`).not.toBeNull();
   return match![0];
@@ -84,7 +76,6 @@ describe("dashboard shell scroll contract (SSR)", () => {
     expect(scrollers).toHaveLength(1);
     expect(scrollers[0]).toContain("flex-1");
     expect(scrollers[0]).toContain("min-h-0");
-    // invariant: The chrome layers never scroll.
     expect(tagOf(html, "sidebar-wrapper")).not.toContain("overflow-y-auto");
     expect(tagOf(html, "sidebar-inset", "main")).not.toContain("overflow-y-auto");
   });
@@ -105,8 +96,6 @@ describe("dashboard shell scroll contract (SSR)", () => {
     const sidebar = tagOf(html, "sidebar");
     expect(sidebar).toContain("h-full");
     expect(sidebar).not.toContain("h-svh");
-    // invariant: In-flow column order: the sidebar renders before the inset, and the
-    // fixed-position variants (rail/gap machinery) are absent.
     expect(html.indexOf('data-slot="sidebar"')).toBeLessThan(html.indexOf('data-slot="sidebar-inset"'));
     expect(html).not.toContain('data-slot="sidebar-container"');
   });

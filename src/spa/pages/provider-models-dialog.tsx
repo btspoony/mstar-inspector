@@ -1,53 +1,26 @@
-/**
- * The model picker: which model ids of an already-configured provider the App
- * exposes (the `update-provider-models` settings op). The stored declaration
- * is the seed — a stored id the catalog no longer lists stays listed and
- * checked, never silently dropped. At least one id must stay selected, and
- * the model-id cap (MAX_CUSTOM_PROVIDER_MODEL_IDS, src/contracts/provider-models.ts)
- * is enforced client-side: an unchecked box is unavailable at the cap, and the
- * server still refuses an over-limit write.
- *
- * Busy state, the disabled save and the failure contract are this dialog's —
- * `StepDialog` owns only the shell. Like the add-key flow, a failed submit
- * stays open with the selection intact; a success is the only close.
- */
 import { useEffect, useRef, useState } from "react";
 import { Button, Input } from "@design-system";
 import { t } from "../../i18n";
 import { MAX_CUSTOM_PROVIDER_MODEL_IDS, resolveModelSize } from "../../contracts/provider-models";
 import type { ModelSize, ModelSizeSource } from "../../contracts/provider-models";
 
-/** The dialog's label vocabulary: the contract's source, plus the mixed pair. */
 type SizeProvenance = ModelSizeSource | "mixed";
 import type { SpaBoot } from "../boot";
 import { StepDialog } from "../components/StepDialog";
 import type { CustomProviderModelMeta, CustomProviderModelsMeta } from "./data";
 import { NoticeRegion, type OpNotice } from "./PageNotice";
 
-/**
- * What ONE selected model shows. Sizes are strings, never numbers: a value that
- * is not a whole number is sent as typed so the server names the field instead
- * of the dialog silently dropping it. `fromCatalog` marks a size the catalog
- * supplied and the operator has not touched — it is shown, but never posted
- * back as if the operator had stated it.
- */
 type FieldState = {
   contextWindow: string;
   maxTokens: string;
   name: string;
-  /** "" = not stated (distinct from an explicit no), "true" / "false" = stated. */
   reasoning: "" | "true" | "false";
   input: string;
   fromCatalog: { contextWindow: boolean; maxTokens: boolean };
 };
 
 function fieldStateOf(meta: CustomProviderModelMeta | undefined, catalog: ModelSize | undefined): FieldState {
-  // Canonical "unset" is an ABSENT field (the store's read boundary normalizes
-  // any legacy null away). The null checks stay as the last line of defence at
-  // THIS boundary: a null must render blank, never as "No reasoning".
   const size = (value: number | null | undefined): string => (value === undefined || value === null ? "" : String(value));
-  // The contract resolves the pair: the operator's statement wins per field,
-  // the catalog fills the blank, and neither side invents one.
   const resolved = resolveModelSize(meta, catalog);
   const unstated = (value: unknown): boolean => value === undefined || value === null;
   return {
@@ -90,45 +63,28 @@ export function ProviderModelsDialog({
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** The provider id the settings POST names. */
   provider: string;
-  /** The group's display label — the dialog title's subject. */
   label: string;
-  /** The declaration's stored ids — the selection seed. */
   storedModelIds: readonly string[];
-  /** The owner's stored per-model facts — the field seed (absent = unstated). */
   storedModelsMeta?: CustomProviderModelsMeta;
-  /** The catalog vocabulary for the provider. */
   catalogModelIds: readonly string[];
-  /** The catalog's per-model sizes (payload `model_limits`) — the blank-field seed. */
   catalogLimits: Record<string, ModelSize>;
-  /** The snapshot those sizes came from (payload `model_limits_snapshot`). */
   limitsSnapshot: string;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
 }) {
-  // Catalog order first, then stored ids the catalog no longer lists (older
-  // declarations) — listed and checked, never silently dropped. The Set also
-  // folds duplicate stored ids into one row: the write path never deduped.
   const allIds = [...new Set([...catalogModelIds, ...storedModelIds])];
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set(storedModelIds));
   const [fields, setFields] = useState<Record<string, FieldState>>(() =>
     seedFields(storedModelIds, storedModelsMeta, catalogLimits),
   );
   const [query, setQuery] = useState("");
-  // The detail editor is folded away by default: the selection list is the
-  // dialog's business, and the per-model facts are an optional second step.
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsFor, setDetailsFor] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const inFlight = useRef(false);
 
-  // Opening re-seeds from the stored list: the declaration is the source of
-  // truth, and a cancelled earlier edit must not leak into the next open.
-  // Seed exactly once per open transition — background reloads hand us a
-  // fresh storedModelIds identity while open and must not wipe the
-  // in-progress selection.
   const wasOpenRef = useRef(false);
   useEffect(() => {
     if (!open) {
@@ -148,17 +104,11 @@ export function ProviderModelsDialog({
   const needle = query.trim().toLowerCase();
   const filtered = needle === "" ? allIds : allIds.filter((id) => id.toLowerCase().includes(needle));
   const atCap = selected.size >= MAX_CUSTOM_PROVIDER_MODEL_IDS;
-  // Select-all acts on the rendered list, so it has nothing to do once every
-  // visible id is checked — the cap alone never disables it.
   const allFilteredSelected = filtered.every((id) => selected.has(id));
-  // The detail editor always shows exactly one selected model; a stale choice
-  // (its id was just unchecked) falls back to the first selected id.
   const selectedIds = [...selected];
   const detailId = detailsFor !== null && selected.has(detailsFor) ? detailsFor : (selectedIds[0] ?? "");
   const detailState = stateOf(detailId);
   const detailSource = sourceOf(detailId);
-  // A provider with no catalog row at all has UNKNOWN sizes, not zero: the
-  // dialog says so instead of crediting a snapshot with numbers it lacks.
   const catalogKnowsSizes = Object.keys(catalogLimits).length > 0;
 
   function toggle(id: string): void {
@@ -173,7 +123,6 @@ export function ProviderModelsDialog({
     });
   }
 
-  /** The typed state of one selected model (a never-touched id seeds from store + catalog). */
   function stateOf(id: string): FieldState {
     return fields[id] ?? fieldStateOf(storedModelsMeta?.[id], catalogLimits[id]);
   }
@@ -182,8 +131,6 @@ export function ProviderModelsDialog({
     setFields((current) => {
       const base = current[id] ?? fieldStateOf(storedModelsMeta?.[id], catalogLimits[id]);
       const next = { ...base, [key]: value };
-      // Typing into a size makes it the operator's own statement: the catalog
-      // value is now an override to post, not a seed to omit.
       if (key === "contextWindow" || key === "maxTokens") {
         next.fromCatalog = { ...base.fromCatalog, [key]: false };
       }
@@ -191,12 +138,6 @@ export function ProviderModelsDialog({
     });
   }
 
-  /**
-   * Where the shown sizes come from — the label beside the fields. A blank pair
-   * is "absent" (the model saves as unstated); "catalog" only when EVERY shown
-   * number is a catalog seed; "declared" when none is; "mixed" when the
-   * operator typed one side and the catalog filled the other.
-   */
   function sourceOf(id: string): SizeProvenance {
     const state = stateOf(id);
     const fields = ["contextWindow", "maxTokens"] as const;
@@ -207,13 +148,6 @@ export function ProviderModelsDialog({
     return fromCatalog.length === filled.length ? "catalog" : "mixed";
   }
 
-  /**
-   * The metadata statement this form carries: ONLY what the operator stated.
-   * A size pre-filled from the catalog and left untouched is not posted back —
-   * the read side resolves it from the same catalog — and a model whose entry
-   * states nothing carries no entry at all: the save is accepted and the
-   * declaration stays unstated (the runtime's own default applies).
-   */
   function overlayStatement(): string {
     const meta: CustomProviderModelsMeta = {};
     for (const id of selected) {
@@ -224,8 +158,6 @@ export function ProviderModelsDialog({
         if (text === "") continue;
         if (state.fromCatalog[key]) continue;
         const value = Number(text);
-        // A non-numeric entry travels as typed so the server names the field
-        // rather than the dialog dropping it silently.
         entry[key] = Number.isFinite(value) ? value : text;
       }
       if (state.name.trim() !== "") entry.name = state.name.trim();
@@ -338,7 +270,6 @@ export function ProviderModelsDialog({
               const checked = selected.has(id);
               return (
                 <li key={id}>
-                  {/* The house checkbox: native input, accent tone (the allowlist switch). */}
                   <label className="flex items-center gap-2 font-mono text-xs">
                     <input
                       type="checkbox"
@@ -360,8 +291,6 @@ export function ProviderModelsDialog({
               type="button"
               className="self-start text-sm font-medium text-(--tone-accent-fg)"
               aria-expanded={detailsOpen}
-              // The region mounts only while open, so the control never names a
-              // missing element (the combobox precedent).
               aria-controls={detailsOpen ? "provider-models-details" : undefined}
               onClick={() => setDetailsOpen(!detailsOpen)}
             >
@@ -372,20 +301,11 @@ export function ProviderModelsDialog({
                 id="provider-models-details"
                 className="flex flex-col gap-3 rounded-(--radius-control) border border-(--border-default) bg-(--surface-inset) px-3 py-2"
               >
-                {/* A provider with NO catalog sizes at all has unknown sizes,
-                    not zero — so one sentence replaces the provenance line
-                    (whose "a catalog size is pre-filled" would credit a
-                    snapshot with numbers this provider does not have) and the
-                    "unstated" note, which is for a catalog that exists but
-                    says nothing about this model. Neither size field is a
-                    precondition in either case. */}
                 {catalogKnowsSizes ? (
                   <>
                     <p className="text-sm text-muted-foreground">
                       {t(locale, "settings.providers.models.requirements")}
                     </p>
-                    {/* The warning is for a model NOTHING supplies; a catalog
-                        value is labelled with its snapshot instead. */}
                     {detailSource === "absent" ? (
                       <p className="text-sm text-muted-foreground">
                         {t(locale, "settings.providers.models.sizesUnstated")}

@@ -1,91 +1,3 @@
-/**
- * Runtime configuration store — the system and workspace review-concurrency
- * caps (migration 0040: `review_runtime_settings` + the nullable
- * `workspaces.max_concurrent_reviews` column).
- *
- * Level contract:
- *   - System cap lives in `review_runtime_settings` under
- *     `review.concurrency.system`; an ABSENT row reads as the platform
- *     quota (256).
- *   - Workspace cap is the `workspaces` column; NULL reads as 32 — the
- *     per-workspace maximum, so no tenant may exceed it.
- *   - Effective = min(system, workspace). The per-PR lock (1) is not
- *     configurable and is not this store's business.
- *
- * Live-workspace policy: both workspace reads filter `deleted_at IS NULL`, the
- * same predicate the settings WRITE uses (`WORKSPACE_AUDIT_SQL` /
- * `WORKSPACE_UPDATE_SQL`). A retired workspace is therefore absent to the read
- * exactly as it is unavailable to the write: it falls back to
- * WORKSPACE_CONCURRENCY_DEFAULT (32, a real bound) rather than continuing to
- * govern its queued jobs with a pinned value nobody can change any more.
- * `deleted_at IS NULL` never degrades a read — it is absence, not untrusted
- * data — so `degraded` stays false on that path.
- *
- * Read discipline: ONE prepared statement per decision point, no KV and no
- * request cache — `getEffectiveConcurrency` reads both levels in a single
- * statement for exactly that reason. Only an ABSENT row/column is the default:
- * a PRESENT value the parse cannot trust, or a result that is not a row at
- * all, answers the CONSERVATIVE cap (1, i.e. serial) with `degraded: true` and
- * never throws — a settings read that breaks must not admit unlimited
- * concurrent reviews. The single-level reader (`getSystemConcurrency`) answers
- * `{ concurrency, degraded }` for the same reason: a settings face that renders
- * the conservative fallback as a normal value invites a save of a number
- * nobody stored. The structured warn belongs
- * to the consumer that has a logger (the pipeline reader), not here — with one
- * exception: the maintenance reader logs its own `maintenance_read_failed`
- * line, because a gate cannot tell a read fault from an open window and would
- * otherwise fail open.
- *
- * Check budgets (spec §7.10) are the same table, global rather than
- * per-workspace: `review.check.terminalize_timeout_ms` (the consumer's wait on
- * the terminalize hook) and `review.check.update_timeout_ms` (the bound on the
- * one `checks.update`). Their defaults live here as ABSENT-ROW defaults, in the
- * one range predicate the writes and the degraded read share: an untrusted
- * stored value answers the default with `degraded: true` and never throws,
- * because a Check never blocks or delays the review.
- *
- * Comment-claim outbox settings (migration 0048) are the same table and the
- * same rule, one tier further out: `review.comment_claim.retry_ms`,
- * `.max_attempts` and `.outbox_cap` bound the cron's recovery of a
- * comment-trigger claim whose queue send never happened. They are operator
- * budgets, not protocol constants — the absent-row defaults below are the
- * documented behaviour, and the admin `/runtime` surface is the only writer.
- *
- * The recheck seat's ask budget (`review.recheck.assignment_max_bytes`) is one
- * more global row: how many UTF-8 bytes of assignment the seat may be asked
- * with. An absent row reads the runner's documented default; an untrusted
- * value answers that default with `degraded: true`, never a throw — the round
- * is still asked, at the conservative budget.
- *
- * The operator default review depth is one more row in the same
- * table: `review.level.default` holds a `REVIEW_LEVELS` tier that every App
- * with no depth of its own inherits. An absent row reads `"default"`; a stored
- * value off the vocabulary is untrusted — the default with `degraded: true`,
- * never a throw, because a review must still run.
- *
- * The official workspace and maintenance mode are the non-`review.` keys:
- * `platform.*` is a domain of the same table because both are global platform
- * parameters, not per-tenant columns. `RUNTIME_SETTING_DOMAINS` is the registry
- * that keeps that honest — the table is the platform's parameter store whose
- * keys group by domain prefix, and a future rename is a mechanical migration,
- * not a behaviour change. Maintenance mode is three rows
- * (`platform.maintenance.enabled|reason|since`) read in ONE statement: an
- * absent `enabled` row is off, and the toggle DELETEs reason/since rather than
- * blanking them, so an absent companion is the one "no reason" / "not running"
- * shape there is.
- *
- * Write discipline: the system value is an integer in 1..SYSTEM_CONCURRENCY_MAX
- * (the platform-wide quota; Cloudflare Queues delivers at most 250 of it at
- * once); the workspace value is an integer in 1..WORKSPACE_CONCURRENCY_MAX.
- * The two bounds are independent: a workspace write is NEVER compared with the
- * system quota — that comparison would let a tenant binary-search the platform
- * number — and the quota applies only at admission, as
- * `min(system, workspace)`. Both writes land with their
- * `platform_audit_events` row in ONE `db.batch`, the `flag.set` pattern in
- * src/admin/index.ts — a failed write appends no audit row.
- *
- * Module boundary: no pipeline or worker dependencies.
- */
 import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
   DEFAULT_CHECK_MIN_SCORE,
@@ -129,7 +41,6 @@ export const CHECK_TERMINALIZE_MIN = 1_000;
 export const CHECK_TERMINALIZE_MAX = 30_000;
 /** Range of a stored update budget. */
 export const CHECK_UPDATE_MAX = 15_000;
-/** The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
 
 /** PK of the comment-claim outbox retry window (migration 0048). */
@@ -153,7 +64,6 @@ export const COMMENT_CLAIM_ATTEMPTS_MAX = 10;
 /** Range of a stored outbox batch size. */
 export const COMMENT_CLAIM_OUTBOX_MIN = 1;
 export const COMMENT_CLAIM_OUTBOX_MAX = 100;
-/** The audit ledger's target id for the trio (one operator save, one row). */
 const COMMENT_CLAIM_TARGET = "review.comment_claim.budgets";
 
 /** PK of the operator default review-depth row. */
@@ -161,7 +71,6 @@ export const REVIEW_LEVEL_KEY = "review.level.default";
 /** Absent row: the tier every App without its own depth inherits. */
 export const REVIEW_LEVEL_DEFAULT: ReviewLevel = "default";
 
-/** Integer in min..max — the one predicate every write and every read re-parses with. */
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
@@ -171,14 +80,6 @@ export function isConcurrencyValue(value: unknown, max: number): value is number
   return isIntegerIn(value, CONCURRENCY_MIN, max);
 }
 
-/**
- * Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
- * so the caller's default applies; `NaN` = the value is present but not a
- * trusted in-range integer, which no reader may treat as a default. Only a
- * number or a string counts: D1's declared column types do not constrain what
- * a row actually carries, so any other runtime value is untrusted, never
- * something `Number()` may coerce into a value (`["16"]` → 16, `true` → 1).
- */
 function parseInRange(value: unknown, min: number, max: number): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
@@ -186,14 +87,6 @@ function parseInRange(value: unknown, min: number, max: number): number | undefi
   return isIntegerIn(parsed, min, max) ? parsed : Number.NaN;
 }
 
-/**
- * The workspace column's parse. A value ABOVE the per-workspace maximum is
- * clamped to it rather than treated as untrusted: migration 0043 lowers the
- * rows that exist when it applies, but the window between "migrations applied"
- * and "new Worker live" lets the previously deployed API store one more
- * 33..64 value. Reading it as the maximum keeps that workspace at a real cap
- * instead of degrading the whole workspace to serial.
- */
 function parseWorkspaceStored(value: unknown): number | undefined {
   if (value === null || value === undefined) return undefined;
   if (typeof value !== "string" && typeof value !== "number") return Number.NaN;
@@ -214,15 +107,9 @@ export type DegradedReason = "read-failed" | "malformed" | "untrusted";
 export type ConcurrencyRead = {
   concurrency: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
-/**
- * One cap from one result row. Only `row === null` is an absent setting, so the
- * caller's default applies; a present row whose selected field is missing is a
- * malformed result — untrusted, never absent.
- */
 function resolveRow(
   row: { value?: unknown } | null,
   fallback: number,
@@ -262,11 +149,9 @@ export type EffectiveConcurrency = {
   workspace: number;
   effective: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
-/** One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
 type RuntimeSettingRow = { value?: unknown };
 
 /**
@@ -312,9 +197,6 @@ export async function getWorkspaceConcurrency(
   }
 }
 
-/**
- * The untrusted-read answer: serial, flagged with its cause.
- */
 function degradedConcurrency(reason: DegradedReason): EffectiveConcurrency {
   return {
     system: CONCURRENCY_MIN,
@@ -345,10 +227,6 @@ export async function getEffectiveConcurrency(
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value?: unknown; workspace_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
-    // is untrustworthy, not that both settings are absent. A present row whose
-    // selected fields are missing is untrusted for the same reason — only a NULL
-    // column means the setting is absent.
     if (row === null) return degradedConcurrency("malformed");
     if (row.system_value === undefined || row.workspace_value === undefined) {
       return degradedConcurrency("malformed");
@@ -382,23 +260,12 @@ const trustedIntSql = (value: string, untrusted: string, min: number, max: numbe
       WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) BETWEEN ${min} AND ${max}
       THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
 
-/**
- * The stored system cap as SQL — the audit `before` value, under the ledger's
- * canonical-digits rule.
- */
 const storedSystemCapSql = (keyParam: string, untrusted: string) =>
   `(SELECT ${trustedIntSql("value", untrusted, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
-/** One stored check budget as SQL — the audit `before` value. */
 const storedBudgetSql = (keyParam: string, untrusted: string, min: number, max: number) =>
   `(SELECT ${trustedIntSql("value", untrusted, min, max)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
-/**
- * Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
- * `before` carries the stored value only under the readers' trust rule, so a
- * corrupt row is recorded as `null` — a bare `CAST` would report `0` for
- * `'abc'` and a number no reader or write predicate ever used for `' 8'`.
- */
 const SYSTEM_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -415,11 +282,6 @@ const SYSTEM_UPSERT_SQL = `
     updated_at = excluded.updated_at,
     updated_by = excluded.updated_by`;
 
-/**
- * The workspace cap as the ledger sees a stored value: the same clamp the
- * reader applies (canonical digits above the maximum record the maximum),
- * so `before` cannot disagree with the cap the workspace was running.
- */
 const workspaceAuditCapSql = (value: string) => `CASE
       WHEN ${value} NOT GLOB '*[^0-9]*' AND CAST(${value} AS INTEGER) > ${WORKSPACE_CONCURRENCY_MAX}
         THEN ${WORKSPACE_CONCURRENCY_MAX}
@@ -427,13 +289,6 @@ const workspaceAuditCapSql = (value: string) => `CASE
         THEN CAST(${value} AS INTEGER)
       ELSE NULL END`;
 
-/**
- * The ledger row carries the UPDATE's own guard — the target exists — so a
- * refused write appends nothing. It computes `before` with a subquery against
- * the not-yet-updated row: a bind cannot read the old value after the write.
- * That subquery uses the workspace clamp above, so a corrupt stored value is
- * recorded as `null` rather than the raw column.
- */
 const WORKSPACE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -444,12 +299,6 @@ const WORKSPACE_AUDIT_SQL = `
          ?5
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
 
-/**
- * The workspace value is bounded by its own maximum only. The system quota is
- * NOT part of this predicate: refusing on it would let a tenant binary-search
- * the platform number, and the quota already applies at admission as
- * `min(system, workspace)`.
- */
 const WORKSPACE_UPDATE_SQL = `
   UPDATE workspaces SET max_concurrent_reviews = ?2
    WHERE id = ?1 AND deleted_at IS NULL`;
@@ -503,7 +352,6 @@ export async function setWorkspaceConcurrency(
   ]);
   if (update?.meta.changes === 1) return value;
 
-  // Zero rows: the target is not a live workspace, so nothing was written.
   throw new UnknownWorkspaceError(workspaceId);
 }
 
@@ -516,11 +364,9 @@ export async function setWorkspaceConcurrency(
 export type CheckMinScoreRead = {
   minScore: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
-/** The untrusted/failed-read answer: the platform default, flagged with its cause. */
 function degradedCheckMinScore(reason: DegradedReason): CheckMinScoreRead {
   return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true, reason };
 }
@@ -576,14 +422,12 @@ export type CheckBudgets = {
   terminalizeMs: number;
   updateMs: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
 /** The pair an accepted write carries. */
 export type CheckBudgetValues = { terminalizeMs: number; updateMs: number };
 
-/** The untrusted/failed-read answer: the documented defaults, flagged with its cause. */
 function degradedCheckBudgets(reason: DegradedReason): CheckBudgets {
   return {
     terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
@@ -610,8 +454,6 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
       )
       .bind(CHECK_TERMINALIZE_KEY, CHECK_UPDATE_KEY)
       .first<{ terminalize_value?: unknown; update_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
-    // is untrustworthy, and a missing field is malformed rather than absent.
     if (row === null) return degradedCheckBudgets("malformed");
     if (row.terminalize_value === undefined || row.update_value === undefined) {
       return degradedCheckBudgets("malformed");
@@ -635,11 +477,6 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
   }
 }
 
-/**
- * One operator save, one audit row: `before` carries each stored value under
- * the readers' trust rule (a corrupt row is `null`), `after` the accepted pair.
- * The two upserts share this batch, so a refused write appends nothing.
- */
 const CHECK_BUDGETS_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -672,9 +509,6 @@ export async function setCheckBudgets(
       `check update budget must be an integer in ${CHECK_UPDATE_MIN}..${CHECK_UPDATE_MAX}`,
     );
   }
-  // The inline wait must contain the send it bounds. The refusal states the
-  // RELATION only — echoing the other stored value would disclose a number the
-  // caller did not supply.
   if (value.terminalizeMs <= value.updateMs) {
     throw new RuntimeConfigError(
       "invalid_value",
@@ -723,7 +557,6 @@ export const REVIEW_ATTEMPT_CAP_MAX_MS = 3_600_000;
 export type ReviewAttemptCap = {
   capMs: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
@@ -752,7 +585,6 @@ export async function getReviewAttemptCapSetting(
     if (row === null) {
       return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false };
     }
-    // A result row without its (NOT NULL) value column is malformed, not absent.
     if (row.value === undefined) {
       return {
         capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
@@ -770,7 +602,6 @@ export async function getReviewAttemptCapSetting(
         reason: "untrusted",
       };
     }
-    // A present row whose value is NULL is an absent setting, not a save.
     return capMs === undefined
       ? { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false }
       : { capMs, saved: true, degraded: false };
@@ -796,16 +627,9 @@ export const REVIEW_ROUTE_WORKFLOW_KEY = "review.route.workflow";
  */
 export type ReviewRouteWorkflowGate = {
   mode: "on" | "off";
-  /** A stored row produced the answer (`false` for the absent-row default). */
   saved: boolean;
-  /** The refusal rests on unreadable evidence, not a stored `off`. */
   degraded: boolean;
   reason?: "malformed" | "untrusted" | "read-failed";
-  /**
-   * The rejected raw value, quoted, so the refusal line names what the row
-   * actually holds (`"on "` and `"on"` are visibly different). A setting is not
-   * a credential, so this is safe to log.
-   */
   rejected?: string;
 };
 
@@ -825,14 +649,9 @@ export async function getReviewRouteWorkflowGate(
       .bind(REVIEW_ROUTE_WORKFLOW_KEY)
       .first<RuntimeSettingRow>();
     if (row === null) return { mode: "off", saved: false, degraded: false };
-    // A result row without its (NOT NULL) value column is malformed, not absent.
     if (row.value === undefined) {
       return { mode: "off", saved: false, degraded: true, reason: "malformed" };
     }
-    // STRICT, deliberately: the value is NOT trimmed. A setting whose meaning
-    // flips on a stray space is exactly the class of bug this iteration
-    // removes, so `"on "`, `" on"`, `"ON"`, `"1"` and `"true"` are all refusals
-    // — and the refused raw value rides the answer so the log names it.
     const raw = row.value;
     if (raw === "on") return { mode: "on", saved: true, degraded: false };
     if (raw === "off") return { mode: "off", saved: true, degraded: false };
@@ -848,12 +667,6 @@ export async function getReviewRouteWorkflowGate(
   }
 }
 
-/**
- * One operator save of the route switch, one audit row: `before` is whatever
- * D1 actually held — a hand-edited `ON` is evidence of the row this save
- * repaired, not absence — and `null` is reserved for "there was no row".
- * `after` is the accepted value.
- */
 const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -893,13 +706,8 @@ export async function setReviewRouteWorkflow(
   return { stored: value, effective: await getReviewRouteWorkflowGate(db) };
 }
 
-/** The audit ledger's target id for the cap (one operator save, one row). */
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
 
-/**
- * One operator save, one audit row: `before` carries the stored value under
- * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
- */
 const REVIEW_ATTEMPT_CAP_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -951,7 +759,6 @@ export type CommentClaimSettings = {
 /** The trio an accepted write carries. */
 export type CommentClaimValues = { retryMs: number; maxAttempts: number; outboxCap: number };
 
-/** The untrusted/failed-read answer: the documented defaults, flagged. */
 function degradedCommentClaimSettings(): CommentClaimSettings {
   return {
     retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
@@ -979,8 +786,6 @@ export async function getCommentClaimSettings(db: DashboardD1): Promise<CommentC
       )
       .bind(COMMENT_CLAIM_RETRY_KEY, COMMENT_CLAIM_ATTEMPTS_KEY, COMMENT_CLAIM_OUTBOX_KEY)
       .first<{ retry_value?: unknown; attempts_value?: unknown; outbox_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
-    // is untrustworthy, and a missing field is malformed rather than absent.
     if (row === null) return degradedCommentClaimSettings();
     if (
       row.retry_value === undefined ||
@@ -1037,8 +842,6 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
       .bind(RECHECK_ASSIGNMENT_KEY)
       .first<RuntimeSettingRow>();
     if (row === null) return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: false };
-    // This query yields one row per stored key; a row without `value` is
-    // malformed rather than absent.
     if (row === undefined || row.value === undefined) {
       return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
     }
@@ -1050,11 +853,6 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
   }
 }
 
-/**
- * One operator save, one audit row: `before` carries each stored value under
- * the readers' trust rule (a corrupt row is `null`), `after` the accepted trio.
- * The three upserts share this batch, so a refused write appends nothing.
- */
 const COMMENT_CLAIM_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1116,10 +914,6 @@ export async function setCommentClaimSettings(
   return value;
 }
 
-/**
- * One operator save, one audit row: `before` carries the stored value under
- * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
- */
 const RECHECK_ASSIGNMENT_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1170,7 +964,6 @@ export async function readDefaultReviewLevel(db: DashboardD1): Promise<DefaultRe
       .bind(REVIEW_LEVEL_KEY)
       .first<RuntimeSettingRow>();
     if (row === null) return { value: REVIEW_LEVEL_DEFAULT, degraded: false };
-    // A present row whose value is missing is malformed, not absent.
     return isReviewLevel(row.value)
       ? { value: row.value, degraded: false }
       : { value: REVIEW_LEVEL_DEFAULT, degraded: true };
@@ -1179,10 +972,6 @@ export async function readDefaultReviewLevel(db: DashboardD1): Promise<DefaultRe
   }
 }
 
-/**
- * One operator save, one audit row: `before` carries the stored level only when
- * it is on the vocabulary (a corrupt row is `null`), `after` the accepted one.
- */
 const REVIEW_LEVEL_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1281,7 +1070,6 @@ export async function setReconcileSettings(db: DashboardD1, input: unknown, acto
   return values;
 }
 
-/** Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
 const SWEEP_RULES = {
   failureThreshold: { key: "platform.sweep.failure_threshold", fallback: QUEUE_MAX_ATTEMPTS + 1, min: 1, max: 10_000 },
   windowHours: { key: "platform.sweep.window_hours", fallback: 24, min: 1, max: 168 },
@@ -1387,14 +1175,8 @@ export const OFFICIAL_WORKSPACE_KEY = "platform.official_workspace_id";
  */
 export const RUNTIME_SETTING_DOMAINS = ["review.", "platform."] as const;
 
-/** One key segment: lowercase, digits and underscore, never empty. */
 const SETTING_SEGMENT = "[a-z0-9_]+";
 
-/**
- * `<registered domain><segment>(.<segment>)*`. The domains are interpolated
- * from the registry above, so adding one is a single edit and the bare
- * `review` / `platform` / `platform.` forms stay refused.
- */
 const RUNTIME_SETTING_KEY_PATTERN = new RegExp(
   `^(?:${RUNTIME_SETTING_DOMAINS.map((domain) => domain.replaceAll(".", "\\.")).join("|")})` +
     `${SETTING_SEGMENT}(?:\\.${SETTING_SEGMENT})*$`,
@@ -1405,16 +1187,8 @@ export function isRuntimeSettingKey(key: unknown): key is string {
   return typeof key === "string" && RUNTIME_SETTING_KEY_PATTERN.test(key);
 }
 
-/** An id the `workspaces` table can hold (the same grammar a slug uses). */
 const OFFICIAL_WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
-/**
- * The official workspace, resolved against live tenants: a stored id naming a
- * live workspace is that id, and an absent row, an unknown id, a soft-deleted
- * workspace or an unusable value all read `null`. Degrading rather than
- * refusing is deliberate — only the write path refuses, so a tenant retired
- * after the write stops new shares without turning the read into an error.
- */
 const OFFICIAL_WORKSPACE_READ_SQL = `
   SELECT w.id AS id
     FROM review_runtime_settings s
@@ -1429,12 +1203,6 @@ export async function readOfficialWorkspaceId(db: DashboardD1): Promise<string |
   return row?.id ?? null;
 }
 
-/**
- * One operator save, one audit row, in ONE batch. The `before` value is read by
- * a subquery against the not-yet-written row, and both statements carry the
- * write's own guard — the target names a live workspace — so a refused write
- * appends neither row.
- */
 const OFFICIAL_WORKSPACE_SET_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1455,11 +1223,6 @@ const OFFICIAL_WORKSPACE_SET_SQL = `
     updated_at = excluded.updated_at,
     updated_by = excluded.updated_by`;
 
-/**
- * Clearing is a DELETE of the key, never an insert of an empty value, and it is
- * idempotent: the audit statement's own `WHERE EXISTS` makes an absent row
- * append nothing.
- */
 const OFFICIAL_WORKSPACE_CLEAR_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1493,10 +1256,6 @@ export async function setOfficialWorkspace(
     return null;
   }
 
-  // An id is matched trimmed, so a console field's stray whitespace is not a
-  // different workspace; a malformed one cannot name a workspace and is refused
-  // without a round trip. The batch's own guard covers a workspace retired in
-  // between.
   const id = workspaceId.trim();
   if (!OFFICIAL_WORKSPACE_ID_PATTERN.test(id)) throw new UnknownWorkspaceError(workspaceId);
   const [, upsert] = await db.batch([
@@ -1513,7 +1272,6 @@ export const MAINTENANCE_ENABLED_KEY = "platform.maintenance.enabled";
 export const MAINTENANCE_REASON_KEY = "platform.maintenance.reason";
 /** When it closed, ISO-8601 UTC. Absent = never closed. */
 export const MAINTENANCE_SINCE_KEY = "platform.maintenance.since";
-/** The audit ledger's target id for the trio (one operator save, one row). */
 const MAINTENANCE_TARGET = "platform.maintenance";
 
 /**
@@ -1575,10 +1333,6 @@ export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMo
   }
 }
 
-/**
- * One operator save, one audit row, in ONE batch. `before` reads the three
- * rows as the getter would state them, `after` is the accepted window.
- */
 const MAINTENANCE_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
@@ -1610,7 +1364,6 @@ export async function setMaintenanceMode(
 ): Promise<void> {
   const { enabled, actor } = input;
   const reason = enabled ? (input.reason?.trim() || null) : null;
-  /** Upsert a value, or DELETE the row when there is none to state. */
   const put = (key: string, value: string | null) =>
     value === null
       ? db.prepare(MAINTENANCE_CLEAR_SQL).bind(key)

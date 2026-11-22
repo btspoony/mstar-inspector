@@ -1,19 +1,3 @@
-/**
- * note: Where the catalog's data lives, and which snapshot is current.
- *
- * A directory says who owns the file: `inputs/` is the only place a human or an
- * external service writes, `generated/` is rebuilt by a step. This module names
- * both and provides the ONE rule for choosing among dated snapshots.
- *
- * The snapshot's date is part of its NAME, not a constant in code: a refresh
- * lands as `inputs/models.dev-<YYYY-MM-DD>.json`, and ISO dates sort
- * lexicographically, so the last name is the newest. `fetch-models-dev.ts` keeps
- * exactly one such file, so newest-or-only are the same file and a stale
- * snapshot can never win the pick.
- *
- * Pure: the file list is an argument, never a directory this module opens. The
- * steps read the directory and pass the names in, so `lib/` stays functions.
- */
 import path from "node:path";
 
 /** The directory a human or an external service writes — the only one. */

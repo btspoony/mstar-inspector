@@ -50,13 +50,6 @@ function reasonOf(error: unknown): string {
   return `${code ?? "unknown error"}: ${error instanceof Error ? error.message : String(error)}`;
 }
 
-/**
- * note: What a path is, as the filesystem answers: a directory, a file, absent, or
- * unanswerable. `ENOENT`/`ENOTDIR` mean "nothing at this spelling" and callers
- * continue; every other error (a permission-restricted parent, a symlink loop)
- * means the question was not answered, and a can't-answer must never be read as
- * "nothing installed".
- */
 type Probe =
   | { kind: "directory" }
   | { kind: "file" }
@@ -73,12 +66,6 @@ function probe(path: string): Probe {
   }
 }
 
-/**
- * note: Whether a `node_modules` directory holds anything that could be a package.
- * A dot entry (`.bin`, `.package-lock.json`, `.cache`) is a manager's bookkeeping,
- * not an installed package; a scoped package lives under `@scope/`, which is
- * neither hidden nor empty.
- */
 type Presence =
   | { kind: "populated" }
   | { kind: "empty" }
@@ -117,7 +104,6 @@ export function inheritedInstall(dir: string): AncestorInstall {
   }
 }
 
-/** note: Lockfiles a repository may commit, and the manager each one names. */
 const LOCKFILES: readonly (readonly [string, string])[] = [
   ["bun.lock", "bun"],
   ["bun.lockb", "bun"],
@@ -140,7 +126,6 @@ const INSTALL_MARKERS: readonly (readonly [string, string])[] = [
   [".modules.yaml", "pnpm"],
 ];
 
-/** note: The nearest directory at or above `dir` holding a `.git` entry. */
 function repositoryRoot(dir: string): string {
   for (let current = dir; ; current = dirname(current)) {
     const git = probe(join(current, ".git"));
@@ -149,7 +134,6 @@ function repositoryRoot(dir: string): string {
   }
 }
 
-/** note: The managers this directory's lockfiles name, with the file that named each. */
 function lockfileManagers(dir: string): Map<string, string> {
   const found = new Map<string, string>();
   for (const [file, manager] of LOCKFILES) {
@@ -159,11 +143,6 @@ function lockfileManagers(dir: string): Map<string, string> {
   return found;
 }
 
-/**
- * why: A local `node_modules` that exists: what it proves, or why it proves nothing.
- * Existence is not the guarantee — the tree must resolve inside the inspected
- * directory, hold packages, and not contradict the repository's lockfiles.
- */
 function inspectLocal(target: string, modules: string): InstallVerdict {
   let real: string;
   try {
@@ -171,8 +150,6 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
   } catch (error) {
     return { kind: "uninspectable", target, path: modules, reason: reasonOf(error) };
   }
-  // why: Containment by SEGMENTS, not by string prefix: a directory named "..deps"
-  // is inside the worktree, while ".." as a segment is not.
   const within = relative(target, real);
   if (within === "" || isAbsolute(within) || within.split(sep).includes("..")) {
     return {
@@ -197,9 +174,6 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
       reason: `it holds no packages (empty, or only a manager's dot entries)${also}`
     };
   }
-  // why: Every marker present counts: a tree written by two managers, or by one the
-  // lockfiles do not name, is not the tree the lockfiles describe — a first
-  // match must not shadow a later foreign marker.
   const found: { manager: string; path: string }[] = [];
   for (const [file, manager] of INSTALL_MARKERS) {
     const path = join(real, file);

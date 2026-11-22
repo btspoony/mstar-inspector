@@ -1,41 +1,3 @@
-/**
- * Unit tests: the runtime configuration store
- * (src/dashboard/runtime-config-store.ts) over the REAL migration DDL.
- *
- * The fixture is the bun:sqlite double in tests/store/helpers.ts, not a hand
- * rolled row map: the store's SQL uses correlated subqueries, `json_object` and
- * `COALESCE`, so running it against the applied migrations is the only check
- * that means anything. It also proves migration 0040 applies to a fresh
- * database.
- *
- * Locked surface:
- *   - absent system row → 256; NULL workspace column → 32
- *   - effective = min(system, workspace)
- *   - the system value is an integer in 1..256 (the platform quota);
- *     the workspace value is an integer in 1..32, independent of the system
- *     quota — that quota applies at admission, never as a write refusal
- *   - a PRESENT but unparseable value degrades to the conservative cap
- *   - a PRESENT value that is not a string or number is untrusted, never
- *     coerced (`["16"]`, `true` and `{}` all degrade)
- *   - a read failure answers the conservative cap with `degraded: true` and
- *     never throws (both readers)
- *   - a degraded answer names its cause — `read-failed`, `malformed` or
- *     `untrusted`; a trustworthy read carries no `reason` at all
- *   - a workspace value above its maximum is clamped to the maximum by the
- *     read, so a deploy-window write cannot degrade that workspace to serial
- *   - a retired workspace (`deleted_at` set) is ABSENT to both reads — the
- *     default applies, matching the write's live-workspace predicate
- *   - a refused write changes no row and appends no audit row
- *   - accepted writes are audited through `platform_audit_events`, and the
- *     `before` of both the system row and the workspace column is `null`
- *     whenever the stored value is not one the readers would trust — never a
- *     `CAST`ed number nothing ever used
- *
- * The operator default review level is the same table with a
- * vocabulary instead of a range: an absent row reads `"default"`, a value off
- * `REVIEW_LEVELS` reads `"default"` with `degraded: true` and never throws, and
- * a write outside the vocabulary is refused with no row and no audit row.
- */
 import { RECONCILE_DEFAULTS, RECONCILE_LIMITS, RECONCILE_RULES } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import {
@@ -87,7 +49,6 @@ import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 const WS = "ws_1";
 const ACTOR = "operator";
 
-/** A migrated database with one workspace row at the NULL default. */
 function fixture() {
   const db = createMigratedTestD1();
   db.raw
@@ -98,7 +59,6 @@ function fixture() {
   return db;
 }
 
-/** The stored workspace column, read raw so a refused write is observable. */
 function storedWorkspace(db: TestD1): number | null {
   const row = db.raw
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = ?")
@@ -106,21 +66,18 @@ function storedWorkspace(db: TestD1): number | null {
   return row?.value ?? null;
 }
 
-/** Every stored system row, raw. */
 function storedSystemRows(db: TestD1): Array<{ value: string }> {
   return db.raw.prepare("SELECT value FROM review_runtime_settings").all() as Array<{
     value: string;
   }>;
 }
 
-/** The audit ledger, raw. */
 function auditRows(db: TestD1): Array<{ action: string; target_id: string }> {
   return db.raw
     .prepare("SELECT action, target_id FROM platform_audit_events ORDER BY action")
     .all() as Array<{ action: string; target_id: string }>;
 }
 
-/** One write action's ledger detail, parsed, in insert order. */
 function auditDetails(db: TestD1, action: string): Array<{ before: unknown; after: unknown }> {
   const rows = db.raw
     .prepare(
@@ -131,7 +88,6 @@ function auditDetails(db: TestD1, action: string): Array<{ before: unknown; afte
   return rows.map((row) => JSON.parse(row.detail_json) as { before: unknown; after: unknown });
 }
 
-/** A D1 face whose every statement fails with this error — the degraded read path. */
 function failingDbWith(error: unknown): DashboardD1 {
   return {
     prepare() {
@@ -143,10 +99,8 @@ function failingDbWith(error: unknown): DashboardD1 {
   };
 }
 
-/** The generic D1 failure: no schema signature, so it must stay `read-failed`. */
 const failingDb: DashboardD1 = failingDbWith(new Error("D1 unavailable"));
 
-/** A D1 face whose every `first()` yields this row verbatim — the row-shape path. */
 function dbWithRow(row: Record<string, unknown>): DashboardD1 {
   return {
     prepare() {
@@ -162,7 +116,6 @@ function dbWithRow(row: Record<string, unknown>): DashboardD1 {
   };
 }
 
-/** A row double carrying both settings, so either reader shape resolves it. */
 function dbWithValues(setting: { system: unknown; workspace: unknown }): DashboardD1 {
   return dbWithRow({
     value: setting.system,
@@ -175,7 +128,6 @@ describe("runtime-config-store", () => {
   test("absent system row falls back to 256, with no degraded reason", async () => {
     const read = await getSystemConcurrency(fixture());
     expect(read).toEqual({ concurrency: SYSTEM_CONCURRENCY_DEFAULT, degraded: false });
-    // Absent is not degraded: a trustworthy read carries no cause at all.
     expect(Object.hasOwn(read, "reason")).toBe(false);
     const effective = await getEffectiveConcurrency(fixture(), WS);
     expect(effective).toEqual({
@@ -252,10 +204,6 @@ describe("runtime-config-store", () => {
   });
 
   test("a workspace value above its maximum reads as the maximum, not degraded", async () => {
-    // 0043 lowers the rows that exist when it applies, but the window between
-    // "migrations applied" and "new Worker live" can admit one more 33..64
-    // write. The read clamps it so the workspace keeps a real cap instead of
-    // degrading to serial.
     const db = fixture();
     db.raw
       .prepare("UPDATE workspaces SET max_concurrent_reviews = ?1 WHERE id = ?2")
@@ -302,8 +250,6 @@ describe("runtime-config-store", () => {
   });
 
   test("a present row with a missing field degrades instead of defaulting", async () => {
-    // A row that exists but does not carry the selected column: absent is
-    // `first() === null`, so a missing field must be untrusted, not a default.
     const degraded: EffectiveConcurrency = {
       system: CONCURRENCY_MIN,
       workspace: CONCURRENCY_MIN,
@@ -323,9 +269,6 @@ describe("runtime-config-store", () => {
   });
 
   test("a present array, boolean or object value degrades instead of being coerced", async () => {
-    // D1's declared column types constrain nothing a row actually carries, so a
-    // stored non-string must never reach `Number()`: `["16"]` would read as 16
-    // and `true` as 1, admitting concurrency the setting never granted.
     const untrusted = [["16"], true, { nested: "16" }, new Uint8Array([8])];
     for (const bad of untrusted) {
       const db = dbWithValues({ system: bad, workspace: bad });
@@ -343,7 +286,6 @@ describe("runtime-config-store", () => {
       });
       expect(await getEffectiveConcurrency(db, WS)).toEqual(degraded);
     }
-    // One untrusted field is enough: the trusted sibling never rescues the read.
     expect(
       await getEffectiveConcurrency(
         dbWithValues({ system: ["8"], workspace: WORKSPACE_CONCURRENCY_DEFAULT }),
@@ -395,8 +337,6 @@ describe("runtime-config-store", () => {
   });
 
   test("a workspace write is never refused for the system quota's sake", async () => {
-    // Refusing on the system cap would let a tenant binary-search the platform
-    // number; the quota applies at admission as min(system, workspace).
     const db = fixture();
     await setSystemConcurrency(db, 8, ACTOR);
     expect(await setWorkspaceConcurrency(db, WS, 16, ACTOR)).toBe(16);
@@ -416,7 +356,6 @@ describe("runtime-config-store", () => {
       setWorkspaceConcurrency(db, WS, WORKSPACE_CONCURRENCY_MAX + 1, ACTOR),
     ).rejects.toThrow();
     expect(storedWorkspace(db)).toBe(12);
-    // Only the accepted write is in the ledger.
     expect(auditRows(db)).toEqual([{ action: "workspace.concurrency.set", target_id: WS }]);
   });
 
@@ -427,13 +366,9 @@ describe("runtime-config-store", () => {
   });
 
   test("a retired workspace reads as the default on both reads, never its pinned value", async () => {
-    // The settings WRITE already requires a live workspace; the READ must use
-    // the same predicate, or a deleted workspace keeps governing its queued
-    // jobs with a value nobody can change any more.
     const db = fixture();
     await setWorkspaceConcurrency(db, WS, 12, ACTOR);
     db.raw.prepare("UPDATE workspaces SET deleted_at = '2026-11-04T00:00:00.000Z' WHERE id = ?").run(WS);
-    // Absence (not untrusted data), so the effective read is NOT degraded.
     expect(await getEffectiveConcurrency(db, WS)).toEqual({
       system: SYSTEM_CONCURRENCY_DEFAULT,
       workspace: WORKSPACE_CONCURRENCY_DEFAULT,
@@ -464,8 +399,6 @@ describe("runtime-config-store", () => {
       `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
        VALUES (?1, ?2, '2026-11-03T00:00:00.000Z')`,
     );
-    // A bare CAST would ledger 0 for 'abc', 8 for ' 8' and 99 for the
-    // out-of-range row: numbers no reader and no write predicate ever used.
     for (const corrupt of ["abc", " 8", String(SYSTEM_CONCURRENCY_MAX + 1)]) {
       seed.run(SYSTEM_CONCURRENCY_KEY, corrupt);
       expect(await setSystemConcurrency(db, 20, ACTOR)).toBe(20);
@@ -492,8 +425,6 @@ describe("runtime-config-store", () => {
     const seed = db.raw.prepare(
       "UPDATE workspaces SET max_concurrent_reviews = ?1 WHERE id = ?2",
     );
-    // The ledger mirrors the reader: non-canonical text is `null`, an
-    // above-maximum value is the maximum the read clamped it to.
     for (const [corrupt, before] of [
       ["abc", null],
       [WORKSPACE_CONCURRENCY_MAX + 1, WORKSPACE_CONCURRENCY_MAX],
@@ -506,7 +437,6 @@ describe("runtime-config-store", () => {
         after: 12,
       });
     }
-    // A readable stored value is still recorded as itself.
     expect(await setWorkspaceConcurrency(db, WS, 8, ACTOR)).toBe(8);
     expect(auditDetails(db, "workspace.concurrency.set").at(-1)).toEqual({
       before: 12,
@@ -522,8 +452,6 @@ describe("runtime-config-store", () => {
   });
 
   test("a corrupt system row does not affect workspace writes", async () => {
-    // The tenant path never parses the system row, so an unreadable quota can
-    // neither refuse a write nor leak its fallback through one.
     const db = fixture();
     db.raw
       .prepare(
@@ -555,7 +483,6 @@ describe("runtime-config-store", () => {
 });
 
 describe("check budgets", () => {
-  /** Both stored budget rows, raw, keyed by PK. */
   function storedBudgetsRaw(db: TestD1): Record<string, string> {
     const rows = db.raw
       .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
@@ -622,7 +549,6 @@ describe("check budgets", () => {
     ]) {
       const error = await setCheckBudgets(db, pair, ACTOR).catch((thrown: unknown) => thrown);
       expect(error).toBeInstanceOf(RuntimeConfigError);
-      // The refusal states the RELATION, never the other stored value.
       expect((error as Error).message).toBe(
         "the terminalize timeout must be greater than the check update budget",
       );
@@ -656,7 +582,6 @@ describe("check budgets", () => {
       },
     ]);
 
-    // A second save records the previous pair as `before`.
     await setCheckBudgets(db, { terminalizeMs: 9_000, updateMs: 6_000 }, ACTOR);
     expect(auditDetails(db, "runtime.check_budgets.set")[1]).toEqual({
       before: { terminalizeMs: 12_000, updateMs: 7_000 },
@@ -666,7 +591,6 @@ describe("check budgets", () => {
 });
 
 describe("comment-claim settings", () => {
-  /** Every stored runtime-config row, raw, keyed by PK. */
   function storedRows(db: TestD1): Record<string, string> {
     const rows = db.raw
       .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
@@ -685,7 +609,6 @@ describe("comment-claim settings", () => {
   test("an untrusted or out-of-range stored value answers the defaults with degraded: true", async () => {
     for (const [key, value] of [
       [COMMENT_CLAIM_RETRY_KEY, "fast"],
-      // Below the 30 s floor: a window that short would duplicate an in-flight send.
       [COMMENT_CLAIM_RETRY_KEY, "1000"],
       [COMMENT_CLAIM_ATTEMPTS_KEY, "0"],
       [COMMENT_CLAIM_ATTEMPTS_KEY, "11"],
@@ -761,7 +684,6 @@ describe("comment-claim settings", () => {
       },
     ]);
 
-    // A second save records the previous trio as `before`.
     await setCommentClaimSettings(db, { retryMs: 45_000, maxAttempts: 2, outboxCap: 4 }, ACTOR);
     expect(auditDetails(db, "runtime.comment_claim.set")[1]).toEqual({
       before: { retryMs: 60_000, maxAttempts: 5, outboxCap: 10 },
@@ -771,7 +693,6 @@ describe("comment-claim settings", () => {
 });
 
 describe("default review level", () => {
-  /** The stored default-level row, raw. */
   function storedLevel(db: TestD1): string | null {
     const row = db.raw
       .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
@@ -779,7 +700,6 @@ describe("default review level", () => {
     return row?.value ?? null;
   }
 
-  /** That row as another writer left it, bypassing the store. */
   function seedLevel(db: TestD1, value: string): void {
     db.raw
       .prepare(
@@ -841,7 +761,6 @@ describe("default review level", () => {
       { before: null, after: "deep" },
     ]);
 
-    // A second save records the previous level as `before`.
     await setDefaultReviewLevel(db, "quick", ACTOR);
     expect(auditDetails(db, "runtime.review_level.set")[1]).toEqual({
       before: "deep",
@@ -858,7 +777,6 @@ describe("default review level", () => {
 });
 
 describe("recheck assignment budget", () => {
-  /** The stored budget row, raw so a refused write is observable. */
   function storedBudget(db: TestD1): string | null {
     const row = db.raw
       .prepare("SELECT value FROM review_runtime_settings WHERE key = ?")
@@ -866,7 +784,6 @@ describe("recheck assignment budget", () => {
     return row?.value ?? null;
   }
 
-  /** That row as another writer left it, bypassing the store. */
   function seedBudget(db: TestD1, value: string): void {
     db.raw
       .prepare(
@@ -933,7 +850,6 @@ describe("recheck assignment budget", () => {
       { before: { maxBytes: null }, after: { maxBytes: 131_072 } },
     ]);
 
-    // A second save records the previous value as `before`.
     await setRecheckAssignmentMaxBytes(db, 200_000, ACTOR);
     expect(auditDetails(db, "runtime.recheck_assignment.set")[1]).toEqual({
       before: { maxBytes: 131_072 },
@@ -956,7 +872,6 @@ describe("workspace check_min_score default", () => {
     const db = fixture();
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: 60, degraded: false });
 
-    // The ends of the accepted range are real values, not the default.
     for (const value of [45, 0, 100]) {
       db.raw.prepare("UPDATE workspaces SET check_min_score = ? WHERE id = ?").run(value, WS);
       expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({ minScore: value, degraded: false });
@@ -965,8 +880,6 @@ describe("workspace check_min_score default", () => {
 
   test("an untrusted stored value reads the platform default, flagged", async () => {
     const db = fixture();
-    // The DDL CHECK refuses this through the store; a foreign writer is what
-    // the read's trust rule exists for.
     db.raw.exec("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'maybe' WHERE id = ?").run(WS);
     db.raw.exec("PRAGMA ignore_check_constraints = OFF");
@@ -978,9 +891,6 @@ describe("workspace check_min_score default", () => {
   });
 
   test("a present row without the selected field degrades as malformed, not as absent", async () => {
-    // `first() === null` is the absent state; a row that exists but does not
-    // carry the selected column is a malformed result, so its default is
-    // untrusted and the cause is named as such.
     expect(await getWorkspaceCheckMinScore(dbWithRow({}), WS)).toEqual({
       minScore: 60,
       degraded: true,
@@ -989,9 +899,6 @@ describe("workspace check_min_score default", () => {
   });
 
   test("a read failing on the floor column degrades as malformed, not read-failed", async () => {
-    // Before 0049 applies, the SELECT itself throws. That is the pre-migration
-    // state the malformed copy names; answering `read-failed` there would make
-    // the copy unreachable in its only scenario.
     const db = failingDbWith(new Error("D1_ERROR: no such column: check_min_score"));
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
       minScore: 60,
@@ -1001,8 +908,6 @@ describe("workspace check_min_score default", () => {
   });
 
   test("a read failing on any other missing column or table stays read-failed", async () => {
-    // Neither gap is the 0049 window, so the migration copy would send the
-    // operator to a repair that does not apply.
     for (const message of ["D1_ERROR: no such column: deleted_at", "no such table: workspaces"]) {
       expect(await getWorkspaceCheckMinScore(failingDbWith(new Error(message)), WS)).toEqual({
         minScore: 60,

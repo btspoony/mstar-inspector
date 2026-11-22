@@ -94,7 +94,6 @@ for (const rows of [3000, 15000, 60000]) {
     const old = measure(before, "before");
     execMigrationScript(db, migration);
     assertHealthIndexes(true);
-    // why: Capture the store's own statements rather than maintaining a second rewrite.
     const after: string[] = [];
     await createReviewBotsStore({
       ...handle,

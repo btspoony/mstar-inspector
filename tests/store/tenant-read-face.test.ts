@@ -1,15 +1,3 @@
-/**
- * why: Task 3 — the App read face.
- *
- * Pins two things:
- *   - every read INNER JOINs `bot_workspaces`, so an unmapped App is INVISIBLE
- *     and every returned row carries `workspace_id`;
- *   - no `src/**` file outside the allowlist reads `review_bots` directly.
- *
- * The exact SQL text is deliberately NOT pinned: those literals proved nothing
- * a behaviour test does not (see the orphan-App and soft-deleted-tenant cases),
- * and re-pinning them made every wording change a false regression.
- */
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -40,7 +28,6 @@ async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Pro
   return createReviewBotsStore(db).createApp({ ...APP_INPUT, id: crypto.randomUUID(), ...overrides });
 }
 
-/** note: One App mapped to the 'default' workspace, one orphan App with no mapping. */
 async function seedMappedAndOrphan() {
   const db = createMigratedTestD1();
   const mapped = await seedApp(db, { githubAppId: 1 });
@@ -78,7 +65,6 @@ describe("apps-store read SQL joins the tenant", () => {
   });
 });
 
-/** note: Every `.ts` file under src/, relative to the repo root. */
 function srcFiles(dir = SRC_DIR, out: string[] = []): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
@@ -91,19 +77,12 @@ function srcFiles(dir = SRC_DIR, out: string[] = []): string[] {
 const DIRECT_READ = /(?:from|join)\s+review_bots\b/;
 const TENANT_BYPASS = "shortcut: tenant-bypass";
 
-/**
- * note: Every `.prepare(…)` call in one source, as {line, sql}: a single left-to-right
- * scan over the file, so several calls on ONE line are all enumerated and a
- * multi-line SQL statement is ONE site. String literals are skipped while
- * balancing parens, so a paren inside SQL does not end the call.
- */
 function prepareStatements(src: string): { line: number; sql: string }[] {
   const out: { line: number; sql: string }[] = [];
   const marker = ".prepare";
   let pos = 0;
   let counted = 0;
   let line = 0;
-  // note: Lazy line counter: `counted` only moves forward because `pos` does.
   const lineAt = (idx: number): number => {
     while (counted < idx) {
       if (src[counted] === "\n") line++;
@@ -149,19 +128,10 @@ function prepareStatements(src: string): { line: number; sql: string }[] {
   }
 }
 
-/** note: Every `.prepare(…)` statement that reads `review_bots`, with its SQL. */
 function readSites(src: string): { line: number; sql: string }[] {
   return prepareStatements(src).filter((s) => DIRECT_READ.test(s.sql));
 }
 
-/**
- * note: The statement's selected columns: from its first `select` to the `from` that
- * closes the projection at paren depth 0. A subquery in the projection list
- * carries its own `from`, so depth — not the first `from` anywhere — decides
- * where the outer projection ends. A column name in a JOIN predicate is a
- * filter on another table's row, not a tenant-facing field of the read, so only
- * the projection is scanned.
- */
 function projection(sql: string): string {
   const start = sql.search(/\bselect\b/i);
   let depth = 0;
@@ -176,13 +146,6 @@ function projection(sql: string): string {
   return start < 0 ? sql : sql.slice(start);
 }
 
-/**
- * note: True when the `.prepare(` line is IMMEDIATELY preceded by a contiguous
- * `//` comment block carrying the marker. A blank line or any code line
- * between the comment and the call means unannotated. Two calls on one line
- * share that line's annotation block, which is the point: the comment covers
- * every call on the line it precedes.
- */
 function isAnnotated(lines: string[], prepareLine: number): boolean {
   for (let k = prepareLine - 1; k >= 0 && lines[k]!.trim().startsWith("//"); k--) {
     if (lines[k]!.includes(TENANT_BYPASS)) return true;
@@ -197,27 +160,15 @@ function directReadFiles(): string[] {
     .sort();
 }
 
-/** note: The maintenance face: every direct `review_bots` read outside apps-store. */
 const MAINTENANCE_SITES: Record<string, number> = {
-  // why: The replay lane resolves a failure's live target/bot/workspace for both callers
-  // (the operator route and the internal sweep retry); it is a maintenance read,
-  // never a tenant read.
   "admin/maintenance-replay.ts": 1,
   "worker/lifecycle-reconcile.ts": 1,
   "worker/check-reconcile.ts": 3,
   "pipeline/review-threads.ts": 1,
   "store/review-checks.ts": 1,
-  // why: The data-upgrade runner's binding seam resolves one bot's App credentials by
-  // exact id to mint an installation token; it returns no identity or ownership
-  // column and never runs on a tenant route.
   "admin/installation-repositories.ts": 1,
 };
 
-/**
- * why: A direct read that is NOT a maintenance bypass: the statement carries the
- * workspace predicate itself, so it is a tenant read and may select the
- * tenant-facing columns a maintenance read may not.
- */
 const TENANT_DIRECT_SITES: Record<string, number> = {
   "dashboard/targets-store.ts": 1,
 };
@@ -245,11 +196,6 @@ describe("tenant read face allowlist", () => {
     expect(counts).toEqual({ ...MAINTENANCE_SITES, ...TENANT_DIRECT_SITES });
   });
 
-  /**
-   * invariant: The workspace predicate is what makes a direct read tenant-scoped, so the
-   * tenant classification is checked rather than assumed: a read that loses its
-   * predicate would be a maintenance bypass in disguise.
-   */
   test("a tenant direct read carries the workspace predicate", () => {
     for (const rel of Object.keys(TENANT_DIRECT_SITES)) {
       for (const site of readSites(readFileSync(join(SRC_DIR, rel), "utf8"))) {
@@ -276,22 +222,6 @@ describe("tenant read face allowlist", () => {
     }
   });
 
-  /**
-   * invariant: The annotation claims "no tenant-facing field". The review-threads read
-   * used to select `ga.slug` (a tenant-facing column) while reading
-   * `identity.slug` instead — a comment that was not true of its statement.
-   * Migration 0036 replaced it with `github_slug` (0038 later dropped the
-   * local route key outright); the cached slug stays off a maintenance read
-   * exactly as `slug` did.
-   * Every maintenance read of `review_bots` must stay off the identity/ownership
-   * columns (`private_key_enc` is frozen plan-scope maintenance credential
-   * routing, not a response field). The scan is the read's own statement, not
-   * every statement in the file: a mixed file (a store that also serves tenant
-   * faces of `review_targets`) selects those columns for its own rows. Within
-   * the statement only the projection is scanned: a column named in a JOIN
-   * predicate filters another table's row and is never returned, so it is not a
-   * tenant-facing field of the read.
-   */
   test("a maintenance read selects no identity or ownership column", () => {
     const TENANT_FACING = /\b(?:github_slug|name|workspace_id)\b/i;
     for (const rel of Object.keys(MAINTENANCE_SITES)) {
@@ -305,16 +235,10 @@ describe("tenant read face allowlist", () => {
     }
   });
 
-  /**
-   * invariant: The projection ends at the outer `from` only: a subquery in the select list
-   * carries its own `from` and must not end the scan early, or a tenant-facing
-   * column after it would escape the guard above.
-   */
   test("the projection scan crosses a subquery in the select list", () => {
     const sql = "select (select 1 from workspaces limit 1), b.name from review_bots b";
     expect(projection(sql)).toContain("b.name");
     expect(projection(sql)).not.toContain("review_bots");
-    // invariant: The JOIN side still stays out: only the returned columns are scanned.
     const joined = "select t.id from review_targets t join review_bots b on b.id = t.bot_id and b.name = t.name";
     expect(projection(joined)).not.toContain("b.name");
   });

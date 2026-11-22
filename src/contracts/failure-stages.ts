@@ -1,16 +1,3 @@
-/**
- * The `review_failures.stage` EXCLUSION partitions — single source of truth
- * (compass contracts B). The dashboard asks "is this row a failure of the
- * review?" and the cron sweep asks "is this row a platform incident?", so the
- * lists are written once here and interpolated into each query by
- * `sqlStageList`; a hand-written stage literal is what let the count/history
- * asymmetry drift.
- *
- * Zero imports: `src/dashboard/**` may import this module but never
- * `store/pipeline/review` code (architect decision Q2, the same admission
- * `src/contracts/sandbox-images.ts` has), and `src/store/failure-store.ts`
- * re-exports the lists as its producer-vocabulary partition.
- */
 
 /**
  * Stages whose rows record a review that CONTINUED — per-round attribution,
@@ -139,7 +126,6 @@ export const GITHUB_RATE_LIMIT_PREFIX = "github-secondary-rate-limit: ";
  */
 export const GITHUB_PRIMARY_RATE_LIMIT_PREFIX = "github-primary-rate-limit: ";
 
-/** Case-insensitive header read over either header shape a transport exposes. */
 function headerValue(headers: unknown, name: string): string | null {
   if (headers === null || typeof headers !== "object") return null;
   if ("get" in headers && typeof headers.get === "function") {
@@ -174,8 +160,6 @@ export function classifyGithubRateLimit(err: unknown): "primary" | "secondary" |
   const response = "response" in err ? err.response : undefined;
   const headers = typeof response === "object" && response !== null && "headers" in response ? response.headers : undefined;
   const message = "message" in err ? err.message : undefined;
-  // The secondary signals are checked FIRST: they win over an exhausted
-  // budget, which GitHub also reports on a throttled secondary 403.
   if (headerValue(headers, "retry-after") !== null) return "secondary";
   if (typeof message === "string" && /secondary rate limit/i.test(message)) return "secondary";
   if (headerValue(headers, "x-ratelimit-remaining") === "0") return "primary";

@@ -1,12 +1,3 @@
-/** note: The boot's create-workspace capability (`canCreateWorkspace` +
- * `createWorkspaceBlockedReason`).
- *
- * `saas` allows one free workspace per login, so a login that already holds a
- * free membership is told `free_slot`; `self-hosted` resolves every workspace
- * to `unlimited` and always allows creation. These are UX mirrors — the
- * creation route re-checks under its write — so the matrix is pinned on the
- * real boot face over the worker mount, not on a helper.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -18,17 +9,12 @@ import { htmlGetRequest, withSpaAssets } from "../helpers/spa";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const LOGIN = "founder";
 
-/** note: Read the injected boot out of a shell document. */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no boot in shell");
   return JSON.parse(json) as SpaBoot;
 }
 
-/** note: The boot for `LOGIN` in `mode`. `freeMember: true` joins the seeded
- * `default` workspace, which carries no subscription row and therefore
- * resolves to `free` — the state that consumes the login's one free slot.
- */
 async function bootFor(mode: "saas" | "self-hosted", freeMember: boolean): Promise<SpaBoot> {
   const db = createMigratedTestD1();
   const userId = crypto.randomUUID();
@@ -78,12 +64,6 @@ describe("boot create-workspace capability", () => {
   });
 
   test("the plan chip's data rides each membership row, in both modes", async () => {
-    // why: Each row names its OWN workspace's plan, because a switch only rewrites
-    // the URL: a boot-level plan would keep naming the document's workspace
-    // after the user moved to another one. Both modes carry it (D16: the mode
-    // gates rendering, never the payload). The seeded `default` workspace holds
-    // no subscription row here, so `saas` falls back to `free`, and
-    // `self-hosted` resolves `unlimited` before any DB read.
     expect((await bootFor("saas", true)).memberships?.map((row) => row.plan)).toEqual(["Free"]);
     expect((await bootFor("self-hosted", true)).memberships?.map((row) => row.plan)).toEqual([
       "Unlimited",

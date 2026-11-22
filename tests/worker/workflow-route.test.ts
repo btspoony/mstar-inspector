@@ -1,23 +1,6 @@
-/**
- * note: The review ROUTE: the queue handler admits, dedupes, settles skips and hands
- * one admitted delivery to exactly one Workflow instance. There is no second
- * execution route — the phases run only inside the Workflow composition, which
- * is what the end-to-end case below drives (with an in-place step, since the
- * tests own no durable step store).
- *
- * Cases:
- *   - one admitted delivery → exactly one instance, zero sandbox work, ack
- *   - a duplicate delivery (live admission row) → zero instances
- *   - a skipped delivery (paused App) → zero instances, explicit ack
- *   - an ambiguous create → ack with no retry (a redelivery could pay twice)
- *   - the workflow carries one review end to end: prepare → review → collect →
- *     publish with `retries: { limit: 0 }` on the paid step
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { WorkflowStep } from "cloudflare:workers";
 
-// note: Load shim FIRST: the workflow module statically imports ./sandbox → the
-// workerd builtin `cloudflare:workers`. Every double is injected.
 import "../helpers/cloudflare-workers-mock";
 
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -37,10 +20,8 @@ import {
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { WorkflowStepConfig } from "cloudflare:workers";
-/** note: The KV the recovery pass writes failed-claim stamps to (a minimal double). */
 const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
-// note: Dynamic: the module graph under test must load after the workerd shim.
 const { WorkflowCreateAmbiguousError, createReviewConsumer, createWorkflowInstance } = await import(
   "../../src/pipeline/consumer"
 );
@@ -51,7 +32,6 @@ beforeEach(() => {
   h = createConsumerHarness();
 });
 
-/** note: A starter that records its refs instead of running anything. */
 function recordingStarter() {
   const started: AttemptRef[] = [];
   return {
@@ -74,10 +54,8 @@ describe("review route — the queue handler hands off only", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // note: One instance, keyed by the attempt identity the consumer minted.
     expect(route.started).toHaveLength(1);
     expect(route.started[0]!.attemptId).toMatch(/^[0-9a-f-]{36}$/);
-    // note: No runner, credential mint or container on this side of the handoff.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
@@ -115,8 +93,6 @@ describe("review route — the queue handler hands off only", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // note: The live row refuses admission: the guard schedules its own retry and no
-    // attempt — therefore no instance — is born.
     expect(route.started).toHaveLength(0);
     expect(h.messageRetryCalls).toHaveLength(1);
     expect(h.sandbox.calls).toHaveLength(0);
@@ -124,7 +100,6 @@ describe("review route — the queue handler hands off only", () => {
 
   test("a skipped delivery still acks and creates no instance", async () => {
     const db = await createSeededTestD1();
-    // note: The paused gate: the skip is settled, zero container, zero instance.
     db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const route = recordingStarter();
     const consumer = createReviewConsumer(
@@ -148,7 +123,6 @@ describe("review route — the queue handler hands off only", () => {
       h.testLog,
       {
         ...h.overrides,
-        // note: The platform reply is lost: the instance MAY exist.
         startAttempt: (_deps, ref) =>
           createWorkflowInstance(
             {
@@ -163,9 +137,6 @@ describe("review route — the queue handler hands off only", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // note: Ack, never retry: a redelivery mints a fresh attempt id and could pay
-    // twice, so the instance that may exist owns the attempt until TTL. The
-    // handoff row stays `ambiguous` for the recovery pass.
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.calls).toHaveLength(0);
@@ -195,13 +166,8 @@ describe("review route — the workflow is the only paid route", () => {
     await consumer(h.makeBatch(makePayload() as ReviewJobPayload));
 
     expect(started).toHaveLength(1);
-    // note: Every post-paid transition is its own durable step; cleanup is one, so an
-    // interrupted host still destroys what the retention table allows.
     expect(steps.map((step) => step.name)).toEqual(["prepare", "review", "collect", "publish", "cleanup"]);
-    // note: The platform cannot retry the paid step.
     expect(steps.find((step) => step.name === "review")!.config?.retries?.limit).toBe(0);
-    // note: The paid route really ran: one publication, the launch row persisted,
-    // and the attempt-scoped container was destroyed.
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
     const launch = db.raw
       .prepare("SELECT state FROM review_launches WHERE attempt_id = ?")
@@ -222,7 +188,6 @@ describe("review route — every handoff is a durable record", () => {
       h.testLog,
       {
         ...h.overrides,
-        // note: A create can only run AFTER the record exists: the callback reads it.
         startAttempt: async (_deps, ref) => {
           observedKey = deliveryKeyOf(payload);
           seen.handoff = await readAttemptHandoff(db as never, observedKey);
@@ -235,7 +200,6 @@ describe("review route — every handoff is a durable record", () => {
 
     expect(seen.handoff?.state).toBe("owed");
     expect(seen.handoff?.attemptId).toMatch(/^[0-9a-f-]{36}$/);
-    // note: The confirmed outcome is recorded on the same row.
     expect((await readAttemptHandoff(db as never, observedKey))?.state).toBe("created");
   });
 
@@ -256,9 +220,6 @@ describe("review route — every handoff is a durable record", () => {
             calls === 1
               ? {
                   create: async () => {
-                    // note: A definite configuration rejection, AND the platform
-                    // confirms this attempt's instance is absent (404) — the
-                    // two facts the non-acceptance path requires.
                     throw Object.assign(new Error("invalid workflow configuration"), { status: 400 });
                   },
                   get: async () => {
@@ -273,14 +234,11 @@ describe("review route — every handoff is a durable record", () => {
 
     await expect(consumer(h.makeBatch(payload))).rejects.toThrow(/could not be created/);
 
-    // note: A definite failure is a FAILURE: the attempt was settled (failure row
-    // written, claim released) and its handoff records the failure.
     expect(failureRows(db)).toHaveLength(1);
     const key = deliveryKeyOf(payload);
     expect((await readAttemptHandoff(db as never, key))?.state).toBe("failed");
     expect(ids).toHaveLength(1);
 
-    // note: The redelivery replays the SAME attempt id — never a second attempt.
     await consumer(h.makeBatch(payload));
 
     expect(ids).toHaveLength(2);
@@ -317,8 +275,6 @@ describe("review route — every handoff is a durable record", () => {
     const movedHeadSha = "feedfacefeedfacefeedfacefeedfacefeedface";
     const intent = successorIntentOf(payload, movedHeadSha)!;
 
-    // note: Two records of the same intent collapse to one outbox row, and the
-    // sender is handed the STORED payload, never a locally rebuilt variant.
     await recordSuccessorIntent(db as never, { dedupeKey: intent.dedupeKey, payload: intent.payload, nowMs: 1 });
     const stored = await recordSuccessorIntent(db as never, {
       dedupeKey: intent.dedupeKey,
@@ -341,7 +297,6 @@ describe("review route — every handoff is a durable record", () => {
     await reconcileReviewRoute(env, 3);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.head_sha).toBe(movedHeadSha);
-    // note: Delivered rows are not re-sent.
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
     await reconcileReviewRoute(env, 4);
     expect(sent).toHaveLength(1);
@@ -351,7 +306,6 @@ describe("review route — every handoff is a durable record", () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const key = deliveryKeyOf(payload);
-    // note: A host died after writing the handoff, before create created anything.
     await reserveAttemptHandoff(db as never, {
       deliveryKey: key,
       attemptId: "attempt-stranded",
@@ -371,19 +325,15 @@ describe("review route — every handoff is a durable record", () => {
       } as never,
     };
 
-    // note: Too fresh: a live delivery may still be trying.
     await reconcileReviewRoute(env, 2_000);
     expect(sent).toHaveLength(0);
 
-    // note: Past the quiet period: the payload is re-enqueued (the queue handler
-    // replays the recorded attempt id), and the row's clock is bumped.
     await reconcileReviewRoute(env, 1_000 + 5 * 60_000 + 1);
     expect(sent).toHaveLength(1);
     expect(deliveryKeyOf(sent[0]!)).toBe(key);
   });
 });
 
-/** note: The in-place step, recording each step's name and config. */
 function recordingStep(steps: Array<{ name: string; config: WorkflowStepConfig | undefined }>): WorkflowStep {
   const base = inlineWorkflowStep();
   const doStep = base.do.bind(base) as (
@@ -403,9 +353,6 @@ function recordingStep(steps: Array<{ name: string; config: WorkflowStepConfig |
 
 describe("review route — a confirmed stop releases what it held", () => {
   test("the runner's exhaustion signal is recorded on the launch row, and cleanup frees the container and capacity", async () => {
-    // note: A supported terminal response: the runner returned exit 0 with the typed
-    // signal. The paid phase OBSERVED the return, so the attempt owes both
-    // terminal facts — a durable failure row and the row's own outcome.
     h.sandbox.runnerStdout = JSON.stringify({
       schema: "mstar.review-budget-exhausted/v1",
       seatsDispatched: 1,
@@ -432,8 +379,6 @@ describe("review route — a confirmed stop releases what it held", () => {
       .prepare("SELECT state, result_outcome FROM review_launches WHERE attempt_id = ?")
       .get(attemptId) as { state: string; result_outcome: string | null };
     expect(launch).toEqual({ state: "failed", result_outcome: "failed" });
-    // note: A confirmed stop is releasable: the container is destroyed and the
-    // admission row is not held to TTL (which would block later reviews).
     expect(h.sandbox.destroyCalls).toBe(1);
     const held = db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get() as { n: number };
     expect(held.n).toBe(0);
@@ -446,8 +391,6 @@ describe("review route — a conflict is resolved by the exact instance", () => 
   }
 
   test("a definite 4xx whose instance exists is a confirmation, not a failure", async () => {
-    // note: The status alone is not proof the create did not land: the readback of
-    // THIS attempt's instance decides, for every rejection class.
     const verdict = await createWorkflowInstance(
       {
         create: async () => {
@@ -462,9 +405,6 @@ describe("review route — a conflict is resolved by the exact instance", () => 
   });
 
   test("a 409 with a confirmed absence still stays unknown — acked, never settled as failed", async () => {
-    // note: No 4xx status may skip the exact-instance readback: a conflict is a
-    // statement about existence, and the attempt id is the only fact that
-    // answers it.
     await expect(
       createWorkflowInstance(
         {
@@ -481,9 +421,6 @@ describe("review route — a conflict is resolved by the exact instance", () => 
   });
 
   test("a definite 4xx with a FAILED instance read is unknown, never a definite failure", async () => {
-    // note: The read did not answer, so nobody knows whether the instance is there.
-    // Treating that as absence would settle the attempt as failed and hand its
-    // capacity to a second attempt over an instance that may exist.
     await expect(
       createWorkflowInstance(
         {
@@ -500,8 +437,6 @@ describe("review route — a conflict is resolved by the exact instance", () => 
   });
 
   test("a failed instance read also overrides a status the classifier would call definite", async () => {
-    // note: Same rule, reached through `status()` rather than `get()`: the handle
-    // exists, the status read fails, and that is still not evidence of absence.
     await expect(
       createWorkflowInstance(
         {

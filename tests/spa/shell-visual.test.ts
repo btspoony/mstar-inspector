@@ -1,25 +1,3 @@
-/** note: shell visual-discipline pins.
- *
- * 1. Motion-token sweep (routed from QC, binding): the shell
- *    primitive faces (ui/sidebar.tsx, ui/sheet.tsx, ui/toggle.tsx) must
- *    express every transition through the duration/ease tokens (duration-
- *    and ease- namespaces) — no raw ms/cubic-bezier literals, no silent
- *    library-default timing. Transition properties stay untouched
- *    (functional collapse faces keep their width/left/right/margin
- *    properties); only duration/easing moved to tokens. The tokens.css
- *    reduce fold (all durations → 1ms) covers every var consumer, so the
- *    faces need no per-component media query.
- * 2. Shell brand surfaces (A1/A2): the sidebar active fill wears the
- * v0.3.2 brand tint through the sanctioned --sidebar-primary bridge
- * (AD-641 retires the left edge line) and the navbar sits on the
- *    background-200 chrome token — zero raw hex in the shell sources.
- * 3. Sidebar hover hierarchy (AD-622): every menu-button hover
- *    face dims to the /40 accent tint + text brighten while the press fill
- *    stays full strength (the open state has no dedicated fill face) and
- * the active face wears the 12%-alpha brand tint (AD-641) —
- *    hover stays lighter than the full-strength press, hue apart from
- *    active.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,30 +18,21 @@ const sources: Record<string, string> = {
   toggle: readFileSync(join(primitivesDir, "toggle.tsx"), "utf8"),
 };
 
-/** note: The two stylesheets that publish the vocabulary: the bridge keys a
- *  `bg-<name>` utility can come from, and the declared token/motion names. */
 const themeCSS = readFileSync(join(spaRoot, "styles/shadcn-theme.css"), "utf8");
 const tokensCSS = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
 
-/** note: The colour names the `@theme inline` bridge publishes. A fill outside this
- *  set — `red-500`, `gray-700` — compiles only if the palette comes back. */
 const THEME_COLOURS = new Set(
   [...themeCSS.matchAll(/^\s*--color-([\w-]+):/gm)].map((match) => match[1] ?? ""),
 );
-/** note: Every `--name` the generated stylesheet declares. */
 const DECLARED_TOKENS = new Set(
   [...tokensCSS.matchAll(/(--[\w-]+)\s*:/g)].map((match) => match[1] ?? ""),
 );
-/** note: The declared motion steps as an alternation: `--duration-<name>` outside it
- *  is a library default or a raw literal wearing a token-shaped name. */
 const DURATION = new RegExp(
   `duration-\\(--duration-(?:${[
     ...new Set([...tokensCSS.matchAll(/--duration-([\w-]+)\s*:/g)].map((match) => match[1] ?? "")),
   ].join("|")})\\)`,
 );
 
-/** invariant: A fill names a published theme colour or a declared `(--token)` — never a
- *  palette step. The `/alpha` suffix is allowed and asserted separately. */
 function expectSemanticFill(fill: string, where: string): void {
   const name = fill.replace(/\/\d+$/, "");
   const token = /^\((--[\w-]+)\)$/.exec(name)?.[1];
@@ -71,7 +40,6 @@ function expectSemanticFill(fill: string, where: string): void {
   expect(known, `${where}: ${fill} names neither a theme colour nor a declared token`).toBe(true);
 }
 
-/** note: Live `transition*` class carriers — comment prose is not a motion face. */
 function transitionFaces(source: string): string[] {
   return source
     .split("\n")
@@ -83,8 +51,6 @@ describe("motion token sweep (routed from QC)", () => {
   for (const [name, source] of Object.entries(sources)) {
     test(`${name}.tsx carries no raw duration or easing literals`, () => {
       expect(source).not.toMatch(/duration-\d{2,4}\b/);
-      // note: Arbitrary-value forms are raw literals too (F-58-3) — the
-      // token consumers use the paren shorthand, never `duration-[...]`.
       expect(source).not.toMatch(/duration-\[[^\]]+\]/);
       expect(source).not.toMatch(/\bease-linear\b/);
       expect(source).not.toMatch(/cubic-bezier\(/);
@@ -94,9 +60,6 @@ describe("motion token sweep (routed from QC)", () => {
       const faces = transitionFaces(source);
       expect(faces.length).toBeGreaterThan(0);
       for (const face of faces) {
-        // note: Every duration on the face, not one of them: a second, undeclared
-        // step beside a declared one used to satisfy a single `toMatch`, and
-        // `duration-(--duration-anything)` is a raw literal in token clothing.
         const durations = [...face.matchAll(/duration-\(([^)]*)\)/g)].map(
           (match) => `duration-(${match[1] ?? ""})`,
         );
@@ -108,8 +71,6 @@ describe("motion token sweep (routed from QC)", () => {
   }
 
   test("sidebar collapse faces (gap + container) ride the same token clock", () => {
-    // note: The transition properties are the faces; the token clock is proven for
-    // every transition face by the sweep above.
     expect(sources.sidebar).toContain("transition-[width]");
     expect(sources.sidebar).toContain("transition-[left,right,width]");
   });
@@ -141,24 +102,15 @@ describe("shell brand surfaces (A1/A2)", () => {
   const layout = readFileSync(join(spaRoot, "Layout.tsx"), "utf8");
 
   test("sidebar active fill wears the brand tint via the sanctioned --sidebar-primary bridge (brand stays off alert semantics)", () => {
-    // note: (AD-641) supersedes the edge line: the active fill is
-    // the low-alpha brand tint on the menu-button variant string, driven by
-    // the `data-active` state.
     const tintLine = sources.sidebar
       ?.split("\n")
       .find((line) => line.includes("data-[active=true]:"));
     expect(tintLine).toBeDefined();
     expect(tintLine).toContain("data-[active=true]:");
-    // note: The tint rides the bridge, not a raw palette var or hex value.
     expect(tintLine).not.toMatch(/var\(--brand-|#[0-9a-fA-F]{3,8}\b/);
-    // note: The retired edge leaves no inset-shadow face in either sidebar source
-    // and no ACTIVE_BRAND_EDGE compat layer behind.
     expect(sources.sidebar).not.toMatch(/inset_\d+px_0_0_0_var\(--sidebar-primary\)/);
     expect(sidebar).not.toMatch(/inset_\d+px_0_0_0_var\(--sidebar-primary\)/);
     expect(sidebar).not.toContain("ACTIVE_BRAND_EDGE");
-    // note: Trap-① discipline (knowledge ui-bugs/tailwind4-compiled-css-traps): the
-    // named tint utility only compiles because the `@theme inline` block maps
-    // the key — pin the mapping layer, not the compiled hex.
     expect(themeCSS).toMatch(/--color-sidebar-primary:\s*var\(--sidebar-primary\)/);
   });
 
@@ -169,8 +121,6 @@ describe("shell brand surfaces (A1/A2)", () => {
   });
 
   test("navbar sits on a shell chrome token, zero raw hex", () => {
-    // note: The header carries its fill as a token utility (the specific step is
-    // the shell band's contract); a literal would fail the hex guard below.
     expect(layout).toMatch(/<header[^>]*bg-\(--[a-z0-9-]+\)/);
     expect(layout).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
@@ -178,27 +128,17 @@ describe("shell brand surfaces (A1/A2)", () => {
 
 describe("sidebar hover hierarchy recipe (AD-622)", () => {
   const appSidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
-  // invariant: The menu-button cva block only — sidebar.tsx carries out-of-scope hover
-  // faces (menu-action, menu-badge, menu-sub) that the AD-622 rework does not touch.
   const menuButtonBlock = sources.sidebar?.match(
     /const sidebarMenuButtonVariants = cva\([\s\S]*?\n\)\n/,
   )?.[0];
-  // note: AD-622 no-motion surface (qc round 1, qc1-F-003 + qc2-F-003): a hover
-  // face may only tint + brighten — no translate/-translate, scale, shadow,
-  // ring or border motion class may join it.
   const hoverMotion = /hover:-?(translate|scale|shadow|ring|border)\b/;
 
   test("menu-button cva block is locatable (pin integrity)", () => {
     expect(menuButtonBlock).toBeDefined();
-    // invariant: Locatability only — the fill's vocabulary is the sibling tests' job, so
-    // this pin does not need to admit every utility a recipe could wear.
     expect(menuButtonBlock).toContain("hover:bg-");
   });
 
   test("menu-button hover faces dim to the /40 accent tint (base + state-open + variants)", () => {
-    // note: Every hover fill in the recipe carries the /40 alpha and names a colour
-    // the theme layer publishes — hover stays lighter than the press face,
-    // and a raw palette step is not a fill this suite accepts.
     const hoverFills = [...(menuButtonBlock ?? "").matchAll(/hover:bg-([^\s"]+)/g)].map(
       (match) => match[1] ?? "",
     );
@@ -207,24 +147,16 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
       expect(fill).toMatch(/\/40$/);
       expectSemanticFill(fill, "menu-button hover");
     }
-    // note: …the open-state hover carries the same dim, on the same vocabulary…
     const openFill = /data-\[state=open\]:hover:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
     expect(openFill, "no open-state hover fill").not.toBe("");
     expect(openFill).toMatch(/\/40$/);
     expectSemanticFill(openFill, "open-state hover");
-    // note: …and a text brighten joins the dimmed fill.
     expect(menuButtonBlock).toMatch(/hover:text-[^\s"]+/);
-    // invariant: No full-strength hover fill survives anywhere in the recipe (base,
-    // default, outline) — hover must stay lighter than active.
     expect(menuButtonBlock).not.toMatch(/hover:bg-[^\s"/]+(?=[\s"])/);
   });
 
   test("menu-button press face keeps its full-strength fill; the active face wears the brand tint (AD-622 untouched list)", () => {
-    // invariant: AD-622's untouched list covers the press face; the v0.3.2 tint rework (AD-641)
-    // supersedes the active-route face — text brighten + font-medium stay.
     expect(menuButtonBlock).toMatch(/active:text-[^\s"]+/);
-    // note: Active is a state-driven tint that is not the press fill's alpha, and
-    // neither face may name a palette step.
     const activeFill = /data-\[active=true\]:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
     const pressFill = /active:bg-([^\s"]+)/.exec(menuButtonBlock ?? "")?.[1] ?? "";
     expect(pressFill, "no press fill").not.toBe("");
@@ -241,8 +173,6 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
   });
 
   test("menu-button cva block carries no motion classes on its hover faces (AD-622)", () => {
-    // why: The tint recipe above is scoped to this exact block, so the no-motion
-    // half of AD-622 covers it too — not just the wordmark scan below.
     expect(menuButtonBlock).not.toMatch(hoverMotion);
   });
 
@@ -256,22 +186,10 @@ describe("sidebar hover hierarchy recipe (AD-622)", () => {
       expectSemanticFill(fill, "wordmark hover");
     }
     expect(appSidebar).toMatch(/hover:text-[^\s"]+/);
-    // note: No translate / scale / shadow / ring / border on hover (AD-622): no
-    // motion class may join the wordmark's hover face.
     expect(appSidebar).not.toMatch(hoverMotion);
   });
 });
 
-/** note: 4. Top-bar workspace switcher: the control left the sidebar header
- *    for the navbar's left cluster. Its ROWS live in a Radix portal, so the
- *    current-row mark and the disabled item's stated reason are only observable
- *    on a mounted render — hence happy-dom here rather than a source pin.
- *
- *    The switcher module is imported after the browser globals exist: Radix (and
- *    react-dom's client entry) capture DOM availability at module-evaluation
- *    time, so a static import would leave the menu permanently closed. Static
- *    imports cannot express that ordering — this is the support-notice pattern.
- */
 describe("top-bar workspace switcher (mounted)", () => {
   const boot: SpaBoot = {
     locale: "en",
@@ -287,7 +205,6 @@ describe("top-bar workspace switcher (mounted)", () => {
     ],
   };
 
-  /** note: Mount the control and open its menu (Radix portals the rows). */
   async function openMenu(pathname: string, overrides: Partial<typeof boot> = {}) {
     const { win, cleanup: closeDom } = installDom(`http://localhost${pathname}`);
     const live = { ...boot, ...overrides };
@@ -300,7 +217,6 @@ describe("top-bar workspace switcher (mounted)", () => {
       ),
     );
     const trigger = container.querySelector('[data-slot="dropdown-menu-trigger"]');
-    // note: Radix opens on the primary-button pointerdown the trigger listens for.
     await act(async () => {
       trigger?.dispatchEvent(
         new win.PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0, pointerType: "mouse" }),
@@ -323,12 +239,10 @@ describe("top-bar workspace switcher (mounted)", () => {
     const { radios, newWorkspaceItem, body, cleanup } = await openMenu("/dashboard/acme/apps");
     try {
       expect(radios.map((row) => row.textContent)).toEqual(["Acme", "Side project"]);
-      // note: A radio group: the current workspace is a CHOSEN row.
       expect(radios[0]?.getAttribute("aria-checked")).toBe("true");
       expect(radios[1]?.getAttribute("aria-checked")).toBe("false");
       expect(newWorkspaceItem?.textContent).toBe("New workspace");
       expect(newWorkspaceItem?.getAttribute("aria-disabled")).toBeNull();
-      // note: The plan chip rides the trigger beside the workspace name.
       expect(body.textContent).toContain("Free");
     } finally {
       await cleanup();
@@ -339,7 +253,6 @@ describe("top-bar workspace switcher (mounted)", () => {
     const { radios, trigger, cleanup } = await openMenu("/dashboard/gone/apps");
     try {
       expect(radios.map((row) => row.getAttribute("aria-checked"))).toEqual(["false", "false"]);
-      // note: The trigger names no workspace the URL does not name.
       expect(trigger?.textContent).not.toContain("Acme");
       expect(trigger?.textContent).toContain("Workspace");
     } finally {
@@ -353,7 +266,6 @@ describe("top-bar workspace switcher (mounted)", () => {
       createWorkspaceBlockedReason: "free_slot",
     });
     try {
-      // note: Disabled, not hidden: the user needs to know why, and the rule itself.
       expect(newWorkspaceItem?.getAttribute("aria-disabled")).toBe("true");
       expect(newWorkspaceItem?.getAttribute("data-disabled")).not.toBeNull();
       expect(newWorkspaceItem?.textContent).toContain("New workspace");

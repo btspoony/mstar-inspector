@@ -1,9 +1,3 @@
-/**
- * why: Secret redaction tests (Phase 5 B2 / SEC-02) — the redaction is applied by
- * the consumer choke point before any model-produced text can reach the
- * public PR review body or D1 raw_output. Every secret-shaped pattern is
- * replaced with [REDACTED]; plain text passes through untouched.
- */
 
 import { describe, expect, test } from "bun:test";
 import {
@@ -119,7 +113,6 @@ describe("redactDocument", () => {
     expect(one.base64).toBe("cC9hIGI=");
     expect(one.base64url).toBe("cC9hIGI");
     expect(one.hex).toBe("702f612062");
-    // JSON escaping is the PARSER's job: no `\uXXXX`/`\/` form exists here.
     expect(Object.keys(one).sort()).toEqual(["base64", "base64url", "hex", "raw", "urlEncoded"]);
   });
 
@@ -152,16 +145,13 @@ describe("redactDocument", () => {
     });
 
     const outcome = redactDocument(envelope, [secret], "run");
-    // Fixture shape is ours: the envelope serialized above.
     const redacted = JSON.parse(outcome.value) as {
       target: { head_sha: string };
       summary_md: string;
       findings: { body: string }[];
     };
 
-    // The host-written path is byte-identical.
     expect(redacted.target.head_sha).toBe(secret);
-    // Forged text — in a string and inside an array — is redacted like any leaf.
     expect(redacted.summary_md).toBe('{"head_sha":"[REDACTED]"}');
     expect(redacted.findings[0]?.body).toBe("only [REDACTED]");
   });
@@ -193,7 +183,6 @@ describe("redactDocument", () => {
     expect(outcome.value.doc.results[0]?.rowId).toBe(secret);
     expect(outcome.value.doc.results[0]?.evidence.sliceId).toBe(secret);
     expect(outcome.value.status.headSha).toBe(secret);
-    // Everything off the table is model text.
     expect(outcome.value.doc.results[0]?.evidence.quote).toBe("[REDACTED]");
     expect([...outcome.value.rejected]).toEqual(["row:[REDACTED]"]);
   });
@@ -206,7 +195,6 @@ describe("redactDocument", () => {
   });
 
   test("a credential that is a substring of the marker cannot corrupt it", () => {
-    // The marker's own word, 8 chars, is a credential-shaped value here.
     expect(redactDocument("[REDACTED]", ["REDACTED"], "text").value).toBe("[REDACTED]");
 
     const once = redactDocument("key REDACTED", ["REDACTED"], "text");
@@ -239,7 +227,6 @@ describe("redactDocument", () => {
 
     const outcome = redactDocument(envelope, ["abc/defg"], "run");
     expect(outcome.replaced).toBe(1);
-    // Documented consequence: a re-serialized document loses that padding.
     expect(outcome.value).toBe('{"summary_md":"[REDACTED]"}');
 
     expect(redactDocument(envelope, ["sk-unrelated-credential-0001"], "run").value).toBe(envelope);
@@ -253,7 +240,6 @@ describe("redactDocument", () => {
     expect(second.value).toEqual(first.value);
     expect(second.replaced).toBe(0);
 
-    // The marker is a fixed point too: it is a scan boundary, never scanned text.
     const marked = redactDocument({ text: "x[REDACTED]abcdefgh" }, secrets, "text");
     const again = redactDocument(marked.value, secrets, "text");
     expect(again.value).toEqual(marked.value);
@@ -270,16 +256,13 @@ describe("redactDocument", () => {
     });
 
     const outcome = redactDocument(envelope, [key], "run");
-    // Fixture shape is ours: the envelope serialized above.
     const redacted = JSON.parse(outcome.value) as {
       target: { head_sha: string };
       note: string;
       findings: { body: string }[];
     };
 
-    // The path walk — not a length floor — is what protects identity.
     expect(redacted.target.head_sha).toBe(headSha);
-    // A short value matches a whole leaf, never a substring.
     expect(redacted.note).toBe("[REDACTED]");
     expect(redacted.findings[0]?.body).toBe("leak abc");
     expect(outcome.replaced).toBe(1);
@@ -290,7 +273,6 @@ describe("redactDocument", () => {
     const envelope = JSON.stringify({ schema: "mstar.review/v1", summary_md: key });
 
     const outcome = redactDocument(envelope, [key], "run");
-    // Fixture shape is ours: the envelope serialized above.
     const redacted = JSON.parse(outcome.value) as { schema: string; summary_md: string };
 
     expect(redacted.schema).toBe("mstar.review/v1");
@@ -319,7 +301,6 @@ describe("redactDocument", () => {
     });
 
     const outcome = redactDocument(envelope, [key], "run");
-    // Fixture shape is ours: the envelope serialized above.
     const redacted = JSON.parse(outcome.value) as {
       schema: string;
       summary_md: string;
@@ -331,7 +312,6 @@ describe("redactDocument", () => {
     expect(redacted.schema).toBe("mstar.review/v1");
     expect(redacted.summary_md).toBe("base64 [REDACTED]");
     expect(redacted.findings[0]?.body).toBe("url [REDACTED] and hex [REDACTED]");
-    // The raw form keeps the exact-leaf rule: embedded text is untouched.
     expect(redacted.note).toBe(`raw ${key}`);
     expect(redacted.exact).toBe("[REDACTED]");
   });
@@ -347,12 +327,9 @@ describe("redactDocument", () => {
     });
 
     const outcome = redactDocument(envelope, [key], "run");
-    // Fixture shape is ours: the envelope serialized above.
     const redacted = JSON.parse(outcome.value) as { schema: string; note: string; exact: string };
 
-    // A 4-char hex form is too weak to scan: embedded text stays intact...
     expect(redacted.note).toBe(`prefix ${forms.hex} suffix`);
-    // ...while a leaf that IS the encoding is still replaced.
     expect(redacted.exact).toBe("[REDACTED]");
     expect(redacted.schema).toBe("mstar.review/v1");
     expect(outcome.replaced).toBe(1);
@@ -362,12 +339,9 @@ describe("redactDocument", () => {
     const key = "p/a b";
     const forms = secretTransforms(key);
 
-    // A short raw spelling is the exact-leaf redaction's job; matching it at
-    // publish would only hit trusted marker text.
     expect(carriesSecretForm(`x ${key} y`, [key])).toBe(false);
     expect(carriesSecretForm(`x ${forms.base64} y`, [key])).toBe(true);
     expect(carriesSecretForm(`x ${forms.urlEncoded} y`, [key])).toBe(true);
-    // A long secret keeps its verbatim substring match.
     expect(carriesSecretForm("x sk-live/paid-session-secret-01 y", ["sk-live/paid-session-secret-01"])).toBe(true);
     expect(carriesSecretForm("mstar.review/v1", [key])).toBe(false);
     expect(carriesSecretForm("plain", ["", key])).toBe(false);
@@ -380,7 +354,6 @@ describe("redactDocument", () => {
       ok: true,
     });
 
-    // The runner's document round-trips byte-for-byte, so nothing is reshaped.
     expect(JSON.stringify(JSON.parse(envelope))).toBe(envelope);
     expect(redactDocument(envelope, [], "run").value).toBe(envelope);
     const unrelated = redactDocument(envelope, ["sk-unrelated-credential-0001"], "run");
@@ -390,10 +363,6 @@ describe("redactDocument", () => {
 });
 
 describe("redactReviewOutput", () => {
-  // safety: F-001: EVERY model-controlled string that reaches the public comment or
-  // the D1 envelope passes through redactSecrets — including finding
-  // title/category/file_path/fingerprint_hint and tally.chatHeader, not
-  // just summary_md/finding bodies.
   const output: ReviewOutput = {
     schema: "mstar.review/v1",
     verdict: "blocked",
@@ -441,10 +410,6 @@ describe("redactReviewOutput", () => {
     expect(redacted.verdict).toBe("blocked");
   });
 
-  // safety: F-001: the `incomplete` fact is model-controlled text — buildReviewBody
-  // interpolates `reason` and `unscanned` into the public comment and the
-  // consumer stores the same object in D1, so both fields pass this choke
-  // point (envelope fact AND its tally echo).
   test("redacts the incomplete fact's reason, every unscanned entry and its tally echo", () => {
     const token = gh("p", "abcdef1234567890");
     const fact = { reason: `provider key ${token} expired`, unscanned: ["src/auth.ts", `tools/${token}/x.ts`] };
@@ -465,11 +430,9 @@ describe("redactReviewOutput", () => {
 
     const redacted = redactReviewOutput(stopped);
     expect(redacted.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
-    // invariant: No entry is trimmed, dropped or reordered: only the secret span goes.
     expect(redacted.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
     expect(redacted.tally!.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
     expect(redacted.tally!.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
-    // invariant: The rendered public comment carries the redacted strings only.
     expect(buildReviewBody(redacted)).not.toContain(token);
   });
 
@@ -530,8 +493,6 @@ describe("redactReviewOutputExact", () => {
     expect(redacted.findings[0]!.title).toBe(clean.findings[0]!.title);
   });
 
-  // safety: F-001: a credential that evades every shape pattern in reason/unscanned
-  // is still removed verbatim, at the envelope fact and its tally echo.
   test("removes the session's actual secret values from the incomplete fact and its tally echo", () => {
     const uuid = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
     const fact = { reason: `cache key ${uuid} rejected`, unscanned: [`a/${uuid}.ts`, "src/clean.ts"] };

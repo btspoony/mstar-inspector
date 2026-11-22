@@ -13,7 +13,6 @@ import {
 import type { SidebarModel } from "../shell";
 import { spaClick } from "../spa-click";
 
-/** Keyed by the nav page segment — a workspace-scoped href carries a slug prefix. */
 const NAV_ICONS = { repos: FolderGit2, apps: LayoutGrid, members: Users, settings: Settings } as const;
 
 /**
@@ -55,9 +54,6 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
                 const Icon = NAV_ICONS[item.href.split("/").pop() as keyof typeof NAV_ICONS];
                 return (
                   <SidebarMenuItem key={item.href}>
-                    {/* Active face (AD-641): low-alpha brand tint +
-                        medium weight live in the SidebarMenuButton variant
-                        string — no edge/fill className appendage here. */}
                     <SidebarMenuButton asChild isActive={item.current} tooltip={item.label}>
                       <a
                         href={item.href}
@@ -79,8 +75,6 @@ export function AppSidebar({ model }: { model: SidebarModel }) {
         <SidebarFooter className="border-t border-sidebar-border p-3">
           <SidebarMenu>
             <SidebarMenuItem>
-              {/* Full document navigation: the console is not a SPA route
-                  (no spaClick), and its own app re-checks authorization. */}
               <SidebarMenuButton asChild tooltip={model.operatorLink.label}>
                 <a href={model.operatorLink.href}>
                   <ShieldCheck />

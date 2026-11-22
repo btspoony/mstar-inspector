@@ -1,13 +1,3 @@
-/** note: StepDialog — DESIGN.md v0.5 `step-dialog`: the multi-step entry shell on
- * ui/dialog's DialogContent (radius, `shadow-pop` elevation, `sm:max-w-lg`,
- * the spacing-6 padding and the heading-16 / label-12 title and description
- * faces are the primitive's), a label-12 step indicator rendered only past
- * one step with exactly the current step marked, and a caller-owned
- * right-aligned footer on the primitive's spacing-2 gap.
- *
- * Mounted, because Radix renders the panel through a portal. The shell holds no
- * busy state: a footer action cannot close it; only the caller's `open` does.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -60,7 +50,6 @@ describe("StepDialog", () => {
       expect(panel?.textContent).toContain("Connect provider");
       expect(panel?.textContent).toContain("Two steps: endpoint, then key.");
       expect(panel?.textContent).toContain("Endpoint form");
-      // note: The shell composes the primitive's faces instead of re-spelling them.
       expect(view.slot("dialog-title")?.textContent).toBe("Connect provider");
       expect(view.slot("dialog-description")?.textContent).toBe(
         "Two steps: endpoint, then key.",
@@ -119,7 +108,6 @@ describe("StepDialog", () => {
     try {
       const footer = view.slot("dialog-footer");
       expect(footer?.textContent).toBe("CancelSave");
-      // note: The shell states the alignment; the spacing rhythm is the primitive's.
       expect(footer?.className).toContain("justify-end");
     } finally {
       await view.cleanup();
