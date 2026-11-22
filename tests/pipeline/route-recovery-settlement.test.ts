@@ -735,12 +735,21 @@ describe("a persisted launch that never staged a publication", () => {
    * The crash window: the paid step persisted its result, the host died before
    * `collect` staged anything, and the attempt's own hard stop has passed. No
    * publication row exists for the scope/head, so the publication lane — which
-   * only ever walks journal rows — cannot own the outcome.
+   * only ever walks journal rows — cannot own the outcome. `check` carries the
+   * Check identity the attempt froze, when it had one.
    */
-  async function seedUnpublished(db: TestD1, payload: ReviewJobPayload): Promise<void> {
+  async function seedUnpublished(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    options: {
+      attemptId?: string;
+      check?: { attempt_key: string | null; generation: number };
+    } = {},
+  ): Promise<void> {
+    const attemptId = options.attemptId ?? UNPUBLISHED_ATTEMPT;
     await reserveAttemptHandoff(db as never, {
       deliveryKey: deliveryKeyOf(payload),
-      attemptId: UNPUBLISHED_ATTEMPT,
+      attemptId,
       payload,
       nowMs: WINDOW_CLOSED_AT - 900_000,
       enqueuedMs: 0,
@@ -748,20 +757,31 @@ describe("a persisted launch that never staged a publication", () => {
     });
     db.raw
       .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
-      .run(UNPUBLISHED_ATTEMPT);
+      .run(attemptId);
     db.raw
       .prepare(
         `INSERT INTO review_launches
-           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
-         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome,
+            attempt_key, attempt_generation)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?, ?)`,
       )
-      .run(UNPUBLISHED_ATTEMPT, WINDOW_CLOSED_AT - 900_000, WINDOW_CLOSED_AT - 800_000, WINDOW_CLOSED_AT - 700_000);
+      .run(
+        attemptId,
+        WINDOW_CLOSED_AT - 900_000,
+        WINDOW_CLOSED_AT - 800_000,
+        WINDOW_CLOSED_AT - 700_000,
+        options.check?.attempt_key ?? null,
+        options.check?.generation ?? null,
+      );
   }
 
-  function unpublishedSettlement(db: TestD1): { settled_ms: number | null; settled_effects: string | null } {
+  function unpublishedSettlement(
+    db: TestD1,
+    attemptId = UNPUBLISHED_ATTEMPT,
+  ): { settled_ms: number | null; settled_effects: string | null } {
     return db.raw
       .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
-      .get(UNPUBLISHED_ATTEMPT) as { settled_ms: number | null; settled_effects: string | null };
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
   }
 
   test("the pass records the terminal failure a failed review gets and settles the attempt", async () => {
@@ -785,6 +805,81 @@ describe("a persisted launch that never staged a publication", () => {
 
     // note: Completed: a second pass writes nothing more.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a persisted launch with an OPEN Check is recorded now and settles once the Check concludes", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    // note: The reported launch shape: the attempt froze a Check identity, so its
+    // settlement owes a Check conclusion this pass never writes.
+    const claimed = await claimAttempt(db as never, {
+      scope: {
+        appId: payload.botRef!.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      githubAppId: 424242,
+      headSha: payload.head_sha!,
+      triggeredBy: "octocat",
+      action: "opened",
+      holder: "consumer-run",
+      nowMs: WINDOW_CLOSED_AT - 900_000,
+      executionDeadlineMs: WINDOW_CLOSED_AT - 1,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`expected a claimed Check row, got ${claimed.kind}`);
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    await seedUnpublished(db, payload, { check });
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+
+    // note: The loss is recorded immediately and the head is abandoned, but the attempt
+    // is NOT settled: its Check is still open, and this pass never concludes one.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).not.toContain("check");
+
+    // note: The Check lane concludes the row (its own transition); the next pass adds
+    // that one fact and completes the settlement — still a single failure row.
+    db.raw
+      .prepare(`UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`)
+      .run(WINDOW_CLOSED_AT - 60_000, claimed.attempt.identity.attemptId);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toContain("check");
+  });
+
+  test("an interrupted retry leaves exactly one failure row", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The failure row lands, then the claim write faults: the pass leaves the
+    // obligation open (no `settled_ms`) instead of certifying it.
+    h.kvState.putError = new Error("KV write failed");
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+
+    // note: The retry finishes the missing effects and never re-records the one it can
+    // read back — repeated faults cannot mint a duplicate stream of operator failures.
+    h.kvState.putError = undefined;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
     expect(failureRows(db)).toHaveLength(1);
   });
 
@@ -826,7 +921,7 @@ describe("a persisted launch that never staged a publication", () => {
 // ---------------------------------------------------------------------------
 
 describe("the recorded publication failure leaves the head re-triggerable", () => {
-  test("a redelivery for the same head still runs instead of being skipped", async () => {
+  test("the reconcile → KV → consumer chain runs a fresh delivery for the same head", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     // note: The same crash window as above: persisted, window closed, nothing staged.
@@ -848,25 +943,36 @@ describe("the recorded publication failure leaves the head re-triggerable", () =
          VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
       )
       .run("attempt-4d-retryable", 9_100_000, 9_200_000, 9_300_000);
-    const env = await h.makeEnv({ DB: db as never });
+    // note: A KV whose writes are readable, seeded with the claim the worker wrote when it
+    // enqueued this head: the consumer assertion below must observe what the pass wrote,
+    // not a value the test installed.
+    const kvStore = new Map<string, string>();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    kvStore.set(claimKey, "1");
+    const kv = {
+      get: async (key: string) => kvStore.get(key) ?? null,
+      put: async (key: string, value: string) => {
+        kvStore.set(key, value);
+      },
+      delete: async (key: string) => {
+        kvStore.delete(key);
+      },
+    };
+    const env = { ...(await h.makeEnv({ DB: db as never })), IDEMPOTENCY_KV: kv as never };
     const queue = { send: async () => {} };
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 10_000_000);
-    expect(failureRows(db)).toHaveLength(1);
 
-    // note: The settlement's claim is `failed` — "a commit that was NOT reviewed, so a
-    // redelivery must enqueue again rather than be skipped" (`src/contracts/idem.ts`).
-    // This is the entry the recorded failure is retried through; nothing else is
-    // needed for the operator's re-trigger.
-    h.kvState.entries.set(
-      idemKey({
-        installation_id: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        pr_number: payload.pr_number,
-        head_sha: payload.head_sha!,
-      }),
-      "failed",
-    );
+    expect(failureRows(db)).toHaveLength(1);
+    // note: The pass replaced the enqueue marker with the abandon claim — "a commit that
+    // was NOT reviewed, so a redelivery must enqueue again" (`src/contracts/idem.ts`).
+    expect(kvStore.get(claimKey)).toBe("failed");
+
     const started: AttemptRef[] = [];
     const consumer = createReviewConsumer(env, h.testLog, {
       ...h.overrides,
@@ -875,8 +981,8 @@ describe("the recorded publication failure leaves the head re-triggerable", () =
         return "created";
       },
     });
-    // note: A fresh delivery of the same head (its own attach identity), which is what a
-    // re-trigger is: the claim the settlement wrote is `failed`, so this must run.
+    // note: A fresh delivery of the same head (its own attach identity) — what a
+    // re-trigger is. It reads the claim the pass wrote and runs.
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: "redelivery-2" })));
 
     expect(started).toHaveLength(1);

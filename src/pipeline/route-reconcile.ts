@@ -68,6 +68,11 @@ export type ReviewRouteEnv = {
  * (this pass never concludes it), and the failed-claim stamp is required only
  * when the lane names a commit. The effects this pass landed are the facts; it
  * never certifies the rest.
+ *
+ * The failure row is persisted as a landed effect IMMEDIATELY, before the KV
+ * write below: the row is randomly identified, so a re-pass cannot recognize its
+ * own earlier insert any other way, and a KV or settlement fault would otherwise
+ * duplicate it on every pass.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -88,6 +93,10 @@ async function landSettlementEffects(
       error: detail,
     });
     landed.add("failure-row");
+    // The fact is durable before the rest of the effects: a fault below leaves the
+    // obligation incomplete (no `settled_ms`), never invisible — the next pass reads
+    // it back and only finishes what is missing.
+    await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
     await putAbandonClaim(
