@@ -1,5 +1,5 @@
 /**
- * The local smoke entry's `/healthz` keeps the same shape as
+ * why: The local smoke entry's `/healthz` keeps the same shape as
  * the production worker face — `{"ok":true,"version":"vX.Y.Z"}` from the
  * generated single source (src/version.ts). The module statically imports
  * the workerd-only sandbox SDK chain, so Bun tests cannot import it; this is
@@ -22,14 +22,14 @@ describe("smoke-entry healthz face", () => {
 });
 
 /**
- * The smoke target repository is a per-run config input, not a baked
+ * why: The smoke target repository is a per-run config input, not a baked
  * constant — pin that the module carries no personal default, that GH_REPO
  * comes from the orchestrator's `--var` path, and that the PR number stays
  * the fixed seed constant.
  */
 describe("smoke-entry smoke target configuration", () => {
   test("no hardcoded personal repository (target comes from configuration)", () => {
-    // The target only ever arrives through env.GH_REPO: the sole permitted
+    // safety: The target only ever arrives through env.GH_REPO: the sole permitted
     // github.com occurrence is the `${repo}` template.
     expect(smokeEntry).not.toMatch(/github\.com\/(?!\$\{repo\})/);
     expect(smokeEntry).not.toMatch(/const GH_REPO = "/);
@@ -40,7 +40,7 @@ describe("smoke-entry smoke target configuration", () => {
     expect(smokeEntry).toContain("function smokeRepo(env: SmokeEnv)");
     expect(smokeEntry).toContain("GITHUB_NAME_RE.test(owner)");
     expect(smokeEntry).toContain("GH_REPO must be owner/repo");
-    // Both routes reject a malformed target instead of shell-interpolating it.
+    // safety: Both routes reject a malformed target instead of shell-interpolating it.
     expect(smokeEntry).toContain('if (url.pathname !== "/smoke" && url.pathname !== "/smoke-review")');
   });
 

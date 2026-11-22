@@ -1,5 +1,5 @@
 /**
- * Consumer recheck CONSERVATIVE PRECEDENCE (spec §7.4): a same-round related
+ * why: Consumer recheck CONSERVATIVE PRECEDENCE (spec §7.4): a same-round related
  * concern outranks closure, and the guard bites only an `addressed` claim —
  * `dismissed` / `unverifiable` keep their own verdict.
  *
@@ -63,7 +63,7 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("an addressed row that names any in-range related concern is still a conflict, never a closure", async () => {
-    // The related concern exists in the final envelope, so it is unresolved
+    // invariant: The related concern exists in the final envelope, so it is unresolved
     // by definition: closure loses to the surviving concern.
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -85,13 +85,13 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("an in-range related index on a non-closure row is not a conflict: the guard only bites `addressed`", async () => {
-    // Same in-range index, but the seat did not claim a fix: `dismissed` and
+    // invariant: Same in-range index, but the seat did not claim a fix: `dismissed` and
     // `unverifiable` keep their own verdict instead of being rewritten.
     for (const verdict of [
       { disposition: "dismissed", reason: "non-fix-dismissal", expected: "dismissed (non-fix-dismissal)" },
       { disposition: "unverifiable", reason: "no-evidence", expected: "unverifiable (no-evidence)" },
     ] as const) {
-      // Each verdict gets its own recorders: the second iteration's body pin
+      // invariant: Each verdict gets its own recorders: the second iteration's body pin
       // must read its own `post-prepared` call, not the first one's.
       h = createConsumerHarness();
       h.sandbox.diffStdout = VALID_DIFF;
@@ -124,7 +124,7 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("a lost large round claims no closure: every row is invalid-output, so precedence has nothing to resolve", async () => {
-    // The RCA's mode (I-000396) on the largest round: the seat's document never
+    // why: The RCA's mode (I-000396) on the largest round: the seat's document never
     // arrives, so no row carries a claim the conservative guards must outvote.
     // The round must still be attributed per reason — and it must resolve
     // nothing, because there is no closure to verify.
@@ -142,7 +142,7 @@ describe("recheck conservative precedence (§7.4)", () => {
     });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    // The default target carries the thread below; the rest fill the round to
+    // note: The default target carries the thread below; the rest fill the round to
     // its full selection cap.
     await seedOpenTarget(db);
     for (let i = 1; i < ASSESSMENT_TARGET_CAP; i += 1) {
@@ -164,14 +164,14 @@ describe("recheck conservative precedence (§7.4)", () => {
     const coverage = coverageLineNumbers(prepared.body)!;
     expect(coverage).toEqual(expectedCoverage);
     expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
-    // No closure was claimed, so none is published and no thread resolves.
+    // invariant: No closure was claimed, so none is published and no thread resolves.
     expect(prepared.body).not.toContain("addressed (verified-fix)");
     expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     const thread = db.raw.query("SELECT resolution_state FROM review_threads").get() as {
       resolution_state: string;
     };
     expect(thread.resolution_state).toBe("pending");
-    // ONE failure row names the lost round at the recheck stage.
+    // note: ONE failure row names the lost round at the recheck stage.
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });
