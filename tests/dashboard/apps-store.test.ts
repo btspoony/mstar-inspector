@@ -1,5 +1,5 @@
 /**
- * Unit tests for the bot-side face in src/dashboard/apps-store.ts: creation,
+ * why: Unit tests for the bot-side face in src/dashboard/apps-store.ts: creation,
  * the user-facing delete, the workspace-scoped resolve, the 已安装
  * installation read and the cached GitHub App visibility.
  *
@@ -30,7 +30,7 @@ import type { TestD1 } from "../store/helpers";
 
 const WS = "default";
 
-/** One review_bots row without the store's crypto path. */
+/** note: One review_bots row without the store's crypto path. */
 function seedApp(
   db: TestD1,
   id: string,
@@ -67,7 +67,7 @@ describe("app creation (D13)", () => {
     const app = await store.getAppById("app-created");
     expect(app?.workspace_id).toBe(WS);
     expect(app?.status).toBe("active");
-    // Creation knows no repository, so it creates no target: a target is born
+    // why: Creation knows no repository, so it creates no target: a target is born
     // when a repository is added.
     expect(await createTargetsStore(db).listLive(WS)).toEqual([]);
   });
@@ -121,7 +121,7 @@ describe("app delete", () => {
     expect((await store.getAppById("app-delete"))?.deleted_at).not.toBeNull();
     expect(await targets.getInWorkspace(WS, target.id)).toBeNull();
 
-    // Idempotent: the first stamps are kept and the second call reports false.
+    // why: Idempotent: the first stamps are kept and the second call reports false.
     expect(await store.softDeleteApp("app-delete")).toBe(false);
     const stamped = db.raw
       .query("SELECT deleted_at FROM review_targets WHERE id = ?")
@@ -155,7 +155,7 @@ const NOW = "2026-02-01T00:00:00.000Z";
 const LATER = "2026-02-02T00:00:00.000Z";
 const OFFICIAL_KEY = "platform.official_workspace_id";
 
-/** A second live workspace beside the seeded `default`. */
+/** note: A second live workspace beside the seeded `default`. */
 function seedWorkspace(db: TestD1, id: string, deleted = false): void {
   db.raw
     .prepare(
@@ -165,7 +165,7 @@ function seedWorkspace(db: TestD1, id: string, deleted = false): void {
     .run(id, id, id);
 }
 
-/** The official-workspace row, written raw: audited writers are their own test. */
+/** note: The official-workspace row, written raw: audited writers are their own test. */
 function seedOfficialWorkspace(db: TestD1, workspaceId: string): void {
   db.raw
     .prepare(
@@ -175,10 +175,10 @@ function seedOfficialWorkspace(db: TestD1, workspaceId: string): void {
     .run(OFFICIAL_KEY, workspaceId, NOW);
 }
 
-/** A fresh numeric App id per seeded bot: `github_app_id` is UNIQUE. */
+/** note: A fresh numeric App id per seeded bot: `github_app_id` is UNIQUE. */
 let nextGithubAppId = 6100;
 
-/** One bot plus its `bot_workspaces` mapping. */
+/** note: One bot plus its `bot_workspaces` mapping. */
 function seedScopedBot(
   db: TestD1,
   id: string,
@@ -187,7 +187,7 @@ function seedScopedBot(
     deleted?: boolean;
     scope?: string;
     sharedAt?: string | null;
-    /** Display name; defaults to the id. An ordering test must vary it. */
+    /** note: Display name; defaults to the id. An ordering test must vary it. */
     name?: string;
   } = {},
 ): void {
@@ -319,12 +319,12 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-elsewhere", { workspaceId: "other" });
     seedScopedBot(db, "bot-home", { workspaceId: WS });
 
-    // No official workspace at all.
+    // note: No official workspace at all.
     expect(
       await setBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW }),
     ).toEqual({ outcome: "outside_official_workspace" });
 
-    // The official workspace is someone else's.
+    // note: The official workspace is someone else's.
     seedOfficialWorkspace(db, WS);
     expect(
       await setBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW }),
@@ -373,7 +373,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
       scope: "shared",
       shared_at: "2026-03-01T00:00:00.000Z",
     });
-    // The earlier instant survives only in the ledger.
+    // why: The earlier instant survives only in the ledger.
     expect(scopeAudits(db)).toHaveLength(3);
   });
 
@@ -396,7 +396,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-raced", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    // A competing writer that commits the moment the transition submits its
+    // why: A competing writer that commits the moment the transition submits its
     // batch — i.e. after the pre-read, before the batch's own statements run.
     let fired = false;
     const racingDb: TestD1 = {
@@ -424,7 +424,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-stale-designation", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    // A competing operator clears the designation the moment this transition
+    // why: A competing operator clears the designation the moment this transition
     // submits its batch — i.e. after the pre-read, before the batch's own
     // statements run.
     let fired = false;
@@ -458,7 +458,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-double-share", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    // The first operator's share commits while this one is in flight: both read
+    // why: The first operator's share commits while this one is in flight: both read
     // `owned`, so both saw the same FROM state.
     let fired = false;
     const racingDb: TestD1 = {
@@ -480,7 +480,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
       },
     };
 
-    // The loser reports the winner's state rather than rewriting shared_at.
+    // note: The loser reports the winner's state rather than rewriting shared_at.
     expect(
       await setBotScope(racingDb, {
         botId: "bot-double-share",
@@ -559,18 +559,18 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-new", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    // Clearing the designation is legal platform state: the existing share is
+    // why: Clearing the designation is legal platform state: the existing share is
     // not revoked and its instant is untouched.
     expect(await setOfficialWorkspace(db, { workspaceId: null, actor: "operator", now: LATER })).toBeNull();
     expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "shared", shared_at: NOW });
 
-    // A new share has nowhere to be authorized from.
+    // why: A new share has nowhere to be authorized from.
     expect(
       await setBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER }),
     ).toEqual({ outcome: "outside_official_workspace" });
     expect(storedScope(db, "bot-new")).toEqual({ scope: "owned", shared_at: null });
 
-    // The stale share stays revocable by the only role that can revoke it.
+    // why: The stale share stays revocable by the only role that can revoke it.
     expect(
       await setBotScope(db, {
         botId: "bot-orphan-share",
@@ -585,7 +585,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
 
   test("the console list carries every live bot with its scope, ordered by name then id", async () => {
     const db = createMigratedTestD1();
-    // The names order OPPOSITE to the ids: an implementation that drops the
+    // why: The names order OPPOSITE to the ids: an implementation that drops the
     // `name` sort key (or sorts by id alone) answers ["bot-a", "bot-b"] and
     // fails here. With `name === id` the two orders were indistinguishable.
     seedScopedBot(db, "bot-b", { workspaceId: WS, scope: "shared", sharedAt: NOW, name: "Alpha" });
@@ -606,9 +606,9 @@ describe("bot scope transitions (contract § 7.1)", () => {
   });
 });
 
-// --- the creation chooser's shared-bot list --------------------------------
+// note: --- the creation chooser's shared-bot list --------------------------------
 
-/** One target on `botId` in `workspaceId`, stamped when `deleted`. */
+/** note: One target on `botId` in `workspaceId`, stamped when `deleted`. */
 function seedTargetIn(db: TestD1, botId: string, workspaceId: string, deleted = false): void {
   db.raw
     .prepare(
@@ -626,7 +626,7 @@ describe("shared bots a workspace may create a target on", () => {
     seedWorkspace(db, "ws-other");
     seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW, name: "Alpha" });
     db.raw.prepare("UPDATE review_bots SET github_slug = 'alpha-app' WHERE id = 'bot-shared'").run();
-    // One live target here, one soft-deleted here, one live in the owner's own
+    // note: One live target here, one soft-deleted here, one live in the owner's own
     // workspace: only the first is the count this workspace reads.
     seedTargetIn(db, "bot-shared", WS);
     seedTargetIn(db, "bot-shared", WS, true);
@@ -637,7 +637,7 @@ describe("shared bots a workspace may create a target on", () => {
     expect(await store.listSharedBots(WS)).toEqual([
       { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 1 },
     ]);
-    // The same bot reads the other workspace's own count, not WS's.
+    // why: The same bot reads the other workspace's own count, not WS's.
     expect(await store.listSharedBots("ws-other")).toEqual([
       { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 2 },
     ]);
@@ -653,7 +653,7 @@ describe("shared bots a workspace may create a target on", () => {
   });
 });
 
-// --- the workspace-scoped App resolve -------------------------------------
+// note: --- the workspace-scoped App resolve -------------------------------------
 
 function githubAppIdOf(db: TestD1, botId: string): number {
   const row = db.raw.query("SELECT github_app_id AS id FROM review_bots WHERE id = ?").get(botId) as {
@@ -664,7 +664,7 @@ function githubAppIdOf(db: TestD1, botId: string): number {
 }
 
 /**
- * The resolve the target pages use: the bot the addressed workspace OWNS (its
+ * why: The resolve the target pages use: the bot the addressed workspace OWNS (its
  * `bot_workspaces` mapping), or a bot it holds a live target on — main's
  * pre-0067 visibility rule. The second arm is the entitlement a target
  * carries, so it reaches a `shared` bot the workspace created a target on AND
@@ -684,18 +684,18 @@ describe("the workspace-scoped App resolve", () => {
     const own = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-own"), WS);
     expect(own?.id).toBe("bot-own");
     expect(own?.workspace_id).toBe(WS);
-    // A bot with no live target here and no mapping here has nothing to resolve.
+    // why: A bot with no live target here and no mapping here has nothing to resolve.
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-shared"), WS)).toBeNull();
-    // Nor is another workspace's bot widened without one.
+    // note: Nor is another workspace's bot widened without one.
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS)).toBeNull();
     expect(await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-dead"), WS)).toBeNull();
 
-    // A live target IS the entitlement, whatever the bot's scope: the
+    // why: A live target IS the entitlement, whatever the bot's scope: the
     // revoked-share read must answer the bot (then report it Blocked), not 404.
     seedTargetIn(db, "bot-foreign", WS);
     const revoked = await store.getScopedAppByGithubId(githubAppIdOf(db, "bot-foreign"), WS);
     expect(revoked?.id).toBe("bot-foreign");
-    // The returned workspace is the bot's owner, not the caller's.
+    // why: The returned workspace is the bot's owner, not the caller's.
     expect(revoked?.workspace_id).toBe("ws-other");
 
     seedTargetIn(db, "bot-shared", WS);
@@ -714,9 +714,9 @@ describe("the workspace-scoped App resolve", () => {
   });
 });
 
-// --- the target page's 已安装 installations --------------------------------
+// note: --- the target page's 已安装 installations --------------------------------
 
-/** One `bot_installations` row; `removed` stamps the removal. */
+/** note: One `bot_installations` row; `removed` stamps the removal. */
 function seedInstallation(db: TestD1, botId: string, installationId: number, removed = false): void {
   db.raw
     .prepare(
@@ -740,10 +740,10 @@ describe("pending installations of a bot", () => {
   test("answers nothing for a bot the addressed workspace may not use", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-other");
-    // Another workspace's owned bot: out of the caller's visible set.
+    // why: Another workspace's owned bot: out of the caller's visible set.
     seedScopedBot(db, "bot-foreign", { workspaceId: "ws-other" });
     seedInstallation(db, "bot-foreign", 501);
-    // A shared bot: usable from every workspace, so its rows read.
+    // note: A shared bot: usable from every workspace, so its rows read.
     seedScopedBot(db, "bot-shared", { workspaceId: "ws-other", scope: "shared", sharedAt: NOW });
     seedInstallation(db, "bot-shared", 502);
 

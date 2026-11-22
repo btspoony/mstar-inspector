@@ -1,5 +1,5 @@
 /**
- * Unit tests: the shared-bot review usage aggregation
+ * why: Unit tests: the shared-bot review usage aggregation
  * (`src/dashboard/review-usage-store.ts`) — the one read behind the workspace
  * settings card and the operator usage page
  * (spec bot-scope-and-claiming § Review usage).
@@ -20,7 +20,7 @@ import { readReviewUsage, reviewUsageMonth } from "../../src/dashboard/review-us
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 
 const NOVEMBER = reviewUsageMonth(new Date("2026-11-16T05:00:00Z"));
-/** The instant after the last second of November, in the stored format. */
+/** note: The instant after the last second of November, in the stored format. */
 const DECEMBER_FIRST = "2026-12-01 00:00:00";
 const NOVEMBER_FIRST = "2026-11-01 00:00:00";
 
@@ -33,7 +33,7 @@ function seedWorkspace(db: TestD1, id: string, name: string, deletedAt: string |
     .run(id, id, name, deletedAt);
 }
 
-/** One review row; `head_sha` is the id so the dedup key never collides. */
+/** note: One review row; `head_sha` is the id so the dedup key never collides. */
 function seedReview(
   db: TestD1,
   row: {
@@ -54,7 +54,7 @@ function seedReview(
 }
 
 /**
- * November's fixture:
+ * note: November's fixture:
  *   ws-alpha — a `shared` bot whose own workspace is ws-alpha (so its reviews
  *              stay shared there) plus an `owned` bot;
  *   ws-gamma — one `owned` bot with more own reviews than ws-alpha;
@@ -68,7 +68,7 @@ function fixture(): TestD1 {
 
   seedBot(db, "bot-shared", 9001);
   db.raw.prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-10-01 00:00:00' WHERE id = 'bot-shared'").run();
-  // The shared bot belongs to ws-alpha; its reviews there still count shared.
+  // why: The shared bot belongs to ws-alpha; its reviews there still count shared.
   db.raw
     .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-shared', 'ws-alpha')")
     .run();
@@ -79,18 +79,18 @@ function fixture(): TestD1 {
   const ownTarget = seedTarget(db, "bot-own", { id: "t-alpha-own", workspaceId: "ws-alpha" });
   const gammaTarget = seedTarget(db, "bot-gamma", { id: "t-gamma", workspaceId: "ws-gamma" });
 
-  // Shared: two counted, one in the previous month, one exactly at the
+  // note: Shared: two counted, one in the previous month, one exactly at the
   // excluded bound of the next month.
   seedReview(db, { id: "r1", prNumber: 1, reviewedAt: "2026-11-02 09:00:00", targetId: sharedTarget, botId: "bot-shared" });
   seedReview(db, { id: "r2", prNumber: 2, reviewedAt: "2026-11-30 23:59:59", targetId: sharedTarget, botId: "bot-shared" });
   seedReview(db, { id: "r3", prNumber: 3, reviewedAt: "2026-10-31 23:59:59", targetId: sharedTarget, botId: "bot-shared" });
   seedReview(db, { id: "r4", prNumber: 4, reviewedAt: DECEMBER_FIRST, targetId: sharedTarget, botId: "bot-shared" });
 
-  // Own: one mid-month, one exactly at the included bound.
+  // note: Own: one mid-month, one exactly at the included bound.
   seedReview(db, { id: "r5", prNumber: 5, reviewedAt: "2026-11-15 12:00:00", targetId: ownTarget, botId: "bot-own" });
   seedReview(db, { id: "r6", prNumber: 6, reviewedAt: NOVEMBER_FIRST, targetId: ownTarget, botId: "bot-own" });
 
-  // The unattributed legacy shape: no target, no bot, no workspace.
+  // why: The unattributed legacy shape: no target, no bot, no workspace.
   seedReview(db, { id: "r7", prNumber: 7, reviewedAt: "2026-11-08 08:00:00", targetId: null, botId: null });
 
   seedReview(db, { id: "r8", prNumber: 8, reviewedAt: "2026-11-09 08:00:00", targetId: gammaTarget, botId: "bot-gamma" });
@@ -126,7 +126,7 @@ describe("reviewUsageMonth", () => {
 describe("readReviewUsage", () => {
   test("splits shared from own by the bot's scope, in the month of reviewed_at", async () => {
     const db = fixture();
-    // ws-alpha owns the shared bot and still reports the shared column: the
+    // why: ws-alpha owns the shared bot and still reports the shared column: the
     // split is the scope, not ownership. The boundary row (00:00:00 on the
     // 1st) counts; the previous month and the next month's first instant do
     // not.
@@ -135,14 +135,14 @@ describe("readReviewUsage", () => {
 
   test("a workspace with no target, or only an unattributed review, counts zero", async () => {
     const db = fixture();
-    // ws-beta holds nothing at all; the unattributed row (r7) belongs to no
+    // why: ws-beta holds nothing at all; the unattributed row (r7) belongs to no
     // workspace, so it never lands in ws-beta's or anyone else's count.
     expect(countsOf(await readReviewUsage(db, NOVEMBER, "ws-beta"))).toEqual([["ws-beta", 0, 0]]);
   });
 
   test("a target with no review this month contributes nothing", async () => {
     const db = fixture();
-    // Two targets, one of them parked, and not a single review in the window:
+    // why: Two targets, one of them parked, and not a single review in the window:
     // the LEFT JOIN keeps these rows, so only `r.id IS NOT NULL` keeps them
     // from reading as one review each in their bot's column.
     seedWorkspace(db, "ws-idle", "Idle");
@@ -155,7 +155,7 @@ describe("readReviewUsage", () => {
       .run();
 
     expect(countsOf(await readReviewUsage(db, NOVEMBER, "ws-idle"))).toEqual([["ws-idle", 0, 0]]);
-    // The operator face agrees, and its other rows are untouched by the two
+    // note: The operator face agrees, and its other rows are untouched by the two
     // target rows that carry no review.
     expect(countsOf(await readReviewUsage(db, NOVEMBER, null))).toEqual([
       ["ws-alpha", 2, 2],
@@ -168,7 +168,7 @@ describe("readReviewUsage", () => {
 
   test("the operator face answers every live workspace in the decided order", async () => {
     const db = fixture();
-    // Shared descending, own descending, then name ascending: Alpha (2
+    // why: Shared descending, own descending, then name ascending: Alpha (2
     // shared), Gamma (3 own), Beta and the seeded Default (both zero).
     expect(countsOf(await readReviewUsage(db, NOVEMBER, null))).toEqual([
       ["ws-alpha", 2, 2],
@@ -180,7 +180,7 @@ describe("readReviewUsage", () => {
 
   test("two same-named workspaces keep a stable order: the id closes the last key", async () => {
     const db = fixture();
-    // `workspaces.name` is not UNIQUE (only `slug` is), so a name tiebreak
+    // why: `workspaces.name` is not UNIQUE (only `slug` is), so a name tiebreak
     // alone would let these two swap places between reloads. Inserted in the
     // reverse of the expected order to prove the id decides, not luck.
     seedWorkspace(db, "ws-twin-b", "Twin");

@@ -1,5 +1,5 @@
 /**
- * The custom-provider model-metadata overlay on the store faces:
+ * why: The custom-provider model-metadata overlay on the store faces:
  * `models_meta` rides beside `model_ids` as a per-model JSON object, is
  * validated before any write (an id outside the declaration, a non-positive
  * size), and a tampered row throws on read (the getAppConfig convention)
@@ -33,7 +33,7 @@ const META = {
   },
 };
 
-/** One review_bots row of the post-0038 shape (no crypto path needed here). */
+/** note: One review_bots row of the post-0038 shape (no crypto path needed here). */
 function seedApp(db: TestD1, id: string): void {
   db.raw
     .prepare(
@@ -67,7 +67,7 @@ describe("app-config store — custom provider models_meta", () => {
     expect((await store.listCustomProviders(appId))[0]!.models_meta).toEqual(META);
     const consumer = await store.getCustomProvidersForConsumer(appId);
     expect(consumer[0]!.models_meta).toEqual(META);
-    // The membership face is untouched: the ids keep their order.
+    // why: The membership face is untouched: the ids keep their order.
     expect(consumer[0]!.model_ids).toEqual(CUSTOM.model_ids);
   });
 
@@ -129,7 +129,7 @@ describe("app-config store — custom provider models_meta", () => {
   test("a null-shaped stored field reads back as UNSTATED on both faces (never null, never false)", async () => {
     const { db, appId, store } = world();
     await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
-    // A row written by the earlier shape rule, which accepted null as "unset".
+    // why: A row written by the earlier shape rule, which accepted null as "unset".
     // The read boundary must normalize it to the ONE canonical form: an absent
     // key — otherwise the dialog renders "No reasoning" and the consumer
     // spreads a null modality list.
@@ -147,7 +147,7 @@ describe("app-config store — custom provider models_meta", () => {
     expect(decl!.models_meta).toEqual({ "deepseek-r1": { contextWindow: 128000, maxTokens: 8192 } });
     const [consumer] = await store.getCustomProvidersForConsumer(appId);
     expect(consumer!.models_meta).toEqual({ "deepseek-r1": { contextWindow: 128000, maxTokens: 8192 } });
-    // No null survives the read, so no downstream spread of `input` can throw.
+    // why: No null survives the read, so no downstream spread of `input` can throw.
     expect(JSON.stringify(consumer!.models_meta)).not.toContain("null");
   });
 
@@ -159,7 +159,7 @@ describe("app-config store — custom provider models_meta", () => {
     };
     await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
 
-    // A plain id-list save (no overlay stated): the stored facts ride along,
+    // why: A plain id-list save (no overlay stated): the stored facts ride along,
     // pruned to the surviving ids. The removed id's facts must not survive — a
     // key outside `model_ids` would fail this row's own read gate.
     await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);

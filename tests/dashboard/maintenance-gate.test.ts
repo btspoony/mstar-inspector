@@ -1,5 +1,5 @@
 /**
- * The maintenance window's gate (D20), driven through the real worker
+ * why: The maintenance window's gate (D20), driven through the real worker
  * mount. The window closes the dashboard surface and NOTHING else:
  *
  *   - a page load answers 503 with the J7 HTML (reason + start time);
@@ -41,7 +41,7 @@ function envFor(db: TestD1): Env {
   } as unknown as Env;
 }
 
-/** `dana` owns `ws-acme`; the operator login exists for the console surface. */
+/** note: `dana` owns `ws-acme`; the operator login exists for the console surface. */
 async function fixture(): Promise<{ db: TestD1 }> {
   const db = createMigratedTestD1();
   const dana = await createUser(db, { login: MEMBER, role: "member" });
@@ -57,7 +57,7 @@ async function fixture(): Promise<{ db: TestD1 }> {
   return { db };
 }
 
-/** Close the window through the shipped writer, the way the Operator does. */
+/** note: Close the window through the shipped writer, the way the Operator does. */
 async function close(db: TestD1, reason: string | null = REASON): Promise<void> {
   await setMaintenanceMode(db, { enabled: true, reason, actor: OPERATOR }, SINCE);
 }
@@ -111,7 +111,7 @@ describe("the maintenance gate", () => {
     await close(db);
     expect((await get(db, "/healthz", null)).status).toBe(200);
     expect((await get(db, "/_internal_admin/api/runtime", OPERATOR)).status).toBe(200);
-    // The console that ends the window needs a session, so signing in must stay
+    // why: The console that ends the window needs a session, so signing in must stay
     // possible while it runs.
     expect((await get(db, "/dashboard/login", null, true)).status).toBe(200);
   });
@@ -119,7 +119,7 @@ describe("the maintenance gate", () => {
   test("the login page's locale toggle and logout still answer during the window", async () => {
     const { db } = await fixture();
     await close(db);
-    // The page this gate still serves carries the EN/中文 toggle: its POST must
+    // why: The page this gate still serves carries the EN/中文 toggle: its POST must
     // set the cookie rather than answer the maintenance page.
     const locale = await worker.fetch(
       new Request("https://worker.local/dashboard/locale", {
@@ -131,7 +131,7 @@ describe("the maintenance gate", () => {
     );
     expect(locale.status).toBe(302);
     expect(locale.headers.get("Set-Cookie")).toContain("mstar_locale");
-    // Logout burns the cookies and never reads workspace data — a closed
+    // why: Logout burns the cookies and never reads workspace data — a closed
     // platform must not trap a session on the browser.
     const logout = await get(db, "/dashboard/logout", MEMBER);
     expect(logout.status).toBe(302);
@@ -140,11 +140,11 @@ describe("the maintenance gate", () => {
 
   test("the absent-row default leaves every surface unchanged", async () => {
     const { db } = await fixture();
-    // The page is the SPA shell, not the maintenance page.
+    // why: The page is the SPA shell, not the maintenance page.
     const page = await get(db, "/dashboard/acme/apps", MEMBER, true);
     expect(page.status).toBe(200);
     expect(await page.text()).not.toContain("Under maintenance");
-    // The API answers its own route's payload, which a closed platform never
+    // why: The API answers its own route's payload, which a closed platform never
     // reaches — the gate sits ahead of dispatch.
     expect((await get(db, "/dashboard/acme/api/settings/concurrency", MEMBER)).status).toBe(200);
   });
@@ -152,7 +152,7 @@ describe("the maintenance gate", () => {
   test("the window is read once per request despite the two mounts", async () => {
     const { db } = await fixture();
     await close(db);
-    // The worker mount covers page loads; an API path passes both mounts, and
+    // why: The worker mount covers page loads; an API path passes both mounts, and
     // the second must reuse the context's verdict rather than read D1 again.
     const statements: string[] = [];
     const observed = {
@@ -174,7 +174,7 @@ describe("the maintenance gate", () => {
 
   test("a read fault closes the platform instead of unlocking it", async () => {
     const { db } = await fixture();
-    // The window is the only fence around the destructive backfill: a settings
+    // why: The window is the only fence around the destructive backfill: a settings
     // read that throws answers the THIRD state, and every gate treats it as
     // closed. Failing open here would let a settings outage unlock traffic.
     const broken = {
@@ -188,7 +188,7 @@ describe("the maintenance gate", () => {
     const page = await worker.fetch(htmlGetRequest("/dashboard/acme/apps", cookie), withSpaAssets(envFor(broken)));
     expect(page.status).toBe(503);
     expect(await page.text()).toContain("Under maintenance");
-    // An API path answers the machine-readable state, never its own payload.
+    // note: An API path answers the machine-readable state, never its own payload.
     const api = await worker.fetch(
       new Request("https://worker.local/dashboard/acme/api/settings/concurrency", { headers: cookie }),
       withSpaAssets(envFor(broken)),
