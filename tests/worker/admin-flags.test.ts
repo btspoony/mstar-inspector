@@ -281,6 +281,14 @@ async function seedApp(db: TestD1): Promise<void> {
     repoOwner: PR_PAYLOAD.repository.owner.login,
     repoName: PR_PAYLOAD.repository.name,
   });
+  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // default per spec § Deployment gate; this suite exercises the flag wiring).
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+       VALUES ('review.route.workflow', 'on', datetime('now'))`,
+    )
+    .run();
 }
 
 function queueCapture(): { queue: Env["REVIEW_QUEUE"]; sent: ReviewJobPayload[] } {
