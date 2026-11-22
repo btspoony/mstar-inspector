@@ -4,6 +4,7 @@ import {
   deliveryKeyOf,
   landFailureEffect,
   listUnpublishedLaunchSettlements,
+  markAttemptSettled,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -51,14 +52,22 @@ async function seedWindow(db: TestD1, attemptId: string): Promise<ReviewJobPaylo
   return payload;
 }
 
+function effectsOf(db: TestD1, attemptId: string): { settled_ms: number | null; settled_effects: string | null } {
+  return db.raw
+    .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+    .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+}
+
 describe("the unpublished-launch selector's failure-row exclusion", () => {
-  test("a landed failure-row leaves the lane; a row without it is still selected", async () => {
+  test("only a failure-row without a landed claim stamp leaves the lane", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT_ID, 424242);
     seedTarget(db, BOT_ID, { id: TARGET_ID });
     const landedPayload = await seedWindow(db, "attempt-landed");
+    const livePayload = await seedWindow(db, "attempt-live");
     await seedWindow(db, "attempt-owed");
 
+    // The interrupted owner pass: the record landed, the claim write never did.
     const recorded = await landFailureEffect(
       db,
       {
@@ -79,15 +88,24 @@ describe("the unpublished-launch selector's failure-row exclusion", () => {
     );
     expect(recorded).toEqual({ landed: true, owned: true });
 
+    // The healthy owner pass: both effects landed, the Check is still open, so the
+    // settlement must stay open — and the row must keep being selected.
+    await markAttemptSettled(
+      db,
+      deliveryKeyOf(livePayload),
+      ["failure-row", "claim-stamp"],
+      ["failure-row", "claim-stamp", "check"],
+      NOW,
+    );
+
     // The record landed but the head-wide claim stamp stays owed — and no later
     // pass can ever write it — so the mark must stay open.
-    const row = db.raw
-      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
-      .get("attempt-landed") as { settled_ms: number | null; settled_effects: string | null };
-    expect(JSON.parse(row.settled_effects!)).toEqual(["failure-row"]);
-    expect(row.settled_ms).toBeNull();
+    expect(JSON.parse(effectsOf(db, "attempt-landed").settled_effects!)).toEqual(["failure-row"]);
+    expect(effectsOf(db, "attempt-landed").settled_ms).toBeNull();
+    expect(JSON.parse(effectsOf(db, "attempt-live").settled_effects!).sort()).toEqual(["claim-stamp", "failure-row"]);
+    expect(effectsOf(db, "attempt-live").settled_ms).toBeNull();
 
     const selected = await listUnpublishedLaunchSettlements(db, { deadlineBeforeMs: NOW, limit: 25 });
-    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-owed"]);
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-live", "attempt-owed"]);
   });
 });

@@ -10,6 +10,7 @@ import { createFailureStore, type FailureStore } from "../../src/store/failure-s
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import {
   deliveryKeyOf,
+  listUnpublishedLaunchSettlements,
   markAttemptSettled,
   reserveAttemptHandoff,
   stampOwedSettlementClaim,
@@ -744,11 +745,8 @@ describe("a persisted launch that never staged a publication", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("a persisted launch with an OPEN Check is recorded now, and the landed failure-row leaves the lane", async () => {
-    const db = await createSeededTestD1();
-    const payload = makePayload();
-    // note: The reported launch shape: the attempt froze a Check identity, so its
-    // settlement owes a Check conclusion this pass never writes.
+  /** The reported shape: a persisted launch whose attempt froze a Check identity. */
+  async function seedWithOpenCheck(db: TestD1, payload: ReviewJobPayload): Promise<string> {
     const claimed = await claimAttempt(db as never, {
       scope: {
         appId: payload.botRef!.appId,
@@ -766,10 +764,61 @@ describe("a persisted launch that never staged a publication", () => {
       executionDeadlineMs: WINDOW_CLOSED_AT - 1,
     });
     if (claimed.kind !== "claimed") throw new Error(`expected a claimed Check row, got ${claimed.kind}`);
+    const attemptId = claimed.attempt.identity.attemptId;
     const check = db.raw
       .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
-      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+      .get(attemptId) as { attempt_key: string; generation: number };
     await seedUnpublished(db, payload, { check });
+    return attemptId;
+  }
+
+  /** The Check lane's own transition: never written by this pass. */
+  function concludeCheck(db: TestD1, attemptId: string): void {
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`,
+      )
+      .run(WINDOW_CLOSED_AT - 60_000, attemptId);
+  }
+
+  test("a landed claim stamp keeps the row selected, and the settlement completes once the Check concludes", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = await seedWithOpenCheck(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The healthy OWNER pass lands the record and the head-wide claim stamp;
+    // the open Check is the only obligation left, so nothing is certified yet.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    const stamps = h.kvPuts.filter((put) => put.value === "failed").length;
+    expect(stamps).toBe(1);
+
+    // note: The row still owes the Check, so it stays in this lane: its landing
+    // stamp proves ownership, so nothing here is unrepairable. Excluding it would
+    // strand a settlement every remaining obligation is about to satisfy.
+    const selected = await listUnpublishedLaunchSettlements(db, { deadlineBeforeMs: WINDOW_CLOSED_AT, limit: 25 });
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual([UNPUBLISHED_ATTEMPT]);
+
+    // note: The Check concludes; the next pass lands that fact from durable state
+    // and discharges the settlement. The stamp already landed, and only its owner
+    // may write it — so this pass must not touch the KV key again.
+    concludeCheck(db, attemptId);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["check", "claim-stamp", "failure-row"]);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.kvPuts.filter((put) => put.value === "failed").length).toBe(stamps);
+  });
+
+  test("a settlement whose claim stamp never landed leaves the lane", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = await seedWithOpenCheck(db, payload);
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
@@ -779,26 +828,21 @@ describe("a persisted launch that never staged a publication", () => {
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
-    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).not.toContain("check");
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
 
-    // note: Pass 2 runs clean and the Check is STILL open: the loss is not re-recorded,
-    // and the attempt is deliberately still unsettled — a Check conclusion is never
-    // this pass's to write.
+    // note: A clean pass cannot prove ownership of the stamp (KV has no
+    // compare-and-set), so it writes nothing — and the row leaves the lane: only
+    // the unwritable stamp is left. Its residual sentinel decays on its own TTL.
     h.kvState.putError = undefined;
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
 
-    // note: The Check lane concludes the row (its own transition). The attempt's
-    // failure row already landed, so the unpublished lane no longer selects it:
-    // only its claim stamp would be left, and no later pass can prove ownership to
-    // write it (KV has no compare-and-set) — the row can never discharge, and its
-    // residual sentinel decays on its own TTL instead of occupying this batch.
-    db.raw
-      .prepare(`UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`)
-      .run(WINDOW_CLOSED_AT - 60_000, claimed.attempt.identity.attemptId);
+    // note: The Check concluding changes nothing: the settlement can never be
+    // discharged, so recording its fact would only buy this batch another pass.
+    concludeCheck(db, attemptId);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
-
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
     expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
