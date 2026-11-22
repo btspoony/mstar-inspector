@@ -1894,7 +1894,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
     expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown to this attempt.",
+      "Review attempt could not be confirmed complete; publication status is unknown.",
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
