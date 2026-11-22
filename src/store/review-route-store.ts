@@ -564,6 +564,54 @@ export async function listIncompleteSettlements(
 }
 
 /**
+ * The persisted-but-unpublished crash window (I-000684): the attempt's paid
+ * result is durable, its own hard stop has passed, and NOTHING was ever staged
+ * for its scope/head — so the publication lane (which only ever walks journal
+ * rows) can never pick it up and no settlement ever started. The pass turns that
+ * into the recorded terminal failure a failed review already gets, so the state
+ * is visible and re-triggerable instead of a paid result hidden behind a queued
+ * Check.
+ *
+ * `state = 'created'` keeps the instances that never got one in the re-enqueue
+ * family's hands; `settling_ms IS NULL` keeps a settlement that already started
+ * in `listIncompleteSettlements`. A journal row for the same scope/head — even a
+ * `failed` or `applied` one — means the publication lane owns the outcome and
+ * this selection leaves it alone. The payload's own head is required: a
+ * delivery that carried none cannot be matched to a publication, and this pass
+ * never guesses.
+ */
+export async function listUnpublishedLaunchSettlements(
+  db: D1Like,
+  input: { deadlineBeforeMs: number; limit: number },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_launches l ON l.attempt_id = h.attempt_id
+        WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
+          AND l.state = 'persisted'
+          AND h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?
+          AND json_extract(h.payload_json, '$.head_sha') IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM review_publications p
+             WHERE p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+               AND p.owner = json_extract(h.payload_json, '$.owner')
+               AND p.repo = json_extract(h.payload_json, '$.repo')
+               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+               AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
+          )
+        ORDER BY h.deadline_ms, h.delivery_key
+        LIMIT ?`,
+    )
+    .bind(input.deadlineBeforeMs, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
  * Handoffs whose create is not confirmed and whose last touch is old enough to
  * retry. `ambiguous` rows are included on purpose: the instance may exist, and
  * the replay is idempotent (create answers "already exists").

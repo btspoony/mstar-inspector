@@ -39,11 +39,13 @@ import {
   listHandoffsForRecovery,
   listIncompleteSettlements,
   listOwedSuccessors,
+  listUnpublishedLaunchSettlements,
   markSuccessorDelivered,
   restoreCommentClaimForRecovery,
   settleAttemptIfDischarged,
   successorGeneration,
   touchAttemptHandoff,
+  type AttemptHandoff,
   type SettlementEffect,
 } from "../store/review-route-store";
 
@@ -58,6 +60,52 @@ export type ReviewRouteEnv = {
   /** The commit claim the failed-claim stamp is written to. */
   IDEMPOTENCY_KV: KVNamespace;
 };
+
+/**
+ * Land the effects a settlement owes that need no dead host's memory — the
+ * failure row and the head's abandoned claim — then let the ONE settlement rule
+ * decide completeness from durable facts: the Check must actually be terminal
+ * (this pass never concludes it), and the failed-claim stamp is required only
+ * when the lane names a commit. The effects this pass landed are the facts; it
+ * never certifies the rest.
+ */
+async function landSettlementEffects(
+  env: ReviewRouteEnv,
+  handoff: AttemptHandoff,
+  landed: Set<SettlementEffect>,
+  detail: string,
+  nowMs: number,
+): Promise<void> {
+  if (!landed.has("failure-row")) {
+    await createFailureStore(env.DB).record({
+      target_id: handoff.payload.targetId,
+      installation_id: handoff.payload.installation_id,
+      owner: handoff.payload.owner,
+      repo: handoff.payload.repo,
+      pr_number: handoff.payload.pr_number,
+      head_sha: handoff.payload.head_sha ?? "",
+      stage: "pipeline",
+      error: detail,
+    });
+    landed.add("failure-row");
+  }
+  if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
+    await putAbandonClaim(
+      env.IDEMPOTENCY_KV,
+      idemKey({
+        installation_id: handoff.payload.installation_id,
+        owner: handoff.payload.owner,
+        repo: handoff.payload.repo,
+        pr_number: handoff.payload.pr_number,
+        head_sha: handoff.payload.head_sha,
+      }),
+      IDEM_FAILED,
+      IDEMPOTENCY_SECONDS,
+    );
+    landed.add("claim-stamp");
+  }
+  await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
+}
 
 /**
  * Deliver what the route owes. Per-row faults are isolated: one bad row never
@@ -115,47 +163,42 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       // written for either; retention owns them.
       const launch = await readReviewLaunch(env.DB, handoff.attemptId);
       if (launch === null || (launch.state !== "failed" && launch.state !== "persisted")) continue;
-      if (!landed.has("failure-row")) {
-        await createFailureStore(env.DB).record({
-          target_id: handoff.payload.targetId,
-          installation_id: handoff.payload.installation_id,
-          owner: handoff.payload.owner,
-          repo: handoff.payload.repo,
-          pr_number: handoff.payload.pr_number,
-          head_sha: handoff.payload.head_sha ?? "",
-          stage: "pipeline",
-          error: `settlement replay: the attempt's settlement did not finish (landed: ${
-            landed.size === 0 ? "nothing" : [...landed].join(", ")
-          }); the route's recovery pass recorded this failure and finished the settlement`,
-        });
-        landed.add("failure-row");
-      }
-      if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
-        await putAbandonClaim(
-          env.IDEMPOTENCY_KV,
-          idemKey({
-            installation_id: handoff.payload.installation_id,
-            owner: handoff.payload.owner,
-            repo: handoff.payload.repo,
-            pr_number: handoff.payload.pr_number,
-            head_sha: handoff.payload.head_sha,
-          }),
-          IDEM_FAILED,
-          IDEMPOTENCY_SECONDS,
-        );
-        landed.add("claim-stamp");
-      }
-      // The ONE settlement rule decides completeness from durable facts: the
-      // Check must actually be terminal (this pass never concludes it), and the
-      // failed-claim stamp is required only when the lane names a commit. The
-      // effects this pass landed are the facts; it never certifies the rest.
-      await settleAttemptIfDischarged(
-        env.DB,
-        { attemptId: handoff.attemptId, landed: [...landed] },
+      await landSettlementEffects(
+        env,
+        handoff,
+        landed,
+        `settlement replay: the attempt's settlement did not finish (landed: ${
+          landed.size === 0 ? "nothing" : [...landed].join(", ")
+        }); the route's recovery pass recorded this failure and finished the settlement`,
         nowMs,
       );
     } catch {
       // Stays incomplete; the next pass retries it.
+    }
+  }
+  // The persisted-but-unpublished crash window (I-000684): the paid result is
+  // durable, the attempt's own hard stop has passed and NOTHING was ever staged
+  // for its scope/head, so no settlement ever started and the publication lane
+  // — which only walks journal rows — can never own it. Landing the same effects
+  // a failed review gets is what makes the loss VISIBLE and re-triggerable: a
+  // failure row the operator reads and the head's abandoned claim, instead of a
+  // paid result hidden behind a queued Check. It is a recorded terminal failure,
+  // not a publication: the staged body (diff/catalog/prepared state) is not
+  // durable anywhere, so nothing here can re-render what was never written.
+  for (const handoff of await listUnpublishedLaunchSettlements(env.DB, {
+    deadlineBeforeMs: nowMs,
+    limit: ROUTE_RECOVERY_LIMIT,
+  })) {
+    try {
+      await landSettlementEffects(
+        env,
+        handoff,
+        new Set<SettlementEffect>(handoff.settledEffects ?? []),
+        `publication never started: the attempt persisted its paid result but no publication was staged for ${handoff.payload.head_sha} before its window closed; the route's recovery pass recorded this failure — re-trigger the review to publish it`,
+        nowMs,
+      );
+    } catch {
+      // Stays selected; the next pass retries it.
     }
   }
   // A claim whose delivery died before recording anything. The state transition

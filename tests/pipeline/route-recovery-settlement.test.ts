@@ -29,6 +29,7 @@ import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { claimAttempt } from "../../src/store/review-checks";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
@@ -715,5 +716,105 @@ describe("a rejection is not an observation", () => {
     // stop may not strand the attempt in `launched` and hold its capacity.
     expect(failureRows(db)).toHaveLength(1);
     expect(launchState(db)).toBe("failed");
+  });
+});
+
+// note: ---------------------------------------------------------------------------
+// A persisted launch that never staged a publication (I-000684)
+// ---------------------------------------------------------------------------
+
+describe("a persisted launch that never staged a publication", () => {
+  // note: Another attempt id, so this suite's `settledMark` helper stays scoped to
+  // the delivery fixtures above.
+  const UNPUBLISHED_ATTEMPT = "attempt-4d-unpublished";
+  const WINDOW_CLOSED_AT = 10_000_000;
+
+  /**
+   * The crash window: the paid step persisted its result, the host died before
+   * `collect` staged anything, and the attempt's own hard stop has passed. No
+   * publication row exists for the scope/head, so the publication lane — which
+   * only ever walks journal rows — cannot own the outcome.
+   */
+  async function seedUnpublished(db: TestD1, payload: ReviewJobPayload): Promise<void> {
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: UNPUBLISHED_ATTEMPT,
+      payload,
+      nowMs: WINDOW_CLOSED_AT - 900_000,
+      enqueuedMs: 0,
+      deadlineMs: WINDOW_CLOSED_AT - 1,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run(UNPUBLISHED_ATTEMPT);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run(UNPUBLISHED_ATTEMPT, WINDOW_CLOSED_AT - 900_000, WINDOW_CLOSED_AT - 800_000, WINDOW_CLOSED_AT - 700_000);
+  }
+
+  function unpublishedSettlement(db: TestD1): { settled_ms: number | null; settled_effects: string | null } {
+    return db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(UNPUBLISHED_ATTEMPT) as { settled_ms: number | null; settled_effects: string | null };
+  }
+
+  test("the pass records the terminal failure a failed review gets and settles the attempt", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+
+    // note: Visible and retryable instead of a paid result hidden behind a queued
+    // Check: the failure row carries the reason, the head's abandoned claim stops a
+    // silent re-pay, and the settle-once mark records the completion.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("publication never started");
+    expect(failureRows(db)[0]!.head_sha).toBe(payload.head_sha!);
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
+
+    // note: Completed: a second pass writes nothing more.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a staged publication keeps the outcome with the publication lane", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    // note: `collect` DID stage the body — the M8 lane may still send it, so this pass
+    // must not declare the review lost.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-staged', ?, ?, ?, ?, ?, ?, 'review', 'prepared', '{}', NULL, 0, 'pending', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        WINDOW_CLOSED_AT - 800_000,
+        WINDOW_CLOSED_AT - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
   });
 });

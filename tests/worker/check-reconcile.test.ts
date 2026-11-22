@@ -593,11 +593,15 @@ describe("a launch whose paid result is durable but whose Check is still open (I
 
   test("the reconciler selects it inside the execution window and concludes from the publication proof", async () => {
     const db = seededDb();
-    // note: The delivery attached the run and is still inside its execution window;
-    // the paid step then persisted its result and the host died. Nobody released
-    // the row, so only the launch's own durable state can make it due.
+    // note: The delivery attached the run and the paid step then persisted its result;
+    // the host died after giving the row back (a release, a failed send, a
+    // settlement give-back) while the execution window still had time left. Nobody
+    // holds the lease, so only the launch's own durable state can make it due.
     const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
     seedPersistedLaunch(db, attempt);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`)
+      .run(attempt.identity.attemptId);
     // note: The publish step's proof landed after admission — the review IS
     // published, only the Check never received its conclusion.
     const proof = proofFor(attempt.identity, "review");
@@ -626,6 +630,39 @@ describe("a launch whose paid result is durable but whose Check is still open (I
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).toBe(T0);
+  });
+
+  test("a live execution holder keeps its lease and its own conclusion still lands", async () => {
+    const db = seededDb();
+    // note: The paid step just persisted its result and the consumer is still
+    // collecting: its lease is live and its last write can predate the paid step's
+    // completion. Recovery must not take the row — taking it bumps the epoch and the
+    // consumer's own terminalize (a staging conflict's `pre-publication-failure`,
+    // say) would then be fenced out, losing a conclusion it actually knows.
+    const { attempt, lease } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
+      expect(summary.examined).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.holder).toBe(lease.holder);
+    expect(row.lease_epoch).toBe(lease.epoch);
+    // note: The holder's conclusion is still saved under its own lease.
+    expect(
+      await setCheckDesired(
+        db,
+        attempt.identity.attemptId,
+        lease,
+        { desired: "failure", title: CHECK_NAME, summary: "pre-publication-failure" },
+        null,
+        T0 + 1_000,
+      ),
+    ).toBe(true);
+    expect((await rawRow(db, attempt.identity.attemptId)).desired).toBe("failure");
   });
 
   test("a Check that already concluded is never touched", async () => {
