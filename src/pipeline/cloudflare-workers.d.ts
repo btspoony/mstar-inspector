@@ -1,5 +1,5 @@
 /**
- * Ambient declarations for the workerd builtins the sandbox adapter imports
+ * note: Ambient declarations for the workerd builtins the sandbox adapter imports
  * (`cloudflare:workers` — src/pipeline/sandbox.ts is the only importer).
  *
  * @cloudflare/workers-types DECLARES this module, but in this repo the package

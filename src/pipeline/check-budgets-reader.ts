@@ -1,5 +1,5 @@
 /**
- * Check budgets at the queue consumer's Check seam (spec §7.10).
+ * note: Check budgets at the queue consumer's Check seam (spec §7.10).
  *
  * The runtime-config store (src/dashboard/runtime-config-store.ts) owns the
  * parse, the defaults and the degraded answer; this module is the ONE export
@@ -30,10 +30,10 @@ export { CHECK_TERMINALIZE_DEFAULT, CHECK_UPDATE_DEFAULT } from "../dashboard/ru
 /** The one warn payload this reader emits. */
 export type CheckBudgetsLogFields = {
   event: "review_check_budgets_degraded";
-  /** The budgets the reader answered with — always the documented defaults. */
+  /** invariant: The budgets the reader answered with — always the documented defaults. */
   terminalize_ms: number;
   update_ms: number;
-  /** Why the read degraded; the store's cause, never a re-derivation. Its own
+  /** invariant: Why the read degraded; the store's cause, never a re-derivation. Its own
    * key because the consumer channel's `reason` is the closed admission
    * vocabulary. */
   degraded_reason?: DegradedReason;

@@ -1,5 +1,5 @@
 /**
- * Bounded discussion capture and model-context assembly (spec
+ * note: Bounded discussion capture and model-context assembly (spec
  * review-lifecycle §7.8).
  *
  * Capture (`listDiscussionWithOctokit`): newest-first GraphQL page traversal
@@ -50,13 +50,13 @@ import {
 } from "./review-threads";
 
 // ---------------------------------------------------------------------------
-// Capture bounds (spec §7.8)
+// note: Capture bounds (spec §7.8)
 // ---------------------------------------------------------------------------
 
 /** >200 replies in a target thread → that thread's coverage `truncated`. */
 export const DISCUSSION_THREAD_MAX_REPLIES = 200;
 
-// Model-context caps (spec §7.8) — ONE source for both faces: the runner's
+// note: Model-context caps (spec §7.8) — ONE source for both faces: the runner's
 // seat assignment states these same figures to the model, so the constants
 // live in the shared wire module and are re-exported here under the
 // consumer-side names.
@@ -67,12 +67,12 @@ export type ListDiscussionInput = {
   owner: string;
   repo: string;
   prNumber: number;
-  /** Known thread associations to capture (§7.8 "each known thread"). */
+  /** note: Known thread associations to capture (§7.8 "each known thread"). */
   threads: { associationId: string; threadId: string }[];
-  /** Captured-at clock (integer Unix ms; one supplied clock per capture). */
+  /** note: Captured-at clock (integer Unix ms; one supplied clock per capture). */
   nowMs?: number;
   /**
-   * Capture the Inspector's own publication comments too. Off for every
+   * note: Capture the Inspector's own publication comments too. Off for every
    * model-context consumer (they are not discussion); the publication
    * discovery lane turns it on to find the comment it may have posted. The
    * digest and `boundDiscussion` keep their filtered domain either way.
@@ -128,7 +128,7 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   const items: Discussion["items"] = [];
   const threads: ThreadSnapshot[] = [];
 
-  // API failure is `unavailable`, never empty/complete (spec §7.8).
+  // invariant: API failure is `unavailable`, never empty/complete (spec §7.8).
   let issue: Awaited<ReturnType<typeof fetchIssueComments>> | null = null;
   try {
     issue = await fetchIssueComments(
@@ -139,7 +139,7 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   } catch {
     issue = null;
   }
-  // Coverage is pagination completeness, never a captured-entry count: the
+  // invariant: Coverage is pagination completeness, never a captured-entry count: the
   // walk is capped at two 100-node pages, so `fetchIssueComments` cannot
   // return more than 200 entries. The Inspector's own publication comments
   // are excluded from the digest/context domain afterwards, so they never
@@ -175,7 +175,7 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
     }
     const overBound = capture.totalCount > DISCUSSION_THREAD_MAX_REPLIES + 1;
     const coverage: Coverage = !capture.complete || overBound ? "truncated" : "complete";
-    // Root identity: the chronological first comment — only provable when
+    // invariant: Root identity: the chronological first comment — only provable when
     // the conversation pagination is complete.
     const root = capture.complete ? (capture.comments[0] ?? null) : null;
     const digest =
@@ -203,7 +203,7 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
     }
   }
 
-  // Chronological presentation order (spec §7.8: nodes are merged
+  // note: Chronological presentation order (spec §7.8: nodes are merged
   // chronologically for presentation/digests) — the capture walked the
   // connections backward (newest page first).
   items.sort((a, b) => {
@@ -214,7 +214,7 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
   return {
     items,
     issueCoverage,
-    // Nothing was dropped or clamped yet: the model-view pass (`boundDiscussion`)
+    // note: Nothing was dropped or clamped yet: the model-view pass (`boundDiscussion`)
     // owns that bookkeeping and flips this only when its caps actually bite.
     issueModelCoverage: "complete",
     issueDigest,
@@ -224,11 +224,11 @@ export async function listDiscussionWithOctokit(octokit: GraphqlOctokit, input: 
 }
 
 // ---------------------------------------------------------------------------
-// Bounded model context (spec §7.8 caps + untrusted-text neutralization)
+// safety: Bounded model context (spec §7.8 caps + untrusted-text neutralization)
 // ---------------------------------------------------------------------------
 
 /**
- * Neutralize one untrusted text so it can neither forge the harness's own
+ * safety: Neutralize one untrusted text so it can neither forge the harness's own
  * delimiter convention nor Inspector marker syntax nor carry control
  * characters: strip Inspector markers, collapse runs of 3+ hyphens (a forged
  * `-----BEGIN …` never survives as a delimiter-shaped run), and drop control
@@ -255,7 +255,7 @@ function neutralizeUntrustedText(text: string): string {
   return out;
 }
 
-/** Single-line, delimiter-safe metadata value (bounded escaped metadata). */
+/** note: Single-line, delimiter-safe metadata value (bounded escaped metadata). */
 function metaValue(value: string): string {
   return neutralizeUntrustedText(value).replace(/[\n\r]/g, " ");
 }
@@ -268,7 +268,7 @@ function metaValue(value: string): string {
 export const BODY_TRUNCATED_SUFFIX = "\n[... body truncated ...]";
 
 /**
- * The model-visible body of one RETAINED item: at most
+ * invariant: The model-visible body of one RETAINED item: at most
  * `MODEL_ITEM_MAX_CHARS` characters of the capture, with Inspector marker
  * syntax, delimiter runs and control characters neutralized, plus the
  * truncation marker when the RAW body was longer than the cap. Clamping
@@ -315,7 +315,7 @@ function modelBodyOf(body: string, overCap: boolean): string {
  * the raw bodies).
  */
 export function boundDiscussion(discussion: Discussion): Discussion {
-  // Chronological presentation order (oldest first), then apply the caps.
+  // note: Chronological presentation order (oldest first), then apply the caps.
   // Bodies this app publishes itself carry `viewerDidAuthor` — the
   // AUTHENTICATED provenance from the capture, never a login suffix — plus its
   // own marker: the review/degraded prefix on an issue comment, the thread
@@ -342,7 +342,7 @@ export function boundDiscussion(discussion: Discussion): Discussion {
   const truncatedThreads = new Set<string>();
   let issueContextTruncated = false;
   /**
-   * Coverage bookkeeping for any item the model did not see in full — dropped
+   * note: Coverage bookkeeping for any item the model did not see in full — dropped
    * by a cap or clamped at the item bound. Metadata only, never a body.
    */
   const markLost = (lost: Discussion["items"][number]): void => {
@@ -350,12 +350,12 @@ export function boundDiscussion(discussion: Discussion): Discussion {
     else if (lost.source === "issue") issueContextTruncated = true;
   };
 
-  // Item cap first: everything older than the newest MODEL_MAX_ITEMS goes.
+  // note: Item cap first: everything older than the newest MODEL_MAX_ITEMS goes.
   const countDropped = Math.max(0, ordered.length - MODEL_MAX_ITEMS);
   for (const lost of ordered.slice(0, countDropped)) markLost(lost);
   const candidates = ordered.slice(countDropped);
 
-  // Then the total-text budget, filled from the NEWEST end — which is what
+  // note: Then the total-text budget, filled from the NEWEST end — which is what
   // makes the oldest-first dropping and the bounded work the same loop.
   const retained: Discussion["items"] = [];
   let totalChars = 0;
@@ -364,7 +364,7 @@ export function boundDiscussion(discussion: Discussion): Discussion {
     const overCap = item.body.length > MODEL_ITEM_MAX_CHARS;
     const body = modelBodyOf(item.body, overCap);
     if (totalChars + body.length > MODEL_TOTAL_MAX_CHARS) {
-      for (const lost of candidates.slice(0, i + 1)) markLost(lost); // this item and every older one
+      for (const lost of candidates.slice(0, i + 1)) markLost(lost); // note: this item and every older one
       break;
     }
     totalChars += body.length;
@@ -377,7 +377,7 @@ export function boundDiscussion(discussion: Discussion): Discussion {
       createdAt: metaValue(item.createdAt),
       updatedAt: metaValue(item.updatedAt),
       body,
-      // Provenance passes through unchanged: an item that reached here either
+      // note: Provenance passes through unchanged: an item that reached here either
       // lacks its marker or was not authored by this App (the predicate needs
       // both halves).
       ownAuthor: item.ownAuthor,

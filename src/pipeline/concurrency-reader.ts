@@ -1,5 +1,5 @@
 /**
- * Review concurrency at the queue consumer's admission decision
+ * note: Review concurrency at the queue consumer's admission decision
  * (iteration spec review-concurrency §1.1/§2.2).
  *
  * The runtime-config store (src/dashboard/runtime-config-store.ts) owns the
@@ -31,9 +31,9 @@ export type { DegradedReason };
 export type ReviewConcurrencyLogFields = {
   event: "review_concurrency_degraded";
   workspace_id: string;
-  /** The cap the reader answered with — always the conservative 1 when degraded. */
+  /** invariant: The cap the reader answered with — always the conservative 1 when degraded. */
   effective: number;
-  /** Why the read degraded; the store's cause, never a re-derivation. Its own
+  /** invariant: Why the read degraded; the store's cause, never a re-derivation. Its own
    * key because the consumer channel's `reason` is the closed admission
    * vocabulary. */
   degraded_reason?: DegradedReason;

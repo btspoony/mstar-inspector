@@ -1,5 +1,5 @@
 /**
- * Comment-claim outbox settings at the cron sweep (migration 0048).
+ * note: Comment-claim outbox settings at the cron sweep (migration 0048).
  *
  * The runtime-config store (src/dashboard/runtime-config-store.ts) owns the
  * parse, the absent-row defaults, the ranges and the degraded answer; this
@@ -32,7 +32,7 @@ export {
 /** The one warn payload this reader emits. */
 export type CommentClaimSettingsLogFields = {
   event: "review_comment_claim_settings_degraded";
-  /** The settings the reader answered with — always the documented defaults. */
+  /** invariant: The settings the reader answered with — always the documented defaults. */
   retry_ms: number;
   max_attempts: number;
   outbox_cap: number;

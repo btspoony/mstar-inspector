@@ -1,5 +1,5 @@
 /**
- * Sandbox smoke entry (STOP-gate + runner falsification)
+ * note: Sandbox smoke entry (STOP-gate + runner falsification)
  * — a dedicated Worker entry that exercises the real sandbox path locally via
  * `wrangler dev`. Not the production worker entry: the production consumer
  * wiring lives in `src/worker/index.ts`. The `SandboxV1` Durable Object
@@ -43,10 +43,10 @@ export { Sandbox, SandboxV1 };
 
 type SmokeEnv = {
   SANDBOX: SandboxBinding;
-  /** Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
+  /** safety: Installation token minted by the orchestrator (scripts/sandbox-smoke.ts). */
   GH_TOKEN: string;
   /**
-   * The operator's ark key for the runner smoke (orchestrator `--var`; the
+   * note: The operator's ark key for the runner smoke (orchestrator `--var`; the
    * Worker-side input, never a container env var). The smoke transports it
    * through the SAME stdin credential payload the production consumer builds
    * (buildRunnerCredentials), which the in-image runner turns into stored
@@ -54,7 +54,7 @@ type SmokeEnv = {
    * container's process environment.
    */
   ARK_API_KEY?: string;
-  /** Smoke target repository `owner/repo` (orchestrator `--var`, no default). */
+  /** note: Smoke target repository `owner/repo` (orchestrator `--var`, no default). */
   GH_REPO: string;
 };
 
@@ -64,15 +64,15 @@ type SmokeEnv = {
  * § Sandbox smoke).
  */
 const GH_PR = "1";
-/** Fixed clone branch of the smoke target (never configurable). */
+/** invariant: Fixed clone branch of the smoke target (never configurable). */
 const SEED_BRANCH = "mstar-inspector-seed";
 
-// GitHub name charset (owner/repo). GH_REPO comes from the orchestrator and
+// note: GitHub name charset (owner/repo). GH_REPO comes from the orchestrator and
 // reaches a shell command string, so validate before minting the shellCommand
 // brand (the same allowlist gitops.ts applies to payload-derived fields).
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
-/** Validated `owner/repo` from GH_REPO, or null when missing/malformed. */
+/** why: Validated `owner/repo` from GH_REPO, or null when missing/malformed. */
 function smokeRepo(env: SmokeEnv): string | null {
   const repo = env.GH_REPO ?? "";
   const [owner, name, ...rest] = repo.split("/");
@@ -83,26 +83,26 @@ function smokeRepo(env: SmokeEnv): string | null {
 }
 
 const CLONE_DIR = "/workspace/repo";
-/** Runner --input JSON path (same constant as the production consumer). */
+/** note: Runner --input JSON path (same constant as the production consumer). */
 const INPUT_PATH = "/workspace/review-input.json";
-/** In-image runner path (Dockerfile: WORKDIR /opt/runner, COPY packages/runner/src). */
+/** why: In-image runner path (Dockerfile: WORKDIR /opt/runner, COPY packages/runner/src). */
 const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
 const HARNESS_ROOT = "/opt/mstar-harness";
-/** Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml). */
+/** why: Image omp agent dir (PI_CODING_AGENT_DIR, empty — the runner synthesizes every models.yml). */
 const OMP_AGENT_DIR = "/opt/omp-agent";
 
 export default {
   async fetch(request: Request, env: SmokeEnv): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/healthz") {
-      // Same additive version field as the worker face.
+      // note: Same additive version field as the worker face.
       return Response.json({ ok: true, version: `v${APP_VERSION}` });
     }
     if (url.pathname !== "/smoke" && url.pathname !== "/smoke-review") {
       return new Response("not found", { status: 404 });
     }
 
-    // GH_REPO reaches a shell command string — validate before the first
+    // note: GH_REPO reaches a shell command string — validate before the first
     // getSandbox call on EITHER route (missing/empty fails closed).
     const repo = smokeRepo(env);
     if (!repo) {
@@ -119,7 +119,7 @@ export default {
     const startedAt = Date.now();
     let result: Record<string, unknown>;
     try {
-      // Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
+      // safety: Path 1 (primary hypothesis): gh CLI with GH_TOKEN env injection.
       // GH_REPO was allowlist-validated in fetch(), and the string is cleared
       // for the sink via the shellCommand brand mint.
       const gh = await sandbox.runCommand(shellCommand(`gh pr diff ${GH_PR} --repo ${repo}`), {
@@ -135,7 +135,7 @@ export default {
           latencyMs: Date.now() - startedAt,
         };
       } else {
-        // Path 2 (fallback): git equivalent — clone the PR head, diff against
+        // note: Path 2 (fallback): git equivalent — clone the PR head, diff against
         // base. Token injected via git env config (never in the command string).
         const git = await sandbox.runCommand(
           shellCommand(
@@ -182,7 +182,7 @@ export default {
       };
     }
 
-    // Destroy is part of the falsification evidence: run it before returning
+    // note: Destroy is part of the falsification evidence: run it before returning
     // so the response carries the destroy outcome (a verdict pin).
     try {
       await sandbox.destroy();
@@ -199,7 +199,7 @@ export default {
 };
 
 /**
- * Runner falsification: real SDK, real model key (the ark credential payload
+ * safety: Runner falsification: real SDK, real model key (the ark credential payload
  * over the exec stdin pipe), real clone of the configured smoke repository's
  * seed branch. The runner inside the image reads the diff file, streams its
  * credential payload, writes the pool into the run's credential store, runs the
@@ -216,7 +216,7 @@ async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
       throw new Error("the ARK_API_KEY var is required for /smoke-review");
     }
 
-    // 1. Clone the seed branch + base into the container.
+    // note: 1. Clone the seed branch + base into the container.
     const clone = await sandbox.runCommand(
       shellCommand(
         [
@@ -260,7 +260,7 @@ async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
 }
 
 /**
- * Steps 2–4 of the review smoke: recon facts → runner input JSON → exec the
+ * why: Steps 2–4 of the review smoke: recon facts → runner input JSON → exec the
  * in-image review runner. The runner input is the same shape the production
  * consumer writes (src/pipeline/consumer.ts): PR fact + checked-out head sha
  * + the numstat universe + an empty capabilityHosts base, base64-transported
@@ -273,7 +273,7 @@ async function execInImageReview(
   startedAt: number,
   repo: string,
 ): Promise<Record<string, unknown>> {
-  // The runner input REQUIRES the capabilityHosts field (there is no baked
+  // note: The runner input REQUIRES the capabilityHosts field (there is no baked
   // models.yml); it carries an EMPTY base — the image declares no provider.
   // The smoke exercises the deployed omp image, resolved through the SAME
   // closed registry the production consumer resolves with.
@@ -321,7 +321,7 @@ async function execInImageReview(
       HARNESS_PLUGIN_ROOT: HARNESS_ROOT,
       PI_CODING_AGENT_DIR: OMP_AGENT_DIR,
     },
-    // The credential payload contract the runner consumes — one ark key, over
+    // safety: The credential payload contract the runner consumes — one ark key, over
     // the exec stdin pipe (never the process environment).
     stdin: encodeCredentialPayload({ ark: [arkKey] }),
   });

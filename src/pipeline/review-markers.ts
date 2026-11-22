@@ -1,5 +1,5 @@
 /**
- * The publication marker wire — the hidden HTML prefix that identifies the
+ * note: The publication marker wire — the hidden HTML prefix that identifies the
  * Inspector's own PR-level issue comments: the review chain
  * (`<!-- mstar-inspector:review:v1 round=N -->`) and the degraded chain
  * (`<!-- mstar-inspector:review-degraded:v1 round=N -->`, a SEPARATE family:

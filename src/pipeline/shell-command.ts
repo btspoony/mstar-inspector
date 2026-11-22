@@ -1,5 +1,5 @@
 /**
- * ShellCommand brand (scanner CWE-78 boundary, qc2 F-001) — the type-level
+ * note: ShellCommand brand (scanner CWE-78 boundary, qc2 F-001) — the type-level
  * gate between raw strings and the sandbox shell sink. A raw `string` —
  * webhook/HTTP-derived or otherwise unvalidated — is a type error at
  * `ReviewSandbox.runCommand`: only the validated pipeline/gitops.ts builders

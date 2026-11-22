@@ -1,5 +1,5 @@
 /**
- * Sandbox adapter (STOP gate) — the ONLY module in the repo that reaches the
+ * invariant: Sandbox adapter (STOP gate) — the ONLY module in the repo that reaches the
  * sandbox runtime (compass contracts A / the Global Constraints). Wraps it
  * behind the locked `ReviewSandbox` contract so the consumer and the smoke
  * never touch the runtime surface directly.
@@ -98,10 +98,10 @@ export type ReviewSandbox = {
   destroy(): Promise<void>;
 };
 
-/** Container image key in `wrangler.jsonc` → `containers[].images`. */
+/** why: Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
- * Instance size. `lite` (256 MiB, 1/16 vCPU) carried the pin over from the
+ * note: Instance size. `lite` (256 MiB, 1/16 vCPU) carried the pin over from the
  * 0.12 `instance_type` value. The note it replaced claimed the all-silent
  * stall "was not resource exhaustion — a memory-starved process would not
  * emit nothing on either stream". That reasoning is wrong on its own terms:
@@ -125,7 +125,7 @@ const CONTAINER_IMAGE_KEY = "sandbox";
  */
 const CONTAINER_INSTANCE = "basic" as const;
 /**
- * Container inactivity bound. The DO stays active while a `runCommand` RPC is
+ * note: Container inactivity bound. The DO stays active while a `runCommand` RPC is
  * in flight, so this guards the gaps BETWEEN calls — it must outlive the
  * longest single review (deep: 14 min runner + git steps, src/pipeline/
  * consumer.ts runnerTimeoutMs + the 15-min queue wall-clock cap).
@@ -136,7 +136,7 @@ const utf8 = new TextDecoder();
 const utf8Encoder = new TextEncoder();
 
 /**
- * Write one payload into the child's stdin and CLOSE it.
+ * note: Write one payload into the child's stdin and CLOSE it.
  *
  * Closing is what sends **EOF**: a reader that consumes stdin to the end (the
  * in-image runner reads its credential payload and its runner-input document
@@ -170,7 +170,7 @@ async function writeExecStdin(stream: WritableStream | null, payload: Uint8Array
  */
 export class SandboxV1 extends DurableObject {
   /**
-   * A restarted DO (deploy, eviction) loses the container's inactivity
+   * note: A restarted DO (deploy, eviction) loses the container's inactivity
    * timeout while the container keeps running, so the timeout is armed again
    * here — before any request — for a container this DO finds already
    * running. `blockConcurrencyWhile` keeps requests behind the re-arm. The
@@ -184,7 +184,7 @@ export class SandboxV1 extends DurableObject {
     }
   }
 
-  /** The container bound to this DO (absent only when the binding is misconfigured). */
+  /** invariant: The container bound to this DO (absent only when the binding is misconfigured). */
   private get container(): Container {
     const container = this.ctx.container;
     if (!container) throw new Error("The container binding is not configured");
@@ -192,7 +192,7 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * Start the container when needed and (re)set the inactivity timeout —
+   * why: Start the container when needed and (re)set the inactivity timeout —
    * idempotent by construction: `running` is true as soon as `start()`
    * returns, the check→start sequence has no await in between (concurrent
    * calls cannot double-start), and every step after `start()` is safe to
@@ -211,7 +211,7 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
+   * note: THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
    * exactly once, as the `-c` payload of `/bin/sh` under the GNU `timeout`
    * bound. The bound is forwarded in seconds WITHOUT rounding — GNU `timeout`
    * takes fractional durations, so an explicit millisecond override keeps the
@@ -228,7 +228,7 @@ export class SandboxV1 extends DurableObject {
     command: ShellCommand,
     opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-    // Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
+    // note: Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
     // headroom and fail before `execve` can report E2BIG. No value is echoed.
     const commandBytes = utf8Encoder.encode(command).byteLength;
     if (commandBytes > MAX_EXEC_COMMAND_BYTES) {
@@ -240,7 +240,7 @@ export class SandboxV1 extends DurableObject {
         throw new Error(`exec env ${name} is ${valueBytes} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`);
       }
     }
-    // Every bound — including the stdin payload — runs BEFORE the container
+    // note: Every bound — including the stdin payload — runs BEFORE the container
     // starts: a payload that can never be delivered must not start one. The
     // encode still happens before `exec`, which is where it is written.
     const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
@@ -250,7 +250,7 @@ export class SandboxV1 extends DurableObject {
       );
     }
     await this.ensureRunning();
-    // Clamp before converting: a zero/negative value must never reach the argv
+    // invariant: Clamp before converting: a zero/negative value must never reach the argv
     // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
     // non-finite override (NaN/Infinity) is not a duration at all — default.
     const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
@@ -261,11 +261,11 @@ export class SandboxV1 extends DurableObject {
       {
         cwd: opts?.cwd,
         env: opts?.env,
-        // No `stdin` option at all = the platform closes stdin and sends EOF.
+        // note: No `stdin` option at all = the platform closes stdin and sends EOF.
         ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
       },
     );
-    // Drain stdout/stderr CONCURRENTLY with the write: a child that emits ahead
+    // note: Drain stdout/stderr CONCURRENTLY with the write: a child that emits ahead
     // of reading its stdin would otherwise deadlock against a full output pipe.
     // (`output()` is readable once, so it is started here and awaited once.)
     const drained = process.output();
@@ -278,14 +278,14 @@ export class SandboxV1 extends DurableObject {
       }
     }
     const output = await drained;
-    // A child that exited while reporting its own failure keeps its result —
+    // why: A child that exited while reporting its own failure keeps its result —
     // that stderr is the real diagnosis. One that claims SUCCESS after the
     // payload failed to land is refused: never report a credential-carrying run
     // as completed when its credentials never arrived.
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
     }
-    // A non-zero exit keeps the child's own stderr, but a stdin write failure
+    // why: A non-zero exit keeps the child's own stderr, but a stdin write failure
     // is still evidence and must not vanish with it: "the payload never landed"
     // and "the payload landed and the child then failed" are different
     // diagnoses, and the caller only sees this string.
@@ -303,7 +303,7 @@ export class SandboxV1 extends DurableObject {
     };
   }
 
-  /** Terminate the container. Ids are never reused (see getSandbox). */
+  /** invariant: Terminate the container. Ids are never reused (see getSandbox). */
   async destroy(): Promise<void> {
     await this.container.destroy();
   }
@@ -325,7 +325,7 @@ export class SandboxV1 extends DurableObject {
  * carrying it — but the export stays (docs/deploy.md § Cloudflare resources).
  */
 export class Sandbox extends DurableObject {
-  // Intentionally empty — the legacy `v1` migration's name holder only.
+  // invariant: Intentionally empty — the legacy `v1` migration's name holder only.
 }
 
 /**
@@ -336,7 +336,7 @@ export class Sandbox extends DurableObject {
  * (0.12's `normalizeId` is gone).
  */
 export async function getSandbox(binding: SandboxBinding, id: string): Promise<ReviewSandbox> {
-  // The stub exposes exactly the RPC methods the DO class defines
+  // safety: The stub exposes exactly the RPC methods the DO class defines
   // (runCommand/destroy) — the ReviewSandbox shape.
   const namespace = binding as { getByName(name: string): ReviewSandbox };
   return namespace.getByName(id.toLowerCase());

@@ -1,5 +1,5 @@
 /**
- * The pipeline's settings seam: `readCheckBudgets` / `readRecheckBacklogFill`.
+ * note: The pipeline's settings seam: `readCheckBudgets` / `readRecheckBacklogFill`.
  *
  * The store owns parsing, defaults and the degraded answer; these readers add
  * exactly one behaviour — ONE structured warn per degraded read, silence on

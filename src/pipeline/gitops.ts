@@ -1,5 +1,5 @@
 /**
- * GitOps command construction — pure command builders for the
+ * note: GitOps command construction — pure command builders for the
  * sandbox exec steps. Trusted orchestration: the consumer runs these commands
  * inside the sandbox with credentials injected via exec env (never in the
  * command string, never in the image, never in logs — compass contracts D).
@@ -44,13 +44,13 @@ export type GitOpsInput = {
 };
 
 export type GitOpsCommands = {
-  /** Shallow clone of the PR head branch into cloneDir. */
+  /** note: Shallow clone of the PR head branch into cloneDir. */
   clone: ShellCommand;
-  /** Read the sha of the checked-out HEAD (authoritative review sha). */
+  /** note: Read the sha of the checked-out HEAD (authoritative review sha). */
   checkedOutSha: ShellCommand;
-  /** Write the PR unified diff to diffPath via gh. */
+  /** note: Write the PR unified diff to diffPath via gh. */
   diff: ShellCommand;
-  /** Numstat of the PR diff — the runner's seat-partition universe. */
+  /** note: Numstat of the PR diff — the runner's seat-partition universe. */
   numstat: ShellCommand;
 };
 
@@ -74,7 +74,7 @@ export const RUNNER_PATH = "/opt/runner/packages/runner/src/runner.ts";
  */
 export const DIFF_PREFETCH_MAX_BYTES = 2 * 1024 * 1024;
 
-/** GitHub name charset (owner/repo) — matches signed webhook payload reality. */
+/** note: GitHub name charset (owner/repo) — matches signed webhook payload reality. */
 const GITHUB_NAME_RE = /^[A-Za-z0-9._-]+$/;
 
 function assertShellSafe(value: string, pattern: RegExp, label: string): void {
@@ -94,7 +94,7 @@ function assertPrNumber(prNumber: number): void {
   }
 }
 
-/** Absolute in-image path charset for the bounded reads — no shell metacharacter. */
+/** note: Absolute in-image path charset for the bounded reads — no shell metacharacter. */
 const IN_IMAGE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
 
 /**
@@ -124,11 +124,11 @@ export function boundedFileReadCommand(path: string, maxBytes: number): ShellCom
  */
 export const BOUNDED_READ_ABSENT_FLAG = "2";
 
-/** A commit sha interpolated into a command path segment — hex only. A shell allowlist, never an answer check. */
+/** invariant: A commit sha interpolated into a command path segment — hex only. A shell allowlist, never an answer check. */
 const SHA_RE = /^[0-9a-f]{7,64}$/;
 
 /**
- * A COMPLETE git object id: SHA-1's 40 or SHA-256's 64 lowercase hex. The
+ * note: A COMPLETE git object id: SHA-1's 40 or SHA-256's 64 lowercase hex. The
  * interpolation allowlist above accepts a truncated reply, so it cannot tell
  * an unusable API answer from a real one.
  */
@@ -234,12 +234,12 @@ export function isDiffTooLarge(stderr: string): boolean {
   );
 }
 
-/** A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
+/** note: A branch ref as GitHub reports it (`base.ref`) — no traversal, no option form. */
 const BRANCH_REF_RE = /^[A-Za-z0-9._/-]+$/;
 
 function assertBranchRef(baseRef: string): void {
   assertShellSafe(baseRef, BRANCH_REF_RE, "base ref");
-  // The charset admits `.` and `-`; `..` escapes a path segment and a leading
+  // note: The charset admits `.` and `-`; `..` escapes a path segment and a leading
   // `-` reads as an option wherever the ref lands as an argument.
   if (baseRef.startsWith("-") || baseRef.includes("..")) {
     throw new Error(`unsafe base ref for shell interpolation: ${JSON.stringify(baseRef)}`);
@@ -406,7 +406,7 @@ export function incrementDiffCommand(
  */
 export function writeJsonCommand(path: string): ShellCommand {
   assertShellSafe(path, IN_IMAGE_PATH_RE, "write path");
-  // The charset admits `.`; a `..` segment would still escape the path.
+  // note: The charset admits `.`; a `..` segment would still escape the path.
   if (path.includes("..")) {
     throw new Error(`unsafe write path for shell interpolation: ${JSON.stringify(path)}`);
   }

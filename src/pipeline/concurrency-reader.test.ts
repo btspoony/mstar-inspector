@@ -1,5 +1,5 @@
 /**
- * Unit tests: the pipeline's review-concurrency reader
+ * note: Unit tests: the pipeline's review-concurrency reader
  * (src/pipeline/concurrency-reader.ts) — the logging wrapper the queue
  * consumer calls at admission over the runtime-config store.
  *
@@ -24,7 +24,7 @@ import { readReviewConcurrency, type ReviewConcurrencyLogFields } from "./concur
 
 const WS = "ws_1";
 
-/** A migrated database with one workspace row at the NULL (default) cap. */
+/** note: A migrated database with one workspace row at the NULL (default) cap. */
 function fixture() {
   const db = createMigratedTestD1();
   db.raw
@@ -35,7 +35,7 @@ function fixture() {
   return db;
 }
 
-/** Captures every structured warn line the reader emits. */
+/** note: Captures every structured warn line the reader emits. */
 function capture() {
   const warns: Array<{ fields: ReviewConcurrencyLogFields; msg?: string }> = [];
   const log = {
@@ -44,7 +44,7 @@ function capture() {
   return { warns, log };
 }
 
-/** A D1 face whose every statement fails — the degraded read path. */
+/** note: A D1 face whose every statement fails — the degraded read path. */
 const failingDb: DashboardD1 = {
   prepare() {
     throw new Error("D1 unavailable");
@@ -57,7 +57,7 @@ const failingDb: DashboardD1 = {
 describe("readReviewConcurrency", () => {
   test("a healthy read exposes both caps and their effective min, and logs nothing", async () => {
     const { warns, log } = capture();
-    // Absent settings: system defaults to 256, the workspace column to 32.
+    // note: Absent settings: system defaults to 256, the workspace column to 32.
     expect(await readReviewConcurrency(fixture(), WS, log)).toEqual({
       system: 256,
       workspace: 32,

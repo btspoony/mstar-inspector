@@ -1,5 +1,5 @@
 /**
- * Secret redaction for model-produced text (Phase 5 B2 / SEC-02) — pure,
+ * safety: Secret redaction for model-produced text (Phase 5 B2 / SEC-02) — pure,
  * unit-tested. The review session can be prompt-injected into echoing
  * secrets (provider keys,
  * installation tokens, PEM material) into ANY model-controlled envelope
@@ -45,11 +45,11 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
-/** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
+/** note: The model-controlled `incomplete` fact (declared cause + unscanned scope). */
 type IncompleteFact = NonNullable<ReviewOutput["incomplete"]>;
 
 /**
- * Redact one `incomplete` fact (qc2 F-001): `reason` and every `unscanned`
+ * why: Redact one `incomplete` fact (qc2 F-001): `reason` and every `unscanned`
  * entry are model-controlled and reach the public review comment and the D1
  * envelope, so both redaction passes rewrite them. Structure is preserved —
  * entries keep their order and count, and an empty list stays empty.
@@ -92,7 +92,7 @@ export function redactReviewOutput(output: ReviewOutput): ReviewOutput {
       ...finding,
       title: redactSecrets(finding.title),
       body: redactSecrets(finding.body),
-      // Conditional spreads keep ABSENT optional fields absent (no
+      // why: Conditional spreads keep ABSENT optional fields absent (no
       // `key: undefined` materialization on the envelope).
       ...(finding.category === undefined ? {} : { category: redactSecrets(finding.category) }),
       ...(finding.file_path == null ? {} : { file_path: redactSecrets(finding.file_path) }),
