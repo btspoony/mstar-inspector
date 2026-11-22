@@ -32,9 +32,9 @@ import {
   idemKey,
   putAbandonClaim,
 } from "../contracts/idem";
-import { createFailureStore } from "../store/failure-store";
 import { readReviewLaunch } from "./review-attempt";
 import {
+  landFailureEffect,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
   listIncompleteSettlements,
@@ -69,10 +69,10 @@ export type ReviewRouteEnv = {
  * when the lane names a commit. The effects this pass landed are the facts; it
  * never certifies the rest.
  *
- * The failure row is persisted as a landed effect IMMEDIATELY, before the KV
- * write below: the row is randomly identified, so a re-pass cannot recognize its
- * own earlier insert any other way, and a KV or settlement fault would otherwise
- * duplicate it on every pass.
+ * The failure row and its landed fact are ONE persistence step (`landFailureEffect`
+ * commits them in a single D1 batch): no interruption and no second pass can see
+ * the row without the fact, and the insert is attempt-keyed so a concurrent pass
+ * adds nothing.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -82,21 +82,25 @@ async function landSettlementEffects(
   nowMs: number,
 ): Promise<void> {
   if (!landed.has("failure-row")) {
-    await createFailureStore(env.DB).record({
-      target_id: handoff.payload.targetId,
-      installation_id: handoff.payload.installation_id,
-      owner: handoff.payload.owner,
-      repo: handoff.payload.repo,
-      pr_number: handoff.payload.pr_number,
-      head_sha: handoff.payload.head_sha ?? "",
-      stage: "pipeline",
-      error: detail,
-    });
+    await landFailureEffect(
+      env.DB,
+      {
+        attemptId: handoff.attemptId,
+        landed: [...landed],
+        failure: {
+          target_id: handoff.payload.targetId,
+          installation_id: handoff.payload.installation_id,
+          owner: handoff.payload.owner,
+          repo: handoff.payload.repo,
+          pr_number: handoff.payload.pr_number,
+          head_sha: handoff.payload.head_sha ?? "",
+          stage: "pipeline",
+          error: detail,
+        },
+      },
+      nowMs,
+    );
     landed.add("failure-row");
-    // The fact is durable before the rest of the effects: a fault below leaves the
-    // obligation incomplete (no `settled_ms`), never invisible — the next pass reads
-    // it back and only finishes what is missing.
-    await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
     await putAbandonClaim(

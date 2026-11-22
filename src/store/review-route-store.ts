@@ -18,6 +18,7 @@
  * worker imports.
  */
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
@@ -411,6 +412,43 @@ async function settlementPlan(
     return null;
   }
   return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
+}
+
+/**
+ * The settlement rule as a plain statement for the attempt's OWN handoff row —
+ * the batchable form of `settleAttemptIfDischarged` (same plan, same union, same
+ * completeness rule). `null` means no lane has closed (or no handoff row): there
+ * is nothing to mark.
+ */
+export async function settlementStatementForEffects(
+  db: D1Like,
+  input: AttemptSettlementInput,
+  nowMs: number,
+): Promise<D1StatementLike | null> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return null;
+  return settlementStatement(db, "attempt_id = ?", [input.attemptId], plan.landed, plan.required, nowMs);
+}
+
+/**
+ * Land the failure effect and its settle-once fact as ONE persistence step. The
+ * row is inserted and the fact recorded in a single D1 batch, so no interruption
+ * (a crash, a KV fault, a second pass) can ever see one without the other; the
+ * insert's deterministic attempt-scoped id makes a concurrent pass a no-op.
+ *
+ * Returns `false` when the attempt has no handoff row to mark: nothing is
+ * written, because a row the settle-once rule cannot see is not a fact.
+ */
+export async function landFailureEffect(
+  db: D1Like,
+  input: AttemptSettlementInput & { failure: ReviewFailureInput },
+  nowMs: number,
+): Promise<boolean> {
+  const landed = input.landed.includes("failure-row") ? [...input.landed] : [...input.landed, "failure-row"];
+  const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
+  if (mark === null) return false;
+  await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
+  return true;
 }
 
 /**

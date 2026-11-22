@@ -725,6 +725,22 @@ describe("a rejection is not an observation", () => {
 // A persisted launch that never staged a publication (I-000684)
 // ---------------------------------------------------------------------------
 
+/**
+ * note: The same database with its settle-once MARK write unavailable — the seam
+ * between the failure row and the fact that records it. Everything else (the
+ * insert, the reads, the KV) still works.
+ */
+function withoutMarkWrites(db: TestD1): TestD1 {
+  return {
+    prepare(sql: string) {
+      if (/UPDATE review_attempt_handoffs/.test(sql)) throw new Error("D1 mark write unavailable");
+      return db.prepare(sql);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
 describe("a persisted launch that never staged a publication", () => {
   // note: Another attempt id, so this suite's `settledMark` helper stays scoped to
   // the delivery fixtures above.
@@ -837,21 +853,28 @@ describe("a persisted launch that never staged a publication", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
+    // note: Pass 1 is INTERRUPTED after the row and its fact landed: the claim write
+    // faults, so the obligation stays open (no `settled_ms`).
+    h.kvState.putError = new Error("KV write failed");
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
-
-    // note: The loss is recorded immediately and the head is abandoned, but the attempt
-    // is NOT settled: its Check is still open, and this pass never concludes one.
     expect(failureRows(db)).toHaveLength(1);
-    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
     expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).not.toContain("check");
+
+    // note: Pass 2 runs clean and the Check is STILL open: the loss is not re-recorded,
+    // and the attempt is deliberately still unsettled — a Check conclusion is never
+    // this pass's to write.
+    h.kvState.putError = undefined;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
 
     // note: The Check lane concludes the row (its own transition); the next pass adds
     // that one fact and completes the settlement — still a single failure row.
     db.raw
       .prepare(`UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`)
       .run(WINDOW_CLOSED_AT - 60_000, claimed.attempt.identity.attemptId);
-    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
 
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
@@ -881,6 +904,28 @@ describe("a persisted launch that never staged a publication", () => {
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
     expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a mark fault between the row and its fact lands neither, and the retry lands one", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The settle-once mark cannot be written — the seam between the failure row
+    // and the fact that records it. One persistence step means neither lands: a row
+    // without its fact could never be recognized by a later pass.
+    await reconcileReviewRoute(
+      { ...env, DB: withoutMarkWrites(db) as never, REVIEW_QUEUE: queue as never },
+      WINDOW_CLOSED_AT,
+    );
+    expect(failureRows(db)).toHaveLength(0);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
   });
 
   test("a staged publication keeps the outcome with the publication lane", async () => {
