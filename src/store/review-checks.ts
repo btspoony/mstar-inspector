@@ -313,16 +313,40 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NONTERMINAL_WHERE = "terminal_ms IS NULL";
 
 /**
+ * The launch whose PAID result is durable (`persisted`) for the Check's own
+ * key + generation: the paid step is over, so no model can still be running for
+ * this attempt and the row must not be withheld until its execution deadline
+ * (I-000684 — a host that died after persisting the result but before the
+ * publish step leaves that Check queued with no failure and no retry). The
+ * state is the attempt's own frozen identity, never a head match.
+ */
+const LAUNCH_PERSISTED_SQL = `EXISTS (
+    SELECT 1 FROM review_launches l
+     WHERE l.attempt_key = review_checks.attempt_key
+       AND l.attempt_generation = review_checks.generation
+       AND l.state = 'persisted'
+  )`;
+
+/**
  * The §7.11.2 due predicate, SHARED by the selector and the recovery claim so
  * the two can never drift (`claimCheckRecovery` repeats the selector's full
  * eligibility by contract). Bound values, in order: `maxAttempts`, `nowMs`,
- * `nowMs`, `nowMs - CHECK_STALE_HOLDER_MS`, `nowMs`, `nowMs`, `nowMs`.
+ * `nowMs`, `nowMs - CHECK_STALE_HOLDER_MS`, `nowMs - CHECK_STALE_HOLDER_MS`,
+ * `nowMs`, `nowMs`, `nowMs`, `nowMs`.
  *
  * The second disjunct is the OWED shape: a resumed publication that could not
  * adopt its Check recorded the obligation on the attempt row (`check_owed_ms`),
  * and that attempt is due as soon as no live lease holds it — the publication
  * proof it concludes from is already durable, so it must not wait out the
  * execution deadline.
+ *
+ * The PERSISTED launch (`LAUNCH_PERSISTED_SQL`) joins the FIRST shape: the paid
+ * result is durable, so the holder's silence is no longer "the model running"
+ * and takes the same stale-holder rule every frozen intent takes — the pass then
+ * concludes the Check from the publication proof, or, past the deadline, with
+ * the approved unconfirmed failure. `recovery_state`, the due time, the attempt
+ * cap and `terminal_ms IS NULL` still gate it, so a concluded Check is never
+ * selected and nothing is re-run or re-published.
  */
 const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
           AND attempts < ?
@@ -330,9 +354,11 @@ const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
             (
               (next_attempt_ms IS NULL OR next_attempt_ms <= ?)
               AND (lease_until_ms IS NULL OR lease_until_ms <= ?
-                   OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
+                   OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?)
+                   OR (${LAUNCH_PERSISTED_SQL} AND holder IS NOT NULL AND updated_ms <= ?))
               AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
-                   OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
+                   OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?)
+                   OR ${LAUNCH_PERSISTED_SQL})
             )
             OR (
               -- An OWED settlement, associated by the Check's OWN attempt key
@@ -944,7 +970,7 @@ export async function claimCheckRecovery(
         WHERE id = ? AND ${NONTERMINAL_WHERE}
           AND ${CHECK_DUE_PREDICATE}`,
     )
-    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs)
+    .bind(holder, nowMs + CHECK_RECOVERY_LEASE_MS, nowMs, id, maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs)
     .run();
   if (claim.meta.changes !== 1) return null;
   const row = await db
@@ -2410,7 +2436,10 @@ export async function listCheckReconcileBatch(
           COALESCE(next_attempt_ms,created_ms),id
         LIMIT ?`,
     )
-    .bind(maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs, nowMs, nowMs, nowMs, limit)
+    .bind(
+      maxAttempts, nowMs, nowMs, nowMs - CHECK_STALE_HOLDER_MS, nowMs - CHECK_STALE_HOLDER_MS,
+      nowMs, nowMs, nowMs, nowMs, limit,
+    )
     .all<ReviewCheckRow>();
   return results.map(attemptOf);
 }

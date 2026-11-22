@@ -572,6 +572,87 @@ describe("due selection (spec §7.11.2 predicate)", () => {
 });
 
 // note: ---------------------------------------------------------------------------
+// A persisted-but-unpublished launch (I-000684)
+// ---------------------------------------------------------------------------
+
+describe("a launch whose paid result is durable but whose Check is still open (I-000684)", () => {
+  /** The paid step's own durable outcome on the attempt's launch row. */
+  function seedPersistedLaunch(db: TestD1, attempt: CheckAttempt): void {
+    const check = db.raw
+      .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+      .get(attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome,
+            attempt_key, attempt_generation)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?, ?)`,
+      )
+      .run(attempt.identity.attemptId, CLAIM_AT, CLAIM_AT, T0 - 60_000, check.attempt_key, check.generation);
+  }
+
+  test("the reconciler selects it inside the execution window and concludes from the publication proof", async () => {
+    const db = seededDb();
+    // note: The delivery attached the run and is still inside its execution window;
+    // the paid step then persisted its result and the host died. Nobody released
+    // the row, so only the launch's own durable state can make it due.
+    const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    // note: The publish step's proof landed after admission — the review IS
+    // published, only the Check never received its conclusion.
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85), T0 - 100_000);
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async () => ({ kind: "found", remote: remoteFor(attempt.identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => {
+            expect(conclusion.desired).toBe("success");
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.examined).toBe(1);
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).toBe(T0);
+  });
+
+  test("a Check that already concluded is never touched", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET terminal_ms = ?, desired = 'success', observed = 'success', recovery_state = 'done' WHERE id = ?`,
+      )
+      .run(T0 - 120_000, attempt.identity.attemptId);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db, "success")) });
+      expect(summary.examined).toBe(0);
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.terminal_ms).toBe(T0 - 120_000);
+    expect(row.desired).toBe("success");
+    expect(fetchStub.urls).toHaveLength(0);
+  });
+});
+
+// note: ---------------------------------------------------------------------------
 // Proof-based terminal conclusions for an expired attempt
 // ---------------------------------------------------------------------------
 
