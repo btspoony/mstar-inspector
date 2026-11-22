@@ -87,7 +87,9 @@ import {
   markResolutionLocalError,
   PREPARED_SEND_MIN_AGE_MS,
   readLineBatchState,
+  recordLineDiscoveryFailure,
   recordNeedsRecheck,
+  resetLineDiscoveryFailures,
   recordPublicationProof,
   recordLineDispatchIntent,
   reenableLifecycleForApps,
@@ -101,7 +103,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type PostPreparedLineCommentsInput, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type LineDiscoveryFailure, type PostPreparedLineCommentsInput, type PostedLineComments, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
@@ -816,6 +818,13 @@ async function applyConfirmedPublication(
  *     transition the foreground uses (exactly one lane wins), or
  *   - finds an intent already recorded and performs read-only discovery —
  *     never a second send.
+ *
+ * The selection is bounded, so one query cannot guarantee a resolvable batch
+ * behind unresolvable ones is reached. Whenever a pass retires a batch (its
+ * discovery bound is spent), the lane re-queries: the retired rows are gone
+ * from the next result, so the pass keeps moving through the backlog and a
+ * fresh batch is reached in THIS pass. `handled` remembers what this pass
+ * already touched, so a row that stays eligible is not processed twice.
  */
 async function reconcileLineBatches(
   db: D1Like,
@@ -828,77 +837,141 @@ async function reconcileLineBatches(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
-  for (const row of rows) {
-    const scope = row.payload.scope;
-    if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
-    // ONE conditional transition decides who sends: the durable dispatch
-    // intent. `null` means the batch was already dispatched (or another lane
-    // holds it) — then the only work left is read-only discovery.
-    const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
-    if (lease === null) {
-      const state = await readLineBatchState(db, row.id);
-      if (!state.pending) continue;
-      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-      if (resolved.kind === "unavailable") continue;
-      try {
-        const recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
-        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+  const handled = new Set<string>();
+  for (;;) {
+    const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+    let retired = 0;
+    for (const row of rows) {
+      if (handled.has(row.id)) continue;
+      handled.add(row.id);
+      const scope = row.payload.scope;
+      if (!canSpend(budget, now(), 1, true)) continue; // stays due, no claim
+      // ONE conditional transition decides who sends: the durable dispatch
+      // intent. `null` means the batch was already dispatched (or another lane
+      // holds it) — then the only work left is read-only discovery.
+      const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
+      if (lease === null) {
+        const state = await readLineBatchState(db, row.id);
+        if (!state.pending) continue;
+        const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+        if (resolved.kind === "unavailable") continue;
+        let recovered: PostedLineComments;
+        try {
+          recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
+        } catch (error) {
+          // A thrown read observed nothing: one failed pass under the read-scope
+          // reason, never a capture.
+          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
+          log.warn(
+            { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
+          );
+          continue;
+        }
+        let capturePersisted = false;
+        try {
+          await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+          capturePersisted = true;
+        } catch (error) {
+          log.warn(
+            { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment id capture failed — the intent stays, discovery owns the rest",
+          );
+        }
+        const persistedProgress = capturePersisted && recovered.posted.length > 0;
+        if (persistedProgress) {
+          // ANY persisted capture is progress — the count means consecutive
+          // attempts that saved nothing, not consecutive incomplete ones.
+          await resetLineDiscoveryFailures(db, row.id, now());
+        } else {
+          // A capture that persisted nothing — a write that threw included —
+          // IS a failed attempt under that definition.
+          const reason: LineDiscoveryFailure =
+            recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
+          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;
+        }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
           "line-comment batch discovered without a second send",
         );
-      } catch (error) {
-        log.warn(
-          { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-          "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
-        );
+        continue;
       }
-      continue;
-    }
-    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-    if (resolved.kind === "unavailable") {
-      await releaseLineDispatch(db, row.id, lease, now(), false);
-      continue;
-    }
-    const input = lineInputOf(row);
-    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
-    if (admitted.kind === "unresolved") {
-      await releaseLineDispatch(db, row.id, lease, now(), false);
-      log.warn(
-        { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
-        "line-comment batch not sent — its admitted attempt cannot be resolved",
-      );
-      continue;
-    }
-    let outcome: "sent" | "refused" | "unknown" = "unknown";
-    try {
-      const posted = await resolved.reviewer.postLineComments({
-        ...input,
-        journalClaim: lease,
-        ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
-      });
+      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+      if (resolved.kind === "unavailable") {
+        await releaseLineDispatch(db, row.id, lease, now(), false);
+        continue;
+      }
+      const input = lineInputOf(row);
+      const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+      if (admitted.kind === "unresolved") {
+        await releaseLineDispatch(db, row.id, lease, now(), false);
+        log.warn(
+          { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
+          "line-comment batch not sent — its admitted attempt cannot be resolved",
+        );
+        continue;
+      }
+      let outcome: "sent" | "refused" | "unknown" = "unknown";
       try {
-        await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+        const posted = await resolved.reviewer.postLineComments({
+          ...input,
+          journalClaim: lease,
+          ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
+        });
+        try {
+          await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+        } catch (error) {
+          log.warn(
+            { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment id capture failed — the intent stays, discovery owns the rest",
+          );
+        }
+        outcome = "sent";
       } catch (error) {
+        // A definitive pre-send refusal proves nothing was sent; anything else
+        // may have landed, so the intent is kept and only discovery may follow.
+        if (error instanceof PreparedSendRejected) outcome = "refused";
         log.warn(
-          { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-          "line-comment id capture failed — the intent stays, discovery owns the rest",
+          { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment batch send failed — an unresolved send stays discovery-only",
         );
+      } finally {
+        if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
       }
-      outcome = "sent";
-    } catch (error) {
-      // A definitive pre-send refusal proves nothing was sent; anything else
-      // may have landed, so the intent is kept and only discovery may follow.
-      if (error instanceof PreparedSendRejected) outcome = "refused";
-      log.warn(
-        { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-        "line-comment batch send failed — an unresolved send stays discovery-only",
-      );
-    } finally {
-      if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
     }
+    if (retired === 0) return;
   }
+}
+
+/**
+ * ONE discovery pass that captured nothing: the durable count moves toward the
+ * bound and, at it, the batch leaves the eligible set with the reason this
+ * pass observed. Reported ONCE — that transition is the report; the selector
+ * never returns the row again — and the row, its count and its reason stay
+ * readable, so an operator can see why recovery stopped. Returns true only
+ * when this call retired the batch (the caller re-queries the selection then).
+ *
+ * `observedCaptures` is the capture state this pass was taken against; a
+ * capture that landed since (full or partial) makes the write a no-op.
+ */
+async function noteLineDiscoveryFailure(
+  db: D1Like,
+  row: PublicationRow,
+  reason: LineDiscoveryFailure,
+  observedCaptures: number,
+  nowMs: number,
+  log: ReconcileLog,
+): Promise<boolean> {
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs);
+  if (settled === null || !settled.unresolvable) return false;
+  log.warn(
+    {
+      event: "ops_lifecycle_line_unresolvable",
+      detail: `publication=${row.id} reason=${reason} attempts=${settled.attempts}`,
+    },
+    "line-comment batch left the recovery set — its remote batch cannot be read back",
+  );
+  return true;
 }
 
 /** The exact frozen batch of one applied publication. */

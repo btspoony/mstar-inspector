@@ -481,7 +481,8 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
     expect(clock.recoveryCreate).toBe(0);
     expect(clock.recoveryReads).toBeGreaterThanOrEqual(1);
     const after = await readLineBatchState(db as never, publicationId);
-    expect(after).toEqual({ pending: false, dispatched: true });
+    // One capture write persisted against the batch (the foreground's).
+    expect(after).toEqual({ pending: false, dispatched: true, captures: 1 });
     const captured = db.raw
       .prepare(`SELECT COUNT(*) AS n FROM review_threads WHERE publication_id = ? AND review_id IS NOT NULL`)
       .get(publicationId) as { n: number };
