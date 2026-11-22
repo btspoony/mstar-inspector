@@ -1,4 +1,4 @@
-# image-inputs: 69e6bece5828b3433f96e506f92976ec
+# image-inputs: 2f51517bd5c0e3b89f2e1a22038be02c
 # mstar-inspector review sandbox image (review-runner containerization).
 #
 # IMAGE INPUTS: this Dockerfile COPYs packages/{runner,shared}/src, but the
@@ -125,7 +125,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
     && { echo "bun $(/usr/local/bin/bun --version)"; gh --version | head -1; } > /etc/mstar-image-versions \
     && cat /etc/mstar-image-versions
 
-# mstar-harness plugin, pinned ref 021b28e9b92e1b1981043a393e107bd121a84b7b (tag v4.8.1, bumped 2026-11-20).
+# mstar-harness plugin, pinned ref a3b2763a7f33a14c1193aee5ac8880dda970d218 (tag v4.8.2, bumped 2026-11-22).
 # Choice: build-time shallow clone (NOT a git submodule, NOT COPY):
 #   - the harness is a separate PUBLIC repo — a submodule would couple this
 #     repo's git metadata to it and require submodule state inside the build
@@ -136,7 +136,7 @@ RUN curl --retry 8 --retry-delay 5 --retry-all-errors -fsSL https://cli.github.c
 # .git is removed after checkout to keep the image lean.
 RUN git init /opt/mstar-harness \
     && git -C /opt/mstar-harness remote add origin https://github.com/btspoony/mstar-harness.git \
-    && git -C /opt/mstar-harness fetch --depth 1 origin 021b28e9b92e1b1981043a393e107bd121a84b7b \
+    && git -C /opt/mstar-harness fetch --depth 1 origin a3b2763a7f33a14c1193aee5ac8880dda970d218 \
     && git -C /opt/mstar-harness checkout FETCH_HEAD \
     && git -C /opt/mstar-harness rev-parse HEAD > /opt/mstar-harness-ref \
     && rm -rf /opt/mstar-harness/.git
