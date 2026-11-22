@@ -1,5 +1,4 @@
-/**
- * The console's data-upgrade screen (spec operator-data-upgrade § Upgrade
+/** note: The console's data-upgrade screen (spec operator-data-upgrade § Upgrade
  * registry and state machine, task 4).
  *
  * Two faces, one contract:
@@ -39,7 +38,7 @@ const state = (over: Partial<DataUpgradeState> = {}): DataUpgradeState => ({
   ...over,
 });
 
-/** Three items: the three states an operator reads differently. */
+/** note: Three items: the three states an operator reads differently. */
 const UPGRADES: DataUpgradeRow[] = [
   {
     id: "repo-backfill",
@@ -105,13 +104,13 @@ const view = (over: Partial<Parameters<typeof DataUpgradeView>[0]> = {}) =>
     }),
   );
 
-/** One item alone: a control the OTHER states offer must not appear here. */
+/** invariant: One item alone: a control the OTHER states offer must not appear here. */
 const viewOf = (index: number, over: Partial<Parameters<typeof DataUpgradeView>[0]> = {}) =>
   view({ data: { upgrades: [UPGRADES[index]!], maintenance: RUNTIME.maintenance }, ...over });
 
 describe("data upgrade screen — static faces", () => {
   test("the time column is Last run: the finish stamp, or the claim while it runs", () => {
-    // A finished run states its OWN finish, never the claim that started it.
+    // invariant: A finished run states its OWN finish, never the claim that started it.
     const done = view({
       data: {
         upgrades: [
@@ -128,14 +127,14 @@ describe("data upgrade screen — static faces", () => {
         maintenance: RUNTIME.maintenance,
       },
     });
-    // Folded, the card's summary carries the same stamp its body column would.
+    // note: Folded, the card's summary carries the same stamp its body column would.
     expect(done).toContain(formatRelativeTime("2026-11-16T09:00:00.000Z", "en"));
     expect(done).not.toContain(formatRelativeTime("2026-11-09T08:00:00.000Z", "en"));
-    // The two single-stamp columns are gone: one run time, not a start and a finish.
+    // note: The two single-stamp columns are gone: one run time, not a start and a finish.
     expect(done).not.toContain("Started");
     expect(done).not.toContain("Finished");
 
-    // No finish yet: the in-flight claim is the closest thing to a run time.
+    // note: No finish yet: the in-flight claim is the closest thing to a run time.
     const running = viewOf(1);
     expect(running).toContain(t("en", "admin.dataUpgrades.lastRunLabel"));
     expect(running).toContain(formatRelativeTime("2026-11-16T08:00:00.000Z", "en"));
@@ -146,14 +145,14 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.nav.dataUpgrades"));
     expect(markup).toContain("Repository identity backfill");
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusPending"));
-    // The item's own impact line: what it changes and what it never touches.
+    // invariant: The item's own impact line: what it changes and what it never touches.
     expect(markup).toContain(UPGRADES[0]!.impact);
-    // The counts are the item's own names, never renamed by the console.
+    // invariant: The counts are the item's own names, never renamed by the console.
     expect(markup).toContain("unidentified_targets");
     expect(markup).toContain("ledger_pairs");
     expect(markup).toContain(t("en", "admin.dataUpgrades.startAction"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.preflightAction"));
-    // A pending item offers no verify: there is nothing to check yet.
+    // invariant: A pending item offers no verify: there is nothing to check yet.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.verifyAction"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.downtimeBadge"));
   });
@@ -166,7 +165,7 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.dataUpgrades.verifyAction"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.resetAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.startAction"));
-    // The stop control belongs to a run in flight, not to a stored state.
+    // note: The stop control belongs to a run in flight, not to a stored state.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.stopAction"));
   });
 
@@ -174,14 +173,14 @@ describe("data upgrade screen — static faces", () => {
     const markup = viewOf(2);
     expect(markup).toContain(t("en", "admin.dataUpgrades.statusFailed"));
     expect(markup).toContain("verify failed: orphan_rows=2");
-    // A failed item takes no new batch: only the retry returns it to pending.
+    // invariant: A failed item takes no new batch: only the retry returns it to pending.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.continueAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.startAction"));
-    // The ambiguous `Reset` is gone; the retry says what it does AND what it does not undo.
+    // note: The ambiguous `Reset` is gone; the retry says what it does AND what it does not undo.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.resetAction"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.restartAction"));
     expect(markup).toContain(t("en", "admin.dataUpgrades.restartConsequence"));
-    // Both faces say it: the Chinese card states the same consequence.
+    // note: Both faces say it: the Chinese card states the same consequence.
     const zh = viewOf(2, { locale: "zh_CN" });
     expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.restartAction"));
     expect(zh).toContain("已迁移的行不会回滚");
@@ -204,7 +203,7 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.verifyAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.continueAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.startAction"));
-    // Nothing to reset a finished run to, and no retry for a run that succeeded.
+    // invariant: Nothing to reset a finished run to, and no retry for a run that succeeded.
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.resetAction"));
     expect(markup).not.toContain(t("en", "admin.dataUpgrades.restartAction"));
   });
@@ -221,7 +220,7 @@ describe("data upgrade screen — static faces", () => {
         maintenance: RUNTIME.maintenance,
       },
     });
-    // The header still states what the item did and when — the body does not.
+    // note: The header still states what the item did and when — the body does not.
     expect(markup).toContain(
       t("en", "admin.dataUpgrades.completedSummary", {
         count: 40,
@@ -251,7 +250,7 @@ describe("data upgrade screen — static faces", () => {
   });
 
   test("the downtime badge marks a runnable item, never a finished one", () => {
-    // Downtime is a property of a run: an item with nothing left to run has no
+    // invariant: Downtime is a property of a run: an item with nothing left to run has no
     // window to warn the operator about.
     const badge = t("en", "admin.dataUpgrades.downtimeBadge");
     const pending = { ...UPGRADES[0]!, requiresDowntime: true };
@@ -264,20 +263,20 @@ describe("data upgrade screen — static faces", () => {
       state: state({ status: "completed" as const, processed: 5, finishedAt: "2026-11-16T09:00:00.000Z" }),
     };
     expect(view1(completed)).not.toContain(badge);
-    // Same for a failed item: it takes no new batch until a restart.
+    // note: Same for a failed item: it takes no new batch until a restart.
     expect(
       view1({
         ...pending,
         state: state({ status: "failed" as const, processed: 5, lastError: "boom" }),
       }),
     ).not.toContain(badge);
-    // And for an empty worklist: the run control is disabled, so no window is
+    // note: And for an empty worklist: the run control is disabled, so no window is
     // needed either.
     expect(view1({ ...pending, preflight: { unidentified_targets: 0 } })).not.toContain(badge);
   });
 
   test("zero preflight disables the run control and states there is nothing to migrate", () => {
-    // The staging face: `已完成` beside every counter at 0 and a live start button.
+    // note: The staging face: `已完成` beside every counter at 0 and a live start button.
     const zero: DataUpgradeRow[] = [
       {
         id: "repo-backfill",
@@ -294,16 +293,16 @@ describe("data upgrade screen — static faces", () => {
       },
     ];
     const markup = view({ data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
-    // An empty worklist states itself and folds: the operator reads the answer
+    // note: An empty worklist states itself and folds: the operator reads the answer
     // without opening a card that has no action to offer. The counts and the
     // (disabled) start control are behind the disclosure.
     expect(markup).toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
     const showLabel = t("en", "admin.dataUpgrades.showDetails").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     expect(markup).toMatch(new RegExp(`>${showLabel}</button>`));
-    // Both dictionaries state it.
+    // note: Both dictionaries state it.
     const zh = view({ locale: "zh_CN", data: { upgrades: zero, maintenance: RUNTIME.maintenance } });
     expect(zh).toContain(t("zh_CN", "admin.dataUpgrades.nothingToMigrate"));
-    // A counter above zero is work: no empty-worklist copy, and no fold.
+    // invariant: A counter above zero is work: no empty-worklist copy, and no fold.
     const live = viewOf(0);
     expect(live).not.toContain(t("en", "admin.dataUpgrades.nothingToMigrate"));
     expect(live).not.toContain(t("en", "admin.dataUpgrades.showDetails"));
@@ -314,7 +313,7 @@ describe("data upgrade screen — static faces", () => {
     expect(markup).toContain(t("en", "admin.dataUpgrades.maintenanceTitle"));
     expect(markup).toContain(t("en", "admin.runtime.maintenanceStateOn"));
     expect(markup).toContain("data upgrade: Repository identity backfill");
-    // The running row is the banner's current item.
+    // note: The running row is the banner's current item.
     expect(markup).toContain("Quota reprice");
     expect(markup).toContain(t("en", "admin.dataUpgrades.progressProcessed", { count: 40 }));
     expect(markup).toContain("verify failed: orphan_rows=2");
@@ -341,12 +340,12 @@ type Surface = {
   sent: Sent[];
   text: () => string;
   click: (node: DomElement | null) => Promise<void>;
-  /** Drain the batch loop: each iteration settles one request and its continuation. */
+  /** note: Drain the batch loop: each iteration settles one request and its continuation. */
   settle: (times?: number) => Promise<void>;
   close: () => Promise<void>;
 };
 
-/** The only button whose label is exactly `label`. */
+/** invariant: The only button whose label is exactly `label`. */
 const button = (container: DomElement, label: string): DomElement | null =>
   [...container.querySelectorAll("button")].find((node) => node.textContent === label) ?? null;
 
@@ -391,7 +390,7 @@ async function mount(respond: Respond): Promise<Surface> {
   };
 }
 
-/** The list read and the runtime read share one stub; only POSTs diverge. */
+/** invariant: The list read and the runtime read share one stub; only POSTs diverge. */
 const readStub =
   (upgrades: DataUpgradeRow[] = UPGRADES): Respond =>
   (request) => {
@@ -400,11 +399,11 @@ const readStub =
     return json({ error: "unexpected request" }, 404);
   };
 
-/** One item's own card: a control belongs to a row, not to the page. */
+/** note: One item's own card: a control belongs to a row, not to the page. */
 const card = (container: DomElement, id: string): DomElement | null =>
   container.querySelector(`[data-upgrade="${id}"]`);
 
-/** The control labelled `label` INSIDE one item's card. */
+/** note: The control labelled `label` INSIDE one item's card. */
 const control = (container: DomElement, id: string, label: string): DomElement | null =>
   button(card(container, id) ?? container, label);
 
@@ -418,7 +417,7 @@ describe("data upgrade screen — mounted", () => {
       },
     ];
     const surface = await mount(readStub(zero));
-    // Folded, the card offers no run control at all.
+    // note: Folded, the card offers no run control at all.
     expect(
       control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction")),
     ).toBeNull();
@@ -426,7 +425,7 @@ describe("data upgrade screen — mounted", () => {
       control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.showDetails")),
     );
     await surface.settle();
-    // `disabled` is the only thing keeping a zero-worklist run from opening the
+    // invariant: `disabled` is the only thing keeping a zero-worklist run from opening the
     // maintenance window a downtime item would own; pin it, not just the copy.
     const start = control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction"));
     expect(start).not.toBeNull();
@@ -454,12 +453,12 @@ describe("data upgrade screen — mounted", () => {
     await surface.click(control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction")));
     await surface.settle();
 
-    // One request per batch: the loop stopped on the answer that said `done`.
+    // note: One request per batch: the loop stopped on the answer that said `done`.
     expect(steps).toBe(2);
     expect(
       card(surface.container, "repo-backfill")?.textContent,
     ).toContain(t("en", "admin.dataUpgrades.progressDone", { batch: 2, count: 40 }));
-    // The list was re-read after the run, so the counts on screen are the server's.
+    // why: The list was re-read after the run, so the counts on screen are the server's.
     const listReads = surface.sent.filter(
       (request) => request.method === "GET" && request.url.endsWith("/data-upgrades"),
     );
@@ -483,7 +482,7 @@ describe("data upgrade screen — mounted", () => {
       t("en", "admin.dataUpgrades.stepFailed", { title: "Repository identity backfill" }),
     );
     expect(text).toContain("maintenance mode must be on to step this upgrade");
-    // One refusal ends the loop: the state row did not move, so no retry.
+    // note: One refusal ends the loop: the state row did not move, so no retry.
     expect(surface.sent.filter((request) => request.method === "POST")).toHaveLength(1);
     expect(card(surface.container, "repo-backfill")?.textContent).toContain(
       t("en", "admin.dataUpgrades.statusPending"),
@@ -493,7 +492,7 @@ describe("data upgrade screen — mounted", () => {
 
   test("stop ends the loop after the batch in flight", async () => {
     let steps = 0;
-    // Every request is answered at once; only the second is held so the run is
+    // why: Every request is answered at once; only the second is held so the run is
     // parked mid-batch when the operator presses stop.
     let hold: ((response: Response) => void) | null = null;
     const surface = await mount((request) => {
@@ -501,7 +500,7 @@ describe("data upgrade screen — mounted", () => {
         steps += 1;
         const answer = json({
           state: state({ status: "running", processed: steps * 20 }),
-          // Nothing is ever done: only the stop can end this loop.
+          // invariant: Nothing is ever done: only the stop can end this loop.
           batch: { processed: 20, done: false },
         });
         if (steps === 1) return answer;
@@ -514,19 +513,19 @@ describe("data upgrade screen — mounted", () => {
 
     await surface.click(control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.startAction")));
     await surface.settle(2);
-    // Parked on batch 2: the stop control is live while the loop waits.
+    // note: Parked on batch 2: the stop control is live while the loop waits.
     expect(steps).toBe(2);
     await surface.click(control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.stopAction")));
     hold!(json({ state: state({ status: "running", processed: 40 }), batch: { processed: 20, done: false } }));
     await surface.settle();
 
-    // The stop landed after the batch in flight, and asked for no third one.
+    // invariant: The stop landed after the batch in flight, and asked for no third one.
     await surface.settle(8);
     expect(steps).toBe(2);
     expect(card(surface.container, "repo-backfill")?.textContent).toContain(
       t("en", "admin.dataUpgrades.progressStopped", { batch: 2, count: 40 }),
     );
-    // The stop control is gone with the loop.
+    // note: The stop control is gone with the loop.
     expect(control(surface.container, "repo-backfill", t("en", "admin.dataUpgrades.stopAction"))).toBeNull();
     await surface.close();
   });
@@ -545,7 +544,7 @@ describe("data upgrade screen — mounted", () => {
     await surface.click(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.verifyAction")));
     await surface.settle();
 
-    // A non-zero check is the server's `failed` + `last_error`, stated as such.
+    // invariant: A non-zero check is the server's `failed` + `last_error`, stated as such.
     expect(card(surface.container, "finding-index")?.textContent).toContain("verify failed: orphan_rows=2");
     expect(
       surface.sent.filter((request) => request.method === "POST" && request.url.endsWith("/verify")),
@@ -561,7 +560,7 @@ describe("data upgrade screen — mounted", () => {
       return readStub()(request);
     });
 
-    // The retry is the ONLY control a failed item offers for starting again.
+    // invariant: The retry is the ONLY control a failed item offers for starting again.
     expect(control(surface.container, "finding-index", t("en", "admin.dataUpgrades.resetAction"))).toBeNull();
     await surface.click(
       control(surface.container, "finding-index", t("en", "admin.dataUpgrades.restartAction")),
@@ -571,7 +570,7 @@ describe("data upgrade screen — mounted", () => {
     const text = card(surface.container, "finding-index")?.textContent ?? "";
     expect(text).toContain(t("en", "admin.dataUpgrades.statusPending"));
     expect(text).not.toContain("verify failed: orphan_rows=2");
-    // Pending again with an empty worklist folds; its counts and the start
+    // note: Pending again with an empty worklist folds; its counts and the start
     // control live behind the disclosure.
     await surface.click(
       control(surface.container, "finding-index", t("en", "admin.dataUpgrades.showDetails")),
@@ -608,7 +607,7 @@ describe("data upgrade screen — mounted", () => {
     ];
     const surface = await mount(readStub(done));
 
-    // Folded: the summary is there, the body's own columns are not.
+    // note: Folded: the summary is there, the body's own columns are not.
     const folded = card(surface.container, "quota-reprice")?.textContent ?? "";
     expect(folded).toContain(
       t("en", "admin.dataUpgrades.completedSummary", {
