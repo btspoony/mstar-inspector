@@ -1,53 +1,3 @@
-/**
- * note: (AD-652): daily stacked bar chart — one column per
- * time bucket (day buckets for the 7/30-day windows, Monday-anchored week
- * buckets for 90d, from the additive `findings_distribution` API field),
- * each column stacked by the caller's closed `series` vocabulary (the
- * severity merge-classes). Replaces the retired aggregate
- * BarChart on the insights stat card.
- *
- * Component API (the chart discipline): `{ buckets, series,
- * ariaLabel }`. `buckets` = the payload's findings_distribution rows
- * (passed through as the page receives them); the
- * component reads each series value as `by_severity[key] ?? 0`.
- * `series` is the closed vocabulary: the PAGE
- * maps semantics → a D14 slot (`slot: ChartSlot`, 1–6) and unknown keys never
- * enter the array — the component never invents a color, and a value outside
- * the six slots does not typecheck. Each entry renders one
- * `<Bar dataKey stackId>` in array order (first = bottom of the
- * stack = first legend item; legend order = stack order).
- *
- * Render discipline (knowledge
- * best-practices/spa-recharts-token-charts.md): fixed numeric width/height
- * + fluid wrapper (`style={{ width: "100%", height: "auto" }}`),
- * `isAnimationActive={false}` on every Bar, named recharts imports, no
- * ResponsiveContainer. The width number comes from useContainerWidth —
- * the measured container width client-side, the designed 560 default on
- * the static/SSR face (v0.3.4 round: true-size rendering, no viewBox
- * upscale on wide cards). Series colors ride charts.css `.chart-fill-{n}` /
- * `.chart-swatch-{n}` class rules only — never presentation-attribute var(),
- * never raw hex; the fill reads the slot's quiet face, the legend swatch its
- * `-mark` face. Legend = the HTML legend row (`.chart-legend` +
- * `.chart-swatch-{n}`), NOT
- * recharts `<Legend>` (architect ruling — same face as
- * TrendChart). The tooltip is the recharts default content token-styled
- * via contentStyle/labelStyle/itemStyle (itemStyle mandatory — recharts'
- * default list text is unreadable on the dark card; BarChart.tsx:123-134
- * precedent).
- *
- * A11y floor (carried across the chart rework): role=img + aria-label + svg `<title>`;
- * every bucket stays on the axis (zero-count buckets are honest grid
- * columns — time continuity, AC-C) with deterministic pinned `M/D` date
- * labels (dateLabel.ts, every locale — 2026-09-16 user-feedback pin)
- * (>8 buckets thin to every-other labels, first bucket
- * always labeled — the TrendChart semantics). Bucket totals read off the
- * y ticks and exact series counts ride the tooltip, so the chart is never
- * the numbers' only carrier; the page-level summary lines and empty states
- * are unchanged.
- *
- * Empty state: owned by the page — empty buckets or empty series render
- * null, never a bare axis.
- */
 import { Bar as RBar, BarChart as RBarChart, Tooltip, XAxis, YAxis } from "recharts";
 import "./charts.css";
 import { chartClasses, type ChartSlot } from "./chartSlots";
@@ -56,11 +6,8 @@ import { useContainerWidth } from "./useContainerWidth";
 
 /** One closed-vocabulary stacked series: the page-mapped label + chart slot. */
 export interface StackedSeries {
-  /** note: Distribution grid key (`by_severity`). */
   key: string;
-  /** note: Legend + tooltip name — the raw engine slug. */
   label: string;
-  /** note: The D14 slot (1–6); the component derives the fill and mark class names. */
   slot: ChartSlot;
 }
 
@@ -94,17 +41,10 @@ export function StackedBarChart({
   series: readonly StackedSeries[];
   ariaLabel: string;
 }) {
-  // note: Measured container width (useContainerWidth): the default-560 static/SSR
-  // face client-side becomes the real container width, so the viewBox never
-  // upscales and the designed 10px ticks stay true-size. Called before the
-  // empty-state return (Rules of Hooks).
   const [containerRef, width] = useContainerWidth();
 
   if (buckets.length === 0 || series.length === 0) return null;
 
-  // note: Flat rows for recharts: one column per bucket, one numeric field per
-  // series key. `?? 0` keeps a missing grid cell at an honest zero (the
-  // API zero-fills the merge-class keys, so only a drifted payload hits it).
   const data = buckets.map((bucket) => ({
     bucket_start: bucket.bucket_start,
     ...Object.fromEntries(series.map((s): [string, number] => [s.key, bucket.by_severity[s.key] ?? 0])),

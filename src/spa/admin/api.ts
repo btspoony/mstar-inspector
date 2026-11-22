@@ -1,19 +1,3 @@
-/**
- * note: The console's data layer: one base path, the reads and writes the four
- * screens use, and the loading/error state machine they share.
- *
- * Reads PARSE into typed rows instead of asserting the API's shape (the
- * `pages/data.ts` precedent): a renamed server field must fail the read
- * visibly, never render a blank cell in an operator's table.
- *
- * Writes answer the server's JSON body when it has one, `undefined`
- * otherwise. A 2xx means the server accepted the change the caller asked for:
- * the caller may adopt the echoed value (the runtime cap) or ignore it, and a
- * body that is not JSON is not a failed write — `JSON.parse` must never turn a
- * landed save into a false failure report. Refusals keep the server's own
- * `{ error }` text, so the console never invents a second wording for a rule it
- * does not own.
- */
 import { useEffect, useState } from "react";
 import { SWEEP_FIELDS, type SweepConfig, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
 import { fetchJson } from "../api";
@@ -32,7 +16,6 @@ export type WorkspaceRow = {
   pendingInviteCount: number;
   planId: string;
   planName: string;
-  /** invariant: The seat cap; NULL means unlimited and must never render as `0`. */
   includedMembers: number | null;
   createdAt: string;
 };
@@ -93,7 +76,6 @@ function num(row: Json, key: string): number {
   return value;
 }
 
-/** note: A quota column where NULL is a real value (no cap), not a missing number. */
 function maybeNum(row: Json, key: string): number | null {
   const value = row[key];
   if (value === null) return null;
@@ -120,7 +102,6 @@ export type CheckBudgetConfig = {
   terminalizeMax: number;
   updateMin: number;
   updateMax: number;
-  /** note: A stored budget could not be read: both numbers are the documented defaults. */
   degraded: boolean;
 };
 
@@ -135,17 +116,14 @@ export type CommentClaimConfig = {
   attemptsMax: number;
   outboxMin: number;
   outboxMax: number;
-  /** note: A stored setting could not be read: every number is the documented default. */
   degraded: boolean;
 };
 
 /** The recheck seat's ask budget as the operator API reports it. */
 export type RecheckAssignmentConfig = {
-  /** note: UTF-8 bytes of assignment the seat may be asked with. */
   maxBytes: number;
   min: number;
   max: number;
-  /** note: The stored budget could not be read: `maxBytes` is the documented default. */
   degraded: boolean;
 };
 
@@ -159,7 +137,6 @@ export type AttemptCapConfig = {
   saved: boolean;
   min: number;
   max: number;
-  /** invariant: No attempt is admitted while the stored row cannot be read. */
   degraded: boolean;
 };
 
@@ -171,12 +148,9 @@ export type AttemptCapConfig = {
  */
 export type RouteWorkflowConfig = {
   mode: "on" | "off";
-  /** note: A stored row produced `mode` (`false` for the absent-row default). */
   saved: boolean;
-  /** note: The answer rests on unreadable evidence, not a stored `off`. */
   degraded: boolean;
   reason: string | null;
-  /** safety: The rejected raw value, quoted; `null` unless the row is untrusted. */
   rejected: string | null;
 };
 
@@ -190,7 +164,6 @@ export type MaintenanceConfig = {
   enabled: boolean;
   reason: string | null;
   since: string | null;
-  /** note: The stored window could not be read: the gates treat it as closed. */
   unreadable: boolean;
 };
 
@@ -207,9 +180,7 @@ export type AdmissionDropCounts = {
  * not readable — never that the queue is empty.
  */
 export type QueueBacklog = {
-  /** note: Messages waiting for a consumer right now. */
   backlogCount: number;
-  /** note: ISO-8601 (`REVIEW_QUEUE.metrics()` reports a Date); `null` for an empty queue. */
   oldestMessageTimestamp: string | null;
 };
 
@@ -218,50 +189,17 @@ export type RuntimeConfig = {
   concurrency: number;
   min: number;
   max: number;
-  /** note: The stored cap could not be read: `concurrency` is the conservative fallback. */
   degraded: boolean;
-  /**
-   * invariant: The Check-budget surface; `null` when the server does not report it (an
-   * older Worker behind a newer SPA bundle). The page then renders the
-   * concurrency card exactly as before and hides the budget card — a missing
-   * field is absence, not an unreadable setting.
-   */
   checkBudgets: CheckBudgetConfig | null;
-  /**
-   * note: The comment-claim outbox surface; `null` under the same absence rule as
-   * `checkBudgets` (an older Worker behind a newer bundle).
-   */
   commentClaim: CommentClaimConfig | null;
-  /** note: Null when the Worker predates the sweep settings surface. */
   sweep: SweepConfig | null;
-  /** note: The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
-  /**
-   * note: The one end-to-end attempt cap; `null` under the same older-Worker rule.
-   * Its `saved` flag is what separates a stored value from the default.
-   */
   attemptCap: AttemptCapConfig | null;
-  /**
-   * why: The review route's operating switch; `null` under the same older-Worker
-   * rule. Its `saved` / `rejected` fields are what let the card name the stored
-   * row behind the gate's answer.
-   */
   routeWorkflow: RouteWorkflowConfig | null;
-  /** note: The maintenance window; `null` under the same older-Worker rule. */
   maintenance: MaintenanceConfig | null;
-  /** note: The 24h admission-drop counts; `null` under the same older-Worker rule. */
   admissionDrops24h: AdmissionDropCounts | null;
-  /**
-   * invariant: The live queue gauge; `null` when the server does not report it or the
-   * gauge itself is unreadable. `null` is never an empty queue.
-   */
   queue: QueueBacklog | null;
-  /** note: The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
-  /**
-   * safety: The platform's designated official workspace — the one tenant whose bots
-   * may be offered platform-wide. `null` is "not designated", never unknown.
-   */
   officialWorkspaceId: string | null;
 };
 
@@ -338,11 +276,6 @@ function parseAttemptCap(row: Json): AttemptCapConfig | null {
   };
 }
 
-/**
- * note: One gate answer as the store writes it: the read group and the save echo.
- * `null` for a foreign shape — the caller decides whether that is a broken
- * read or an unconfirmed write.
- */
 function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
   if (typeof raw !== "object" || raw === null) return null;
   const gate = raw as Json;
@@ -357,23 +290,19 @@ function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
     mode: gate.mode,
     saved: gate.saved,
     degraded: gate.degraded,
-    // note: Additive: an absent reason / rejected belongs to a trustworthy answer.
     reason: typeof gate.reason === "string" ? gate.reason : null,
     rejected: typeof gate.rejected === "string" ? gate.rejected : null,
   };
 }
 
-/** note: The route switch's gate answer; absent (older Worker) answers `null`. */
 function parseRouteWorkflow(row: Json): RouteWorkflowConfig | null {
   const raw = row.routeWorkflow;
   if (raw === undefined) return null;
   const gate = routeWorkflowGate(raw);
-  // note: A present but foreign group is a broken read, not absence.
   if (gate === null) throw new Error("admin API: routeWorkflow is not a gate answer");
   return gate;
 }
 
-/** note: The maintenance window; absent (older Worker) answers `null`. */
 function parseMaintenance(row: Json): MaintenanceConfig | null {
   const raw = row.maintenance;
   if (raw === undefined) return null;
@@ -382,8 +311,6 @@ function parseMaintenance(row: Json): MaintenanceConfig | null {
     enabled: bool(window, "enabled"),
     reason: maybeText(window, "reason"),
     since: maybeText(window, "since"),
-    // note: Additive field: an older Worker omits it, and its absence is "readable"
-    // (that Worker had no unreadable state to report).
     unreadable: window.unreadable === true,
   };
 }
@@ -400,11 +327,6 @@ function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
   };
 }
 
-/**
- * why: The live queue gauge. A foreign shape answers `null` like the server's own
- * `null` does — both mean "not readable", so the page degrades instead of
- * failing the whole read over one optional gauge.
- */
 function parseQueue(row: Json): QueueBacklog | null {
   const raw = row.queue;
   if (typeof raw !== "object" || raw === null) return null;
@@ -417,7 +339,6 @@ function parseQueue(row: Json): QueueBacklog | null {
   };
 }
 
-/** note: The 24h secondary-rate-limit count; an older Worker's silence reads as `0`. */
 function parseGithubRateLimited(row: Json): number {
   const value = row.githubRateLimited24h;
   return typeof value === "number" ? value : 0;
@@ -440,9 +361,6 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
-    // invariant: Additive field: an older Worker omits it, and an absent designation is
-    // exactly what `null` says on the wire. A present non-string is still a
-    // broken read, so `maybeText` answers it.
     officialWorkspaceId:
       body.officialWorkspaceId === undefined ? null : maybeText(body, "officialWorkspaceId"),
   };
@@ -454,7 +372,6 @@ export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number 
 export type DurationReportCutoff = {
   capMs: number;
   over: number;
-  /** note: `null` when the sample is empty — a share of nothing is not `0%`. */
   share: number | null;
   crossed: { queueWait: number; execution: number; publication: number };
 };
@@ -548,8 +465,6 @@ export async function setOfficialWorkspace(workspaceId: string | null): Promise<
     const stored = answer.workspaceId;
     if (stored === null || typeof stored === "string") return stored;
   }
-  // note: A 2xx with an unreadable body still landed the write: the request value
-  // stands in, the same rule as `setSystemConcurrency`.
   return workspaceId;
 }
 
@@ -557,7 +472,6 @@ export async function saveSweepSettings(values: SweepValues): Promise<void> {
   await write("PATCH", "/runtime", { sweep: values });
 }
 
-/** note: The server's `{ concurrency }` answer; `null` when the body is not that shape. */
 function storedConcurrency(answer: unknown): number | null {
   if (typeof answer !== "object" || answer === null || !("concurrency" in answer)) return null;
   return typeof answer.concurrency === "number" ? answer.concurrency : null;
@@ -714,8 +628,6 @@ export async function setMaintenance(
     if (typeof saved === "object" && saved !== null && "enabled" in saved) {
       const { enabled, reason, since, unreadable } = saved as Json;
       if (typeof enabled === "boolean") {
-        // note: The write's own answer: a save that returned a readable state is
-        // readable, so `unreadable` defaults false when the field is absent.
         return {
           enabled,
           reason: typeof reason === "string" ? reason : null,
@@ -751,19 +663,13 @@ export type BotScope = "owned" | "shared";
 export type BotRow = {
   botId: string;
   name: string;
-  /** note: The GitHub App the bot runs as. */
   githubAppId: number;
   workspaceId: string | null;
-  /** note: The owning workspace's display name; `null` for an unmapped bot. */
   workspaceName: string | null;
-  /** note: The bot's workspace IS the platform's official workspace. */
   isOfficial: boolean;
   scope: BotScope;
-  /** note: When the share was granted; `null` while the bot is owned. */
   sharedAt: string | null;
-  /** note: Live GitHub installations (`removed_at IS NULL`). */
   installationCount: number;
-  /** note: Live review targets (`deleted_at IS NULL`). */
   liveTargetCount: number;
 };
 
@@ -870,7 +776,6 @@ export class AdminWriteError extends Error {
   }
 }
 
-/** note: The server's `{ error }` body, else the raw body. */
 function refusal(raw: string): string {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -878,17 +783,10 @@ function refusal(raw: string): string {
       if (typeof parsed.error === "string") return parsed.error;
     }
   } catch {
-    // note: Not JSON — the raw body is the message.
   }
   return raw;
 }
 
-/**
- * why: One write, answering the server's JSON body (or `undefined` when there is
- * none). `redirect: "manual"` keeps a login redirect from reading as
- * success: the console renders a failure instead of confirming a write that
- * went to an HTML login page.
- */
 async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<unknown> {
   const res = await fetch(`${BASE}${path}`, {
     method,
@@ -901,8 +799,6 @@ async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: u
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new AdminWriteError(res.status, refusal(await res.text()));
-  // invariant: The write already landed: an unreadable body answers `undefined` rather
-  // than reporting a failure the server never had.
   try {
     return await res.json();
   } catch {
@@ -944,11 +840,8 @@ export type QuotaPlan = { id: string; name: string };
 export type QuotaVersionRow = {
   id: string;
   version: number;
-  /** note: ISO-8601 instant; renders as `YYYY-MM-DD`. */
   effectiveFrom: string;
-  /** note: The next profile's start; `null` for the open (last) interval. */
   effectiveTo: string | null;
-  /** note: The version judging this month, one scheduled after it, the rest past. */
   state: "current" | "scheduled" | "past";
   base: { quick: number; default: number; deep: number };
   source: { byok: number; shared: number };
@@ -959,11 +852,9 @@ export type QuotaVersionRow = {
 
 export type QuotaVersionsData = {
   judgingVersion: number;
-  /** why: The ordinal a create would mint — the form's read-only version field. */
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
-  /** note: Plans the judging version sets no ceiling for: refused until republished. */
   uncoveredPlanIds: string[];
 };
 
@@ -978,7 +869,6 @@ export type QuotaCandidate = {
 
 export type QuotaImpact = { count: number; total: number; startsOn: string };
 
-/** invariant: A list of plan ids (the coverage report's shape), never a list of rows. */
 function planIds(value: unknown): string[] {
   if (!Array.isArray(value) || !value.every((id): id is string => typeof id === "string")) {
     throw new Error("admin API: uncoveredPlanIds must be a list of plan ids");
@@ -986,7 +876,6 @@ function planIds(value: unknown): string[] {
   return value;
 }
 
-/** note: A ceiling map where a plan's `null` is a real value (no limit), not missing. */
 function quotaCeilings(value: unknown, what: string): Record<string, number | null> {
   const ceilings: Record<string, number | null> = {};
   for (const [planId, entry] of Object.entries(map(value, what))) {
@@ -1004,7 +893,6 @@ export async function readQuotaVersions(): Promise<QuotaVersionsData> {
     judgingVersion: num(body, "judgingVersion"),
     nextVersion: num(body, "nextVersion"),
     plans: list(body.plans, "plans").map((row) => ({ id: text(row, "id"), name: text(row, "name") })),
-    // why: Plan IDS, not rows: `list()` maps objects, so a string array is read raw.
     uncoveredPlanIds: planIds(body.uncoveredPlanIds),
     versions: list(body.versions, "versions").map((row) => {
       const state = text(row, "state");
@@ -1061,7 +949,6 @@ export type DataUpgradeStatus = "pending" | "running" | "verifying" | "completed
 
 export type DataUpgradeState = {
   status: DataUpgradeStatus;
-  /** note: Rows the batches moved so far; a reset returns it to 0. */
   processed: number;
   startedAt: string | null;
   finishedAt: string | null;
@@ -1075,9 +962,7 @@ export type DataUpgradeCounts = Record<string, number>;
 export type DataUpgradeRow = {
   id: string;
   title: string;
-  /** invariant: The item's own statement of which rows it changes and never touches. */
   impact: string;
-  /** note: The item refuses a second batch while the maintenance window is off. */
   requiresDowntime: boolean;
   state: DataUpgradeState;
   preflight: DataUpgradeCounts;
@@ -1099,7 +984,6 @@ function upgradeStatus(value: unknown): DataUpgradeStatus {
   return known;
 }
 
-/** invariant: A count map: a non-number entry is a broken read, never a zero. */
 function upgradeCounts(value: unknown, what: string): DataUpgradeCounts {
   const counts: DataUpgradeCounts = {};
   for (const [name, entry] of Object.entries(map(value, what))) {
@@ -1190,7 +1074,6 @@ export function useLoaded<T>(read: () => Promise<T>) {
 
   useEffect(() => {
     let live = true;
-    // why: Keep a loaded table on screen while re-reading; a first read has nothing to keep.
     setState((previous) => (previous.status === "ready" ? previous : { status: "loading" }));
     read().then(
       (data) => {
@@ -1207,9 +1090,7 @@ export function useLoaded<T>(read: () => Promise<T>) {
 
   return {
     state,
-    /** note: Re-read: the retry after a failed read, and the refresh after a server-generated row. */
     reload: () => setAttempt((count) => count + 1),
-    /** note: Apply an accepted write without a second read. */
     update: (change: (data: T) => T) =>
       setState((previous) =>
         previous.status === "ready" ? { status: "ready", data: change(previous.data) } : previous,

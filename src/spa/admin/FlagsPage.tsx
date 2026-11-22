@@ -1,14 +1,3 @@
-/**
- * note: Server flags — the three platform-wide switches (spec §3.1).
- *
- * A toggle asks first: clicking the state control opens an alertdialog that
- * names the flag, the ON → OFF (or reverse) change and the effect text, and
- * only the confirm button writes ONE `PATCH /api/flags`, applying the
- * accepted value without a second read. The server pairs the write with its
- * audit row, so this screen owns no ledger logic. `review_global` carries
- * the note the spec requires: turning it off stops new enqueues and does not
- * cancel queued work.
- */
 import { useEffect, useState } from "react";
 import {
   Button,
@@ -29,26 +18,21 @@ import { PageNotice } from "../pages/PageNotice";
 import { AdminWriteError, readFlags, setFlag, useLoaded, type FlagRow } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** note: What each flag governs while it is off (spec §3.1) — dictionary keys. */
 const EFFECT_KEYS: Record<string, DictionaryKey> = {
   review_global: "admin.flags.effectReviewGlobal",
   signup_open: "admin.flags.effectSignupOpen",
   workspace_creation_open: "admin.flags.effectWorkspaceCreationOpen",
 };
 
-/** note: The write a pending confirmation dialog would commit on confirm. */
 type PendingWrite = { key: string; enabled: boolean };
 
 export function FlagsPage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readFlags);
-  /** invariant: The row key currently being written — only that row disables. */
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingWrite | null>(null);
-  /** note: The row that just saved, for the short inline confirmation. */
   const [savedKey, setSavedKey] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
 
-  /** note: The "Saved." note is short-lived; the timer clears on change and unmount. */
   useEffect(() => {
     if (savedKey === null) return;
     const timer = setTimeout(() => setSavedKey(null), 3000);
@@ -64,7 +48,6 @@ export function FlagsPage({ locale }: { locale: Locale }) {
       update((flags) => flags.map((flag) => (flag.key === key ? { ...flag, enabled } : flag)));
       setSavedKey(key);
     } catch (error) {
-      // note: Generic message primary, the server's `{error}` text as secondary detail.
       const generic = t(locale, "admin.flags.toggleFailed", { flag: key });
       setRefusal(
         error instanceof AdminWriteError
@@ -167,7 +150,6 @@ export function FlagsPage({ locale }: { locale: Locale }) {
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              {/* why: Cancel first: Radix focuses the first focusable node, so Escape-or-cancel stays the default. */}
               <Button type="button" variant="outline" size="sm" onClick={() => setPending(null)}>
                 {t(locale, "admin.flags.cancelButton")}
               </Button>

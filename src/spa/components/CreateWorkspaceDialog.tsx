@@ -1,20 +1,3 @@
-/**
- * note: Workspace creation from the top-bar switcher. Before this
- * surface, the menu item sent an existing member to `/dashboard`, which serves
- * the creation form only for a `needsWorkspace` boot — so the click landed on
- * their own workspace. The dialog posts the same route with the same name
- * limits, then hands the browser a FULL navigation to the landing page the 201
- * names: the in-memory boot is pre-creation and lists no membership for the
- * new workspace, so an in-SPA `navigate()` would render a shell that cannot
- * name it.
- *
- * The free-slot rule stays the server's (compass D5): the client posts and
- * nothing here pre-judges the slot. The server states a 409 in English only,
- * so its two named reasons are mapped at this edge onto the reason copy the
- * shell already localizes (I-000161); an unrecognised 409 body still renders
- * the server's own words verbatim. Every other status renders the localized
- * failure copy — a non-409 body is not this dialog's copy.
- */
 import { useState, type FormEvent } from "react";
 import {
   Button,
@@ -32,7 +15,6 @@ import type { SpaBoot } from "../boot";
 import { parseCreatedWorkspace, createWorkspaceRefusalKey } from "../pages/data";
 import { PageNotice } from "../pages/PageNotice";
 
-/** note: Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
 
 export function CreateWorkspaceDialog({
@@ -50,10 +32,7 @@ export function CreateWorkspaceDialog({
   const [busy, setBusy] = useState(false);
 
   function handleOpenChange(next: boolean): void {
-    if (busy) return; // invariant: a POST in flight cannot be dismissed under itself
-    // note: A reopened dialog starts clean: the previous attempt's name and refusal
-    // belong to that attempt. Every close path (ESC, overlay, Cancel) routes
-    // through here.
+    if (busy) return;
     setName("");
     setError(null);
     onOpenChange(next);
@@ -61,7 +40,7 @@ export function CreateWorkspaceDialog({
 
   async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy) return; // note: in-flight guard — no double submit
+    if (busy) return;
     const trimmed = name.trim();
     if (trimmed.length === 0) {
       setError(t(locale, "workspace.nameRequired"));
@@ -80,12 +59,6 @@ export function CreateWorkspaceDialog({
         window.location.assign(homePath);
         return;
       }
-      // note: 409 is the server's free-slot / creation-closed refusal. Its two named
-      // bodies are English-only, so they read as the shell's own reason copy in
-      // the dialog's locale. An unrecognised 409 body IS the copy the user must
-      // read and renders verbatim — but only a 409 may: a 400 validation body,
-      // a 500 storage error, or the login page an expired session lands on is
-      // not localized copy for this dialog (I-000161).
       const key = createWorkspaceRefusalKey(status, body);
       if (key !== null) {
         setError(t(locale, key));

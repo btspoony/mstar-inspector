@@ -1,54 +1,3 @@
-/**
- * why: Repository identity backfill — the first registered operator data upgrade
- * (spec operator-data-upgrade § Repository backfill item, D15/D22).
- *
- * 0067 keyed a review target by repository but moved no rows: every migrated
- * row keeps the 0067 leftover shape — `repo_id`, `repo_owner` and `repo_name`
- * all NULL — one row per BOT, while its `pull_requests` rows name the several
- * repositories that bot actually reviewed. This item splits such a row into
- * one live target per repository, repoints the ledger onto it and retires the
- * old row.
- *
- * The worklist predicate IS the leftover shape, and that is what makes a
- * replay over finished work move NOTHING: the rows a batch creates name their
- * repository, so they never re-enter the worklist. A target that already names
- * a repository is left alone, including one still awaiting its first
- * delivery's `repo_id` claim (D15).
- *
- * Identity is BOT-scoped: 0068's uniqueness claim and `resolveByRepo` both key
- * a repository by `(bot_id, repo_id)`, so the group, its members, the
- * already-named lookup and the verify checks all key `(bot_id, owner, repo)` —
- * across workspaces. Two bots reviewing the same repository own two targets;
- * one bot's two workspaces collapse into ONE, created in the D22 winner's
- * workspace.
- *
- * Merge rule D22: several old rows of one bot naming the same
- * `(owner, repo)` collapse into ONE target. The winner is the row with the
- * newest `pull_requests.last_seen_at` for that repository, then the newest
- * `reviews.reviewed_at`, then the lowest id — a total order, so the item is
- * deterministic and its batches are replayable. Losers' configuration is
- * discarded and counted in the batch log; no user choice is ever surfaced.
- *
- * Owner and repository compare `COLLATE NOCASE` on every side — the store's
- * own add path and `resolveByRepo` are case-insensitive, so a case variant
- * spelling must join its group rather than create a second live target. The
- * JS side of that comparison folds ASCII `A-Z` only, exactly like `NOCASE`:
- * `toLowerCase()` would collapse `Ä` onto `ä`, which SQL keeps apart.
- *
- * One step is capped by GROUPS, not by worklist rows: a single target can name
- * hundreds of repositories, and a row cap would both wedge the cursor and fan
- * out unbounded reads. A target whose pairs did not all fit is left in the
- * worklist (its migrated pairs are gone, so the next step resumes on what is
- * left) — EXCEPT one this batch emptied of every pair it held: the worklist
- * finds a row only by a ledger row, so such a row is retired by the
- * same batch instead of stranding as a live row nobody will scan again.
- * `IN (…)` lists are chunked at IN_CHUNK values — D1 refuses a statement that
- * binds more than 100 parameters.
- *
- * A batch is ONE `db.batch` transaction: the reads plan it, the write half
- * commits or rolls back as a whole, so a worker that dies leaves the previous
- * batch intact and the cursor resumes on work the worklist still names.
- */
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
 import type {
   DataUpgradeItem,
@@ -58,43 +7,24 @@ import type {
   UpgradeVerifyContext,
 } from "../data-upgrades";
 
-/** note: Repository groups per step (spec § Repository backfill item). */
 const GROUPS_PER_BATCH = 20;
 
-/** note: Worklist rows scanned per step: the reads planning one batch are bounded too. */
 const SCAN_LIMIT = 20;
 
-/** note: Values per `IN (…)` list (D1's bound-parameter cap leaves room for the rest). */
 const IN_CHUNK = 40;
 
-/** note: A live target of the 0067 leftover shape: no identity, no repository name. */
 const LEFTOVER_TARGET = `t.deleted_at IS NULL
   AND t.repo_id IS NULL AND t.repo_owner IS NULL AND t.repo_name IS NULL`;
 
-/**
- * why: Every ledger row's claim on a repository. `pull_requests` is the only table
- * that carries `pr_number`/`last_seen_at`, but a target is leftover work while
- * ANY of the four tables still points at it: sweeping the PRs does not sweep
- * the reviews, findings or failures written for them.
- */
 const LEDGER_IDENTITIES = `SELECT target_id, owner, repo FROM pull_requests
    UNION ALL SELECT target_id, owner, repo FROM reviews
    UNION ALL SELECT target_id, owner, repo FROM review_findings
    UNION ALL SELECT target_id, owner, repo FROM review_failures`;
 
-/** note: Any ledger row at all on `target`: the eligibility predicate of every seam. */
 function hasLedger(target: string): string {
   return `EXISTS (SELECT 1 FROM (${LEDGER_IDENTITIES}) x WHERE x.target_id = ${target})`;
 }
 
-/**
- * why: Ledger rows sitting on a soft-deleted target this item's worklist could not
- * visit again (a live target of the same bot already covers the repository,
- * wherever it lives — naming it is enough, it need not hold a PR). The split is
- * a TIME comparison, not a flag: retirement stamps `deleted_at`, and this run's
- * own start stamp is what separates its work from deletions that predate it.
- * `%s` is the time predicate on that stamp.
- */
 const RETIRED_LEDGER_ROWS = `FROM (${LEDGER_IDENTITIES}) x
   JOIN review_targets d ON d.id = x.target_id AND d.deleted_at IS NOT NULL
  WHERE EXISTS (
@@ -104,16 +34,6 @@ const RETIRED_LEDGER_ROWS = `FROM (${LEDGER_IDENTITIES}) x
       AND l.repo_name = x.repo COLLATE NOCASE)
    AND %s`;
 
-/**
- * why: One retired-target count: `blocking` rows (retired at or after the run's
- * start, so this run could have stranded them) or `historical` ones (retired
- * before it). With no recorded run start nothing was retired by this item, so
- * every deleted target is history — and no row can block.
- *
- * `datetime()` on both sides: `deleted_at` is written as SQLite's
- * `datetime('now')` while the run start is an ISO-8601 stamp, and a lexical
- * comparison of those two shapes would be wrong.
- */
 function retiredRowsSql(kind: "blocking" | "historical", runStart: string | null): string {
   if (runStart === null) {
     return RETIRED_LEDGER_ROWS.replace("%s", kind === "blocking" ? "0 = 1" : "1 = 1");
@@ -122,14 +42,8 @@ function retiredRowsSql(kind: "blocking" | "historical", runStart: string | null
   return RETIRED_LEDGER_ROWS.replace("%s", `datetime(d.deleted_at) ${op} datetime(?1)`);
 }
 
-/** note: One worklist row: an old target and its bot. */
 type WorklistRow = { id: string; bot_id: string };
 
-/**
- * note: One old row's claim on a repository, with the D22 tie-breakers read in SQL.
- * The workspace travels with the row: it spans groups, so the winner's own
- * workspace is where the merged target is created.
- */
 type MemberRow = {
   id: string;
   workspace_id: string;
@@ -137,15 +51,12 @@ type MemberRow = {
   last_reviewed: string | null;
 };
 
-/** note: One repository a batch collapses onto, and the rows it consumes. */
 type Group = { botId: string; owner: string; repo: string };
 
-/** note: A planned batch: the statements to commit, and what they do. */
 type Plan = {
   statements: DashboardD1Statement[];
   created: number;
   adopted: number;
-  /** note: Old targets this batch retires — deduped across the groups sharing one. */
   consumed: Set<string>;
   discarded: number;
   repointed: number;
@@ -166,19 +77,16 @@ function emptyPlan(): Plan {
   };
 }
 
-/** note: `?, ?, …` — one placeholder per value (D1's bound-parameter list). */
 function placeholders(count: number): string {
   return new Array(count).fill("?").join(", ");
 }
 
-/** note: Split a bound list into D1-sized statements. */
 function chunked<T>(values: readonly T[]): T[][] {
   const out: T[][] = [];
   for (let at = 0; at < values.length; at += IN_CHUNK) out.push(values.slice(at, at + IN_CHUNK));
   return out;
 }
 
-/** note: D22 over one member's two stamps: newest activity first, then the lowest id. */
 function compareMembers(a: MemberRow, b: MemberRow): number {
   const bySeen = (b.last_seen ?? "").localeCompare(a.last_seen ?? "");
   if (bySeen !== 0) return bySeen;
@@ -193,21 +101,6 @@ async function countRows(db: DashboardD1, sql: string, ...values: unknown[]): Pr
   return row?.n ?? 0;
 }
 
-/**
- * note: Every live leftover row of one bot that holds ledger rows for this group's
- * `owner/repo`, in D22 order, ACROSS the bot's workspaces. Members are resolved
- * for the WHOLE bot, not just the current batch: two old rows naming the same
- * repository may sit in different batches, and the second batch must see that
- * the first already retired its sibling rather than create a second target for
- * the same repo. Bot scope also spans workspaces, because 0068's claim and
- * `resolveByRepo` do: a repository a bot reviews is one target, not one per
- * workspace.
- *
- * A member is any ledger table's claim: a target whose PRs were swept but whose
- * reviews or findings remain still holds this repository's history. With no PR
- * row its `last_seen` is NULL — D22 falls through to the review stamp, not to
- * "no member".
- */
 async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> {
   const res = await db
     .prepare(
@@ -229,7 +122,6 @@ async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> 
   return res.results.slice().sort(compareMembers);
 }
 
-/** note: The live target of this bot that already names this repository, or null. */
 async function findNamedTarget(db: DashboardD1, group: Group): Promise<string | null> {
   const row = await db
     .prepare(
@@ -243,10 +135,6 @@ async function findNamedTarget(db: DashboardD1, group: Group): Promise<string | 
   return row?.id ?? null;
 }
 
-/**
- * why: Plan one batch. Every read happens here; the write half is the returned
- * statement list, so ONE `db.batch` commits the whole move.
- */
 async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<Plan> {
   const after = typeof cursor?.last_target_id === "string" ? cursor.last_target_id : "";
   const worklist = await db
@@ -268,20 +156,9 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   const groups: Group[] = [];
   const seen = new Set<string>();
   let complete = true;
-  // why: The cursor may only advance past rows this batch retires: a row left live
-  // sits behind it, so once one is left, the prefix is frozen.
   let frozen = false;
 
-  // why: Collect up to GROUPS_PER_BATCH groups, batch row by batch row. A row whose
-  // pairs did not all fit is left OUT of the batch and out of the cursor: the
-  // next step re-reads it, and the pairs already migrated no longer show up.
-  // The scan CONTINUES past it, though: a later row whose pairs were all
-  // planned by an earlier row's group has no ledger rows left to keep it in
-  // the worklist (`EXISTS (ledger)` is what finds a row), so this batch
-  // must retire it — otherwise it strands as a live all-NULL ghost.
   for (const row of rows) {
-    // note: `COLLATE NOCASE` inside DISTINCT: the pair set folds exactly as the
-    // grouping below does — ASCII only, so `Ä` and `ä` stay two identities.
     const pairs = await db
       .prepare(
         `SELECT DISTINCT owner COLLATE NOCASE AS owner, repo COLLATE NOCASE AS repo
@@ -292,8 +169,6 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
     let drained = true;
     for (const pair of pairs.results) {
       const group = { botId: row.bot_id, owner: pair.owner, repo: pair.repo };
-      // note: Same fold as the SQL above: ASCII `A-Z` only. `Ä` and `ä` are two
-      // identities to `NOCASE`, so they must stay two groups here.
       const key = JSON.stringify([
         group.botId,
         group.owner.replace(/[A-Z]/g, (char) => char.toLowerCase()),
@@ -318,9 +193,6 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
 
   for (const group of groups) await planGroup(db, plan, group, batch);
 
-  // why: A leftover row with no ledger rows awaits its first delivery (待安装): it is
-  // untouched apart from this flag, so its copied configuration keeps
-  // answering instead of the workspace's (D16 — no live review changes).
   plan.statements.push(
     db.prepare(
       `UPDATE review_targets SET follow_workspace_defaults = 0, updated_at = datetime('now')
@@ -330,10 +202,6 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
     ),
   );
 
-  // why: Retire the batch's own old rows LAST: one row may hold ledger rows for
-  // several repositories, so it is repointed by every group before it is
-  // retired (deleting it inside a group would hide it from the next group's
-  // reads). A member outside this batch stays live and is picked up later.
   for (const ids of chunked([...plan.consumed])) {
     plan.statements.push(
       db
@@ -349,16 +217,11 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   return plan;
 }
 
-/** note: Append one group's statements to `plan` and count what they do. */
 async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<string>): Promise<void> {
   const members = await readMembers(db, group);
   if (members.length === 0) return;
   const winner = members[0]!;
 
-  // why: An already-named live target is the repository's home: repointing onto it
-  // keeps one live target per repository instead of creating a duplicate the
-  // store's own add path would refuse. It may live in the bot's other
-  // workspace — the claim is bot-scoped, so it is still the same repository.
   const named = await findNamedTarget(db, group);
   const targetId = named ?? crypto.randomUUID();
   if (named === null) {
@@ -378,7 +241,6 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
         )
         .bind(
           targetId,
-          // note: D22 winner: the merged row is born in the winner's own workspace.
           winner.workspace_id,
           group.botId,
           `${group.owner}/${group.repo}`,
@@ -397,17 +259,10 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
   } else {
     plan.adopted += 1;
   }
-  // note: Losers' configuration goes with their rows; the count is the only record
-  // the operator keeps of what the merge discarded.
   plan.discarded += members.length - 1;
 
   const memberIds = members.map((member) => member.id);
 
-  // why: `(target_id, owner, repo, pr_number)` is UNIQUE (0057:229-230): two old
-  // rows of one group may hold the same PR. Keep the later `last_seen_at`
-  // (then the lower id) and delete the rest BEFORE the repoint, so the update
-  // cannot collide with itself. The read is chunked, so the order is applied
-  // here over the merged result.
   const prs: Array<{ id: string; pr_number: number; last_seen_at: string | null }> = [];
   for (const ids of chunked(memberIds)) {
     const res = await db
@@ -426,12 +281,6 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
       (b.last_seen_at ?? "").localeCompare(a.last_seen_at ?? "") ||
       (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
   );
-  // why: An adopted destination may already hold a PR of its own: the repoint would
-  // collide with it just the same. The destination's row wins only when its
-  // `last_seen_at` is LATER; otherwise it is dropped and the member's row takes
-  // its place. `reviews`/`review_findings`/`review_failures` key on
-  // installation/bot plus PR identity, never on `target_id`, so only this
-  // table's unique index can collide.
   const destination =
     named === null
       ? []
@@ -482,8 +331,6 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
   }
   plan.repointed += keepers.size;
 
-  // why: Retired by `planBatch` after every group ran: this row may still hold
-  // ledger rows for another repository of the same batch.
   for (const id of memberIds) if (batch.has(id)) plan.consumed.add(id);
 }
 
@@ -500,18 +347,12 @@ export const repoBackfill: DataUpgradeItem = {
   requiresDowntime: true,
   order: 10,
 
-  /** note: Four counts the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     return {
-      // note: Every live row whose repository identity is still unset.
       unidentified_targets: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM review_targets t WHERE ${LEFTOVER_TARGET}`,
       ),
-      // note: The (target, repository) pairs the split moves rows for — filtered to
-      // the leftover shape, so the count is what a run will actually move.
-      // Any of the four ledger tables contributes a pair: a swept PR row does
-      // not take its reviews' repository with it.
       ledger_pairs: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
@@ -520,10 +361,6 @@ export const repoBackfill: DataUpgradeItem = {
             WHERE ${LEFTOVER_TARGET}
             GROUP BY x.target_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE)`,
       ),
-      // why: Repositories covered by more than one live row: D22 collapses them.
-      // Bot-scoped, matching 0068's `(bot_id, repo_id)` claim: the same
-      // repository in two of a bot's workspaces is one duplicate, not two
-      // independent homes.
       conflicting_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
@@ -533,10 +370,6 @@ export const repoBackfill: DataUpgradeItem = {
             GROUP BY t.bot_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE
            HAVING COUNT(DISTINCT t.id) > 1)`,
       ),
-      // note: Leftover rows awaiting their first delivery: the batch leaves them in
-      // place and only settles the follow flag. Filtered by the same leftover
-      // predicate as the other counters, so a claimed target that simply has no
-      // ledger rows yet is not reported as backfill work.
       leftover_without_ledger: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM review_targets t
@@ -545,13 +378,6 @@ export const repoBackfill: DataUpgradeItem = {
     };
   },
 
-  /**
-   * why: ONE transaction per call; a replay over migrated rows processes nothing.
-   *
-   * No `actor`: the only target this item creates inherits the D22 winner's
-   * `created_by` (spec B5 — the merged row keeps that winner's configuration),
-   * so naming the operator would misattribute a historical row.
-   */
   async runBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise<UpgradeBatch> {
     const plan = await planBatch(db, cursor);
     if (plan.statements.length > 0) await db.batch(plan.statements);
@@ -570,19 +396,6 @@ export const repoBackfill: DataUpgradeItem = {
     };
   },
 
-  /**
-   * why: Read-only checks. Every blocking entry must read 0; `historical_rows` and
-   * `ledger_rows_without_pr` are advisory — reported, never a failure.
-   *
-   * The unrepointed check is the crash residual, not a data-quality opinion: a
-   * ledger row still naming a retired target WHILE a live target of the same bot
-   * already covers that repository is a batch that created the replacement and
-   * died before repointing every row. Only targets retired AT OR
-   * AFTER this run started can be that residual; one retired earlier is history
-   * the worklist can never visit again, so it is counted as `historical_rows`
-   * and never fails the item. With no run start recorded, nothing was retired by
-   * this run: every such row is history.
-   */
   advisoryChecks: ["historical_rows", "ledger_rows_without_pr"],
 
   async verify(db: DashboardD1, context: UpgradeVerifyContext): Promise<UpgradeCounts> {
@@ -591,8 +404,6 @@ export const repoBackfill: DataUpgradeItem = {
     const historicalSql = retiredRowsSql("historical", runStart);
     const blockingBinds = runStart === null ? [] : [runStart];
     return {
-      // note: Identity is owner/name, not `repo_id`: a backfilled row names its
-      // repository and legitimately awaits the first delivery's id claim (D15).
       unidentified_targets_with_ledger: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM review_targets t
@@ -610,11 +421,6 @@ export const repoBackfill: DataUpgradeItem = {
             GROUP BY t.bot_id, t.repo_owner COLLATE NOCASE, t.repo_name COLLATE NOCASE
            HAVING COUNT(*) > 1)`,
       ),
-      // note: Advisory, and exact: ledger ROWS outside `pull_requests` whose
-      // repository has no PR row left — a swept PR does not sweep its reviews,
-      // findings or failures. Not a failure: the row is still on a live named
-      // target and nothing points at a retired one, so the item has no repair
-      // to offer. An unidentified leftover still blocks above.
       ledger_rows_without_pr: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (

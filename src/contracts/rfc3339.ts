@@ -1,9 +1,3 @@
-/**
- * why: RFC 3339 (what GitHub stamps) → the ONE spelling every stored / compared
- * stamp uses. Shared contract: the webhook face gates the raw payload with it
- * and the PR-ledger store re-applies it, so a second caller cannot store an
- * unorderable spelling behind a lexical comparison.
- */
 
 const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 

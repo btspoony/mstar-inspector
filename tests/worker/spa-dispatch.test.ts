@@ -1,5 +1,3 @@
-/** note: enumerated SPA dispatch + HTML/JSON negotiation.
- */
 import { describe, expect, test } from "bun:test";
 import type { Fetcher } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
@@ -12,14 +10,9 @@ import { SPA_INDEX_HTML, htmlGetRequest } from "../helpers/spa";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 type AssetCall = { method: string; pathname: string };
 
-/** note: Users-store D1 double for the W-001 shell membership gate: returns a row
- * for any login (the tests here only distinguish session-present from
- * session-absent; the removed-member denial is pinned in dashboard.test.ts).
- */
 function memberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
-      // note: Unbound reads (the sole-workspace / landing resolver) answer "none".
       all: async () => ({ results: [] }),
       first: async () => null,
       bind: () => ({
@@ -30,16 +23,12 @@ function memberDbStub(): Env["DB"] {
           created_at: new Date().toISOString(),
           invited_by: null,
         }),
-        // note: The boot's invite discovery read: this login has no invitations.
         all: async () => ({ results: [] }),
       }),
     }),
   } as unknown as Env["DB"];
 }
 
-/** note: Users-store D1 double for the removed-member shell gate:
- * `first()` returns no row, so any session login is treated as removed.
- */
 function removedMemberDbStub(): Env["DB"] {
   return {
     prepare: () => ({
@@ -86,7 +75,6 @@ function makeEnv(overrides: Partial<Env> = {}): { env: Env; calls: AssetCall[] }
 }
 
 
-/** invariant: The independent shell reads must all be in flight before any can finish. */
 function concurrentBootReads() {
   const arrived = new Set<string>();
   let release: (() => void) | null = null;
@@ -110,7 +98,6 @@ function concurrentBootReads() {
   };
   const respond = (query: string) => {
     if (query.includes("workspace_invites i JOIN workspaces w")) return { all: async () => { await arrive("invites"); return { results: [] }; } };
-    // note: The switcher's list carries `w.name`; the boot's workspace-access read does not.
     if (query.includes("w.name AS name")) return { all: async () => { await arrive("memberships"); return { results: [] }; } };
     if (query.includes("wm.role AS role")) return { all: async () => { await arrive("workspace"); return { results: [] }; } };
     if (query.includes("FROM server_flags")) return { first: async () => { await arrive("flag"); return null; } };
@@ -130,7 +117,6 @@ function concurrentBootReads() {
 
 describe("SPA dispatch", () => {
   test("SPA page GET with Accept: text/html fetches /index.html", async () => {
-    // why: Members is workspace-scoped, so the tenant gate must admit the ref.
     const { env, calls } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
@@ -145,15 +131,12 @@ describe("SPA dispatch", () => {
   });
 
   test("each enumerated page GET hits ASSETS (with a session)", async () => {
-    // note: App pages are workspace-scoped; the root App path and the login page are
-    // the deployment-level shell entries.
     const pages: string[] = [
       "/dashboard",
       "/dashboard/acme/apps",
       "/dashboard/acme/apps/12345",
       "/dashboard/acme/repos",
       "/dashboard/acme/repos/12345",
-      // note: Members is workspace-scoped: the root path is retired.
       "/dashboard/acme/members",
       "/dashboard/login",
     ];
@@ -197,8 +180,6 @@ describe("SPA dispatch", () => {
     expect(res.status).toBe(200);
     expect(calls).toEqual([{ method: "GET", pathname: "/index.html" }]);
     expect(await res.text()).toContain("window.__BOOT__=");
-    // note: QC S-001: the boot-injected document carries identity (login/
-    // role) — explicitly uncacheable.
     expect(res.headers.get("cache-control")).toBe("private, no-store");
   });
 
@@ -251,11 +232,6 @@ describe("SPA dispatch", () => {
   });
 
   test("theme bootstrap precedes the injected boot and the bundle in the served shell", async () => {
-    // note: serveSpaIndex fetches ASSETS /index.html verbatim and injects the boot
-    // at <!--SPA_BOOT--> — the prod document is the real shell source plus
-    // the injection, so serve the actual src/spa/index.html here to pin the
-    // no-flash ordering (theme applied before window.__BOOT__ and the module
-    // bundle can paint).
     const shell = await Bun.file(new URL("../../src/spa/index.html", import.meta.url)).text();
     const calls: AssetCall[] = [];
     const { env } = makeEnv({ ASSETS: stubAssets({ "/index.html": shell }, calls) });
@@ -269,8 +245,6 @@ describe("SPA dispatch", () => {
     expect(bootAt).toBeGreaterThan(-1);
     expect(bootstrapAt).toBeLessThan(bootAt);
     expect(bootstrapAt).toBeLessThan(body.indexOf("./main.tsx"));
-    // invariant: Whitelist: only the exact stored values may set data-theme — anything
-    // else (corrupted/unreadable) must behave as unset.
     expect(body).toContain('if (t === "light" || t === "dark")');
     expect(body).not.toContain(SPA_BOOT_MARKER);
   });
@@ -285,8 +259,6 @@ describe("SPA dispatch", () => {
   });
 
   test("boot script carries locale from the mstar_locale cookie", async () => {
-    // note: The login page is exempt from the no-session redirect,
-    // so it is the session-less shell surface that still carries the boot.
     const { env } = makeEnv();
     const res = await worker.fetch(
       htmlGetRequest("/dashboard/login", { Cookie: `${LOCALE_COOKIE}=zh_CN` }),
@@ -309,9 +281,6 @@ describe("SPA dispatch", () => {
   });
 
   test("boot script carries login from the session cookie", async () => {
-    // note: W-001: a session-bearing shell request re-reads membership
-    // through D1 — bind the users store so the boot's login/name resolve
-    // past the gate (role comes from the same single lookup).
     const { env } = makeEnv({ DB: memberDbStub() });
     const session = await createSessionValue("octocat", "The Octocat", SESSION_SECRET);
     const res = await worker.fetch(
@@ -322,14 +291,10 @@ describe("SPA dispatch", () => {
     const body = await res.text();
     expect(body).toContain('"login":"octocat"');
     expect(body).toContain('"name":"The Octocat"');
-    // note: `users.role` left the boot contract (the workspace-role change,
-    // 2026-10): nav visibility reads the workspace role in `memberships[]`.
     expect(body).not.toContain('"role":"admin"');
   });
 
   test("session on the shell path fails closed when D1 is unbound (500, W-001)", async () => {
-    // note: Mirrors the guard: a session whose membership cannot be verified (no
-    // users-store binding) must never receive the shell — 500, not a leak.
     const { env } = makeEnv({ DB: undefined });
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const res = await worker.fetch(
@@ -340,11 +305,8 @@ describe("SPA dispatch", () => {
     expect(await res.text()).toContain("dashboard storage is not configured");
   });
 
-  // note: --- auth redirect 全覆盖 (spec §1.3) ---
 
   test("unauthenticated deep link HTML GET → 302 login, no ASSETS call", async () => {
-    // invariant: Workspace-scoped deep links only: the retired deployment-level App
-    // family answers 404 before any session read.
     const deepLinks = [
       "/dashboard/acme/apps",
       "/dashboard/acme/members",
@@ -479,8 +441,6 @@ describe("SPA dispatch", () => {
 });
 
 describe("the retired targets family redirects once", () => {
-  // note: The repository family was renamed `targets` → `repos`. A bookmark from
-  // before the rename must reach the page it names, with its target segment.
   const redirects: Array<[string, string]> = [
     ["/dashboard/acme/targets", "/dashboard/acme/repos"],
     ["/dashboard/acme/targets/12345", "/dashboard/acme/repos/12345"],
@@ -497,7 +457,6 @@ describe("the retired targets family redirects once", () => {
       );
       expect(res.status).toBe(302);
       expect(res.headers.get("Location")).toBe(to);
-      // note: The retired address renders no page: no shell read, no ASSETS.
       expect(calls).toEqual([]);
     });
   }
@@ -514,7 +473,6 @@ describe("the retired targets family redirects once", () => {
 describe("the retired settings-tab addresses redirect once", () => {
   const redirects: Array<[string, string]> = [
     ["/dashboard/acme/apps/12345/settings", "/dashboard/acme/apps/12345?tab=settings"],
-    // invariant: The retired bot page: same 302 to the settings tab, never a page.
     ["/dashboard/acme/apps/12345/bot", "/dashboard/acme/apps/12345?tab=settings"],
   ];
 
@@ -528,7 +486,6 @@ describe("the retired settings-tab addresses redirect once", () => {
       );
       expect(res.status).toBe(302);
       expect(res.headers.get("Location")).toBe(to);
-      // note: The address no longer renders a page: no shell read, no ASSETS.
       expect(calls).toEqual([]);
     });
   }

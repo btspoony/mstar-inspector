@@ -1,17 +1,3 @@
-/** note: settings section-rhythm visual-discipline pins (A1/A2,
- * AD-591 two-tier surface + grouped rhythm). Source-scan + static-SSR
- * contract — no DOM runner.
- *
- * 1. AD-591: the tier idiom is defined ONCE in SectionCard.tsx (composing
- *    the copy-in ui/card.tsx); the page picks a tier through the prop and
- *    never hand-assembles tier classNames. Tier 1 = identity/status zone
- *    (identity header + AppInfo + Ops/Health), Tier 2 = configuration zone
- *    (RuntimeHarness from T1; Providers/Chains/Seats joined in T2).
- * 2. v0.3 face: page/panel headings ride the heading-24/20 token steps
- * (QC idiom convergence), card titles ride heading-16, group
- *    eyebrows separate the two zones at the spacing-8 rhythm.
- * 3. Group label keys exist atomically in both locales.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -32,8 +18,6 @@ const spaRoot = join(import.meta.dir, "../../src/spa");
 const sectionCard = readFileSync(join(spaRoot, "components/SectionCard.tsx"), "utf8");
 const settingsPageOnly = readFileSync(join(spaRoot, "pages/SettingsPage.tsx"), "utf8");
 const botPageOnly = readFileSync(join(spaRoot, "pages/BotSettingsPage.tsx"), "utf8");
-/** note: Both settings faces: the target's tab and the bot's page, plus the providers
- * modules they compose — one source for the section idioms both share. */
 const settingsTabSource =
   settingsPageOnly +
   botPageOnly +
@@ -43,7 +27,6 @@ const detailPage = readFileSync(join(spaRoot, "pages/AppDetailPage.tsx"), "utf8"
 const pageHeader = readFileSync(join(spaRoot, "components/PageHeader.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
 
-/** why: A manage-face settings payload, so the detail shell renders its real body. */
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   installation: null,
@@ -87,9 +70,6 @@ const detailPayload = (): SettingsManagePayload => ({
   installations: [],
 });
 
-/** note: The same payload with one configured provider: the precondition for the group
- * card the providers section renders.
- */
 const providersPayload = (): SettingsManagePayload & ProviderManagementPayload => ({
   ...detailPayload(),
   model_limits_snapshot: "fixture-snapshot",
@@ -121,21 +101,14 @@ const providersPayload = (): SettingsManagePayload & ProviderManagementPayload =
 
 describe("SectionCard tier idiom (AD-591)", () => {
   test("the idiom is single-point: a hand-written wrapper composing ui/card, not a copy-in edit", () => {
-    // note: AD-591: SectionCard lives in components/ (the extension surface), and
-    // composes the copy-in Card primitive rather than forking it.
     expect(sectionCard).toMatch(/import \{[^}]*\bCard\b[^}]*\} from "@design-system";/);
-    // note: The tier prop is the closed two-value union — no third tier can creep in.
     expect(sectionCard).toContain('type SectionTier = "primary" | "secondary"');
-    // note: Each tier face names a border colour token (the primitive's bare
-    // `border` is width only, and preflight would paint it in currentColor),
-    // and neither carries elevation — shadows belong to overlays.
     const faces = [...sectionCard.matchAll(/(primary|secondary):\s*"([^"]*)"/g)];
     expect(faces.map(([, tier]) => tier)).toEqual(["primary", "secondary"]);
     for (const [, tier, face] of faces) {
       expect(face, tier).toMatch(/border-\(--[\w-]+\)/);
       expect(face, tier).not.toMatch(/shadow/);
     }
-    // invariant: Zero raw hex in the idiom file.
     expect(sectionCard).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
@@ -146,9 +119,6 @@ describe("SectionCard tier idiom (AD-591)", () => {
       const markup = html(tier);
       expect(markup).toContain(`data-tier="${tier}"`);
       expect(markup).toContain('data-slot="card"');
-      // invariant: r3: an inline card is a hairline plus the surface step, never an
-      // elevated plane. Which hairline strength each tier takes is the
-      // surface-idioms test's assertion, not a pinned class here.
       expect(markup).not.toMatch(/shadow-/);
     }
   });
@@ -158,9 +128,6 @@ describe("settings section flow (r3 baseline § 5)", () => {
   const providersSource = readFileSync(join(spaRoot, "pages/settings-providers.tsx"), "utf8");
 
   test("every settings section composes the exported FlowSection — no per-section card frame", () => {
-    // note: The settings body is ONE content plane divided by hairlines: the plan's
-    // sections are the design system's FlowSection, not six framed cards. The
-    // section face is the pattern's; the page passes copy and body only.
     const sectionBlock = (start: string, end: string) => {
       const from = settingsTabSource.indexOf(start);
       expect(from, start).toBeGreaterThan(-1);
@@ -181,30 +148,21 @@ describe("settings section flow (r3 baseline § 5)", () => {
       expect(body, section).toContain(titleKey);
       expect(body, section).not.toContain("<SectionCard tier");
     }
-    // note: Providers lives in its own module and follows the same pattern; the
-    // grouped provider cards (the v1.4 contract) stay GroupCards inside it.
     expect(providersSource).toContain("<FlowSection");
     expect(providersSource).not.toContain("<SectionCard");
   });
 
   test("the App settings body keeps the identity card only; the target policy lives on the repository surface", () => {
-    // note: The owner split: the App page's settings body has no target-owned
-    // section at all, and the review-policy sections that used to be declared
-    // here are gone with the manager branch nothing could reach.
     const view = settingsTabSource.slice(
       settingsTabSource.indexOf("export function SettingsView"),
       settingsTabSource.indexOf("export function pendingConfirmCopy"),
     );
     expect(view).toContain("<AppInfoSection");
-    // invariant: OpsSection survives (the App page's own danger zone), only the three
-    // target-owned policy sections are gone.
     expect(settingsTabSource).toContain("export function OpsSection");
     for (const marker of ["<ReviewTriggerSection", "<ReviewDepthSection", "<ReviewGateSection"]) {
       expect(settingsTabSource, marker).not.toContain(`export function ${marker.slice(1)}`);
       expect(view, marker).not.toContain(marker);
     }
-    // note: The sections are direct siblings of one flow plane: the manage face
-    // opens that plane once and never re-groups it into tiers.
     expect(settingsTabSource).not.toContain("SectionGroup");
     expect(settingsTabSource).toMatch(/gap-\(--spacing-[a-z0-9-]+\)/);
   });
@@ -216,8 +174,6 @@ describe("settings section flow (r3 baseline § 5)", () => {
     ] as const) {
       expect(source, name).toMatch(/import \{[^}]*\bFlowSection\b[^}]*\} from "@design-system"/);
     }
-    // note: A section separator is the pattern's hairline; no page hand-spells a
-    // bordered section face or a card tier.
     expect(settingsTabSource).not.toContain("border-b border-(--border-subtle)");
     expect(settingsTabSource).not.toContain("data-tier");
   });
@@ -225,16 +181,6 @@ describe("settings section flow (r3 baseline § 5)", () => {
 
 describe("settings heading idiom (QC convergence)", () => {
   test("the appId identity header is the rendered heading-24 h1; sections title with h2", () => {
-    // note: SUPERSEDE (App detail IA): the identity header lives on the AppDetailPage
-    // shell with the heading-24 face; that face lives in the ONE PageHeader
-    // spelling and the shell composes it. Below it the settings body is the
-    // section flow, whose titles are the pattern's h2 — never a second page
-    // title.
-    //
-    // Rendering alone cannot express OWNERSHIP: a shell that inlines the same
-    // heading-24 triple renders byte-identical markup. The source pins below
-    // are what keep the face single-homed — the shell composes <PageHeader>
-    // and PageHeader is the only file spelling the triple.
     const shell = withLocation("/dashboard/apps/1", () =>
       renderToStaticMarkup(
         createElement(AppDetailView, {
@@ -249,23 +195,17 @@ describe("settings heading idiom (QC convergence)", () => {
         }),
       ),
     );
-    // invariant: The identity header is the page's ONLY h1, and it carries the App's
-    // display name as its content.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell).toContain('<h1 data-slot="page-header-title"');
     expect(shell).toContain(">Demo</h1>");
-    // note: Ownership: the title face is PageHeader's, and the shell composes it
-    // rather than re-spelling it.
     expect(pageHeader).toContain('data-slot="page-header-title"');
     expect(detailPage).toContain("<PageHeader");
     expect(detailPage).toContain("title={appDisplayName(payload.app)}");
     expect(detailPage).not.toContain("--typo-heading-24");
     expect(settingsTabSource).not.toContain("--typo-heading-24");
-    // note: Section titles are the flow's h2, one level under the page h1.
     expect(shell).toContain('data-slot="flow-section"');
     expect(shell).toContain('<h2 class=');
     expect(shell.match(/data-slot="page-header-title"/g)).toHaveLength(1);
-    // note: No raw Tailwind size utility reaches either rendered face.
     for (const [name, html] of [
       ["AppDetailView", shell],
       ["SettingsPage", settingsTabSource],
@@ -277,9 +217,6 @@ describe("settings heading idiom (QC convergence)", () => {
   });
 
   test("the heading-16 title step stays single-homed (the named-chain panel composes SectionCardTitle)", () => {
-    // note: A tabpanel title inside the chains section is still a card-title face
-    // (heading-16), composed rather than re-spelled; the section titles above
-    // it are FlowSection's, so the page never spells the token step itself.
     const chainsBody = settingsTabSource.slice(
       settingsTabSource.indexOf("function ChainsSection"),
       settingsTabSource.indexOf("function SeatsSection"),
@@ -291,9 +228,6 @@ describe("settings heading idiom (QC convergence)", () => {
 
 describe("configuration sections (providers / chains / seats)", () => {
   test("the configuration sections keep the v1.4 provider grouping inside the flow", () => {
-    // invariant: The setup re-face changes the section chrome only: one group card per
-    // configured provider id, its key rows, and the three dialogs stay as
-    // they were (AC-10/AC-12 — provider configuration lives in this tab).
     expect(settingsTabSource).not.toContain("<Card>");
     for (const [section, next] of [
       ["function ChainsSection", "function SeatsSection"],
@@ -308,17 +242,8 @@ describe("configuration sections (providers / chains / seats)", () => {
   });
 
   test("form labels stay label-above-control; the mirror rows speak one compact dialect", () => {
-    // invariant: The shared label-above-field wrapper survives untouched on every
-    // ProviderConfigForm / CustomExpand / DraftChainPanel / SeatsSection field
-    // (the combobox aria-labelledby picker label rides its own pinned idiom).
     const labelIdiom = 'className="flex flex-col gap-1.5 text-sm font-medium"';
     expect(settingsTabSource.split(labelIdiom).length - 1).toBeGreaterThanOrEqual(8);
-    // note: The configured rows are the shared list-row / group-card composition
-    // (the shared components), never a hand-assembled row dialect: identity →
-    // status → meta → actions arrives through ListRow props, the pill through
-    // StatusBadge, the group chrome through GroupCard.
-    // The group card is the providers module's tail (the forms live in the
-    // dialog module), so the slice runs to the end of it.
     const groupCard = settingsTabSource.slice(settingsTabSource.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain("<GroupCard>");
     expect(groupCard).toContain("<GroupCardHeader");
@@ -328,10 +253,6 @@ describe("configuration sections (providers / chains / seats)", () => {
     expect(groupCard).toContain("<StatusBadge");
     expect(settingsTabSource).toContain('from "../components/GroupCard"');
     expect(settingsTabSource).toContain('from "../components/ListRow"');
-    // note: The pill reaches the group card by composition, not by an import line's
-    // spelling: the rendered card carries the TIER as its own status badge. The
-    // per-key pills below it are a different slot, so the label is what
-    // separates the two — `data-slot` alone would be satisfied by either.
     expect(
       renderToStaticMarkup(
         createElement(ProvidersSection, {
@@ -356,13 +277,10 @@ describe("provider combobox panel face", () => {
   const combobox = readFileSync(join(spaRoot, "components/provider-combobox.tsx"), "utf8");
 
   test("the open panel is the capped, scrollable overlay; no generic shadow returns", () => {
-    // invariant: The panel exists only while the picker is open, caps its height and
-    // scrolls internally; its surface and elevation are the overlay tokens.
     expect(combobox).toContain("{open ? (");
     expect(combobox).toContain("max-h-72");
     expect(combobox).toContain("overflow-y-auto");
     expect(combobox).not.toContain("shadow-md");
-    // Zero raw hex in the component (iteration hard constraint #4).
     expect(combobox).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 });
@@ -371,10 +289,6 @@ describe("notice face (A5)", () => {
   const pageNotice = readFileSync(join(spaRoot, "pages/PageNotice.tsx"), "utf8");
 
   test("each kind renders its semantic glyph; the alert/status role contract is untouched", () => {
-    // note: v0.3 dual-state form: success/warn/error get their semantic glyph over
-    // the tinted token face. The WCAG 4.1.3 role pin survives
-    // verbatim, and the kind two-value + message semantics are unchanged
-    // (op-outcome notices keep the PageNotice channel — AD-582 boundary).
     expect(pageNotice).toContain('role={kind === "error" ? "alert" : "status"}');
     const html = (kind: "success" | "warn" | "error") =>
       renderToStaticMarkup(createElement(PageNotice, { kind, message: "msg" }));
@@ -394,16 +308,12 @@ describe("notice face (A5)", () => {
     const block = pagesCss.match(/\.notice \{[\s\S]*?\n\}/);
     expect(block).not.toBeNull();
     const css = block![0];
-    // note: 16px padding (spacing-4 — converges with the SSR .banner face) and the
-    // copy-14 line step; the flex row carries the glyph at the text's edge.
     expect(css).toContain("padding: var(--spacing-4)");
     expect(css).not.toContain("padding: var(--spacing-3)");
     expect(css).toContain("line-height: var(--typo-copy-14-line)");
     expect(css).toContain("font-size: var(--typo-copy-14-size)");
     expect(css).toContain("display: flex");
     expect(css).toContain("gap: var(--spacing-2)");
-    // note: Token discipline: the notice reads the tone system directly — the
-    // --notice-* aliases retired with the dashboard surface pass (2026-11-01).
     expect(css).toContain("var(--tone-success-border)");
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
@@ -411,18 +321,10 @@ describe("notice face (A5)", () => {
 
 describe("composed load/error states (A6)", () => {
   test("the foreground load gate rides the forms skeleton; retry wires the shell's load", () => {
-    // note: SUPERSEDE (App detail IA): the load machinery lives on the
-    // AppDetailPage shell now — the skeleton is the page's full loading face
-    // (its heading placeholder stands in for the real h1; the settings kind
-    // is "forms", AD-582), and retry binds the foreground load, the only
-    // path that flips state back to "loading" (the background-reload
-    // contract: op-triggered reloads never flash the skeleton).
     expect(detailPage).toContain('<PageSkeleton locale={locale} kind="forms" />');
     expect(detailPage).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
-    // note: The old text-notice faces are retired from this page.
     expect(detailPage).not.toContain("LoadingNotice");
     expect(detailPage).not.toContain("LoadFailedNotice");
-    // invariant: The background-reload failure channel stays the page banner.
     expect(detailPage).toContain('{notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}');
   });
 });
@@ -433,19 +335,12 @@ describe("chains panel faces (review deferrals)", () => {
       settingsTabSource.indexOf("function ChainsSection"),
       settingsTabSource.indexOf("function SeatsSection"),
     );
-    // note: The panel title now composes the shared SectionCardTitle
-    // instead of re-spelling the heading-16 utility chain at the site.
     expect(chainsBody).toContain("<SectionCardTitle>{tab.id}</SectionCardTitle>");
     expect(chainsBody).not.toContain("text-(length:--typo-heading-16-size)");
-    // invariant: No bare 16px-inherit title face remains in the panel header.
     expect(chainsBody).not.toContain('<span className="font-medium">{tab.id}</span>');
   });
 
   test("the selector-row remove is a local edit (outline); stored-data removes stay destructive", () => {
-    // note: The ChainEditor row remove filters the UNSAVED local list — recoverable,
-    // no dialog, no server op — so it rides the AD-552 local-edit face. The
-    // named-chain header remove opens the confirm dialog (stored chain) and
-    // keeps the destructive face.
     const editorBody = settingsPageOnly.slice(settingsPageOnly.indexOf("function ChainEditor"));
     expect(editorBody).toContain('variant="outline"');
     expect(editorBody).toContain('onClick={() => setChain(chain.filter((_, i) => i !== index))}');
@@ -462,12 +357,8 @@ describe("chains panel faces (review deferrals)", () => {
       settingsTabSource.indexOf("function DraftChainPanel"),
       settingsTabSource.indexOf("function ChainEditor"),
     );
-    // note: The name field is the panel's identity header: compact block (w-fit +
-    // w-64, the invite-input idiom), label-above-control idiom preserved.
     expect(panelBody).toContain('className="flex w-fit flex-col gap-1.5 text-sm font-medium"');
     expect(panelBody).toContain('className="w-64"');
-    // invariant: AD-551 controlled surface + the busy-gate-only state inventory (pinned
-    // in settings-layout) are untouched — presence re-checked here.
     expect(panelBody).toContain("value={name}");
     expect(panelBody).toContain("onNameChange(event.target.value)");
     expect(panelBody.match(/useState\([^)]*\)/g) ?? []).toEqual(["useState(false)"]);
@@ -476,15 +367,12 @@ describe("chains panel faces (review deferrals)", () => {
 
 describe("section description wording (A8)", () => {
   test("the Default-chain term stays stable across zh faces (wording consistency pass)", () => {
-    // note: The stable technical term is the capitalized chain id; the zh faces for
-    // the remove-cascade and the chains description used a lowercase drift.
     expect(t("zh_CN", "settings.seatsCopy")).toContain("回退到 Default");
     expect(t("zh_CN", "settings.modelChainsCopy")).toContain("回退到 Default 链");
     expect(t("zh_CN", "settings.confirmRemoveChainBody")).toContain("回退到 Default 链");
     for (const key of ["settings.modelChainsCopy", "settings.confirmRemoveChainBody"] as const) {
       expect(t("zh_CN", key), key).not.toContain("回退到 default");
     }
-    // note: Pinned technical facts of the touched description survive the pass.
     expect(t("en", "settings.modelChainsCopy")).toContain("tabs");
     expect(t("en", "settings.modelChainsCopy")).toContain("can't be removed");
     expect(t("zh_CN", "settings.modelChainsCopy")).toContain("标签页");
@@ -509,24 +397,15 @@ describe("delivery-status summary line (I-000251)", () => {
     );
 
   test("the refusal count wears the alert colour, and only when it is non-zero", () => {
-    // note: The line is prose, not a band entry: the count segment carries the same
-    // alert token the metric band uses, and the last-webhook text beside it
-    // stays muted. Identified by the colour it resolves to, never by a class
-    // spelling.
     const [segment = ""] = alertSegments(render(3), "light");
     expect(segment).toContain(t("en", "apps.health.rejected24h", { count: 3 }));
     const lastWebhook = t("en", "settings.lastWebhook", { time: t("en", "common.time.never") });
     expect(render(3)).toContain(lastWebhook);
-    // invariant: Zero refusals is a healthy line: today's muted text, no count rendered.
     expect(alertSegments(render(0), "light")).toEqual([]);
     expect(render(0)).toContain(lastWebhook);
   });
 });
 
-/** note: The moved sections still render — on the bot page, which is now the home of
- * the bot-owned configuration. Each assertion names a VALUE the section shows,
- * so a section that renders its title over an empty body still fails.
- */
 describe("the bot page carries the moved sections", () => {
   const botPayload = (): BotSettingsPayload => ({
     can_manage: true,
@@ -589,16 +468,12 @@ describe("the bot page carries the moved sections", () => {
         onReload: async () => true,
       }),
     );
-    // note: Provider management waits for its separately loaded catalog.
     expect(markup).toContain(t("en", "settings.providers.title"));
     expect(markup).toContain(t("en", "common.loading"));
-    // note: Chains: the Default chain's selectors plus the named chain.
     expect(markup).toContain(t("en", "settings.modelChains"));
     expect(markup).toContain("openai/gpt-5");
     expect(markup).toContain("fast");
-    // note: Seats: the role → chain mapping.
     expect(markup).toContain(t("en", "settings.seats"));
-    // note: Sandbox image: the selector carries the stored id.
     expect(markup).toContain("omp");
   });
 
@@ -614,9 +489,6 @@ describe("the bot page carries the moved sections", () => {
     );
     expect(markup).toContain(t("en", "botSettings.readOnly"));
     expect(markup).toContain(t("en", "botSettings.scopeShared"));
-    // invariant: Same values, no write affordance: the read-only face names the stored
-    // sandbox image instead of offering the selector, and the keys render
-    // their masked tails without a remove control.
     expect(markup).toContain(t("en", "settings.runtimeHarnessValue", { id: "omp" }));
     expect(markup).toContain("wxyz");
     expect(markup).not.toContain(t("en", "settings.saveRuntimeHarness"));

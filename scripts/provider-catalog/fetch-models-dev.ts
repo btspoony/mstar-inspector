@@ -35,14 +35,9 @@ import { INPUTS_DIR, SNAPSHOT_NAME } from "./lib/snapshot";
 const UPSTREAM_URL = "https://models.dev/api.json";
 const FETCH_TIMEOUT_MS = 120_000;
 
-/** why: A model keeps its sizes only when BOTH are usable token counts — the same
- *  rule the generator applies (`modelLimitOf`), so the snapshot never carries a
- *  half row the size table would have to drop again. */
 const Limit = z.object({ context: z.number().int().positive(), output: z.number().int().positive() });
 
 const Model = z.object({
-  // why: Loose: an unusable `limit` (upstream ships 0-output audio and embedding
-  // models) costs that model its sizes, not the whole fetch.
   limit: z.object({ context: z.number().optional(), output: z.number().optional() }).optional(),
 });
 
@@ -52,9 +47,6 @@ const Provider = z.object({
   env: z.array(z.string()).optional(),
   api: z.string().nullish(),
   doc: z.string().nullish(),
-  // note: The shape this script exists for: `models` is an object keyed by model id.
-  // An array here means upstream went back to a list, which would make the
-  // conversion a copy instead of a mapping — the parse rejects it.
   models: z.record(z.string(), Model),
 });
 
@@ -132,8 +124,6 @@ export async function storeSnapshot(
   date = new Date().toISOString().slice(0, 10),
 ): Promise<{ changed: boolean; file: string; bytes: number; pruned: number }> {
   const existing = (await readdir(dir)).filter((name) => SNAPSHOT_NAME.test(name)).sort();
-  // note: Any committed snapshot with these exact bytes IS this payload; keeping the
-  // oldest such name makes the choice independent of how many files survived.
   for (const name of existing) {
     if ((await readFile(path.join(dir, name), "utf8")) === payload) {
       return { changed: false, file: path.join(dir, name), bytes: payload.length, pruned: 0 };

@@ -1,18 +1,3 @@
-/**
- * why: Status pill — the ONE status face (DESIGN.md § Tone × strength). A state is
- * a tone, painted at one of three strengths: `quiet` withholds the tint (edge
- * and label carry the meaning), `soft` is the tinted pill every status today
- * wears, and `solid` is the fill reserved for the one state that must be seen
- * first.
- *
- * The tones are the token families' names. The retired call-site vocabulary
- * maps onto them one way: brand → accent, warning → warn, error → danger.
- *
- * `data-slot` and the `data-tone` / `data-strength` pair are written after
- * `{...props}`: they are the component's identity, so a caller cannot spoof
- * any of them through a spread. The slot is what the preview's export ledger
- * reads to prove this pattern is exercised, like every primitive's.
- */
 import type { ComponentProps } from "react";
 
 import { cn } from "../cn";
@@ -20,11 +5,6 @@ import { cn } from "../cn";
 export type StatusTone = "neutral" | "accent" | "success" | "warn" | "danger";
 export type StatusStrength = "quiet" | "soft" | "solid";
 
-/**
- * why: Strength × tone faces — the only place the pill's colours are spelled out.
- * The class names are literal because Tailwind scans source text; a composed
- * `--tone-${tone}-bg` would never reach the stylesheet.
- */
 const FACES: Record<StatusStrength, Record<StatusTone, string>> = {
   quiet: {
     neutral: "border-(--tone-neutral-border) bg-transparent text-(--tone-neutral-fg)",
@@ -41,9 +21,6 @@ const FACES: Record<StatusStrength, Record<StatusTone, string>> = {
     danger: "border-(--tone-danger-border) bg-(--tone-danger-bg) text-(--tone-danger-fg)",
   },
   solid: {
-    // why: A tone fg is chosen to sit on its tint, not on its own solid step, so
-    // the label on a solid is the page ink — except accent, whose solid is the
-    // primary-action fill and whose label there is `on-brand`.
     neutral: "border-transparent bg-(--tone-neutral-solid) text-(--surface-page)",
     accent: "border-transparent bg-(--tone-accent-solid) text-(--on-brand)",
     success: "border-transparent bg-(--tone-success-solid) text-(--surface-page)",
@@ -59,7 +36,6 @@ export function StatusBadge({
   ...props
 }: ComponentProps<"span"> & {
   tone: StatusTone;
-  /** note: Defaults to `soft`, the tinted pill. */
   strength?: StatusStrength;
 }) {
   return (

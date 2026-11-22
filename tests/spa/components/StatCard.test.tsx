@@ -1,11 +1,3 @@
-/** note: StatCard + StatGrid — label / value / hint / progress, and the grid that
- * makes them one definition list.
- *
- * Static render: no hooks, so every prop (and the 0–1 progress clamp) is
- * asserted on the emitted markup. The assertions name the definition-list
- * structure, the rendered text and the accessible progress values — never a
- * design-token class, so a token rename cannot false-fail this file.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -65,7 +57,6 @@ describe("StatGrid", () => {
     );
     expect(html).toStartWith("<dl ");
     expect(html).toEndWith("</dl>");
-    // note: Two dt/dd groups inside one dl — the card is written for this wrapper.
     expect(html.match(/<dt /g)?.length).toBe(2);
     expect(html.match(/<dd /g)?.length).toBe(2);
     expect(html).toContain(">Plan</dt>");

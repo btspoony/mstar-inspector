@@ -1,18 +1,3 @@
-/**
- * safety: Measured container width for the token-chart pin path (v0.3.4 round,
- * 2026-09-16): charts render at the width they actually occupy so the
- * designed 10px tick text stays true-size — the old fixed-560 svg stretched
- * by the `style={{ width: "100%", height: "auto" }}` wrapper upscaled the
- * viewBox ~1.7× on wide stat cards.
- *
- * This refines, not breaks, the knowledge pin-path
- * (spa-recharts-token-charts.md): the fixed numeric width/height props
- * remain (ResponsiveContainer stays banned); only the number's source
- * changes client-side. Static/SSR render never measures (no effects, and
- * `attachWidthObserver` no-ops when ResizeObserver is unavailable — old
- * webviews included) and keeps the designed DEFAULT_CHART_WIDTH = 560
- * face — the SSR geometry pins hold unchanged.
- */
 import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 /** The designed chart face: default/static/SSR width (fixed geometry pin). */

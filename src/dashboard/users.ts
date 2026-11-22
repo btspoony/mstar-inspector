@@ -1,41 +1,3 @@
-/**
- * note: Dashboard users store + OAuth-callback sign-in decision
- * (spec dashboard-multi-app-platform.md § AuthZ + § Data model).
- *
- * Self-contained on purpose (route isolation, architect decision Q2 — the
- * dashboard/index.ts header contract): NO pipeline/store/review imports.
- * The narrow D1 face below mirrors src/store/types.ts `D1Like`
- * structurally, so a real `D1Database` and the bun:sqlite test double both
- * satisfy it; the store's multi-write path — operator removal (tombstone +
- * membership delete + row delete) — is ONE `batch`.
- *
- * Sign-in is NOT operator-gated: a `users` row is the only
- * requirement, so any GitHub login completes the OAuth callback. There is no
- * deployment allowlist and no first-login promotion — a new row carries
- * `role = 'member'` (the legacy column is never read for a workspace
- * authorization decision) and NO workspace membership: admission into a
- * workspace is its creation (creator becomes `owner`) or an accepted invite.
- *
- * Sign-in precedence is EXACT, evaluated in order:
- *   1. user row exists   → allow, zero writes
- *   2. login was removed → deny (migration 0023; enforced both by a read and
- *                          by the insert itself, and cleared only by a
- *                          deliberate re-admission)
- *   3. otherwise         → create a `member` row, allow
- *
- * There is NO status column: operator removal = row delete (migration 0003),
- * and that delete records a tombstone in the SAME transaction (migration 0023)
- * so a later sign-in cannot resurrect a login an operator removed. Removal
- * state has exactly two writers — the operator removal batch (records it) and
- * createUser (clears it, deliberate re-admission); the automatic sign-in path
- * touches neither, so an in-flight OAuth callback cannot undo a removal.
- * Leaving a WORKSPACE is not that: {@link deleteWorkspaceMember} deletes the
- * membership row only, so it writes neither the tombstone nor the users row.
- *
- * Case handling: GitHub logins are case-insensitive upstream, so row
- * lookups and the removal record are case-insensitive; the UNIQUE index on
- * github_login backstops exact-case duplicates at the DDL layer.
- */
 
 /** A row of the `users` table (D1 column names, snake_case; migration 0003). */
 export type DashboardUserRow = {
@@ -43,7 +5,6 @@ export type DashboardUserRow = {
   github_login: string;
   role: "admin" | "member";
   created_at: string;
-  /** note: NULL = created at sign-in, not invited. */
   invited_by: string | null;
 };
 
@@ -75,7 +36,6 @@ export type DashboardD1 = {
   batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]>;
 };
 
-// note: --- login-list parsing (comma-separated configuration values) ---
 
 /**
  * Parse a comma-separated login list: entries trimmed, empties dropped.
@@ -91,7 +51,6 @@ export function parseLoginList(value: string | undefined): string[] {
     .filter((entry) => entry.length > 0);
 }
 
-// note: --- users store ---
 
 /** Case-insensitive lookup (GitHub logins are case-insensitive upstream). */
 export async function getUserByLogin(
@@ -116,7 +75,6 @@ export class DuplicateLoginError extends Error {
   }
 }
 
-/** note: UNIQUE-constraint detection that tolerates bun:sqlite and D1 error shapes. */
 function isUniqueConstraintError(err: unknown): boolean {
   if (err instanceof Error) {
     if ("code" in err && typeof err.code === "string" && err.code.includes("UNIQUE")) return true;
@@ -171,11 +129,6 @@ export async function createUser(
            ON CONFLICT (github_login) DO NOTHING`,
         )
         .bind(row.id, row.github_login, row.role, row.created_at, row.invited_by),
-      // invariant: A deliberate (re-)creation is the ONLY thing that may undo a removal:
-      // clearing the tombstone in the SAME batch as the insert is what makes a
-      // re-admitted login admissible again (migration 0023). The sign-in path
-      // (signInCreateUser) never clears removal state — an in-flight OAuth
-      // callback must not be able to undo a removal that landed after its reads.
       db
         .prepare("DELETE FROM removed_logins WHERE github_login = ? COLLATE NOCASE")
         .bind(user.login),
@@ -193,11 +146,6 @@ export async function createUser(
       );
     }
     if (existing.github_login !== user.login) {
-      // note: Case-variant conflict (migration 0016 NOCASE unique index): the row
-      // exists under a different casing. The 0003 BINARY UNIQUE does not
-      // fire across cases, so ON CONFLICT (github_login) absorbed the
-      // NOCASE-index conflict here — surface it as DuplicateLoginError so a
-      // caller can tell a case-variant conflict from a fresh insert (W-1).
       throw new DuplicateLoginError(user.login);
     }
     return existing;
@@ -217,7 +165,6 @@ export async function listUsers(db: DashboardD1): Promise<DashboardUserRow[]> {
   return results;
 }
 
-// note: --- removal: the tombstone and the row delete are ONE transaction (0023) ---
 
 /** Case-insensitive tombstone lookup — same NOCASE comparison as getUserByLogin. */
 export async function isLoginRemoved(db: DashboardD1, login: string): Promise<boolean> {
@@ -228,14 +175,6 @@ export async function isLoginRemoved(db: DashboardD1, login: string): Promise<bo
   return row !== null;
 }
 
-/**
- * note: Removal = record the login as removed (migration 0023), drop the user's
- * workspace memberships and delete its row, as ONE D1 `batch` — a transaction
- * (d1-batch-atomicity), so a removal can never be recorded without the row
- * actually being gone, or a row deleted without being recorded. `removedBy` is
- * the acting member's login, NULL when the caller has no actor in scope.
- * Returns true when the row was deleted.
- */
 async function removeUser(db: DashboardD1, id: string, removedBy: string | null): Promise<boolean> {
   const results = await db.batch([
     db
@@ -246,13 +185,7 @@ async function removeUser(db: DashboardD1, id: string, removedBy: string | null)
            SET removed_at = excluded.removed_at, removed_by = excluded.removed_by`,
       )
       .bind(new Date().toISOString(), removedBy, id),
-    // note: The workspace side first: 0026 declares `workspace_members.user_id
-    // REFERENCES users(id)` with no cascade, so the row delete below is
-    // impossible while a membership points at it.
     db.prepare("DELETE FROM workspace_members WHERE user_id = ?").bind(id),
-    // why: `workspace_invites.invited_by` is ON DELETE SET NULL (0028), so invites
-    // this account authored survive as anonymous history instead of blocking
-    // the delete.
     db.prepare("DELETE FROM users WHERE id = ?").bind(id),
   ]);
   return results[2]!.meta.changes > 0;
@@ -271,21 +204,10 @@ export async function deleteUser(
   return removeUser(db, id, removedBy);
 }
 
-// note: --- workspace membership: removal, role change (migration 0026) ---
 
 /** `workspace_members.role` domain (0026 CHECK; `workspace-store` owns the same type). */
 export type WorkspaceMemberRole = "owner" | "admin" | "member";
 
-/**
- * note: The sole-owner guard, workspace-scoped (migration 0026): a row may not be
- * removed or demoted when it is the only `owner` of its workspace — a
- * workspace can never be left without one. `role` is the target row's CURRENT
- * role, so a promotion to `owner` is never refused by it.
- *
- * The condition is parameterized so EVERY statement of a batch carries the
- * same predicate (the `NOT_LAST_ADMIN` 0023 precedent), and it is evaluated
- * inside the writing statement — never a read-check-then-write window.
- */
 function notSoleOwner(workspaceId: string, userId: string): { sql: string; params: string[] } {
   return {
     sql: `NOT (
@@ -365,38 +287,18 @@ export async function countUsers(db: DashboardD1): Promise<number> {
   return row?.n ?? 0;
 }
 
-// note: --- sign-in decision (OAuth callback hook) ---
 
 export type SignInDecision =
   | { outcome: "allow"; user: DashboardUserRow; created: boolean }
   | { outcome: "deny" };
 
-/**
- * note: Sign-in's OWN row creation — deliberately not `createUser`: the automatic
- * OAuth path must never clear removal state, and its insert must be refused at
- * the WRITE boundary. ONE statement both tests the removal record and inserts
- * (there is no read-check-then-insert window to lose):
- *
- *   INSERT INTO users … SELECT … WHERE NOT EXISTS (removal record for login)
- *
- * so a removal that lands *after* the caller's earlier reads is still refused
- * by the database. A refused insert resolves to the ordinary deny decision
- * having written nothing; `changes === 0` is classified by a re-read — an
- * existing row (exact-case or case-variant race) is signed in and is allowed,
- * no row at all means the insert was refused. The removal record is compared
- * NOCASE, like every other login lookup (migration 0023).
- *
- * The row carries `role = 'member'` (the column is NOT NULL; its value is
- * never read for a workspace authorization decision) and writes NO
- * `workspace_members` row — sign-in joins nobody to a workspace.
- */
 async function signInCreateUser(db: DashboardD1, login: string): Promise<SignInDecision> {
   const row: DashboardUserRow = {
     id: crypto.randomUUID(),
     github_login: login,
     role: "member",
     created_at: new Date().toISOString(),
-    invited_by: null, // note: signed in, not invited
+    invited_by: null,
   };
   let changes: number;
   try {
@@ -412,8 +314,6 @@ async function signInCreateUser(db: DashboardD1, login: string): Promise<SignInD
     ]);
     changes = results[0]!.meta.changes;
   } catch (err) {
-    // note: D1 raises where bun:sqlite absorbs into ON CONFLICT: the row exists (a
-    // case-variant race) — classify it below instead of 500ing the callback.
     if (!isUniqueConstraintError(err)) throw err;
     changes = 0;
   }
@@ -421,7 +321,7 @@ async function signInCreateUser(db: DashboardD1, login: string): Promise<SignInD
   const existing = await getUserByLogin(db, login);
   return existing
     ? { outcome: "allow", user: existing, created: false }
-    : { outcome: "deny" }; // note: refused by the removal record — nothing was written
+    : { outcome: "deny" };
 }
 
 /**
@@ -443,8 +343,6 @@ export async function signInDashboardUser(
 ): Promise<SignInDecision> {
   const existing = await getUserByLogin(db, login);
   if (existing) return { outcome: "allow", user: existing, created: false };
-  // invariant: A recorded removal denies (migration 0023): only a deliberate re-admission
-  // — createUser, which clears the record — lets the login back in.
   if (await isLoginRemoved(db, login)) return { outcome: "deny" };
   return signInCreateUser(db, login);
 }

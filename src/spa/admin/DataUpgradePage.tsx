@@ -1,23 +1,3 @@
-/**
- * note: Data upgrades — the operator's one place to run a large data migration
- * (spec operator-data-upgrade § Upgrade registry and state machine).
- *
- * The registry is the server's, so this page holds no item knowledge: it lists
- * whatever `GET /api/data-upgrades` answers with the state row's own words,
- * and every control is one `POST .../:id/:action`. A run is a LOOP of single
- * batches (one batch = one server transaction) rather than one long request:
- * the operator sees the processed count move, can stop after the batch in
- * flight, and a dropped connection never loses work — 继续 resumes from the
- * cursor the server stored.
- *
- * The maintenance banner reads `/api/runtime` because that store, not the
- * upgrade row, owns the window: whether the platform is closed, why, and since
- * when. `null` means an older Worker does not report it and the banner is
- * absent — a missing field is absence, never a closed platform.
- *
- * `DataUpgradeView` is the pure face (fixtures render it without effects);
- * `DataUpgradePage` adds the reads and the run loop.
- */
 import { useRef, useState } from "react";
 import { Button, CardContent, CardHeader, StatusBadge, type StatusTone } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
@@ -42,7 +22,6 @@ import {
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** invariant: The status pill's tone per state: only a failure or a completion shouts. */
 const TONES: Record<DataUpgradeStatus, StatusTone> = {
   pending: "neutral",
   running: "accent",
@@ -75,16 +54,11 @@ export type RunOutcome = { id: string; kind: "done" | "stopped"; batch: number; 
 export type DataUpgradeViewProps = {
   locale: Locale;
   data: DataUpgradePageData;
-  /** note: The item with a write in flight: every control of it is disabled. */
   busyId: string | null;
-  /** note: The item whose batch loop is running: its stop control is live. */
   runningId: string | null;
-  /** why: Batches this run has committed so far. */
   batches: number;
   outcome: RunOutcome | null;
-  /** note: The write refusal, already resolved to one string. */
   failure: string | null;
-  /** why: The row itself, so the page needs no id lookup of its own. */
   onPreflight: (row: DataUpgradeRow) => void;
   onStep: (row: DataUpgradeRow) => void;
   onStop: () => void;
@@ -92,24 +66,17 @@ export type DataUpgradeViewProps = {
   onReset: (row: DataUpgradeRow) => void;
 };
 
-/**
- * why: Every preflight counter is zero: the item's own worklist is empty, so a run
- * could move nothing. An EMPTY map is not zero — it is an item that reports no
- * counts at all, and the console must not invent an answer for it.
- */
 function zeroPreflight(counts: Record<string, number>): boolean {
   const entries = Object.values(counts);
   return entries.length > 0 && entries.every((count) => count === 0);
 }
 
-/** why: The stamp a group orders by: the run's own finish, else the in-flight claim. */
 function lastRunAt(row: DataUpgradeRow): number {
   const stamp = row.state.finishedAt ?? row.state.startedAt;
   const parsed = stamp === null ? Number.NaN : Date.parse(stamp);
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-/** note: A count map as the item reported it; an empty map is one dash. */
 function Counts({ counts }: { counts: Record<string, number> }) {
   const entries = Object.entries(counts);
   if (entries.length === 0) return <span className="text-sm text-muted-foreground">—</span>;
@@ -139,25 +106,17 @@ export function DataUpgradeView({
   onReset,
 }: DataUpgradeViewProps) {
   const { upgrades, maintenance } = data;
-  // invariant: A completed card's body starts folded: only the operator asking opens it.
   const [openCompleted, setOpenCompleted] = useState<Record<string, boolean>>({});
-  // note: Open work first, in the registry's own order; then what is done, newest
-  // run on top. The sort is stable, so equal (or absent) stamps keep the
-  // registry's order.
   const ordered = [
     ...upgrades.filter((row) => row.state.status !== "completed"),
     ...upgrades
       .filter((row) => row.state.status === "completed")
       .sort((a, b) => lastRunAt(b) - lastRunAt(a)),
   ];
-  // why: The item the window is being held for: the one running now, else the one
-  // the state row says is mid-flight (a run this tab did not start).
   const current =
     upgrades.find((row) => row.id === runningId) ??
     upgrades.find((row) => row.state.status === "running" || row.state.status === "verifying") ??
     null;
-  // why: The banner's error is the running item's own when it has one — a stale
-  // error on another row must not read as this upgrade failing.
   const lastError =
     current?.state.lastError ??
     upgrades.find((row) => row.state.lastError !== null)?.state.lastError ??
@@ -254,16 +213,9 @@ export function DataUpgradeView({
           const mine = runningId === row.id;
           const state: DataUpgradeState = row.state;
           const nothingToMigrate = zeroPreflight(row.preflight);
-          // invariant: The run control's own condition, so the badge and the button cannot
-          // disagree: downtime is a property of a run, and a card that cannot
-          // take a batch has no window to warn about.
           const canRun =
             (state.status === "pending" || state.status === "running") && !nothingToMigrate;
           const done = state.status === "completed";
-          // note: A pending card with an empty worklist has nothing to offer but its
-          // counts, so it folds exactly like a finished run — "nothing to
-          // migrate" IS its answer. A failed or in-flight card never folds: its
-          // controls (retry, progress) are the only reason to look at it.
           const foldable = done || (nothingToMigrate && state.status === "pending");
           const open = openCompleted[row.id] === true;
           const verifiable =
@@ -282,9 +234,6 @@ export function DataUpgradeView({
                   <code className="text-xs text-muted-foreground">{row.id}</code>
                   {foldable ? (
                     <>
-                      {/* note: Folded, the row still answers what the operator needs:
-                          how much a finished run moved, or that there is
-                          nothing to migrate. */}
                       <span className="text-sm text-muted-foreground">
                         {done
                           ? t(locale, "admin.dataUpgrades.completedSummary", {
@@ -326,9 +275,6 @@ export function DataUpgradeView({
                   </div>
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">{t(locale, "admin.dataUpgrades.lastRunLabel")}</dt>
-                    {/* invariant: `started_at` is only the in-flight claim, so a run that
-                        finished states its own stamp; the claim stands in while
-                        one is running. */}
                     <dd className="font-medium">
                       {formatRelativeTime(state.finishedAt ?? state.startedAt, locale)}
                     </dd>
@@ -340,8 +286,6 @@ export function DataUpgradeView({
                   </span>
                   <Counts counts={row.preflight} />
                 </div>
-                {/* note: Zero counts are the whole answer: without this line the card
-                    reads like a run that finished and moved nothing. */}
                 {nothingToMigrate ? (
                   <p className="text-sm">{t(locale, "admin.dataUpgrades.nothingToMigrate")}</p>
                 ) : null}
@@ -405,18 +349,11 @@ export function DataUpgradeView({
                       {t(locale, "admin.dataUpgrades.verifyAction")}
                     </Button>
                   ) : null}
-                  {/* invariant: Live only during the loop: one batch is one transaction, so the
-                      stop lands after the batch in flight — never mid-write. */}
                   {mine ? (
                     <Button type="button" variant="destructive-outline" size="sm" onClick={onStop}>
                       {t(locale, "admin.dataUpgrades.stopAction")}
                     </Button>
                   ) : null}
-                  {/* note: A failed run's one recovery, named for what it does, with the
-                      one thing it does NOT do beside it: the rows the earlier
-                      batches moved are not rolled back. No other face offers it —
-                      a pending item never started and a finished one has nothing
-                      left to redo. */}
                   {state.status === "failed" ? (
                     <>
                       <Button
@@ -433,7 +370,6 @@ export function DataUpgradeView({
                       </span>
                     </>
                   ) : null}
-                  {/* note: An in-flight run may be abandoned; nothing moved is undone. */}
                   {state.status === "running" || state.status === "verifying" ? (
                     <Button
                       type="button"
@@ -456,7 +392,6 @@ export function DataUpgradeView({
   );
 }
 
-/** invariant: The list and the window come from one read: the banner never lags the rows. */
 async function readPage(): Promise<DataUpgradePageData> {
   const [upgrades, runtime] = await Promise.all([readDataUpgrades(), readRuntime()]);
   return { upgrades, maintenance: runtime.maintenance };
@@ -469,7 +404,6 @@ export function DataUpgradePage({ locale }: { locale: Locale }) {
   const [batches, setBatches] = useState(0);
   const [outcome, setOutcome] = useState<RunOutcome | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
-  /** why: Read by the loop between batches; a ref so the stop is seen immediately. */
   const stop = useRef(false);
 
   const setItem = (id: string, next: DataUpgradeState) =>
@@ -478,7 +412,6 @@ export function DataUpgradePage({ locale }: { locale: Locale }) {
       upgrades: page.upgrades.map((row) => (row.id === id ? { ...row, state: next } : row)),
     }));
 
-  /** note: The page's generic message first, the server's own `{error}` as detail. */
   function refused(key: DictionaryKey, title: string, error: unknown): string {
     const generic = t(locale, key, { title });
     return error instanceof AdminWriteError
@@ -504,7 +437,6 @@ export function DataUpgradePage({ locale }: { locale: Locale }) {
     }
   }
 
-  /** note: One batch per request, until the walk is done or the operator stops it. */
   async function step(row: DataUpgradeRow) {
     stop.current = false;
     setBusyId(row.id);
@@ -531,7 +463,6 @@ export function DataUpgradePage({ locale }: { locale: Locale }) {
     } finally {
       setRunningId(null);
       setBusyId(null);
-      // note: The moved rows change the preflight counts the list shows.
       reload();
     }
   }
@@ -540,8 +471,6 @@ export function DataUpgradePage({ locale }: { locale: Locale }) {
     setBusyId(row.id);
     setFailure(null);
     try {
-      // note: All-zero checks complete the item; any other leaves it `failed` with
-      // `last_error`, which the row shows — never a refusal this page invents.
       setItem(row.id, (await verifyDataUpgrade(row.id)).state);
     } catch (error) {
       setFailure(refused("admin.dataUpgrades.verifyFailed", row.title, error));

@@ -1,9 +1,3 @@
-/** note: The console document's server-side locale substitution:
- * `serveDocument` resolves the locale from the `mstar_locale` cookie and
- * rewrites `<html lang>` (BCP 47: `zh_CN` → `zh-CN`) and the `<title>` (from
- * `admin.documentTitle`) before serving. No second document route, no
- * client-side attribute write.
- */
 import { describe, expect, test } from "bun:test";
 import type { Fetcher } from "@cloudflare/workers-types";
 import worker from "../../src/worker/index";
@@ -15,7 +9,6 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 const SESSION_SECRET = ["test", "admin", "document", "secret", "32-bytes!"].join("-");
 const OPERATOR = "Support-Bot";
 
-/** note: The built console document shape: lang, title and the boot marker. */
 const ADMIN_HTML = `<!doctype html><html lang="en"><head><title>Morning Star — Platform operations</title><!--SPA_BOOT--></head><body>admin console</body></html>`;
 
 function adminAssets(): Fetcher {
@@ -48,7 +41,6 @@ function envFor(): Env {
   } as unknown as Env;
 }
 
-/** note: The boot the Worker injected into the document. */
 function bootOf(html: string): Record<string, unknown> {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no boot in the admin document");

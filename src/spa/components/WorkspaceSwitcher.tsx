@@ -1,17 +1,3 @@
-/**
- * note: The top-bar workspace control (moved out of the sidebar header into the
- * navbar's left cluster). URL-only: picking a workspace rewrites
- * the workspace segment of the CURRENT path and lets the router re-render from
- * the pathname — no fetch, no reload, no cookie. A workspace the current path
- * has no resource for stays a 404 on that URL (the unknown-path stub), which is
- * the honest answer; nothing redirects back.
- *
- * The menu ends with "New workspace": enabled when the boot allows it, and at
- * the free-slot cap a DISABLED row carrying the stated reason — a user needs to
- * know why they cannot create one, and the rule itself. The enabled row opens
- * the shell's creation dialog (`CreateWorkspaceDialog`); the disabled one opens
- * nothing.
- */
 import { useState } from "react";
 import { ChevronDown, Plus } from "lucide-react";
 import {
@@ -34,7 +20,6 @@ import { CreateWorkspaceDialog } from "./CreateWorkspaceDialog";
 
 type BlockedReason = NonNullable<SpaBoot["createWorkspaceBlockedReason"]>;
 
-/** invariant: One stated reason per boot block reason — never a generic "disabled". */
 const BLOCKED_REASON_KEY: Record<BlockedReason, DictionaryKey> = {
   free_slot: "nav.newWorkspaceBlockedFreeSlot",
   flag: "nav.newWorkspaceBlockedFlag",
@@ -71,23 +56,10 @@ export function WorkspaceSwitcher({
   model: WorkspaceSwitcherModel | null;
   boot: SpaBoot;
 }) {
-  // invariant: The creation dialog lives here because this menu is its only entry: an
-  // existing member creates from the switcher (Task 6), while a
-  // no-workspace login still gets the routed setup page.
   const [creating, setCreating] = useState(false);
-  // note: No membership at all is not a choice: the shell renders no control.
   if (model === null) return null;
   const locale = boot.locale;
-  // invariant: Never a stand-in name: when the path names a workspace this login does not
-  // list (a slug renamed away, a revoked membership) — or names none at all —
-  // NO row is current, so the trigger shows the control's own label.
   const current = model.options.find((option) => option.ref === model.currentRef);
-  // invariant: The plan chip is a `saas` surface only (D15/D20): self-hosted has no tier
-  // to display. It rides the CURRENT workspace's name, so a path that names no
-  // workspace (the navigator) shows no chip. The value comes from that
-  // membership row, never from the boot's addressed workspace: a switch only
-  // rewrites the URL, so a boot-keyed plan would keep naming the workspace the
-  // document loaded with.
   const plan = boot.deploymentMode === "saas" ? model.currentPlan : undefined;
   const blockedReason: BlockedReason | null =
     boot.canCreateWorkspace === false ? (boot.createWorkspaceBlockedReason ?? null) : null;
@@ -105,8 +77,6 @@ export function WorkspaceSwitcher({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-64">
           <DropdownMenuLabel>{model.label}</DropdownMenuLabel>
-          {/* note: A radio group: "the current workspace" is a chosen row, not a click
-              target — each row reports `aria-checked`. An empty value marks none. */}
           <DropdownMenuRadioGroup
             value={model.currentRef ?? ""}
             onValueChange={(ref) => void switchWorkspace(ref, model.target)}

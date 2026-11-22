@@ -1,4 +1,4 @@
-// note: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over) see tests/spa/tokens.test.ts.
 import * as React from "react"
 import { CheckIcon, ChevronRightIcon, CircleIcon } from "lucide-react"
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu"

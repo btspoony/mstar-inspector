@@ -1,23 +1,5 @@
-/**
- * note: The attempt's ONE absolute hard stop: frozen at admission from the original
- * Queue send stamp plus the operator's end-to-end cap, carried on the delivery's
- * handoff row and on the Check attempt row, read by every step instead of being
- * re-derived.
- *
- * These cases pin four behaviours:
- *  - the paid exec is bounded by that instant, and a kill at it is a CONFIRMED
- *    stop (a returned status, recorded as one);
- *  - a lost reply is `unknown` — no failure row, no Check conclusion, no
- *    destruction;
- *  - a resumed prepare keeps the frozen instant even when the cap seam and the
- *    clock move;
- *  - a redelivery replays the recorded deadline rather than reading a cap the
- *    operator may have changed in between.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// note: Load shim FIRST: the execution module statically imports ./sandbox → the
-// workerd builtin `cloudflare:workers`. Every double is injected.
 import "../helpers/cloudflare-workers-mock";
 
 import {
@@ -54,7 +36,6 @@ import type {
   ProcessDeps,
 } from "../../src/pipeline/review-attempt-execution";
 
-// note: Dynamic: the module graph under test must load after the workerd shim.
 const {
   createCheckSettlement,
   prepareAttempt,
@@ -80,7 +61,6 @@ beforeEach(() => {
   h = createConsumerHarness();
 });
 
-/** note: The seeded D1 plus this case's doubles (a fresh host unless `share` is given). */
 async function makeDeps(share?: { db: Awaited<ReturnType<typeof createSeededTestD1>> }): Promise<{
   deps: ProcessDeps;
   db: Awaited<ReturnType<typeof createSeededTestD1>>;
@@ -114,7 +94,6 @@ async function makeDeps(share?: { db: Awaited<ReturnType<typeof createSeededTest
   return { deps, db };
 }
 
-/** note: The attempt's data input, with its FROZEN deadline supplied by the caller. */
 function makeRef(payload: ReviewJobPayload, deadlineMs: number): AttemptRef {
   return {
     attemptId: ATTEMPT_ID,
@@ -142,7 +121,6 @@ function makeRef(payload: ReviewJobPayload, deadlineMs: number): AttemptRef {
   };
 }
 
-/** note: A harness whose first `prepare` has completed, returning the sealed handoff. */
 async function prepareFor(deps: ProcessDeps, ref: AttemptRef): Promise<PrepareStep> {
   registerGitOpsCommands(h.sandbox, ref.payload);
   h.sandbox.resolvedSha = SHA;
@@ -153,8 +131,6 @@ describe("the paid exec at the frozen deadline", () => {
   test("the exec's timeout is the deadline remainder, and a kill at it is a confirmed stop", async () => {
     const { deps, db } = await makeDeps();
     h.sandbox.runnerExitCode = 124;
-    // note: A saturated diff requests the tier maximum, so the cutoff is not the
-    // binding term and the exec's own bound is the absolute remainder.
     h.sandbox.numstatStdout = "5000\t0\tsrc/auth.ts\n";
     const terminalized: Array<{ outcome: string; exhaustion: unknown }> = [];
     const handle: CheckHandle = {
@@ -175,7 +151,6 @@ describe("the paid exec at the frozen deadline", () => {
       const ref = makeRef(makePayload(), clock.now + CAP_MS);
       const step = await prepareFor(deps, ref);
       if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
-      // note: The runner deadline is the tier maximum INSIDE the frozen cutoff.
       expect(step.prepared.budget.cutoff_ms).toBe(clock.now + CAP_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT));
       expect(step.prepared.runnerDeadlineMs).toBe(clock.now + 600_000);
 
@@ -185,25 +160,19 @@ describe("the paid exec at the frozen deadline", () => {
       } catch (err) {
         thrown = err;
       }
-      // note: The container answered with a status: exit 124 at the anchored instant.
-      // It is a stop, recorded as one — never `unknown`.
       expect(thrown).toBeInstanceOf(Error);
       const failure = thrown as { cause?: unknown };
       const cause = failure.cause;
       expect(cause).toBeInstanceOf(BudgetExhaustedError);
       expect((cause as BudgetExhaustedError).outcome.cause).toBe("sandbox-kill");
 
-      // note: The guarded request carries the ABSOLUTE instant; the DO reads the
-      // remaining window after its proof and kills a hung child there.
       const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
       expect(runnerCall).toBeDefined();
       const runnerOpts = runnerCall!.opts as { deadlineEpochMs?: number };
       expect(runnerOpts.deadlineEpochMs).toBe(clock.now + 600_000);
-      // note: The runner input document carries the SAME absolute instant.
       const written: { outerDeadlineEpochMs?: number } = JSON.parse(h.sandbox.writtenInputJson!);
       expect(written.outerDeadlineEpochMs).toBe(runnerOpts.deadlineEpochMs);
 
-      // note: Settled: the durable stop record and the Check conclusion agree.
       const ref2 = ref;
       const cleanup = {};
       expect(await settleAttemptFailure(deps, ref2, thrown, cleanup)).toEqual({
@@ -224,8 +193,6 @@ describe("the paid exec at the frozen deadline", () => {
 
   test("a lost reply is unknown: no failure row, no Check conclusion, nothing destroyed", async () => {
     const { deps, db } = await makeDeps();
-    // note: The container accepted the exec (the launch fence is taken) and the reply
-    // never came back.
     h.sandbox.runnerError = new Error("the exec's reply was lost");
     let terminalizeCalls = 0;
     deps.checks = {
@@ -252,15 +219,11 @@ describe("the paid exec at the frozen deadline", () => {
 
       const cleanup = {};
       expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toEqual({ kind: "unknown" });
-      // note: Ambiguity is not a stop and not a failure: nothing is recorded as
-      // either, and no Check copy is frozen over a possibly-running call.
       expect(failureRows(db)).toHaveLength(0);
       expect(terminalizeCalls).toBe(0);
       expect(cleanup).toEqual({ headSha: SHA, unproven: true });
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
 
-      // note: The retention table is the gate: `launched` with no outcome holds the
-      // container and capacity.
       expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "unknown" });
       expect(h.sandbox.destroyCalls).toBe(0);
     });
@@ -278,8 +241,6 @@ describe("the frozen deadline survives a resume", () => {
       expect(cutoff).toBe(clock.now + CAP_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT));
       expect(first.prepared.budget.deadline_ms).toBe(first.prepared.runnerDeadlineMs);
 
-      // note: A NEW host, the same attempt row, a moved clock and a much larger cap
-      // override: the replayed prepare must still bill the recorded instant.
       clock.now += 300_000;
       const { deps: resumed } = await makeDeps({ db });
       resumed.attemptCapMs = 5_000_000;
@@ -309,18 +270,12 @@ describe("the frozen deadline survives a resume", () => {
       deadlineMs: live,
     });
     await settlement.begin(SCOPE, 424242, SHA);
-    // note: A LIVE attempt's claim carries its hard stop verbatim.
     expect(captured).toEqual([live]);
   });
 
   test("a live attempt's instant is byte-identical even with less than one lease left", async () => {
     const { deps, db } = await makeDeps();
-    // note: Live, and SHORTER than the settlement window a spent deadline would open:
-    // an attempt whose hard stop is one minute away must keep exactly that
-    // minute. Extending it would let a running review outlive its own cap.
     const live = Date.now() + 60_000;
-    // note: A scripted create that proves the attempt's identity, exactly what the
-    // real adapter needs to persist `sending` and attach the run.
     const octokit = {
       rest: {
         checks: {
@@ -368,8 +323,6 @@ describe("the frozen deadline survives a resume", () => {
       .prepare("SELECT execution_deadline_ms, lease_until_ms FROM review_checks WHERE id = ?")
       .bind(handle!.attemptId)
       .first<{ execution_deadline_ms: number; lease_until_ms: number }>();
-    // note: The minted row's deadline and its lease are the attempt's own instant —
-    // unchanged by the claim.
     expect(row!.execution_deadline_ms).toBe(live);
     expect(row!.lease_until_ms).toBe(live);
   });
@@ -384,10 +337,6 @@ describe("the frozen deadline survives a resume", () => {
       },
       terminalize: async () => {},
     };
-    // note: The stop is already known and the attempt's instant has passed: a spent
-    // instant can own no lease, so the claim opens the settlement window
-    // `settleSkipped` opens — that is what lets the stop's category be frozen
-    // instead of dropped (and it never moves an existing row's deadline).
     const spent = Date.now() - 60_000;
     const settlement = createCheckSettlement({
       deps,
@@ -412,8 +361,6 @@ describe("admission freezes the deadline durably", () => {
       )
       .run(REVIEW_ATTEMPT_CAP_KEY, String(CAP_MS));
     const seen: AttemptRef[] = [];
-    // note: A DEFINITE create failure keeps the handoff row and releases admission, so
-    // the same message can be delivered again and must replay the same attempt.
     const startAttempt = async (_deps: unknown, ref: AttemptRef): Promise<void> => {
       seen.push(ref);
       throw new WorkflowCreateFailedError(ref.attemptId, new Error("no instance"));
@@ -430,8 +377,6 @@ describe("admission freezes the deadline durably", () => {
       expect(seen).toHaveLength(1);
       expect(seen[0]!.deadlineMs).toBe(admittedAt + CAP_MS);
 
-      // note: The operator doubles the cap and the queue redelivers the same message
-      // later: the attempt may not be extended by either.
       db.raw.prepare(`UPDATE review_runtime_settings SET value = ? WHERE key = ?`).run("1800000", REVIEW_ATTEMPT_CAP_KEY);
       clock.now += 60_000;
       await consumer(h.makeBatch(payload)).catch(() => {});
@@ -475,10 +420,6 @@ describe("the cap's settings read", () => {
   });
 });
 
-/**
- * note: A DB whose launch-claim write spends `spentMs` of the frozen clock: the claim
- * is a D1 round trip taken INSIDE the attempt's own window, not before it.
- */
 function claimSpendingDb(db: unknown, spentMs: number, clock: { now: number }): unknown {
   const real = db as { prepare(query: string): { bind(...values: unknown[]): unknown } };
   return {
@@ -513,8 +454,6 @@ describe("the launch claim is part of the attempt's clock", () => {
 
       const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
       expect(runnerCall).toBeDefined();
-      // note: The wire carries the anchored instant itself; the DO computes what the
-      // claim's 10s left of it, immediately before the process starts.
       const runnerOpts = runnerCall!.opts as { deadlineEpochMs?: number };
       expect(runnerOpts.deadlineEpochMs).toBe(step.prepared.runnerDeadlineMs);
     });
@@ -546,15 +485,12 @@ describe("the launch claim is part of the attempt's clock", () => {
         seatsDispatched: 0,
         seatsStopped: 0,
       });
-      // note: Never a zero/negative exec: the paid call was not sent at all.
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 
       const cleanup = {};
       expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toMatchObject({ kind: "budget-exhausted" });
       expect(failureRows(db)).toHaveLength(1);
-      // note: No paid work was sent, and the stop is durable: the container is
-      // releasable rather than held as an unproven `launched` row.
       expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "retained" });
       expect(h.sandbox.destroyCalls).toBe(1);
     });
@@ -586,8 +522,6 @@ describe("the admission guard and the attempt deadline agree", () => {
         expires_at: string;
       }>;
       expect(rows).toHaveLength(1);
-      // note: 3,000 s of attempt + the 60 s handoff→create margin; the level's own
-      // 2,412 s floor is smaller, so the frozen deadline wins the TTL.
       expect(Date.parse(rows[0]!.expires_at) - Date.parse(rows[0]!.acquired_at)).toBe(3_060_000);
     });
   });
@@ -619,8 +553,6 @@ describe("a pre-deadline handoff row is anchored once", () => {
       await consumer(h.makeBatch(payload)).catch(() => {});
       expect(seen).toHaveLength(1);
       expect(seen[0]!.attemptId).toBe("legacy-attempt");
-      // note: The legacy row's own admission instant + the cap — never this
-      // delivery's clock, which a recovery re-enqueue would move.
       expect(seen[0]!.deadlineMs).toBe(createdMs + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
       expect((await readAttemptHandoff(db as never, key))?.deadlineMs).toBe(createdMs + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
 
@@ -635,8 +567,6 @@ describe("a pre-deadline handoff row is anchored once", () => {
 describe("a container-side deadline refusal is a confirmed stop", () => {
   test("a request whose proof consumed the window starts nothing and records the cap stop", async () => {
     const { deps, db } = await makeDeps();
-    // note: The DO's answer when the absolute deadline (less the kill grace) was
-    // already gone: NOTHING ran.
     deps.getSandbox = async () => ({
       runCommand: h.fakeSandbox.runCommand,
       runMarked: async (marker: string, cmd: string, opts?: unknown) =>
@@ -668,9 +598,6 @@ describe("a container-side deadline refusal is a confirmed stop", () => {
         seatsDispatched: 0,
         seatsStopped: 0,
       });
-      // note: The refused exec never reached the sandbox's recorded call list, and
-      // the claimed row is a durable stop — not an `unknown` that holds the
-      // container forever.
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 

@@ -1,11 +1,3 @@
-/** note: `server_flags` and its consumers (spec operator-admin-surface §3.1).
- *
- * Pinned at the CONSUMER, not at the accessor alone: an absent row means
- * ENABLED (the behaviour the platform shipped with), and a stored `0` changes
- * what the named consumer does — signup refused, review not enqueued, creation
- * refused. The console's write path is pinned too: one PATCH = one flag row +
- * exactly one platform audit row.
- */
 import { afterEach, describe, expect, test } from "bun:test";
 import { Webhooks } from "@octokit/webhooks";
 import worker from "../../src/worker/index";
@@ -29,7 +21,6 @@ const OPERATOR = "Support-Bot";
 const OPERATOR_KEY = OPERATOR.toLowerCase();
 const MEMBER = "regular-member";
 
-/** note: Raw fixture writes (the accessor and every consumer read real SQL). */
 function insertUser(db: TestD1, login: string): void {
   db.raw
     .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)")
@@ -61,7 +52,6 @@ afterEach(() => {
   globalThis.fetch = origFetch;
 });
 
-/** note: GitHub identity stub: token exchange then `/user` for the given login. */
 function stubGitHubIdentity(login: string): void {
   globalThis.fetch = (async (url: unknown) => {
     const target = String(url);
@@ -78,7 +68,6 @@ function stubGitHubIdentity(login: string): void {
   }) as unknown as typeof fetch;
 }
 
-/** note: Run the real OAuth callback for `login`. */
 async function oauthCallback(login: string, env: Env): Promise<Response> {
   stubGitHubIdentity(login);
   const state = await createStateValue(SESSION_SECRET);
@@ -91,14 +80,12 @@ async function oauthCallback(login: string, env: Env): Promise<Response> {
 }
 
 function userCount(db: TestD1, login: string): number {
-  // note: bun:sqlite returns an untyped row; the SELECT above fixes its shape.
   const row = db.raw
     .prepare("SELECT COUNT(*) AS n FROM users WHERE github_login = ? COLLATE NOCASE")
     .get(login) as { n: number } | null;
   return row?.n ?? 0;
 }
 
-/** note: Does the response mint a live session cookie? */
 function mintedSession(res: Response): boolean {
   return res.headers
     .getSetCookie()
@@ -150,9 +137,7 @@ describe("signup_open at the OAuth first-sign-in branch", () => {
   });
 });
 
-// note: --- workspace_creation_open at POST /dashboard/api/workspaces --------------
 
-/** note: The route's 409 body when the flag is off (spec §3.1). */
 const WORKSPACE_CLOSED_REFUSAL =
   "This workspace was not created. Workspace creation is closed on this platform right now.";
 
@@ -199,7 +184,6 @@ describe("workspace_creation_open at POST /dashboard/api/workspaces", () => {
   });
 });
 
-// note: --- workspace_creation_open in the boot payload ----------------------------
 
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
@@ -238,9 +222,7 @@ describe("workspace_creation_open in the boot payload", () => {
   });
 });
 
-// note: --- review_global at the webhook enqueue decision --------------------------
 
-/** invariant: base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 const WEBHOOK_SECRET = "app-x-secret";
 const PR_PAYLOAD = {
@@ -251,10 +233,7 @@ const PR_PAYLOAD = {
   repository: { id: 9001, name: "test-repo", owner: { login: "test-owner" } },
 };
 
-/** note: An active App row with real secretbox envelopes plus its workspace mapping. */
 async function seedApp(db: TestD1): Promise<void> {
-  // why: The row id is the webhook URL's app segment, so the route assertion can
-  // name it.
   const id = "app-x";
   const box = createSecretbox(ENCRYPTION_KEY);
   const webhookSecretEnc = await box.encryptSecret(
@@ -271,17 +250,12 @@ async function seedApp(db: TestD1): Promise<void> {
     )
     .run(id, privateKeyEnc, webhookSecretEnc);
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
-  // note: The webhook resolves the bot's target by the delivery's own repository
-  // before it classifies anything, so the row has to carry that identity — a
-  // bot without one answers `ignored` and the flag under test never runs.
   seedTarget(db, id, {
     id: "target-app-x",
     repoId: PR_PAYLOAD.repository.id,
     repoOwner: PR_PAYLOAD.repository.owner.login,
     repoName: PR_PAYLOAD.repository.name,
   });
-  // note: The route's operating switch: ON here (the acceptance gate is OFF by
-  // default per spec § Deployment gate; this suite exercises the flag wiring).
   db.raw
     .prepare(
       `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
@@ -342,7 +316,6 @@ describe("review_global at the webhook enqueue decision", () => {
   });
 });
 
-// note: --- the console's flags API ------------------------------------------------
 
 type AuditRow = {
   action: string;
@@ -366,11 +339,6 @@ function flagRowCount(db: TestD1): number {
   return row?.n ?? 0;
 }
 
-/** note: A competing writer that commits the moment the handler submits its batch —
- * i.e. after any pre-batch read the handler performed, and before the batch's
- * own statements run. The flag row is written raw (never through the wrapped
- * face), so the interleave cannot re-enter the handler.
- */
 function withCompetingToggle(
   db: TestD1,
   key: ServerFlagKey,
@@ -462,7 +430,6 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
     });
     expect(JSON.parse(first[0]!.detail_json ?? "null")).toEqual({ before: true, after: false });
 
-    // invariant: A second toggle appends its own single row carrying the new before value.
     const again = await flagsApi(db, {
       method: "PATCH",
       body: JSON.stringify({ key: "signup_open", enabled: true }),
@@ -472,7 +439,6 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
     expect(second).toHaveLength(2);
     expect(JSON.parse(second[1]!.detail_json ?? "null")).toEqual({ before: false, after: true });
 
-    // note: The read face follows the stored row.
     const read = await flagsApi(db, { method: "GET" });
     const body = (await read.json()) as { flags: Array<{ key: string; enabled: boolean }> };
     expect(body.flags.find((flag) => flag.key === "signup_open")).toEqual({
@@ -508,17 +474,12 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
     expect(auditRows(db)).toHaveLength(0);
   });
 
-  /** note: The audit's `before` must be the state the upsert actually overwrote, not
-   * what a separate pre-read saw. A competing writer commits between the two
-   * (`withCompetingToggle`), so an implementation that reads `before` OUTSIDE
-   * the batch records the pre-competition value and this assertion fails.
-   */
   test("the audit before-value is read inside the batch: a competing toggle in between cannot make it stale", async () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
-    setFlagRow(db, "signup_open", 0); // note: stored state entering the request
+    setFlagRow(db, "signup_open", 0);
 
-    const competing = withCompetingToggle(db, "signup_open", 1); // note: the value at write time
+    const competing = withCompetingToggle(db, "signup_open", 1);
     const res = await flagsApi(competing.db, {
       method: "PATCH",
       body: JSON.stringify({ key: "signup_open", enabled: false }),
@@ -528,13 +489,9 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
 
     const rows = auditRows(db);
     expect(rows).toHaveLength(1);
-    // invariant: The batch overwrote `1` — so `before` is true, not the pre-competition 0.
     expect(JSON.parse(rows[0]!.detail_json ?? "null")).toEqual({ before: true, after: false });
   });
 
-  /** note: One transaction: a failing flag upsert rolls the audit row back. A split
-   * write leaves the audit row behind and this assertion fails.
-   */
   test("a failed flag upsert appends no audit row", async () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);

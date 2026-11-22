@@ -1,18 +1,3 @@
-/**
- * why: What a rendered element actually paints its text in.
- *
- * A tone assertion has to survive a class-string change, so the treatment is
- * identified by the COLOUR the browser computes: this reads the one
- * `text-(--token)` utility the element names and follows the token to the
- * value the token layer declares. An element that names no colour token is
- * inheriting from its container — reported as `null`, never as a pass.
- *
- * The theme is an argument, never a module-level constant: the same class list
- * resolves to a different colour per theme, so a pair that coincides today and
- * splits later would be judged against the wrong face.
- *
- * `text-(length:--x)` is a type step, not a colour, so it never matches.
- */
 import { resolveTheme, type ThemeName } from "../../src/design-system/tokens";
 
 /** The colour the alert face resolves to (`--tone-danger-fg`) in `theme`. */
@@ -48,8 +33,6 @@ export function slotTags(markup: string, slot: string): string[] {
 export function alertSegments(markup: string, theme: ThemeName): string[] {
   const segments: string[] = [];
   const danger = dangerFg(theme);
-  // why: Each opening tag is judged on its OWN class list: an outer muted span that
-  // merely contains the coloured one is not the coloured one.
   for (const open of markup.matchAll(/<span\b[^>]*>/g)) {
     if (textColourOf(open[0], theme) !== danger) continue;
     const rest = markup.slice((open.index ?? 0) + open[0].length);

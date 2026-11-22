@@ -1,7 +1,3 @@
-/**
- * invariant: Hash-free client router. Enumerated routes only — unknown
- * paths render the unknown stub; the Worker never history-fallbacks them.
- */
 import { useEffect, useState, type ReactNode } from "react";
 import { matchSpaRoute, type SpaRoute } from "./routes";
 

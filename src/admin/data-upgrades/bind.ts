@@ -1,34 +1,12 @@
-/**
- * why: Repository-id binding, shared by the upgrades that leave a target named only
- * by `owner/name`.
- *
- * A target in that shape waits for the repository's first delivery to claim its
- * `repo_id` (D15). When the owner still has a LIVE installation of the bot, an
- * upgrade can ask GitHub instead of waiting: mint an installation token, list
- * that installation's repositories once, match `owner/name`, and write the
- * numeric id. No live installation (a removed one is history), a repository the
- * installation does not grant, or a GitHub failure leaves `repo_id` NULL and is
- * counted — never thrown.
- */
 import type { DashboardD1 } from "../../dashboard/users";
 import type { UpgradeRunContext } from "../data-upgrades";
 
-/**
- * note: The one live target that names the repository and has no id. Exactly one row
- * is required: with two, stamping both with the same `repo_id` would violate
- * 0068's `(bot_id, repo_id)` unique index and abort the whole batch.
- */
 const UNCLAIMED_TARGET = `
   SELECT id FROM review_targets
    WHERE deleted_at IS NULL AND bot_id = ?1
      AND repo_owner = ?2 COLLATE NOCASE AND repo_name = ?3 COLLATE NOCASE
      AND repo_id IS NULL`;
 
-/**
- * note: Write the repository's numeric id onto ONE target id. Guarded twice: only
- * while the claim is still absent, and never when another live target of the
- * same bot already holds that id.
- */
 const BIND_BY_ID = `
   UPDATE review_targets SET repo_id = ?1, updated_at = datetime('now')
    WHERE id = ?2 AND repo_id IS NULL AND deleted_at IS NULL
@@ -36,11 +14,6 @@ const BIND_BY_ID = `
                       WHERE o.bot_id = review_targets.bot_id AND o.repo_id = ?1
                         AND o.deleted_at IS NULL AND o.id <> review_targets.id)`;
 
-/**
- * note: Every live installation of this bot under `owner`, oldest first. The table's
- * unique key is `(app_id, installation_id)`, so a re-install can leave two live
- * rows for one account; the caller tries each until one grants the repository.
- */
 async function liveInstallations(
   db: DashboardD1,
   botId: string,
@@ -79,8 +52,6 @@ export async function bindRepository(
   const lookup = context?.repoLookup;
   if (lookup === undefined) return "unbound";
 
-  // why: Two live targets naming one repository is the shape this item refuses to
-  // guess at: the operator merges them and runs again.
   const candidates = await db
     .prepare(UNCLAIMED_TARGET)
     .bind(botId, owner, repo)
@@ -89,7 +60,6 @@ export async function bindRepository(
   const targetId = candidates.results[0]!.id;
 
   const installationIds = await liveInstallations(db, botId, owner);
-  // why: A removed installation is history: the first delivery claims the id.
   if (installationIds.length === 0) return "unbound";
 
   let sawFailure = false;

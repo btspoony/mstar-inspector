@@ -1,10 +1,3 @@
-/** note: The settings POST family's plain-text 400s carry a
- * machine-readable key — the SPA gets JSON `{ key, message, params? }`
- * (`message` keeps the English face, `params` replays the interpolation in
- * the operator's locale), native form posts keep the legacy 302, and the
- * CARRY-2 verify-route eligibility rejection gains the same keyed face with
- * no new reason value. Static-key bodies carry no `params` field.
- */
 import { describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -17,7 +10,6 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** invariant: The App's immutable GitHub App id — the only App address form (D0). */
 const APP_ID = 1001;
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
@@ -62,7 +54,6 @@ function rawRun(db: ReturnType<typeof createMigratedTestD1>, sql: string, ...par
   db.raw.prepare(sql).run(...params);
 }
 
-/** invariant: Row count of one table — the zero-writes assertion after a refused request. */
 function rawCount(db: ReturnType<typeof createMigratedTestD1>, table: string): number {
   const row = db.raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
   return row.n;
@@ -89,7 +80,6 @@ async function postForm(
   );
 }
 
-/** note: GET helper for the settings JSON face (the read side of the depth control). */
 async function getJson(path: string, login: string, env: Env): Promise<Response> {
   return worker.fetch(
     new Request(`https://worker.local${path}`, {
@@ -99,7 +89,6 @@ async function getJson(path: string, login: string, env: Env): Promise<Response>
   );
 }
 
-/** note: JSON-body POST helper for the target-addressed settings family. */
 async function postJson(
   path: string,
   login: string,
@@ -271,18 +260,12 @@ describe("settings 400 key transport", () => {
       { Accept: "text/html" },
     );
     expect(res.status).toBe(302);
-    // invariant: The detail address carries the target's OWN id, never the App id.
     expect(res.headers.get("Location")).toBe(`/dashboard/default/repos/${targetId}`);
     expect(res.headers.get("Location")).not.toBe(`/dashboard/default/repos/${APP_ID}`);
   });
 });
 
 describe("F1: a `!`-prefixed key is refused where the operator types it", () => {
-  // safety: The review runtime's credential store is resolved through the SDK's
-  // config-value resolver, which RUNS any `!`-prefixed value as a shell
-  // command. The runner's payload decoder refuses the shape fail-closed; these
-  // pin the dashboard-side refusal so the operator sees the cause on the form
-  // instead of getting a failed review run later. Zero writes on every path.
   const COMMAND_KEY = "!touch /tmp/pwned";
 
   test("add-key → keyed 400, zero writes", async () => {
@@ -342,8 +325,6 @@ describe("F1: a `!`-prefixed key is refused where the operator types it", () => 
 
   test("a key that merely CONTAINS `!` still stores (only the leading prefix is the command shape)", async () => {
     const { db } = await seededWorld();
-    // invariant: The refusal tests above never reach the network (the guard precedes the
-    // probe); this one does, so stub the provider's model-list endpoint.
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(
       (async () => new Response(JSON.stringify({ data: [{ id: "claude-sonnet-4-6" }] }), { status: 200 })) as unknown as typeof fetch,
     );
@@ -426,7 +407,6 @@ describe("verify route: a spent provider account keeps its own reason", () => {
 describe("review depth op (per-App review level)", () => {
   const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
 
-  /** note: The operator-default depth leaf's exact statement, counted per request. */
   const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
   const countDefaultLevelReads = (db: TestD1): { db: TestD1; reads: () => number } => {
     let reads = 0;
@@ -454,7 +434,6 @@ describe("review depth op (per-App review level)", () => {
     const managerBody = (await manager.json()) as { app: Record<string, unknown> };
     expect(managerBody.app.review_level).toBeNull();
     expect(managerBody.app.default_review_level).toBe("deep");
-    // invariant: The manager face names the inherit target: exactly one operator-default read.
     expect(counted.reads()).toBe(1);
 
     const member = await getJson(SETTINGS_API, "mallory", makeEnv(counted.db));
@@ -462,7 +441,6 @@ describe("review depth op (per-App review level)", () => {
     const memberBody = (await member.json()) as { app: Record<string, unknown> };
     expect("review_level" in memberBody.app).toBe(false);
     expect("default_review_level" in memberBody.app).toBe(false);
-    // why: The identity-only face renders no depth control, so it pays no settings read.
     expect(counted.reads()).toBe(1);
   });
 });

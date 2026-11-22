@@ -1,4 +1,4 @@
-// note: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over) see tests/spa/tokens.test.ts.
 import * as React from "react"
 
 import { cn } from "../cn"
@@ -7,7 +7,7 @@ function Card({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="card"
-      // why: rounded-xl resolves to the container tier via the bridge remap
+      // rounded-xl resolves to the container tier via the bridge remap
       // (--radius-lg/xl onto var(--radius-container)). Definition is the
       // hairline plus the surface step: the card names its border colour
       // token because preflight leaves `border-color` at currentColor, and it

@@ -1,11 +1,3 @@
-/** note: I-000648: 席位链 rendered each seat as a stacked pair — `name — role` on one
- * line and a full-size select on the next — so five seats read as five tall
- * blocks and 保存席位链 trailed the last seat.
- *
- * Pinned structurally over the rendered section: one `<label>` row per seat
- * carries BOTH the identity and its select, and the save is the section's own
- * trailing action outside every row. The control's behaviour is untouched.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -66,13 +58,9 @@ describe("I-000648: a seat and its chain are one scannable row", () => {
     expect(rows).toHaveLength(ROLES.length);
     for (const [index, role] of ROLES.entries()) {
       const row = rows[index]!;
-      // invariant: Identity and control together: the seat name AND exactly one select.
-      // A stacked pair would put the select in a second block under the
-      // identity — `flex-col` is what that shape reads as.
       expect(row.text.startsWith(`${role} — `), role).toBe(true);
       expect(row.selects, role).toBe(1);
       expect(row.classes, role).not.toContain("flex-col");
-      // invariant: The role caption stays in the row, not dropped with the stacked layout.
       expect(row.text.length, role).toBeGreaterThan(role.length + 3);
     }
   });
@@ -92,7 +80,6 @@ describe("I-000648: a seat and its chain are one scannable row", () => {
     });
 
     expect(save.exists).toBe(true);
-    // why: A save nested in the last seat's label would read as that seat's action.
     expect(save.insideSeatRow).toBe(false);
     expect(save.classes).toContain("justify-end");
     expect(save.rows).toBe(ROLES.length);

@@ -19,20 +19,13 @@ import { providerGroups, type ProviderGroup } from "./providers-groups";
 import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
-/**
- * invariant: AC-10: exactly one verification label per key row, from the four store
- * states. `reachable` is the weaker "the endpoint answered" claim and takes the
- * accent tone; `unverified` is the NULL column.
- */
 const KEY_STATUS = {
   ok: { tone: "success", label: "settings.providers.status.ok" },
-  // note: The probe could not reject the key: the accent tone, not success.
   reachable: { tone: "accent", label: "settings.providers.status.reachable" },
   failed: { tone: "danger", label: "settings.providers.status.failed" },
   unverified: { tone: "neutral", label: "settings.providers.status.unverified" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
-/** note: Tier badge faces: the template tier is the one gold surface. */
 const TIER_FACE = {
   builtin: { tone: "neutral", label: "settings.providers.tier.builtin" },
   template: { tone: "warn", label: "settings.providers.tier.template" },
@@ -99,26 +92,16 @@ export function LoadedProvidersSection({
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
-  /** why: The add-flow (verify / template) outcomes — removes render group-locally (below). */
   notice: OpNotice | null;
-  /** why: (audit UI-45-05): the remove-key / remove-custom outcome, rendered beside the group the removed row belonged to. */
   removeOutcome: { notice: OpNotice; slot: number } | null;
-  /** note: Where the dialogs' completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
-  /** note: Re-reads the settings face after a model-list write (the sync flow's count). */
   onReload: () => Promise<unknown>;
 }) {
   const [addOpen, setAddOpen] = useState(false);
-  // note: The group whose Add key dialog is open; null = no add-key flow.
   const [addKeyTarget, setAddKeyTarget] = useState<{ provider: string; label: string; count: number } | null>(null);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
   const groups = providerGroups(payload);
-  // note: (audit UI-45-05, regrouped): the captured slot indexes the PRE-POST
-  // configured rows. A failure or the tolerant no-op leaves the row in place,
-  // so its provider names the group that renders the notice. A success took the
-  // row away and may have taken the whole group, so the notice renders under
-  // the add-flow region instead of pointing at a group that no longer exists.
   const removedRow =
     removeOutcome === null || removeOutcome.notice.kind === "success"
       ? null
@@ -136,9 +119,6 @@ export function LoadedProvidersSection({
       subtitle={t(locale, "settings.providersCopy")}
     >
       <div className="flex flex-col gap-3">
-        {/* note: A dialog trigger, not a disclosure: aria-haspopup names the
-            overlay, and no region of this section is expanded by it. The
-            flow section owns no action slot, so the trigger heads the body. */}
         <div className="flex flex-wrap items-center justify-end">
           <Button
             type="button"
@@ -151,13 +131,7 @@ export function LoadedProvidersSection({
             {t(locale, "settings.addProvider")}
           </Button>
         </div>
-        {/* note: The section's region sits under the title: a completed flow's
-            outcome survives the dialog's success-close (dialog-local state
-            does not). A failed submit stays inside the dialog that produced
-            it. */}
         <NoticeRegion notice={notice} />
-        {/* note: A removal whose group is gone has no row to sit beside; the notice
-            stays in the section so the outcome is never dropped. */}
         <NoticeRegion notice={orphanRemoveNotice} />
         {groups.length === 0 ? (
           <p className="text-sm text-muted-foreground">{t(locale, "settings.noConfiguredProviders")}</p>
@@ -209,21 +183,6 @@ export function LoadedProvidersSection({
   );
 }
 
-/**
- * note: The endpoint summary a template / custom group can state: the stored
- * declaration first (it is what the pool is actually bound to), the catalog
- * entry as the prefill otherwise. A provider with no declaration and no
- * catalog endpoint (a key-only fallback id) has nothing to state.
- *
- * The DECLARATION is the authority for the disclosure list and its count
- * (I-000644): it is the vocabulary the App actually runs, and the same list the
- * 编辑模型 dialog seeds from. The catalog's per-protocol bucket is the prefill
- * for a provider with no declaration yet — it is a third-party snapshot, may be
- * stale, and may spell ids in a dialect the provider no longer accepts, so it is
- * reported as the CATALOG's vocabulary rather than handed over as the App's.
- * Making the catalog override a stored declaration is how the card came to
- * report 50 models for a provider serving 104.
- */
 function groupMeta(
   group: ProviderGroup,
   catalog: CatalogProvider | undefined,
@@ -231,7 +190,6 @@ function groupMeta(
   api: string;
   baseUrl: string;
   modelIds: readonly string[];
-  /** invariant: Whose list this is — the two are never presented as the same claim. */
   source: "declaration" | "catalog";
 } | null {
   if (group.kind === "builtin") return null;
@@ -244,12 +202,6 @@ function groupMeta(
   return { api, baseUrl, modelIds: modelsForProtocol(catalog, api), source: "catalog" };
 }
 
-/**
- * note: One provider group: header identity (label + tier badge + aggregate counts +
- * the add-key and declaration-remove actions), the key rows, the empty state of
- * a declaration with no key yet, and the endpoint meta-line with its model-id
- * disclosure (AC-20 / I-000208).
- */
 function ProviderGroupCard({
   locale,
   appId,
@@ -264,42 +216,22 @@ function ProviderGroupCard({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  /** note: The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
   appId: number;
   group: ProviderGroup;
-  /** why: The catalog entry of this id, when the catalog knows it. */
   catalog: CatalogProvider | undefined;
-  /** note: The vendor snapshot the catalog sizes came from. */
   limitsSnapshot: string;
-  /** note: The remove outcome this group owns, or null. */
   removeNotice: OpNotice | null;
   onPending: (action: PendingAction) => void;
-  /** why: Opens this group's add-key dialog — the second key no longer detours through the catalog. */
   onAddKey: () => void;
-  /** why: The settings op submit (the model picker posts `update-provider-models` through it). */
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
-  /** note: Where the model picker's completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
-  /** note: Re-reads the settings face after a write that changes the stored list. */
   onReload: () => Promise<unknown>;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
-  // invariant: The model picker is a declaration-only flow: no declaration, no trigger.
   const [modelsEditOpen, setModelsEditOpen] = useState(false);
-  // invariant: I-000644: the sync flow is a declaration-only flow too — it replaces a
-  // stored model list, so a provider with none has nothing to sync into.
   const [syncOpen, setSyncOpen] = useState(false);
-  // note: The key row whose usage panel is open, with its probe generation (the
-  // re-click bumps the nonce, remounting the panel = re-probe). At most one
-  // panel per group: another key's usage action closes this one. Every key
-  // of the group shares the provider, so the group's catalog entry decides
-  // whether the row's usage action exists at all.
   const [usageFor, setUsageFor] = useState<{ keyId: string; nonce: number } | null>(null);
   const meta = groupMeta(group, catalog);
-  // note: The disclosure region's id uses the provider id verbatim. Custom provider
-  // ids are stored under the slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), so no
-  // character needs escaping; folding would only merge two distinct ids into
-  // one DOM id.
   const modelsId = `provider-models-${group.providerId}`;
   const tier = TIER_FACE[group.kind];
 
@@ -344,8 +276,6 @@ function ProviderGroupCard({
               const usage = usageFor !== null && usageFor.keyId === key.keyId ? usageFor : null;
               const usagePanelId = `usage-panel-${key.keyId}`;
               return (
-                // why: The wrapper keeps the row + its panel one divide-y unit: the
-                // divider lands on the wrapper, the panel sits under its row.
                 <div key={key.keyId}>
                   <ListRow
                     identity={
@@ -354,7 +284,6 @@ function ProviderGroupCard({
                         : t(locale, "settings.keyTooShort")
                     }
                     status={<StatusBadge tone={status.tone}>{t(locale, status.label)}</StatusBadge>}
-                    // invariant: AC-11: the timestamp is this secondary slot, never the label.
                     meta={
                       key.verifiedStatus === "ok" && key.verifiedAt
                         ? t(locale, "settings.providers.verifiedAt", {
@@ -372,8 +301,6 @@ function ProviderGroupCard({
                             variant="outline"
                             size="sm"
                             aria-expanded={usage !== null}
-                            // invariant: The panel mounts only while open, so the control
-                            // never names a missing element.
                             aria-controls={usage !== null ? usagePanelId : undefined}
                             onClick={() =>
                               setUsageFor((current) =>
@@ -407,8 +334,6 @@ function ProviderGroupCard({
                   {usage === null ? null : (
                     <div id={usagePanelId}>
                       <UsagePanel
-                        // note: The keyed remount IS the refresh: a re-click bumps
-                        // the nonce, a fresh panel re-posts the same probe.
                         key={`${key.keyId}:${usage.nonce}`}
                         locale={locale}
                         appId={appId}
@@ -436,17 +361,12 @@ function ProviderGroupCard({
                 meta.modelIds.length === 1 ? "settings.providers.modelCountOne" : "settings.providers.modelCount",
                 { count: meta.modelIds.length },
               )}
-              {/* invariant: The vocabulary belongs to the App only when a declaration states
-                  it. A catalog prefill says so, in the same line, so the two
-                  claims can never be read as one (I-000644). */}
               {meta.source === "catalog" ? ` (${t(locale, "settings.providers.catalogVocabulary")})` : null}
             </span>
             <button
               type="button"
               className="text-(--tone-accent-fg)"
               aria-expanded={modelsOpen}
-              // invariant: The region mounts only while open, so the control never names
-              // a missing element (the combobox precedent).
               aria-controls={modelsOpen ? modelsId : undefined}
               onClick={() => setModelsOpen(!modelsOpen)}
             >
@@ -475,13 +395,6 @@ function ProviderGroupCard({
           </div>
         ) : null}
         {meta && modelsOpen ? (
-          // note: Light: `--surface-page` resolves to the same value as the card's own
-          // surface, so this fill is dead there and the border carries the well.
-          // The knowledge base's surface-tokens-can-collapse-across-themes.md
-          // records the token arithmetic.
-          // A catalog fallback can carry the full snapshot vocabulary
-          // (hundreds of ids), so the list scrolls internally instead of
-          // growing the card unboundedly (house combobox pattern).
           <ul
             id={modelsId}
             className="mt-2 flex max-h-72 flex-wrap gap-x-3 gap-y-1 overflow-y-auto rounded-(--radius-control) border border-(--border-default) bg-(--surface-page) px-3 py-2 font-mono text-xs text-muted-foreground"
@@ -502,8 +415,6 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={modelsForProtocol(catalog, group.declaration.api)}
-          // invariant: The same id-only rule the Worker applies: the sizes belong to the
-          // model, so the dialog pre-fills them whatever endpoint is declared.
           catalogLimits={catalog?.model_limits ?? {}}
           limitsSnapshot={limitsSnapshot}
           onSettings={onSettings}

@@ -1,22 +1,3 @@
-/**
- * note: Unit tests: the pipeline's review-concurrency reader
- * (src/pipeline/concurrency-reader.ts) — the logging wrapper the queue
- * consumer calls at admission over the runtime-config store.
- *
- * The fixture is the bun:sqlite double executing the REAL migrations, so the
- * reader's one statement runs against the production schema (migration 0040
- * included).
- *
- * Locked surface:
- *   - a healthy read exposes BOTH caps separately plus their effective min, and
- *     logs nothing
- *   - a workspace cap below the system cap stays distinct from it
- *   - a degraded read returns the conservative cap (1, i.e. serial) for both
- *     levels, never throws, and logs EXACTLY one structured warn carrying the
- *     store's reason
- *   - both degradation paths warn: a throwing read, and a PRESENT value the
- *     store cannot trust
- */
 import { describe, expect, test } from "bun:test";
 import type { DashboardD1 } from "../dashboard/users";
 import { createMigratedTestD1 } from "../../tests/store/helpers";
@@ -24,7 +5,6 @@ import { readReviewConcurrency, type ReviewConcurrencyLogFields } from "./concur
 
 const WS = "ws_1";
 
-/** note: A migrated database with one workspace row at the NULL (default) cap. */
 function fixture() {
   const db = createMigratedTestD1();
   db.raw
@@ -35,7 +15,6 @@ function fixture() {
   return db;
 }
 
-/** note: Captures every structured warn line the reader emits. */
 function capture() {
   const warns: Array<{ fields: ReviewConcurrencyLogFields; msg?: string }> = [];
   const log = {
@@ -44,7 +23,6 @@ function capture() {
   return { warns, log };
 }
 
-/** note: A D1 face whose every statement fails — the degraded read path. */
 const failingDb: DashboardD1 = {
   prepare() {
     throw new Error("D1 unavailable");
@@ -57,7 +35,6 @@ const failingDb: DashboardD1 = {
 describe("readReviewConcurrency", () => {
   test("a healthy read exposes both caps and their effective min, and logs nothing", async () => {
     const { warns, log } = capture();
-    // note: Absent settings: system defaults to 256, the workspace column to 32.
     expect(await readReviewConcurrency(fixture(), WS, log)).toEqual({
       system: 256,
       workspace: 32,

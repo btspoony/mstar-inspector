@@ -1,16 +1,3 @@
-/**
- * why: Effective server flags (`server_flags`, migration 0033).
- *
- * Read pattern (spec §3.1, architect verdict 2026-10-25): ONE prepared point
- * read per decision site. No cache, no KV, no request-scoped memo — every
- * consumer reads its flag once per request, and the read rides a path that
- * already spends several D1 statements, so a PK lookup is marginal. A memo
- * becomes required only if a future consumer reads the same flag twice in one
- * request; cross-request caching stays forbidden.
- *
- * An ABSENT row reads as ENABLED: the platform's shipped behaviour is the
- * default, and a flag nobody has toggled cannot break a live consumer.
- */
 import type { DashboardD1 } from "../dashboard/users";
 
 /** The flags the console exposes; the API refuses any other key. */

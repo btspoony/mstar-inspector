@@ -1,11 +1,3 @@
-/**
- * note: The PR detail face's pure model.
- *
- * Everything here is data-in / text-out: severity grouping and order, the
- * family the face opens on, the timeline and its cap, attribution, verdict
- * tone, and the fold/copy labels. No React import — the component module owns
- * state, effects and JSX, and these rules are pinnable without a DOM.
- */
 import { FINDING_SEVERITIES, isFindingSeverity } from "../../contracts/finding-severity";
 import { t, type Locale } from "../../i18n";
 import { formatRelativeTime } from "../relative-time";
@@ -21,13 +13,6 @@ import type {
 /** The three record families the detail face switches between. */
 export type RecordFamily = "findings" | "reviews" | "failures";
 
-/**
- * note: The severity buckets in the order an operator asks about them, built from
- * the shared merge-class vocabulary (`FINDING_SEVERITIES`) so a filter chip is
- * always a spelling the record route accepts. `severity` is a free string in
- * the payload; this table names the contract's classes and the catch-all
- * bucket (`OTHER_BUCKET`) collects every other one.
- */
 const SEVERITY_PRESENTATION = {
   "must-fix": { labelKey: "pullRequests.severityMustFix", tone: "danger" },
   "should-fix": { labelKey: "pullRequests.severityShouldFix", tone: "warn" },
@@ -40,7 +25,6 @@ export const SEVERITY_GROUPS = FINDING_SEVERITIES.map((severity) => ({
   ...SEVERITY_PRESENTATION[severity],
 }));
 
-/** note: The bucket every spelling outside the table lands in, rendered last. */
 const OTHER_BUCKET = {
   key: CATCH_ALL_SEVERITY,
   labelKey: "pullRequests.severityOther",
@@ -136,15 +120,6 @@ export function reviewClassCounts(
 /** A tone the timeline and the verdict surfaces can wear. */
 export type ActivityTone = "danger" | "success" | "neutral";
 
-/**
- * note: The one verdict-tone rule — the band, the review badge and the timeline dot
- * all read this table, so a verdict cannot be an alarm on one surface and
- * quiet on another. It names the whole known vocabulary: the current schema's
- * `ship it` / `needs fixes` / `blocked` / `incomplete` and the pre-v1 rows
- * that kept GitHub's review words. Anything outside the table — including
- * `""`, the payload's coercion of a missing verdict — is unknown, and an
- * unknown word is not an alarm.
- */
 const VERDICT_TONES: Record<string, ActivityTone> = {
   "ship it": "success",
   approve: "success",
@@ -171,10 +146,6 @@ export function reviewAttribution(
 ): string {
   if (review.provider === "") return review.model;
   if (review.model === "") return review.provider;
-  // invariant: The configured head IS the serving provider when the round never switched:
-  // rendering "provider/model" then prints the same name twice ("ark/ark/…").
-  // Repairing it HERE also fixes rows already persisted with both values, and
-  // leaves the stored `reviews.provider` contract untouched.
   if (review.provider === review.model) return review.model;
   return t(locale, "pullRequests.reviewMeta", { model: review.model, provider: review.provider });
 }
@@ -191,7 +162,6 @@ export function formatReviewDuration(locale: Locale, durationMs: number): string
   return t(locale, "pullRequests.reviewDurationMinutes", { minutes, seconds: totalSeconds % 60 });
 }
 
-/** why: Characters an id may carry literally; anything else is escaped. */
 const ID_LITERAL = /^[A-Za-z0-9-]$/;
 
 /**
@@ -285,18 +255,12 @@ export function timelineRows(
   failures: readonly PullRequestFailure[],
   totals: PullRequestCounts,
 ): TimelineRow[] {
-  // why: Both tables stamp `datetime('now')` (UTC), so the raw text orders
-  // chronologically.
   const history: ActivityEntry[] = [
     ...reviews.map((review, index) => {
-      // note: The payload coerces an absent verdict to ""; a label of "Review · "
-      // would paint a separator with nothing after it.
       const label =
         review.verdict === ""
           ? t(locale, "pullRequests.timelineReviewNoVerdict")
           : t(locale, "pullRequests.timelineReview", { verdict: review.verdict });
-      // invariant: The same attribution the review head wears, so a provider-only review
-      // names its provider here instead of an empty model.
       const attribution = reviewAttribution(locale, review);
       const when = formatRelativeTime(review.reviewed_at, locale);
       return {
@@ -319,8 +283,6 @@ export function timelineRows(
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   const shown = history.slice(0, TIMELINE_LIMIT);
-  // invariant: `history` is the loaded window only (one page per family), so the events
-  // beyond it are the sections' TOTALS minus the rows the window handed over.
   const hidden = totals.reviews + totals.failures - shown.length;
   const truncated: TimelineRow[] =
     hidden > 0 ? [{ key: "timeline-truncated", hidden }] : [];

@@ -1,4 +1,4 @@
-// note: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over) see tests/spa/tokens.test.ts.
 import * as React from "react"
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import * as SelectPrimitive from "@radix-ui/react-select"
@@ -24,7 +24,7 @@ function SelectValue({
 }
 
 /**
- * note: The trigger is a field, not an action: DESIGN.md "Input — States: hover
+ * The trigger is a field, not an action: DESIGN.md "Input — States: hover
  * holds the edge" keeps the rest edge through hover (only the pressed/action
  * faces step their border), so this face declares no hover edge.
  */

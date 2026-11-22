@@ -17,33 +17,6 @@ import { UsersPage } from "./UsersPage";
 import { WorkspacesPage } from "./WorkspacesPage";
 import { ADMIN_PAGES, type AdminPageId } from "./pages";
 
-/**
- * note: The console's own document entry (`src/spa/admin.html`, a second Vite input).
- *
- * Deliberately NOT the workspace shell (`../main.tsx`, `../Layout`): that shell
- * carries workspace chrome, workspace boot reads and the workspace router, and
- * reusing it would put admin paths into `src/spa/routes.ts`. Navigation here is
- * the local matcher over `ADMIN_PAGES`; the Worker serves this same document
- * for every page path, after the operator gate — so nothing renders for an
- * outsider, and the document's existence is never confirmed.
- *
- * Bilingual like the workspace shell: `readBoot()` carries `boot.locale`
- * (falling back to `en` when the boot was never injected), the header/nav copy
- * resolves through `t(locale, …)`, and the locale switch is the SAME zero-JS
- * form the workspace shell uses (`../Layout.tsx`) — one POST to
- * `/dashboard/locale`, the 302 re-GETs this document with the new cookie, and
- * the server re-injects the boot. No SPA locale state.
- *
- * `SCREENS` is keyed by the page id union, so a screen without a page (or a
- * page without a screen) is a compile error rather than a blank route.
- *
- * The console is the D15 **plain variant**: `admin.html` carries
- * `data-surface="ops"` on the document root, and that one re-map resolves the
- * accent tone to its neutral counterpart and the primary action to neutral
- * emphasis. Nothing here forks a component to look plainer — a fork would be
- * the second component set the plan forbids. A surface the variant cannot
- * express through tokens is a token gap to record, not a component to copy.
- */
 const SCREENS: Record<AdminPageId, ComponentType<{ locale: Locale }>> = {
   flags: FlagsPage,
   runtime: RuntimePage,
@@ -71,11 +44,6 @@ export function App() {
         </div>
         <div className="flex items-center gap-2">
           <a href="/dashboard">{t(locale, "admin.header.dashboardLink")}</a>
-          {/*
-           * note: Zero-JS locale switch — same form as the workspace shell: POST
-           * /dashboard/locale sets the cookie and 302s back here; the
-           * re-GETted document carries the new boot.locale.
-           */}
           <form className="m-0" method="post" action="/dashboard/locale">
             <input type="hidden" name="locale" value={otherLocale(locale)} />
             <button type="submit" className="admin-locale-switch">
@@ -102,8 +70,6 @@ export function App() {
   );
 }
 
-// why: Guarded so the module can be imported by tests before a DOM exists; in the
-// real document #root is always present.
 const root = typeof document === "undefined" ? null : document.getElementById("root");
 if (root) {
   createRoot(root).render(

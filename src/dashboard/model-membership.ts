@@ -1,13 +1,3 @@
-/**
- * note: Selector membership + dropdown composition for the provider-first
- * settings flow (spec §6.3). Pure functions over the
- * verified-model cache and custom-provider declarations — dashboard-side,
- * zero pipeline/review imports (Q2).
- *
- * Syntax (`parseModelChain`) stays the existing mirror; this module is the
- * NEW membership layer. Variant suffixes (`provider/model:thinking`) are
- * stripped to the base `provider/model` before judging cache membership.
- */
 import type { VerifiedModels } from "./app-config-store";
 
 /**

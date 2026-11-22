@@ -1,20 +1,3 @@
-/** note: Save feedback rides the button; success notices expire on their own.
- *
- * Three layers, pinned where each contract lives:
- * 1. the Button status face (static SSR) — one leading glyph per state,
- *    aria-busy only while loading, data-status exposed for tests, markup
- *    byte-identical without status, the spinner folding under
- *    prefers-reduced-motion while the three states stay distinguishable;
- * 2. the useSaveSignal hook (mounted, fake timers) — success reverts to idle
- *    after ~2s, error sticks until the next submit, restart and unmount
- *    clear the clock;
- * 3. NoticeRegion's success expiry (mounted, fake timers) — ~3s, warn/error
- *    persist, replacement restarts the clock, unmount is safe — and the
- *    workspace-name card end to end: a saved name renders no role=status
- *    notice box, shows the check on the button, keeps the success copy as
- *    assistive text, and a refusal keeps the persistent role=alert notice
- *    with the button's error face.
- */
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -31,8 +14,6 @@ import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
 
-// invariant: Rendered on main before the status face existed — the no-status markup
-// must stay byte-identical.
 const PLAIN_BUTTON_MARKUP =
   '<button data-slot="button" data-variant="default" data-size="default" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-sm text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-(--duration-base) ease-(--ease-in-out) outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-hover h-(--control-h-md) px-4 py-2 has-[&gt;svg]:px-3" type="submit">Save changes</button>';
 const OUTLINE_BUTTON_MARKUP =
@@ -114,18 +95,15 @@ describe("useSaveSignal", () => {
         signalProbe.succeed();
       });
       expect(signalProbe.status).toBe("success");
-      // invariant: Still confirming just before its own deadline…
       await act(async () => {
         jest.advanceTimersByTime(1999);
       });
       expect(signalProbe.status).toBe("success");
-      // invariant: …and idle once it passes, so a stale confirmation never lingers.
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
       expect(signalProbe.status).toBe("idle");
 
-      // invariant: An error is the sticky face: it survives any deadline until the next submit.
       await act(async () => {
         signalProbe.fail();
       });
@@ -135,7 +113,6 @@ describe("useSaveSignal", () => {
       });
       expect(signalProbe.status).toBe("error");
 
-      // note: A new submit restarts the clock: the pending revert is cancelled.
       await act(async () => {
         signalProbe.succeed();
       });
@@ -155,9 +132,6 @@ describe("useSaveSignal", () => {
   });
 
   test("a late completion after unmount is ignored: no transition, no new timer", async () => {
-    // note: The write is still in flight when the form unmounts (a navigation
-    // away); the retained succeed/fail callbacks must not transition state
-    // nor arm the revert timer once teardown has run.
     jest.useFakeTimers();
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
     try {
@@ -167,7 +141,7 @@ describe("useSaveSignal", () => {
         signalProbe.start();
       });
       expect(signalProbe.status).toBe("loading");
-      const armed = jest.getTimerCount(); // note: an in-flight save arms none
+      const armed = jest.getTimerCount();
       await act(async () => root.unmount());
 
       await act(async () => {
@@ -200,7 +174,6 @@ describe("useSaveSignal", () => {
       });
       const armed = jest.getTimerCount();
       await act(async () => root.unmount());
-      // invariant: The teardown removed exactly one timer: the revert this success armed.
       expect(jest.getTimerCount()).toBe(armed - 1);
       await act(async () => {
         jest.advanceTimersByTime(10_000);
@@ -231,7 +204,6 @@ describe("NoticeRegion success expiry", () => {
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
-      // invariant: Hidden locally — the region renders nothing without the parent clearing.
       expect(container.querySelector('[role="status"]')).toBeNull();
 
       await act(async () => {
@@ -273,7 +245,6 @@ describe("NoticeRegion success expiry", () => {
       await act(async () => {
         regionPush({ kind: "success", message: "Second." });
       });
-      // invariant: The replacement restarted the clock: 2500ms in, the second notice stays.
       await act(async () => {
         jest.advanceTimersByTime(2500);
       });
@@ -326,8 +297,6 @@ function stubWorkspaceSettingsFetch(put: (body: string) => Response) {
         headers: { "Content-Type": "application/json" },
       });
     }
-    // invariant: The read-only usage card the page composes above these settings: a
-    // settled payload, so the page carries no unrelated failure notice.
     if (url.endsWith("/api/settings/review-usage")) {
       return new Response(
         JSON.stringify({ month: "2026-11", sharedReviews: 4, ownReviews: 1, sharedBot: "available" }),
@@ -376,9 +345,7 @@ describe("workspace name card end to end", () => {
       const { button } = await submitName(win, container as unknown as Element, "Acme Labs");
       expect(button.getAttribute("data-status")).toBe("success");
       expect(button.querySelector("svg.lucide-circle-check")).not.toBeNull();
-      // invariant: The success never renders as a notice box on the op channel…
       expect(container.querySelector("p[role=\"status\"]")).toBeNull();
-      // invariant: …the copy stays in the DOM as assistive text announced by a live region…
       expect(container.textContent).toContain(t("en", "workspace.nameSaved"));
       const live = container.querySelector("span[role=\"status\"]") as unknown as HTMLSpanElement;
       expect(live.className).toContain("sr-only");
@@ -420,7 +387,6 @@ describe("workspace name card end to end", () => {
       );
       expect(alerts.some((text) => text.includes("name taken"))).toBe(true);
 
-      // note: The failure does not self-clear: face and notice outlive any deadline.
       await act(async () => {
         jest.advanceTimersByTime(10_000);
       });
@@ -464,9 +430,6 @@ describe("stale error replacement", () => {
       const { container, root } = mount(win);
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
-      // note: 1. The SIBLING cluster (the review-gate floor card) fails FIRST,
-      //    through its own form — a real UI path, so its persistent error
-      //    notice exists on the page before the name card ever submits.
       const floor = win.document.querySelector(
         "#workspace-check-min-score",
       ) as unknown as HTMLInputElement;
@@ -482,13 +445,10 @@ describe("stale error replacement", () => {
       });
       expect(container.textContent).toContain("floor too high");
 
-      // note: 2. The name card fails too: two persistent alert boxes coexist.
       await submitName(win, container as unknown as Element, "Taken Name");
       expect(container.textContent).toContain("name taken");
       expect(container.querySelectorAll("p[role=\"alert\"]")).toHaveLength(2);
 
-      // note: 3. The name card's retry lands: its OWN stale error is replaced by
-      //    the check plus the success copy as assistive text.
       refuseName = false;
       await submitName(win, container as unknown as Element, "Acme Labs");
       expect(container.textContent).not.toContain("name taken");
@@ -496,10 +456,6 @@ describe("stale error replacement", () => {
       const retried = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
       expect(retried.getAttribute("data-status")).toBe("success");
 
-      // invariant: 4. Isolation measured, not annotated: the sibling's notice survives
-      //    the name card's retry. Each workspace card owns its notice state
-      //    and there is no shared region a widened clear could hide in — a
-      //    clear that reached the sibling would remove this very node.
       const alerts = [...container.querySelectorAll("p[role=\"alert\"]")].map(
         (node) => node.textContent ?? "",
       );
@@ -550,7 +506,6 @@ describe("runtime page save face", () => {
         });
       };
 
-      // note: Pending: the spinner rides the button with aria-busy.
       await typeValue("40");
       await act(async () => {
         button().dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as Event);
@@ -560,7 +515,6 @@ describe("runtime page save face", () => {
       expect(button().getAttribute("aria-busy")).toBe("true");
       expect(button().querySelector("svg.lucide-loader-circle")).not.toBeNull();
 
-      // note: Success: the check replaces the spinner, then the face reverts.
       await act(async () => {
         resolvePatch?.(
           new Response(JSON.stringify({ concurrency: 40 }), {
@@ -577,7 +531,6 @@ describe("runtime page save face", () => {
       });
       expect(button().getAttribute("data-status")).toBeNull();
 
-      // note: Failure: the alert face AND the persistent readable error notice.
       resolvePatch = null;
       await typeValue("20");
       await act(async () => {
@@ -598,7 +551,6 @@ describe("runtime page save face", () => {
         (node) => node.textContent ?? "",
       );
       expect(alerts.some((text) => text.includes("out of range"))).toBe(true);
-      // note: The failure does not self-clear.
       await act(async () => {
         jest.advanceTimersByTime(10_000);
       });
@@ -658,14 +610,10 @@ describe("in-flight save announcement", () => {
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
       const savingCopy = t("en", "common.saving");
 
-      // invariant: In flight: the spinner is aria-hidden and the label is unchanged, so
-      // one polite live region carries the Saving copy — exactly one.
       await submitName(win, container as unknown as Element, "Acme Labs");
       expect(resolveNamePut).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // note: Success: the in-flight region is replaced by the success copy as
-      // assistive text — no stale Saving text survives the outcome.
       await act(async () => {
         resolveNamePut?.(
           new Response(JSON.stringify({ name: "Acme Labs" }), {
@@ -738,8 +686,6 @@ describe("in-flight save announcement", () => {
       expect(resolveConcurrencyPut).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // invariant: Refusal: the error notice is unchanged and no Saving copy, no stale
-      // success text survives on the card.
       await act(async () => {
         resolveConcurrencyPut?.(
           new Response(JSON.stringify({ message: "outside the accepted range" }), {
@@ -795,8 +741,6 @@ describe("in-flight save announcement", () => {
       expect(resolvePatch).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // note: Success: the card's live region carries the success copy instead —
-      // the in-flight announcement is gone, nothing stale survives.
       await act(async () => {
         resolvePatch?.(
           new Response(JSON.stringify({ concurrency: 40 }), {
@@ -853,15 +797,11 @@ describe("in-flight save announcement", () => {
           .closest("form")
           ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
       });
-      // note: In flight: the region repeats the action the button's face names —
-      // the verifying copy — and never the generic Saving copy. (The dialog
-      // renders through a portal, so the regions live on the document.)
       const verifyingCopy = t("en", "settings.providers.verifying");
       const doc = win.document as unknown as Element;
       expect(savingRegions(doc, verifyingCopy)).toHaveLength(1);
       expect(savingRegions(doc, t("en", "common.saving"))).toHaveLength(0);
 
-      // invariant: The outcome clears the region — no stale in-flight copy survives.
       await act(async () => {
         resolveVerify?.({ kind: "success", message: "added" });
       });
@@ -902,8 +842,6 @@ describe("in-flight save announcement", () => {
         form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
       });
       expect(resolveSettings).not.toBeNull();
-      // invariant: Exactly one region with the copy that button's busy face names — the
-      // button is disabled while busy, so its own relabel is not a channel.
       const savingCopy = t("en", "settings.providers.saving");
       const doc = win.document as unknown as Element;
       expect(savingRegions(doc, savingCopy)).toHaveLength(1);

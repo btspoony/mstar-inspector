@@ -1,22 +1,3 @@
-/**
- * why: Quota profile leaf (migration 0063) — the read side of the versioned quota
- * configuration: which profile judges an instant, which profile judges a
- * calendar month, and what one started review costs in RP.
- *
- * Module boundary (compass contracts A, same as usage-store.ts): type imports
- * from ./types plus the shared type package only — no worker/pipeline/session
- * dependency — so the dashboard, the webhook route and the pipeline consumer
- * all import one module.
- *
- * A month is judged by the profile covering that month's FIRST day, never by
- * the profile current at the moment of the read (compass D5): a profile
- * published mid-month starts judging on the next 1st, so a price change cannot
- * evict a workspace mid-month. Both reads implement exactly that rule.
- *
- * `effective_from` is the only stored interval endpoint — a profile's interval
- * ends at the next profile's `effective_from` — so this module never reads a
- * second column to answer "until when".
- */
 
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { D1Like } from "./types";
@@ -28,14 +9,12 @@ export type QuotaSource = "byok" | "shared";
 export type QuotaProfile = {
   id: string;
   version: number;
-  /** note: ISO-8601 UTC: the instant the operator chose for this profile to start. */
   effectiveFrom: string;
   base: Record<ReviewLevel, number>;
   source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
-/** note: The read's row shape: SQLite column names, weight columns named per level. */
 type QuotaProfileRow = {
   id: string;
   version: number;
@@ -205,7 +184,6 @@ export function quotaStartsOn(effectiveFrom: string): string {
 /** One stored profile with its operator-only notes and its per-plan ceilings. */
 export type QuotaProfileVersion = QuotaProfile & {
   notes: string | null;
-  /** note: This version's ceiling per plan id; `null` means that plan is unlimited. */
   monthlyRp: Record<string, number | null>;
 };
 

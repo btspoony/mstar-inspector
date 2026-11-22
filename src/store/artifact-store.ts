@@ -1,51 +1,3 @@
-/**
- * why: D1 ArtifactStore adapter — the ONE write authority for
- * review persistence. Implements the engine `ArtifactStore` contract for
- * `kind: "review"` only; every other kind (status / snapshot / residuals /
- * json) throws — fail-loud, never a silent no-op pretending success. D1
- * never enumerates or deletes: `delete` / `list` are omitted, which the
- * engine contract explicitly allows (callers probe
- * `typeof store.list === "function"`).
- *
- * Intentional deviation from the engine FsStore overwrite semantics
- * (architect-locked, spec mstar-review-v1-consumption § ArtifactStore): a
- * `put` whose UNIQUE (installation_id, owner, repo, pr_number, head_sha)
- * key already exists does NOT overwrite — it resolves successfully and the
- * first-written row wins. The UNIQUE hard invariant outranks FsStore's
- * last-write-wins: a queue retry losing the write race must never clobber
- * the already-stored review or duplicate its findings. Declared here
- * because the module header is the contract surface for that deviation.
- *
- * Era model (migration 0002): `reviews.envelope IS NOT NULL` ⇔ the row
- * follows the v0.3+ path (mstar.review/v1). M1 rows keep raw_output + M1
- * vocab as read-only history — never rewritten. New rows never write
- * raw_output (the envelope is authoritative; raw_output's 64KB truncation
- * is not losslessly restorable). `findings.severity` carries the harness
- * merge class for v1 rows — the SINGLE vocab-switch mapping point
- * (`MstarReviewFinding.mergeClass` → `severity` column); M1 rows keep
- * critical | warning | suggestion | info. Era disambiguation is always
- * `reviews.envelope IS NOT NULL`.
- *
- * Module boundary (compass contracts A): type imports + the engine
- * pure-function gate (`validateMstarReviewV1` via the engine root entry —
- * the only workerd-legal face) only; no worker/pipeline/session/omp
- * dependencies. The `db` parameter is the narrow D1 face (`D1Like`) so the
- * bun:sqlite test double and a real `D1Database` both satisfy it
- * structurally.
- *
- * Per-bot attribution (migration 0005; REQUIRED):
- * the put doc carries the caller-supplied `appId` — the resolved `botRef`'s
- * id — which is bound into `reviews.bot_id`. Every new write is attributed;
- * `bot_id` NULL survives only on legacy historical rows (the column
- * stays nullable, zero DDL — AL-24-4). The column's FK to `review_bots(id)`
- * makes an unknown appId a loud batch failure, never a silent
- * mis-attribution.
- *
- * Version records: the put doc may carry the review's
- * `model` (the effective model chain's head selector, consumer-resolved)
- * and `provider` (always NULL on the v1 path — architect AL-2) — both
- * OPTIONAL; omitted = NULL (byte-compat for legacy callers).
- */
 
 import {
   validateMstarReviewV1,
@@ -71,7 +23,6 @@ export const REVIEW_SCHEMA = "mstar.review/v1" as const;
 export const REVIEW_SKILL_VERSION =
   `${OMP_SANDBOX_IMAGE_PINS.harnessVersion}+${OMP_SANDBOX_IMAGE_PINS.harnessRef.slice(0, 8)}`;
 
-/** note: Number of `:`-separated segments in an `idemKey()` string. */
 const IDEM_KEY_PARTS = 5;
 
 /**
@@ -114,12 +65,6 @@ export function parseIdemKey(key: string): IdempotencyKey {
   };
 }
 
-/**
- * why: Cross-check the envelope `target` (when present) against the five-tuple
- * parsed from the idempotency key (architect-locked: 不一致 throw). Fields
- * the envelope omits are not checked — `installation_id` exists only in the
- * key, so the key is authoritative for the five-tuple.
- */
 function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
   const target = payload.target;
   if (target === undefined) return;
@@ -154,65 +99,12 @@ function assertTargetAgrees(key: IdempotencyKey, payload: MstarReviewV1): void {
  * `appId` (the new contract's single shape).
  */
 export type ReviewArtifactDoc = ArtifactDoc & {
-  /**
-   * note: `review_bots.id` the review belongs to. REQUIRED on every new write
-   * (AL-24-4): the type-level guarantee that no new row is
-   * unattributed — `bot_id` NULL survives only on legacy historical
-   * rows. Never a credential.
-   */
   appId: string;
-  /**
-   * note: `review_targets.id` the review ran under. REQUIRED on every new write:
-   * the tenant read faces bind `target_id` (joined to the target's
-   * workspace), so a row written without it is invisible to every workspace
-   * — including the one that paid for the review. NULL survives only on
-   * legacy rows written before the target split.
-   */
   targetId: string;
-  /**
-   * note: Version record: the HEAD (primary) selector of the
-   * effective chain the review ran with — `chainHeadSelector` (consumer.ts)
-   * on the `effectiveModelChain` result (comma-separated, trimmed, empty
-   * segments dropped; single-sourced with `effectiveModelChain`). Omitted/NULL
-   * is historical rows (pre-AL-24-5) or direct unit callers only: on the
-   * production path `assertAppConfigComplete` fail-closes any App whose
-   * chain is missing or parses to zero selectors, so a successful put never
-   * records NULL and the in-image DEFAULT_MODEL_PATTERN scaffold is
-   * unreachable from the consumer. Column stays nullable for the historical
-   * rows.
-   */
   model?: string | null;
-  /**
-   * note: Version record: always NULL on the v1 path —
-   * `RunnerAppConfig` carries a multi-provider key set, not one provider
-   * (architect AL-2: do not invent a mapping). Optional; omitted = NULL.
-   */
   provider?: string | null;
-  /**
-   * note: The round could not fully scan the scope it claims to have reviewed, so
-   * its `verdict` covers only what was read: the pending lifecycle journal
-   * apply failed (its closure/anchor state was never applied), or the capture
-   * failed — lifecycle targets (D1 read error), the discussion, an increment
-   * diff that came back empty, or a diff capture that was empty / over the
-   * byte bound / unreadable. The row is still published and stored, but
-   * `findIncrementBase` must never diff a later round against it.
-   * Optional; omitted = 0 (byte-compat for every other caller).
-   */
   contextIncomplete?: boolean;
-  /**
-   * note: Wall clock of the round, in milliseconds: the consumer's
-   * `Date.now() - roundStartedAt` at staging time, so the detail face can
-   * show how long each review ran. Optional; omitted = NULL (historical rows
-   * predate the column, and no duration is fabricated for them).
-   */
   durationMs?: number;
-  /**
-   * note: The publication round ordinal this review reports — the same value the
-   * lifecycle stamps onto `review_findings.first_seen_round`, so both detail
-   * faces print one number space. Optional; omitted = NULL (rows written
-   * before migration 0050, and direct unit callers) and the read falls back
-   * to the `reviewed_at` ordinal.
-   */
   round?: number | null;
 };
 
@@ -225,9 +117,7 @@ export type ReviewArtifactDoc = ArtifactDoc & {
  * target resolved before the write (no pre-batch read, no later rewrite).
  */
 export type TargetIdExpression = {
-  /** note: One scalar expression yielding a `review_targets.id`. */
   sql: string;
-  /** note: Binds for `sql`, in text order. */
   binds: readonly unknown[];
 };
 
@@ -239,42 +129,14 @@ export type ComposedStatement = {
 
 /** `put` inputs that are not part of the artifact document itself. */
 export type ArtifactPutOptions = {
-  /** note: Overrides `doc.targetId` with an expression evaluated at insert time. */
   targetIdExpression?: TargetIdExpression;
-  /**
-   * why: An inline predicate (with its binds, in text order) that FENCES the
-   * artifact inserts: the review INSERT becomes `INSERT … SELECT … WHERE
-   * <guard>` and each finding INSERT runs as `INSERT … SELECT … WHERE <guard>`
-   * (a bare `WHERE 1` without a guard), so a caller that owns a lease cannot
-   * commit an artifact under a lease it no longer holds. The lifecycle apply
-   * passes its `APPLY_LEASE_GUARD_SQL`.
-   */
   guard?: { sql: string; binds: unknown[] };
 };
 
 /** The D1 store face: the engine `ArtifactStore` plus the consumer's pre-check. */
 export type D1ArtifactStore = ArtifactStore & {
-  /**
-   * note: Widened put input (see `ReviewArtifactDoc`): the REQUIRED `appId` rides
-   * the doc into `reviews.bot_id`; the optional `model` / `provider`
-   * version records ride into `reviews.model` /
-   * `reviews.provider` (absent/NULL = unset). `options.targetIdExpression`
-   * replaces the bound `doc.targetId` value in the review INSERT.
-   */
   put(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): Promise<void>;
-  /**
-   * note: The statements `put` would run — the review INSERT then one INSERT per
-   * finding — composed WITHOUT executing them, so a caller that owns a larger
-   * transaction can splice them in (the lifecycle apply does: the review row,
-   * its public findings and the lifecycle rows commit or roll back together).
-   * Same validation, same guards, same idempotent `ON CONFLICT DO NOTHING`.
-   */
   statementsFor(doc: ReviewArtifactDoc, options?: ArtifactPutOptions): ComposedStatement[];
-  /**
-   * note: Consumer idempotency pre-check (dedup before clone/diff/run). Not part
-   * of the engine `ArtifactStore` interface — it stays on the store face
-   * (spec mstar-review-v1-consumption § ArtifactStore).
-   */
   findByIdempotencyKey(key: IdempotencyKey): Promise<ReviewRow | null>;
 };
 
@@ -297,12 +159,6 @@ export type D1ArtifactStore = ArtifactStore & {
  * statement error still throws (and rolls back).
  */
 export function createArtifactStore(db: D1Like): D1ArtifactStore {
-  /**
-   * note: Compose the artifact write — the review INSERT plus one INSERT per
-   * finding — without executing anything. Both `put` (its own batch) and the
-   * lifecycle apply (the larger batch) run exactly these statements, so the
-   * two paths can never diverge in validation, guards or attribution.
-   */
   function composeStatements(
     doc: ReviewArtifactDoc,
     options?: ArtifactPutOptions,
@@ -319,9 +175,6 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     }
     const key = parseIdemKey(doc.key);
 
-    // why: Put gate (spec 产品要求 2 /纵深防御): the container already validated
-    // this envelope; re-validate BEFORE any row is written so M1 vocab or
-    // a malformed envelope fails loud with zero rows written.
     const gate = validateMstarReviewV1(doc.payload);
     if (!gate.ok) {
       const detail = gate.violations.map((v) => `${v.code}: ${v.message}`).join("; ");
@@ -332,30 +185,13 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
     const payload = doc.payload as MstarReviewV1;
     assertTargetAgrees(key, payload);
 
-    // why: The review id IS the apply's idempotency key: first attempt and every
-    // retry compute the same id, so the review row satisfies first-write-wins
-    // and a finding can name it without looking any row up. The finding ids
-    // extend the same key (`<key>#<index>`), so both halves are derived, not
-    // discovered.
     const reviewId = doc.key;
-    // note: bot_id: the REQUIRED caller-supplied per-bot attribution
-    // (every new row is attributed; NULL survives only on
-    // legacy historical rows). The FK to review_bots(id) rejects an
-    // unknown appId loud. `target_id` is the tenant half of the same
-    // attribution: the read faces bind it, so a row without it is
-    // invisible to every workspace.
     const appId = doc.appId;
-    // why: `target_id`: a plain value by default; an expression when the caller's
-    // attribution can only be resolved by the INSERT itself (the lifecycle
-    // apply's live installation binding). Its binds take the value's place in
-    // text order, so the rest of the bind list is unchanged.
     const targetIdSql = options?.targetIdExpression?.sql ?? "?";
     const targetIdBinds: readonly unknown[] =
       options?.targetIdExpression === undefined ? [doc.targetId] : options.targetIdExpression.binds;
     const reviewColumns = `(id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id, target_id, model, provider, context_incomplete, duration_ms, round)`;
     const reviewValues = `?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${targetIdSql}, ?, ?, ?, ?, ?`;
-    // why: Without a guard the row is a plain VALUES insert; with one it is a
-    // fenced SELECT, so a superseded lease holder writes nothing.
     const reviewStmt: ComposedStatement = {
       sql:
         options?.guard === undefined
@@ -373,42 +209,20 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         key.pr_number,
         key.head_sha,
         payload.verdict,
-        // note: `?? null`: the envelope's summary is optional, and D1 rejects
-        // `undefined` in a bind list — the whole review row would be lost.
         payload.summary_md ?? null,
         REVIEW_SKILL_VERSION,
-        // note: The validated envelope object itself — full JSON, losslessly
-        // restorable via get() (no 64KB truncation on this column).
         JSON.stringify(payload),
         appId,
         ...targetIdBinds,
-        // note: Version records: the caller-supplied chain head
-        // selector / provider — `?? null` because D1 .bind() rejects
-        // undefined; omitted put-input fields persist NULL (byte-compat).
         doc.model ?? null,
         doc.provider ?? null,
-        // note: 1/0 (SQLite has no boolean): a capture-failed round is stored but
-        // is never an incremental base.
         doc.contextIncomplete === true ? 1 : 0,
-        // note: The measured round wall clock; NULL for rows that never carried one.
         doc.durationMs ?? null,
-        // note: The publication round, so the findings and reviews faces share one
-        // ordinal space; NULL on rows written before migration 0050.
         doc.round ?? null,
         ...(options?.guard?.binds ?? []),
       ],
     };
-    // note: raw_output stays NULL on the v1 path: the envelope is authoritative
-    // (its 64KB truncation is not losslessly restorable).
 
-    // why: A finding attaches to the review that ACTUALLY exists for this head:
-    // the row found by the natural key first (a historically written review
-    // carries a UUID id), else the deterministic id this attempt computes
-    // (inserted by the review statement ahead of this one). The UNIQUE on
-    // (installation_id, owner, repo, pr_number, head_sha) admits at most one
-    // candidate, so the lookup cannot cross a head or a tenant. The finding id
-    // is the same derived `<key>#<index>`, so a retry writes a missing one
-    // once and never duplicates.
     const findingStmts: ComposedStatement[] = payload.findings.map((finding, index) => ({
       sql: `INSERT INTO findings (id, review_id, severity, category, file_path, line_start, line_end, title, body, fingerprint)
              SELECT ?, COALESCE((SELECT id FROM reviews
@@ -424,22 +238,13 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
           key.pr_number,
           key.head_sha,
           reviewId,
-          // note: THE vocab-switch mapping point (architect-locked): v1 rows
-          // carry the harness merge class in the legacy `severity` column.
           finding.mergeClass,
-          // note: D1 .bind() rejects undefined; optional finding fields
-          // (envelope contract: category/location may be omitted) are
-          // coalesced to NULL.
           finding.category ?? null,
           finding.file_path ?? null,
           finding.line_start ?? null,
           finding.line_end ?? null,
           finding.title,
           finding.body,
-          // note: AL-21-1: the persist path is the single fingerprint
-          // write point — a non-blank, non-marker hint is returned verbatim
-          // by the pure function; a blank or [REDACTED]-marker hint falls
-          // back to the normalized FNV-1a fingerprint (W-1).
           computeFindingFingerprint(finding),
           ...(options?.guard?.binds ?? []),
       ],
@@ -456,9 +261,6 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
       );
 
       if (results[0]!.meta.changes === 0) {
-        // note: UNIQUE conflict — another consumer already stored this sha.
-        // Idempotent success: the first-written row wins and is never
-        // overwritten (module-header deviation from FsStore semantics).
         return;
       }
     },
@@ -481,9 +283,6 @@ export function createArtifactStore(db: D1Like): D1ArtifactStore {
         )
         .bind(key.installation_id, key.owner, key.repo, key.pr_number, key.head_sha)
         .first<{ envelope: string | null }>();
-      // note: Missing row → undefined; M1-era row (envelope NULL) → undefined:
-      // M1 history is never served as a v1 envelope (era model, migration
-      // 0002).
       if (row === null || row.envelope === null) return undefined;
       return JSON.parse(row.envelope) as T;
     },

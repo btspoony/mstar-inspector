@@ -1,12 +1,3 @@
-/**
- * why: Unit tests: the `usage_events` ledger leaf (migration 0031, metered by 0064).
- *
- * The seq mint is the one thing tests can observe that callers depend on:
- * one review may hold several rows (attempt number), distinct reviews each
- * start at 1, and the FK refuses an unattributable row. Migration 0064 adds the
- * `rp` charge, written by the SAME statement so `seq` and cost cannot disagree —
- * and `0` stays the pre-metering marker that contributes nothing to a ceiling.
- */
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1 } from "./helpers";
 import {
@@ -119,7 +110,6 @@ describe("usage_events.rp (migration 0064)", () => {
       rp: 60,
       source: "shared",
     });
-    // note: A genuine retry of the same review: the next seq carries its own RP.
     await recordUsageEvent(db, {
       reviewId: "review-a",
       executionToken: "token-a2",
@@ -138,7 +128,6 @@ describe("usage_events.rp (migration 0064)", () => {
 
   test("a pre-metering row defaults to 0 and contributes nothing", async () => {
     const db = createMigratedTestD1();
-    // note: Written the way a row that predates 0064 reads: the column's default.
     db.raw
       .prepare(
         `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
@@ -157,11 +146,8 @@ describe("usage_events.rp (migration 0064)", () => {
       )
       .run();
     for (const [reviewId, workspaceId, occurredAt, rp] of [
-      // note: The first instant of the month counts …
       ["at-start", "default", "2026-10-01T00:00:00.000Z", 1],
-      // note: … the first instant of the next month does not …
       ["after-end", "default", "2026-11-01T00:00:00.000Z", 100],
-      // note: … and another workspace's rows are its own.
       ["other-ws", "other", "2026-10-10T00:00:00.000Z", 10],
     ] as const) {
       db.raw
@@ -199,15 +185,11 @@ describe("usage_events.source (migration 0065)", () => {
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
     expect(usage).toEqual({ workspaceId: "default", total: 62, sharedRp: 60, byokRp: 2 });
-    // invariant: The card's total and its split come from one statement, so the split's
-    // parts can never disagree with the number the ceiling is compared against.
     expect(await sumMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso)).toBe(usage!.total);
   });
 
   test("a pre-column row counts in the total and in neither split", async () => {
     const db = createMigratedTestD1();
-    // note: Written the way a row that predates 0065 reads: the source is genuinely
-    // unknown, so the split must not guess it.
     db.raw
       .prepare(
         `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp)
@@ -225,8 +207,6 @@ describe("usage_events.source (migration 0065)", () => {
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
     expect(usage).toEqual({ workspaceId: "default", total: 7, sharedRp: 0, byokRp: 1 });
-    // invariant: Honest arithmetic: the split totals less than the month because six RP
-    // belong to a row that recorded no source. Nothing is attributed by default.
     expect(usage!.sharedRp + usage!.byokRp).toBeLessThan(usage!.total);
   });
 
@@ -252,15 +232,12 @@ describe("usage_events.source (migration 0065)", () => {
       { workspaceId: "default", total: 3, sharedRp: 3, byokRp: 0 },
       { workspaceId: "other", total: 3, sharedRp: 0, byokRp: 3 },
     ]);
-    // invariant: The set read and the tenant read are the same aggregate: the operator's
-    // preview cannot disagree with what the card or the ceiling sees.
     expect(await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso)).toEqual([
       { workspaceId: "default", total: 3, sharedRp: 3, byokRp: 0 },
     ]);
   });
 });
 
-/** note: The aggregate the two faces share, as SQL the plan can be asked about. */
 function usageByWorkspaceSql(extraWhere = ""): string {
   return `SELECT workspace_id AS workspaceId, COALESCE(SUM(rp), 0) AS total
             FROM usage_events
@@ -285,9 +262,7 @@ describe("migration 0066 (the preview's month index)", () => {
       (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
         .map((row) => row.detail)
         .join(" | ");
-    // why: The preview binds no workspace: it must not scan the table.
     expect(plan(usageByWorkspaceSql())).toContain("idx_usage_events_occurred_rp");
-    // note: The tenant form keeps its seek on the pre-existing index.
     expect(plan(usageByWorkspaceSql("workspace_id = 'default'"))).toContain("usage_events_workspace_occurred");
   });
 });

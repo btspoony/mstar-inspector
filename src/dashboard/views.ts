@@ -21,11 +21,6 @@ import { t, type Locale } from "../i18n";
 import type { SsrTheme } from "./ssr-tokens.generated";
 import { ssrTokenValues } from "./ssr-tokens.generated";
 
-/**
- * safety: Every token this face paints with, by name. The values live in the generated
- * table, so this list is a vocabulary choice — never a second copy of a design
- * decision, and never a palette step.
- */
 const SSR_TOKENS = [
   "font-sans",
   "font-mono",
@@ -84,7 +79,6 @@ const SSR_TOKENS = [
 
 type SsrToken = (typeof SSR_TOKENS)[number];
 
-/** why: One theme's value for a name this face declares. A missing name fails loudly here, at import. */
 const tokenValue = (theme: SsrTheme, name: SsrToken): string => {
   const value = ssrTokenValues[theme][name];
   if (value === undefined) throw new Error(`src/dashboard/views.ts names an undeclared token --${name}`);
@@ -94,7 +88,6 @@ const tokenValue = (theme: SsrTheme, name: SsrToken): string => {
 const declarations = (theme: SsrTheme, names: readonly SsrToken[]): string =>
   names.map((name) => `  --${name}: ${tokenValue(theme, name)};`).join("\n");
 
-/** invariant: The dark face declares the whole vocabulary; light re-declares only what differs. */
 const DARK_DECLARATIONS = declarations("dark", SSR_TOKENS);
 const LIGHT_DECLARATIONS = declarations(
   "light",
@@ -102,7 +95,6 @@ const LIGHT_DECLARATIONS = declarations(
 );
 
 
-/** safety: Escape GitHub-sourced user data before HTML interpolation (XSS guard). */
 function escapeHtml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -304,24 +296,9 @@ function wrapPhraseAsLink(text: string, phrase: string, href: string): string {
   return `${text.slice(0, i)}<a href="${href}">${phrase}</a>${text.slice(i + phrase.length)}`;
 }
 
-/**
- * safety: Brand mark for the auth-journey faces (SSR sync) — the same
- * inline silhouette as the SPA AppSidebar Logo (zero image assets; the
- * mark colors via `currentColor`, see `.auth-brand svg` in STYLE).
- */
 const AUTH_MARK =
   '<svg viewBox="0 0 24 24" width="24" height="24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="1.5"></circle><path d="M12 4 L13.2 10.2 L20 12 L13.2 13.8 L12 20 L10.8 13.8 L4 12 L10.8 10.2 Z" fill="currentColor"></path></svg>';
 
-/**
- * safety: No-chrome auth-journey face (SSR sync): the login-family
- * surfaces (denied / removed / forbidden / OAuth error) render the SPA
- * login face's centered-card language — wordmark echo + card on the themed
- * canvas. `bannerHtml` must arrive pre-escaped by the caller: dynamic values
- * are escapeHtml-ed before `t()` interpolation, and links are composed by
- * string replace on the already-escaped output (wrapPhraseAsLink belongs to
- * the manifest error pages, not this face); the alert keeps role="alert"
- * (WCAG 4.1.3, unchanged from the banner contract).
- */
 function authFace(title: string, bannerHtml: string, locale: Locale = "en"): string {
   return page(
     title,
@@ -357,14 +334,6 @@ ${STYLE}
 </html>`;
 }
 
-/**
- * note: Flow-page chrome: product name + GitHub identity + Logout, restyled to
- * the SPA navbar tokens. Manifest pages never pass `adminNav` (Members
- * stays on the dashboard shell only). No language toggle — current IA.
- * Brand and Apps point at the request's workspace Apps page when the page
- * was reached through one (`/dashboard/<ref>/apps`), else the dashboard root
- * (which redirects a signed-in request to the repository overview).
- */
 function shellHeader(
   user: { login: string; name?: string },
   adminNav = false,
@@ -400,7 +369,6 @@ export function manifestStartPage(
   manifestJson: string,
   createUrl: string,
   locale: Locale = "en",
-  /** note: Workspace ref (id) the flow targets; null renders the deployment-level links. */
   workspaceRef: string | null = null,
 ): string {
   const appsHref =
@@ -434,7 +402,6 @@ export function manifestConfirmPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string | null; webhookUrl: string },
   locale: Locale = "en",
-  /** why: Workspace ref (id) the held App commits into; null renders the deployment-level links. */
   workspaceRef: string | null = null,
 ): string {
   const appsHref =
@@ -443,9 +410,6 @@ export function manifestConfirmPage(
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
     id: `<span class="id">${app.id}</span>`,
   });
-  // note: Before the first metadata sync GitHub's slug is unknown; the App id is the
-  // honest stand-in, and it carries the App ID label rather than pretending to
-  // be a GitHub slug.
   const slugWebhook = app.slug
     ? t(locale, "manifest.confirm.slugWebhook", {
         slug: `<strong>${escapeHtml(app.slug)}</strong>`,
@@ -493,28 +457,17 @@ export function manifestOnboardingPage(
   user: { login: string; name?: string },
   app: { id: number; name: string; slug: string | null; webhookUrl: string },
   locale: Locale = "en",
-  /** note: Workspace ref (id or slug) under `strict`; null renders today's legacy targets. */
   workspaceRef: string | null = null,
-  /** note: The review target the CTA opens; null = the repository overview. */
   settingsTargetId: string | null = null,
 ): string {
   const connected = t(locale, "manifest.onboarding.connected", {
     appName: `<strong>${escapeHtml(app.name)}</strong>`,
     id: `<span class="id">${app.id}</span>`,
   });
-  // why: The legacy App family answers 404 under `strict`, so the primary CTA
-  // follows the workspace the page was reached through. The review policy it
-  // opens lives on the repository surface now. The secondary link follows the
-  // same workspace; only a page with no ref falls back to the dashboard root.
   const settingsBase =
     workspaceRef === null
       ? "/dashboard"
       : `/dashboard/${escapeHtml(workspaceRef)}/apps`;
-  // note: The CTA needs a workspace segment to name a repository detail: without one
-  // the only honest address is the dashboard root, which redirects a signed-in
-  // request to its workspace's overview. Interpolating the target into the
-  // REF slot would build `/dashboard/<targetId>` — a workspace-ref-shaped path
-  // that names no workspace at all.
   const settingsHref =
     workspaceRef === null || settingsTargetId === null
       ? workspaceRef === null
@@ -549,9 +502,6 @@ export function manifestErrorPage(
   locale: Locale = "en",
   repair: { phrase: string; text: string; href: string; end: string } | null = null,
 ): string {
-  // why: Resumable failures (retryable commit outcomes: 400/500/502) keep the
-  // hold cookie, so the what-to-do-next link goes back to the confirm gate,
-  // not a shell with no confirm form.
   const next = resumable
     ? wrapPhraseAsLink(
         t(locale, "manifest.error.resumable"),
@@ -559,9 +509,6 @@ export function manifestErrorPage(
         "/dashboard/manifest/confirm",
       )
     : wrapPhraseAsLink(t(locale, "manifest.error.retry"), "/dashboard", "/dashboard");
-  // why: The caller owns the whole clause, terminator included, so the locale-owned
-  // punctuation rides with the phrase and link it closes instead of being
-  // rederived here.
   const repairHtml = repair
     ? `${escapeHtml(repair.phrase)} <a href="${escapeHtml(repair.href)}">${escapeHtml(repair.text)}</a>${escapeHtml(repair.end)} `
     : "";

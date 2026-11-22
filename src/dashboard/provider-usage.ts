@@ -52,21 +52,14 @@ export type UsageStatus = "ok" | "absent" | "unauthorized" | "error";
 /** One normalized limit. Window and balance limits share the wire shape so the
  *  dialog has one list to render. */
 export type UsageLimit = {
-  /** note: Stable per family, e.g. `commandcode:session`, `hyper:balance`. */
   id: string;
   kind: "window" | "balance";
-  /** invariant: Window only: share of the window consumed, 0..1. */
   usedFraction?: number;
-  /** why: Balance amount, or a window's remaining count when the vendor states it. */
   remaining?: number;
-  /** note: On-demand amount held beside `remaining`: real money the vendor granted
-   *  outside the dimension's own pool. Same cell, labelled apart. */
   extraRemaining?: number;
   limit?: number;
   unit: "percent" | "requests" | "credits" | "usd" | "tokens";
-  /** note: Epoch milliseconds. */
   resetsAt?: number;
-  /** note: One account-wide pool behind several stored keys. */
   shared?: boolean;
 };
 
@@ -82,17 +75,14 @@ export type UsageSnapshot = {
 /** Probe deps (injected for tests): outbound fetch + timeout override. */
 export type UsageDeps = {
   fetch: VerifyFetch;
-  /** note: Budget for the whole probe; defaults to VERIFY_TIMEOUT_MS. */
   timeoutMs?: number;
 };
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 const WEEK_MS = 7 * DAY_MS;
-/** note: A span under a day is the session window; longer spans are the weekly pool. */
 const SESSION_MAX_MS = DAY_MS;
 
-// note: --- shared normalizers (pure; no clock, network or key state) ---
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
@@ -100,7 +90,6 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-/** note: Numbers arrive as numbers or numeric strings depending on the endpoint. */
 function toNumber(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value === "string" && value.trim().length > 0) {
@@ -122,8 +111,6 @@ export function fractionFromUsed(usedPercent: number): number | undefined {
 
 /** Used/limit counter pair → used fraction; `undefined` when unusable. */
 export function fractionFromCounts(used: number | undefined, limit: number | undefined): number | undefined {
-  // note: A negative used count (remaining above the limit) is not "0 % used": drop
-  // the window instead of rendering a fake empty bar.
   if (used === undefined || limit === undefined || limit <= 0 || used < 0) return undefined;
   return Math.min(1, used / limit);
 }
@@ -136,7 +123,6 @@ export function fractionFromCounts(used: number | undefined, limit: number | und
 export function resetFrom(value: unknown): number | undefined {
   if (typeof value === "number") {
     if (!Number.isFinite(value) || value <= 0) return undefined;
-    // note: Epoch milliseconds passed 1e12 in 2001; anything below that is seconds.
     return value < 1e12 ? value * 1000 : value;
   }
   if (typeof value === "string" && value.trim().length > 0) {
@@ -147,12 +133,10 @@ export function resetFrom(value: unknown): number | undefined {
   return undefined;
 }
 
-/** why: Relative-delay alias (milliseconds from now) → absolute epoch milliseconds. */
 function resetAfterMs(ms: number | undefined): number | undefined {
   return ms === undefined || ms <= 0 ? undefined : Date.now() + ms;
 }
 
-/** note: Reset time across one row's alias keys. */
 function resetOf(row: Record<string, unknown>, keys: readonly string[]): number | undefined {
   for (const key of keys) {
     const parsed = resetFrom(row[key]);
@@ -161,7 +145,6 @@ function resetOf(row: Record<string, unknown>, keys: readonly string[]): number 
   return undefined;
 }
 
-/** note: The first alias that reads as a number; unreadable values fall through. */
 function firstNumber(row: Record<string, unknown>, keys: readonly string[]): number | undefined {
   for (const key of keys) {
     const value = toNumber(row[key]);
@@ -170,12 +153,10 @@ function firstNumber(row: Record<string, unknown>, keys: readonly string[]): num
   return undefined;
 }
 
-/** note: Span classification: under a day is the session window, longer is the week. */
 function windowIdForSpan(spanMs: number): "session" | "week" {
   return spanMs < SESSION_MAX_MS ? "session" : "week";
 }
 
-/** why: Duration + unit pair (hours/days/weeks/minutes) → span in milliseconds. */
 function spanFromDuration(duration: number | undefined, unit: string): number | undefined {
   if (duration === undefined || duration <= 0 || unit.length === 0) return undefined;
   const upper = unit.toUpperCase();
@@ -187,7 +168,6 @@ function spanFromDuration(duration: number | undefined, unit: string): number | 
   return undefined;
 }
 
-// note: --- limit builders ---
 
 function windowLimit(args: {
   id: string;
@@ -196,10 +176,8 @@ function windowLimit(args: {
   resetsAt?: number;
   limit?: number;
   remaining?: number;
-  /** invariant: Only where the vendor states one account-wide pool behind every key. */
   shared?: boolean;
 }): UsageLimit {
-  // note: Absent fields are omitted, not emitted as `undefined` keys.
   return {
     id: args.id,
     kind: "window",
@@ -212,7 +190,6 @@ function windowLimit(args: {
   };
 }
 
-/** why: Keep the most-binding limit per id: several model buckets share one plan pool. */
 function keepTighter(limits: Map<string, UsageLimit>, next: UsageLimit): void {
   const current = limits.get(next.id);
   if (current === undefined || (next.usedFraction ?? 0) > (current.usedFraction ?? 0)) {
@@ -220,20 +197,15 @@ function keepTighter(limits: Map<string, UsageLimit>, next: UsageLimit): void {
   }
 }
 
-// note: --- one classified GET ---
 
-/** note: One probe's view of the transport plus its shared budget. */
 type ProbeInput = { fetch: VerifyFetch; deadline: number };
 
-/** invariant: The failure classes a read can produce (never `ok`). */
 type QuotaReadFailure = Exclude<UsageStatus, "ok">;
 
-/** why: A parsed 2xx body, or the classified reason the read produced nothing. */
 type QuotaRead =
   | { ok: true; body: Record<string, unknown> }
   | { ok: false; status: QuotaReadFailure; reason: string };
 
-/** why: The origin a URL names; `undefined` when it does not parse. */
 function originOf(url: string): string | undefined {
   try {
     return new URL(url).origin;
@@ -242,41 +214,25 @@ function originOf(url: string): string | undefined {
   }
 }
 
-/**
- * why: GET `url` and classify the response into the shared vocabulary, so every
- * family means the same thing by 401/403, 404, transport failure and an
- * unparseable body. Never throws; never logs the key. The credential only ever
- * travels to `url`'s origin: a 3xx is never followed and a 2xx that reports a
- * different final origin is refused.
- */
 async function readQuotaJson(
   input: ProbeInput,
   url: string,
   headers: Record<string, string>,
 ): Promise<QuotaRead> {
   try {
-    // note: One budget per probe: Command Code's two sequential GETs share it.
     const budgetMs = Math.max(1, input.deadline - Date.now());
     const response = await input.fetch(url, {
       headers: { accept: "application/json", "user-agent": VERIFY_USER_AGENT, ...headers },
-      // invariant: A redirect is never followed: `manual` hands any 3xx to the classifier
-      // below instead of replaying the Authorization header at another origin.
       redirect: "manual",
       signal: AbortSignal.timeout(budgetMs),
     });
     if (response.status === 401 || response.status === 403) {
       return { ok: false, status: "unauthorized", reason: `http ${response.status}` };
     }
-    // The vendor answered "nothing here": the probe ran, the account has no
-    // plan/quota row to meter.
     if (response.status === 404) return { ok: false, status: "absent", reason: "http 404" };
     if (response.status < 200 || response.status >= 300) {
       return { ok: false, status: "error", reason: `http ${response.status}` };
     }
-    // note: Defense in depth for redirects a transparent proxy still performs: a 2xx
-    // whose FINAL URL is on another origin never has its body read. An empty
-    // `response.url` means the platform reported none (a synthetic response),
-    // which is not evidence of a redirect.
     if (response.url !== "" && originOf(response.url) !== originOf(url)) {
       return { ok: false, status: "error", reason: "redirected off origin" };
     }
@@ -299,11 +255,6 @@ function failureSnapshot(read: Extract<QuotaRead, { ok: false }>, fetchedAt: num
   };
 }
 
-/**
- * note: Build the snapshot from a classified read. An extractor returns either the
- * limits or a reason string; an empty result is a parse failure, never an
- * `ok` with zero bars.
- */
 function snapshotFromRead(
   read: QuotaRead,
   extract: (body: Record<string, unknown>) => UsageLimit[] | string,
@@ -318,14 +269,6 @@ function snapshotFromRead(
   return { status: "ok", fetchedAt, limits: extracted };
 }
 
-/**
- * safety: A 2xx whose BODY rejects the credential. Vendors that gate the route at the
- * application layer answer 200 and put the verdict in the payload; that verdict
- * is deterministic about the KEY, so it renders as `unauthorized` ("this key was
- * rejected") instead of `error` ("could not read"). Each family passes its own
- * documented code mapping; `undefined` means the body raised no such verdict and
- * the caller continues with normal extraction.
- */
 function bodyKeyRejection(
   read: QuotaRead,
   rejectionReason: (body: Record<string, unknown>) => string | undefined,
@@ -335,11 +278,8 @@ function bodyKeyRejection(
   return reason === undefined ? undefined : { status: "unauthorized", fetchedAt: Date.now(), limits: [], reason };
 }
 
-/** invariant: One family's probe: GET its endpoint(s), normalize to limits. Never throws
- *  by contract (an escaping throw is caught by probeProviderUsage). */
 type UsageProbe = (input: ProbeInput, key: string) => Promise<UsageSnapshot>;
 
-// note: --- family: commandcode (credits + windows) ---
 
 const COMMANDCODE_ORIGIN = "https://api.commandcode.ai";
 const COMMANDCODE_WINDOWS = [
@@ -347,24 +287,12 @@ const COMMANDCODE_WINDOWS = [
   { key: "weekly", id: "week" },
 ] as const;
 
-/**
- * why: One credit component: `undefined` when the field is ABSENT, `null` when it is
- * present but not a finite non-negative number. The distinction matters — an
- * absent component contributes nothing, while an unreadable one makes the
- * account total unknowable.
- */
 function creditComponent(value: unknown): number | undefined | null {
   if (value === undefined || value === null) return undefined;
   const amount = toNumber(value);
   return amount === undefined || amount < 0 ? null : amount;
 }
 
-/**
- * note: Command Code's inference base is `/provider`, while the account routes sit at
- * the host root — so the origin is a constant, never derived from a base URL.
- * `/alpha/whoami` names the org whose credit pool the CLI reads; without one
- * the personal credits route is the pool.
- */
 const commandCodeUsage: UsageProbe = async (input, key) => {
   const auth = { authorization: `Bearer ${key}` };
   const whoamiRead = await readQuotaJson(input, `${COMMANDCODE_ORIGIN}/alpha/whoami`, auth);
@@ -381,7 +309,6 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
     `${COMMANDCODE_ORIGIN}/alpha/billing/credits` + (orgId ? `?orgId=${encodeURIComponent(orgId)}` : "");
   const creditsRead = await readQuotaJson(input, creditsUrl, auth);
   return snapshotFromRead(creditsRead, (raw) => {
-    // note: Account routes answer `{ data: … }`; accept an unwrapped body too.
     const body = asRecord(raw.data) ?? raw;
     const limits: UsageLimit[] = [];
     const windowLimits = asRecord(body.windowLimits);
@@ -405,13 +332,6 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
       const monthly = creditComponent(credits.monthlyCredits);
       const purchased = creditComponent(credits.purchasedCredits);
       const free = creditComponent(credits.freeCredits);
-      // invariant: A month cell exists only when the vendor states a monthly pool: a
-      // pay-as-you-go account has no month at all, and labelling its purchases
-      // "monthly" would invent a period that does not exist. When both are
-      // stated they share one cell as two amounts — the subscription budget
-      // that resets with the period, and the on-demand credits that never do —
-      // so the quota row still grows no second line for the same dimension. An
-      // unreadable component is omitted, never zero-filled; zero adds nothing.
       const onDemand = purchased === null || free === null ? undefined : (purchased ?? 0) + (free ?? 0);
       const extra = onDemand !== undefined && onDemand > 0 ? onDemand : undefined;
       if (typeof monthly === "number") {
@@ -424,8 +344,6 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
           shared: true,
         });
       } else if (extra !== undefined) {
-        // note: No month to attach it to: the purchases stand on their own balance,
-        // outside the dimensional row.
         limits.push({ id: "commandcode:balance", kind: "balance", remaining: extra, unit: "credits", shared: true });
       }
     }
@@ -433,7 +351,6 @@ const commandCodeUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: opencode-go ---
 
 const OPENCODE_GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
 const OPENCODE_GO_WINDOWS = [
@@ -441,10 +358,7 @@ const OPENCODE_GO_WINDOWS = [
   { key: "weekly", id: "week" },
   { key: "monthly", id: "month" },
 ] as const;
-// note: The monthly bucket anchors on the subscription anniversary, not a 30-day
-// span, so it keeps its own `month` id instead of being relabelled a week.
 
-/** note: `percent` is USED percent; `status: "rate-limited"` outranks it. */
 const opencodeGoUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, OPENCODE_GO_USAGE_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -470,12 +384,10 @@ const opencodeGoUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: zai / zhipuai ---
 
 const ZAI_HOST = "https://api.z.ai";
 const ZHIPU_HOST = "https://open.bigmodel.cn";
 const ZAI_QUOTA_PATH = "/api/monitor/usage/quota/limit";
-/** note: Z.AI `unit` enum: 3 = hours, 6 = weeks. Day/month buckets are not windows. */
 const ZAI_UNIT_HOURS = 3;
 const ZAI_UNIT_WEEKS = 6;
 
@@ -486,22 +398,8 @@ function zaiLimitUnit(type: unknown): UsageLimit["unit"] | undefined {
   return undefined;
 }
 
-/**
- * safety: Z.AI's documented authentication-failure body code (the bigmodel error table:
- * 401 — token expired or incorrect / "Authorization Token illegal"). Any other
- * non-success code is account or service state — e.g. 500 for "the user has no
- * coding plan" — and stays `error`.
- */
 const ZAI_AUTH_FAILURE_CODE = 401;
 
-/**
- * safety: GLM coding-plan quota. The key rides `Authorization` verbatim (no Bearer
- * prefix). `percentage` is a server-rounded USED percent, so the exact counter
- * pair wins when both absolutes are present. The route answers HTTP 200 for an
- * application-level failure, so a body carrying the documented auth code 401 is
- * the CREDENTIAL's verdict (`unauthorized`); every other non-success body is
- * `error` with its code in the diagnostic reason.
- */
 function zaiUsage(host: string): UsageProbe {
   return async (input, key) => {
     const read = await readQuotaJson(input, `${host}${ZAI_QUOTA_PATH}`, {
@@ -538,8 +436,6 @@ function zaiUsage(host: string): UsageProbe {
         if (limitUnit === undefined) continue;
         const spent = toNumber(row.currentValue);
         const total = toNumber(row.usage);
-        // invariant: A present-but-invalid counter pair drops the row; only a MISSING
-        // counter may fall back to the rounded percentage.
         const usedFraction =
           spent !== undefined ? fractionFromCounts(spent, total) : fractionFromUsed(toNumber(row.percentage) ?? Number.NaN);
         if (usedFraction === undefined) continue;
@@ -560,42 +456,25 @@ function zaiUsage(host: string): UsageProbe {
   };
 }
 
-// note: --- family: minimax-code ---
 
 const MINIMAX_INTL_HOST = "https://api.minimax.io";
 const MINIMAX_CN_HOST = "https://api.minimaxi.com";
 const MINIMAX_REMAINS_PATH = "/v1/token_plan/remains";
-/** note: `current_*_status` enum: 2 = exhausted, 3 = unlimited. */
 const MINIMAX_STATUS_EXHAUSTED = 2;
 const MINIMAX_STATUS_UNLIMITED = 3;
-/**
- * note: `base_resp.status_code` values that mean the KEY was rejected, per
- * platform.minimax.io's error table: 1004 (not authorized — the token does not
- * match the group, or the key is inactive) and 2049 (invalid API key). Any other
- * non-zero code is a service-side failure and stays `error`.
- */
 const MINIMAX_AUTH_STATUS_CODES: readonly number[] = [1004, 2049];
 
-/**
- * note: One bucket's window fraction. The endpoint's own status outranks any stale
- * percentage; a present-but-invalid used count drops the window instead of
- * falling through to the remaining-percent alias.
- */
 function minimaxFraction(row: Record<string, unknown>, scope: "interval" | "weekly"): number | undefined {
   if (toNumber(row[`current_${scope}_status`]) === MINIMAX_STATUS_EXHAUSTED) return 1;
   const total = toNumber(row[`current_${scope}_total_count`]);
   const used = toNumber(row[`current_${scope}_usage_count`]);
   if (used !== undefined) return fractionFromCounts(used, total);
-  // note: Missing usage counter: derive from the remaining percentage (100 - p is
-  // the used percent), then from a remaining count.
   const remainingPercent = toNumber(row[`current_${scope}_remaining_percent`]);
   if (remainingPercent !== undefined) return fractionFromUsed(100 - remainingPercent);
   const remaining = toNumber(row[`current_${scope}_remaining_count`]);
   return remaining !== undefined ? fractionFromCounts(total !== undefined ? total - remaining : undefined, total) : undefined;
 }
 
-/** note: A bucket outside the current plan reports both windows unlimited with zero
- *  totals; keeping it would render a pristine quota that does not exist. */
 function isUnavailableMinimaxPlan(row: Record<string, unknown>): boolean {
   return (
     toNumber(row.current_interval_total_count) === 0 &&
@@ -605,9 +484,6 @@ function isUnavailableMinimaxPlan(row: Record<string, unknown>): boolean {
   );
 }
 
-/** safety: MiniMax Token Plan. The vendor answers HTTP 200 for a rejected credential,
- *  so `base_resp.status_code` is the real success signal: the documented auth
- *  codes report `unauthorized`, every other non-zero code `error`. */
 function minimaxUsage(host: string): UsageProbe {
   return async (input, key) => {
     const read = await readQuotaJson(input, `${host}${MINIMAX_REMAINS_PATH}`, {
@@ -665,12 +541,9 @@ function minimaxUsage(host: string): UsageProbe {
   };
 }
 
-// note: --- family: cline-pass ---
 
 const CLINE_USAGE_URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits";
 const CLINE_CLIENT_VERSION = "3.5.54";
-// shortcut: version pinned from magpie 3.5.54; upgrade: if the endpoint starts version-gating
-/** why: The desktop client headers the route is gated on (vendor constants, not credentials). */
 const CLINE_HEADERS: Readonly<Record<string, string>> = {
   accept: "application/json",
   "http-referer": "https://cline.bot",
@@ -686,16 +559,12 @@ const CLINE_WINDOWS: Readonly<Record<string, "session" | "week" | "month">> = {
   monthly: "month",
 };
 
-/** note: ClinePass plan limits: `limits[]` carries `type`, `percentUsed` (USED) and
- *  an ISO `resetsAt`. The 30-day row is still a real window and keeps its own
- *  id rather than being relabelled as a week. */
 const clineUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, CLINE_USAGE_URL, {
     ...CLINE_HEADERS,
     authorization: `Bearer ${key}`,
   });
   return snapshotFromRead(read, (body) => {
-    // note: Cline wraps every answer in `{ success, error, data }`.
     if (body.success === false) return "usage request rejected";
     const data = asRecord(body.data) ?? body;
     const rows = Array.isArray(data.limits) ? data.limits : [];
@@ -721,11 +590,9 @@ const clineUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: synthetic ---
 
 const SYNTHETIC_QUOTAS_URL = "https://api.synthetic.new/v2/quotas";
 
-/** why: Dollar-form credit amount (`"$12.34"` or a number) → number. */
 function parseCreditAmount(value: unknown): number | undefined {
   if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
   if (typeof value === "string" && value.trim().length > 0) {
@@ -735,8 +602,6 @@ function parseCreditAmount(value: unknown): number | undefined {
   return undefined;
 }
 
-/** note: Synthetic's two pools are account-wide: every stored key reports the same
- *  numbers, so each limit is `shared`. */
 const syntheticUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, SYNTHETIC_QUOTAS_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -765,8 +630,6 @@ const syntheticUsage: UsageProbe = async (input, key) => {
       const remaining = parseCreditAmount(weekly.remainingCredits);
       const max = parseCreditAmount(weekly.maxCredits);
       const percentRemaining = toNumber(weekly.percentRemaining);
-      // note: `percentRemaining` is REMAINING percent; 100 - p is the used percent.
-      // Only a missing percentage falls back to the credit counters.
       const usedFraction =
         percentRemaining !== undefined
           ? fractionFromUsed(100 - percentRemaining)
@@ -791,13 +654,9 @@ const syntheticUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: umans ---
 
 const UMANS_USAGE_URL = "https://api.code.umans.ai/v1/usage";
 
-/** note: Umans: one rolling request window plus the concurrency ceiling. The
- *  weighted counters are the authoritative utilization (raw counts include
- *  burst traffic); the burst `hard_cap` row is not rendered here. */
 const umansUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, UMANS_USAGE_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -839,13 +698,9 @@ const umansUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: charm-hyper ---
 
 const HYPER_CREDITS_URL = "https://hyper.charm.land/credits";
 
-/** why: Prepaid credits: `/credits` answers `{balance}` and nothing else (no
- *  allowance, no reset), so the limit is remaining-only by construction and
- *  account-wide across keys. */
 const hyperUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, HYPER_CREDITS_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -855,12 +710,9 @@ const hyperUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: kimi-for-coding ---
 
 const KIMI_USAGE_URL = "https://api.kimi.com/coding/v1/usages";
 
-/** note: Kimi numbers arrive as strings. A missing `used` derives one from
- *  `limit - remaining`; a present-but-negative count drops the window. */
 function kimiFraction(row: Record<string, unknown>): number | undefined {
   const limit = toNumber(row.limit);
   const used = toNumber(row.used);
@@ -871,8 +723,6 @@ function kimiFraction(row: Record<string, unknown>): number | undefined {
     : undefined;
 }
 
-/** note: `GET /coding/v1/usages`: the aggregate `usage` object is the weekly window,
- *  each `limits[]` row is a window classified by its reported span. */
 const kimiUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, KIMI_USAGE_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -921,15 +771,9 @@ const kimiUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// note: --- family: cursor ---
 
 const CURSOR_USAGE_URL = "https://api2.cursor.sh/auth/usage";
 
-/**
- * note: The account's reset instant from the payload's own aliases: an explicit cycle
- * end wins, otherwise one month after a cycle start. Unreadable aliases fall
- * through, so a garbled end never hides a usable start.
- */
 function cursorResetsAt(payload: Record<string, unknown>): number | undefined {
   const end = resetOf(payload, ["billingCycleEnd", "endOfMonth", "resetsAt", "nextReset"]);
   if (end !== undefined) return end;
@@ -938,13 +782,10 @@ function cursorResetsAt(payload: Record<string, unknown>): number | undefined {
   const date = new Date(start);
   const targetMonth = date.getUTCMonth() + 1;
   date.setUTCMonth(targetMonth);
-  // note: A day the target month lacks (Jan 31 -> Feb) rolls into the next month;
-  // pin it to the last day of the month it was meant to land in.
   if (date.getUTCMonth() !== targetMonth % 12) date.setUTCDate(0);
   return date.getTime();
 }
 
-/** why: Bucket name → its counters' unit: the spend buckets report dollars. */
 function cursorUnit(bucket: string): "usd" | "requests" {
   const name = bucket.toLowerCase();
   return name === "planusage" || name.includes("billing") || name.includes("usd") || name.includes("stripe")
@@ -952,14 +793,6 @@ function cursorUnit(bucket: string): "usd" | "requests" {
     : "requests";
 }
 
-/**
- * note: Cursor's request-count / spend buckets: the payload's top-level entries ARE
- * the buckets, each carrying a used counter and — on a capped plan — a cap.
- * Only a bucket with BOTH readable numbers becomes a bar: an uncapped bucket
- * has no fraction to draw, and a garbled counter is dropped rather than zeroed.
- * The reset instant is payload-wide (the vendor states one cycle for the
- * account), so every bucket shares it when present.
- */
 const cursorUsage: UsageProbe = async (input, key) => {
   const read = await readQuotaJson(input, CURSOR_USAGE_URL, { authorization: `Bearer ${key}` });
   return snapshotFromRead(read, (body) => {
@@ -988,20 +821,7 @@ const cursorUsage: UsageProbe = async (input, key) => {
   });
 };
 
-// why: --- catalog id → family ---
 
-/**
- * note: The probe table, keyed by catalog id. Every id here is a row in
- * `PROVIDER_CATALOG` (parity is asserted by the suite); an id absent from this
- * table has no usage endpoint and is never probed. The ids are the catalog's
- * own names — the reference implementations' aliases (charm-hyper,
- * minimax-code, zhipu-coding-plan, kimi-code) are not this product's ids.
- *
- * Each entry also carries the vendor hosts its probe reaches, derived from the
- * SAME endpoint constants the probe calls (and asserted so by the suite), so
- * the set can never drift from where the credential actually travels: a stored
- * declaration may only point at one of them.
- */
 type UsageProbeEntry = {
   probe: UsageProbe;
   hosts: readonly string[];
@@ -1021,7 +841,6 @@ export function endpointHost(url: string): string | null {
   }
 }
 
-/** note: The distinct hosts a family's own endpoint constants name. */
 function hostsOf(...urls: string[]): readonly string[] {
   const hosts = new Set<string>();
   for (const url of urls) {
@@ -1048,12 +867,6 @@ const USAGE_PROBES: Readonly<Record<string, UsageProbeEntry>> = Object.freeze({
   cursor: { probe: cursorUsage, hosts: hostsOf(CURSOR_USAGE_URL) },
 });
 
-/**
- * note: The catalog row a declaration id names: a declaration stored under a
- * collapsed per-protocol id probes the same endpoint as the row that absorbed
- * it. Own-property check: a plain index would answer `constructor` with a
- * function and hand it back as a probe.
- */
 function probeIdOf(provider: string): string {
   return Object.hasOwn(LEGACY_PROVIDER_IDS, provider) ? LEGACY_PROVIDER_IDS[provider]! : provider;
 }

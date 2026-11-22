@@ -1,12 +1,3 @@
-/** note: The add-key dialog's refusals, end to end: a per-status response reaches the
- * operator as its own sentence, never as one generic "unexpected response"
- * (I-000573).
- *
- * Mounted, because the notice is dialog-local state produced by the real save
- * path (`submitVerify` → `postForm` → `fetch`); `fetch` is stubbed one
- * response per case. The resolver's own matrix is pinned in
- * settings-error-keys.test.ts — this file proves the dialog renders it.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -68,10 +59,6 @@ function payload(): BotSettingsPayload {
   };
 }
 
-/** note: The verify POST's answer, one per case: either a response or a rejection
- * (the network failure). Every other POST succeeds so the page never blocks
- * on an unrelated channel.
- */
 async function refusalNotice(answer: { status: number; body: string } | "reject"): Promise<string> {
   const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps/1/bot");
   const realFetch = globalThis.fetch;

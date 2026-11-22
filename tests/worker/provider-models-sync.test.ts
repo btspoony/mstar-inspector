@@ -1,16 +1,3 @@
-/** note: I-000644: the declared-provider model sync. A template / custom declaration's
- * stored `model_ids` is what every fallback chain actually runs, so the card, the
- * picker and the sync all speak about this ONE list.
- *
- * Pinned here:
- *   1. a keyless provider (no stored credential) still syncs — several template
- *      providers publish their directory unauthenticated, and gating on a key
- *      would hide exactly the list the operator asked for;
- *   2. the fetched list REPLACES the stored one, ids verbatim;
- *   3. a failed fetch, an empty list, a key-mandatory endpoint, and an
- *      over-bound list each answer their 400 with the stored list untouched;
- *   4. the preview states the replace arithmetic without writing.
- */
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createMigratedTestD1, seedDefaultMemberships, seedTarget } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
@@ -65,12 +52,6 @@ function makeEnv(db: unknown): Env {
   } as Env;
 }
 
-/** note: One declared provider with the given stored vocabulary, and a key pool that
- * is either empty (`withKey: false` — the keyless template provider) or holds
- * the seed credential. A keyless pool is reached by declaring with a key and
- * then deleting it, because the store refuses to create a declaration with no
- * credential at all.
- */
 async function declare(
   store: ReturnType<typeof createAppConfigStore>,
   appId: string,
@@ -107,7 +88,6 @@ async function preview(login: string, env: Env, provider: string): Promise<Respo
   );
 }
 
-/** note: A provider response shaped like the live commandcode endpoint. */
 function mockVocabulary(entries: Array<{ id: string; supported_endpoints?: string[] }>): ReturnType<typeof spyOn> {
   return spyOn(globalThis, "fetch").mockImplementation((async () =>
     new Response(JSON.stringify({ object: "list", data: entries }), {
@@ -116,7 +96,6 @@ function mockVocabulary(entries: Array<{ id: string; supported_endpoints?: strin
     })) as unknown as typeof fetch);
 }
 
-/** note: The live commandcode vocabulary, both dialects, as measured. */
 const LIVE = [
   { id: "deepseek/deepseek-v4-pro", supported_endpoints: ["/chat/completions", "/responses"] },
   { id: "Qwen/Qwen3.8-Max", supported_endpoints: ["/chat/completions"] },
@@ -138,7 +117,6 @@ describe("provider model sync (I-000644)", () => {
 
   test("a keyless provider syncs: the fetched list replaces the stored one, ids verbatim", async () => {
     const { db, app, store } = await seededWorld();
-    // note: Declared with NO key at all — the endpoint answers unauthenticated.
     await declare(store, app.id, { ...COMMANDCODE, model_ids: ["stale-a", "stale-b"] }, false);
     const outbound: RequestInit[] = [];
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_u: string, init?: RequestInit) => {
@@ -152,11 +130,8 @@ describe("provider model sync (I-000644)", () => {
     const res = await post("mallory", makeEnv(db), { op: "sync-provider-models", provider: "commandcode" });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Synced 2 models for commandcode");
-    // safety: No credential was invented for a keyless pool.
     expect(new Headers(outbound[0]?.headers).get("authorization")).toBeNull();
 
-    // invariant: The messages-only Claude id is NOT stored on a chat-completions
-    // declaration, and the two chat ids keep the provider's own spelling.
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["deepseek/deepseek-v4-pro", "Qwen/Qwen3.8-Max"]);
   });
@@ -260,7 +235,6 @@ describe("provider model sync (I-000644)", () => {
       added: 1,
       dropped: 2,
     });
-    // invariant: A preview is a read: the stored list is exactly what it was.
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["deepseek/deepseek-v4-pro", "stale-a", "stale-b"]);
   });

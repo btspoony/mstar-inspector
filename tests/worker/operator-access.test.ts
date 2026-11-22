@@ -1,30 +1,3 @@
-/** note: Platform operators and support grants — the workspace gate's operator classes
- * (platform-operator support, 2026-10).
- *
- * The fixture puts ONE listed operator in the env allowlist, with no membership
- * anywhere, plus a real workspace, its members, and an App. Every case asserts
- * BOTH the HTTP answer and the audit rows the gate wrote, because the two are
- * one decision: the row records the attempt before dispatch, so the count must
- * be exactly one per operator request and zero for everyone else.
- *
- * Pinned here:
- *   - operator without a grant (and with an EXPIRED one) → the outsider 404
- *     plus one `support.denied` row;
- *   - granted operator → 200 on the support view / member list, one
- *     `support.read` row per request;
- *   - granted operator → 403 on every other workspace route (App settings,
- *     credentials verify, role change, invites, audit list), one
- *     `support.forbidden` row;
- *   - a grant on W1 grants nothing on W2;
- *   - an operator who IS a member keeps ordinary membership rights (AC1) and is
- *     not audited as a support read;
- *   - the ceiling matches the METHOD too: HEAD rides the GET handler, a POST at
- *     a read path is refused;
- *   - the shell boot asks the gate's own classifier, so a membership-less
- *     operator lands on the workspace path (never the bare `/dashboard` whose
- *     support read has no tenant) and a listed operator holding a live invite
- *     is an invitee, not a support visitor.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -40,14 +13,10 @@ import { join } from "node:path";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** note: The operator the allowlist names, in mixed case — the compare is NOCASE. */
 const OPERATOR = "Support-Bot";
-/** note: A second listed operator, holding its own grant on the same workspace. */
 const OTHER_OPERATOR = "Other-Bot";
 const DAY = 24 * 60 * 60 * 1000;
-/** invariant: The fixture App's GitHub App id — the App routes' only address form (D0). */
 const APP_ID = 4000;
-/** note: The fixture App's target in `ws-acme` — the target-addressed faces' key. */
 const TARGET_ID = "target-operator";
 
 function envFor(db: TestD1, operators = OPERATOR): Env {
@@ -84,9 +53,7 @@ function seed(db: TestD1, sql: string, ...params: Array<string | number | null>)
   db.raw.prepare(sql).run(...params);
 }
 
-/** invariant: The `users.id` of a seeded login (fixtures only; bun:sqlite returns unknown). */
 function userIdOf(db: TestD1, login: string): string {
-  // note: bun:sqlite's `get()` is typed `unknown`; this fixture owns the query shape.
   const row = db.raw.prepare("SELECT id FROM users WHERE github_login = ?").get(login) as
     | { id: string }
     | null;
@@ -94,7 +61,6 @@ function userIdOf(db: TestD1, login: string): string {
   return row.id;
 }
 
-/** invariant: The workspace role of a seeded member (fixtures only). */
 function roleOf(db: TestD1, userId: string): string {
   const row = db.raw
     .prepare("SELECT role FROM workspace_members WHERE user_id = ?")
@@ -156,9 +122,6 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
 }
 
-/** note: Two workspaces, one member owner each, one App in W1, and the operator as a
- * signed-in login with NO membership anywhere.
- */
 function fixture() {
   const db = createMigratedTestD1();
   seedUser(db, OPERATOR);
@@ -169,13 +132,10 @@ function fixture() {
   seedMembership(db, "ws-acme", owner, "owner");
   seedMembership(db, "ws-other", other, "owner");
   seedApp(db, "app-acme", "acme-app", "ws-acme");
-  // note: The App's repository target: the ledger/insights routes are target-addressed,
-  // so the ceiling sweep needs a real id to present.
   seedTarget(db, "app-acme", { id: TARGET_ID, workspaceId: "ws-acme" });
   return { db, owner };
 }
 
-/** note: Grant `login` on `workspaceId` from now for `ttlMs` (negative = expired). */
 function grant(db: TestD1, workspaceId: string, login: string, ttlMs: number): void {
   const now = Date.now();
   return void insertSupportGrant(db, {
@@ -190,10 +150,6 @@ function grant(db: TestD1, workspaceId: string, login: string, ttlMs: number): v
 
 type AuditRow = { action: string; actor_login: string; workspace_id: string };
 
-/** note: Every audit row in WRITE order. `created_at` ties for requests inside one
- * test (same-millisecond ISO), and the row `id` is a random UUID — so `rowid`
- * (insertion order) is the only deterministic tiebreak.
- */
 function auditRows(db: TestD1): AuditRow[] {
   return db.raw
     .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY created_at ASC, rowid ASC")
@@ -309,27 +265,23 @@ describe("operator with a valid grant", () => {
     grant(db, "ws-acme", OTHER_OPERATOR, DAY);
     const env = envFor(db, `${OPERATOR},${OTHER_OPERATOR}`);
 
-    // note: The two operator-reachable faces carry the same grant projection.
     for (const path of ["/dashboard/acme/api/support/workspace", "/dashboard/acme/api/support/grants"]) {
       const res = await worker.fetch(await authedRequest(path, OPERATOR), env);
       expect(res.status, path).toBe(200);
       const body = (await res.json()) as {
         grants: Array<{ operator_login: string; reason: string }>;
       };
-      // note: AC2: the operator's window is the grant that opened it — one row, theirs.
       expect(body.grants, path).toHaveLength(1);
       expect(body.grants[0]?.operator_login, path).toBe(OPERATOR);
       expect(body.grants[0]?.reason, path).toBe("tenant-reported incident");
     }
 
-    // note: AC4: the member notice is the whole live set — both operators' rows.
     const notice = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
     expect(notice.status).toBe(200);
     const noticeBody = (await notice.json()) as { grants: Array<{ operator_login: string }> };
     expect(noticeBody.grants.map((row) => row.operator_login).sort()).toEqual(
       [OPERATOR, OTHER_OPERATOR].sort(),
     );
-    // note: The member read is not audited; the two operator reads are.
     expect(auditRows(db).map((row) => row.action)).toEqual(["support.read", "support.read"]);
   });
 
@@ -341,8 +293,6 @@ describe("operator with a valid grant", () => {
       { path: "/dashboard/acme/api/apps" },
       { path: `/dashboard/acme/api/apps/${APP_ID}/settings` },
       { path: `/dashboard/acme/api/apps/${APP_ID}/models` },
-      // invariant: Target-addressed data faces: a support grant never widens to
-      // tenant data, so insights and both ledger faces stay 403.
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/insights/summary` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests` },
       { path: `/dashboard/acme/api/targets/${TARGET_ID}/pull-requests/acme/widgets/131` },
@@ -355,9 +305,6 @@ describe("operator with a valid grant", () => {
       );
       expect(res.status, item.path).toBe(403);
       expect(((await res.json()) as { error: string }).error).toBe("forbidden");
-      // invariant: The ceiling's 403 comes from the scope middleware, before any handler —
-      // the /api/* prefix sets this ahead of it, so the deny is not cacheable
-      // either (the ledger pair above rides the same assertion).
       if (item.path.includes("/api/")) {
         expect(res.headers.get("Cache-Control"), item.path).toBe("private, no-store");
       }
@@ -383,7 +330,6 @@ describe("operator with a valid grant", () => {
     }
     const audit = await worker.fetch(await authedRequest("/dashboard/acme/api/audit", OPERATOR), env);
     expect(audit.status).toBe(403);
-    // invariant: The owner is untouched by every refused write.
     expect(roleOf(db, owner)).toBe("owner");
     expect(auditRows(db)).toHaveLength(4);
     expect(auditRows(db).every((row) => row.action === "support.forbidden")).toBe(true);
@@ -401,7 +347,6 @@ describe("operator with a valid grant", () => {
       env,
     );
     expect(other.status).toBe(404);
-    // note: Both rows land in the same millisecond, so compare as a set.
     const rows = auditRows(db);
     expect(rows.map((row) => row.action).sort()).toEqual(["support.denied", "support.read"]);
     expect(rows.find((row) => row.action === "support.denied")?.workspace_id).toBe("ws-other");
@@ -412,10 +357,8 @@ describe("operator with a valid grant", () => {
 describe("an operator who is also a member", () => {
   test("keeps ordinary membership rights and writes no support audit row", async () => {
     const { db } = fixture();
-    // note: `dana` owns W1 and is listed as an operator too.
     grant(db, "ws-acme", "dana", DAY);
     const env = envFor(db, `${OPERATOR},dana`);
-    // why: A write route the ceiling would refuse an operator: as a member it serves.
     const res = await worker.fetch(
       await authedRequest("/dashboard/acme/api/members", "dana"),
       env,
@@ -440,7 +383,6 @@ describe("tenant-visible grant notice and member audit reads", () => {
     if (row === undefined) throw new Error("no grant row");
     expect(Object.keys(row).sort()).toEqual(["expires_at", "operator_login", "reason"]);
     expect(row.operator_login).toBe(OPERATOR);
-    // note: AC4a: the whole notice payload — who, why, until when.
     expect(row.reason).toBe("tenant-reported incident");
     const expiresAt = row.expires_at;
     expect(typeof expiresAt).toBe("string");
@@ -486,14 +428,11 @@ describe("tenant-visible grant notice and member audit reads", () => {
         await authedRequest("/dashboard/acme/api/support/grants", "dana", { method, body: "x=1" }),
         env,
       );
-      // note: No mutating handler is mounted at all (405), so there is no dismiss
-      // verb for the tenant to reach whatever the status.
       expect(res.status >= 400, method).toBe(true);
     }
     const still = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
     const stillBody = (await still.json()) as { grants: Array<{ operator_login: string }> };
     expect(stillBody.grants.map((row) => row.operator_login)).toEqual([OPERATOR]);
-    // note: Tenant refusals are the tenant's own gate — no support audit row.
     expect(auditRows(db).map((row) => row.action)).toEqual([]);
   });
 
@@ -501,11 +440,9 @@ describe("tenant-visible grant notice and member audit reads", () => {
     const { db } = fixture();
     grant(db, "ws-acme", OPERATOR, DAY);
     const env = envFor(db);
-    // note: `erin` owns W2 and holds no grant there.
     const res = await worker.fetch(await authedRequest("/dashboard/other/api/support/grants", "erin"), env);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { grants: unknown[] }).grants).toEqual([]);
-    // note: The live grant on W1 is unaffected by the empty read on W2.
     const onW1 = await worker.fetch(await authedRequest("/dashboard/acme/api/support/grants", "dana"), env);
     expect(((await onW1.json()) as { grants: Array<{ operator_login: string }> }).grants).toHaveLength(1);
     expect(auditRows(db)).toEqual([]);
@@ -517,15 +454,11 @@ describe("the read ceiling is method-aware", () => {
     const { db } = fixture();
     grant(db, "ws-acme", OPERATOR, DAY);
     const env = envFor(db);
-    // why: Hono dispatches HEAD through the GET route, so the ceiling must admit it
-    // for the handler that actually runs.
     const head = await worker.fetch(
       await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR, { method: "HEAD" }),
       env,
     );
     expect(head.status).toBe(200);
-    // note: The same path with a write method: no POST handler is mounted there, and
-    // the ceiling refuses before the router can answer 404/405.
     const post = await worker.fetch(
       await authedRequest("/dashboard/acme/api/support/workspace", OPERATOR, {
         method: "POST",
@@ -539,17 +472,12 @@ describe("the read ceiling is method-aware", () => {
 });
 
 describe("the shell boot asks the gate's own classifier", () => {
-  /** note: The boot the served shell injected. */
   function bootOf(html: string): SpaBoot {
     const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
     if (json === undefined) throw new Error("no injected SPA boot");
     return JSON.parse(json) as SpaBoot;
   }
 
-  /** note: A strict deployment with ONE live workspace (`default`, seeded by 0026) —
-   * the shape the landing redirect resolves. Migration 0026 seeds it, so this
-   * fixture only adds the operator login.
-   */
   function soleWorkspaceFixture() {
     const db = createMigratedTestD1();
     seedUser(db, OPERATOR);
@@ -563,11 +491,8 @@ describe("the shell boot asks the gate's own classifier", () => {
       await authedRequest("/dashboard", OPERATOR, { accept: "text/html" }),
       withSpaAssets(envFor(db)),
     );
-    // note: The support view derives its API base from the pathname's workspace
-    // segment; on the bare mount that read has no tenant and 404s.
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
-    // note: A shell navigation is not a workspace route: no audit row.
     expect(auditRows(db)).toEqual([]);
   });
 
@@ -586,10 +511,6 @@ describe("the shell boot asks the gate's own classifier", () => {
   });
 
   test("a granted operator's support landing names the workspace ID, not its slug", async () => {
-    // note: ONE live workspace whose id differs from its readable slug: the landing
-    // and the boot must both emit the id, so a later slug change cannot stale
-    // the URL. 0026's seeded `default` row is retired first (it is the sole
-    // workspace, which is the shape this landing needs).
     const db = createMigratedTestD1();
     seedUser(db, OPERATOR);
     seed(db, "DELETE FROM workspaces");
@@ -626,17 +547,12 @@ describe("the shell boot asks the gate's own classifier", () => {
       withSpaAssets(envFor(db)),
     );
     const boot = bootOf(await res.text());
-    // note: The gate classifies `invitee` (the grant is intentionally inert), so the
-    // shell must not replace the acceptance surface with the support face.
     expect(boot.supportOnly).toBeUndefined();
-    // note: Discovery names the workspace by its ID — the ref the accept POST takes
-    // and the ref the shell links to.
     expect(boot.pendingInvites?.map((invite) => invite.workspaceRef)).toEqual(["ws-acme"]);
   });
 });
 
 describe("the shell boot reads the workspace facts once", () => {
-  /** note: Every statement the request prepares, in order. */
   function recordingDb(db: TestD1): { observed: TestD1; statements: string[] } {
     const statements: string[] = [];
     const observed = {
@@ -649,11 +565,8 @@ describe("the shell boot reads the workspace facts once", () => {
     return { observed, statements };
   }
 
-  /** note: The boot's own access join: the workspace row + role + login's users row. */
   const ACCESS_JOIN = /FROM workspaces w\s+LEFT JOIN users u/;
-  /** note: A plain `workspaces` re-read by ref or as the sole workspace. */
   const WORKSPACE_REREAD = /SELECT id, slug, name, created_at FROM workspaces/;
-  /** note: The classifier's member test, which the access join has already answered. */
   const MEMBERSHIP_REREAD = /FROM workspace_members WHERE workspace_id = \? AND user_id = \?/;
 
   function count(statements: string[], shape: RegExp): number {
@@ -669,19 +582,14 @@ describe("the shell boot reads the workspace facts once", () => {
       withSpaAssets(envFor(observed)),
     );
     expect(res.status).toBe(200);
-    // note: Reinstating a second sole-vs-ref resolution (a second `workspaceBoot`, or
-    // `operatorSupportWorkspace` re-reading the workspace + role itself) raises
-    // both counts and fails here.
     expect(count(statements, ACCESS_JOIN)).toBe(1);
     expect(count(statements, WORKSPACE_REREAD)).toBe(0);
     expect(count(statements, MEMBERSHIP_REREAD)).toBe(0);
-    // invariant: The behaviour the reads exist for is unchanged.
     const boot = bootOf(await res.text());
     expect(boot.supportOnly).toBe(true);
     expect(boot.workspaceRef).toBe("acme");
   });
 
-  /** note: The boot the served shell injected. */
   function bootOf(html: string): SpaBoot {
     const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
     if (json === undefined) throw new Error("no injected SPA boot");
@@ -689,8 +597,6 @@ describe("the shell boot reads the workspace facts once", () => {
   }
 
   test("a granted operator's bare /dashboard reuses the boot it already paid for", async () => {
-    // why: The sole-workspace shape: `/dashboard` names no ref, so the landing can
-    // only resolve through the deployment's single workspace.
     const db = createMigratedTestD1();
     seedUser(db, OPERATOR);
     grant(db, "default", OPERATOR, DAY);
@@ -701,17 +607,11 @@ describe("the shell boot reads the workspace facts once", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
-    // invariant: The landing resolves from the boot extras — the same request must not
-    // re-run the sole-vs-ref resolution.
     expect(count(statements, ACCESS_JOIN)).toBe(1);
     expect(count(statements, WORKSPACE_REREAD)).toBe(0);
   });
 
   test("a plain workspace member's bare /dashboard lands through the shared landing policy", async () => {
-    // note: A member, not an operator and holding no grant: the request reaches
-    // `signedInLanding` itself (the support redirect above absorbs the operator
-    // path), so this is the case that keeps the policy wired to the boot it
-    // already paid for.
     const db = createMigratedTestD1();
     const member = seedUser(db, "dana");
     seedMembership(db, "default", member, "member");
@@ -722,8 +622,6 @@ describe("the shell boot reads the workspace facts once", () => {
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
-    // note: Reinstating a second `workspaceBoot` (the landing re-reading what the
-    // dispatch already resolved) raises this count and fails here.
     expect(count(statements, ACCESS_JOIN)).toBe(1);
     expect(count(statements, WORKSPACE_REREAD)).toBe(0);
   });
@@ -737,8 +635,6 @@ describe("the shell boot reads the workspace facts once", () => {
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
-    // note: No grant: no support face. The grant probe is the classifier's own read,
-    // and the workspace facts still come from the single access join.
     expect(boot.supportOnly).toBeUndefined();
     expect(count(statements, ACCESS_JOIN)).toBe(1);
     expect(count(statements, MEMBERSHIP_REREAD)).toBe(0);
@@ -755,7 +651,6 @@ describe("the shell boot reads the workspace facts once", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { workspace: { id: string; slug: string; name: string; created_at: string } };
     expect(body.workspace.id).toBe("ws-acme");
-    // why: The authorization join supplied the row; a separate ref lookup would repeat it.
     expect(count(statements, WORKSPACE_REREAD)).toBe(0);
   });
 });

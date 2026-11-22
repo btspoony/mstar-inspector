@@ -1,17 +1,3 @@
-/** note: The console's plain variant (compass D15; console migration, 2026-11-01).
- *
- * "Plainer" is one re-map, never a second component set: `data-surface="ops"`
- * on `src/spa/admin.html`'s `<html>` puts every Radix portal — the
- * flag-confirm dialog, dropdowns, tooltips — under the same variant, because
- * they mount on `<body>` and inherit the root's custom properties. The
- * generated block then withholds the accent tone whole.
- *
- * Four assertions, because the rule breaks four ways: the attribute leaves
- * the document root, the generated block stops re-mapping a token, the bridge
- * stops resolving through those tokens (so the re-map never reaches the
- * painted control), or admin code names the tone (or a brand step) the variant
- * withholds and its own colours win over the re-map.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -37,7 +23,6 @@ const BUTTON_PATH = join(REPO, "src/design-system/primitives/button.tsx");
 const ADMIN_HTML = readFileSync(ADMIN_HTML_PATH, "utf8");
 const CSS = readFileSync(CSS_PATH, "utf8");
 
-/** note: The declarations of the first block whose selector is `selector`. */
 function block(css: string, selector: string): Record<string, string> {
   const at = css.indexOf(selector);
   if (at === -1) throw new Error(`stylesheet has no ${selector}`);
@@ -50,12 +35,10 @@ function block(css: string, selector: string): Record<string, string> {
   return out;
 }
 
-/** note: The declarations of the generated ops block, parsed out of the stylesheet. */
 function opsBlock(): Record<string, string> {
   return block(CSS, ':root[data-surface="ops"] {');
 }
 
-/** note: One `var(--x)` chain resolved inside a merged declaration map. */
 function resolve(vars: Record<string, string>, name: string): string {
   let value = vars[name];
   for (let hop = 0; hop < 8 && value?.startsWith("var("); hop += 1) {
@@ -65,10 +48,6 @@ function resolve(vars: Record<string, string>, name: string): string {
   return value;
 }
 
-/** note: The declarations the console's document resolves against. `data-theme` and
- * `data-surface` selectors both score 0-2-0, so the merge order is the
- * stylesheet's source order: bridge, root, the stored-light branch, then ops.
- */
 function consoleVars(theme: "dark" | "light"): Record<string, string> {
   const bridge = block(readFileSync(BRIDGE_PATH, "utf8"), ":root {");
   const base = { ...bridge, ...block(CSS, ":root {") };
@@ -76,7 +55,6 @@ function consoleVars(theme: "dark" | "light"): Record<string, string> {
   return { ...base, ...light, ...opsBlock() };
 }
 
-/** note: `src/spa/admin/**` plus the document — the console's whole surface. */
 function adminFiles(): string[] {
   const sources = readdirSync(ADMIN_DIR, { recursive: true })
     .map(String)
@@ -89,15 +67,11 @@ describe("the console's plain variant", () => {
   test("the admin document root carries data-surface=ops", () => {
     const rootTag = ADMIN_HTML.match(/<html\b[^>]*>/)?.[0];
     expect(rootTag, "admin.html has no <html> tag").toBeDefined();
-    // note: On the ROOT: `:root[data-surface="ops"]` is what the stylesheet keys the
-    // re-map on, and a page wrapper would leave every portal un-re-mapped.
     expect(rootTag).toContain('data-surface="ops"');
   });
 
   test("the generated ops block withholds the accent tone and the brand action", () => {
     const ops = opsBlock();
-    // note: The file is a pure function of the source, so a hand edit or a dropped
-    // declaration is a difference here rather than a silently plainer console.
     expect(ops).toEqual({ ...opsSurface });
     for (const face of ["bg", "border", "fg", "solid"]) {
       expect(ops[`tone-accent-${face}`], `--tone-accent-${face}`).toBe(
@@ -105,26 +79,16 @@ describe("the console's plain variant", () => {
       );
     }
     expect(ops["button-primary-bg"]).toBe("var(--tone-neutral-bg)");
-    // note: One plane up the neutral ladder: the base hover brightens the brand
-    // step, which would put the withheld accent straight back on the action.
     expect(ops["button-primary-hover-bg"]).toBe("var(--surface-overlay)");
   });
 
   test("the console's primary action paints the quiet pair", () => {
-    // note: The classes the default variant actually wears — `bg-primary` and
-    // `text-primary-foreground` — are read from the component, so a renamed
-    // utility fails here instead of passing on an assumption. `<Button>` with
-    // no `variant` prop (every console submit and the flag confirm) is this
-    // face.
     const variant = /default:\s*"([^"]+)"/.exec(readFileSync(BUTTON_PATH, "utf8"))?.[1];
     const fillKey = /(?:^|\s)bg-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant ?? "")?.[1];
     const labelKey = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(variant ?? "")?.[1];
     expect(fillKey, "the default variant paints a token fill").toBeDefined();
     expect(labelKey, "the default variant paints a token label").toBeDefined();
 
-    // note: Painted, not declared: resolve the pair through the same cascade the
-    // document uses. The declared ops block reaching `button-primary-*` is not
-    // enough — before this bridge hop it left the fill on `tone-neutral-solid`.
     for (const theme of ["dark", "light"] as const) {
       const vars = consoleVars(theme);
       expect(resolve(vars, fillKey!), `${theme} ops fill`).toBe(resolve(vars, "tone-neutral-bg"));
@@ -134,12 +98,8 @@ describe("the console's plain variant", () => {
 
   test("no admin file names the withheld tone or a brand step", () => {
     const files = adminFiles();
-    // invariant: A scan that found nothing to scan is not a pass.
     expect(files.length).toBeGreaterThan(1);
 
-    // note: A `tone="accent"` prop is a semantic request for the emphasis face, not
-    // the token name this guard forbids — the surface re-map withholds the
-    // paint, and the painted pair is asserted above.
     const forbidden = [
       { rule: "tone-accent-*", re: /tone-accent-/ },
       { rule: "brand step", re: /\bbrand-\d{2,3}\b/ },
@@ -161,10 +121,6 @@ describe("the console's plain variant", () => {
 
 describe("the console document's own styles", () => {
   test("admin.html spells no colour, radius or hairline of its own", () => {
-    // invariant: The shell's frame is the document's only hand-written CSS. Every value
-    // in it has to be a token reference: a hex (or a palette step) re-introduces
-    // a second colour vocabulary, a `--rounded-*` alias re-spells the radius
-    // tiers, and a px width on a border is the hairline someone hand-corrected.
     const rules = [
       { rule: "colour literal", re: /#[0-9a-fA-F]{3,8}\b/ },
       { rule: "palette step", re: /var\(--(?:gray|gray-alpha|brand|blue|red|amber|green|purple)-/ },
@@ -182,7 +138,6 @@ describe("the console document's own styles", () => {
 });
 
 describe("the release version lives on the console only", () => {
-  /** invariant: The identity-only App settings face — every member's tenant view. */
   const TENANT_PAYLOAD = {
     can_manage: false as const,
     workspace_id: "ws_0123456789abcdefghijkl",
@@ -207,8 +162,6 @@ describe("the release version lives on the console only", () => {
 
   test("the runtime screen carries the deployment's version", () => {
     const markup = renderToStaticMarkup(createElement(RuntimePage, { locale: "en" }));
-    // note: The build constant plus its localized sentence, so a dropped footer or a
-    // stale key both fail here.
     expect(markup).toContain(`v${APP_VERSION}`);
     expect(markup).toContain(t("en", "admin.runtime.version", { version: `v${APP_VERSION}` }));
   });
@@ -226,12 +179,9 @@ describe("the release version lives on the console only", () => {
 });
 
 describe("every ADMIN_PAGES id is served and routed", () => {
-  // note: Registered paths on the admin sub-app (src/admin/index.ts), Hono's own projection.
   const adminRoutes = adminApp.routes.map((route) => route.method.toUpperCase() + " " + route.path);
 
   test("each page id has a served document and a localized nav label", () => {
-    // note: One document per id from the Worker, one id lookup in the client entry —
-    // both sides read the SAME list, so a dropped page fails here either way.
     expect(ADMIN_PAGES.length).toBeGreaterThan(0);
     for (const page of ADMIN_PAGES) {
       expect(adminRoutes, "no served document for " + page.id).toContain("GET /" + page.id);
@@ -264,11 +214,9 @@ describe("the shared-bot routes are registered", () => {
   test("the workspace route table carries the owning workspace's scope write", () => {
     const routes = paths(dashboardApp);
     expect(routes).toContain("PATCH /:workspaceRef/api/apps/:appId/bot/scope");
-    // invariant: The route must sit in APP_ROUTES with write access, not a stray handler:
-    // read-classified rows would widen the operator read ceiling's suffix match.
     const row = APP_ROUTES.find((entry) => entry.path === "/api/apps/:appId/bot/scope");
     expect(row, "workspace scope route is declared in APP_ROUTES").toBeDefined();
-    expect(row && row.method).toBe("patch"); // note: APP_ROUTES declares its own lowercase method
+    expect(row && row.method).toBe("patch");
     expect(row && row.access).toBe("write");
   });
 });

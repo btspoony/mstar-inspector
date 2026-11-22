@@ -1,22 +1,3 @@
-/**
- * note: The workspace settings usage card: the month's credit spend against the
- * ceiling, then the shared-bot vs own-bot published-review counts for the same
- * UTC month (spec bot-scope-and-claiming § Review usage).
- *
- * One card, two counters, and the copy says which is which: the credit block
- * reads `usage_events` (attempts — the same rows the members page counts) and
- * the rows below read `reviews` (published reviews). `workspace.quotaBasis`
- * states that relationship on the surface, so a workspace at its ceiling can
- * tell which number will refuse it.
- *
- * Credits are presentation over integer RP: every figure the server sends is
- * RP, and this file divides by the judging profile's `rp_per_credit` to two
- * decimals. Nothing is stored or compared in credits.
- *
- * `self-hosted` renders no quota block at all — there is no ceiling to report —
- * so the card falls back to the published-review rows alone, exactly as the
- * previous iteration shipped it.
- */
 import { useEffect, useState } from "react";
 import { FlowSection } from "@design-system";
 import { quotaSpent } from "../../store/quota-store";
@@ -26,14 +7,12 @@ import { apiBase } from "../workspace-base";
 import { parseReviewUsage, type ReviewUsage } from "./data";
 import { LoadFailedNotice, LoadingNotice, PageNotice } from "./PageNotice";
 
-/** note: The shared-bot row's value and hint per state (the two states differ). */
 const SHARED_BOT_COPY: Record<ReviewUsage["sharedBot"], { value: DictionaryKey; hint?: DictionaryKey }> = {
   available: { value: "workspace.usageAvailable" },
   "not-in-plan": { value: "workspace.usageNotInPlan", hint: "workspace.usageNotInPlanHint" },
   "not-designated": { value: "workspace.usageNotDesignated", hint: "workspace.usageNotDesignatedHint" },
 };
 
-/** invariant: RP as credits, two decimals — the only place the division happens. */
 function credits(rp: number, rpPerCredit: number): string {
   return (rp / rpPerCredit).toFixed(2);
 }
@@ -91,8 +70,6 @@ export function ReviewUsageCard({
         <div className="flex flex-col gap-3">
           {quota === null ? null : (
             <>
-              {/* why: The consequence, not just the figure: the pair below is kept so
-                  the reader sees by how much, and this states what happens next. */}
               {quotaSpent(quota.usedRp, quota.limitRp) ? (
                 <PageNotice
                   kind="warn"
@@ -152,13 +129,9 @@ export function ReviewUsageCard({
               </div>
             )}
           </dl>
-          {/* why: The surface statement: which counter each figure reads, so the
-              credits and the review counts are never read as the same number. */}
           {quota === null ? null : (
             <p className="text-xs text-muted-foreground">{t(locale, "workspace.quotaBasis")}</p>
           )}
-          {/* note: The hint explains the status row directly above it and is absent
-              for `available`. */}
           {deploymentMode === "self-hosted" || status.hint === undefined ? null : (
             <p className="text-xs text-muted-foreground">{t(locale, status.hint)}</p>
           )}

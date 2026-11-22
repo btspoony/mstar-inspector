@@ -7,28 +7,7 @@ import { parseSupportGrants, type SupportGrantRow } from "../pages/data";
 import { ErrorState } from "./state/ErrorState";
 import { PageNotice } from "../pages/PageNotice";
 
-/**
- * invariant: The tenant's always-on support notice (platform-operator support, 2026-10).
- *
- * Every member of the workspace sees who holds a live support grant, why, and
- * when it ends. It is deliberately UNDISMISSABLE and carries no control — the
- * tenant can neither end nor edit a grant; only the operator's own store action
- * can. The read is the same `/api/support/grants` face the operator's support
- * view uses, so a grant that lapses simply stops being listed.
- *
- * The read happens once per workspace, not once per route: the shell survives
- * client-side navigation, so a pathname-keyed effect re-read a notice that
- * cannot change between pages of the same workspace. A failed read renders an
- * inline error with a retry control instead of reading as "no active grants".
- *
- * Renders nothing for the operator's own support face (they already see their
- * grants there) and for a login with no workspace yet.
- */
 
-/**
- * note: One read per workspace base (the workspace, not the page), shared by every
- * mount that lands on it. A rejection is evicted so retry reads again.
- */
 const reads = new Map<string, Promise<SupportGrantRow[] | null>>();
 
 function readGrants(base: string): Promise<SupportGrantRow[] | null> {
@@ -51,8 +30,6 @@ export function SupportNotice({ boot, pathname }: { boot: SpaBoot; pathname: str
 
   useEffect(() => {
     if (skip) return;
-    // invariant: Clear first: a workspace switch must not leave another workspace's
-    // notice on screen.
     setGrants([]);
     setFailed(false);
     let live = true;

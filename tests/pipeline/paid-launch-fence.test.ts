@@ -1,14 +1,3 @@
-/**
- * note: The paid-launch fence: one row per attempt decides who may provision, who
- * may pay, and whether a result is already durable.
- *
- * Proven here, in both directions: a lost reply, a retried entry and a restart
- * each leave the attempt `launched` and refuse a second launch (no exec, no
- * model); a persisted result is read back without touching the container; the
- * state machine cannot be walked twice because the statements are conditional
- * and the schema couples `persisted` to a stored result; and a replayed prepare
- * never provisions a second container for an attempt that already has one.
- */
 
 import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -18,8 +7,6 @@ import { secretTransforms } from "../../src/pipeline/redact";
 import { failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-// note: The shared mock must register the workerd builtin BEFORE the sandbox adapter
-// loads, so those modules cannot be static imports here.
 import "../helpers/cloudflare-workers-mock";
 
 const {
@@ -68,12 +55,6 @@ function progress() {
   };
 }
 
-/**
- * note: The attempt module's view of a sandbox, with the test deciding the facts that
- * matter here: whether the paid exec's reply is lost, whether the container
- * already carries the attempt's marker, and whether that container is replaced
- * right after the replay proves it.
- */
 type SandboxDouble = {
   events: string[];
   counts: { paidCalls: number };
@@ -90,19 +71,14 @@ function sandboxDouble(
     marker?: "present" | "absent" | "foreign";
     vanishAfterProof?: boolean;
     markerClaimThrows?: boolean;
-    /** note: A guarded read's reply is lost: the proof (`proof`) or the command after it. */
     guardedThrows?: "proof" | "command";
-    /** note: The paid exec's own stdout and status (defaults: empty, 0). */
     paidStdout?: string;
     paidExitCode?: number;
-    /** note: The report document (`mstar.report/v1`) the post-runner read answers with. */
     reportDoc?: string;
   } = {},
 ): SandboxDouble {
   const events: string[] = [];
   const counts = { paidCalls: 0 };
-  // note: The container's own filesystem: the claim writes these bytes, so a later
-  // guarded read answers `ran` only on the incarnation the claim stamped.
   const container = { marked: decision.marker === "present", proofServed: false, guardedCalls: 0 };
   return {
     events,
@@ -117,8 +93,6 @@ function sandboxDouble(
     async runMarked(_marker: string, command: string) {
       events.push(`marked:${command}`);
       container.guardedCalls += 1;
-      // note: The paid exec runs through the guarded form, so this is where a paid
-      // call (and its lost reply) is observed now.
       if (command.includes(RUNNER_PATH)) {
         counts.paidCalls += 1;
         if (decision.lostReply === true) throw new Error("container exec reply lost");
@@ -130,9 +104,6 @@ function sandboxDouble(
         throw new Error("guarded read reply lost");
       }
       if (!container.marked) return { kind: "unknown" as const };
-      // note: The proof lands on the incarnation that exists; a container replaced
-      // immediately afterwards answers `unknown` to every later guarded
-      // command, so the caller must not act on a replacement.
       if (decision.vanishAfterProof === true) {
         if (container.proofServed) return { kind: "unknown" as const };
         container.proofServed = true;
@@ -143,7 +114,7 @@ function sandboxDouble(
           ? `${SHA}\n`
           : command.includes(RUNNER_PATH)
             ? (decision.paidStdout ?? "")
-            : // note: A bounded read answers "<content>\n<overflow flag>\n".
+            :
               command.includes(REPORT_OUTPUT_PATH)
               ? `${decision.reportDoc ?? ""}\n0\n`
               : "",
@@ -201,7 +172,6 @@ function executionInput(sandbox: SandboxDouble, db: TestD1) {
   };
 }
 
-/** note: The row an attempt that prepared successfully would already carry. */
 async function claimedAttempt(db: TestD1): Promise<void> {
   expect(await claimReviewAttempt(db, ATTEMPT, Date.now(), null)).toBe("claimed");
 }
@@ -241,13 +211,9 @@ describe("the paid step is taken at most once per attempt", () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
 
-    // note: The container accepted the paid exec; the reply never came back. The
-    // guarded form needs a MARKED container to reach the exec at all.
     await expect(
       runReviewAttempt(executionInput(sandboxDouble({ marker: "present", lostReply: true }), db)),
     ).rejects.toThrow("container exec reply lost");
-    // note: The ambiguity is RECORDED, not resolved by retrying: the row says the
-    // paid step was taken and no result is durable.
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
 
     const retry = sandboxDouble();
@@ -261,8 +227,6 @@ describe("the paid step is taken at most once per attempt", () => {
     await claimedAttempt(db);
     expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
 
-    // note: A fresh entry after a process restart holds no in-memory state; the row
-    // is the only witness, and it refuses.
     const sandbox = sandboxDouble();
     await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
     expect(sandbox.events).toEqual([]);
@@ -295,9 +259,6 @@ describe("the paid step is taken at most once per attempt", () => {
     await claimedAttempt(db);
     const sandbox = sandboxDouble({ marker: "present" });
 
-    // note: The claim's reply is lost. It may have landed, so the attempt may already
-    // own its one paid step — that is `unknown`, never a settleable failure and
-    // never a second launch.
     await expect(
       runReviewAttempt({
         ...executionInput(sandbox, db),
@@ -305,9 +266,6 @@ describe("the paid step is taken at most once per attempt", () => {
       }),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
 
-    // note: The claim now sits in the statement that is about to SEND: everything
-    // before it (here the runner-input write) already ran, and the paid exec
-    // never did. The row stays `provisioned`, which cleanup may still release.
     expect(sandbox.events.filter((event) => event.includes(RUNNER_PATH))).toEqual([]);
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("provisioned");
   });
@@ -324,7 +282,6 @@ describe("the paid step is taken at most once per attempt", () => {
       }),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
 
-    // note: The paid call did run; only its durability is unconfirmed.
     expect(sandbox.counts.paidCalls).toBe(1);
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
   });
@@ -357,8 +314,6 @@ describe("the state machine cannot be walked twice", () => {
     await claimedAttempt(db);
     expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
 
-    // note: Bypassing the module: the state may not reach `persisted` without the
-    // result in the same row, so completion cannot outrun durability.
     expect(() =>
       db
         .prepare("UPDATE review_launches SET state = 'persisted', persisted_at_ms = ? WHERE attempt_id = ?")
@@ -375,10 +330,6 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
     await claimedAttempt(db);
     expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
 
-    // note: Bypassing the module: SQLite's three-valued CHECK used to accept this
-    // (`(NULL = 'failed') = (state = 'failed')` is NULL, which a CHECK allows),
-    // so a terminal row could exist with nothing saying which outcome it
-    // records — and cleanup treats "terminal" as authorisation.
     expect(() =>
       db
         .prepare("UPDATE review_launches SET state = 'failed', failed_at_ms = ? WHERE attempt_id = ?")
@@ -389,7 +340,6 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
   });
 
   test("a stored terminal row whose outcome cannot be read decodes as unreadable, not as permission", async () => {
-    // note: A row written by another build: timestamps present, outcome missing.
     const row = {
       state: "failed",
       claimed_at_ms: 1,
@@ -407,8 +357,6 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
 
     const decoded = await readReviewLaunch(stub, ATTEMPT);
     expect(decoded?.state).toBe("unknown");
-    // note: `unknown` is never `null`: it means a row exists that nothing may reason
-    // about, and cleanup holds the container on it.
     expect(launchVerdict(decoded)).toEqual({ kind: "unrecognised" });
   });
 
@@ -420,9 +368,6 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
       runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidExitCode: 1 }), db)),
     ).rejects.toThrow();
 
-    // note: Destruction permission is NOT recorded before the failure row exists, so
-    // a lost settlement or a racing cleanup cannot destroy a paid container on
-    // a state whose other half never landed.
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
   });
 });
@@ -435,8 +380,6 @@ describe("no runner output reaches durable storage before redaction", () => {
     const sandbox = sandboxDouble({
       marker: "present",
       paidStdout: `{"note":"${secret}"}`,
-      // note: The runner writes a SECOND document after the exec; its free text is
-      // model-authored too, and it lands on the same row.
       reportDoc: JSON.stringify({
         schema: "mstar.report/v1",
         headSha: SHA,
@@ -458,8 +401,6 @@ describe("no runner output reaches durable storage before redaction", () => {
     expect(execution.run.stdout).toContain("[REDACTED]");
     expect(execution.report?.overview).not.toContain(secret);
     expect(execution.report?.overview).toContain("[REDACTED]");
-    // note: The durable copy — what a later collect and a later host can read — is
-    // the SAME sanitized value; the raw material never crosses the boundary.
     const stored = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT) as { result_json: string };
@@ -478,8 +419,6 @@ describe("no runner output reaches durable storage before redaction", () => {
     const secret = "sk-live/9f2a44c1d3";
     const forms = secretTransforms(secret);
     const echoes = [forms.raw, forms.urlEncoded, forms.base64, forms.base64url, forms.hex];
-    // The escaped echo is a JSON escape in the serialized envelope, so only
-    // decoding (not a substring form) can recover the raw character.
     const stdout =
       `{"schema":"mstar.review/v1","target":{"head_sha":"${SHA}"},"attempt_id":"${ATTEMPT}",` +
       `"score":0.5,"blocked":false,"echoes":${JSON.stringify(echoes)},` +
@@ -493,7 +432,6 @@ describe("no runner output reaches durable storage before redaction", () => {
     const stored = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT) as { result_json: string };
-    // Stored shape is the module's own `encodeExecution` contract.
     const row = JSON.parse(stored.result_json) as { run: { stdout: string; exitCode: number } };
     const envelope = JSON.parse(row.run.stdout) as {
       target: { head_sha: string };
@@ -505,15 +443,12 @@ describe("no runner output reaches durable storage before redaction", () => {
     };
     expect(envelope.echoes).toEqual(Array(5).fill("[REDACTED]"));
     expect(envelope.escaped).toBe("[REDACTED]");
-    // Host-written identity and non-string leaves are the unredacted bytes.
     expect(envelope.target.head_sha).toBe(SHA);
     expect(envelope.attempt_id).toBe(ATTEMPT);
     expect(envelope.score).toBe(0.5);
     expect(envelope.blocked).toBe(false);
     expect(row.run.exitCode).toBe(0);
     expect(execution.run.stdout).toBe(row.run.stdout);
-    // The stored bytes did change — that is the point — but they are still a
-    // serialized envelope this build can parse.
     expect(row.run.stdout).not.toBe(stdout);
   });
 
@@ -536,15 +471,12 @@ describe("no runner output reaches durable storage before redaction", () => {
     const stored = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT) as { result_json: string };
-    // Stored shape is the module's own `encodeExecution` contract.
     const row = JSON.parse(stored.result_json) as { run: { stdout: string } };
     const envelope = JSON.parse(row.run.stdout) as {
       schema: string;
       summary_md: string;
       target: { head_sha: string };
     };
-    // The whole-value echo is gone; the structural value containing it survives,
-    // so the stored envelope still parses as a review.
     expect(envelope.summary_md).toBe("[REDACTED]");
     expect(envelope.schema).toBe("mstar.review/v1");
     expect(envelope.target.head_sha).toBe(SHA);
@@ -561,7 +493,6 @@ describe("no runner output reaches durable storage before redaction", () => {
       blocked: false,
     });
 
-    // The only evidence the envelope is not reshaped: its own bytes round-trip.
     expect(JSON.stringify(JSON.parse(stdout))).toBe(stdout);
 
     await runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db));
@@ -588,8 +519,6 @@ describe("a replayed prepare never provisions a second container", () => {
     expect(first.events.filter((event) => event.startsWith("claim:"))).toHaveLength(1);
     expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
 
-    // note: A replaced container (empty filesystem) is refused WITHOUT writing a
-    // marker on it: the row already says this attempt provisioned.
     const replacement = sandboxDouble({ marker: "absent" });
     await expect(prepareReviewAttempt(prepareInput(db, replacement))).rejects.toBeInstanceOf(
       AttemptUnknownError,
@@ -597,8 +526,6 @@ describe("a replayed prepare never provisions a second container", () => {
     expect(replacement.events.filter((event) => event.startsWith("claim:"))).toEqual([]);
     expect(replacement.events).toEqual([`marked:true`]);
 
-    // note: The same live incarnation still proceeds: a replay is refused a second
-    // container, not a second look at the first one.
     const same = sandboxDouble({ marker: "present" });
     await expect(prepareReviewAttempt(prepareInput(db, same))).resolves.toMatchObject({ headSha: SHA });
     expect(same.events.filter((event) => event.startsWith("claim:"))).toEqual([]);
@@ -611,8 +538,6 @@ describe("a replayed prepare never provisions a second container", () => {
     await prepareReviewAttempt(prepareInput(db, sandbox));
 
     expect(sandbox.events[0]).toBe(`claim:${attemptMarker(ATTEMPT)}`);
-    // note: Provisioning is granted by the row, so the claim exists before anything
-    // touched the container.
     expect(await readReviewLaunch(db, ATTEMPT)).not.toBeNull();
   });
 
@@ -620,15 +545,11 @@ describe("a replayed prepare never provisions a second container", () => {
     const db = createMigratedTestD1();
     await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
 
-    // note: The proof lands on the incarnation that exists; the container is gone
-    // before the clone, so every later command must stay guarded and refuse.
     const replaced = sandboxDouble({ marker: "present", vanishAfterProof: true });
     await expect(prepareReviewAttempt(prepareInput(db, replaced))).rejects.toBeInstanceOf(
       AttemptUnknownError,
     );
 
-    // note: Nothing was run through the start-permitted path: an unguarded clone here
-    // would have started (and used) a replacement the proof never covered.
     expect(replaced.events.some((event) => event.startsWith("run:"))).toBe(false);
     expect(replaced.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
   });
@@ -637,8 +558,6 @@ describe("a replayed prepare never provisions a second container", () => {
     const db = createMigratedTestD1();
     await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
 
-    // note: The proof's reply is lost. That is not an answer: no incarnation is
-    // proven, so no command may run on any of them.
     const rejected = sandboxDouble({ marker: "present", guardedThrows: "proof" });
     await expect(prepareReviewAttempt(prepareInput(db, rejected))).rejects.toBeInstanceOf(
       AttemptUnknownError,
@@ -663,8 +582,6 @@ describe("a replayed prepare never provisions a second container", () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble();
 
-    // note: A rejected claim does not establish that no earlier entry provisioned —
-    // so nothing is resolved, claimed or run on that evidence.
     await expect(
       prepareReviewAttempt(prepareInput(db, sandbox, failingDb(db, "INSERT INTO review_launches"))),
     ).rejects.toBeInstanceOf(AttemptUnknownError);
@@ -679,16 +596,11 @@ describe("a lost marker reply is unknown", () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble({ markerClaimThrows: true });
 
-    // note: The write may already have landed, so a concurrent replay can prove this
-    // container and start paying on it: settling this entry as a failure would
-    // then destroy a paying container. Unknown.
     await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toBeInstanceOf(
       AttemptUnknownError,
     );
 
     expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
-    // note: The provisioning claim itself succeeded: this entry owns the attempt, and
-    // the attempt's outcome — not its claim — is what is unknown.
     expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
   });
 });

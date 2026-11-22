@@ -12,14 +12,9 @@ import { WorkspaceSetupPage } from "./pages/WorkspaceSetupPage";
 import { WorkspaceSettingsPage } from "./pages/WorkspaceSettingsPage";
 
 export function DashboardPage({ route, boot }: { route: ClientRoute; boot: SpaBoot }) {
-  // note: A login with no workspace sees creation, not the workspace pages: its API
-  // reads would 404 (sign-in joins nobody).
   if (boot.needsWorkspace === true && route.page !== "login") {
     return <WorkspaceSetupPage boot={boot} />;
   }
-  // invariant: A platform operator under a support grant sees ONE read-only face, whatever
-  // workspace page the URL names: every other page here would only 403 its own
-  // data reads. The grant, not the path, decides what an operator may read.
   if (boot.supportOnly === true && route.page !== "login") {
     return <SupportPage boot={boot} />;
   }

@@ -1,25 +1,3 @@
-/**
- * note: Terminal failure status (compass D9, migration 0087) — every terminal review
- * failure persists ONE approved category, and that category selects the
- * user-facing wording.
- *
- * What this suite pins:
- *   - the approved set is exactly `paused` / `unknown-failure` / `budget-stop` /
- *     `cap-stop`, each with fixed text (or, for `budget-stop`, the existing
- *     trusted exhaustion summary) and NO interpolated error;
- *   - every terminal path `decideConclusion` reaches carries a category, and the
- *     two deliberate exceptions carry none (a missed gate is a verdict on the
- *     change; a superseded attempt is not a fault);
- *   - the operator's end-to-end cap and a spent tier window stay DISTINCT
- *     categories;
- *   - the store freezes the category in the SAME write as the terminal intent,
- *     reads it back, leaves a waiting attempt with none, clears it when a proof
- *     correction turns the failure into success, and refuses an unknown
- *     category at the schema.
- *
- * Everything runs against the real migration SQL (bun:sqlite double); no
- * GitHub, Cloudflare or Sandbox request is made (spec §7.13).
- */
 import { describe, expect, test } from "bun:test";
 import {
   TERMINAL_FAILURE_TEXT,
@@ -57,7 +35,6 @@ const T0 = 1_700_000_000_000;
 const DEADLINE = T0 + CHECK_LEASE_MS;
 const GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
 
-/** note: The four approved categories — nothing else may ever be persisted. */
 const APPROVED: readonly CheckFailureStatus[] = ["paused", "unknown-failure", "budget-stop", "cap-stop"];
 
 const BUDGET_RECORD = {
@@ -102,7 +79,6 @@ function seededDb(): TestD1 {
   return db;
 }
 
-/** note: One claimed attempt holding its own live lease. */
 async function claimed(db: TestD1, deliveryId?: string): Promise<{ attemptId: string; lease: Lease }> {
   const result = await claimAttempt(db, {
     scope: SCOPE,
@@ -121,20 +97,14 @@ async function claimed(db: TestD1, deliveryId?: string): Promise<{ attemptId: st
 
 describe("the approved wording set (compass D9)", () => {
   test("exactly four categories, each with its fixed approved text", () => {
-    // note: The catalogue is closed: the set below IS the set a Check may carry.
     expect(Object.keys(TERMINAL_FAILURE_TEXT).sort()).toEqual(["cap-stop", "paused", "unknown-failure"]);
     expect(APPROVED).toHaveLength(4);
     for (const status of APPROVED) {
       const text = terminalFailureSummary(status, BUDGET_RECORD);
-      // note: Keyed by category, not formatted from an error: the same category
-      // always renders exactly the same string.
       expect(terminalFailureSummary(status, BUDGET_RECORD)).toBe(text);
       expect(text.length).toBeGreaterThan(0);
     }
-    // note: `budget-stop` keeps the existing exhaustion summary, unchanged.
     expect(terminalFailureSummary("budget-stop", BUDGET_RECORD)).toBe(budgetExhaustedSummary(BUDGET_RECORD));
-    // note: Each category names its single next step (or, for the budget stop, the
-    // documented shrink-the-diff guidance).
     expect(TERMINAL_FAILURE_TEXT.paused).toContain("no action is needed from you");
     expect(TERMINAL_FAILURE_TEXT["unknown-failure"]).toContain("mentioning the review bot in a PR comment");
     expect(TERMINAL_FAILURE_TEXT["cap-stop"]).toContain("maximum review duration");
@@ -160,9 +130,7 @@ describe("every terminal path persists a category (or deliberately none)", () =>
   const verdictMissed = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("needs fixes", 40) });
   const verdictMet = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("ship it", 90) });
 
-  /** note: name → the conclusion the terminal path freezes + the category it must carry. */
   const paths: ReadonlyArray<{ path: string; decided: CheckConclusion; status: CheckFailureStatus | null }> = [
-    // note: Execution faults with no readable result.
     { path: "pre-publication-failure", decided: decideConclusion({ proof: null, outcome: "pre-publication-failure", gate: GATE, review: null }), status: "unknown-failure" },
     { path: "degraded-not-posted", decided: decideConclusion({ proof: null, outcome: "degraded-not-posted", gate: GATE, review: null }), status: "unknown-failure" },
     { path: "publication-unknown", decided: decideConclusion({ proof: null, outcome: "publication-unknown", gate: GATE, review: null }), status: "unknown-failure" },
@@ -182,10 +150,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
       }),
       status: "unknown-failure",
     },
-    // note: The wall-clock categories, keyed by the WINDOW the stop drew on and never
-    // by the observer's `cause`: the same spent instant is reported as
-    // `sandbox-kill` by the runner input write's kill and as `consumer-deadline`
-    // by the refusal right after it.
     {
       path: "budget-stop: runner window, runner-deadline",
       decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "runner-deadline" } }),
@@ -212,7 +176,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
       }),
       status: "cap-stop",
     },
-    // note: Deliberate exceptions: a result, and a skip that is not a fault.
     { path: "gate-missed verdict", decided: verdictMissed, status: null },
     { path: "gate-met", decided: verdictMet, status: null },
     { path: "superseded", decided: decideConclusion({ proof: null, outcome: "superseded", gate: GATE, review: null, headSha: SHA }), status: null },
@@ -223,7 +186,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
     for (const { path, decided, status } of paths) {
       expect({ path, status: decided.failureStatus ?? null }).toEqual({ path, status });
       if (status !== null) {
-        // note: A category IS the wording: the frozen text is that category's text.
         expect({ path, summary: decided.summary }).toEqual({
           path,
           summary: terminalFailureSummary(status, BUDGET_RECORD),
@@ -234,9 +196,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
   });
 
   test("a category is only ever written with a terminal conclusion", () => {
-    // note: `CheckConclusion.desired` excludes `in_progress` by type, so no path can
-    // pair a category with a waiting attempt; the DB round-trip below proves
-    // the same at the row.
     for (const { decided } of paths) {
       expect(decided.desired).not.toBe("in_progress");
     }
@@ -250,10 +209,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
   });
 
   test("one spent instant maps to one category, whoever observed it", () => {
-    // note: The runner input write is killed at the anchored deadline (`sandbox-kill`)
-    // while the refusal right after it reports the Worker's cutoff
-    // (`consumer-deadline`); both spent the SAME frozen runner window, so both
-    // are one category.
     const sameInstant = (["runner-deadline", "sandbox-kill", "consumer-deadline"] as const).map((cause) =>
       decideConclusion({
         proof: null,
@@ -267,7 +222,6 @@ describe("every terminal path persists a category (or deliberately none)", () =>
       expect(decided.failureStatus).toBe("budget-stop");
       expect(decided.summary).toBe(terminalFailureSummary("budget-stop", BUDGET_RECORD));
     }
-    // note: The preparation window is a different fact, whatever its cause reads.
     for (const cause of ["consumer-deadline", "sandbox-kill"] as const) {
       const decided = decideConclusion({
         proof: null,
@@ -286,7 +240,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
   test("a failure writes its category in the same statement as the intent", async () => {
     const db = seededDb();
     const { attemptId, lease } = await claimed(db);
-    // note: A WAITING attempt carries none.
     expect((await getCheckAttempt(db, attemptId))!.terminalFailureStatus).toBeNull();
 
     const conclusion: CheckConclusion = {
@@ -300,7 +253,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     const row = (await getCheckAttempt(db, attemptId))!;
     expect(row.desired).toBe("failure");
     expect(row.terminalFailureStatus).toBe("unknown-failure");
-    // note: The frozen text is the approved wording, verbatim.
     const stored = (await db
       .prepare("SELECT desired_summary FROM review_checks WHERE id = ?")
       .bind(attemptId)
@@ -312,8 +264,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     const db = seededDb();
     const deliveryId = "delivery-paused";
     const { attemptId, lease } = await claimed(db, deliveryId);
-    // note: Attach a proven run, then give the row back the way an attach does: the
-    // settlement takes a released row its own delivery created.
     expect(await setCheckCreateState(db, attemptId, lease, "sending", undefined, T0)).toBe(true);
     expect(await attachCheckRunId(db, attemptId, lease, 4242, T0)).toBe(true);
     db.raw.prepare("UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?").run(attemptId);
@@ -321,7 +271,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     const lifecycle = createCheckLifecycle({
       db,
       nowMs: () => T0,
-      // note: Store-only settlement: the paused gate must spend no credential.
       getAdapter: () => null,
       getCheckGate: async () => null,
     });
@@ -380,8 +329,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
   });
 
   test("a proof never rewrites a frozen stop category", async () => {
-    // note: Both stops name WHY the attempt ended, so a prior generation's
-    // publication is not evidence that can overwrite them.
     for (const status of ["cap-stop", "budget-stop"] as const) {
       const db = seededDb();
       const { attemptId, lease } = await claimed(db);
@@ -460,9 +407,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
       )
       .run(APP_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
 
-    // note: A second writer with the SAME desired but its own text and category: the
-    // frozen intent is what the user may already have seen, so only the proof
-    // link moves.
     expect(
       await setCheckDesired(
         db,
@@ -488,8 +432,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
   test("an expired lease leaves the known category recoverable under the recovery claim", async () => {
     const db = seededDb();
     const { attemptId } = await claimed(db);
-    // note: The attempt's own deadline ran out with nothing frozen, so its execution
-    // lease is dead: the recovery lease is the only way to record what we know.
     const later = DEADLINE + 1;
     const recovery = await claimCheckRecovery(db, attemptId, "recovery:fixture", later);
     expect(recovery).not.toBeNull();
@@ -513,8 +455,6 @@ describe("the category is frozen with the intent (migration 0087)", () => {
     const row = (await getCheckAttempt(db, attemptId))!;
     expect(row.desired).toBe("failure");
     expect(row.terminalFailureStatus).toBe("cap-stop");
-    // note: Immediately due: a frozen intent needs no due time, so the minute lane
-    // can deliver the approved wording instead of concluding an unknown failure.
     const due = await listCheckReconcileBatch(db, later);
     expect(due.map((attempt) => attempt.identity.attemptId)).toContain(attemptId);
   });

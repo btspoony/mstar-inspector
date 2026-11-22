@@ -1,7 +1,3 @@
-/**
- * why: Prior-findings recheck on an increment round: which rows are targeted, and
- * how their revalidated disposition is rendered once in the prepared body.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
@@ -36,15 +32,6 @@ const PREVIOUS_SHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 const issueView = (issueNumber: number) => issueViewCommand(TEST_OWNER, TEST_REPO, issueNumber);
 
-/**
- * note: One reviewed row for this PR at `headSha` (the increment base candidate).
- * The identity DEFAULTS to the canonical one `makePayload()` reviews with, so a
- * negative case can differ in exactly one field and still prove the read's
- * filter (not an identity mismatch) is what excluded the row.
- * `reviewedAt` is the ONE format the column carries in production — SQLite's
- * `datetime('now')`, i.e. `YYYY-MM-DD HH:MM:SS` — because base selection
- * ORDERS BY this text.
- */
 function seedReview(
   db: TestD1,
   headSha: string,
@@ -87,30 +74,17 @@ function seedReview(
     );
 }
 
-/** note: The written runner input JSON (the one `base64 -d >` write of the round). */
 function runnerInput(): Record<string, unknown> {
   return JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
 }
 
-/**
- * note: The prepared review body the round sent — and the round sent exactly ONE.
- * Taking the first call would let a duplicate-publication regression pass every
- * body assertion in this suite.
- */
 function preparedBody(): string {
   const prepared = h.commenterCalls.filter((call) => call.op === "post-prepared");
   expect(prepared).toHaveLength(1);
-  // note: The harness records `args` as `unknown`; this double is its only writer.
   const call = prepared[0]!.args as { body: string };
   return call.body;
 }
 
-/**
- * why: The harness contract this suite is the reference consumer of: every recorder
- * belongs to ONE instance. Covered set — the ack record and the commenter op
- * log, i.e. the two recorders a second suite previously cleared under the
- * shared singletons.
- */
 describe("consumer harness isolation", () => {
   test("a call recorded on one instance is invisible to another", async () => {
     const first = createConsumerHarness();
@@ -139,8 +113,6 @@ describe("prior-findings recheck", () => {
   test("the recheck catalog is still built from the FULL diff on an increment round", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.compareStatus = "ahead";
-    // invariant: The full diff proves the prior finding's file; the increment touches a
-    // DIFFERENT file, so a catalog built from the increment would exclude it.
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.incrementDiffStdout = [
       "diff --git a/docs/readme.md b/docs/readme.md",
@@ -182,8 +154,6 @@ describe("prior-findings recheck", () => {
       planToFix: "1. Add the guard.\n2. Rerun the suite.",
     });
     const db = await createSeededTestD1();
-    // note: One open prior finding, rechecked this round: the body's ONE
-    // prior-findings rendering carries it.
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
@@ -192,20 +162,15 @@ describe("prior-findings recheck", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const body = preparedBody();
-    // note: The linked issue was read (the issue number came from the PR body).
     expect(h.sandbox.calls.some((c) => c.cmd === issueView(7))).toBe(true);
     expect(body).toContain("**What this PR does**: Adds an expiry guard to the auth path.");
     expect(body).toContain("<summary>Revalidated findings</summary>");
-    // invariant: ONE prior-findings rendering: the §7.10 coverage line + the row land
-    // exactly once.
     expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
     expect(body.match(/Reassessed /g)).toHaveLength(1);
     expect(body).toContain(`| ${TARGET_ORIGINAL.title} | addressed (verified-fix) | current-code |`);
     expect(body).toContain("### Linked-issue AC");
     expect(body).toContain("Expiry rejected: met.");
     expect(body).toContain("<details><summary>Expand fix plan</summary>");
-    // note: Template order: overview inside Review, the collapsed revalidated block
-    // after findings, plan last.
     expect(body.indexOf("## 📋 Review")).toBeLessThan(body.indexOf("**What this PR does**"));
     expect(body.indexOf("**What this PR does**")).toBeLessThan(
       body.indexOf("<summary>Revalidated findings</summary>"),

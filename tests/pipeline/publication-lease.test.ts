@@ -1,20 +1,3 @@
-/**
- * note: Publication-lease wiring tests (spec review-lifecycle §7.9, ADR
- * `2026-11-21-two-tier-lease-for-long-review`): every GitHub send proves
- * publication AUTHORITY for its exact action at the moment of the send.
- *
- * Proven here against the REAL store and scripted transports:
- *   - a Check terminal update and a prepared review comment refuse to send
- *     while another holder — a send OR the same action's recovery — owns the
- *     action's lease;
- *   - a lease that lapses between acquisition and dispatch refuses AT dispatch,
- *     after the token mint / marker scan that spent the window;
- *   - a settled send releases the action and nothing else: the attempt's
- *     execution lease is untouched, and releasing execution never releases a
- *     held publication lease;
- *   - send and recovery contend on the SAME key, so switching intent cannot
- *     bypass a live holder.
- */
 
 import { describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
@@ -70,7 +53,6 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const T0 = 1_700_000_000_000;
 const RUN_ID = 4242;
 
-/** note: The transaction clock every test drives explicitly (spec §7.0). */
 let CLOCK = T0;
 
 async function seededDb(): Promise<TestD1> {
@@ -87,7 +69,6 @@ async function seededDb(): Promise<TestD1> {
   return db;
 }
 
-/** note: One claimed attempt holding a live execution lease from `T0`. */
 async function claimedAttempt(db: D1Like): Promise<{ attemptId: string; identity: CheckIdentity; lease: Lease }> {
   CLOCK = T0;
   const result = await claimAttempt(db, {
@@ -106,7 +87,6 @@ async function claimedAttempt(db: D1Like): Promise<{ attemptId: string; identity
 
 const SUCCESS: CheckConclusion = { desired: "success", title: CHECK_NAME, summary: "review gate met" };
 
-/** note: The attempt with an attached run and its terminal intent frozen at `T0`. */
 async function readyToComplete(db: D1Like): Promise<{ attemptId: string; identity: CheckIdentity; lease: Lease }> {
   const claim = await claimedAttempt(db);
   expect(await setCheckCreateState(db, claim.attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
@@ -128,7 +108,6 @@ function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload>
   };
 }
 
-/** note: A scripted Checks surface that records every request it was asked to send. */
 function fakeChecks(identity: CheckIdentity): {
   octokit: ChecksOctokit;
   updates: ChecksRelabelParams[];
@@ -145,8 +124,6 @@ function fakeChecks(identity: CheckIdentity): {
         },
         async update(params) {
           updates.push(params);
-          // note: Delivery is the conclusion AND the frozen text (spec §7.9): the
-          // scripted run echoes the text it was sent, as GitHub stores it.
           const output = "output" in params ? (params.output as { title?: string; summary?: string }) : undefined;
           const conclusion = "conclusion" in params ? (params.conclusion as string) : undefined;
           return {
@@ -194,8 +171,6 @@ describe("Check send — the publication lease of check:complete", () => {
   test("a terminal update is refused while another holder owns the action", async () => {
     const db = await seededDb();
     const { attemptId, identity, lease } = await readyToComplete(db);
-    // note: The action's lease is live under a RECOVERY holder: a send must contend
-    // with it, not bypass it.
     expect(
       await claimPublicationLease(db, {
         attemptId, actionKey: PUBLICATION_ACTION_CHECK_COMPLETE, holder: "recover:2", mode: "recover", nowMs: T0,
@@ -210,7 +185,6 @@ describe("Check send — the publication lease of check:complete", () => {
     expect(result.kind === "unavailable" && result.reason).toMatch(/publication lease for check:complete is held by another holder/);
     expect(result.kind === "unavailable" && result.requests).toBe(0);
     expect(fake.updates).toHaveLength(0);
-    // note: The refused send released nothing: the live acquisition is still theirs.
     expect((await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE))?.holder).toBe("recover:2");
   });
 
@@ -218,8 +192,6 @@ describe("Check send — the publication lease of check:complete", () => {
     const db = await seededDb();
     const { attemptId, identity, lease } = await readyToComplete(db);
     const fake = fakeChecks(identity);
-    // note: Token minting and client resolution cross the 120 s publication window
-    // (the execution lease is still live — CHECK_LEASE_MS is longer).
     const adapter = createChecksAdapter({
       db,
       nowMs: () => CLOCK,
@@ -237,7 +209,6 @@ describe("Check send — the publication lease of check:complete", () => {
     );
     expect(result.kind === "unavailable" && result.requests).toBe(0);
     expect(fake.updates).toHaveLength(0);
-    // note: Handed off: the action is free for the recovery lane again.
     expect((await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE))?.holder).toBeNull();
   });
 
@@ -254,8 +225,6 @@ describe("Check send — the publication lease of check:complete", () => {
     expect(released?.holder).toBeNull();
     expect(released?.lease_until_ms).toBeNull();
     expect(released?.mode).toBe("send");
-    // note: The attempt's EXECUTION lease is a different row and stays exactly as it
-    // was: a settled publication never gives away the right to run the attempt.
     const row = await checkRow(db, attemptId);
     expect(row.holder).toBe(lease.holder);
     expect(row.lease_epoch).toBe(lease.epoch);
@@ -263,7 +232,6 @@ describe("Check send — the publication lease of check:complete", () => {
   });
 });
 
-/** note: The prepared-review send input: a create (no target) with a fixed body. */
 const commentInput = (publicationId: string) => ({
   installationId: 123,
   owner: "acme",
@@ -276,7 +244,6 @@ const commentInput = (publicationId: string) => ({
   publicationId,
 });
 
-/** note: An Issues surface; `onScan` is where the marker scan's cost is simulated. */
 function fakeIssues(onScan?: () => void | Promise<void>): {
   octokit: PostOctokit;
   calls: { verb: string; params: Record<string, unknown> }[];
@@ -311,7 +278,6 @@ const guardFor = (db: D1Like, attemptId: string): PublicationSendGuard => ({
   attemptId,
 });
 
-/** note: The no-Check-row lane: the caller's §7.7 journal claim, proved at dispatch. */
 const journalGuard = (db: D1Like, publicationId: string, claim: Lease): PublicationSendGuard => ({
   kind: "journal",
   db,
@@ -320,7 +286,6 @@ const journalGuard = (db: D1Like, publicationId: string, claim: Lease): Publicat
   claim,
 });
 
-/** note: Stage and claim ONE journal publication, returning the claim this sender holds. */
 async function journalClaim(db: D1Like, publicationId: string): Promise<Lease> {
   await stagePublication(db, {
     id: publicationId,
@@ -377,8 +342,6 @@ describe("prepared comment send — the publication lease of comment:<publicatio
   test("a lease that lapses during the marker scan refuses the create", async () => {
     const db = await seededDb();
     const { attemptId } = await claimedAttempt(db);
-    // note: The scan is the unbounded await between acquiring the action and the
-    // mutation — here it spends the whole 120 s window.
     const fake = fakeIssues(() => {
       CLOCK = T0 + PUBLICATION_LEASE_MS + 1;
     });
@@ -405,12 +368,10 @@ describe("prepared comment send — the publication lease of comment:<publicatio
     const released = await publicationRow(db, attemptId, "comment:pub-3");
     expect(released?.holder).toBeNull();
     expect(released?.mode).toBe("send");
-    // note: The SAME key is what recovery takes: the released send hands it over...
     const recovered = await claimPublicationLease(db, {
       attemptId, actionKey: "comment:pub-3", holder: "pub:recover-b", mode: "recover", nowMs: CLOCK,
     });
     expect(recovered).not.toBeNull();
-    // note: ...and a live recovery blocks the next send of that action.
     expect(
       await claimPublicationLease(db, {
         attemptId, actionKey: "comment:pub-3", holder: "send:again", mode: "send", nowMs: CLOCK,
@@ -430,30 +391,19 @@ describe("the two lease tiers release independently", () => {
       }),
     ).not.toBeNull();
 
-    // note: The unrelated execution path gives its own lease back...
     expect(await releaseCheckClaim(db, attemptId, lease, T0)).toBe(true);
-    // note: ...and the publication lease is still held.
     expect((await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE))?.holder).toBe("pub:send-a");
 
     const held = { holder: "pub:send-a", epoch: (await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE))!.lease_epoch, untilMs: T0 + PUBLICATION_LEASE_MS };
     expect(await releasePublicationLease(db, { attemptId, actionKey: PUBLICATION_ACTION_CHECK_COMPLETE, lease: held, nowMs: T0 })).toBe(true);
     expect((await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE))?.holder).toBeNull();
-    // note: The Check row is untouched by either publication release.
     const row = await checkRow(db, attemptId);
-    expect(row.holder).toBeNull(); // note: cleared by the EXECUTION release above, not by the publication one
+    expect(row.holder).toBeNull();
     expect(row.execution_deadline_ms).toBe(T0 + CHECK_LEASE_MS);
   });
 });
 
-// note: ---------------------------------------------------------------------------
-// Fix-round regressions: identity, absence, and the pre-dispatch re-proofs
-// ---------------------------------------------------------------------------
 
-/**
- * note: A store whose `publication_leases` reads answer late — the await between
- * acquiring the action and the mutation that no in-process clock otherwise
- * produces.
- */
 function delayedFenceRead(db: D1Like, delayMs: number): D1Like {
   const wrap = (query: string, inner: D1StatementLike): D1StatementLike => ({
     bind: (...values) => wrap(query, inner.bind(...values)),
@@ -480,8 +430,6 @@ describe("the key's identity is the Check attempt, never the execution one", () 
   test("a comment send naming an id that is not a Check attempt is refused", async () => {
     const db = await seededDb();
     await claimedAttempt(db);
-    // note: The container/execution identity the pipeline used to pass. A lease row
-    // for it exists and is live — the exact phantom fence the wrong id built.
     const executionId = "review-0e5c1f2a-container";
     expect(
       await claimPublicationLease(db, {
@@ -548,7 +496,6 @@ describe("publication authority is required, not optional", () => {
 describe("the held-check relabel re-proves its row at dispatch", () => {
   test("a row that stopped qualifying during client resolution is not relabelled", async () => {
     const db = await seededDb();
-    // note: A released delivery row in the shape the predicate relabels.
     const claim = await claimAttempt(db, {
       scope: SCOPE,
       githubAppId: GITHUB_APP_ID,
@@ -568,9 +515,6 @@ describe("the held-check relabel re-proves its row at dispatch", () => {
       db,
       nowMs: () => CLOCK,
       getOctokit: async () => {
-        // note: The review reaches its conclusion while the client is being resolved:
-        // freezing the intent makes the conditional write at dispatch select
-        // nothing, so the queued text can never overwrite the settled run.
         expect(await setCheckDesired(db, claim.attempt.identity.attemptId, claim.lease, SUCCESS, null, T0)).toBe(true);
         return fake.octokit;
       },
@@ -611,8 +555,6 @@ describe("the held-check relabel takes the output action's publication lease", (
     const attemptId = claim.attempt.identity.attemptId;
     expect(await setCheckCreateState(db, attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
     expect(await attachCheckRunId(db, attemptId, claim.lease, RUN_ID, T0)).toBe(true);
-    // note: The run's own output send (its terminal update, or a recovery of it) is
-    // in flight: while that lease is held, no relabel may publish over it.
     expect(
       await claimPublicationLease(db, {
         attemptId,
@@ -669,10 +611,6 @@ describe("the held-check relabel takes the output action's publication lease", (
     expect(await setCheckCreateState(db, attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
     expect(await attachCheckRunId(db, attemptId, claim.lease, RUN_ID, T0)).toBe(true);
 
-    // note: The relabel's own eligibility write runs before the lease is taken; the
-    // review concludes right after it. The adapter's FIRST `getCheckAttempt` is
-    // the fence's own identity proof, the SECOND is the read under the lease —
-    // that one must see the settled row.
     let reads = 0;
     const raced = new Proxy(db as object, {
       get(target, prop) {
@@ -734,7 +672,6 @@ describe("the held-check relabel takes the output action's publication lease", (
 
     expect(sent).toBe(false);
     expect(fake.updates).toHaveLength(0);
-    // note: The re-read is what saw the settled row: the fence's proof, then this.
     expect(reads).toBe(2);
   });
 
@@ -756,9 +693,6 @@ describe("the held-check relabel takes the output action's publication lease", (
     expect(await setCheckCreateState(db, attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
     expect(await attachCheckRunId(db, attemptId, claim.lease, RUN_ID, T0)).toBe(true);
 
-    // note: The row is still eligible, but the acquisition's window closes while the
-    // eligibility is being read — the second `getCheckAttempt` (the read under
-    // the lease) is where the clock passes the expiry.
     let reads = 0;
     const lapsing = new Proxy(db as object, {
       get(target, prop) {
@@ -813,7 +747,6 @@ describe("the held-check relabel takes the output action's publication lease", (
 
     expect(sent).toBe(false);
     expect(fake.updates).toHaveLength(0);
-    // note: Nothing was retained: the refused attempt handed its action back.
     const lease = await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE);
     expect(lease?.holder).toBeNull();
     CLOCK = T0;
@@ -824,8 +757,6 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
   test("a marker rewritten after the scan is left in place", async () => {
     const marker = (round: number) =>
       `<!-- mstar-inspector:review-degraded:v1 round=${round} -->\n**Review degraded: output failed schema validation**`;
-    // note: The scan sees round 1; by the delete the same comment carries round 2 —
-    // a newer degraded publication that must survive.
     const bodies = [marker(1), marker(2)];
     let scans = 0;
     const deleted: number[] = [];
@@ -885,8 +816,6 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
         }
         scans += 1;
         if (scans === 2) {
-          // note: Paused between the scan and the delete: a newer degraded body is
-          // staged for the SAME target, and a writer tries to reuse it.
           await stagePublication(db, {
             id: "pub-newer-degraded",
             nowMs: T0,
@@ -904,7 +833,6 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
               lineIntents: [],
             },
           });
-          // note: A staging (or sending) writer must lose the same target.
           const writer = await claimDegradedTarget(db, {
             scope: SCOPE,
             commentId: 7001,
@@ -918,8 +846,6 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
       return json(200, {});
     }) as unknown as typeof fetch;
 
-    // note: The PRODUCTION factory: its delete wires both the preservation recheck
-    // and the target exclusion against the same journal.
     const commenter = createReviewCommenter(
       { APP_ID: "1001", PRIVATE_KEY: TEST_PRIVATE_KEY },
       { db, nowMs: () => T0, fetchImpl },
@@ -935,10 +861,7 @@ describe("the degraded cleanup deletes only the marker it scanned", () => {
     });
 
     expect(scans).toBeGreaterThanOrEqual(2);
-    // note: The cleanup holds the exact target while its delete is in flight: the
-    // writer's acquisition must lose, not race the DELETE.
     expect(writerClaimWon).toBe(false);
-    // note: A newer staged body is still that comment's evidence: no delete.
     expect(outcome.deleted).toBe(0);
     expect(outcome.skipped).toBe(1);
     expect(deletes).toBe(0);
@@ -950,8 +873,6 @@ describe("the frozen deadline is read after the lease proof", () => {
     const db = await seededDb();
     const { attemptId } = await claimedAttempt(db);
     const fake = fakeIssues();
-    // note: The lease proof's read answers 250ms late; the frozen instant is 150ms
-    // away. A clock read BEFORE the verification would see 150ms of room.
     const slow = delayedFenceRead(db, 250);
     const notAfterMs = Date.now() + 150;
 
@@ -967,15 +888,11 @@ describe("the frozen deadline is read after the lease proof", () => {
   });
 });
 
-// note: ---------------------------------------------------------------------------
-// Fix round 2: the no-Check lane's own authority, and the Check create
-// ---------------------------------------------------------------------------
 
 describe("the no-Check lane proves its journal claim at dispatch", () => {
   test("a claim taken over during the scan refuses the send", async () => {
     const db = await seededDb();
     const claim = await journalClaim(db, "pub-j1");
-    // note: The recovery lane takes the journal row over while this sender scans.
     const fake = fakeIssues(async () => {
       expect(await claimPublication(db, "pub-j1", "recovery:9", T0 + PUBLICATION_LEASE_MS + 1, "sending")).not.toBeNull();
     });
@@ -1004,8 +921,6 @@ describe("the no-Check lane proves its journal claim at dispatch", () => {
 
     expect(sent.commentId).toBe(9001);
     expect(fake.calls.map((call) => call.verb)).toEqual(["create"]);
-    // note: The §7.7 claim belongs to the caller: the send proves it but never hands
-    // it to recovery (the caller releases after the proof is persisted).
     const row = await journalRow(db, "pub-j2");
     expect(row.holder).toBe(claim.holder);
     expect(row.lease_epoch).toBe(claim.epoch);
@@ -1032,7 +947,6 @@ describe("the Check create proves its own action lease", () => {
     );
     expect(result.kind === "unavailable" && result.requests).toBe(0);
     expect(fake.creates).toHaveLength(0);
-    // note: Nothing was attempted, so the row keeps its honest pre-send state.
     const row = await db
       .prepare(`SELECT create_state FROM review_checks WHERE id = ?`)
       .bind(attemptId)
@@ -1103,8 +1017,6 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
       return { data: comments };
     };
     return {
-      // note: Route-aware pagination: reviews and the review's comments each get
-      // their complete list.
       paginate: async (route: unknown) => (route === listReviews ? reviews : comments),
       rest: {
         issues: {
@@ -1212,8 +1124,6 @@ describe("the line-batch readback verifies authorship, uniqueness and publicatio
 describe("the degraded-target acquisition uses the row its own statement wrote", () => {
   test("a same-holder acquisition landing between write and read cannot be mistaken for this one", async () => {
     const inner = await seededDb();
-    // note: A store whose degraded_target_leases READ is delayed; the hook models a
-    // same-holder release + re-claim that lands in that window.
     let hookFired = false;
     const delaying: D1Like = {
       prepare: (query) => {
@@ -1223,8 +1133,6 @@ describe("the degraded-target acquisition uses the row its own statement wrote",
           first: async <T = Record<string, unknown>>() => {
             if (!hookFired && query.includes("FROM degraded_target_leases")) {
               hookFired = true;
-              // note: The delete's unresolved marker is cleared first: this witness
-              // is about the epoch alone, not about the unresolved exclusion.
               await inner
                 .prepare(
                   `UPDATE degraded_target_leases
@@ -1233,8 +1141,6 @@ describe("the degraded-target acquisition uses the row its own statement wrote",
                 )
                 .bind("cleanup")
                 .run();
-              // note: Same holder, SAME clock: the re-claim has the same expiry, so
-              // only the epoch distinguishes it from this acquisition.
               await claimDegradedTarget(inner, {
                 scope: SCOPE,
                 commentId: 7001,
@@ -1259,7 +1165,6 @@ describe("the degraded-target acquisition uses the row its own statement wrote",
       nowMs: T0,
       deleting: true,
     });
-    // note: The exclusive RETURNING row is this acquisition's, not a later epoch's.
     expect(lease).toEqual({ holder: "cleanup", epoch: 1, untilMs: T0 + PUBLICATION_LEASE_MS });
   });
 });
@@ -1271,8 +1176,6 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
     const cleanup = await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true });
     if (cleanup === null) throw new Error("fixture: the cleanup claim was refused");
 
-    // note: The intent is durable from the acquisition onward: a writer is refused
-    // while the DELETE runs and, if the worker died, after the lease lapses.
     expect(await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 })).toBeNull();
     expect(
       await claimDegradedTarget(db, {
@@ -1282,7 +1185,6 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
       }),
     ).toBeNull();
 
-    // note: A known outcome (the DELETE request returned) is proof and frees it.
     expect(await releaseDegradedTarget(db, { ...ref, lease: cleanup, nowMs: T0, keep: false })).toBe(true);
     expect(
       await claimDegradedTarget(db, { ...ref, holder: "degraded:writer", nowMs: T0 + PUBLICATION_LEASE_MS * 10 + 1 }),
@@ -1294,9 +1196,6 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
     const ref = { scope: SCOPE, commentId: 7001 };
     expect(await claimDegradedTarget(db, { ...ref, holder: "cleanup", nowMs: T0, deleting: true })).not.toBeNull();
 
-    // note: A complete, successful scan of the same (still present) marker cannot
-    // prove a late DELETE will not land: the cleanup skips it and the target
-    // stays closed to writers, forever.
     const marker = `<!-- mstar-inspector:review-degraded:v1 round=1 -->\n**Review degraded: output failed schema validation**`;
     const json = (status: number, body: unknown) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -1378,7 +1277,6 @@ describe("a degraded target whose delete is unresolved blocks every writer", () 
       }),
     ).rejects.toThrow(/scan failed/);
 
-    // note: A walk that did not complete proves nothing; the exclusion stays.
     expect(
       await claimDegradedTarget(db, {
         ...ref,

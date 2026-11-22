@@ -1,11 +1,3 @@
-/** note: The console's review usage read (spec bot-scope-and-claiming
- * § Review usage): `GET /_internal_admin/api/usage`.
- *
- * Pinned at the product seams: one statement answers every live workspace
- * (zeros included) with the month it covers, the decided order holds, the
- * shared/own split is the bot's scope, and only an operator may read it — the
- * route sits behind the same login path as every other console read.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -53,7 +45,6 @@ function seedWorkspace(db: TestD1, id: string, name: string, deletedAt: string |
   );
 }
 
-/** note: One review stamped at the current instant, i.e. inside the route's month. */
 function seedReviewNow(db: TestD1, id: string, prNumber: number, targetId: string, botId: string): void {
   seed(
     db,
@@ -78,10 +69,6 @@ async function usageApi(db: TestD1, login: string | null = OPERATOR): Promise<Re
   );
 }
 
-/** note: `ws-alpha` spends the shared bot (2) and its own bot (1); `ws-gamma` spends
- * only its own bot (4); `ws-beta` nothing; `ws-retired` is soft-deleted with a
- * review that must stay invisible.
- */
 function fixture(): TestD1 {
   const db = createMigratedTestD1();
   seedUser(db, OPERATOR);
@@ -120,9 +107,6 @@ describe("GET /_internal_admin/api/usage", () => {
     const body: unknown = await res.json();
     expect(body).toEqual({
       month: reviewUsageMonth(new Date()).month,
-      // note: Shared descending, then own descending, then name ascending. The
-      // retired workspace is gone; `default` (seeded by migration 0026) and
-      // ws-beta answer zeros rather than disappearing.
       workspaces: [
         { workspaceId: "ws-alpha", workspaceName: "Alpha", workspaceSlug: "ws-alpha", sharedReviews: 2, ownReviews: 1 },
         { workspaceId: "ws-gamma", workspaceName: "Gamma", workspaceSlug: "ws-gamma", sharedReviews: 0, ownReviews: 4 },

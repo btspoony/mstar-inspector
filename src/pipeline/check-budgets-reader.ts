@@ -1,22 +1,3 @@
-/**
- * note: Check budgets at the queue consumer's Check seam (spec §7.10).
- *
- * The runtime-config store (src/dashboard/runtime-config-store.ts) owns the
- * parse, the defaults and the degraded answer; this module is the ONE export
- * the pipeline consumes — `readCheckBudgets` — so the consumer never imports a
- * dashboard route surface. It adds exactly one thing: the structured warn a
- * degraded read owes the operator.
- *
- * Why the warn lives here: the store answers both budgets as the documented
- * defaults with `degraded: true` instead of throwing (a broken settings read
- * must not make a Check unbounded or block the review), and the consumer's log
- * channel is the one place these lines are read. Exactly one line per degraded
- * read — never per budget, never per retry.
- *
- * The budgets are global (no workspace column), so the log fields carry no PR
- * identity: a caller adapting its job log keeps its own fields and spreads
- * these.
- */
 import {
   getCheckBudgets,
   type CheckBudgets,
@@ -30,12 +11,8 @@ export { CHECK_TERMINALIZE_DEFAULT, CHECK_UPDATE_DEFAULT } from "../dashboard/ru
 /** The one warn payload this reader emits. */
 export type CheckBudgetsLogFields = {
   event: "review_check_budgets_degraded";
-  /** invariant: The budgets the reader answered with — always the documented defaults. */
   terminalize_ms: number;
   update_ms: number;
-  /** invariant: Why the read degraded; the store's cause, never a re-derivation. Its own
-   * key because the consumer channel's `reason` is the closed admission
-   * vocabulary. */
   degraded_reason?: DegradedReason;
 };
 

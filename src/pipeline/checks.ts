@@ -1,51 +1,3 @@
-/**
- * note: GitHub Checks adapter (spec review-lifecycle §7.9).
- *
- * One advisory Check per review attempt: created `queued` at the delivery
- * acceptance head SHA, promoted to `in_progress` when the review itself starts,
- * and terminalized from PERSISTED publication proof.
- * The adapter is the only place a Check HTTP request is built, and it builds no
- * credential: the client comes from `src/pipeline/comment.ts`'s single per-App
- * `createAppAuth` path through the SAME purpose-scoped `review-write` octokit
- * (spec §7.6 — the `checks: "write"` grant rides that one permission set; there
- * is no second token, client or auth object).
- *
- * Contract boundaries the rest of the pipeline depends on:
- *
- *   - `beginCheck` sends `name`, `head_sha`, `external_id` and a status, and
- *     NEVER `details_url` (spec §7.9: "omit details_url entirely" — there is no
- *     Inspector destination, and RL-12 forbids inventing one).
- *   - A missing Checks surface, a 403/404 permission rejection, and any API or
- *     transport failure all return `{ kind: "unavailable", reason, requests }`.
- *     `requests` is the NUMBER of Checks calls this lane actually invoked: `0`
- *     for every refusal taken before the callable ran (unowned attempt, missing
- *     surface/client, an expired lease fence), `1` once it was answered or lost
- *     — the recovery lane's create-versus-adopt gate. The
- *     adapter never throws: Check failure must not block or delay publication
- *     (D3/RL-3), and `unavailable` changes recovery bookkeeping only — never
- *     the attempt's `desired` or `observed`.
- *   - Ownership is proven from PERSISTED state immediately before a send
- *     (`getCheckOwnership`) plus the identity fields on the response.
- *     `beginCheck` refuses an attempt that already owns a run; `completeCheck`
- *     refuses a run id this attempt did not persist, refuses `in_progress` by
- *     type, and never accepts a caller-chosen arbitrary check id.
- *   - `adoptCheckRun` matches ONLY on the persisted `external_id`, the owning
- *     `app.id`, `head_sha` and the exact run name, across at most two
- *     `filter: "all"` pages of `listForRef`. Zero exact matches after a
- *     complete walk is `absent`; a saturated walk, a malformed candidate or two
- *     distinct matches is `incomplete`/`ambiguous` — never `absent`, because
- *     GitHub caps `listForRef` at the 1000 most recent check suites on a ref.
- *   - `decideConclusion` reads PERSISTED proof plus the APPLIED review, never
- *     a code path. A confirmed normal publication concludes `success` only
- *     when the review satisfies the App's configured gate (score floor plus
- *     passing verdicts); a missed gate, an unreadable review, a degraded
- *     publication and every unconfirmed or failed execution are `failure`.
- *     An EMPTY increment has no review of its own, so it INHERITS the reviewed
- *     head's result judged against the current gate — the same
- *     success/failure rule — and concludes `neutral` ONLY when that baseline
- *     result cannot be read. A skipped round may therefore never replace a
- *     failing required Check for the same content with `neutral`.
- */
 
 import type { D1Like } from "../store/types";
 import {
@@ -92,7 +44,6 @@ import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
 
-// note: --- Transport seam (spec §7.6: one credential path; §7.9: typed responses) ---
 
 /** A check-run payload as the installed octokit types deliver it. */
 export type CheckRunPayload = {
@@ -103,12 +54,6 @@ export type CheckRunPayload = {
   status: string;
   conclusion: string | null;
   app: { id: number | bigint } | null;
-  /**
-   * invariant: The human-facing text GitHub stores on the run. It is the only remote
-   * evidence that the approved wording LANDED: a conclusion alone is what an
-   * earlier writer left behind (spec §7.9, plan "Persistence and
-   * reconciliation contract").
-   */
   output?: { title?: string | null; summary?: string | null } | null;
 };
 
@@ -118,7 +63,6 @@ export type ChecksCreateParams = {
   name: string;
   head_sha: string;
   external_id: string;
-  /** note: Created `queued`: the review has not started yet (promoted by `markInProgress`). */
   status: "queued";
 };
 
@@ -132,12 +76,6 @@ export type ChecksRelabelParams = {
   owner: string;
   repo: string;
   check_run_id: number;
-  /**
-   * invariant: GitHub's only carrier for the human-facing text. A top-level
-   * `title`/`summary` pair is not part of `PATCH /check-runs/{id}` — the API
-   * drops unknown fields silently, which left every run a bare name plus
-   * conclusion while the frozen gate result stayed only in D1.
-   */
   output: { title: string; summary: string };
 };
 
@@ -168,7 +106,6 @@ export type ChecksInProgressParams = ChecksRelabelParams & {
  * recovery lane instead of updating it itself.
  */
 export type CheckPromotion =
-  /** note: The send settled: `promoted` says the PATCH landed. */
   | { kind: "settled"; promoted: boolean }
   | { kind: "abandoned" };
 
@@ -209,7 +146,6 @@ export type ChecksOctokit = {
   };
 };
 
-// note: --- Remote evidence helpers ---
 
 /**
  * Narrow a raw check-run payload to the fields this contract reasons about, or
@@ -224,8 +160,6 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
   if (typeof payload.status !== "string") return null;
   if (payload.external_id !== null && typeof payload.external_id !== "string") return null;
   if (payload.conclusion !== null && typeof payload.conclusion !== "string") return null;
-  // invariant: A payload with no readable text is NOT malformed: it is a run whose
-  // wording cannot be proven, which `null` says without failing the read.
   const rawSummary = payload.output?.summary;
   const summary = typeof rawSummary === "string" ? rawSummary : null;
   if (payload.app === null || payload.app === undefined) {
@@ -269,34 +203,11 @@ export function remoteBelongsTo(remote: CheckRemote, identity: CheckIdentity): b
   );
 }
 
-// note: --- Dependencies and adapter shape ---
 
 export type ChecksDeps = {
-  /** note: The journal/registry D1 face — proof and ownership are persisted state. */
   db: D1Like;
-  /**
-   * note: The per-App review-write octokit for the exact App installation and
-   * repository (spec §7.6), supplied by `createReviewCommenter` so Checks share
-   * the single `createAppAuth` construction point and its token cache.
-   * null = no GitHub mutation (missing/disabled App, identity disagreement,
-   * denial); every operation then reports `unavailable`.
-   */
   getOctokit(input: { scope: Scope }): Promise<ChecksOctokit | null>;
-  /**
-   * invariant: The transaction clock (spec §7.0). Every ownership read and remote send
-   * fences on `lease_until_ms > now`, so the adapter must be handed the
-   * caller's current time rather than trusting a lease object it was given —
-   * an expired holder may not create or update a remote Check merely because
-   * recovery has not yet bumped the epoch (spec §7.9).
-   */
   nowMs: () => number;
-  /**
-   * note: Adapter-level fallback bound on the terminal update send. The consumer
-   * passes the operator-configured budget per message; this field covers every
-   * other caller (recovery). Omitted entirely → the store's documented
-   * absent-row default (`CHECK_UPDATE_DEFAULT`). Injectable so tests exercise
-   * the timeout without waiting the default budget out.
-   */
   updateBudgetMs?: number;
 };
 
@@ -317,58 +228,29 @@ export type ChecksAdapter = {
     lease: Lease;
     checkRunId: number;
     conclusion: CheckConclusion;
-    /** note: The operator-configured update budget for THIS call; omitted → the adapter-level fallback. */
     updateBudgetMs?: number;
   }): Promise<
     | { kind: "completed"; remote: CheckRemote }
     | { kind: "unavailable"; reason: string; requests: number }
   >;
-  /**
-   * invariant: Promote the run this attempt created to `in_progress` when the review
-   * actually starts (spec §7.9): the create happens at delivery acceptance, so
-   * until the review begins the truthful state is `queued`. Proven on the live
-   * lease and the PERSISTED run id, exactly like `completeCheck`, and bounded
-   * by `updateBudgetMs`. A REFUSAL (no attached run, an already-decided
-   * attempt, no client, no callable `update`) is not a failure and stays
-   * silent: it answers settled with `promoted: false`. A rejection or a budget
-   * overrun IS the failure this lane reports — exactly one warn through
-   * `warn` — and a budget overrun answers `abandoned`, because its PATCH may
-   * still be on the wire. It never throws: a Check never blocks or delays the
-   * review. Optional like the relabel beside it: an implementation or double
-   * without it simply promotes nothing.
-   */
   markInProgress?(input: {
     identity: CheckIdentity;
     lease: Lease;
     summary: string;
-    /** note: The operator-configured update budget for THIS call; omitted → the adapter-level fallback. */
     updateBudgetMs?: number;
-    /** invariant: One warn when the send failed or ran out of budget — never a throw. */
     warn: (detail: string) => void;
   }): Promise<CheckPromotion>;
-  /**
-   * invariant: Relabel an owned run WITHOUT moving it: the text says this delivery is
-   * QUEUED behind the PR's live review (the in-flight guard held it). No status,
-   * no conclusion — a run that reported one could not be reopened. Resolves
-   * false when the App has no Checks surface; a send fault rejects, so the
-   * caller logs one warn and its retry outcome is unaffected.
-   */
   markQueuedBehindInflight?(input: {
     scope: Scope;
     headSha: string;
     triggeredBy: string;
     action: string;
-    /** note: THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
-    /** note: The run the caller selected with the same predicate. */
     checkRunId: number;
     summary: string;
-    /** note: The operator-configured bound; omitted → the adapter, then the store's default. */
     updateBudgetMs?: number;
-    /** invariant: One warn when the send failed or ran out of budget — never a throw. */
     warn: (detail: string) => void;
   }): Promise<boolean>;
-  /** invariant: Read-only GET + identity proof: the recovery lane's confirmation path (§7.11.2 step 3). */
   fetchCheckRun(input: {
     identity: CheckIdentity;
     checkRunId: number;
@@ -416,14 +298,6 @@ export function isRequestNotDispatched(error: unknown): boolean {
   return false;
 }
 
-/**
- * invariant: The one network request each send lane issues, so a refusal can report
- * whether the API was actually contacted (an `unavailable` that never sent
- * leaves nothing possibly-created on GitHub). A typed pre-dispatch refusal
- * reports `0`; EVERY other rejection — including one whose cause chain we
- * cannot classify — reports `1`, because "we cannot prove it was not sent" is
- * exactly the case that must stay adopt-only.
- */
 function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: T | { failure: unknown } }> {
   return promise.then(
     (outcome) => ({ sent: 1, outcome }),
@@ -431,28 +305,7 @@ function sendRequests<T>(promise: Promise<T>): Promise<{ sent: number; outcome: 
   );
 }
 
-/**
- * invariant: The bound on the terminal UPDATE send. A create may take as long as the
- * transport needs (the row stays `sending` and recovery adopts), but a
- * finished review must not sit on its lease waiting for an update that never
- * answers: at the budget the send is reported unavailable so the lifecycle
- * releases the attempt to recovery (spec §7.10: a Check never delays the
- * review, and a lease is never held by a caller that can no longer make
- * progress). The bound itself comes from the operator runtime configuration
- * (`review.check.update_timeout_ms`); `CHECK_UPDATE_DEFAULT` is only its
- * documented absent-row default.
- */
 
-/**
- * invariant: `sendRequests` bounded by a wall-clock budget. A timed-out request may still
- * have reached GitHub, so it is reported as SENT (`requests: 1`) — recovery
- * must adopt/retry conservatively instead of assuming nothing landed.
- *
- * `settled: false` is the one thing a caller cannot otherwise observe: the
- * budget won while the request may still be ON THE WIRE. A caller whose later
- * write must not be overtaken by this one (the promotion before a terminal
- * send) reads it; every other lane only reads `sent`/`outcome`.
- */
 async function sendRequestsWithin<T>(
   promise: Promise<T>,
   budgetMs: number,
@@ -477,7 +330,6 @@ async function sendRequestsWithin<T>(
   }
 }
 
-/** note: Adoption walk bounds (spec §7.9: "max 2 pages", per_page 100). */
 const ADOPT_MAX_PAGES = 2;
 const ADOPT_PAGE_SIZE = 100;
 
@@ -497,16 +349,6 @@ export function createChecksAdapter(deps: ChecksDeps): ChecksAdapter {
   };
 }
 
-/**
- * invariant: Create the run for an attempt this invocation holds (spec §7.9
- * "Create/adopt"): prove the persisted row still belongs to this identity and
- * live lease, prove no run is attached yet, then send `external_id` with NO
- * `details_url` and `status: "queued"` — the review has not started, so the
- * public surface must not claim it has (`markInProgress` promotes it when the
- * review's own begin runs). A response failing the identity check is
- * `unavailable` — an unprovable create is never adopted, and the attempt stays
- * `unknown` for read-only recovery rather than blind re-creation.
- */
 async function beginCheckWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; lease: Lease },
@@ -514,37 +356,18 @@ async function beginCheckWith(
   const nowMs = deps.nowMs();
   const owned = await guardOwnership(deps, input.identity, input.lease, nowMs);
   if (owned.kind === "unavailable") return owned;
-  // invariant: Route on the PERSISTED scope, never the caller's (spec §7.6): the lease may
-  // be valid while the supplied scope points at another installation/repo.
   const identity = owned.data.identity;
   if (owned.data.checkRunId !== null) {
     return refused("attempt already owns a remote check run");
   }
-  // invariant: A create is legal ONLY from a definitive pre-send state (spec §7.9/RL-12):
-  // `sending`/`unknown` mean a create may already have reached GitHub, and
-  // since `external_id` is correlation rather than server-side idempotency, the
-  // only honest recovery is bounded read-only adoption — never a second create.
   if (owned.data.createState !== "not-sent") {
     return refused(`create is not definitively unsent (create_state=${owned.data.createState}); adopt instead`);
   }
-  // invariant: Resolve the client BEFORE any durable claim of a send: with no client
-  // nothing has been attempted, so the row must stay `not-sent` (an honest
-  // `sending` mark here would strand the attempt as possibly-sent forever).
   const client = await clientFor(deps, identity.scope);
   if ("reason" in client) return refused(client.reason);
-  // invariant: Preflight the EXACT callable before recording anything (a surface can exist
-  // while `create` is missing on an older/foreign client). A missing method is
-  // a definitive pre-send refusal: the row must keep its honest `not-sent`
-  // state rather than be marked as a create that could never have left.
   if (!hasChecksMethod(client.client, "create")) {
     return refused("Checks surface has no callable create method");
   }
-  // invariant: §7.9: a create IS a GitHub mutation — it mints the run this attempt will
-  // later terminalize — so it takes the publication lease of ITS action
-  // (`check:create`) like every other send. The `create_state = 'not-sent'`
-  // proof above says no run may already exist; the lease says who may create
-  // it now, and a live holder (a send or a recovery of the same create) refuses
-  // this one before the `sending` mark is written.
   const opened = await openPublicationFence(deps, {
     attemptId: identity.attemptId,
     actionKey: PUBLICATION_ACTION_CHECK_CREATE,
@@ -553,30 +376,14 @@ async function beginCheckWith(
   if ("reason" in opened) return refused(opened.reason);
   const fence = opened.fence;
   try {
-    // invariant: Persist `sending` BEFORE the request leaves (spec §7.9): if the response is
-    // lost, the row must already record that a create was attempted, because that
-    // durable fact is what stops a later `beginCheck` from minting a second run.
-    // Fenced on the live lease, so a lease lost between the guard and here aborts
-    // the send instead of creating an unattributable run.
     const marked = await setCheckCreateState(deps.db, identity.attemptId, input.lease, "sending", undefined, nowMs);
     if (!marked) {
       return refused("could not record the create attempt under this lease");
     }
-    // safety: Client resolution minted a token and awaited the network; the lease may
-    // have expired meanwhile WITHOUT an epoch takeover. Re-sample the clock and
-    // re-prove the live lease immediately before the request: the earlier
-    // snapshot authorised the decision, not the send itself (spec §7.9).
     if (!(await stillLive(deps, identity, input.lease))) {
-      // invariant: Nothing was invoked, so the `sending` mark above now MISSTATES the row
-      // (`requests: 0`). Undo it under an identity fence — this is exactly the
-      // path where a liveness fence would be false — so the attempt does not sit
-      // in the RL-12 adopt-only state with no request behind it. A lost race
-      // leaves `sending` in place, which stays conservative: recovery then adopts
-      // rather than creating again.
       await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
       return refused("lease expired before the create request");
     }
-    // note: …and the publication lease of this action, on the same last line.
     if (!(await fence.verify())) {
       await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
       return refused(`publication lease ${fence.actionKey} lapsed before the create request`);
@@ -594,19 +401,11 @@ async function beginCheckWith(
     );
     if ("failure" in attempted.outcome) {
       if (attempted.sent === 0) {
-        // invariant: The transport refused BEFORE dispatch (a typed pre-dispatch marker), so
-        // the `sending` mark above now MISSTATES the row: nothing left the
-        // process. Undo it under the identity fence — this is exactly the path
-        // where a liveness fence would be false — so the attempt does not sit in
-        // the RL-12 adopt-only state with no request behind it. A lost race
-        // leaves `sending` in place, which stays conservative.
         await rollbackCheckCreateDispatch(deps.db, identity.attemptId, input.lease, nowMs);
       }
       return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check create") };
     }
     const remote = toCheckRemote(attempted.outcome.data);
-    // invariant: A malformed or foreign response is still a REQUEST: the run may exist on
-    // GitHub, so recovery must adopt rather than create again.
     if (remote === null) {
       return { kind: "unavailable", requests: attempted.sent, reason: "check create returned a malformed payload" };
     }
@@ -615,27 +414,16 @@ async function beginCheckWith(
     }
     return { kind: "ready", remote };
   } finally {
-    // invariant: The create either settled or is handed to recovery; either way this
-    // acquisition is spent and the action must be claimable again.
     await fence.release();
   }
 }
 
-/**
- * invariant: Find the run this attempt's persisted `external_id` already created (spec
- * §7.9). Read-only by design: no create, no update, no state write — GitHub's
- * `external_id` is correlation, not server-side idempotency (RL-12), so the
- * only honest answer to "did my create land?" is an identity-matched read.
- */
 async function adoptCheckRunWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity },
 ): Promise<
   { kind: "found"; remote: CheckRemote } | { kind: "absent" | "incomplete" | "ambiguous" }
 > {
-  // invariant: Adoption is read-only, but it is still an operation ON a persisted
-  // attempt: resolve the stored identity first and target the stored scope, so
-  // a caller cannot use it to probe another installation/repository (§7.9).
   const persisted = await persistedIdentity(deps, input.identity);
   if (persisted.kind === "unavailable") return { kind: "incomplete" };
   const identity = persisted.identity;
@@ -659,46 +447,24 @@ async function adoptCheckRunWith(
         page,
       });
     } catch {
-      // note: An errored walk proves nothing about presence or absence.
       return { kind: "incomplete" };
     }
     const runs = result?.data?.check_runs;
     if (!Array.isArray(runs)) return { kind: "incomplete" };
     for (const payload of runs) {
       const remote = toCheckRemote(payload);
-      // note: A malformed candidate inside the App/name/SHA window makes the walk
-      // ambiguous: skipping it could silently drop OUR run.
       if (remote === null) return { kind: "ambiguous" };
       if (remoteBelongsTo(remote, identity)) matches.push(remote);
     }
     if (matches.length > 1) return { kind: "ambiguous" };
     saturated = runs.length >= ADOPT_PAGE_SIZE;
-    // invariant: A NON-saturated page exhausts the candidate set: the walk is complete, so
-    // a single match is now provably unique and the absence of one is provable.
-    // Returning `found` from a SATURATED page would be a claim about an
-    // incomplete set — an unobserved duplicate on page 2 (a `Re-run` UI action,
-    // a server-side anomaly) would then be treated as ours and terminalized
-    // while the reachable second page was never read (spec §7.9: "Multiple/
-    // incomplete candidates remain unknown").
     if (!saturated) {
       return matches.length === 1 ? { kind: "found", remote: matches[0]! } : { kind: "absent" };
     }
   }
-  // why: The bound was reached while the pages were still saturated (spec §7.9:
-  // "listForRef also caps at the 1000 most recent suites on a ref"), and
-  // `ADOPT_MAX_PAGES` is all the honesty this lane may spend. Uniqueness is
-  // NOT proven for a single match either, so the answer stays incomplete.
   return { kind: "incomplete" };
 }
 
-/**
- * invariant: Terminalize an owned run with a frozen conclusion (spec §7.9 "Desired versus
- * observed"): prove persisted ownership of the lease AND of `checkRunId`,
- * require the persisted terminal intent to agree with what is being sent (the
- * store freezes `desired` BEFORE any update), take the publication lease of
- * THIS action, then validate the response's identity and terminal state. Only
- * a validated response lets the caller advance `observed`.
- */
 async function completeCheckWith(
   deps: ChecksDeps,
   input: {
@@ -712,18 +478,9 @@ async function completeCheckWith(
   const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
   if (owned.kind === "unavailable") return owned;
   const identity = owned.data.identity;
-  // invariant: The persisted row must already carry THIS terminal intent: `desired` is
-  // frozen by `setCheckDesired` before any update (spec §7.9), so an
-  // `in_progress` row here means the caller skipped the intent write. The
-  // parameter type already excludes `in_progress`, so no send can carry it.
   if (owned.data.desired === "in_progress") {
     return refused("terminal intent was never persisted for this attempt");
   }
-  // invariant: The FROZEN text is what ships (spec §7.9): the update carries the persisted
-  // conclusion, title and summary, never the caller's copies. A caller that
-  // mutates or enlarges the text between freezing the intent and completing the
-  // run therefore cannot diverge from what was bounded and stored — and cannot
-  // push an oversized/unredacted title into the public Check surface.
   const frozenTitle = owned.data.desiredTitle;
   const frozenSummary = owned.data.desiredSummary;
   if (frozenTitle === null || frozenSummary === null) {
@@ -740,10 +497,6 @@ async function completeCheckWith(
   if (owned.data.checkRunId !== input.checkRunId) {
     return refused("check run id is not the one this attempt persisted");
   }
-  // invariant: §7.9: the PUBLICATION lease of this action, taken before the token mint so
-  // the 120 s window covers the whole bounded send. A live holder — of a send
-  // or of the same action's recovery — refuses this one instead of being
-  // bypassed, and the request below is never issued.
   const opened = await openPublicationFence(deps, {
     attemptId: identity.attemptId,
     actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
@@ -754,17 +507,10 @@ async function completeCheckWith(
   try {
     return await terminalUpdate(deps, fence, identity, input, frozen);
   } finally {
-    // invariant: Settlement or handoff: either way this acquisition is spent, and the
-    // action must be claimable again (recovery reconciles what was sent).
     await fence.release();
   }
 }
 
-/**
- * invariant: The terminal update itself, under an acquired publication fence: the request
- * is issued only after the fence is re-proved on a FRESH clock, because the
- * client resolution here mints a token and awaits the network.
- */
 async function terminalUpdate(
   deps: ChecksDeps,
   fence: PublicationFence,
@@ -783,38 +529,22 @@ async function terminalUpdate(
   if (!hasChecksMethod(client, "update")) {
     return refused("Checks surface has no callable update method");
   }
-  // invariant: Same fresh live-lease proof as the create path: token minting and client
-  // resolution can cross `lease.untilMs`, and an expired holder must not
-  // terminalize a remote run (spec §7.9).
   if (!(await stillLive(deps, identity, input.lease))) {
     return refused("lease expired before the update request");
   }
-  // invariant: …and the same proof for the PUBLICATION lease: a lapsed or superseded one
-  // refuses the send here, on the last line before the request.
   if (!(await fence.verify())) {
     return refused(`publication lease ${fence.actionKey} lapsed before the update request`);
   }
-  // invariant: §7.9a: the DISPATCH INTENT is durable before anything leaves. From here the
-  // outcome is unknown, so this action may only be discovered — a lane that
-  // finds the intent set (a lost reply, a fresh recovery claim) must read the
-  // run back instead of sending the same update twice.
   if (!(await recordTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs()))) {
     return refused("a terminal update for this attempt was already dispatched — reconcile it by readback");
   }
   const { scope } = identity;
-  // invariant: Typed as the TERMINAL pair: status and conclusion are required together, so
-  // this send can never be built without the frozen conclusion it reports.
   const terminal: ChecksUpdateParams = {
     owner: scope.owner,
     repo: scope.repo,
     check_run_id: input.checkRunId,
     status: "completed",
     conclusion: frozen.desired,
-    // invariant: GitHub reads the human-facing text from `output`, never from a
-    // top-level title/summary: an un-nested pair is dropped silently, which
-    // left every run a bare name + conclusion while the frozen gate text
-    // stayed only in D1 (spec §7.9 requires the summary to say what bar was
-    // missed).
     output: { title: frozen.title, summary: frozen.summary },
   };
   const attempted = await sendRequestsWithin(
@@ -823,17 +553,12 @@ async function terminalUpdate(
     "check update",
   );
   if ("failure" in attempted.outcome) {
-    // invariant: A refusal PROVEN zero-dispatched (a typed pre-send marker) means nothing
-    // left the Worker, so the intent above would misstate the row: clear it and
-    // the next pass may send the same frozen intent.
     if (attempted.sent === 0) {
       await clearTerminalDispatch(deps.db, identity.attemptId, input.lease, deps.nowMs());
     }
     return { kind: "unavailable", requests: attempted.sent, reason: surfaceFailure(attempted.outcome.failure, "check update") };
   }
   const remote = toCheckRemote(attempted.outcome.data);
-  // note: An unprovable response is still a REQUEST: the update may have landed, so
-  // `observed` stays untouched and the attempt defers to recovery.
   if (remote === null) {
     return { kind: "unavailable", requests: attempted.sent, reason: "check update returned a malformed payload" };
   }
@@ -843,28 +568,12 @@ async function terminalUpdate(
   if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
-  // note: Delivery is the conclusion AND the frozen text (spec §7.9): a reply with no
-  // readable output proves nothing about what the user now reads, so it is an
-  // unconfirmed send and recovery re-reads/resends the SAME run.
   if (remote.summary !== frozen.summary) {
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response does not carry the frozen text" };
   }
   return { kind: "completed", remote };
 }
 
-/**
- * invariant: Promote the created-but-not-started run to `in_progress` (spec §7.9): the
- * delivery acceptance creates it `queued`, and only the review's own begin may
- * say it is running. Ownership and the run id come from the PERSISTED row, so
- * an attempt with no attached run, a lost lease, an already-decided row or an
- * unresolvable client is REFUSED without a send — and silently, because a
- * refusal is not a failure.
- *
- * Bounded and never rejecting: it sits on the review's critical path right
- * after `begin`, so a hanging PATCH must end at the budget instead of holding
- * the round. Past that budget the answer is `abandoned` with one warn, because
- * the PATCH may still be in flight; the review runs regardless.
- */
 async function markInProgressWith(
   deps: ChecksDeps,
   input: {
@@ -877,19 +586,11 @@ async function markInProgressWith(
 ): Promise<CheckPromotion> {
   const owned = await guardOwnership(deps, input.identity, input.lease, deps.nowMs());
   if (owned.kind === "unavailable") return { kind: "settled", promoted: false };
-  // note: Already decided: a frozen terminal intent means the review reached its
-  // conclusion (the close is imminent or recovery owns it), so promoting the
-  // status now would be a lie. The evidence is the persisted row's own field —
-  // no extra store read.
   if (owned.data.desired !== "in_progress") return { kind: "settled", promoted: false };
   const runId = owned.data.checkRunId;
-  // note: Nothing to promote: the run this attempt created is not attached here.
   if (runId === null) return { kind: "settled", promoted: false };
   const { scope } = owned.data.identity;
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
-  // invariant: §7.9: this PATCH is a GitHub mutation, so it needs the action's publication
-  // lease, not the attempt's execution lease alone. A refusal is silent, like
-  // every other pre-send refusal on this lane: the run simply is not promoted.
   const opened = await openPublicationFence(deps, {
     attemptId: owned.data.identity.attemptId,
     actionKey: PUBLICATION_ACTION_CHECK_IN_PROGRESS,
@@ -903,10 +604,7 @@ async function markInProgressWith(
       if ("reason" in resolvedClient) return false;
       const client = resolvedClient.client;
       if (!hasChecksMethod(client, "update")) return false;
-      // invariant: Same fresh live-lease proof as the terminal send: token minting can cross
-      // `lease.untilMs`, and an expired holder must not speak for the run.
       if (!(await stillLive(deps, owned.data.identity, input.lease))) return false;
-      // note: …and the publication lease, re-proved on the last line before the PATCH.
       if (!(await fence.verify())) return false;
       await client.rest.checks.update({
         owner: scope.owner,
@@ -919,8 +617,6 @@ async function markInProgressWith(
     })();
     const attempted = await sendRequestsWithin(send, budgetMs, "check in-progress");
     if (!attempted.settled) {
-      // why: The PATCH may still be in flight: report that honestly so the caller
-      // does not write a terminal state it could be overtaken by.
       input.warn(surfaceFailure(attempted.outcome.failure, "check in-progress"));
       return { kind: "abandoned" };
     }
@@ -930,24 +626,10 @@ async function markInProgressWith(
     }
     return { kind: "settled", promoted: attempted.outcome };
   } finally {
-    // invariant: Settled or handed off — never left held by a caller that has moved on.
     await fence.release();
   }
 }
 
-/**
- * invariant: The one NON-TERMINAL send of the §7.9 surface: say the delivery is queued
- * behind the PR's live review. The run id comes from the fenced store write that
- * already proved this delivery's own attach row, so the send addresses a run
- * this delivery created; the PATCH carries the output pair only, which leaves
- * status and conclusion untouched.
- *
- * BOUNDED, and it never rejects: this send sits in the guard's held path BEFORE
- * the delayed retry is scheduled, so a hanging PATCH would cost the whole
- * delivery — the retry would never be arranged before the invocation is killed.
- * Client resolution AND the update share one `review.check.update_timeout_ms`
- * budget; past it the caller gets `false` and one warn.
- */
 async function markQueuedBehindInflightWith(
   deps: ChecksDeps,
   input: {
@@ -964,17 +646,10 @@ async function markQueuedBehindInflightWith(
 ): Promise<boolean> {
   const budgetMs = input.updateBudgetMs ?? deps.updateBudgetMs ?? CHECK_UPDATE_DEFAULT;
   const send = (async (): Promise<boolean> => {
-    // invariant: Resolve the client FIRST: it is the slow step, and the authority below
-    // must be re-established after it, not before.
     const resolvedClient = await clientFor(deps, input.scope);
     if ("reason" in resolvedClient) return false;
     const client = resolvedClient.client;
     if (!hasChecksMethod(client, "update")) return false;
-    // note: The authority at the dispatch: the SAME conditional write that selected
-    // this row (`desired = 'in_progress'`, non-terminal, own/released holder)
-    // run again on a fresh clock. A different holder that froze the intent or
-    // terminalized the run meanwhile makes it select nothing, and no PATCH is
-    // issued — the write is conditional on the predicate, not a read beside it.
     const relabeled = await markCheckQueuedBehindInflight(deps.db, {
       scope: input.scope,
       headSha: input.headSha,
@@ -986,11 +661,6 @@ async function markQueuedBehindInflightWith(
       nowMs: deps.nowMs(),
     });
     if (relabeled === null || relabeled.checkRunId !== input.checkRunId) return false;
-    // invariant: This PATCH writes the run's OUTPUT — the same surface the terminal send
-    // owns — so it takes that action's publication lease rather than assuming
-    // the row's eligibility is authority. A released Check an adopter may have
-    // claimed is exactly what the local write cannot see; while this lease is
-    // held, no newer Check output can be published underneath the PATCH.
     const opened = await openPublicationFence(deps, {
       attemptId: relabeled.id,
       actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
@@ -999,14 +669,7 @@ async function markQueuedBehindInflightWith(
     if ("reason" in opened) return false;
     const fence = opened.fence;
     try {
-      // note: Re-proved on the last line before the request: the client resolution
-      // and the relabel both awaited past the acquisition.
       if (!(await fence.verify())) return false;
-      // invariant: The ELIGIBILITY is re-read UNDER the lease. The local relabel proved it
-      // before acquisition, so a Check that concluded since would otherwise be
-      // overwritten with queued copy: the terminal send needs this same key, so
-      // while the lease is held nothing newer can be dispatched — and this read
-      // refuses the row that is already settled.
       const current = await getCheckAttempt(deps.db, relabeled.id);
       if (
         current === null ||
@@ -1016,9 +679,6 @@ async function markQueuedBehindInflightWith(
       ) {
         return false;
       }
-      // note: The lease can lapse between that read and the request, and a lapsed
-      // lease is no authority: prove it once more ON the line that dispatches,
-      // the same shape the comment send uses for its last-line proof.
       if (!(await fence.verify())) return false;
       await client.rest.checks.update({
         owner: input.scope.owner,
@@ -1028,15 +688,11 @@ async function markQueuedBehindInflightWith(
       });
       return true;
     } finally {
-      // invariant: A PATCH that never answers never reaches this line, so the lease stays
-      // held to its own expiry and no adopter can publish over it meanwhile.
       await fence.release();
     }
   })();
   const attempted = await sendRequestsWithin(send, budgetMs, "held check relabel");
   if (!attempted.settled) {
-    // note: The PATCH may still be in flight — report that honestly, as the
-    // promotion lane does, instead of a relabel that may be overtaken.
     input.warn(surfaceFailure(attempted.outcome.failure, "held check relabel"));
     return false;
   }
@@ -1048,11 +704,6 @@ async function markQueuedBehindInflightWith(
   return outcome;
 }
 
-/**
- * note: Read one run back and prove it belongs to this attempt (spec §7.11.2 step 3:
- * "If ID known, GET/validate ownership before update"). `absent` = the remote
- * object is gone (404 or foreign identity); anything else is `unavailable`.
- */
 async function fetchCheckRunWith(
   deps: ChecksDeps,
   input: { identity: CheckIdentity; checkRunId: number },
@@ -1092,22 +743,10 @@ async function fetchCheckRunWith(
   }
 }
 
-/**
- * invariant: A send-lane refusal that provably never reached the API. `guardOwnership`
- * and every pre-dispatch branch funnel through here so the additive
- * `requests: number` contract cannot drift into an `undefined` count: an
- * unowned attempt, a missing callable and a refusal BEFORE the request all
- * report `0`, and only the lanes that actually invoked the callable report a
- * positive count (see `sendRequests`).
- */
 function refused(reason: string): { kind: "unavailable"; reason: string; requests: 0 } {
   return { kind: "unavailable", reason, requests: 0 };
 }
 
-/**
- * invariant: The persisted-ownership read every send shares, behind the same never-throw
- * rule: a D1 read failure is `unavailable`, not an exception into the review.
- */
 async function guardOwnership(
   deps: ChecksDeps,
   identity: CheckIdentity,
@@ -1129,13 +768,6 @@ async function guardOwnership(
   return { kind: "ok", data: owned };
 }
 
-/**
- * invariant: Exact identity agreement between a caller-supplied identity and the PERSISTED
- * row (spec §7.6/§7.9). Every routing component is compared, not just the check
- * fields: a caller holding a valid lease but presenting a different
- * installation, owner, repository, PR, App row or SHA must not be able to aim
- * the purpose-scoped client — or an adoption read — at another tenant's scope.
- */
 function sameIdentity(persisted: CheckIdentity, supplied: CheckIdentity): boolean {
   return (
     persisted.attemptId === supplied.attemptId &&
@@ -1151,12 +783,6 @@ function sameIdentity(persisted: CheckIdentity, supplied: CheckIdentity): boolea
   );
 }
 
-/**
- * invariant: The PERSISTED identity of an attempt, read without a lease (the read-only
- * lanes' entry point) or `null` when the row is gone. Adoption and fetch are
- * read-only, so they cannot present a lease — but they must still answer for
- * the stored attempt, never for a caller-supplied scope (spec §7.9).
- */
 async function persistedIdentity(
   deps: ChecksDeps,
   supplied: CheckIdentity,
@@ -1174,22 +800,11 @@ async function persistedIdentity(
   return { kind: "ok", identity: attempt.identity };
 }
 
-/**
- * invariant: The exact callable a lane is about to use. A structural surface can be
- * present while a method is missing (an older client, a partial double, a
- * foreign object), and calling it would throw — which would look like a
- * possibly-lost send instead of the definitive pre-send refusal it is.
- */
 function hasChecksMethod(client: ChecksOctokit, method: "create" | "update" | "get" | "listForRef"): boolean {
   const surface = client?.rest?.checks as Record<string, unknown> | undefined;
   return typeof surface?.[method] === "function";
 }
 
-/**
- * safety: Re-prove the live lease against a FRESH clock reading, immediately before a
- * remote request. Fails closed on a D1 read error: an unprovable lease is not
- * an authorised send.
- */
 async function stillLive(deps: ChecksDeps, identity: CheckIdentity, lease: Lease): Promise<boolean> {
   try {
     return (await getCheckOwnership(deps.db, identity.attemptId, lease, deps.nowMs())) !== null;
@@ -1198,13 +813,6 @@ async function stillLive(deps: ChecksDeps, identity: CheckIdentity, lease: Lease
   }
 }
 
-/**
- * invariant: Client resolution — a throwing transport is `unavailable`, never a throw.
- * The failure TEXT rides the resolution: the mint's own reason (permissions,
- * rate limit, timeout) is the only diagnosis a recovery row can carry, and
- * collapsing every cause into "no client" made a permanent in_progress Check
- * unexplainable from `review_checks.last_error`.
- */
 async function clientFor(
   deps: ChecksDeps,
   scope: Scope,
@@ -1217,12 +825,6 @@ async function clientFor(
   }
 }
 
-/**
- * invariant: Map an octokit rejection to a bounded reason. 403/404 are the permission
- * answers the fresh-App manifest owes (spec §7.12); every other status or a
- * non-Error rejection is still only `unavailable` — Check failure never aborts
- * a review (RL-3).
- */
 function surfaceFailure(error: unknown, surface: string): string {
   const status = httpStatus(error);
   if (status === 403) return `${surface} refused (403): the App installation lacks checks:write`;
@@ -1236,13 +838,11 @@ function httpStatus(error: unknown): number | null {
   return typeof status === "number" ? status : null;
 }
 
-/** safety: Redacted, bounded error text — a transport message may carry a URL or token. */
 function safeDetail(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactSecrets(message).replace(/[\r\n]+/g, " ").slice(0, 240);
 }
 
-// note: --- §7.9 publication lease — the right to perform ONE GitHub mutation ---
 
 /** The §7.9 action key of the terminal Check update on one attempt. */
 export const PUBLICATION_ACTION_CHECK_COMPLETE = "check:complete";
@@ -1259,19 +859,7 @@ export const PUBLICATION_ACTION_CHECK_CREATE = "check:create";
  */
 export type PublicationFence = {
   actionKey: string;
-  /**
-   * invariant: Re-prove the EXACT acquired row on a fresh clock, immediately before the
-   * request. False means this sender no longer has the action: the row lapsed,
-   * or a newer epoch took it — either way nothing may be sent. Never throws:
-   * an unprovable lease is not an authorised send.
-   */
   verify(): Promise<boolean>;
-  /**
-   * invariant: Hand the action back when this acquisition settles (sent, refused or
-   * possibly-sent). Clears holder + expiry under this epoch only, so a late
-   * release cannot clear a newer acquisition. Never throws: an unreleased row
-   * lapses at its own expiry, and the send's own outcome is the truth.
-   */
   release(): Promise<boolean>;
 };
 
@@ -1286,10 +874,6 @@ export async function openPublicationFence(
   deps: { db: D1Like; nowMs: () => number },
   input: { attemptId: string; actionKey: string; holder: string },
 ): Promise<{ fence: PublicationFence } | { reason: string }> {
-  // invariant: The key's `attempt_id` is a `review_checks.id`, NEVER a container or
-  // execution identity: a lease taken under anything else can never contend
-  // with this attempt's own sends or with recovery, so the identity is proved
-  // BEFORE the row is written instead of fencing a phantom key.
   try {
     if ((await getCheckAttempt(deps.db, input.attemptId)) === null) {
       return { reason: `${input.actionKey}: ${input.attemptId} is not a Check attempt — no publication authority` };
@@ -1349,7 +933,6 @@ export async function openPublicationFence(
   };
 }
 
-// note: --- Conclusions (spec §7.9 matrix) ---
 
 /**
  * The per-App review gate (spec §7.9): a published review satisfies it only
@@ -1373,49 +956,19 @@ export const CHECK_SUMMARIES = {
     `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   gateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
     `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  /**
-   * note: The promotion text: the run created at delivery acceptance reports THIS
-   * commit's review from the moment the review starts (§7.9).
-   */
   inProgress: (sha7: string) => `Review started for ${sha7} — this run reports the review of this commit.`,
-  /** note: The fallback for a row whose frozen intent carries no text at all. */
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
-  /** note: Nothing to review: an eligible increment base with an empty `base...head`. */
   skipped: "No new changes since the last reviewed head; nothing to review for this head.",
-  /**
-   * invariant: An empty increment INHERITS the reviewed head's result (it has no review
-   * of its own to judge): the summary names both heads and the inherited
-   * verdict/score, and never claims an approval of this head.
-   */
   inheritedGateMet: (head7: string, base7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes at ${head7} (since ${base7}); the review gate result of ${base7} is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   inheritedGateMissed: (head7: string, base7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes at ${head7} (since ${base7}); the review gate of ${base7} was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  /**
-   * why: The SAME head is both the subject and the baseline (a duplicate delivery
-   * whose own review already exists): `since <head>` would be nonsense, so the
-   * wording names the reviewed head once.
-   */
   sameHeadInheritedGateMet: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes since the reviewed head ${sha7}; its own gate result is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   sameHeadInheritedGateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes since the reviewed head ${sha7}; its own gate was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  /**
-   * invariant: The attempt was CLAIMED early (admission time, before the container) and
-   * the authoritative checkout then proved a newer commit: this run never
-   * reviewed anything, so it is closed instead of being left in progress.
-   *
-   * Deliberately NOT a failure category: nothing went wrong and no action is
-   * owed — the newer commit carries the review — so the approved set (which
-   * would tell the user to re-trigger or to wait) has no entry for it.
-   */
   superseded: (sha7: string) =>
     `Review attempt was superseded by a newer commit; no review was published for ${sha7}.`,
-  /**
-   * invariant: A delivery that was SKIPPED before execution (RL-10): the attached run is
-   * settled `neutral` with the reason, never `failure` — nothing was
-   * reviewed, so the skip is not a verdict on the commit.
-   */
   skippedByDelivery: (reason: string) =>
     `Review was skipped for this head: ${boundedText(reason, "the delivery was skipped before execution")}. No review was published.`,
 } as const;
@@ -1451,7 +1004,6 @@ export function terminalFailureSummary(
   return budgetExhaustedSummary(budgetExhaustion);
 }
 
-/** note: The ONE terminal-failure conclusion shape: the category selects the wording. */
 function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetExhaustedOutcome): CheckConclusion {
   return {
     desired: "failure",
@@ -1461,27 +1013,11 @@ function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetEx
   };
 }
 
-/**
- * invariant: The approved category of a typed wall-clock stop, keyed by the WINDOW the stop
- * drew on — the one fact that says which clock ended the attempt, whoever
- * noticed it. `cause` is an attribution of the observer, not a category: the
- * runner input write's kill at the anchored instant reports `sandbox-kill`
- * while the refusal right after it reports `consumer-deadline`, and both are the
- * same spent window.
- *
- *   - `preparation` — the derived pre-runner cutoff exists so the runner still
- *     gets a window before the end-to-end cap; a stop there IS that cap.
- *   - `runner` — the window frozen for the paid runner; spending it is the
- *     tier's time budget, not the platform's duration.
- *
- * Total by type, so no window can fall through to a default.
- */
 const STOP_CATEGORY: Record<BudgetExhaustedOutcome["budgetWindow"], CheckFailureStatus> = {
   preparation: "cap-stop",
   runner: "budget-stop",
 };
 
-/** note: The cause phrase the public summary carries for each typed stop. */
 const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], string> = {
   "runner-deadline": "runner deadline reached",
   "consumer-deadline": "consumer deadline reached",
@@ -1532,7 +1068,6 @@ export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string 
   );
 }
 
-/** note: The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
 function verdictsText(gate: ReviewGate): string {
   return gate.passVerdicts.map((verdict) => boundedText(verdict, "unknown")).join(" | ").slice(0, 400);
 }
@@ -1544,18 +1079,8 @@ export type CheckTerminalOutcome =
   | "publication-unknown"
   | "expired"
   | "local-error"
-  /** why: The round was acked without a review because the increment was empty. */
   | "skipped"
-  /**
-   * note: The attempt was claimed ahead of the checkout and the authoritative head
-   * proved a DIFFERENT commit: this run reviewed nothing for its own SHA.
-   */
   | "superseded"
-  /**
-   * note: The attempt's wall clock ended the review before an envelope existed —
-   * the typed terminal outcome outside the verdict envelope, published once
-   * in the Check summary from the `budgetExhaustion` input.
-   */
   | "budget-exhausted";
 
 /**
@@ -1604,33 +1129,11 @@ export function decideConclusion(input: {
   outcome: CheckTerminalOutcome;
   gate: ReviewGate | null;
   review: PublishedReview | null;
-  /**
-   * note: Set for an EMPTY increment (`outcome: "skipped"`): the head under check
-   * and the reviewed head whose result it inherits. `gate` and `review` are
-   * then that head's row and the App's CURRENT gate.
-   */
   inherited?: { headSha: string; reviewedHeadSha: string };
-  /**
-   * invariant: The head THIS attempt covers (`handle.headSha`). Read only by the
-   * `superseded` branch, whose summary must name the commit that was not
-   * reviewed: with no proof there is no other honest source for it.
-   */
   headSha?: string;
-  /**
-   * invariant: Required with `outcome: "budget-exhausted"`: this attempt's typed stop
-   * record — the summary's sole source of tier, budget and observed counters.
-   */
   budgetExhaustion?: BudgetExhaustedOutcome;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
-  // invariant: A wall-clock stop resolves BEFORE any persisted proof: this attempt
-  // published nothing, so a readable same-head proof can only be a PRIOR
-  // generation's applied publication, and its gate result must never freeze
-  // this attempt's Check (RL-12 reuses the head SHA). `budgetExhaustion` is
-  // required by contract — the two seams that supply this outcome always carry
-  // the record they resolved, so a missing one is a caller defect, named on the
-  // throw. The category reads the record's WINDOW, never the `cause`: the same
-  // spent instant is reported by two paths with different causes.
   if (outcome === "budget-exhausted") {
     if (input.budgetExhaustion === undefined) {
       throw new Error(
@@ -1642,8 +1145,6 @@ export function decideConclusion(input: {
   if (proof !== null) {
     if (proof.kind === "degraded") return terminalFailure("unknown-failure");
     const sha7 = proof.headSha.slice(0, 7);
-    // invariant: An unreadable gate row or tally is evidence this build could not read,
-    // never a verdict: it is an execution fault, not a judgement on the change.
     if (gate === null || review === null || review.scorePct === null) {
       return terminalFailure("unknown-failure");
     }
@@ -1655,27 +1156,15 @@ export function decideConclusion(input: {
           summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
         }
       : {
-          // note: A missed gate is the review's verdict, not a failure of the review.
           desired: "failure",
           title: CHECK_NAME,
           summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
         };
   }
-  // invariant: An empty increment has no send of its own to lose, but its content IS the
-  // reviewed head's: the Check carries THAT head's result judged against the
-  // App's CURRENT gate. There is NO neutral exit: the baseline row, envelope,
-  // verdict and score are read fail-closed, so an unreadable baseline cannot
-  // shed a failing required check through an empty commit. A non-passing
-  // verdict, an unreadable gate row and an unreadable score fail closed,
-  // exactly as that head's own round did.
   if (inherited !== undefined) {
     const head7 = inherited.headSha.slice(0, 7);
     const base7 = inherited.reviewedHeadSha.slice(0, 7);
-    // why: A duplicate delivery inherits from the head ITSELF: "since <head>" would
-    // be nonsense, so that case gets its own wording.
     const sameHead = inherited.headSha === inherited.reviewedHeadSha;
-    // invariant: An unreadable baseline is evidence this build could not read — an
-    // execution fault either way, never a judgement on the inherited change.
     if (review === null || gate === null || review.scorePct === null) {
       return terminalFailure("unknown-failure");
     }
@@ -1689,7 +1178,6 @@ export function decideConclusion(input: {
             : CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
         }
       : {
-          // note: The inherited verdict missed the gate: a result, not a failure.
           desired: "failure",
           title: CHECK_NAME,
           summary: sameHead
@@ -1697,37 +1185,21 @@ export function decideConclusion(input: {
             : CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
         };
   }
-  // invariant: A round with nothing to review and no inheritable baseline never had a
-  // send to lose: it is not an execution failure, so its own neutral conclusion
-  // is the honest one.
   if (outcome === "skipped") {
     return { desired: "neutral", title: CHECK_NAME, summary: CHECK_SUMMARIES.skipped };
   }
-  // invariant: An early claim the checkout contradicted: this attempt's own SHA was never
-  // reviewed. A PROVEN publication for that same SHA still wins above (it is
-  // an older attempt's result and the honest one for that commit); without one
-  // the run fails closed rather than claiming an approval nobody earned. No
-  // failure category: nothing went wrong and no action is owed.
   if (outcome === "superseded") {
-    // safety: The attempt's OWN head, sliced raw like every other summary (redaction
-    // is for prose, not for a commit id the caller already knows).
     const sha7 = input.headSha === undefined || input.headSha === "" ? "unknown" : input.headSha.slice(0, 7);
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.superseded(sha7) };
   }
-  // note: Every remaining outcome is an execution fault with no readable result:
-  // `pre-publication-failure`, `degraded-not-posted`, `local-error`,
-  // `publication-unknown` and `expired` without proof. The approved wording says
-  // so once — the cause stays in `review_failures` and the logs.
   return terminalFailure("unknown-failure");
 }
 
-/** safety: Bounded, redacted summary fragment (spec §7.9: summary ≤2000 chars). */
 function boundedText(text: string, fallback: string): string {
   const value = text.trim().length === 0 ? fallback : text;
   return redactSecrets(value).replace(/[\r\n]+/g, " ").slice(0, 240);
 }
 
-// note: --- Lifecycle seam implementation (spec §7.10 hooks / §7.7 4+12) ---
 
 /**
  * What the production lifecycle needs beyond the frozen §7.10 hook input.
@@ -1740,14 +1212,7 @@ function boundedText(text: string, fallback: string): string {
 export type CheckLifecycleDeps = {
   db: D1Like;
   getAdapter(scope: Scope): ChecksAdapter | null;
-  /**
-   * note: The App's review gate (spec §7.9), read through the caller's store helper
-   * (`getCheckGate`). `null` = the gate is unreadable (unknown App row, bad
-   * JSON, off-vocabulary or non-array verdicts); a review proof then
-   * concludes `failure` — there is no permissive default.
-   */
   getCheckGate(scope: Scope): Promise<ReviewGate | null>;
-  /** note: The transaction clock (spec §7.0) — re-read immediately before each fenced write. */
   nowMs(): number;
 };
 
@@ -1804,209 +1269,50 @@ export type CheckLifecycle = {
     triggeredBy: string;
     action: string;
     executionDeadlineMs: number;
-    /**
-     * invariant: The Check identity a RESUMED phase must act on, frozen on the attempt's
-     * own row: `attempt_key` + `generation`. Supplied by adoption/settlement
-     * callers only. A claim that lands on any other generation of the key is
-     * refused (see `begin`) — an older attempt must never promote, conclude or
-     * drive a newer attempt's run, and the latest open generation is not a
-     * substitute for the frozen pair. Omitted → the caller IS the claim (a
-     * fresh review).
-     */
     expect?: { key: string; generation: number };
-    /**
-     * invariant: OPTIONAL per-invocation abandonment latch owned by the caller. When the
-     * caller's §7.10 budget elapses it trips `abandon()`, and this `begin` then
-     * stops attaching a created run on behalf of a caller that is gone —
-     * handing the attempt to the recovery lane instead (see
-     * `abandonUnterminalized`). Omitted → this invocation is never abandoned,
-     * which is the non-consumer (test/recovery) default.
-     */
     latch?: CheckBeginLatch;
   }): Promise<CheckLifecycleHandle | null>;
   terminalize(input: {
     handle: CheckLifecycleHandle;
     publicationId: string | null;
     outcome: CheckTerminalOutcome;
-    /**
-     * invariant: The reviewed head an EMPTY increment inherits (its `base...head` is
-     * empty): the Check then carries THAT head's persisted result judged
-     * against the current gate, so a skipped round can never replace a failing
-     * baseline Check with `neutral`; an unreadable baseline fails closed.
-     * Omitted → no result to inherit (`neutral` for `skipped`).
-     */
     inheritedHeadSha?: string;
-    /**
-     * invariant: Required with `outcome: "budget-exhausted"`: this attempt's typed stop
-     * record — the frozen Check summary's sole source of budget facts.
-     */
     budgetExhaustion?: BudgetExhaustedOutcome;
-    /**
-     * note: The operator-configured bound on the one terminal `checks.update`
-     * (`review.check.update_timeout_ms`). Omitted → the adapter's own fallback,
-     * then the store's documented default (recovery callers).
-     */
     updateBudgetMs?: number;
   }): Promise<void>;
-  /**
-   * invariant: Promote the run this handle's attempt created to `in_progress`: the run is
-   * created `queued` at delivery acceptance, so the review's own begin is what
-   * makes the public status truthful. Best-effort by contract — a settled
-   * `false` means there was nothing to promote (no run, no Checks surface, a
-   * lease this invocation no longer holds, an already-terminal attempt) or the
-   * bounded send failed; one warn rides `warn`, and nothing here can block the
-   * review. `abandoned` means the budget ended the WAIT while the PATCH may
-   * still be in flight, so the caller must NOT write a terminal state itself.
-   */
   markInProgress(input: {
     handle: CheckLifecycleHandle;
-    /** note: The one text the promoted run carries. */
     summary: string;
-    /** note: The operator-configured bound; omitted → the adapter, then the store's default. */
     updateBudgetMs?: number;
-    /** note: One warn when the best-effort send failed or ran out of budget. */
     warn: (detail: string) => void;
   }): Promise<CheckPromotion>;
-  /**
-   * invariant: §7.9 skip settlement: the delivery was SKIPPED before execution (an
-   * idempotency hit, a publication-journal hand-off, an in-flight guard
-   * rejection, a paused App), so its attached run has no review to report and
-   * nobody holds a handle to terminalize it. The attached row — released, or
-   * still under a stalled delivery holder — is taken with the same fenced
-   * claim and concluded from THIS head's own published result against the
-   * App's CURRENT gate (the `inherited` branch, same head both sides): the
-   * confirmed publication's proof first, its persisted `reviews` row when that
-   * projection has not landed. A head whose review met the gate stays
-   * `success`, one that missed it stays `failure`, and an unreadable tally fails
-   * closed exactly as that head's own run does — a skip never concludes more
-   * favourably than the run it stands in for. A confirmed publication whose
-   * payload yields no readable review is evidence that one exists and fails
-   * closed the same way. An ABSENT gate is different: it is no evidence at all
-   * (the webhook lane passes one deliberately, a damaged row reads the same),
-   * so nothing is frozen and the attempt is left to the reconciler. A degraded
-   * publication settles `failure` from its own summary, without reading the
-   * projection. `neutral` — with the skip reason — is only the skip with
-   * NOTHING to inherit: no readable proof and no readable review. A proof whose
-   * bytes do not parse falls back to the projection; a proof that cannot be
-   * READ settles nothing at all (the run is left to the reconciler's deadline
-   * path) — evidence this lane cannot read is never turned into a verdict. A
-   * live consumer holder, a frozen intent and a terminal row are never taken;
-   * `false` means there was nothing to settle. A store or transport fault
-   * rejects — the caller logs it and the ACK is unaffected.
-   */
   settleSkipped(input: {
     scope: Scope;
     headSha: string;
     triggeredBy: string;
     action: string;
-    /**
-     * invariant: THIS delivery's attach identity (`payload.attachDeliveryId`). Required to
-     * settle anything: without it the delivery created no row of its own, so
-     * taking a row would mean taking another delivery's.
-     */
     attachDeliveryId?: string;
-    /** why: Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
-    /**
-     * invariant: The skip was a PAUSED App, not a completed result: the review never ran,
-     * and the approved `paused` wording says what happened and that the user
-     * owes nothing. Only reachable when nothing inherited a verdict below.
-     */
     paused?: boolean;
-    /**
-     * invariant: One warn when the settlement had to fall back off the publication proof:
-     * its bytes do not parse (the `reviews` projection is then the fallback),
-     * or the proof could not be READ at all (nothing is settled — the run is
-     * left to the recovery lane). Never a throw; an omitted hook drops the line.
-     */
     warn?: (detail: string) => void;
-    /** note: The operator-configured bound on the one terminal `checks.update`. */
     updateBudgetMs?: number;
   }): Promise<boolean>;
-  /**
-   * invariant: §7.10 held-Check visibility: the in-flight guard refused a message whose
-   * Check was already attached, so the run must SAY it is queued behind the PR's
-   * live review — the run is `queued` already, and without this it would sit
-   * there for the whole backoff with nothing explaining it. Writes the text only
-   * (never the status, never the intent) on THIS delivery's own attach row.
-   *
-   * Resolves true only when the relabel was sent; false means there was nothing
-   * to label (no own attach row, no remote run) or no Checks surface to send
-   * with. A store/transport fault rejects, and the caller logs it as one warn —
-   * the retry it is about to schedule is never affected.
-   */
   markQueuedBehindInflight(input: {
     scope: Scope;
     headSha: string;
     triggeredBy: string;
     action: string;
-    /** note: THIS delivery's attach identity — absent means it created no row. */
     attachDeliveryId?: string;
-    /** note: The queue reason the Check summary carries. */
     summary: string;
-    /**
-     * invariant: The operator-configured bound on the one `checks.update`
-     * (`review.check.update_timeout_ms`). Required here, unlike the terminal
-     * seam: the caller sits in the guard's held path, so it always has the
-     * budget it read and must never let a hanging PATCH delay its retry.
-     */
     updateBudgetMs: number;
-    /** invariant: One warn when the send failed or ran out of budget — never a throw. */
     warn: (detail: string) => void;
   }): Promise<boolean>;
-  /**
-   * invariant: The consumer gave up on `terminalize` (its bounded wait elapsed, or the
-   * hook threw): hand the attempt to recovery NOW with `remote-unconfirmed`,
-   * so the minute Check reconciler closes the run instead of waiting out the
-   * execution deadline. Sends NO remote request, and sends none twice: a fence
-   * already claimed by recovery refuses every write here (a silent no-op).
-   *
-   * The frozen terminal intent is NEVER replaced. A row that already carries
-   * one (a proof-derived success, a precise gate failure) is released as-is and
-   * recovery sends exactly that text; only a row still wanting `in_progress`
-   * receives the fallback, and that condition is the UPDATE's predicate — so a
-   * terminalize freezing its conclusion concurrently wins.
-   *
-   * Resolves `true` only when the fenced RELEASE write changed the row. A
-   * live fence recovery already claimed, or an expired lease, writes nothing —
-   * and a caller about to take the next attempt must read that as "not
-   * handed off". A store fault rejects (never swallowed).
-   */
   abandonTerminalize(input: {
     handle: CheckLifecycleHandle;
     reason: string;
-    /**
-     * invariant: The terminal knowledge this hand-off carries. Omitted → the generic
-     * `failure/unconfirmed` of an interrupted terminalize. Given, the frozen
-     * fallback is only what the CALLER already knew: an outcome-only conclusion
-     * for `superseded` / `local-error` / `pre-publication-failure`, and for
-     * `skipped` with `inheritedHeadSha` the inherited head's gate result.
-     *
-     * It is deliberately NOT the terminal path's conclusion for
-     * `publication-unknown` / `expired` / `degraded-not-posted`: that path reads
-     * `readPublicationProof` and can conclude `success`, while this seam always
-     * passes `proof: null` and freezes the unconfirmed fallback. The safety net
-     * is the recovery lane — the last writer — which re-reads the proof and
-     * corrects the frozen intent.
-     */
     outcome?: CheckTerminalOutcome;
-    /**
-     * invariant: Required with `outcome: "budget-exhausted"`: the same typed record the
-     * terminal path carries, so a deferred send freezes the same summary.
-     */
     budgetExhaustion?: BudgetExhaustedOutcome;
-    /**
-     * invariant: Set with `outcome: "skipped"`: the reviewed head whose result the run
-     * inherits, read exactly as `terminalize` reads it.
-     */
     inheritedHeadSha?: string;
-    /**
-     * note: Delay THIS row's first recovery attempt past the maximum possible
-     * lifetime of an ABANDONED promotion request: the update budget bounds the
-     * send's own life and the transport adds the rest; scheduling recovery
-     * beyond that is what makes the recovery write the last writer. Omitted →
-     * the shared first backoff rung.
-     */
     firstRecoveryDelayMs?: number;
   }): Promise<boolean>;
 };
@@ -2027,15 +1333,8 @@ export type CheckAttachDeps = {
  * failure, because only the failure arm owes the operator a warn (spec §7.9).
  */
 export type CheckAttachResult =
-  /** note: The delivery created a row of its own; `deliveryId` is its attach identity. */
   | { kind: "attached"; deliveryId: string }
-  /**
-   * note: The key is already owned by another delivery/attempt, already ended, or
-   * the admitted consumer adopted the row before this invocation could release
-   * it — the expected overlap, not a failure.
-   */
   | { kind: "skipped"; reason: "busy" | "terminal" | "adopted" }
-  /** note: The create, the run-id write or the release failed: recovery owns the row. */
   | { kind: "failed"; reason: string };
 
 /**
@@ -2066,12 +1365,6 @@ export async function attachCheckAtAcceptance(
     headSha: string;
     triggeredBy: string;
     action: string;
-    /**
-     * why: The delivery's attach identity, generated by the caller BEFORE the attach
-     * starts (spec §7.9): it is the holder this claim takes AND the value
-     * recorded on the row, so a later settlement can tell THIS delivery's row
-     * from another delivery's even after the row was released.
-     */
     deliveryId: string;
   },
 ): Promise<CheckAttachResult> {
@@ -2087,22 +1380,13 @@ export async function attachCheckAtAcceptance(
     nowMs: deps.nowMs(),
     executionDeadlineMs: deps.nowMs() + CHECK_ATTACH_WINDOW_MS,
   });
-  // note: `busy` (another delivery, or an earlier attach, owns a nonterminal row for
-  // this key) and `terminal` (the head is already published) both mean the one
-  // run this head may have already exists: nothing to attach, nothing to mint.
   if (claimed.kind === "absent") {
-    // invariant: Unreachable by contract: only a FROZEN-pair claim may answer `absent`,
-    // and a delivery attach never passes one. Naming it beats folding it into
-    // "the head is already published".
     throw new Error("review-checks: a delivery attach claim answered absent — the store must mint without an expectation");
   }
   if (claimed.kind !== "claimed") return { kind: "skipped", reason: claimed.kind };
   const { identity } = claimed.attempt;
   const begun = await deps.adapter.beginCheck({ identity, lease: claimed.lease });
   if (begun.kind !== "ready") {
-    // why: A request may already have reached GitHub (`requests > 0`), so the row is
-    // handed to the recovery lane as possibly-sent and adopted there instead of
-    // being created a second time (RL-12).
     await releaseToRecovery(deps, identity.attemptId, claimed.lease, begun.reason, begun.requests > 0);
     return { kind: "failed", reason: begun.reason };
   }
@@ -2112,11 +1396,6 @@ export async function attachCheckAtAcceptance(
     await releaseToRecovery(deps, identity.attemptId, claimed.lease, reason, true);
     return { kind: "failed", reason };
   }
-  // note: Give the row back with every durable fact intact (identity, the run id,
-  // `create_state = 'known'`, `recovery_state = 'pending'`) plus a grace due
-  // time: the admitted message adopts it through `adoptReleasedCheckAttempt`
-  // (which ignores the due time), and if nobody does, the minute reconciler
-  // takes it once the grace passes instead of at the one-hour window's expiry.
   const nowMs = deps.nowMs();
   const released = await releaseAttachedCheck(
     deps.db,
@@ -2126,10 +1405,6 @@ export async function attachCheckAtAcceptance(
     nowMs,
   );
   if (!released) {
-    // why: A zero-row release has one EXPECTED cause: the admitted consumer took the
-    // row first (the stalled-delivery takeover bumps the epoch, so this
-    // invocation's fence no longer matches). Re-read once and classify it — an
-    // adopting consumer is not a failure, and no write is issued here.
     const current = await getCheckAttempt(deps.db, identity.attemptId).catch(() => null);
     const adoptedByConsumer =
       current !== null &&
@@ -2142,7 +1417,6 @@ export async function attachCheckAtAcceptance(
   return { kind: "attached", deliveryId };
 }
 
-/** note: Release an attach attempt to the recovery lane with the honest state. */
 async function releaseToRecovery(
   deps: CheckAttachDeps,
   attemptId: string,
@@ -2175,13 +1449,6 @@ export const CHECK_ATTACH_OVERLAP_RETRY_MS = 250;
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/**
- * invariant: Whether a refused adoption is worth exactly one retry: the active row must
- * still be owned by the DELIVERY path (its attach may simply not have finished
- * — that is the overlap the ordering cannot remove) and must still want
- * `in_progress`. A consumer holder is a review that is running, and a frozen
- * intent belongs to recovery; neither is waited for or taken.
- */
 function retryableOverlap(attempt: CheckAttempt): boolean {
   return attempt.lease !== null && attempt.lease.holder.startsWith("delivery:") && attempt.desired === "in_progress";
 }
@@ -2210,35 +1477,8 @@ function retryableOverlap(attempt: CheckAttempt): boolean {
  * lane, never blocking or delaying the review.
  */
 export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
-  /**
-   * invariant: The fence for ONE fenced mutation: the lease this invocation holds, with a
-   * clock sampled at this instant. Every fenced store call re-reads the clock
-   * here, so a lease that expired while an asynchronous proof/attempt/client
-   * read was in flight refuses the write (spec §7.9: all local updates require
-   * `lease_until_ms > now`) — a clock captured before such a read cannot
-   * authorise a mutation that lands after it.
-   */
   const fenceFor = (lease: Lease): { lease: Lease; nowMs: number } => ({ lease, nowMs: deps.nowMs() });
 
-  /**
-   * invariant: A lease carried by an invocation the CONSUMER has already abandoned (the
-   * §7.10 two-second hook budget elapsed). A refused attach or unavailable send
-   * must not leave such an attempt holding a lease nothing will terminalize, so
-   * the attempt is released NOW with the honest recovery state (`pending`, or
-   * `remote-unconfirmed` when a request was spent) — identity, the attached run
-   * id and any sent-request truth are all preserved.
-   *
-   * No terminal intent is written here. Abandonment is not a conclusion: the
-   * frozen `failure` / unconfirmed summary this path used to write froze a
-   * Check before the publication could prove itself, which is how a review that
-   * published successfully kept a red Check. The conclusion belongs to the
-   * reconciler, which derives it from the persisted publication proof (or from
-   * the elapsed execution deadline).
-   *
-   * The release is fenced on the live lease, so an attempt whose lease has
-   * genuinely expired is untouched by this path — its own expiry is what the
-   * deadline rule already covers.
-   */
   const abandonUnterminalized = async (
     attemptId: string,
     lease: Lease,
@@ -2248,27 +1488,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     await releaseForRecovery(attemptId, lease, reason, requestsSpent);
   };
 
-  /**
-   * invariant: Hand an attempt to the recovery lane: release the lease and record the
-   * honest state + backoff. `requestsSpent` is the caller's knowledge that a
-   * remote request was already issued (or may have been) for this attempt:
-   * such a row is `remote-unconfirmed` so recovery adopts instead of blindly
-   * creating, otherwise it is `pending`. The clock is sampled for THIS write.
-   * `true` only when the fenced UPDATE changed the row: a live fence recovery
-   * already claimed (or an expired lease) writes nothing, and a caller that
-   * needs proof of the handoff must not read that as a release.
-   */
   const releaseForRecovery = async (
     attemptId: string,
     lease: Lease,
     reason: string,
     requestsSpent: boolean,
-    /**
-     * invariant: A TARGETED override of the first recovery attempt, never a change to the
-     * shared schedule: the abandoned-promotion handoff uses it so the recovery
-     * write lands after the abandoned request's maximum possible lifetime
-     * (budget + transport). Omitted → the first backoff rung.
-     */
     firstRecoveryDelayMs?: number,
   ): Promise<boolean> => {
     const nowMs = deps.nowMs();
@@ -2285,38 +1509,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     );
   };
 
-  /**
-   * invariant: Record the run a cancelled invocation created, then hand the attempt to
-   * recovery. The id is attached first — the durable fact recovery needs to
-   * ADOPT this run instead of creating a second one — and the released lease
-   * leaves the row recoverable with no conclusion of its own: the reconciler
-   * decides it from the persisted publication proof, or once the execution
-   * deadline passes. Every write is fenced on the live lease: if the lease died
-   * while the create ran, the attach is refused and the row keeps exactly what
-   * the adapter persisted (`sending` for the adopt-only state the deadline rule
-   * already covers).
-   */
   const adoptLateCreatedRun = async (identity: CheckIdentity, lease: Lease, remoteId: number): Promise<void> => {
     const fence = fenceFor(lease);
     if (!(await attachCheckRunId(deps.db, identity.attemptId, fence.lease, remoteId, fence.nowMs))) return;
     await abandonUnterminalized(identity.attemptId, lease, "the creating invocation was abandoned by the consumer budget", true);
-    // invariant: The consumer never received a handle for this run, so its step-12
-    // terminalize cannot fire at all; recovery owns the conclusion from here.
-    // Recorded so the row says so (migration 0052) instead of only the log.
     await recordTerminalizeOutcome(deps.db, identity.attemptId, "no-handle", null).catch(() => {});
   };
 
   return {
     async begin(input) {
-      // note: Eligibility BEFORE the claim (L2-accepted): an App whose commenter
-      // exposes no Checks surface is ineligible outright — no registry row is
-      // created for an attempt nothing could ever drive, and no lease is taken.
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return null;
-      // invariant: The claim INSERT establishes ownership, so no lease exists to fence on
-      // yet; the clock is sampled for this write. With a frozen pair the store
-      // call itself never mints (it answers from the frozen key's row), so
-      // verification and claim are one step.
       const claim = await claimAttempt(deps.db, {
         scope: input.scope,
         githubAppId: input.githubAppId,
@@ -2328,26 +1531,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         executionDeadlineMs: input.executionDeadlineMs,
         ...(input.expect === undefined ? {} : { expect: input.expect }),
       });
-      // note: A pair is still verified before anything is adopted, attached,
-      // promoted or terminalized: the open row for the key can be a NEWER
-      // generation than the frozen one (another attempt's), and taking that
-      // would drive somebody else's run. Nothing was minted here, so there is
-      // nothing to compensate.
       if (input.expect !== undefined && claim.kind !== "absent") {
         const ownsFrozenPair =
           claim.attempt.identity.generation === input.expect.generation &&
           (await readCheckIdentity(deps.db, claim.attempt.identity.attemptId))?.key === input.expect.key;
         if (!ownsFrozenPair) return null;
       }
-      // invariant: busy = a nonterminal attempt already owns this key: either the
-      // delivery path already attached this head's run (spec §7.7 step 4) or a
-      // duplicate delivery's second pass is looking at the first one's row. A
-      // row that was RELEASED with a known run id is adopted — the review then
-      // terminalizes that run inline instead of leaving it to the reconciler —
-      // while a row a live holder owns, or one whose intent is already frozen,
-      // is never taken (`adoptReleasedCheckAttempt` fences on exactly that).
-      // terminal = a generation of this key already ended with a proven
-      // publication: no Check here.
       if (claim.kind === "busy") {
         const busy = claim.attempt;
         const adopt = (): Promise<Lease | null> =>
@@ -2359,19 +1548,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
             nowMs: deps.nowMs(),
           });
         let adopted = await adopt();
-        // note: One bounded retry when the delivery holder is still mid-attach: the
-        // message was admitted before that attach released the row, and a
-        // consumer that gives up here leaves the run to the recovery lane.
         if (adopted === null && retryableOverlap(busy)) {
           await delay(CHECK_ATTACH_OVERLAP_RETRY_MS);
           adopted = await adopt();
         }
         if (adopted === null) return null;
-        // invariant: The adoption is one D1 round trip, but the consumer's begin budget is
-        // only 2 s: if it elapsed while this write was in flight, the handle
-        // would be returned into a promise nobody awaits and the row would hold
-        // a 900 s lease nothing terminalizes. Re-check AFTER the write (never
-        // only before) and hand the row back like the claimed branch does.
         if (input.latch?.isAbandoned() === true) {
           await recordTerminalizeOutcome(deps.db, claim.attempt.identity.attemptId, "no-handle", null).catch(() => {});
           await abandonUnterminalized(
@@ -2397,23 +1578,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         await releaseForRecovery(identity.attemptId, claim.lease, begun.reason, begun.requests > 0);
         return null;
       }
-      // invariant: The consumer's §7.10 budget may already have elapsed while this create
-      // ran. Its wait is bounded (publication is never delayed by a Check), so
-      // the honest response is to stop attaching and leave the created run to
-      // the recovery lane with a terminal obligation instead of a fifteen-minute
-      // wait for the execution deadline. The check reads THIS call's own latch —
-      // never ambient state — so a later message can neither un-abandon this
-      // begin nor observe its abandonment. The attempt keeps its identity and
-      // the run id this invocation just proved, so recovery ADOPTS rather than
-      // creating a second run (RL-12).
       if (input.latch?.isAbandoned() === true) {
         await adoptLateCreatedRun(identity, claim.lease, begun.remote.id);
         return null;
       }
-      // invariant: The run is OURS only once its id is attached under a lease this
-      // invocation still holds: a create that awaited a token mint and the
-      // network may have outlived it, and then we own nothing (the create stays
-      // `sending` for read-only adoption, never a blind second create).
       const attached = await attachCheckRunId(
         deps.db,
         identity.attemptId,
@@ -2422,10 +1590,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         fenceFor(claim.lease).nowMs,
       );
       if (!attached) {
-        // invariant: The invocation still owns the claim but cannot prove the run, so the
-        // attempt is handed to recovery (a create WAS sent — possibly two, if a
-        // concurrent writer attached first) instead of holding a lease nobody
-        // will terminalize. A dead lease makes this a no-op by fence.
         await releaseForRecovery(
           identity.attemptId,
           claim.lease,
@@ -2434,14 +1598,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         );
         return null;
       }
-      // invariant: The same abandonment can land DURING this attach: the consumer's 2 s
-      // budget expires while the D1 write is in flight, so the handle below is
-      // returned into a promise nobody awaits. Left alone that row holds a live
-      // lease nothing will terminalize and the Check only closes when the 900 s
-      // execution deadline expires — measured at 40% of attempts before this
-      // branch existed (terminal - created = 904-965 s). Hand it to recovery
-      // exactly like the pre-attach case: the run id is already persisted, so
-      // the reconciler ADOPTS this run instead of creating a second one.
       if (input.latch?.isAbandoned() === true) {
         await recordTerminalizeOutcome(deps.db, identity.attemptId, "no-handle", null).catch(() => {});
         await abandonUnterminalized(
@@ -2464,17 +1620,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     async markInProgress(input) {
       const adapter = deps.getAdapter(input.handle.scope);
       if (adapter === null) return { kind: "settled", promoted: false };
-      // invariant: The adapter proves ownership from the PERSISTED row and sends that
-      // row's run id, so the identity it is handed is the row's — never one
-      // rebuilt from the handle.
       let attempt: CheckAttempt | null;
       try {
         attempt = await getCheckAttempt(deps.db, input.handle.attemptId);
       } catch {
         return { kind: "settled", promoted: false };
       }
-      // invariant: This attempt already ended: never reopen a finished run. The attempt
-      // this lane already read is the terminal evidence — no second read.
       if (attempt === null || attempt.terminalMs !== null) return { kind: "settled", promoted: false };
       return (
         (await adapter.markInProgress?.({
@@ -2488,10 +1639,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     },
 
     async settleSkipped(input) {
-      // invariant: A missing Checks surface does NOT end the settlement: the store-only
-      // path below freezes the neutral intent and lets the reconciler send it,
-      // so a paused App (whose gate forbids any credential work) still closes
-      // its run without a commenter.
       const adapter = deps.getAdapter(input.scope);
       const nowMs = deps.nowMs();
       const claimed = await claimAttachedCheckForSettlement(deps.db, {
@@ -2504,34 +1651,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         executionDeadlineMs: nowMs + CHECK_LEASE_MS,
         nowMs,
       });
-      // note: Nothing to settle: no attach row for this delivery, or the row is a
-      // live consumer's, already frozen, or terminal.
       if (claimed === null) return false;
       const { identity } = claimed.attempt;
-      // invariant: A skip must never conclude more favourably than the same head's own run
-      // would on the same evidence. A CONFIRMED publication is the proof the
-      // review landed, while its `reviews` projection can still lag the apply —
-      // so the proof is read first and the projection only backs it up. A
-      // DEGRADED publication is a parse-degrade notice, not a verdict: that head
-      // concluded `failure` and the skip carries the same summary, from the
-      // proof alone.
       let proof: PublicationProof | null = null;
       try {
         proof = await readPublicationProof(deps.db, { scope: input.scope, headSha: input.headSha });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
         if (!(err instanceof SyntaxError)) {
-          // invariant: The SELECT itself could not answer — a fault, not an unreadable
-          // payload. Settling now would conclude from evidence this lane cannot
-          // read and could freeze `neutral` over a confirmed failing review, so
-          // NOTHING is frozen: the attempt is left to the reconciler's own
-          // deadline path, which re-reads proof and review with its own
-          // fallbacks. One warn names the fault.
           input.warn?.(`publication proof read failed (settling nothing; left to the recovery lane): ${detail}`);
           return false;
         }
-        // invariant: The row exists and its bytes do not parse: UNREADABLE, exactly like a
-        // missing proof — the projection below is the fallback.
         input.warn?.(`publication proof unreadable (falling back to the persisted review): ${detail}`);
       }
       const degraded = proof !== null && proof.kind === "degraded";
@@ -2546,21 +1676,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               })) ?? (await readInheritedReview(deps.db, { scope: input.scope, headSha: input.headSha }));
       const gate = review === null ? null : await deps.getCheckGate(input.scope);
       if (review !== null && gate === null) {
-        // invariant: NO GATE EVIDENCE here (the webhook lane passes an absent gate on
-        // purpose; a damaged row reads the same way). "Cannot read the gate" is
-        // not "the gate was missed": freezing a failure would turn a passing
-        // head red on a zero-config lane, so NOTHING is frozen and the run is
-        // left to the reconciler, which reads the real gate. One warn says why.
         input.warn?.(
           "the App's gate is unreadable from this lane — settling nothing; the recovery lane reads the real gate",
         );
         return false;
       }
-      // safety: ANY readable review goes through the inherited branch, which fails
-      // closed on an unreadable tally exactly as that head's own run does. A
-      // confirmed publication whose payload yields no review is EVIDENCE that a
-      // review exists, so it fails closed the same way. `neutral` is only
-      // "nothing to inherit": no readable proof AND no readable review.
       const conclusion: CheckConclusion = degraded
         ? terminalFailure("unknown-failure")
         : proof !== null || review !== null
@@ -2572,9 +1692,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               inherited: { headSha: input.headSha, reviewedHeadSha: input.headSha },
             })
           : input.paused === true
-            ? // why: Nothing ran and nothing was inherited: the approved `paused`
-              // why: wording (kept `neutral` — nothing was reviewed, so the run is
-              // not a verdict on the commit).
+            ?
               {
                 desired: "neutral",
                 title: CHECK_NAME,
@@ -2591,21 +1709,12 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         return false;
       }
       if (adapter === null) {
-        // invariant: STORE-ONLY settlement (spec §7.9): the intent is frozen and the lease
-        // is given back, which makes the row immediately due — the selector's
-        // `desired <> 'in_progress'` disjunct needs no due time — so the minute
-        // reconciler performs the single remote update. No credential is
-        // touched here, which is what lets the paused gate settle a run while
-        // still making ZERO config/GitHub calls (architect lock L4).
         return releaseCheckClaim(deps.db, identity.attemptId, claimed.lease, deps.nowMs());
       }
       const ownedFence = fenceFor(claimed.lease);
       const owned = await getCheckOwnership(deps.db, identity.attemptId, ownedFence.lease, ownedFence.nowMs);
       if (owned === null) return false;
       if (owned.checkRunId === null) {
-        // note: The selector proved a run id a moment ago; a row without one is not
-        // this lane's to close remotely, so it is released with its frozen
-        // intent and recovery finishes it.
         await releaseForRecovery(identity.attemptId, claimed.lease, "the skipped attempt has no attached run", false);
         return false;
       }
@@ -2617,7 +1726,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         updateBudgetMs: input.updateBudgetMs,
       });
       if (completed.kind !== "completed") {
-        // invariant: Recovery status/error/backoff only — the frozen intent stays.
         await releaseForRecovery(identity.attemptId, claimed.lease, completed.reason, completed.requests > 0);
         return false;
       }
@@ -2626,10 +1734,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
     },
 
     async markQueuedBehindInflight(input) {
-      // invariant: The row is selected here and the SAME conditional write runs again in
-      // the adapter on the dispatching line — the client resolution between them
-      // is an unbounded await, and a relabel must never land on a row another
-      // holder froze or terminalized meanwhile.
       const selectRelabelable = () =>
         markCheckQueuedBehindInflight(deps.db, {
           scope: input.scope,
@@ -2642,8 +1746,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           nowMs: deps.nowMs(),
         });
       const relabeled = await selectRelabelable();
-      // note: No own attach row (another delivery owns the key), a row that is no
-      // longer running, or no remote run: nothing to label.
       if (relabeled === null) return false;
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return false;
@@ -2663,28 +1765,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
 
     async terminalize(input) {
       const { handle } = input;
-      // invariant: PROOF decides (spec §7.9): the publication THIS attempt published.
-      // `null` is UNPROVEN — never "not published" — which is why an
-      // unconfirmed send must conclude `failure`, not success. Only the linked
-      // publication proves anything: RL-12 lets a re-trigger reuse the head
-      // SHA, so the reader's head fallback would adopt ANOTHER generation's
-      // row (the oldest one) and freeze this attempt's Check from an envelope
-      // it never published. Without an own publication id and without an
-      // inherited head that is the only thing the read could return, so it is
-      // not issued at all (the recovery lane's `readProof` applies the same
-      // rule). The APPLIED review follows that SAME proof publication: the
-      // scope/SHA `reviews` row may be an earlier attempt's result and must
-      // not decide this one. The gate and the review are consulted ONLY inside
-      // `decideConclusion`'s branches, so without a proof and without an
-      // inherited head both reads are skipped rather than issued and
-      // discarded; a review payload without a readable tally stays unreadable,
-      // never a pass, and an unreadable gate row fails closed the same way. An
-      // EMPTY increment reads the reviewed head's `reviews` row instead — the
-      // head whose content this round covers.
       const ownPublicationId = input.publicationId ?? undefined;
-      // invariant: A `budget-exhausted` outcome is decided from its own typed record
-      // alone — a same-head proof could only be a PRIOR generation's applied
-      // publication, so the fallback read is suppressed for that outcome too.
       const readProof =
         input.outcome === "budget-exhausted" ||
         (ownPublicationId === undefined && input.inheritedHeadSha === undefined)
@@ -2694,12 +1775,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               headSha: handle.headSha,
               publicationId: ownPublicationId,
             });
-      // invariant: The reader prefers the linked row but still falls back to another row
-      // with a readable proof for the same head — under RL-12 that is a PRIOR
-      // generation's applied publication (one row per scope/head/kind, so a
-      // re-trigger owns the degraded row and can only ever see an older
-      // `review` row). That proof is not this attempt's: a foreign publication
-      // id is UNPROVEN, exactly as the recovery lane's `readProof` treats it.
       const proof =
         readProof !== null && ownPublicationId !== undefined && readProof.publicationId !== ownPublicationId
           ? null
@@ -2737,9 +1812,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: handle.headSha,
         ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
       });
-      // invariant: Freeze the boundary title/summary and the proof link BEFORE any remote
-      // update, fenced on the CURRENT lease with a clock sampled for THIS write
-      // (the proof read awaited D1; its pre-read clock cannot authorise it).
       const intentFence = fenceFor(handle.lease);
       const frozen = await setCheckDesired(
         deps.db,
@@ -2756,9 +1828,6 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       const attemptId = owned.identity.attemptId;
       const checkRunId = owned.checkRunId;
       if (checkRunId === null) {
-        // invariant: No remote run exists to terminalize (an attempt whose create never
-        // landed). Release it with its frozen intent instead of holding this
-        // lease until the execution deadline: recovery is due after backoff.
         await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, "no remote check run attached to this attempt", true);
         return;
       }
@@ -2775,34 +1844,17 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         updateBudgetMs: input.updateBudgetMs,
       });
       if (completed.kind === "completed") {
-        // invariant: `observed` advances ONLY from this validated response (spec §7.9),
-        // under a fence re-read for this mutation. A conclusion derived WITHOUT
-        // a proof leaves the record revisable exactly once when it links the
-        // publication that can still contradict it (`reopenTerminalCorrection`);
-        // the store applies that mark only to a linked row. Every proof-derived
-        // conclusion is final.
         const observedFence = fenceFor(handle.lease);
         await recordCheckObservation(deps.db, attemptId, observedFence.lease, completed.remote, observedFence.nowMs, {
           conclusionUnproven: proof === null,
         });
         return;
       }
-      // invariant: Unavailable/unconfirmed: recovery status, error and backoff only —
-      // never `desired`, never `observed`. Publication is untouched either way.
       await releaseForRecovery(attemptId, fenceFor(handle.lease).lease, completed.reason, completed.requests > 0);
     },
 
     async abandonTerminalize(input) {
       const { handle } = input;
-      // invariant: The fallback is what the CALLER already knew, decided from the outcome
-      // alone (plus, for `skipped`, the inherited head — read exactly as
-      // `terminalize` reads it). It is deliberately NOT the terminal path's
-      // proof-derived conclusion: `proof: null` here, so `publication-unknown`
-      // / `expired` / `degraded-not-posted` freeze the unconfirmed fallback that
-      // path would have used without proof. The safety net is the recovery
-      // lane — the last writer — which re-reads the proof and can correct it.
-      // `outcome` omitted is the interrupted-terminalize case: an execution
-      // fault with no readable result, so it carries the approved wording.
       const conclusion: CheckConclusion =
         input.outcome === undefined
           ? terminalFailure("unknown-failure")
@@ -2820,25 +1872,8 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               headSha: handle.headSha,
               ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
             });
-      // note: Sample the fence clock for THIS write, after the reads above: the
-      // inherited-head reads are D1 round trips, and a snapshot taken before
-      // them could authorise a write that lands after the lease expired.
       const fence = fenceFor(handle.lease);
-      // invariant: The fallback lands ONLY where nothing is frozen yet: the state
-      // predicate is part of the UPDATE, so a concurrent terminalize's
-      // proof-derived conclusion and its exact summary survive this write.
       await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);
-      // invariant: The dispatch intent is NOT cleared here. The abandoned send may already
-      // have landed, and a give-up is a statement about the WAIT, not about what
-      // GitHub received: recovery reconciles by readback and never re-sends
-      // (§7.9a). A give-up that cleared it would be the resend path the rule
-      // forbids.
-      // Released on BOTH branches — an already-frozen intent is sent by
-      // recovery exactly as it stands. `requestsSpent: true` keeps the row
-      // `remote-unconfirmed`, so recovery ADOPTS the run the interrupted
-      // terminalize may already have updated (RL-12). The boolean is the
-      // RELEASE write's own result: a dead fence (recovery claimed the
-      // attempt, or the lease expired) changed nothing and reports `false`.
       return releaseForRecovery(
         handle.attemptId,
         fence.lease,

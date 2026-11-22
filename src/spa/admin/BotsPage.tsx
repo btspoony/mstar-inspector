@@ -1,17 +1,3 @@
-/**
- * Bots — every live review bot with its owning workspace and its scope, and the
- * operator's override of that scope (contract § 8.3).
- *
- * The list is ONE read; the page filters it client-side and never pages. Scope
- * writes reuse `PATCH /api/bots/:botId/scope` unchanged: a share needs the bot's
- * workspace to BE the official workspace, an unshare needs `confirm: true` —
- * the dialog here is that confirmation, and its copy names the consequence.
- *
- * A bot outside the official workspace renders its share action disabled with
- * the reason; that is a hint, never the authorization. The server's 409 stays
- * the guard, and an already-shared bot stays unsharable-into rather than
- * unrevocable: a stale share must remain revocable from this screen.
- */
 import { useState } from "react";
 import {
   Button,
@@ -33,24 +19,19 @@ import { AdminWriteError, readBots, setBotScope, useLoaded, type BotRow } from "
 import { ConsolePath, Screen } from "./screen";
 import { TableSearch } from "./TableSearch";
 
-/** note: The scope a committed write moves the bot to: the other of its two values. */
 function opposite(scope: BotRow["scope"]): BotRow["scope"] {
   return scope === "shared" ? "owned" : "shared";
 }
 
-/** note: The share's stamp as the table shows it: date and minute, UTC. */
 function sharedStamp(value: string | null): string {
   return value === null ? "—" : value.slice(0, 16).replace("T", " ");
 }
 
 export function BotsPage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readBots);
-  /** invariant: The row awaiting confirmation — the dialog's only subject. */
   const [pending, setPending] = useState<BotRow | null>(null);
-  /** invariant: The row being written; only that row's action disables. */
   const [busyId, setBusyId] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  /** note: Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
 
   async function commit(row: BotRow): Promise<void> {
@@ -58,10 +39,8 @@ export function BotsPage({ locale }: { locale: Locale }) {
     setRefusal(null);
     try {
       await setBotScope(row.botId, opposite(row.scope));
-      // note: The accepted write re-reads: `sharedAt` is the server's stamp.
       reload();
     } catch (error) {
-      // note: Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.bots.scopeChangeFailed", { name: row.name });
       setRefusal(
         error instanceof AdminWriteError
@@ -113,9 +92,6 @@ export function BotsPage({ locale }: { locale: Locale }) {
     {
       header: "",
       cell: (row) => {
-        // note: Sharing INTO the platform needs the official workspace; revoking a
-        // share does not (the server allows it, so the stale share stays
-        // revocable from here).
         if (row.scope === "owned" && !row.isOfficial) {
           return (
             <div className="flex flex-col gap-1">
@@ -175,7 +151,6 @@ export function BotsPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.botId}
                 empty={
-                  // invariant: No-match copy is only true when there were rows to match.
                   query && bots.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}
@@ -216,7 +191,6 @@ export function BotsPage({ locale }: { locale: Locale }) {
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              {/* why: Cancel first: Radix focuses the first focusable node, so Escape-or-cancel stays the default. */}
               <Button type="button" variant="outline" size="sm" onClick={() => setPending(null)}>
                 {t(locale, "admin.bots.cancelAction")}
               </Button>

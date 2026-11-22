@@ -1,31 +1,7 @@
-/**
- * invariant: Finding fingerprint normalization contract lock (AL-21-1).
- *
- * `src/store/fingerprint.ts` is the single source of truth for the
- * deterministic finding fingerprint written to `findings.fingerprint`
- * (persist path consumes it in Task 2). Locked input domain:
- *
- *   fnv1a64(normPath(file_path) + "\0" + bucket + "\0" + normTitle)
- *
- * - normPath: `\` → `/` (Windows path normalization), NO case folding
- * - normTitle: trim → collapse whitespace → lowercase → strip TRAILING punctuation
- * - bucket: N=10 FIXED line bucket (not a sliding window); null/undefined or
- *   non-positive line_start → "noline" (S-2)
- * - `body` / `line_end` / `category` / `mergeClass` never enter the hash
- * - `fingerprint_hint` (non-blank, non-marker) wins verbatim — legacy
- *   passthrough; a blank or `[REDACTED]`-marker hint falls back to
- *   normalization (W-1)
- *
- * These pins are the AC-21a evidence set ("归一化单测 pin 过": near-line same
- * fingerprint / cross-file different / title normalization / mergeClass no
- * effect / hint priority) plus the fixed-bucket boundary, no-line bucket, and
- * a golden FNV-1a 64 vector (pins the hash algorithm + 16 lowercase hex shape).
- */
 import { describe, expect, test } from "bun:test";
 import { computeFindingFingerprint, type FindingFingerprintInput } from "../../src/store/fingerprint";
 import { sk } from "../helpers/fake-secrets";
 
-/** note: Default realistic finding; tests override only the dimension under pin. */
 function finding(over: Partial<FindingFingerprintInput> = {}): FindingFingerprintInput {
   return {
     file_path: "src/app.ts",
@@ -55,10 +31,6 @@ describe("computeFindingFingerprint", () => {
   });
 
   test("golden vector: pins FNV-1a 64 over the normalized composite", () => {
-    // note: normPath("src/foo.ts") + "\0" + bucket(15 → "11") + "\0" + normTitle("Fix the bug!") =
-    // "src/foo.ts" + "\0" + "11" + "\0" + "fix the bug" (two NUL separators, literal "11")
-    // → FNV-1a 64 = c3f136c3fe89ebbb (canonical vector, verified against the BigInt
-    // FNV-1a 64 reference: "" → cbf29ce484222325, "a" → af63dc4c8601ec8c).
     expect(fp(finding({ file_path: "src/foo.ts", title: "Fix the bug!" }))).toBe("c3f136c3fe89ebbb");
   });
 
@@ -80,11 +52,8 @@ describe("computeFindingFingerprint", () => {
 
   test("no-line pin: line_start null → noline bucket, file+title dimension", () => {
     const a = fp(finding({ line_start: null }));
-    // note: Same file+title, null line → deterministic noline fingerprint.
     expect(a).toBe(fp(finding({ line_start: null })));
-    // invariant: noline bucket ≠ line-1 bucket.
     expect(a).not.toBe(fp(finding({ line_start: 1 })));
-    // invariant: Different file in the noline dimension → different fingerprint.
     expect(a).not.toBe(fp(finding({ line_start: null, file_path: "src/other.ts" })));
   });
 
@@ -96,7 +65,6 @@ describe("computeFindingFingerprint", () => {
     const noline = fp(finding({ line_start: null }));
     expect(fp(finding({ line_start: 0 }))).toBe(noline);
     expect(fp(finding({ line_start: -5 }))).toBe(noline);
-    // invariant: Not a null-handling regression: still distinct from the line-1 bucket.
     expect(fp(finding({ line_start: 0 }))).not.toBe(fp(finding({ line_start: 1 })));
     expect(fp(finding({ line_start: -5 }))).not.toBe(fp(finding({ line_start: 1 })));
   });
@@ -135,7 +103,6 @@ describe("computeFindingFingerprint", () => {
     for (const title of ["修复空指针。", "修复空指针！", "修复空指针…", "修复空指针。！…"]) {
       expect(fp(finding({ title }))).toBe(base);
     }
-    // invariant: Different CJK content still differs.
     expect(fp(finding({ title: "修复空指针" }))).not.toBe(fp(finding({ title: "修复越界" })));
   });
 
@@ -156,9 +123,7 @@ describe("computeFindingFingerprint", () => {
 
   test("hint priority: non-blank hint is returned verbatim, regardless of the finding", () => {
     expect(fp(finding({ fingerprint_hint: "abc123" }))).toBe("abc123");
-    // invariant: Verbatim: no hex coercion, no case folding, no trimming.
     expect(fp(finding({ fingerprint_hint: "custom-hint!" }))).toBe("custom-hint!");
-    // invariant: Title/body/file changes do not change the fingerprint while a hint exists.
     expect(fp(finding({ fingerprint_hint: "abc123", file_path: "other.ts", line_start: 1, title: "Different" }))).toBe(
       "abc123",
     );
@@ -173,21 +138,15 @@ describe("computeFindingFingerprint", () => {
   });
 
   test("hint priority: a hint CONTAINING the redaction marker falls back to normalization (embedded marker)", () => {
-    // safety: Redaction replaces only the secret span: a sk-prefixed secret + " prod" → "[REDACTED] prod".
-    // A hint that merely CONTAINS the marker must not win verbatim — two
-    // findings whose hints both embed the marker would otherwise collapse
-    // into one false repeat (Bugbot wave-1).
     const a = fp(finding({ fingerprint_hint: sk("abc") + " prod [REDACTED] key", title: "Secret leak in auth" }));
     const b = fp(finding({ fingerprint_hint: sk("xyz") + " prod [REDACTED] key", title: "Secret leak in billing" }));
     expect(a).not.toBe(b);
-    // invariant: Each equals its own hint-less fingerprint (normalized over distinct content).
     expect(a).toBe(fp(finding({ title: "Secret leak in auth" })));
     expect(b).toBe(fp(finding({ title: "Secret leak in billing" })));
   });
 
   test("hint priority: a marker-free hint still wins verbatim", () => {
     expect(fp(finding({ fingerprint_hint: sk("abc") + " prod" }))).toBe(sk("abc") + " prod");
-    // invariant: Marker-free hint survives even when the finding content differs.
     expect(fp(finding({ fingerprint_hint: sk("abc") + " prod", title: "Different title" }))).toBe(sk("abc") + " prod");
   });
 });

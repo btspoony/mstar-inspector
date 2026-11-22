@@ -1,12 +1,3 @@
-/**
- * why: Consumer recheck CONSERVATIVE PRECEDENCE (spec §7.4): a same-round related
- * concern outranks closure, and the guard bites only an `addressed` claim —
- * `dismissed` / `unverifiable` keep their own verdict.
- *
- * Sibling files cover status/row accounting (`consumer-recheck-status`) and the
- * trusted evidence catalog (`consumer-recheck-catalog`); the doubles, D1
- * seeders and payload builders come from ../helpers/consumer-harness.
- */
 import { beforeEach, describe, expect, test } from "bun:test";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import {
@@ -38,9 +29,6 @@ beforeEach(() => {
 
 describe("recheck conservative precedence (§7.4)", () => {
   test("a related index the final envelope cannot resolve is fabrication: unverifiable/conflict, no resolution", async () => {
-    // The seat cites finding #1 while the round's final envelope carries one
-    // finding (#0): the index names nothing the consumer can verify, so the
-    // closure claim is never trusted (§7.4 conservative precedence).
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [1] });
@@ -63,8 +51,6 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("an addressed row that names any in-range related concern is still a conflict, never a closure", async () => {
-    // invariant: The related concern exists in the final envelope, so it is unresolved
-    // by definition: closure loses to the surviving concern.
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.recheckFileContent = recheckDocWith({ relatedCurrentFindingIndexes: [0] });
@@ -85,14 +71,10 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("an in-range related index on a non-closure row is not a conflict: the guard only bites `addressed`", async () => {
-    // invariant: Same in-range index, but the seat did not claim a fix: `dismissed` and
-    // `unverifiable` keep their own verdict instead of being rewritten.
     for (const verdict of [
       { disposition: "dismissed", reason: "non-fix-dismissal", expected: "dismissed (non-fix-dismissal)" },
       { disposition: "unverifiable", reason: "no-evidence", expected: "unverifiable (no-evidence)" },
     ] as const) {
-      // invariant: Each verdict gets its own recorders: the second iteration's body pin
-      // must read its own `post-prepared` call, not the first one's.
       h = createConsumerHarness();
       h.sandbox.diffStdout = VALID_DIFF;
       h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -124,10 +106,6 @@ describe("recheck conservative precedence (§7.4)", () => {
   });
 
   test("a lost large round claims no closure: every row is invalid-output, so precedence has nothing to resolve", async () => {
-    // why: The RCA's mode (I-000396) on the largest round: the seat's document never
-    // arrives, so no row carries a claim the conservative guards must outvote.
-    // The round must still be attributed per reason — and it must resolve
-    // nothing, because there is no closure to verify.
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.recheckFileContent = "";
@@ -142,8 +120,6 @@ describe("recheck conservative precedence (§7.4)", () => {
     });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    // note: The default target carries the thread below; the rest fill the round to
-    // its full selection cap.
     await seedOpenTarget(db);
     for (let i = 1; i < ASSESSMENT_TARGET_CAP; i += 1) {
       await seedOpenTarget(db, {
@@ -164,14 +140,12 @@ describe("recheck conservative precedence (§7.4)", () => {
     const coverage = coverageLineNumbers(prepared.body)!;
     expect(coverage).toEqual(expectedCoverage);
     expect(coverage.assessed + coverage.invalidOutput + coverage.omitted).toBe(coverage.selected);
-    // invariant: No closure was claimed, so none is published and no thread resolves.
     expect(prepared.body).not.toContain("addressed (verified-fix)");
     expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     const thread = db.raw.query("SELECT resolution_state FROM review_threads").get() as {
       resolution_state: string;
     };
     expect(thread.resolution_state).toBe("pending");
-    // note: ONE failure row names the lost round at the recheck stage.
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: "recheck", head_sha: SHA });

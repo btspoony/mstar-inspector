@@ -1,33 +1,3 @@
-/**
- * Quota versions — the operator console's profile store (spec
- * [bot scope and claiming](../../docs/specs/feature/bot-scope-and-claiming.md)
- * § Review usage, and the iteration's quota plans).
- *
- * Three things live here, all of them operator-only:
- *
- * 1. {@link listQuotaVersions} — every stored profile with its interval, the
- *    marker on the one judging this month, and the ceilings it sets per plan.
- *    The interval END is derived from the next row's `effective_from`: the
- *    table stores one endpoint per profile, so nothing here can disagree with
- *    a second column that does not exist.
- * 2. {@link previewQuotaImpact} — the tightness check the create form must show
- *    before publishing: how many live `saas` workspaces have ALREADY spent the
- *    candidate ceiling for their plan at today's usage. It reads the month's RP
- *    through `readMonthlyRp`, the same statement the enqueue's ceiling read
- *    answers from, so at equal usage and equal numbers the preview cannot
- *    disagree with a refusal. It cannot predict a cut-off: under D5 a profile
- *    published mid-month judges from the next 1st, and that month starts at
- *    0 RP.
- * 3. {@link createQuotaVersion} — one `batch`: the profile row, one
- *    `monthly_rp` row per plan and the audit entry. It closes nothing: a
- *    profile's interval ends at its successor's `effective_from`, so no other
- *    row changes. `version` is derived inside the insert (`MAX(version)+1`), so
- *    two concurrent creates cannot mint the same ordinal — the unique index
- *    refuses the loser.
- *
- * The console is mounted on the `saas` router only, so every workspace here is
- * a `saas` workspace; `self-hosted` reads no ceiling at all.
- */
 import { FREE_PLAN_ID } from "../dashboard/entitlement";
 import type { DashboardD1 } from "../dashboard/users";
 import {
@@ -52,13 +22,7 @@ export type QuotaVersionRow = {
   id: string;
   version: number;
   effectiveFrom: string;
-  /** note: The next profile's `effective_from`; `null` for the last (open) interval. */
   effectiveTo: string | null;
-  /**
-   * note: `current` is the profile judging this month (its `effective_from` covers
-   * the month's 1st); `scheduled` starts after that 1st and never judges the
-   * month in progress; `past` judged an earlier month.
-   */
   state: "past" | "current" | "scheduled";
   base: Record<ReviewLevel, number>;
   source: Record<QuotaSource, number>;
@@ -68,25 +32,10 @@ export type QuotaVersionRow = {
 };
 
 export type QuotaVersionsPayload = {
-  /** note: The version judging this month (the `current` marker is relative to it). */
   judgingVersion: number;
-  /** note: The ordinal a create would mint — the form's read-only `fieldVersion`. */
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
-  /**
-   * why: Plan ids the JUDGING version states no ceiling for, ordered by id. Empty is
-   * the healthy state.
-   *
-   * `quota_profile_plans` must carry a row for every plan (a missing row would
-   * be indistinguishable from "no ceiling", so `resolveMonthlyQuota` throws by
-   * design), and the enqueue turns that throw into a REFUSAL: every webhook of
-   * a workspace on one of these plans is skipped, with a recorded `entitlement`
-   * failure, until a version that covers the plan is published. Publishing is
-   * the only repair — no setting anywhere can add the row. The page states this
-   * because otherwise the state is invisible: the deliveries are refused and
-   * nothing on any other surface says why.
-   */
   uncoveredPlanIds: string[];
 };
 
@@ -106,7 +55,6 @@ export async function listPlans(db: DashboardD1): Promise<QuotaPlan[]> {
  */
 export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<QuotaVersionsPayload> {
   const month = quotaMonth(now);
-  // note: D1 returns each statement's rows at its batch position, in one transaction.
   const [profileResult, planResult] = await db.batch([
     db.prepare(QUOTA_PROFILES_SQL),
     db.prepare(PLAN_LIST_SQL),
@@ -131,10 +79,6 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
   }));
-  // why: The JUDGING version is the one that decides today's verdicts, so its plan
-  // coverage is what the page must report: a gap in a past or scheduled version
-  // cannot refuse anything this month. `judging` comes from the same snapshot,
-  // so a plan it covers can never be reported as uncovered.
   const uncoveredPlanIds = plans.filter((plan) => !Object.hasOwn(judging.monthlyRp, plan.id)).map((plan) => plan.id);
   return {
     judgingVersion: judging.version,
@@ -147,21 +91,16 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
 
 /** The candidate numbers a preview and a publish share. */
 export type QuotaCandidate = {
-  /** note: ISO-8601 instant, `T00:00:00.000Z` — the form submits a UTC date. */
   effectiveFrom: string;
-  /** note: One ceiling per plan id; `null` means that plan is unlimited. */
   monthlyRp: Record<string, number | null>;
 };
 
 export type QuotaImpact = {
   count: number;
-  /** note: The same `saas` live-workspace count the numerator was drawn from. */
   total: number;
-  /** note: The first 1st this candidate judges (`quotaStartsOn`), `YYYY-MM-DD`. */
   startsOn: string;
 };
 
-/** note: Every live workspace with the plan id its subscription resolves to. */
 async function liveWorkspacePlans(db: DashboardD1): Promise<Array<{ id: string; planId: string }>> {
   const res = await db
     .prepare(
@@ -287,8 +226,6 @@ export async function createQuotaVersion(
         ),
     ]);
   } catch (err) {
-    // why: A concurrent publish can take the same instant between the probe and the
-    // batch; the unique index refuses this one, and that is the same conflict.
     if (err instanceof Error && /UNIQUE constraint failed: quota_profiles\.effective_from/.test(err.message)) {
       return { kind: "effective_from_taken" };
     }
@@ -301,13 +238,11 @@ export async function createQuotaVersion(
   return { kind: "ok", version: row?.version ?? 0 };
 }
 
-/** note: A `YYYY-MM-DD` date as the UTC instant the profile stores. */
 function utcDate(date: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   const iso = `${date}T00:00:00.000Z`;
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return null;
-  // note: Reject a date the calendar does not have (2026-02-31 rolls over).
   return at.toISOString().slice(0, 10) === date ? iso : null;
 }
 

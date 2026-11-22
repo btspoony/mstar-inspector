@@ -64,9 +64,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
   const [payload, setPayload] = useState<AppsPayload | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  // note: Read per render (the MembersPage precedent): the switcher navigates with
-  // pushState + popstate, so no new document re-injects the boot — the page
-  // base must track the URL it is actually on.
   const base = apiBase();
   const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
   const unavailableReason =
@@ -93,8 +90,6 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
     void load();
   }, [load]);
 
-  // note: Loading rides the shared skeleton as the page's full loading face —
-  // the component's heading placeholder stands in for the real h1 (AD-582).
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="table" />;
   }
@@ -141,18 +136,6 @@ export function AppsView({
     />
   );
 
-  // invariant: The metric band is payload arithmetic only — four figures `AppsPayload`
-  // can prove. An installation or repository count is not on that payload, so
-  // it can never join them (compass D13). "Enabled" is the status axis the
-  // App's own enable/disable actions name; a paused App is enabled but not
-  // reviewing, so the pause axis gets its own count instead of joining it.
-  // Both axes read the payload through `data.ts`'s normalization, never a
-  // second copy of the wire rule.
-  //
-  // Refusals are the one figure here that reports a failure: `rejected24h`
-  // counts refused webhooks (bad signature, invalid body, missing fields), not
-  // review volume, so it — and only it — wears the alert face, and only when
-  // the sum is non-zero. Review-off is a deliberate pause and stays neutral.
   const rejected24h =
     state === "ok" && payload
       ? payload.apps.reduce((total, app) => total + app.health.rejected24h, 0)
@@ -179,8 +162,6 @@ export function AppsView({
 
   return (
     <div className="flex flex-col gap-6">
-      {/* note: One create-form instance on the page: while the empty state
-          carries the action, the header yields its slot to it. */}
       <PageHeader
         title={t(locale, "apps.heading")}
         description={t(locale, "apps.headingDescription")}
@@ -190,10 +171,6 @@ export function AppsView({
       {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
       {state === "ok" && payload ? (
         appsEmpty ? (
-          // note: Composed first-App guidance: the action reuses the exact
-          // CreateAppButton form — creation is still the only path. The card
-          // keeps the honest "no Apps yet" line and lets the button carry the
-          // unavailable reason when this caller cannot run the flow.
           <EmptyState
             icon={<GitHubMark />}
             title={t(locale, "apps.emptyTitle")}
@@ -208,16 +185,6 @@ export function AppsView({
   );
 }
 
-/**
- * note: The Create control: ONE action opening the two paths that still create
- * something — the repository surface's add flow (the only target creator; the
- * old official-mode form posted a bare `botId` the repository contract
- * refuses) and the self-hosted GitHub App manifest flow.
- *
- * The shared bots the payload lists are INFORMATION here, never a creation
- * form: which App a repository binds to is the add dialog's choice, not this
- * page's.
- */
 function CreateAppChooser({
   locale,
   canCreate,
@@ -297,10 +264,6 @@ export function AppsList({
   const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
     {
       header: t(locale, "apps.tableName"),
-      // note: AD-581 identity cell: the App's brand surface. The list row links
-      // and keys by the immutable App id; the block is the App's GitHub
-      // avatar + display name (primary line) + App id (meta line) — the
-      // D6 fallback chain github_name ?? github_slug ?? String(github_app_id).
       cell: (app) => (
         <div className="flex items-center gap-3">
           <AppAvatar
@@ -342,8 +305,6 @@ export function AppsList({
               : t(locale, "apps.health.deliveryNever")}
             {latest ? ` · ${deliveryOutcomeLabel(latest.outcome, locale)}` : ""}
             {app.health.rejected24h > 0 ? (
-              // why: The count segment is the failure, so it wears the same alert
-              // token the band uses; the delivery prose beside it stays muted.
               <>
                 {" · "}
                 <span className="text-(--tone-danger-fg)">

@@ -1,22 +1,3 @@
-/**
- * invariant: `env.production` ↔ top-level resource parity lock (PR #63 review, should-fix:
- * "`env.production` is hand-duplicated with no parity guard").
- *
- * A wrangler named environment does NOT inherit resource keys — only
- * name/main/compatibility_* flow down — so `wrangler.jsonc`'s `env.production`
- * restates every binding/trigger/migration by hand against prod-only
- * resources. Until now the only machine guard was the sandbox-image contract
- * test, which pins just the container `dockerfile`/`build_context` values
- * (that ownership stays there; this file never re-pins them). A binding, cron
- * or migration added at the top level would deploy fine to staging and be
- * silently missing in production, where the smoke asserts only healthz, the
- * cron string and the image digest — the drift would surface as a production
- * runtime failure.
- *
- * The expected key list is DERIVED from the top level (minus the fields
- * wrangler inherits or rejects inside an env block), so a future top-level
- * resource key fails this lock loudly instead of being ignored.
- */
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -27,12 +8,6 @@ import { stripJsonComments } from "../../scripts/check-image-inputs";
 const REPO_ROOT = join(import.meta.dir, "..", "..");
 const CONFIG_PATH = join(REPO_ROOT, "wrangler.jsonc");
 
-/**
- * invariant: Top-level keys a named environment must NOT restate: name/main/compatibility_*
- * are inherited by wrangler, `keep_vars` is rejected inside an env block
- * (wrangler 4.147.0: `Unexpected fields found in env.production field`), and
- * `env` is the environments container itself.
- */
 const NOT_RESTATED: Record<string, true> = {
   name: true,
   main: true,
@@ -52,7 +27,6 @@ function asArray(value: unknown): Json[] {
   return Array.isArray(value) ? (value as Json[]) : [];
 }
 
-/** note: Every file under one repo-relative directory (the stale-var scans use it). */
 function walk(dir: string): string[] {
   return readdirSync(join(REPO_ROOT, dir), { withFileTypes: true }).flatMap((entry) => {
     const path = `${dir}/${entry.name}`;
@@ -64,12 +38,6 @@ const config: Json = JSON.parse(stripJsonComments(readFileSync(CONFIG_PATH, "utf
 const staging: Json = config;
 const production: Json = asObject(asObject(config.env).production);
 
-/**
- * why: Leaf fingerprint of a nested block as `key.path=value` strings, so a
- * one-sided change to any depth (e.g. `observability.traces.head_sampling_rate`
- * or `assets.directory`) shows up as a differing key path instead of passing
- * silently. Arrays are opaque leaves — nothing here restates one.
- */
 function leafFingerprints(value: unknown, prefix: string): string[] {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return [`${prefix}=${JSON.stringify(value)}`];
@@ -79,7 +47,6 @@ function leafFingerprints(value: unknown, prefix: string): string[] {
   );
 }
 
-/** note: Binding NAMES each block declares, per binding kind. */
 function bindingNames(block: Json): Record<string, string[]> {
   return {
     "kv_namespaces[].binding": asArray(block.kv_namespaces).map((entry) => String(entry.binding)),
@@ -94,7 +61,6 @@ function bindingNames(block: Json): Record<string, string[]> {
   };
 }
 
-/** note: Backing-resource identities each block points at, per resource kind. */
 function resourceIdentities(block: Json): Record<string, string[]> {
   const consumers = asArray(asObject(block.queues).consumers);
   return {
@@ -116,13 +82,6 @@ function resourceIdentities(block: Json): Record<string, string[]> {
   };
 }
 
-/**
- * why: Fingerprint of one `migrations[]` entry: its `tag` plus whichever class
- * lists it carries (`new_sqlite_classes` / `deleted_classes`). A staging-only
- * `v3` tag or class addition changes a fingerprint, so the set-equality below
- * fails instead of shipping a production Worker that replays a different
- * migration history.
- */
 function migrationFingerprints(block: Json): string[] {
   return asArray(block.migrations).map((entry) =>
     [
@@ -134,15 +93,6 @@ function migrationFingerprints(block: Json): string[] {
   );
 }
 
-/**
- * why: Fingerprint of one `containers[]` entry: its `class_name`, its
- * `scheduling_policy` and the image keys it declares. The scheduling policy is
- * pinned here because a container application canNOT change it in place
- * (Sandbox 1.0 migration), so a staging-only change would deploy a production
- * Worker whose DO namespace shape no longer matches. The image
- * `dockerfile`/`build_context` VALUES stay owned by `sandbox-images.test.ts`;
- * only the shape is locked here.
- */
 function containerFingerprints(block: Json): string[] {
   return asArray(block.containers).map(
     (entry) =>
@@ -152,17 +102,6 @@ function containerFingerprints(block: Json): string[] {
   );
 }
 
-/**
- * why: Fingerprint of the protective tuning each `queues.consumers[]` entry
- * declares. `dead_letter_queue` enters as PRESENCE, never as a value: staging
- * and production each point at their OWN DLQ (`review-dlq` vs
- * `review-dlq-prod` — their distinctness is asserted above), but a consumer
- * that declares no DLQ at all, or drops its retry batch bounds, is exactly the
- * drift this lock catches. Both consumers pin max_batch_size 1, the
- * deploy-time max_concurrency ceiling and max_retries 3 (see the
- * wrangler.jsonc rationale). Set-equality keeps the two blocks equal; the
- * ceiling VALUE and the batch-size literal are pinned by the test below it.
- */
 function consumerTuningFingerprints(block: Json): string[] {
   return asArray(asObject(block.queues).consumers).map((entry) =>
     [
@@ -174,7 +113,6 @@ function consumerTuningFingerprints(block: Json): string[] {
   );
 }
 
-/** note: Set-equality between the two blocks for one projection (order-irrelevant). */
 function expectSameSet(kind: string, values: (block: Json) => string[]): void {
   expect(
     new Set(values(production)),
@@ -183,24 +121,11 @@ function expectSameSet(kind: string, values: (block: Json) => string[]): void {
   ).toEqual(new Set(values(staging)));
 }
 
-/**
- * why: Cloudflare route patterns are literal text with `*` standing for any
- * character run — not a segment glob. The `/` before a `*` is part of the
- * literal, so `host/x/*` never matches `host/x` itself. Match the way the edge
- * does: a pattern that only looks like it covers a path must fail here.
- */
 function routePatternMatches(pattern: string, hostAndPath: string): boolean {
   const literal = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
   return new RegExp(`^${literal}$`).test(hostAndPath);
 }
 
-/**
- * note: URLs this Worker answers on its own: what the shell links to (the operator
- * entry carries no trailing slash), where the login redirect and the OAuth
- * round-trip land, and the prefixes the bundle and the webhook face own. Each
- * must be matched by a production route — an unmatched one is served by the
- * marketing Worker instead, with no error on this side.
- */
 const WORKER_ENTRY_PATHS = [
   "/dashboard",
   "/dashboard/login",
@@ -217,7 +142,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expect(Object.keys(production).length, `wrangler.jsonc: env.production is missing`).toBeGreaterThan(0);
 
     const expected = Object.keys(config).filter((key) => NOT_RESTATED[key] !== true);
-    // why: A restatement with nothing to compare against would pass vacuously.
     expect(expected.length, "wrangler.jsonc: no restatable top-level keys found").toBeGreaterThan(0);
 
     const missing = expected.filter((key) => !(key in production));
@@ -250,15 +174,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     }
   });
 
-  /**
-   * why: The prod Worker name is a named environment's ONLY non-inherited identity
-   * key wrangler honours, and every resource name derives from it (the
-   * container application name is `<worker>-<class>-<image key>`). `name` sits
-   * in `NOT_RESTATED` because wrangler inherits it — so without this pin a
-   * deleted/mistyped value would silently redeploy the STAGING Worker against
-   * prod D1/KV/queues, orphaning the container application, before the
-   * post-deploy healthz smoke notices.
-   */
   test("env.production.name is the production Worker, distinct from the staging name", () => {
     expect(production.name, `wrangler.jsonc: env.production.name must be pinned`).toBe(
       "mstar-inspector-production",
@@ -270,34 +185,18 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     ).not.toBe(staging.name);
   });
 
-  /** why: A cron added/removed at the top level would ship silently (the prod smoke
-   * greps only the literal schedule). */
   test("triggers.crons match between the top level and env.production", () => {
     expectSameSet("triggers.crons", (block) => asArray(asObject(block.triggers).crons).map(String));
   });
 
-  /** why: A staging-only `v3` tag or class addition changes the replayed history;
-   * every restatable block must restate it identically. */
   test("migrations (tag + class lists) match between the top level and env.production", () => {
     expectSameSet("migrations", migrationFingerprints);
   });
 
-  /** why: The consumer tuning is the protective shape: a staging-only loosening of
-   * the batch bound or the retry count would silently open a retry-storm → DLQ
-   * path in production, and a staging-only ceiling change would make the two
-   * blocks admit different numbers of reviews. */
   test("queues.consumers[] tuning (batch size, concurrency, retries, DLQ presence) matches between the top level and env.production", () => {
     expectSameSet("queues.consumers[] tuning", consumerTuningFingerprints);
   });
 
-  /** why: The ceiling's VALUE is a deploy-config decision, but it is the blast-radius
-   * bound (every admitted attempt starts its own container), so both blocks are
-   * pinned to Cloudflare Queues' hard limit: 250 concurrent consumer
-   * invocations. `max_batch_size` is pinned to the literal 1 beside it: a batch
-   * above 1 packs several reviews into one invocation and breaks the
-   * one-attempt-per-message retry/DLQ accounting plus the wall-clock budget.
-   * Set-equality above only keeps the two blocks from drifting — never a value
-   * they drift to together. */
   test("both consumer blocks pin max_concurrency to 250 and max_batch_size to 1", () => {
     for (const [block, consumer] of [
       ["top level (staging)", asArray(asObject(staging.queues).consumers)[0]],
@@ -309,33 +208,20 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     }
   });
 
-  /** why: A second/unregistered container entry must fail the lock, not hide behind
-   * the first. Image values stay owned by `sandbox-images.test.ts`. */
   test("containers (class_name + scheduling_policy + images keys) match between the top level and env.production", () => {
     expectSameSet("containers[]", containerFingerprints);
   });
 
-  /** why: The lock previously compared `assets` by `binding` only: a staging-only
-   * `directory` or `run_worker_first` change would ship silently. Fingerprints
-   * carry the `assets.<key>` path, so the failure names the differing key. */
   test("assets (directory, binding, run_worker_first) match between the top level and env.production", () => {
     expectSameSet("assets", (block) => leafFingerprints(asObject(block.assets), "assets"));
   });
 
-  /** why: Nothing read `observability` before: the legacy top-level `enabled` plus
-   * the `logs`/`traces` sub-toggles (their enabled flags, sampling rates and
-   * persist) were only guarded by hand. A one-sided sub-toggle change would
-   * silently alter prod log/trace volume; fingerprints carry the full
-   * `observability.<sub>.<key>` path. */
   test("observability (top-level flags, logs/traces sub-toggles) match between the top level and env.production", () => {
     expectSameSet("observability", (block) =>
       leafFingerprints(asObject(block.observability), "observability"),
     );
   });
 
-  /** note: The prod-only resources `wrangler deploy --env production` resolves to.
-   * Pinned here (once) so a copy-paste staging value fails loudly; the smoke
-   * workflow's own literal grep is a different artifact. */
   test("env.production resolves to the prod-only resources and routes", () => {
     const d1 = asArray(production.d1_databases)[0] ?? {};
     expect(d1.database_name, `wrangler.jsonc: prod D1 database name`).toBe(
@@ -365,13 +251,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     ).toEqual([]);
   });
 
-  /**
-   * why: The durable half of the routing contract: whichever patterns the config
-   * carries, every URL this Worker emits must match one. A frozen pattern list
-   * only proves the config was copied, and it happily freezes the very gap it
-   * should catch — `/x/*` does not match `/x`, so a bare console path fell to
-   * the marketing Worker while the list stayed green.
-   */
   test("every entry URL this Worker serves is matched by a production route", () => {
     const patterns = asArray(production.routes).map((entry) => String(entry.pattern));
     expect(patterns.length, `wrangler.jsonc: prod declares no routes`).toBeGreaterThan(0);
@@ -384,12 +263,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     ).toEqual([]);
   });
 
-  /**
-   * note: `DEPLOYMENT_MODE` is the deployment-shape switch (2026-10): `self-hosted`
-   * or `saas`, validated at startup, read by the login/landing faces only. Both
-   * deploy workflows pass it with `--var` so a config default cannot silently
-   * disagree with the instance the run is deploying.
-   */
   test("DEPLOYMENT_MODE: both deploy workflows pass --var, and each config block declares a value", () => {
     for (const name of ["deploy.yml", "deploy-prod.yml"]) {
       const text = readFileSync(join(REPO_ROOT, ".github", "workflows", name), "utf8");
@@ -400,13 +273,6 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     expect(asObject(production.vars).DEPLOYMENT_MODE).toBe("saas");
   });
 
-  /**
-   * why: The top-level `vars` is the LOCAL shape (`wrangler dev`, and a manual
-   * staging deploy): it must declare `self-hosted`, so a laptop starts a
-   * self-hosted instance instead of failing loud on an unset var. The two
-   * blocks disagree ON PURPOSE — that is why `vars` is not in the leaf
-   * fingerprints above; both values are still pinned to the accepted shapes.
-   */
   test("DEPLOYMENT_MODE: the top-level vars declares the local self-hosted shape", () => {
     expect(
       asObject(staging.vars).DEPLOYMENT_MODE,
@@ -418,32 +284,12 @@ describe("wrangler env.production parity (PR #63 should-fix)", () => {
     ]);
   });
 
-  /**
-   * why: `env.production.vars` is the plain-var roster for prod. The open-sign-in
-   * change removed the deployment allowlist and the tenant-mode removal
-   * (2026-10) dropped the tenant read mode, so the ONLY prod var left is the
-   * deployment shape — a config var
-   * that a deploy re-supplies must not quietly come back as a half-configured
-   * bootstrap list.
-   */
   test("env.production.vars carries exactly the deployment shape", () => {
     expect(Object.keys(asObject(production.vars)).sort()).toEqual(["DEPLOYMENT_MODE"]);
   });
 });
 
-/**
- * why: The deployment allowlist is GONE end to end (issue I-000064):
- * sign-in no longer consults a list of blessed logins, so a surviving reference
- * anywhere in the shipped code, the tests, the workflows or the docs would be a
- * second, undocumented authority. `.changes/unreleased/*` is release history
- * and is deliberately NOT scanned.
- */
 describe("no deployment allowlist survives", () => {
-  /**
-   * why: The retired allowlist var name, assembled from fragments so THIS file does
-   * not match its own scan — a grep-assertion that trips on itself proves
-   * nothing.
-   */
   const RETIRED_VAR = ["ADMIN", "LOGINS"].join("_");
 
   const SCANNED_ROOTS = ["src", "tests", "docs"] as const;
@@ -468,15 +314,7 @@ describe("no deployment allowlist survives", () => {
   });
 });
 
-/**
- * why: The deployment-wide review brake is GONE end to end (2026-10): per-App
- * `review_bots.review_enabled` is the only review control, so a surviving
- * reader, env declaration or doc row would document a variable nothing reads
- * — and would imply a deployment can freeze every tenant's reviews.
- * `.changes/unreleased/*` is release history and deliberately NOT scanned.
- */
 describe("no deployment-wide review brake survives", () => {
-  /** why: Assembled from fragments so THIS file does not match its own scan. */
   const RETIRED_VAR = ["REVIEW", "ENABLED"].join("_");
 
   const SCANNED_ROOTS = [
@@ -508,16 +346,7 @@ describe("no deployment-wide review brake survives", () => {
   });
 });
 
-/** why: The v1.2 tenant read mode is GONE end to end (the tenant-mode removal,
- * 2026-10): one SQL face, one
- * App route family, no mode var — so a surviving reference in the shipped
- * code, the deploy scripts, the workflows, the tests, the docs or the deploy
- * config would either resurrect a second read path or document a variable
- * nothing reads. `.changes/unreleased/*` is release history and is
- * deliberately NOT scanned (the removal note names the retired var there).
- */
 describe("no tenant read mode survives", () => {
-  /** why: Assembled from fragments so THIS file does not match its own scan. */
   const RETIRED_VAR = ["WORKSPACE", "TENANT", "MODE"].join("_");
 
   const SCANNED_ROOTS = ["src", "scripts", "tests", "docs"] as const;
@@ -539,19 +368,6 @@ describe("no tenant read mode survives", () => {
   });
 });
 
-/**
- * why: `.mstar/` is gitignored local process data (plans, iterations, SDD runs,
- * workflows), so its identifiers must never appear in a tracked file: a reader
- * of the code cannot resolve them, because the record they name is not in the
- * repository. A tracked comment states its own provenance instead — what it is
- * plus a date, e.g. "the deployment-shape switch (2026-10)".
- *
- * `AD-*` / `AL-*` / `F-*` / `I-0000xx` ids are NOT process ids (several are
- * recorded in tracked docs on purpose), so the scan is narrow: only the local
- * plan/iteration shapes AGENTS.md bans. The patterns and their samples are
- * ASSEMBLED from fragments for the same reason the retired-var scans above are:
- * a grep assertion that trips on its own source proves nothing.
- */
 describe("no local process ids in tracked content", () => {
   const SCANNED_ROOTS = ["src", "tests", "scripts", "docs", "migrations", ".github", ".changes"] as const;
   const SCANNED_FILES = ["wrangler.jsonc", "wrangler.smoke.jsonc", ".env.example", "README.md", "README_CN.md"] as const;
@@ -561,7 +377,6 @@ describe("no local process ids in tracked content", () => {
   const DOT_MSTAR = [".mstar", "/"].join("");
   const PLAN_SUBDIR = ["pl", "ans"].join("");
 
-  /** note: Local plan/iteration identifiers the AGENTS.md rule bans, with a sample each. */
   const BANNED: Array<[label: string, source: string, sample: string]> = [
     ["plan id", `\\b${PLAN}[ _-]?\\d{2,}\\b`, `see ${PLAN} 100 for why`],
     ["iteration id", `\\b${ITER}(?:ation)?[ _-]?\\d{2,}\\b`, `closed in ${ITER} 042`],
@@ -575,8 +390,6 @@ describe("no local process ids in tracked content", () => {
 
   test("no tracked file names a local plan, iteration or process path", () => {
     const rules = BANNED.map(([label, source, sample]) => ({ label, pattern: new RegExp(source, "i"), sample }));
-    // why: Every rule must fire on its sample, or a typo'd pattern would pass
-    // vacuously across the whole repo.
     for (const { label, pattern, sample } of rules) {
       expect(pattern.test(sample), `${label} pattern matches nothing — it cannot guard anything`).toBe(true);
     }

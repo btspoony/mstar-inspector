@@ -1,14 +1,3 @@
-/**
- * note: The review route's deployment gate (spec § Deployment gate). One system
- * setting decides whether a queue delivery may create a Workflow instance, so
- * merging this code is safe and enabling the route is a deliberate operator
- * act: absent is OFF, a stored `on` is the ONLY admission, and an unreadable
- * row refuses rather than admits.
- *
- * The consumer arrives through `runReviewQueueBatch`'s loader parameter, so this
- * suite needs no `mock.module` — a process-wide stub cannot be undone in Bun
- * and would leak into later files.
- */
 import { afterAll, describe, expect, mock, test } from "bun:test";
 import type { ExecutionContext, MessageBatch } from "@cloudflare/workers-types";
 import "../helpers/cloudflare-workers-mock";
@@ -35,10 +24,8 @@ afterAll(() => {
 
 const KEY = "review.route.workflow";
 
-/** note: Counts how often the gate let the handler reach the consumer. */
 let consumerLoads = 0;
 
-/** note: The fake consumer module: a no-op consumer, so the batch costs nothing. */
 async function fakeConsumer(): Promise<never> {
   consumerLoads += 1;
   return {
@@ -98,9 +85,6 @@ describe("the review route's deployment gate", () => {
   });
 
   test("an unreadable row refuses, and says why", async () => {
-    // note: Anything that is not exactly `on`/`off` is a refusal — including a
-    // padded `"on "`: a setting whose meaning flips on a stray space is the
-    // bug class this switch exists to avoid.
     for (const raw of ["on ", " on", "on\t", "\non", "ON", "1", "true", "maybe"]) {
       reset();
       const db = createMigratedTestD1();
@@ -109,8 +93,6 @@ describe("the review route's deployment gate", () => {
       await runReviewQueueBatch(BATCH, { DB: db } as never, CTX, fakeConsumer);
 
       expect(consumerLoads).toBe(0);
-      // note: Unreadable evidence is a fault, so the line rides warn; the refusal is
-      // the same as an absent row, and it names the raw value it rejected.
       expect(logLines).toHaveLength(0);
       expect(warnLines).toHaveLength(1);
       const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;

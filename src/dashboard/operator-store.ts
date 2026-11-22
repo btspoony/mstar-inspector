@@ -1,35 +1,3 @@
-/**
- * note: Platform-operator store — the one read/write authority for `support_grants`
- * and `audit_events` (migration 0029 is the DDL single source).
- *
- * The exports are the whole surface — two appends (`insertSupportGrant`,
- * `insertAuditEvent`), the console's PAIRED writes (`insertSupportGrantWithAudit`,
- * `deleteSupportGrantWithAudit` — grant plus its audit row in ONE `batch`),
- * three listing reads (`listActiveSupportGrants`, `listAllActiveSupportGrants`,
- * `listAuditEvents`), and the validity probe (`hasValidGrant`). A grant is a
- * time-boxed access aid, not history (spec operator-admin-surface §3.4), so the
- * operator console revokes it by deleting the row; `audit_events` stays
- * append-only by construction.
- *   * `support_grants` is the time-boxed, workspace-scoped window that lets a
- *     non-member platform operator read a workspace's identity fields and
- *     member list. Expiry is evaluated per request from the stored
- *     `expires_at` (`> now`), never by a timer or a status flip, so a lapsed
- *     grant stops matching exactly like no row at all.
- *     Both reads judge ONE row per (workspace, operator): the newest by
- *     `rowid` (insertion order), so an appended row can end a window its
- *     predecessor still claims. The console's revocation deletes the whole
- *     pair (see `deleteSupportGrantWithAudit`), so it can never reveal an older row.
- *   * `audit_events` records the operator access attempt in the workspace gate
- *     (`support.read` | `support.forbidden` | `support.denied`), one row per
- *     operator request, and the console's grant maintenance
- *     (`support.grant.create` | `support.grant.delete`), one row per write.
- *     Every read of it is owner/admin-only.
- *
- * Zero-dependency leaf (the `workspace-store` / `invite-store` module
- * boundary): the `db` parameter is a locally-declared narrow D1 face (types
- * only, zero imports), satisfied structurally by the real `D1Database` and the
- * dashboard test double.
- */
 
 /**
  * Closed `audit_events.action` vocabulary (free TEXT in the DDL, checked
@@ -66,7 +34,6 @@ export type AuditEventRow = {
   created_at: string;
 };
 
-/** note: Narrow D1 face: the statements these two tables need. */
 type OperatorStoreStatement = {
   bind(...values: unknown[]): OperatorStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -77,17 +44,11 @@ type OperatorStoreStatement = {
   }>;
 };
 
-/** note: One statement's result inside a `batch()` (order matches input). */
 type OperatorStoreBatchResult = {
   results: unknown[];
   meta: { changes: number; last_row_id: number };
 };
 
-/**
- * why: `batch` is part of the face because a console grant write and its audit row
- * are ONE transaction; a face without `batch` throws before any statement runs
- * (nothing written), which is why the paired writes have no fallback.
- */
 type OperatorStoreD1 = {
   prepare(query: string): OperatorStoreStatement;
   batch(statements: OperatorStoreStatement[]): Promise<OperatorStoreBatchResult[]>;
@@ -102,16 +63,9 @@ const GRANT_INSERT_SQL = `INSERT INTO support_grants
 const AUDIT_INSERT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
    VALUES (?, ?, ?, ?, ?)`;
 
-/**
- * note: The same audit append, with its workspace taken from the grant row inside the
- * transaction — a batch fixes every bind at submit, so a prior statement's
- * result cannot be bound here. Ordered BEFORE the paired DELETE: after it the
- * subquery finds nothing and the append would be a silent no-op.
- */
 const AUDIT_INSERT_FROM_GRANT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
  SELECT ?, g.workspace_id, ?, ?, ? FROM support_grants g WHERE g.id = ?`;
 
-/** note: The whole (workspace, operator) window, resolved from the row id in-SQL. */
 const GRANT_PAIR_DELETE_SQL = `DELETE FROM support_grants
  WHERE workspace_id = (SELECT workspace_id FROM support_grants WHERE id = ?)
    AND operator_login = (SELECT operator_login FROM support_grants WHERE id = ?)`;

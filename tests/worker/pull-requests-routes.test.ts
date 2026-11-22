@@ -1,21 +1,3 @@
-/** note: GET /api/targets/:targetId/pull-requests,
- * GET /api/targets/:targetId/pull-requests/:owner/:repo/:number and its three
- * `findings` / `reviews` / `failures` section reads — the target-scoped PR
- * ledger faces (migration 0039 for the tables).
- *
- * Both ride the SAME gate ladder as every other target JSON read: membership →
- * the target-id resolution INSIDE the session workspace (unknown / soft-deleted
- * / CROSS-WORKSPACE all collapse into the one `unknown target` 404) → the
- * workspace owner/admin role. The head answers
- * `{ pull_request, counts, latest_review }`; each section answers one page plus
- * its total. A
- * tuple this App never received is a 404 on every path — the address is the
- * ledger's own key, so a same-number PR in another repo is a miss, never a
- * fallback. Bad paging is a 400, never a silent default — but a well-formed
- * `limit` outside `[1, 50]` is clamped into it rather than rejected. A
- * `severity` outside the merge-class vocabulary is a 400 too: it has no
- * predicate, so an empty page would misreport it as "no match".
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -27,7 +9,6 @@ import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers"
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** invariant: Each fixture App gets its own numeric GitHub id (the App's only address). */
 const ACME_APP_ID = 3001;
 const OTHER_APP_ID = 3002;
 
@@ -64,9 +45,6 @@ async function seedApp(
   seedTarget(db, opts.id, { id: `target-${opts.id}`, workspaceId: opts.workspaceId });
 }
 
-/** note: Two workspaces, one App each. `octocat` owns `acme` and belongs to nothing in
- * `other`, so the cross-workspace denial is real membership, not a missing row.
- */
 async function fixture(): Promise<TestD1> {
   const db = createMigratedTestD1();
   const now = new Date().toISOString();
@@ -112,8 +90,6 @@ async function getFace(path: string, db: TestD1, login = "octocat"): Promise<Res
 describe("GET /api/targets/:targetId/pull-requests", () => {
   test("a PR with null title / head_sha still appears, with empty strings", async () => {
     const db = await fixture();
-    // note: The payload for a sparse delivery omits both (migration 0039 keeps them
-    // nullable). One such row must not blank the whole list.
     await createReviewBotsStore(db).upsertPullRequest({
       appId: "app-acme",
       targetId: "target-app-acme",
@@ -156,10 +132,8 @@ describe("GET /api/targets/:targetId/pull-requests", () => {
       head_sha: "sha-1",
       latest_review: null,
       failure_count: 0,
-      // note: D11/D16: no live lock → the explicit idle state, not an absent field.
       reviewing: { state: "none" },
     });
-    // note: The option set rides every answer, filtered or not.
     expect(body.repos).toEqual(["acme/widgets"]);
   });
 
@@ -187,8 +161,6 @@ describe("GET /api/targets/:targetId/pull-requests", () => {
     expect(await res.json()).toEqual({ pull_requests: [], repos: ["acme/widgets"] });
   });
 
-  // invariant: A filter the server cannot apply must never read as an unfiltered ledger:
-  // the value is exactly two non-empty segments split on the FIRST `/`.
   for (const malformed of ["a/b/c", "a/", "/b", "a", ""]) {
     test(`a malformed repo query (${JSON.stringify(malformed)}) is a 400, never a filtered 200`, async () => {
       const db = await fixture();
@@ -203,9 +175,6 @@ describe("GET /api/targets/:targetId/pull-requests", () => {
 
   test("a target from another workspace answers the same 404 as an unknown one", async () => {
     const db = await fixture();
-    // note: `octocat` owns acme; app-other's target lives in ws-other. Addressing it
-    // under the acme workspace ref must not resolve, and the body must not
-    // name it: the 404 is the resolution's own verdict, not a membership deny.
     const cross = await getFace(`/dashboard/acme/api/targets/target-app-other/pull-requests`, db);
     expect(cross.status).toBe(404);
     expect(await cross.json()).toEqual({ error: "unknown target" });
@@ -224,7 +193,6 @@ describe("GET /api/targets/:targetId/pull-requests", () => {
 const detailPath = `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/131`;
 const sectionPath = (section: "findings" | "reviews" | "failures") => `${detailPath}/${section}`;
 
-/** note: The installation the failure join reads (one App, one installation). */
 function seedInstallation(db: TestD1): void {
   db.raw
     .prepare(
@@ -233,7 +201,6 @@ function seedInstallation(db: TestD1): void {
     .run();
 }
 
-/** `count` reviews for #131, oldest first, so the store's newest-first order is observable. */
 function seedReviews(db: TestD1, count: number): void {
   for (let index = 0; index < count; index += 1) {
     db.raw
@@ -254,7 +221,6 @@ function seedFailure(db: TestD1, id = "fx-1"): void {
     .run(id);
 }
 
-/** note: Lifecycle findings: one publication, one row per entry. */
 function seedFindings(
   db: TestD1,
   entries: Array<{
@@ -305,9 +271,6 @@ function seedFindings(
 describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => {
   test("a review with NULL provider / model round-trips as empty strings", async () => {
     const db = await fixture();
-    // note: The v1 pipeline always writes reviews.provider NULL (the artifact store
-    // persists the payload's null), and a degraded run may omit model. The
-    // whole detail panel must still parse.
     seedInstallation(db);
     db.raw
       .prepare(
@@ -316,7 +279,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
       )
       .run();
 
-    // note: The head's counts are the review count; the row itself rides the page.
     const head = (await (await getFace(detailPath, db)).json()) as { counts: { reviews: number } };
     expect(head.counts.reviews).toBe(1);
 
@@ -330,7 +292,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
   test("a review row carries its round, its per-class tally and its run time; the retired numeric total is not on the wire", async () => {
     const db = await fixture();
     seedInstallation(db);
-    // invariant: Two rounds; only the newer one was measured and reported a finding.
     seedReviews(db, 2);
     db.raw.prepare("UPDATE reviews SET duration_ms = 42000 WHERE id = 'r-1'").run();
     db.raw
@@ -341,16 +302,10 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>>; total: number };
     expect(body.total).toBe(2);
-    // invariant: Newest first: round 2 is the measured round with one must-fix finding;
-    // round 1 predates the measurement and reported none. The retired
-    // `findings` total no longer rides the wire — the row's count claim is
-    // the per-class tally alone.
     expect(body.items.map((item) => [item.round, item.duration_ms])).toEqual([
       [2, 42_000],
       [1, null],
     ]);
-    // why: The wire shape is frozen: exactly these keys, so the retired numeric
-    // `findings` total cannot reappear and no new column leaks by accident.
     expect(Object.keys(body.items[0]!).sort()).toEqual([
       "duration_ms",
       "head_sha",
@@ -367,8 +322,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
   test("each reviews page row carries its per-severity finding counts", async () => {
     const db = await fixture();
     seedInstallation(db);
-    // note: Two rounds: the newer one reported three findings across two classes,
-    // the older one reported none.
     seedReviews(db, 2);
     for (const [id, severity] of [
       ["f-1", "must-fix"],
@@ -383,22 +336,14 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     const res = await getFace(sectionPath("reviews"), db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<{ round: number; severity_counts: string }> };
-    // note: Newest first. The tally is JSON text the client parses once; the round
-    // that reported no findings carries the empty aggregate, never a
-    // fabricated zero class.
     expect(body.items.map((item) => item.round)).toEqual([2, 1]);
     expect(JSON.parse(body.items[0]!.severity_counts)).toEqual({ "must-fix": 2, "should-fix": 1 });
-    // note: The round that reported no findings carries the empty aggregate
-    // (`"{}"`), never a fabricated zero class.
     expect(body.items[1]!.severity_counts).toBe("{}");
   });
 
   test("a repo-wide finding (null file_path) round-trips as ''", async () => {
     const db = await fixture();
     seedInstallation(db);
-    // note: The ordinal is stored on the lifecycle row: the first-seen sha is
-    // irrelevant to the read, and the last-seen round differs so a
-    // first/last column mix-up cannot pass.
     seedFindings(db, [
       { id: "row-1", findingId: "F-1", mergeClass: "nit", filePath: null, lineStart: null, firstSeenRound: 2, lastSeenRound: 3 },
       { id: "row-2", findingId: "F-2", mergeClass: "must-fix", filePath: "src/a.ts", lineStart: 3, firstSeenRound: 3, lastSeenRound: 5 },
@@ -407,7 +352,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     const res = await getFace(sectionPath("findings"), db);
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<Record<string, unknown>> };
-    // note: Newest insert first: the round-3 row, then the round-2 row.
     expect(body.items[0]).toMatchObject({ finding_id: "F-2", review_round: 3 });
     expect(body.items[1]).toMatchObject({ finding_id: "F-1", file_path: "", line: null, review_round: 2 });
   });
@@ -429,9 +373,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
       counts: Record<string, number>;
       latest_review: Record<string, unknown> | null;
     };
-    // note: The newest review rides the ENVELOPE, beside `counts`, and the failure
-    // total rides `counts` alone: the head row is the list's row shape minus
-    // the list's aggregates, with one carrier per number.
     expect(Object.keys(body).sort()).toEqual(["counts", "latest_review", "pull_request"]);
     expect(body.pull_request).toMatchObject({
       number: 131,
@@ -451,9 +392,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
   });
 
   test("the SPA parser reads this route's own body: attribution on the head, the tally on the reviews page", async () => {
-    // note: Cross-boundary: the real route body through the real parser. A field
-    // moved to the other end of the envelope re-drifting fails HERE, not only
-    // in a component test that feeds a hand-built payload.
     const db = await fixture();
     seedInstallation(db);
     db.raw
@@ -462,7 +400,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
          VALUES ('r-attributed', 77, 'acme', 'widgets', 131, 'sha-1', 'needs fixes', 'The race is reachable.', 'kimi-for-coding', 'openrouter', '2026-01-02 00:00:00', 'app-acme', 'target-app-acme')`,
       )
       .run();
-    // note: The reviewed round reported two findings.
     db.raw
       .prepare(
         `INSERT INTO findings (id, review_id, severity, title)
@@ -474,8 +411,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(res.status).toBe(200);
     const parsed = parsePullRequestDetail(await res.json());
     expect(parsed).not.toBeNull();
-    // invariant: The head is the attribution only: no round ordinal, tally or clock —
-    // those belong to the paged section, which is the one place that counts.
     expect(parsed?.latest_review).toEqual({
       verdict: "needs fixes",
       model: "kimi-for-coding",
@@ -484,7 +419,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
       head_sha: "sha-1",
     });
     expect(parsed?.latest_review).not.toHaveProperty("findings");
-    // note: Same round, read from the page that carries its tally.
     const reviewsPage = parseRecordPage("reviews", await (await getFace(sectionPath("reviews"), db)).json());
     expect(reviewsPage?.items[0]).toMatchObject({ round: 1 });
     expect(reviewsPage?.items[0]?.severity_counts).toEqual({ "must-fix": 1, nit: 1 });
@@ -494,7 +428,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     const db = await fixture();
     seedInstallation(db);
     seedReviews(db, 12);
-    // note: No paging params: the server's default limit is 10.
     const first = (await (await getFace(sectionPath("reviews"), db)).json()) as {
       items: Array<{ reviewed_at: string }>;
       total: number;
@@ -503,8 +436,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(first.total).toBe(12);
     expect(first.items).toHaveLength(10);
     expect(first.items[0]?.reviewed_at).toBe("2026-01-12 00:00:00");
-    // note: The applied page size rides the payload: the pager strides on THIS, so it
-    // cannot disagree with the window the server actually returned.
     expect(first.limit).toBe(10);
 
     const paged = (await (await getFace(`${sectionPath("reviews")}?limit=2&offset=2`, db)).json()) as {
@@ -538,26 +469,19 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
       };
       return { ids: body.items.map((item) => item.finding_id), total: body.total };
     };
-    // invariant: Every spelling in the vocabulary is a real predicate, not only the first.
     expect(await ids("must-fix")).toEqual({ ids: ["F-1"], total: 1 });
     expect(await ids("should-fix")).toEqual({ ids: ["F-3"], total: 1 });
     expect(await ids("nit")).toEqual({ ids: ["F-2"], total: 1 });
 
-    // note: An empty severity is no filter.
     const noFilter = (await (await getFace(`${sectionPath("findings")}?severity=`, db)).json()) as {
       total: number;
     };
     expect(noFilter.total).toBe(3);
 
-    // note: An out-of-vocabulary spelling has no server-side predicate: it is a 400,
-    // never a 200 empty page that claims the filter matched nothing.
     const unknown = await getFace(`${sectionPath("findings")}?severity=blocker`, db);
     expect(unknown.status).toBe(400);
     expect(await unknown.json()).toEqual({ error: "invalid severity" });
 
-    // invariant: 404 still outranks 400: a PR this App never received answers 404 even
-    // when the filter is also malformed. The refusal is decided BEFORE the
-    // section read, so the existence probe is what keeps this order.
     const unknownPr = await getFace(
       `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999/findings?severity=blocker`,
       db,
@@ -575,8 +499,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
       { id: "row-3", findingId: "F-3", mergeClass: "critical", filePath: null, lineStart: null },
     ]);
 
-    // note: The complement of the vocabulary, newest first — the same rows the SPA
-    // renders under its catch-all bucket.
     const body = (await (await getFace(`${sectionPath("findings")}?unclassified=1`, db)).json()) as {
       items: Array<{ finding_id: string }>;
       total: number;
@@ -584,8 +506,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(body.items.map((item) => item.finding_id)).toEqual(["F-3", "F-2"]);
     expect(body.total).toBe(2);
 
-    // note: It is a filter MODE, not a fifth severity spelling: `severity` still
-    // refuses the bucket name, and the two filters never combine.
     const asSeverity = await getFace(`${sectionPath("findings")}?severity=other`, db);
     expect(asSeverity.status).toBe(400);
     expect(await asSeverity.json()).toEqual({ error: "invalid severity" });
@@ -596,7 +516,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(malformed.status).toBe(400);
     expect(await malformed.json()).toEqual({ error: "invalid filter" });
 
-    // note: The same 404-outranks-400 rule the severity guard keeps.
     const unknownPr = await getFace(
       `/dashboard/acme/api/targets/target-app-acme/pull-requests/acme/widgets/999/findings?unclassified=yes`,
       db,
@@ -620,9 +539,6 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     const db = await fixture();
     seedInstallation(db);
     seedReviews(db, 12);
-    // note: 100000 is the last accepted offset (RECORD_PAGE_OFFSET_MAX); one past it
-    // is a window no PR history can reach, so it is malformed paging, not a
-    // page that walks and discards the whole family before answering empty.
     const atMax = await getFace(`${sectionPath("reviews")}?offset=100000`, db);
     expect(atMax.status).toBe(200);
     const atMaxPage = (await atMax.json()) as { items: unknown[] };
@@ -635,21 +551,14 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
   test("an out-of-bounds limit is clamped into [1, 50], not rejected", async () => {
     const db = await fixture();
     seedInstallation(db);
-    // why: More than the maximum page size, so the ceiling is observable: accepting
-    // or ignoring a limit of 51 would answer with 51 rows.
     seedReviews(db, 51);
-    // note: limit=0 clamps up to 1: a one-row page, not a 400.
     const floorLimit = await getFace(`${sectionPath("reviews")}?limit=0`, db);
     expect(floorLimit.status).toBe(200);
     const floored = (await floorLimit.json()) as { items: unknown[]; total: number; limit: number };
     expect(floored.items).toHaveLength(1);
     expect(floored.total).toBe(51);
-    // why: The clamp's RESULT is what the payload reports, so the pager strides on
-    // the page size actually applied rather than on the 0 it asked for.
     expect(floored.limit).toBe(1);
 
-    // invariant: limit=51 clamps down to 50: one full maximum page, and the total stays the
-    // unpaged count of the whole corpus.
     const ceilingLimit = await getFace(`${sectionPath("reviews")}?limit=51`, db);
     expect(ceilingLimit.status).toBe(200);
     const ceilinged = (await ceilingLimit.json()) as { items: unknown[]; total: number; limit: number };
@@ -701,18 +610,9 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
   });
 });
 
-/** note: Reviewing-now on the wire (compass D11/D16): both PR faces carry the
- * three-state `reviewing` projection the STORE decides — the client does no
- * inference — and a failed inflight read reaches the client as `unknown`
- * rather than as the idle `none` or as a failed face.
- */
 describe("GET pull-requests — reviewing projection", () => {
   const LIST_PATH = `/dashboard/acme/api/targets/target-app-acme/pull-requests`;
 
-  /**
-   * One lock row for #131 as the pipeline writes it, and its `acquired_at`.
-   * `expiresAt` decides the disposition: future = held, past = expired.
-   */
   function lock(db: TestD1, expiresAt: string, headSha = "sha-live"): string {
     const acquiredAt = new Date(Date.now() - 60_000).toISOString();
     db.raw
@@ -766,9 +666,6 @@ describe("GET pull-requests — reviewing projection", () => {
     const db = await fixture();
     seedInstallation(db);
     lock(db, new Date(Date.now() + 3_600_000).toISOString());
-    // why: The route builds its store from `env.DB`, so the wrapper is the fault
-    // injection: only the lock statement breaks, and both faces must still
-    // answer 200 with the degraded field.
     const failing = {
       prepare(sql: string) {
         if (sql.includes("review_inflight")) throw new Error("D1_ERROR: dead binding");

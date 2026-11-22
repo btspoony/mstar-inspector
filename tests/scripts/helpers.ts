@@ -1,10 +1,3 @@
-/**
- * why: Shared fixtures for release-script unit tests (D11).
- *
- * The scripts take an explicit `root` so tests run against throwaway temp
- * dirs — no chdir, no touching the real checkout's `.changes/`, changelogs,
- * or package.json.
- */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";

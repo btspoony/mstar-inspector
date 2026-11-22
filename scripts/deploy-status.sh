@@ -27,11 +27,6 @@ requested="${2:-}"
 deployed="${3:-}"
 serving="${4:-}"
 
-# why: Two version-creating steps: the first deploy can succeed while the version
-# that actually serves never lands (a secret write or the serving deploy
-# fails). That SHA must not be reported as what this run shipped.
-# The fourth argument is the caller declaring "a separate serving step exists",
-# so an EMPTY outcome (the step never ran or was skipped) also refuses.
 if [ "$outcome" = "success" ] && [ "$#" -ge 4 ] && [ "$serving" != "success" ]; then
   echo "deploy-status: the serving step did not succeed (outcome=${serving:-<empty>}) — refusing to certify $deployed as deployed" >&2
   outcome="serving-${serving:-empty}"

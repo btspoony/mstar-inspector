@@ -1,33 +1,8 @@
-/**
- * why: Sandbox adapter unit tests — mock the workerd builtin `cloudflare:workers`
- * boundary (Bun's test runner cannot resolve it; same technique the tests
- * used for the @cloudflare/sandbox SDK dist) so they stay deterministic.
- * Contract under test (plan interface section):
- *   - the in-repo `SandboxV1` Durable Object starts its own container (image
- *     from `container.images.sandbox`, basic instance, internet on), (re)sets
- *     the inactivity timeout on every guard, and never restarts a running
- *     container;
- *   - runCommand wraps the branded command ONCE: GNU `timeout` bound +
- *     `/bin/sh -lc` sink, per-call env/cwd, buffered output mapped to
- *     { stdout, stderr, exitCode };
- *   - the command and every env value are UTF-8 byte-bounded (MAX_EXEC_COMMAND_BYTES per argument, 8 KiB per env value);
- *   - every run is time-bounded: an explicit opts.timeout wins, otherwise
- *     DEFAULT_EXEC_TIMEOUT_MS is applied (plan QC 06 fix round 1 / qc3 F-001);
- *   - destroy() delegates to the container destroy;
- *   - getSandbox(binding, id) lowercases the id (0.12's normalizeId is gone)
- *     and hands back the DO stub as the ReviewSandbox contract;
- *   - the adapter import point is this module only (compass contracts A).
- *
- * The adapter is imported dynamically: its static `cloudflare:workers` import
- * is hoisted above `mock.module` in ESM, and the builtin is unresolvable in
- * Bun's test runner. Dynamic import resolves after the mock is registered.
- */
 
 import { describe, expect, mock, test, type Mock } from "bun:test";
 import { withFrozenClock } from "../helpers/clock";
 import type { ExecOutput } from "@cloudflare/workers-types";
 
-/** note: The fake container the DO drives (the `this.ctx.container` surface). */
 type FakeContainer = {
   readonly running: boolean;
   images: Record<string, string>;
@@ -45,7 +20,6 @@ type FakeContainer = {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-/** note: Test bytes as the ArrayBuffer the real `ExecOutput.stdout` carries. */
 function bytes(text: string): ArrayBuffer {
   return encoder.encode(text).buffer as ArrayBuffer;
 }
@@ -62,31 +36,14 @@ let execResult: { stdout: ArrayBuffer; stderr: ArrayBuffer; exitCode: number } =
 let running = false;
 let execError: Error | undefined;
 let destroyError: Error | undefined;
-/**
- * why: The fake child's stdin surface: `undefined` = no stream (a command that
- * passes no `stdin` option), `"reader"` = a `cat`-like reader whose output
- * exists only once stdin reached EOF, `"error-on-write"` = a child that died
- * before reading (the sink rejects), `"gated-write"` = a child that fills its
- * output pipe, so the stdin pipe accepts the payload ONLY once output
- * collection started (the drain-order deadlock), `"delayed-write"` = a pipe
- * whose write settles only when the test opens the gate (the backpressure the
- * adapter must await before the stream can close).
- */
 let execStdin: "reader" | "error-on-write" | "gated-write" | "delayed-write" | undefined;
-/** note: Bytes the fake child read from stdin (decoded). */
 let execStdinBytes = "";
-/** note: Whether the fake child saw EOF (the writer closed the stream). */
 let execStdinEof = false;
-/** note: Order of the fake sink's own observations: `write` / `write-settled` / `close`. */
 let stdinEvents: string[] = [];
-/** note: Whether output collection had already started when `write()` was called. */
 let stdinWriteSawDrain = false;
-/** note: Whether the adapter has started collecting the child's output. */
 let drainStarted = false;
-/** note: Opens the `"delayed-write"` gate (the test, not the adapter, holds it). */
 let openWriteGate: () => void = () => {};
 
-/** note: Concatenate the chunks a fake child read from stdin. */
 function concatChunks(chunks: Uint8Array[]): Uint8Array {
   const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   const out = new Uint8Array(total);
@@ -98,7 +55,6 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
   return out;
 }
 
-/** note: The fake container the DO drives (the `this.ctx.container` surface). */
 function makeContainer(): FakeContainer {
   return {
     get running() {
@@ -119,18 +75,10 @@ function makeContainer(): FakeContainer {
       const chunks: Uint8Array[] = [];
       let eof = false;
       const { promise: closed, resolve: onClose } = Promise.withResolvers<void>();
-      // invariant: The child's stdout pipe is FULL until someone drains it: with
-      // `gated-write` the stdin pipe therefore accepts the payload only once
-      // output collection started (writing first is a real deadlock), and with
-      // `delayed-write` the pipe accepts it only once the test opens the gate
-      // (the parent's buffer is slow — the adapter must await that write).
       const { promise: drained, resolve: onDrain } = Promise.withResolvers<void>();
       const { promise: writeGate, resolve: onWriteGate } = Promise.withResolvers<void>();
       openWriteGate = () => onWriteGate();
       drainStarted = false;
-      // note: The child's read is complete only when the stream ended (close/abort):
-      // recording there keeps `execStdinBytes`/`execStdinEof` truthful for the
-      // modes whose `output()` resolves before the write settles.
       const record = () => {
         execStdinBytes = decoder.decode(concatChunks(chunks));
         execStdinEof = eof;
@@ -138,7 +86,6 @@ function makeContainer(): FakeContainer {
       const stream = new WritableStream<Uint8Array>({
         write(chunk) {
           if (execStdin === "error-on-write") {
-            // note: A child that exited before reading: the platform errors the pipe.
             onClose();
             throw new Error("EPIPE");
           }
@@ -151,9 +98,6 @@ function makeContainer(): FakeContainer {
             });
           }
           if (execStdin === "gated-write") {
-            // note: A real full output pipe blocks here forever; bounded so a
-            // reordered adapter fails the drain-order assertion instead of
-            // hanging the suite.
             return Promise.race([drained, Bun.sleep(150)]).then(() => {
               stdinEvents.push("write-settled");
             });
@@ -174,11 +118,6 @@ function makeContainer(): FakeContainer {
       });
       return {
         stdin: stream,
-        // invariant: A reader that consumes stdin to the END before producing output: the
-        // adapter must close the stream (EOF) AND drain output concurrently, or
-        // this promise never settles. The gated/delayed modes resolve as soon
-        // as collection started — they model a child whose output pipe blocks
-        // the payload, not a child that reads stdin to EOF.
         output: async () => {
           drainStarted = true;
           onDrain();
@@ -196,9 +135,6 @@ function makeContainer(): FakeContainer {
 }
 
 
-// why: The ONE builtin registration lives in the shared helper — importing it here
-// (before the adapter loads) keeps the `cloudflare:workers` mock deterministic
-// no matter which test file's registration a shared process saw first.
 import "../helpers/cloudflare-workers-mock";
 
 const {
@@ -213,17 +149,12 @@ const {
 } = await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
-/** note: The adapter's idle bound — pinned here so a silent shrink below the deep-review envelope fails. */
 const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
 function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
   const container = makeContainer();
-  // note: ctx double: the real DurableObjectState's blockConcurrencyWhile runs the
-  // callback behind the concurrency gate and resolves with its result.
   const ctx = {
     container,
-    // note: Migration 0089: the DO loads its durable revocation flag before any
-    // request, so every ctx double carries storage.
     storage: { get: async () => undefined, put: async () => {} },
     blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
   };
@@ -264,8 +195,6 @@ describe("SandboxV1 Durable Object", () => {
         enableInternet: true,
       },
     ]);
-    // note: safe to repeat: a running container is never restarted, but the
-    // inactivity timeout is (re)set on every guard (a deploy restarts the DO).
     expect(inactivityCalls).toEqual([
       INACTIVITY_TIMEOUT_MS,
       INACTIVITY_TIMEOUT_MS,
@@ -276,7 +205,7 @@ describe("SandboxV1 Durable Object", () => {
 
   test("runCommand wraps the command string into the single /bin/sh sink under the default 600s bound", async () => {
     reset();
-    running = true; // note: start() already returned (deploy restart mid-flight)
+    running = true;
     const { sandbox } = makeDo();
 
     const result = await sandbox.runCommand(shellCommand("gh pr diff 1 --repo acme/widgets"), {
@@ -315,11 +244,11 @@ describe("SandboxV1 Durable Object", () => {
 
   test("a restarted DO re-arms the inactivity timeout in its constructor when the container is already running", () => {
     reset();
-    running = true; // note: the container outlived the DO instance (deploy / eviction)
+    running = true;
     const { container } = makeDo();
 
     expect(inactivityCalls).toEqual([INACTIVITY_TIMEOUT_MS]);
-    expect(startCalls).toEqual([]); // note: a running container is never restarted
+    expect(startCalls).toEqual([]);
     expect(container.setInactivityTimeout).toHaveBeenCalledTimes(1);
   });
 
@@ -336,8 +265,6 @@ describe("SandboxV1 Durable Object", () => {
     const container = { ...makeContainer(), images: {} };
     const ctx = {
     container,
-    // note: Migration 0089: the DO loads its durable revocation flag before any
-    // request, so every ctx double carries storage.
     storage: { get: async () => undefined, put: async () => {} },
     blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
   };
@@ -456,22 +383,10 @@ describe("getSandbox", () => {
     expect(names).toEqual(["smoke-abc-123"]);
     expect(await sandbox.runCommand(shellCommand("echo hi"))).toEqual({ stdout: "out", stderr: "", exitCode: 0 });
     await sandbox.destroy();
-    expect(destroyCalls).toEqual([]); // note: stub-level: destroy runs in the DO, not the fake namespace
+    expect(destroyCalls).toEqual([]);
   });
 });
 
-/**
- * why: The credential channel: `stdin` on the exec path. The payload is the ONLY
- * way a key reaches the container, so the lifecycle matters as much as the
- * bytes — a run that waits for EOF must see the stream closed, output must be
- * drained concurrently with the write (a child whose full output pipe blocks
- * the stdin write deadlocks otherwise), the write must be AWAITED (the sink
- * closes only after it settles), and an oversized or undelivered payload must
- * fail closed with a REDACTED error (never the payload itself). The
- * drain-order and backpressure guarantees are pinned by their own two cases
- * below — both fail against an adapter that writes first / does not await the
- * write.
- */
 describe("SandboxV1 stdin transport (the credential channel)", () => {
   const PAYLOAD = '{"version":1,"pools":{"ark":["secret-key"]}}';
 
@@ -487,7 +402,6 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
       stdin: PAYLOAD,
     });
 
-    // invariant: The per-call {cwd, env} contract is untouched; the payload rides the pipe.
     expect(execCalls).toEqual([
       {
         cmd: ["timeout", "--kill-after=5", "600", "/bin/sh", "-lc", "bun run runner.ts"],
@@ -511,7 +425,7 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
   test("an oversized payload fails closed BEFORE the container starts — and the error carries the size, never the payload", async () => {
     reset();
     const { sandbox } = makeDo();
-    const payload = `s${"e".repeat(MAX_EXEC_STDIN_BYTES)}`; // note: one byte past the cap
+    const payload = `s${"e".repeat(MAX_EXEC_STDIN_BYTES)}`;
 
     let message = "";
     try {
@@ -532,8 +446,6 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     reset();
     execStdin = "reader";
     const { sandbox } = makeDo();
-    // invariant: A cap lowered under this size fails here: the runner-input document is
-    // the payload class the 2 MiB bound is sized for.
     const payload = "x".repeat(4 * Math.ceil((512 * 1024) / 3));
 
     await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: payload });
@@ -570,10 +482,6 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
     const result = await sandbox.runCommand(shellCommand("bun run runner.ts"), { stdin: PAYLOAD });
 
     expect(result.exitCode).toBe(1);
-    // invariant: The child's stderr leads — it is the real diagnosis — and the failed
-    // stdin delivery is appended rather than dropped: "the payload never
-    // arrived" and "it arrived and the run then failed" are different causes,
-    // and the caller only ever sees this string.
     expect(result.stderr).toBe(
       "review: cannot read runner input\nexec stdin: exec stdin closed before the payload was delivered",
     );
@@ -581,9 +489,6 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
 
   test("output collection starts BEFORE the payload write (a child whose full output pipe blocks the stdin write cannot deadlock the run)", async () => {
     reset();
-    // note: The child's stdout pipe is full until someone drains it, so the stdin
-    // pipe accepts the payload only once output collection started: an adapter
-    // that writes and only then calls output() never delivers the payload.
     execStdin = "gated-write";
     execResult = { stdout: bytes("envelope\n"), stderr: new ArrayBuffer(0), exitCode: 0 };
     const { sandbox } = makeDo();
@@ -598,9 +503,6 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
 
   test("runCommand does not settle until the delayed write does, and the sink closes only after it (awaited backpressure)", async () => {
     reset();
-    // invariant: The pipe accepts the payload only once the test opens the gate: the
-    // adapter must await the write (and only then let the stream close), or a
-    // caller may tear the container down with the payload still in flight.
     execStdin = "delayed-write";
     const { sandbox } = makeDo();
 
@@ -612,9 +514,9 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
         return value;
       });
 
-    await Bun.sleep(10); // note: several turns with the write still gated
+    await Bun.sleep(10);
     expect(settled).toBe(false);
-    expect(stdinEvents).toEqual(["write"]); // note: no close before the write settles
+    expect(stdinEvents).toEqual(["write"]);
     expect(execStdinEof).toBe(false);
 
     openWriteGate();
@@ -627,16 +529,11 @@ describe("SandboxV1 stdin transport (the credential channel)", () => {
   });
 });
 
-/**
- * why: The per-argument bound: the command and every env value are measured in
- * UTF-8 bytes and refused before the container starts, so a payload that would
- * make `execve` report E2BIG fails where the diagnosis is readable instead.
- */
 describe("SandboxV1 exec argv/env bounds", () => {
   test("a command or env value past the per-argument bound fails closed BEFORE any process starts — and the error carries no text", async () => {
     reset();
     const { sandbox } = makeDo();
-    const command = "z".repeat(MAX_EXEC_COMMAND_BYTES + 1); // note: one byte past the cap
+    const command = "z".repeat(MAX_EXEC_COMMAND_BYTES + 1);
 
     let message = "";
     try {
@@ -670,7 +567,6 @@ describe("SandboxV1 exec argv/env bounds", () => {
   test("the bound counts UTF-8 bytes, not string length (a multibyte command past the cap is refused)", async () => {
     reset();
     const { sandbox } = makeDo();
-    // why: 32,769 characters × 3 bytes: a String.length implementation would accept it.
     const command = "字".repeat(MAX_EXEC_COMMAND_BYTES / 3 + 1);
     const bytes = new TextEncoder().encode(command).byteLength;
 
@@ -699,15 +595,9 @@ describe("SandboxV1 exec argv/env bounds", () => {
   });
 });
 
-/**
- * note: The absolute deadline the paid exec carries: the DO reads what is left of it
- * AFTER its own queue and the marker proof, immediately before the process
- * starts, and reserves the SIGKILL grace out of that remainder.
- */
 describe("SandboxV1 absolute exec deadline", () => {
   const MARKER = "mstar.review-attempt/v1:abc\n";
 
-  /** note: A container whose marker proof spends `proofSpentMs` of the frozen clock. */
   function proofSpendingContainer(proofSpentMs: number, clock: { now: number }) {
     const { sandbox, container } = makeDo();
     const realExec = container.exec;
@@ -735,7 +625,6 @@ describe("SandboxV1 absolute exec deadline", () => {
       });
       expect(result).toEqual({ kind: "deadline-spent", remainingMs: 0 });
     });
-    // note: The marker read ran; no `timeout` child was ever started.
     expect(execCalls).toHaveLength(1);
     expect(execCalls[0]!.cmd[5]).toContain("cat --");
   });
@@ -753,9 +642,6 @@ describe("SandboxV1 absolute exec deadline", () => {
       expect(result.kind).toBe("ran");
     });
     const child = execCalls.find((call) => call.cmd[0] === "/bin/sh")!;
-    // note: The container's own shell derives `timeout` from the epoch it is handed:
-    // queueing between this request and the process start cannot move the
-    // bound, because no duration was frozen host-side.
     expect(child.cmd.slice(0, 3)).toEqual(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER]);
     expect(child.cmd[2]).toContain("$(date +%s)");
     expect(child.cmd[2]).toContain("exec timeout --kill-after=$grace_s");
@@ -765,9 +651,6 @@ describe("SandboxV1 absolute exec deadline", () => {
   });
 
   test("a container clock past the deadline exits 124 without running the runner", () => {
-    // note: Execute the EXACT wrapper the container runs, on the test host's shell.
-    // A deadline a minute in the past must reach the `exit 124` branch before
-    // `timeout` (and the command) is ever started.
     const past = Math.floor(Date.now() / 1000) - 60;
     const result = Bun.spawnSync(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER, "mstar-deadline", String(past), "5000", "echo ran"]);
     expect(result.exitCode).toBe(124);

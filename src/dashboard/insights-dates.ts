@@ -1,29 +1,3 @@
-/**
- * note: Shared date helpers for the insights surface (QC W-C): the ONE
- * copy of the UTC date math used by the insights store test, the JSON
- * route test, and the HTML panel test — previously duplicated verbatim
- * in all three files.
- *
- * `mondayOf` is a JS mirror of the store's Monday-anchored bucketing
- * expression (`date(reviewed_at, '-' || ((strftime('%w', reviewed_at)+6)%7)
- * || ' days')` in src/dashboard/insights-store.ts) — expected week values
- * are computed from the SAME seeded timestamps, so no clock race. Keep the
- * mirror and the SQL in lockstep; the concrete-date pin test
- * (tests/dashboard/insights-store.test.ts, S-1) anchors both to real
- * calendar dates.
- *
- * AD-652 adds the distribution bucket-grid generators here — the
- * single copy of the bucket-boundary math, imported by the store itself
- * (still zero imports from store/pipeline/review) and by its tests:
- *
- *   - `dayGrid`   — every UTC date the window predicate can return
- *   - `weekGrid`  — every Monday-anchored week intersecting the window
- *     (anchored via `mondayOf`, so the grid shares the weekly_trend week
- *     definition; never a second one)
- *
- * Dashboard leaf: zero imports from store/pipeline/review (AL-22-1
- * candidate A boundary — tests may import these helpers).
- */
 
 /**
  * UTC datetime string N days before now, hour forced to 12:00 UTC — the
@@ -48,13 +22,11 @@ export function mondayOf(dt: string): string {
   return new Date(Date.UTC(y!, m! - 1, d! - daysToMonday)).toISOString().slice(0, 10);
 }
 
-/** note: Epoch ms of the current UTC date at midnight. */
 function utcTodayMs(): number {
   const now = new Date();
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
-/** note: `YYYY-MM-DD` for an epoch-ms UTC midnight. */
 function isoDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }

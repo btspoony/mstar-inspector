@@ -1,18 +1,3 @@
-/**
- * why: Usage ledger leaf (migration 0031) — the single write authority for
- * `usage_events`. One row per STARTED execution of a review; `seq` is the
- * attempt number within one `review_id`, minted by the ledger itself so
- * concurrent writers cannot agree on the same value.
- *
- * The insert is ONE statement (`INSERT … SELECT MAX(seq)+1`): the read and
- * the write happen inside the same statement, so there is no read-then-write
- * window. `review_id` has no FK on purpose (an attempt can outlive a review
- * row that rolled back); `workspace_id` does, and an unknown workspace is
- * refused by the schema.
- *
- * Module boundary (compass contracts A): type imports from ./types only — no
- * worker/pipeline/session dependencies (same contract as failure-store.ts).
- */
 
 import type { D1Like } from "./types";
 
@@ -26,26 +11,10 @@ export type UsageSource = "byok" | "shared";
 /** The usage row input. `occurredAt` is an ISO-8601 string supplied by the caller. */
 export type UsageEventInput = {
   reviewId: string;
-  /**
-   * note: One per STARTED execution attempt, minted by the producer before it writes
-   * (UNIQUE in the table). It is the identity a failed insert is read back by:
-   * earlier attempts for the same review must never answer for this one.
-   */
   executionToken: string;
   workspaceId: string;
   occurredAt: string;
-  /**
-   * note: The RP this started execution costs, from `rpFor(level, source, profile)`.
-   * `0` is reserved for rows written before migration 0064 metered the ledger:
-   * `rpFor` is >= 1 by construction, so a metered row can never read as 0.
-   */
   rp: number;
-  /**
-   * note: The source that price was computed from — `shared` for the shared bot,
-   * `byok` for the workspace's own App (D7: BYOK is metered too). Stored
-   * beside `rp` because the product of the two factors cannot be decomposed
-   * back into them once a profile chooses its own multipliers.
-   */
   source: UsageSource;
 };
 
@@ -69,38 +38,11 @@ export async function countUsageEventsSince(
 /** One workspace's month in RP, with the source split the card shows. */
 export type MonthlyRpUsage = {
   workspaceId: string;
-  /** note: `SUM(rp)` — the ceiling's own number, never the parts re-added. */
   total: number;
   sharedRp: number;
   byokRp: number;
 };
 
-/**
- * why: THE month aggregation over `usage_events.rp`: one row per workspace that
- * spent RP in the half-open window, with the `source` split of the same rows.
- * Both faces bind this one expression — the tenant face through
- * {@link readMonthlyRp}, the operator preview through
- * {@link readMonthlyRpByWorkspace} — so `sharedRp + byokRp === total` (for rows
- * written since migration 0065) and no face can invent a second definition.
- *
- * Two statement texts, one aggregate, and two DIFFERENT indexes — chosen by
- * predicate, not by taste:
- *
- * - the tenant form leads `workspace_id = ?` and rides
- *   `usage_events_workspace_occurred (workspace_id, occurred_at)` (migration
- *   0031), so the enqueue's read — this is the pre-enqueue path of every
- *   review — stays a seek;
- * - the preview binds no workspace at all, so its predicate is the window, and
- *   it rides `idx_usage_events_occurred_rp (occurred_at, workspace_id, rp,
- *   source)` (migration 0066), which also covers the three aggregated columns.
- *
- * Spelling the tenant form as `(?1 IS NULL OR workspace_id = ?1)` to reach both
- * shapes from one text would make SQLite scan the whole index — it cannot fold
- * a parameter-only OR branch into the seek.
- *
- * `rp` is 0 on every row written before migration 0064 and `source` is NULL on
- * every row written before 0065, so a pre-metering row contributes to nothing.
- */
 const MONTH_RP_AGGREGATE = `SELECT workspace_id AS workspaceId,
               COALESCE(SUM(rp), 0) AS total,
               COALESCE(SUM(CASE WHEN source = 'shared' THEN rp ELSE 0 END), 0) AS sharedRp,

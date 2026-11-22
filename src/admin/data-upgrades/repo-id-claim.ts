@@ -1,24 +1,3 @@
-/**
- * why: Repository id claim — the fourth registered operator data upgrade.
- *
- * A target can carry `repo_owner`/`repo_name` and still have no `repo_id`: the
- * shape `repo-backfill` leaves behind when it merges the 0067 leftover target
- * into one row per repository, and the shape a target created by
- * `ledger-target-alignment` has until its first delivery (D15). The dashboard
- * reads `repo_id IS NULL` as 待安装, so those repositories list as uninstalled
- * even though their ledger rows are complete.
- *
- * This item is the explicit repair for that shape, separate from its creators:
- * it visits every live target that names a repository and has no id, and asks
- * GitHub — through the same binding `ledger-target-alignment` uses — whether a
- * live installation of its bot still grants the repository. It never creates,
- * retires or re-points anything, and never touches a target that already has an
- * id.
- *
- * `unclaimed_targets` is advisory on verify: a repository whose owner has no
- * live installation of that bot cannot be claimed by this item, and the first
- * delivery is still allowed to claim it later.
- */
 import type { DashboardD1 } from "../../dashboard/users";
 import { bindRepository } from "./bind";
 import type {
@@ -29,7 +8,6 @@ import type {
   UpgradeRunContext,
 } from "../data-upgrades";
 
-/** note: Targets visited per step. */
 const TARGETS_PER_BATCH = 50;
 
 const UNCLAIMED_SQL = `
@@ -65,17 +43,10 @@ export const repoIdClaim: DataUpgradeItem = {
   requiresDowntime: false,
   order: 22,
 
-  /** note: One count the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     return { unclaimed_targets: await countUnclaimed(db) };
   },
 
-  /**
-   * why: ONE walk over the unclaimed targets, paged by target id. Binding happens
-   * outside any transaction — a GitHub call inside one would hold the write
-   * lock for its whole timeout — and each bind is guarded by the id still being
-   * absent, so a delivery that claims a target mid-walk is left alone.
-   */
   async runBatch(
     db: DashboardD1,
     cursor: UpgradeCursor | null,

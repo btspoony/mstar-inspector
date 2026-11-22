@@ -1,11 +1,3 @@
-/**
- * why: Shared SPA dispatch test helpers.
- *
- * Worker tests that exercise HTML navigation against spa-dispatch need a
- * stub ASSETS binding that serves a marker-bearing index.html. Four files
- * duplicated the same INDEX_HTML / spaEnv / htmlGet trio — this module is
- * the single copy.
- */
 import { readFileSync } from "node:fs";
 import type { Fetcher } from "@cloudflare/workers-types";
 import { SPA_BOOT_MARKER } from "../../src/spa/boot";

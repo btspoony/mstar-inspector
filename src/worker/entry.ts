@@ -12,14 +12,5 @@
  * runtime import point remains src/pipeline/sandbox.ts (compass contracts A).
  */
 export { default } from "./index";
-// invariant: The review-attempt Workflow class: `wrangler.jsonc` names it
-// (`workflows[].class_name = "ReviewWorkflow"`), so it must be exported from
-// the entry module. It lives outside src/worker/index.ts so the fetch hot path
-// stays free of the workerd-only `cloudflare:workers` builtin.
 export { ReviewWorkflow } from "../workflow/review";
-// `SandboxV1` is the live review-sandbox implementation and the ONLY class the
-// wrangler CONTAINER config names (`class_name`); `Sandbox` exists solely so
-// the retained `v1` `new_sqlite_classes` entry stays replayable on a fresh
-// deploy (it has no container entry). Both must be exported from this entry
-// module — see src/pipeline/sandbox.ts for the compatibility class contract.
 export { Sandbox, SandboxV1 } from "../pipeline/sandbox";

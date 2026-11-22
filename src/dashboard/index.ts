@@ -1,32 +1,7 @@
-/**
- * note: /dashboard Hono sub-app: GitHub OAuth login + signed-cookie session
- * + GitHub App Manifest start/callback/commit (the
- * commit writes the encrypted review_bots D1 row, the Cloudflare secrets-bulk
- * path is retired) + per-App management UI (/dashboard/apps list,
- * POST …/disable|enable|delete — workspace owner/admin) + per-App review
- * pause/resume (POST …/pause|/resume — the same action
- * pattern) + per-App AI config settings (POST
- * /dashboard/apps/:appId/settings — BYOK provider keys, masked, + model chain
- * — and POST …/settings/key/delete, workspace owner/admin; plus the
- * settings Review switch and the read-only install-health panel, and
- * the Role models editor on the same op-discriminated POST) behind a
- * per-request membership guard + admin-only members management.
- * Mounted by src/worker/index.ts as
- * `app.route("/dashboard", dashboardApp)`.
- *
- * Route isolation (architect decision Q2): this module MUST NOT import
- * pipeline/store/review code. Fail-closed everywhere: missing OAuth secrets
- * → 5xx; bad CSRF state → 4xx and the session cookie is never set; missing
- * DASHBOARD_ENCRYPTION_KEY → the encryption-dependent commit and settings
- * routes 5xx with the hold kept / nothing stored (spec § Crypto envelope).
- */
 import { Hono, type Context, type Handler } from "hono";
 import { getCookie } from "hono/cookie";
 import { orderedReads } from "./ordered-reads";
 import { providerCatalog } from "./provider-catalog";
-// note: The review gate's verdict vocabulary — the same engine constant apps-store
-// validates saveCheckGate against, so the route's 400 and the store's
-// backstop can never drift.
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { deploymentModeOf, type DeploymentMode, type Env } from "../worker/env";
 import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
@@ -249,12 +224,6 @@ import {
 } from "../spa/routes";
 import { SPA_POST_FORM_HEADER, SPA_POST_FORM_VALUE } from "../spa/post-form-headers";
 
-/**
- * invariant: Principal classes of a workspace request (the request-path ordering
- * contract, step 3). `invitee` may reach ONLY the invite-accept route;
- * `operator-granted` may reach ONLY `read`-declared routes, and
- * `operator-denied` answers the outsider 404.
- */
 type WorkspacePrincipal =
   | "member"
   | "invitee"
@@ -273,58 +242,29 @@ type WorkspacePrincipal =
  */
 export type DashboardVariables = {
   tenant?: {
-    /** note: The workspace segment the request named: an id or a slug. */
     ref: string;
-    /** note: null until the workspace-scope middleware resolves the live row. */
     workspaceId: string | null;
-    /**
-     * why: The resolved `workspaces` row (id, slug, name, created_at), so a route
-     * reads the scope's own row instead of re-querying by the same ref.
-     */
     workspaceRow?: WorkspaceRow;
-    /** note: null until the workspace-scope middleware classifies the principal. */
     role: WorkspaceRole | null;
-    /** note: null until the workspace-scope middleware classifies the caller. */
     principal: WorkspacePrincipal | null;
   };
-  /** note: The users row the session guard resolved; absent on exempt routes. */
   authUser?: DashboardUserRow;
-  /** invariant: Verified by the session guard; never reused across requests. */
   authSession?: SessionPayload;
-  /** note: The live ref and membership role resolved alongside the active user. */
   authWorkspace?: { workspace: WorkspaceRow; role: WorkspaceRole | null };
-  /**
-   * invariant: The workspace-scope resolution of one request (ordering-contract step 3):
-   * `undefined` = not classified yet, `null` = the caller is not a member.
-   */
   workspaceScope?: WorkspaceScope | null;
-  /**
-   * note: The maintenance window as this request read it (once per request, D20):
-   * set by {@link dashboardMaintenanceGate}, absent until it runs.
-   */
   maintenance?: MaintenanceMode;
 };
 
 type DashboardContext = Context<{ Bindings: Env; Variables: DashboardVariables }>;
 
-/** note: The resolved workspace scope of one workspace path. */
 type WorkspaceScope = { workspaceId: string; role: WorkspaceRole };
 
 export const dashboardApp = new Hono<{ Bindings: Env; Variables: DashboardVariables }>();
 
-/** note: SPA shell entry for members/apps list mutations (QC W-2, apps route). */
 const DASHBOARD_SHELL_REDIRECT = "/dashboard";
-/** note: The repository overview and the Apps list — both workspace-scoped page
- * families this file re-targets under the request's workspace ref. */
 const REPOS_LIST_REDIRECT = "/dashboard/repos";
 const APPS_LIST_REDIRECT = "/dashboard/apps";
 
-/**
- * note: An Apps or repository path rewritten under the request's workspace ref: the
- * pre-workspace App family answers 404, so a redirect to the bare path would
- * land on a dead URL. Requests with no workspace context and paths outside
- * those two families are returned unchanged.
- */
 function scopedAppPath(c: DashboardContext, path: string): string {
   const tenant = c.get("tenant");
   if (!tenant) return path;
@@ -375,11 +315,6 @@ export type WorkspaceBoot = {
   canCreateApp?: boolean;
   needsWorkspace?: boolean;
   workspaceRequired?: boolean;
-  /**
-   * note: The resolved workspace row with the login's membership role and users row
-   * — the ONE read the boot's consumers share. `null` when no workspace
-   * resolved (unknown ref, several workspaces, unbound store).
-   */
   access: WorkspaceAccess | null;
   memberships: WorkspaceMembershipOption[];
 };
@@ -419,22 +354,14 @@ export async function workspaceBoot(
     listWorkspaceMembershipOptions(db, login),
   ]);
   const boot = { access, memberships };
-  // why: No live membership → no workspace to name: every workspace path 404s this
-  // login, so the shell must offer creation instead.
   if (memberships.length === 0) return { ...boot, canCreateApp: false, needsWorkspace: true };
   if (access !== null) {
     return {
       ...boot,
       workspaceRef: access.id,
-      // note: A new App lands in the addressed workspace, where a plain member has
-      // no manage rights — so creation is owner/admin there.
       canCreateApp: canManageRole(access.role),
     };
   }
-  // note: A requested ref that did not resolve is not this login's workspace: the
-  // boot names none, and the page's own guard has already answered (or will
-  // answer) the outsider 404. Only the ref-less path can reach the "several
-  // workspaces" state below.
   if (requestedRef !== undefined) return { ...boot, canCreateApp: false };
   if ((await countLiveWorkspaces(db)) > 1) {
     return { ...boot, workspaceRequired: true, canCreateApp: false };
@@ -489,22 +416,7 @@ export async function pendingInvitesForLogin(
   return listInviteDiscoveryForLogin(db, login, new Date().toISOString());
 }
 
-/**
- * why: Where an App-creation request may land, or the reason it may not. The flow
- * runs outside any workspace path, so the target workspace comes from the
- * request context: the `/:workspaceRef` segment when the request has one (the
- * SPA's create form posts under the page it is on), else an explicit
- * `workspace_ref` field in the flow state (the recovery resubmit, which
- * carries what the start route minted).
- *
- * `{ kind: "denied" }` = the caller is not owner/admin OF THAT workspace, which
- * is a real permission answer (403). `{ kind: "workspace_required" }` = the
- * request names no workspace and the deployment has more than one, so no
- * attribution exists at all — a readable 409, never a bare 403 (nothing about
- * the caller's rights is wrong; the request is missing a target).
- */
 type CreationTarget =
-  /** invariant: `workspaceRef` is the workspace's stable id — URLs only, never identity. */
   | { kind: "ok"; workspaceId: string; workspaceRef: string }
   | { kind: "denied" }
   | { kind: "workspace_required" }
@@ -525,31 +437,15 @@ async function resolveCreationTarget(
         ? await getWorkspaceAccessById(db, requestedRef, login)
         : await getWorkspaceAccessByRef(db, requestedRef, login);
   if (access === null) {
-    // note: The ref named no workspace this login may attribute an App to. With no
-    // ref at all that is either zero workspaces (nobody to attribute to) or
-    // several (no answer): the latter is the recoverable shape.
     if (requestedRef === undefined && (await countLiveWorkspaces(db)) > 1) {
       return { kind: "workspace_required" };
     }
     return { kind: "denied" };
   }
-  // note: A ref that resolved to a workspace the caller is not a member of has
-  // `role: null` — not a creator there either.
   if (!canManageRole(access.role)) return { kind: "denied" };
   return { kind: "ok", workspaceId: access.id, workspaceRef: access.id };
 }
 
-/**
- * note: The target workspace an App-creation request addresses, or a refusal
- * response. Shared by every manifest route, because each one can write the
- * row: start mints the state, callback + commit write the App, confirm hands
- * out the commit affordance.
- *
- * `denied` is a real permission answer and keeps the styled 403 page every
- * manifest route has always served (the flow is a page navigation, not a JSON
- * API). `workspace_required` is a missing-input answer, not a permission one:
- * JSON `{code, message}` for a fetch, the same styled surface for navigation.
- */
 function creationRefusal(
   c: DashboardContext,
   login: string,
@@ -564,11 +460,6 @@ function creationRefusal(
   }
 }
 
-/**
- * invariant: The one surface for a creation request that cannot be attributed to a
- * workspace: JSON `{code, message}` for a fetch, the styled error page for a
- * navigation. The code is the stable machine answer (`workspace_required`).
- */
 function creationDeniedResponse(c: DashboardContext, message: string): Response {
   if (!wantsHtml(c.req.header("Accept") ?? null) && !wantsHtmlFormNavigation(c)) {
     return c.json({ code: "workspace_required", message }, 409);
@@ -576,14 +467,6 @@ function creationDeniedResponse(c: DashboardContext, message: string): Response 
   return c.html(manifestErrorPage(message, false, requestLocale(c)), 409);
 }
 
-/**
- * note: The repair affordance for an unreadable workspace floor: the settings route
- * of the workspace the flow addresses, so the copy and its href cannot drift
- * between the callback and commit switches. The returned clause carries its own
- * locale-owned terminator, so the sentence's shape lives here rather than in
- * the view. A target that is not `ok` has no workspace page to repair from —
- * the message then carries the instruction alone.
- */
 function floorRepairLink(
   locale: Locale,
   target: CreationTarget,
@@ -598,15 +481,6 @@ function floorRepairLink(
     : null;
 }
 
-/**
- * note: The fail-closed floor read's page, branched on the read's cause. A transient
- * read failure is fixed by resubmitting, so it names no setting and carries no
- * repair link. A malformed result has no floor field at all — the database
- * predates the column — so a settings visit repairs nothing and the copy
- * names the migration that adds it. An untrusted stored value IS what needs
- * repair, so it keeps the settings link. Both render sites share this
- * decision.
- */
 function workspaceFloorUnreadablePage(
   locale: Locale,
   reason: DegradedReason | undefined,
@@ -644,41 +518,17 @@ export async function signedInLanding(
   login: string,
   boot?: WorkspaceBoot,
 ): Promise<string> {
-  // note: A caller that already booted this login for the same request (`/dashboard`
-  // in spa-dispatch) passes the result instead of paying the read twice.
   const extras = boot ?? (await workspaceBoot(env, login));
   if (extras.workspaceRef !== undefined) return reposHomePath(extras.workspaceRef);
   if (extras.needsWorkspace === true) return DASHBOARD_MOUNT;
   const first = extras.memberships[0];
   if (first !== undefined) return reposHomePath(first.id);
-  // note: A login that belongs to no workspace is the EXPECTED landing on the
-  // creation surface, not a configuration fault; only a member the deployment
-  // cannot place is the operator-facing dead end.
   console.warn(JSON.stringify({ event: "dashboard_landing", reason: "no_sole_workspace" }));
   return DASHBOARD_MOUNT;
 }
 
-/**
- * why: Where a committed App lands, or the named failure when its workspace no
- * longer resolves (deleted mid-flow): a silent shell redirect would hide a
- * written App behind a page that cannot show it.
- */
 type ManifestSuccessTarget = { kind: "ok"; path: string } | { kind: "workspace_gone" };
 
-/**
- * note: The post-commit landing page. The manifest flow's own request carries no
- * workspace segment, so `scopedAppPath` cannot rewrite this target: the App's
- * onboarding page is named by the workspace the commit just mapped it into and
- * by the GitHub App id — the only identity GitHub never changes.
- *
- * The URL names the workspace by its stable id, which the flow already carried
- * — the row is resolved HERE, after the write, only to prove the workspace
- * still exists. A workspace renamed mid-flow therefore still lands on the right
- * onboarding page (and the App is in the right tenant either way, because the
- * mapping was written from the id). A workspace retired mid-flow resolves
- * nothing and answers the named `workspace_gone` failure — never a bare
- * `/dashboard` redirect.
- */
 async function manifestSuccessTarget(
   env: Env,
   workspaceId: string,
@@ -694,7 +544,6 @@ function isSpaFetchPost(c: DashboardContext): boolean {
   return c.req.header(SPA_POST_FORM_HEADER) === SPA_POST_FORM_VALUE;
 }
 
-/** note: Native `<form method="post">` navigation — not the SPA's fetch `postForm`. */
 function wantsHtmlFormNavigation(c: DashboardContext): boolean {
   return wantsHtml(c.req.header("Accept") ?? null) && !isSpaFetchPost(c);
 }
@@ -706,10 +555,6 @@ function pinnedPostMutationResponse(
   status: 200 | 400 | 404 | 409 | 500 = 200,
 ): Response {
   const htmlNavigation = wantsHtmlFormNavigation(c);
-  // note: Tenant invisibility is final on a workspace-scoped request: an unknown or
-  // cross-workspace App answers a real 404 (rendered page on navigation),
-  // never the legacy redirect — a redirect would confirm nothing but still
-  // move the operator into a surface the request cannot see.
   if (status === 404 && c.get("tenant")) {
     return htmlNavigation ? c.html(notFoundPage(requestLocale(c)), 404) : c.text(message, status);
   }
@@ -731,53 +576,24 @@ function dashboardSecrets(env: Env) {
   return clientId && clientSecret && sessionSecret ? { clientId, clientSecret, sessionSecret } : null;
 }
 
-/**
- * The dashboard D1 binding's face: the users-store narrow face PLUS D1
- * `batch` (Phase 5 fix, PR #7 review) — the settings routes hand this
- * binding to the App-config store, whose setModelRoles full-map save is ONE
- * atomic batch. Truthful for the runtime binding (a real D1Database) and
- * the bun:sqlite test double, which both implement batch; the DashboardD1
- * face alone (a single-row store's view) just doesn't declare it.
- */
 type DashboardDb = DashboardD1 & AppConfigBatchFace;
 
-/**
- * note: D1 membership store binding. Runtime-real via wrangler.jsonc
- * `d1_databases` (binding DB), but the fetch-face Env deliberately does not
- * declare it — read through this local intersection and fail closed when
- * unbound, like every missing dashboard dependency.
- */
 function dashboardD1(env: Env): DashboardDb | null {
   const db = (env as Env & { DB?: DashboardDb }).DB;
   return db ?? null;
 }
 
-// note: --- Manifest commit helpers ---
 
 function errorTypeName(err: unknown): string {
   return err instanceof Error ? err.name : String(err);
 }
 
-/** note: The sqlite UNIQUE violation for one review_bots column. */
 function isAppsUniqueViolation(err: unknown, column: "github_app_id"): boolean {
   return err instanceof Error && err.message.includes(`review_bots.${column}`);
 }
 
-// note: --- Workspace (tenant) routing gate (migration 0026) ---
-//
-// ONE middleware, mounted before the membership guard and every route, decides
-// which route family a /dashboard path may address: the workspace named by the
-// first path segment. Every App route lives under that family, so there is no
-// second registration. Non-App paths (login, logout, oauth/callback, locale,
-// healthz) carry no ref and pass through; the retired pre-workspace App family
-// (`/apps…`, `/api/apps…`) answers the same 404 an unmatched path does.
 const DASHBOARD_MOUNT = "/dashboard";
 
-/**
- * note: The retired pre-workspace App family: `/apps/<appId>…` and `/api/apps…`.
- * The bare `/dashboard/apps` spelling is NOT retired — it is one of the two
- * dashboard roots, and `spaDispatch` redirects it to the repository overview.
- */
 function isRetiredAppPath(pathname: string): boolean {
   const relative = pathname.startsWith(`${DASHBOARD_MOUNT}/`)
     ? pathname.slice(DASHBOARD_MOUNT.length)
@@ -786,31 +602,10 @@ function isRetiredAppPath(pathname: string): boolean {
   return (first === "apps" && second !== undefined) || (first === "api" && second === "apps");
 }
 
-/**
- * why: The workspace ref a mount-pinned /dashboard path addresses, else null.
- *
- * Derived from the ONE SPA family (`WORKSPACE_FAMILY_SEGMENTS`) so a new
- * segment cannot drift across the bundle boundary. The two SPA-only segments
- * are excluded: `settings` and `repos` are page paths with no Worker route
- * under `/<ref>/`, and admitting either would route a page path through this
- * gate. This exclusion list IS the gate's admission list: a new SPA-only
- * segment has to be excluded here too.
- */
 const WORKSPACE_SEGMENTS: ReadonlySet<string> = new Set(
   WORKSPACE_FAMILY_SEGMENTS.filter((segment) => segment !== "settings" && segment !== "repos"),
 );
 
-/**
- * note: Classify a mount-pinned /dashboard path into the workspace it addresses —
- * step 1 of the request-path ordering contract. Both sides read the ONE family
- * export (`WORKSPACE_FAMILY_SEGMENTS` in `src/spa/routes.ts`): the SPA's
- * `workspaceRefOf` builds its alternation from it, and `WORKSPACE_SEGMENTS`
- * above is its derivation, not a second list. The family has five members;
- * this gate admits three because `settings` and `repos` are SPA page paths
- * with no Worker route.
- * A reserved first segment is never a workspace, so `:workspaceRef` cannot
- * capture a real route (`/apps`, `/api/apps`, `/login`, `/members`, …).
- */
 function classifyDashboardPath(pathname: string): { kind: "workspace"; ref: string } | { kind: "other" } {
   const relative =
     pathname === DASHBOARD_MOUNT || pathname.startsWith(`${DASHBOARD_MOUNT}/`)
@@ -828,12 +623,6 @@ function classifyDashboardPath(pathname: string): { kind: "workspace"; ref: stri
   return { kind: "other" };
 }
 
-/**
- * note: Tenant invisibility 404, the ONE surface for every hidden path: HTML
- * navigation renders the console's styled page (the same surface the
- * pinned-POST 404 uses), a fetch keeps the bare status — the SPA's API reads
- * parse status only.
- */
 async function tenantNotFound(c: DashboardContext): Promise<Response> {
   return wantsHtml(c.req.header("Accept") ?? null)
     ? c.html(notFoundPage(requestLocale(c)), 404)
@@ -847,8 +636,6 @@ async function tenantNotFound(c: DashboardContext): Promise<Response> {
  * reason + start time, no ETA promise).
  */
 export function maintenanceResponse(c: DashboardContext, mode: MaintenanceMode): Response {
-  // invariant: Never cached (same header the API prefix sets): a cached 503 would keep
-  // people out after the window closed, and the reason can be operator-set.
   c.header("Cache-Control", "private, no-store");
   return /^\/dashboard\/(?:api\/|[^/]+\/api\/)/.test(c.req.path)
     ? c.json({ maintenance: true, reason: mode.reason, since: mode.since }, 503)
@@ -913,15 +700,9 @@ export const dashboardTenantGate: Handler<{
   Variables: DashboardVariables;
 }> = async (c, next) => {
   if (c.get("tenant")) return next();
-  // note: The pre-workspace App family is retired: the same 404 an unmatched path
-  // answers with. `/dashboard` itself stays the workbench shell.
   if (isRetiredAppPath(c.req.path)) return tenantNotFound(c);
   const target = classifyDashboardPath(c.req.path);
   if (target.kind !== "workspace") return next();
-  // invariant: CLASSIFY ONLY — no D1 read. The workspace row and the caller's membership
-  // are resolved with the user's row AFTER the session is verified,
-  // so an anonymous request neither pays a pre-auth round trip nor learns from
-  // the response whether the slug exists (both cases 302 to login).
   c.set("tenant", {
     ref: target.ref,
     workspaceId: null,
@@ -933,31 +714,8 @@ export const dashboardTenantGate: Handler<{
 
 dashboardApp.use("*", dashboardTenantGate);
 
-// note: --- Per-request allowlist guard (spec § AuthZ, lock L5) ---
-//
-// ONE middleware mount before every route definition auto-covers all
-// /dashboard routes (B1 manifest trio + the POST "*" catch-all today, plan
-// 13/14 routes tomorrow) — no per-route guard copies. Membership is the
-// users row: removal = row delete, so a removed member's stateless cookie
-// fails here on every request. Exempt set is EXACTLY the two pre-session
-// routes — a guard on /dashboard/login would loop the login page, and
-// /dashboard/oauth/callback is the request that establishes the session.
-// /logout stays guarded (L5 — NOT in the exempt set) but is SESSION-gated,
-// not membership-gated (qc2 F-002): the owner of a valid-but-stale cookie
-// (removed member) must be able to burn it, so a row-less session reaches
-// the logout route; without a session it still 302s into the OAuth flow.
-// Per-route readSessionValue handling (incl. B1 hold/state cookies) stays
-// as-is below — the guard only ADDS the D1 membership check. Paths are the
-// full mount-pinned form: dashboardApp is mounted once at /dashboard
-// (src/worker/index.ts, L5 code-verified).
 const GUARD_EXEMPT_PATHS = new Set(["/dashboard/login", "/dashboard/oauth/callback"]);
 
-/**
- * note: The paths the maintenance window leaves open: the guard's two pre-session
- * routes plus the session-level pair the login page needs — its EN/中文 toggle
- * (`POST /locale`) and logout. Neither touches workspace data, and a closed
- * platform must still let a session be renewed and burned.
- */
 const WINDOW_OPEN_PATHS = new Set([
   ...GUARD_EXEMPT_PATHS,
   "/dashboard/locale",
@@ -969,30 +727,11 @@ dashboardApp.use("*", async (c, next) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), sessionSecret);
-  // why: No session → the pre-guard behavior: 302 into the OAuth flow.
-  // POST /dashboard/locale is session-optional: the login-page
-  // language toggle must set mstar_locale without membership. Locale is not
-  // a privileged action — the route writes only the language cookie.
   if (!session) {
     if (c.req.path === "/dashboard/locale") return next();
     return c.redirect("/dashboard/login", 302);
   }
-  // note: Logout needs no membership row (qc2 F-002): any VALID session may burn
-  // its own cookies. The route itself touches no membership data, so this
-  // sits before the D1 check — storage misconfiguration cannot trap a
-  // stale cookie on the browser either.
-  // Locale follows the same L5 session-level exemption: a row-less (removed)
-  // session may still set language preference.
   if (c.req.path === "/dashboard/logout" || c.req.path === "/dashboard/locale") return next();
-  // invariant: Logged in → the only new check: an active user row (spec § AuthZ).
-  // Fail closed on an unbound store, like every missing dashboard dependency.
-  // Callback/confirm must still run so a retryable db_unbound can park the
-  // hold and serve the resumable confirm link (QC F-005). Neither route needs
-  // the membership row for that outcome: the callback reaches its own
-  // `db_unbound` outcome, and confirm reads the hold cookie plus the creation
-  // gate, which answers no refusal on an unbound store
-  // (`resolveCreationTarget` → `db_unbound`) so the hold survives instead of
-  // being burned on a configuration failure.
   const db = dashboardD1(c.env);
   if (!db) {
     if (c.req.path === "/dashboard/manifest/callback" || c.req.path === "/dashboard/manifest/confirm") {
@@ -1004,8 +743,6 @@ dashboardApp.use("*", async (c, next) => {
   const access = tenant ? await getWorkspaceRequestAccess(db, session.login, tenant.ref) : null;
   const user = tenant ? access?.user : await getUserByLogin(db, session.login);
   if (!user) {
-    // note: Same structured-log convention as logOAuthFailure / logManifestFailure;
-    // the login is public identity (it renders on the denial page).
     console.warn(
       JSON.stringify({
         event: "dashboard_access",
@@ -1014,31 +751,18 @@ dashboardApp.use("*", async (c, next) => {
         login: session.login,
       }),
     );
-    // note: Actively invalidate the removed member's session. HTML
-    // navigation → expire + 302 login; API/fetch → expire + 403 (a fetch
-    // must not silently follow the 302 into the HTML login page).
     c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
     if (wantsHtmlFormNavigation(c)) {
       return c.redirect("/dashboard/login", 302);
     }
     return c.html(removedPage(session.login, requestLocale(c)), 403);
   }
-  // note: The resolved users row is a per-request fact every later gate reuses.
   c.set("authUser", user);
   c.set("authSession", session);
   if (access?.workspace) c.set("authWorkspace", { workspace: access.workspace, role: access.role });
   return next();
 });
 
-/**
- * note: The ONE principal classifier of a workspace request, shared by the gate
- * (which acts on the verdict) and the SPA shell boot (which only asks whether
- * the caller is a granted operator). Ordering is the contract, not an
- * implementation detail: member wins, then a live pending invite, and only
- * then the operator allowlist — so an operator who is a member (or holds an
- * invite here) keeps that ordinary standing (AC1), and the shell can never
- * hand a listed operator an invitee's landing page.
- */
 async function classifyWorkspacePrincipal(
   env: Env,
   db: DashboardDb,
@@ -1055,39 +779,6 @@ async function classifyWorkspacePrincipal(
   return { principal: granted ? "operator-granted" : "operator-denied", role: null };
 }
 
-/**
- * Workspace-scope resolution — ordering-contract step 3, ONE middleware for
- * every workspace route. It runs after the session guard (so `authUser` is the
- * verified caller) and classifies the principal in order:
- *
- *   member → invitee → operator-granted → operator-denied → outsider
- *
- * `member` gets the workspace scope with its `workspace_members.role`;
- * `invitee` (a live pending invite for this workspace matches the login) may
- * reach ONLY the accept route; everything else is `outsider`, which the routes
- * answer with the byte-identical tenant 404.
- *
- * The operator classes come LAST, after membership and the invite check: an
- * operator who is a member keeps ordinary membership rights (AC1), so
- * `PLATFORM_OPERATORS` is not even parsed until neither applies. A listed
- * operator without a live `support_grants` row on THIS workspace is
- * `operator-denied` (the outsider 404, including an expired grant); one with a
- * live row is `operator-granted`, and the ceiling admits only the routes
- * declared `access: "read"` — everything else answers 403.
- *
- * Every operator decision writes exactly ONE `audit_events` row here, before
- * dispatch: `support.read` for a granted read-route dispatch,
- * `support.forbidden` for a granted request the ceiling refuses, and
- * `support.denied` for an operator without a grant. A route handler therefore
- * cannot skip the audit — classification and the write happen before `next()`,
- * and mounting a workspace route at all requires the route table that declares
- * its access. HTML shell loads are dispatch, not workspace routes: they are
- * classified by the same function but write no row (see `docs/deploy.md`).
- */
-// note: Every App-scoped JSON answer — the 200 payload, the 403 the ceiling below
-// returns, and the 404 the route handlers return — is per-workspace data and
-// must not be cached. Set once on the prefix, ahead of the scope middleware, so
-// no later return path (including the middleware's own 404/403) can miss it.
 dashboardApp.use("/:workspaceRef/api/*", async (c, next) => {
   c.header("Cache-Control", "private, no-store");
   return next();
@@ -1112,8 +803,6 @@ dashboardApp.use("*", async (c, next) => {
     return next();
   }
   if (principal === "operator-denied") {
-    // why: Expired and absent grants are the same answer — the outsider 404 — so
-    // the response never reveals the grant state.
     await insertAuditEvent(db, {
       workspaceId: workspace.id,
       actorLogin: user.github_login,
@@ -1125,8 +814,6 @@ dashboardApp.use("*", async (c, next) => {
     return await tenantNotFound(c);
   }
   if (principal === "operator-granted") {
-    // note: The audit row records the ATTEMPT, before dispatch: it is written here,
-    // so no route handler can skip it and none can change what was decided.
     const read = isOperatorReadPath(c.req.path, c.req.method);
     await insertAuditEvent(db, {
       workspaceId: workspace.id,
@@ -1150,9 +837,6 @@ dashboardApp.use("*", async (c, next) => {
   return next();
 });
 
-// note: The maintenance gate last: the workspace/member verdict above is unchanged,
-// and closing the platform now covers every route below without touching a
-// route's declared `access` class.
 dashboardApp.use("*", dashboardMaintenanceGate);
 
 /**
@@ -1166,19 +850,6 @@ export function isPlatformOperator(env: Env, login: string): boolean {
   );
 }
 
-/**
- * note: The operator read ceiling: the routes declared `access: "read"` in the
- * workspace route table, for the method the request actually uses — a future
- * non-GET handler mounted at a read path is `write` by default rather than
- * admitted by its path alone. Everything else — every App read, credentials,
- * settings, role change, invites, the audit list — is write-classified and
- * answers 403, and an UNDECLARED route is `write` too, so a route added later
- * cannot widen the surface by omission. Declared paths are literals (no
- * `:param`), which is what makes the suffix match exact.
- *
- * Hono dispatches a HEAD request through the GET route table, so HEAD is
- * compared as `get` — the ceiling follows the handler that actually runs.
- */
 function isOperatorReadPath(path: string, method: string): boolean {
   const routeMethod = method === "HEAD" ? "get" : method.toLowerCase();
   return APP_ROUTES.some(
@@ -1189,7 +860,6 @@ function isOperatorReadPath(path: string, method: string): boolean {
 async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
-  // why: Already signed in → bounce back to the shell (IA routing table).
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (session) return c.redirect(await signedInLanding(c.env, session.login), 302);
   const state = await createStateValue(secrets.sessionSecret);
@@ -1198,16 +868,12 @@ async function startOAuthLogin(c: DashboardContext): Promise<Response> {
   return c.redirect(buildAuthorizeUrl(secrets.clientId, callbackUri, state), 302);
 }
 
-// note: GET starts OAuth for non-HTML clients. SPA login (Accept: text/html) is
-// served by spa-dispatch; its "Sign in with GitHub" form POSTs here so the
-// browser does not loop on the SPA GET.
 dashboardApp.get("/login", startOAuthLogin);
 dashboardApp.post("/login", startOAuthLogin);
 
 dashboardApp.get("/oauth/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
-  // note: The state cookie is single-use: invalidated on every callback outcome.
   c.header("Set-Cookie", expireCookie(OAUTH_STATE_COOKIE));
   const stateOk = await verifyStateValue(
     getCookie(c, OAUTH_STATE_COOKIE),
@@ -1223,9 +889,6 @@ dashboardApp.get("/oauth/callback", async (c) => {
     logOAuthFailure("callback", "missing_code");
     return c.html(errorPage(t(requestLocale(c), "common.oauth.missingCode"), requestLocale(c)), 400);
   }
-  // invariant: Entry-level shape gate, symmetric with the manifest callback: only
-  // URL-safe opaque codes reach the exchange (the code travels in the POST
-  // body to the fixed github.com token endpoint — never in a fetched URL).
   if (!GITHUB_CODE_SHAPE.test(code)) {
     logOAuthFailure("callback", "unsafe_code_shape");
     return c.html(errorPage(t(requestLocale(c), "common.oauth.codeRejected"), requestLocale(c)), 400);
@@ -1239,36 +902,15 @@ dashboardApp.get("/oauth/callback", async (c) => {
   if (!user) {
     return c.html(errorPage(t(requestLocale(c), "common.oauth.profileFailed"), requestLocale(c)), 502);
   }
-  // note: Sign-in decision BEFORE any session is minted. A recorded removal denies
-  // (migration 0023 — an operator's removal is authoritative) and is cleared
-  // only by a deliberate re-admission; every other GitHub-verified login gets
-  // a `users` row (there is no deployment allowlist). The invite
-  // path is NOT consulted here: sign-in never joins a workspace (acceptance is
-  // the explicit POST). Deny = 403 page with ZERO Set-Cookie
-  // (spec: 零 cookie、零写入) — the single-use state-expiry header set above is
-  // withdrawn here — and zero D1 writes (the deny branch never inserts).
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
-  // note: The callback is the SECOND (and last) `DEPLOYMENT_MODE` read face: it
-  // decides whether this sign-in's landing carries the empty-instance
-  // guidance. A bad value fails the callback with the named error before
-  // anything is written, so no session is minted from a guessed shape.
   let deploymentMode: DeploymentMode;
   try {
     deploymentMode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   } catch (error) {
     return c.text((error as Error).message, 500);
   }
-  // note: Read BEFORE the sign-in writes its row: after it, `users` is non-empty on
-  // a first sign-in and the fact is gone. `self-hosted` is the only shape that
-  // tells the instance story; `saas` never does.
-  // Not atomic with the insert below: two concurrent first sign-ins can both
-  // read 0 and both claim "first account". Cosmetic sentence only, so no lock.
   const emptyInstance = deploymentMode === "self-hosted" && (await countUsers(db)) === 0;
-  // note: Signup flag (spec §3.1): closed means no NEW `users` row — a login that
-  // already has one signs in unchanged. Absent flag row = open. The refusal
-  // mints no session and writes nothing, so the state-expiry header set above
-  // is withdrawn, like the removal deny below.
   if (!(await isFlagEnabled(db, "signup_open")) && (await getUserByLogin(db, user.login)) === null) {
     logOAuthFailure("sign_in", "signup_closed", { login: user.login });
     c.header("Set-Cookie", undefined);
@@ -1276,8 +918,6 @@ dashboardApp.get("/oauth/callback", async (c) => {
   }
   const decision = await signInDashboardUser(db, user.login);
   if (decision.outcome === "deny") {
-    // invariant: The only deny is a recorded removal, so the deny face is the removal
-    // face: sign-in no longer denies for any other reason.
     logOAuthFailure("sign_in", "removed", { login: user.login });
     c.header("Set-Cookie", undefined);
     return c.html(removedPage(user.login, requestLocale(c)), 403);
@@ -1287,11 +927,6 @@ dashboardApp.get("/oauth/callback", async (c) => {
     append: true,
   });
   const landing = await signedInLanding(c.env, user.login);
-  // note: A first-account sign-in lands on the creation surface (it joins no
-  // workspace) and carries the empty-instance marker for the shell it lands
-  // on. Only a CREATED row can be the first account, and only the shell that
-  // reads the marker may render the guidance — it is signed for this login and
-  // expires on first read.
   if (emptyInstance && decision.created) {
     c.header(
       "Set-Cookie",
@@ -1308,30 +943,15 @@ dashboardApp.get("/oauth/callback", async (c) => {
 
 dashboardApp.get("/logout", (c) => {
   c.header("Set-Cookie", expireCookie(SESSION_COOKIE));
-  // note: Any parked manifest credentials die with the session (spec L7).
   c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE), { append: true });
   return c.redirect("/dashboard/login", 302);
 });
 
-// note: --- Workspace creation ---
-//
-// The ONLY membership write outside the invite path (Global Constraints): a
-// signed-in login with no workspace creates one and becomes its `owner`.
-// Deliberately OUTSIDE the workspace gate — the caller has no workspace yet, so
-// there is no `:workspaceRef` to scope it to. The session guard already
-// requires a `users` row; nothing here reads a role.
-//
-// The id is `ws_` + 22 chars of lowercase base32 (`a-z2-7`, all inside the
-// `[a-z0-9]` alphabet) drawn from `crypto.getRandomValues`. Lowercase-only is
-// load-bearing: `slug = id` then keeps the BINARY `workspaces.slug` UNIQUE
-// equivalent to case-insensitive uniqueness (the workspace-ref routing depends on it).
 const WORKSPACE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz234567";
-/** note: Bounded retries for the (astronomically unlikely) slug collision. */
 const WORKSPACE_ID_ATTEMPTS = 6;
 export const WORKSPACE_NAME_MAX_LENGTH = 80;
 
-/** why: A fresh workspace id; 256 is divisible by 32, so the sampling is unbiased. */
 function createWorkspaceId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(22));
   const suffix = Array.from(
@@ -1352,23 +972,12 @@ dashboardApp.post("/api/workspaces", async (c) => {
   if (name.length > WORKSPACE_NAME_MAX_LENGTH) {
     return c.text(`Workspace name must be at most ${WORKSPACE_NAME_MAX_LENGTH} characters.`, 400);
   }
-  // invariant: One free workspace per login, and `saas` only: the read below is fast-fail
-  // UX for the authority in `createWorkspace`'s own insert guard, so a creation
-  // that commits between this read and the write still cannot land a second
-  // free workspace. Self-hosted resolves every workspace to `unlimited`
-  // (spec §4 "always allowed"), so the rule and its read are skipped there.
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   try {
-    // why: Operator flag first: when creation is closed platform-wide the per-login
-    // free-slot answer is irrelevant, so its read is skipped. Absent flag row
-    // = open.
     if (!(await isFlagEnabled(db, "workspace_creation_open"))) {
       return c.text(WORKSPACE_CREATION_CLOSED_REFUSAL, 409);
     }
     if (mode === "saas") {
-      // why: The workspace does not exist yet, so the question names none: the
-      // per-login rule alone, with no plan read and the counter read only when
-      // the answer can turn on it.
       const verdict = await checkEntitlement({
         db,
         mode,
@@ -1393,10 +1002,6 @@ dashboardApp.post("/api/workspaces", async (c) => {
         mode,
       );
       if (created) {
-        // invariant: The client cannot derive the post-creation landing: a new workspace
-        // may be the second one, so `/dashboard` would strand the creator on a
-        // slug-less shell. The new workspace's own repository overview is the
-        // answer.
         return c.json(
           { id, slug: id, name, role: "owner" as const, homePath: reposHomePath(id) },
           201,
@@ -1410,20 +1015,6 @@ dashboardApp.post("/api/workspaces", async (c) => {
   }
 });
 
-// note: --- Locale preference (i18n) ---
-//
-// POST /dashboard/locale — the navbar [EN/中文] toggle target. Body is
-// JSON or form-encoded `{ locale }`; valid ids are the two Locale values.
-// Writes the mstar_locale cookie (HttpOnly, SameSite=Lax, Path=/
-// — the session.ts attribute set, widened so the platform console
-// /_internal_admin sends the cookie back too) and 302s back to
-// a Referer-derived target sanitized by safeLocaleRedirect (anything
-// off-origin, protocol-relative, empty, or missing → /dashboard). Invalid
-// locale → 400, no cookie.
-// The mount-level guard treats POST /dashboard/locale as
-// session-optional and membership-exempt (same L5 family as logout). A
-// logged-out login-page toggle and a row-less session may both set the
-// cookie. Every other /dashboard route stays membership-enforcing.
 
 /**
  * Safe 302 target for the locale toggle. The Referer header is
@@ -1446,12 +1037,10 @@ function safeLocaleRedirect(referer: string | null | undefined, origin: string):
       if (path.startsWith("/") && !path.startsWith("//")) return path;
     }
   } catch {
-    // why: unparseable referer → /dashboard
   }
   return "/dashboard";
 }
 
-/** why: JSON or form body `{ locale }` → valid Locale, or null (invalid/malformed). */
 async function readLocaleFromBody(c: DashboardContext): Promise<Locale | null> {
   const contentType = c.req.header("Content-Type") ?? "";
   try {
@@ -1474,8 +1063,6 @@ dashboardApp.post("/locale", async (c) => {
   return c.redirect(location, 302);
 });
 
-// safety: --- GitHub App Manifest start + callback (no secret write) ---
-// --- The App id mints here and rides the signed state ---
 
 // Start: logged-in only. The SPA's create form posts under the workspace page
 // it is on (`/:workspaceRef/manifest/start`), so the target workspace comes
@@ -1494,10 +1081,6 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
-  // note: Creation is owner/admin OF THE ADDRESSED workspace (I-000082): a plain
-  // member there could not manage the App the flow creates. A request that
-  // names no workspace on a multi-workspace deployment has no target at all
-  // → 409 workspace_required. Checked BEFORE the path mint / state cookie.
   const target = await resolveCreationTarget(c.env, session.login, workspaceRef);
   if (target.kind === "db_unbound") return c.text("dashboard storage is not configured", 500);
   if (target.kind !== "ok") return creationRefusal(c, session.login, target);
@@ -1525,21 +1108,9 @@ async function manifestStartRoute(c: DashboardContext, workspaceRef: string | un
 dashboardApp.post("/manifest/start", (c) => manifestStartRoute(c, undefined));
 dashboardApp.post("/:workspaceRef/manifest/start", (c) => manifestStartRoute(c, c.req.param("workspaceRef")));
 
-// why: Callback: GitHub redirects here with ?code=…&state=…. Bad/missing state →
-// 4xx with ZERO secret-API calls (the conversion fetch never runs). On
-// success the code is exchanged and — AC4b — the App is committed
-// immediately (no second click): the shared commit path (commitManifestApp,
-// the same write the POST /manifest/commit recovery route uses) encrypts
-// the credentials with DASHBOARD_ENCRYPTION_KEY and writes one review_bots
-// row INTO THE WORKSPACE THE STATE NAMES (carried from start). Success → 302
-// to that workspace's onboarding page; non-retryable conflicts (409) burn the
-// hold like the commit route; retryable outcomes (500) park the hold cookie so
-// /manifest/confirm stays the resume path. The response never carries PEM or
-// webhook_secret.
 dashboardApp.get("/manifest/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
-  // note: The state cookie is single-use: invalidated on every callback outcome.
   c.header("Set-Cookie", expireCookie(MANIFEST_STATE_COOKIE));
   const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
   if (!session) return c.redirect("/dashboard/login", 302);
@@ -1555,15 +1126,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
       400,
     );
   }
-  // invariant: Creation capability is re-checked HERE, not only at start — IN THE WORKSPACE
-  // THE STATE NAMES: a flow that began as owner/admin must not complete after a
-  // mid-flight demotion, and the callback writes the row itself (same rule as
-  // the start/commit routes). The state cookie is already expired above, so the
-  // flow is burned either way. A state naming a workspace the caller cannot
-  // manage is the plain permission refusal (403).
-  // `db_unbound` is NOT a refusal: it falls through to the commit path's own
-  // config
-  // outcome, which parks the hold so the credentials survive (QC F-005).
   const target = await resolveCreationTarget(c.env, session.login, state.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
     logManifestFailure("callback", "not_a_creator");
@@ -1574,10 +1136,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
     logManifestFailure("callback", "missing_code");
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.missingCode"), false, requestLocale(c)), 400);
   }
-  // invariant: Entry-level shape gate (mirrors the in-function gate): only URL-safe
-  // opaque codes ever reach the conversion call — the request-derived value
-  // can influence nothing but one encoded path segment on the fixed
-  // api.github.com host.
   if (!GITHUB_CODE_SHAPE.test(code)) {
     logManifestFailure("callback", "unsafe_code_shape");
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 400);
@@ -1587,17 +1145,12 @@ dashboardApp.get("/manifest/callback", async (c) => {
     return c.html(manifestErrorPage(t(requestLocale(c), "manifest.error.codeRejected"), false, requestLocale(c)), 502);
   }
   const locale = requestLocale(c);
-  // note: The App cap is judged under this deployment's shape (spec §4: `self-hosted`
-  // has no cap and reads no column). A deployment that cannot name its shape
-  // already fails every SPA route; naming it here keeps that one 500.
   let mode: DeploymentMode;
   try {
     mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   } catch (error) {
     return c.text((error as Error).message, 500);
   }
-  // note: The payload feeds the shared commit path; the cookie string is parked on
-  // retryable outcomes so /manifest/confirm can resume.
   const holdPayload = buildHoldPayload(conversion, session.login, state.appId, state.workspaceId);
   const hold = await encryptHoldValue(holdPayload, secrets.sessionSecret);
   const outcome = await commitManifestApp({
@@ -1608,31 +1161,21 @@ dashboardApp.get("/manifest/callback", async (c) => {
     workspaceId: target.kind === "ok" ? target.workspaceId : null,
     mode,
   });
-  // why: Retryable outcomes (db_unbound / encrypt_failed / db_rejected) keep the
-  // hold: park the cookie so the operator can resume via /manifest/confirm.
   const parkHold = () =>
     c.header("Set-Cookie", serializeCookie(MANIFEST_HOLD_COOKIE, hold, MANIFEST_HOLD_MAX_AGE_SEC), {
       append: true,
     });
-  // note: Every burn/park header APPENDS: the state-cookie expiry from the top of
-  // the handler must reach the browser beside it (Hono replaces same-name
-  // headers unless `append: true`).
   switch (outcome.kind) {
     case "success": {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
-        // note: The App row is written but its workspace is gone (deleted between the
-        // commit and this read): answer the named failure instead of a landing
-        // page that cannot show the App.
         logManifestFailure("callback", "workspace_gone");
         return c.html(manifestErrorPage(t(locale, "manifest.error.workspaceGone"), false, locale), 409);
       }
       return c.redirect(target.path, 302);
     }
     case "login_mismatch": {
-      // note: Unreachable here (the hold is minted for this session) — same burn
-      // semantics as the commit route for the shared contract.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.loginMismatch"), false, locale), 403);
     }
@@ -1646,7 +1189,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(manifestErrorPage(t(locale, "manifest.error.alreadyConnected"), false, locale), 409);
     case "app_cap_reached":
-      // invariant: Non-retryable: a resubmit cannot free a slot, so the hold is burned.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE), { append: true });
       return c.html(
         manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
@@ -1661,18 +1203,6 @@ dashboardApp.get("/manifest/callback", async (c) => {
   }
 });
 
-// note: Commit (spec § Multi-App 契约 — replaces the retired Cloudflare
-// secrets-bulk write; `confirm=overwrite` is gone because nothing shared is
-// overwritten). The hold cookie is bound to the committing session and
-// survives RETRYABLE outcomes (500 encrypt/DB failures) so the operator can
-// retry without creating a second GitHub App; it is burned on success,
-// login mismatch, an undecryptable/expired hold, and the non-retryable
-// already-connected conflict (the same GitHub App cannot be connected twice).
-// Missing/undecryptable/expired hold = flow expired → 302 back to the start,
-// zero writes. The write is delegated to commitManifestApp — the
-// SAME path the callback auto-commit runs — so a native resubmit after a
-// retryable callback failure is an idempotent recovery resubmit, and success
-// lands on the same onboarding page as the auto-commit.
 dashboardApp.post("/manifest/commit", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -1681,17 +1211,9 @@ dashboardApp.post("/manifest/commit", async (c) => {
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold) {
     logManifestFailure("commit", "hold_missing_or_expired");
-    // safety: Bad hold: burn the cookie so no stale credential lingers.
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     return c.redirect("/dashboard", 302);
   }
-  // note: Same creation capability as the start route (I-000082), judged in the
-  // workspace the HOLD names — the explicit `workspace_ref` of the flow state,
-  // which is what the start route minted. The recovery resubmit must not become
-  // the bypass, and demoting the operator mid-flow must not complete either;
-  // the hold is left untouched so the op can be restored and retried.
-  // `db_unbound` falls through to the commit path's own config outcome (the
-  // hold stays parked, nothing is written).
   const target = await resolveCreationTarget(c.env, session.login, hold.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
     logManifestFailure("commit", "not_a_creator");
@@ -1708,8 +1230,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
   });
   switch (outcome.kind) {
     case "success": {
-      // note: Success: the hold is single-success — burned now that the row exists;
-      // the operator lands on the App's onboarding page.
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       const target = await manifestSuccessTarget(c.env, outcome.workspaceId, outcome.row.github_app_id);
       if (target.kind === "workspace_gone") {
@@ -1719,8 +1239,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
       return c.redirect(target.path, 302);
     }
     case "login_mismatch": {
-      // note: The hold is bound to the login that ran the callback: a different
-      // operator must restart the flow (zero writes, hold burned).
       c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
       return c.html(manifestErrorPage(t(locale, "manifest.error.loginMismatch"), false, locale), 403);
     }
@@ -1737,8 +1255,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
         manifestErrorPage(t(locale, "manifest.error.appCapReached", { limit: outcome.limit }), false, locale),
         409,
       );
-    // why: Nothing to park: the submitted hold cookie IS this route's hold, so it
-    // stays for the repair-then-resubmit retry — same as `db_rejected` below.
     case "workspace_gate_unreadable":
       return c.html(workspaceFloorUnreadablePage(locale, outcome.reason, target), 500);
     case "db_rejected":
@@ -1746,8 +1262,6 @@ dashboardApp.post("/manifest/commit", async (c) => {
   }
 });
 
-// note: --- Shared manifest commit (callback auto-commit + POST
-// /manifest/commit recovery run the same write path, spec § 5) ---
 
 type ManifestCommitOutcome =
   | { kind: "success"; row: GithubAppRow; workspaceId: string }
@@ -1759,32 +1273,12 @@ type ManifestCommitOutcome =
   | { kind: "app_cap_reached"; limit: number }
   | { kind: "db_rejected" };
 
-/**
- * note: The manifest commit body, shared by the callback auto-commit (AC4b — no
- * second click) and the POST /manifest/commit recovery route. The decrypted
- * hold payload + the acting session login are passed in; the hold's login
- * binding is re-checked here on EVERY call. Outcomes mirror the route's long-standing
- * semantics: success = ONE review_bots row (secretbox AAD rowKey = the row
- * PK, which IS the start-minted app id — the same value the manifest's
- * webhook URL carries);
- * login_mismatch / already_connected / app_cap_reached = non-retryable (the
- * caller burns the hold: a retry cannot free a slot); db_unbound /
- * encrypt_failed / workspace_gate_unreadable / db_rejected = retryable (the
- * caller keeps the hold so /manifest/confirm can resume).
- * Zero upstream calls: encryption + a local D1 write only.
- */
 async function commitManifestApp(args: {
   db: DashboardDb | null;
   encryptionKey: string | undefined;
   hold: ManifestHoldPayload;
   login: string;
-  /**
-   * why: The target workspace the caller resolved from the hold's ref, or null when
-   * the store itself is unbound — there is no workspace to resolve, and the
-   * `db_unbound` outcome returns before it is read.
-   */
   workspaceId: string | null;
-  /** note: The deployment shape the App cap is judged under (spec §4). */
   mode: DeploymentMode;
 }): Promise<ManifestCommitOutcome> {
   const { db, encryptionKey, hold, login, workspaceId, mode } = args;
@@ -1793,11 +1287,6 @@ async function commitManifestApp(args: {
     return { kind: "login_mismatch" };
   }
   if (!db || workspaceId === null) return { kind: "db_unbound" };
-  // note: The signed hold's app id IS the row PK: the App's identity was decided at
-  // start (the manifest already registered
-  // {origin}/webhook/{workspaceId}/{appId} with GitHub), so a second local
-  // UUID would give one App two identities. AAD rowKey
-  // (github_apps.<column>:<id>) therefore binds that id.
   let privateKeyEnc: string;
   let webhookSecretEnc: string;
   try {
@@ -1811,38 +1300,18 @@ async function commitManifestApp(args: {
       `github_apps.webhook_secret_enc:${hold.appId}`,
     );
   } catch (err) {
-    // note: SecretboxKeyError (missing/malformed DASHBOARD_ENCRYPTION_KEY) and any
-    // other encrypt failure are equally fail-closed: 500, zero writes, hold
-    // KEPT — fixing the env makes the retry succeed.
     logManifestFailure("commit", "encrypt_failed", {
       error_type: errorTypeName(err),
       key_error: err instanceof SecretboxKeyError,
     });
     return { kind: "encrypt_failed" };
   }
-  // note: The remaining UNIQUE identity is github_app_id: the same GitHub App
-  // cannot be connected twice, and a retry cannot help — the hold is burned.
   const apps = createReviewBotsStore(db);
-  // why: The floor a new App starts at: the workspace's own default, else the
-  // platform default. A degraded read is refused above — it would otherwise
-  // seed a wider floor than the tenant configured.
   const workspaceFloor = await getWorkspaceCheckMinScore(db, workspaceId);
   if (workspaceFloor.degraded) {
-    // note: The workspace's own default is unreadable (a failed read, or a stored
-    // value no reader trusts). Seeding the platform default here would
-    // silently WIDEN a floor the tenant may have set higher, so the commit
-    // fails closed before anything is written. This is not a database
-    // rejection: the hold is kept and the operator retries once the stored
-    // workspace setting is repaired. The cause decides which page they get.
     logManifestFailure("commit", "db_error", { error_type: "workspace_gate_unreadable" });
     return { kind: "workspace_gate_unreadable", reason: workspaceFloor.reason };
   }
-  // note: The plan's App allowance (D8). A NULL limit is no cap and `self-hosted`
-  // answers the unlimited constant, so the count (a thunk) is only read for a
-  // plan that actually has one. This read is FAST-FAIL UX: `createApp`'s insert
-  // re-counts the same live Apps in its own statement, so concurrent commits
-  // never land more Apps than the cap allows — the loser of a race for the
-  // last slot gets the refusal.
   const verdict = await checkEntitlement({
     db,
     mode,
@@ -1864,34 +1333,23 @@ async function commitManifestApp(args: {
       webhookSecretEnc,
       createdBy: login,
       workspaceId,
-      // why: The same plan the verdict above carries: one resolution, so the cap the
-      // insert enforces can never be a different one than the pre-check read.
       maxApps: verdict.plan.appsPerWorkspace,
     });
     return { kind: "success", row, workspaceId };
   } catch (err) {
-    // note: The guarded insert wrote no row: the cap this plan carries was reached by
-    // a concurrent commit. Same non-retryable outcome as the pre-check.
     if (err instanceof AppCountExceededError) {
       logManifestFailure("commit", "app_cap_reached", { apps_per_workspace: err.limit });
       return { kind: "app_cap_reached", limit: err.limit };
     }
     if (isAppsUniqueViolation(err, "github_app_id")) {
-      // invariant: The same GitHub App is already connected — retrying cannot help.
       logManifestFailure("commit", "github_app_id_conflict", { github_app_id: hold.id });
       return { kind: "already_connected" };
     }
-    // note: Retryable (missing migrations, transient D1 failure, …): hold kept.
     logManifestFailure("commit", "db_error", { error_type: errorTypeName(err) });
     return { kind: "db_rejected" };
   }
 }
 
-// why: Confirm resume (Bugbot: the hold survives retryable commit outcomes, so a
-// refresh / error-page link must re-render the confirm gate, not a dead
-// shell). Hold decrypts + hold.login === session.login → summary page with
-// id/name/slug/webhook URL (PEM/webhook_secret never render); anything else
-// → 302 shell.
 dashboardApp.get("/manifest/confirm", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -1899,14 +1357,8 @@ dashboardApp.get("/manifest/confirm", async (c) => {
   if (!session) return c.redirect("/dashboard/login", 302);
   const hold = await readHoldValue(getCookie(c, MANIFEST_HOLD_COOKIE), secrets.sessionSecret);
   if (!hold || hold.login !== session.login) return c.redirect("/dashboard", 302);
-  // note: This page is the resume gate for the commit that /manifest/commit performs,
-  // so it applies the same creation capability, in the same workspace (the
-  // hold's ref): a member demoted mid-flight must not be handed the commit
-  // affordance.
   const target = await resolveCreationTarget(c.env, session.login, hold.workspaceId, true);
   if (target.kind === "denied" || target.kind === "workspace_required") {
-    // invariant: The resume gate is the commit affordance's only entry, so a refusal here
-    // burns the held credentials rather than leaving them parked.
     c.header("Set-Cookie", expireCookie(MANIFEST_HOLD_COOKIE));
     logManifestFailure("confirm", "not_a_creator");
     return creationRefusal(c, session.login, target);
@@ -1921,24 +1373,11 @@ dashboardApp.get("/manifest/confirm", async (c) => {
         webhookUrl: `${new URL(c.req.url).origin}/webhook/${hold.workspaceId}/${hold.appId}`,
       },
       requestLocale(c),
-      // note: The hold names the workspace the App commits into; a store failure
-      // (`db_unbound`) left the target unresolved, so the page keeps the
-      // deployment-level links.
       target.kind === "ok" ? target.workspaceRef : null,
     ),
   );
 });
 
-// note: --- Post-commit onboarding page (AC4b) ---
-//
-// The landing page after a successful manifest commit: App name / GitHub
-// id / slug / webhook URL + the provider-first next-step CTA into Settings.
-// Authorization = the same membership + owner-or-admin rule as the settings
-// family (plan Interfaces: "membership + manage 规则与 settings 相同"); the
-// settings family's DASHBOARD_ENCRYPTION_KEY fail-closed is NOT inherited —
-// this page reads plaintext columns only. Unknown / soft-deleted App =
-// the settings-family 404 shape. Rendered by the SSR manifest page family
-// (no chrome beyond shellHeader), so no SPA shell is served.
 const appOnboardingRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -1954,10 +1393,6 @@ const appOnboardingRoute = async (c: DashboardContext) => {
     return c.html(forbiddenPage(member.session.login, requestLocale(c)), 403);
   }
   const origin = new URL(c.req.url).origin;
-  // note: The CTA opens the App's ONE review target, resolved HERE: a target id is a
-  // UUID minted by the targets store, never the GitHub App id this route is
-  // addressed by. Zero targets (nothing to configure yet) or several (no single
-  // page owns the policy) land on the repository overview, which always resolves.
   const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
   return c.html(
     manifestOnboardingPage(
@@ -1969,22 +1404,12 @@ const appOnboardingRoute = async (c: DashboardContext) => {
         webhookUrl: `${origin}/webhook/${member.scope.workspaceId}/${app.id}`,
       },
       requestLocale(c),
-      // invariant: Set only on a workspace-scoped request; the view never reads env.
       c.get("tenant")?.ref ?? null,
       live.length === 1 ? live[0]!.id : null,
     ),
   );
 };
 
-// note: --- Workspace members + invitations ---
-//
-// Authority is workspace-scoped: the routing gate classified the ref, the
-// route-local member gate below resolves the workspace + the caller's row, and
-// each handler applies its own role check. The pre-workspace root faces
-// (`GET /api/members`, `POST /members/{invite,remove,role}`) are retired — a
-// deployment-level membership list has no meaning once authority is per
-// workspace. Pending invites are `owner`/`admin` only; the member list is
-// visible to every member.
 
 type AdminGate =
   | {
@@ -1996,19 +1421,10 @@ type AdminGate =
     }
   | { ok: false; response: Response };
 
-// note: GitHub login syntax (qc1/qc2 F-003): letters, digits, single hyphens — 1–39
-// chars, never starting or ending with a hyphen and never two in a row (the
-// grammar GitHub itself enforces, so every accepted entry is claimable).
 const GITHUB_LOGIN_PATTERN = /^[a-zA-Z0-9](?:[a-zA-Z0-9]|-(?=[a-zA-Z0-9])){0,38}$/;
 
-/** note: Invitations live for 7 days — long enough to survive a weekend sign-up. */
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/**
- * note: Route-local workspace-manager gate: a resolved workspace scope whose role is
- * `owner` or `admin`. A plain `member` gets the members-family 403 page; a
- * non-member never reaches here (`requireMember` answered the outsider 404).
- */
 async function requireAdmin(c: DashboardContext): Promise<AdminGate> {
   const member = await requireMember(c);
   if (!member.ok) return { ok: false, response: member.response };
@@ -2022,11 +1438,6 @@ async function requireAdmin(c: DashboardContext): Promise<AdminGate> {
   return { ok: true, session: member.session, db: member.db, user: member.user, scope };
 }
 
-/**
- * note: The plain-text body of a members-family refusal. The SPA's `postForm`
- * branches on the status only, so the text is for operators and tests; the
- * plan pins `invite.pending_exists` / `invite.expired` as stable codes.
- */
 function inviteMutationResponse(
   c: DashboardContext,
   message: string,
@@ -2035,15 +1446,6 @@ function inviteMutationResponse(
   return c.text(message, status);
 }
 
-/**
- * note: The workspace's member list — every member sees it (AC4), and the route is
- * declared `read`, so a granted platform operator reaches it too. The operator
- * response carries ONLY the two AC2 fields (login + role): no row ids, no join
- * stamps, no viewer role, since an operator holds no workspace role and can
- * act on nothing here. A member's payload keeps its fields and adds the
- * settings summary: the resolved plan, its member limit and the attempts
- * metered this UTC month.
- */
 const memberListRoute = async (c: DashboardContext) => {
   const tenant = c.get("tenant");
   if (tenant?.principal === "operator-granted") {
@@ -2070,9 +1472,6 @@ const memberListRoute = async (c: DashboardContext) => {
     member.scope.workspaceId,
     monthStart,
   );
-  // why: A pending invite occupies a seat at the cap, so the summary derives that
-  // count as (members + pending, the cap's own predicate) minus the member
-  // rows already in hand — never a second, differently-filtered count.
   const seats = await countMembersAndPendingInvites(
     member.db,
     member.scope.workspaceId,
@@ -2083,8 +1482,6 @@ const memberListRoute = async (c: DashboardContext) => {
     viewer: { login: member.user.github_login, role: member.scope.role },
     workspace: {
       plan: { id: plan.id, name: plan.name },
-      // note: Null means "no seat cap" (the unlimited tier); the field stays present
-      // in both modes and only rendering branches on it.
       memberLimit: plan.includedMembers,
       reviewAttemptsThisMonth,
       pendingInvites,
@@ -2098,7 +1495,6 @@ const memberListRoute = async (c: DashboardContext) => {
   });
 };
 
-/** invariant: The workspace's live pending invites — `owner`/`admin` only (AC4). */
 const inviteListRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2115,14 +1511,6 @@ const inviteListRoute = async (c: DashboardContext) => {
   });
 };
 
-/**
- * invariant: Create one pending invite (AC2). `owner` or `admin` only; inviting an
- * existing member or a login that already has a live pending invite is 409 and
- * writes nothing. A lapsed pending row is flipped terminal by the store before
- * the insert, so re-inviting after expiry is legal. The plan's member cap
- * counts members plus live pending invites; at the cap the route answers the
- * Product copy's 409 without writing.
- */
 const inviteCreateRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2142,11 +1530,6 @@ const inviteCreateRoute = async (c: DashboardContext) => {
       400,
     );
   }
-  // note: A recorded removal (migration 0023) denies sign-in for that login at the
-  // write boundary, so an invite minted here could never be accepted: it would
-  // sit `pending` and expire into `expired` without ever admitting anyone.
-  // Refusing is the only honest answer; clearing the record is an operator
-  // decision (`createUser`), never a side effect of an invite.
   if (await isLoginRemoved(gate.db, login)) {
     return inviteMutationResponse(
       c,
@@ -2154,21 +1537,12 @@ const inviteCreateRoute = async (c: DashboardContext) => {
       409,
     );
   }
-  // why: Already a member → 409, zero writes (AC2). Resolution is on the
-  // WORKSPACE row, not the users row: a signed-in outsider is not a member.
   const now = new Date();
   const members = await listWorkspaceMembers(gate.db, gate.scope.workspaceId);
   if (members.some((row) => row.github_login.toLowerCase() === login.toLowerCase())) {
     return inviteMutationResponse(c, "Already a member.", 409);
   }
   try {
-    // note: The plan's seats are members plus live pending invites; a lapsed pending
-    // row has already stopped counting, so a refusal here writes nothing and
-    // revoking an invite frees the seat immediately. This read is fast-fail UX:
-    // `createInvite` re-checks the same predicate inside its insert, which is
-    // what a concurrent pair of invitations cannot both pass. A null limit has
-    // no seats to exhaust, so this gate cannot fire for it — and self-hosted
-    // resolves `unlimited` before it reads anything.
     const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
     const seats = await countMembersAndPendingInvites(
       gate.db,
@@ -2199,14 +1573,9 @@ const inviteCreateRoute = async (c: DashboardContext) => {
     );
   } catch (err) {
     if (err instanceof MemberCapError) {
-      // note: The plan is out of seats (members + live pending invites): 409 with
-      // the Product copy, zero writes. Only this class carries that boundary;
-      // anything else stays a 500.
       return inviteMutationResponse(c, err.message, 409);
     }
     if (err instanceof InvitePendingExistsError) {
-      // note: A live pending invite already exists (sequential pre-state or a lost
-      // concurrent race) — the first row is untouched.
       return inviteMutationResponse(c, "invite.pending_exists", 409);
     }
     throw err;
@@ -2214,11 +1583,6 @@ const inviteCreateRoute = async (c: DashboardContext) => {
   return inviteMutationResponse(c, "ok", 200);
 };
 
-/**
- * note: Revoke a live pending invite (AC6). Workspace-scoped in the store's
- * WHERE clause, so a foreign invite id is indistinguishable from an unknown
- * one; both are 404, and a later accept of the revoked row is 410.
- */
 const inviteRevokeRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2227,22 +1591,6 @@ const inviteRevokeRoute = async (c: DashboardContext) => {
   return inviteMutationResponse(c, "ok", 200);
 };
 
-/**
- * invariant: Accept an invite as the signed-in login (AC3). This is the ONLY write
- * that creates a membership from outside. It is reachable by an `invitee`
- * principal (a signed-in login holding a live pending invite in this
- * workspace) as well as by a member, so it gates on the workspace + session
- * instead of `requireMember`.
- *
- * Outcomes follow the plan's failure table exactly: login mismatch or unknown
- * invite → 404; terminal (revoked/expired) → 410; lapsed-but-pending → 409
- * `invite.expired` (the store flips the row in the same request, so a repeat is
- * 410); the accepting login already holds a free workspace and the target is
- * `free` → 409 Product copy § Invite acceptance with the invite left pending;
- * the workspace's members are at the plan's seat limit (a downgrade can leave
- * pending invites without seats) → 409 acceptance copy, also left pending;
- * success → 200.
- */
 const inviteAcceptRoute = async (c: DashboardContext) => {
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
@@ -2251,33 +1599,16 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   const user = c.get("authUser");
   if (!user) return await tenantNotFound(c);
   const inviteId = c.req.param("id") ?? "";
-  // note: Workspace-scoped pre-read: an invite id from another workspace answers the
-  // same 404 as an unknown one, and the accept cannot be replayed across refs.
-  // The pre-read deliberately ignores expiry: a LAPSED pending invite must still
-  // reach `acceptInvite` so the plan's 409 `invite.expired` (and its terminal
-  // flip) answers instead of a 404. `acceptInvite` owns the rest of the
-  // classification — login mismatch → not_found (404), terminal → 410.
   const invite = await getInviteInWorkspace(db, tenant.workspaceId, inviteId);
   if (!invite) return await tenantNotFound(c);
 
   const now = new Date().toISOString();
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
-  // invariant: The free slot gates only an acceptance that could otherwise land: a foreign
-  // login (404) and a terminal or lapsed row (410 / 409 `invite.expired`) keep
-  // their own answers — the copy below asserts the invite is STILL pending. The
-  // slot belongs to the accepting login and is spent only by a live membership
-  // in a workspace that resolves to `free`, so a paid target is never gated.
-  // Self-hosted resolves `unlimited` for every workspace, so this branch is
-  // unreachable there without a mode check of its own.
-  // Nothing is written before this point, so a refusal leaves the row pending.
   const wouldAccept =
     invite.status === "pending" &&
     invite.expires_at > now &&
     invite.github_login.toLowerCase() === user.github_login.toLowerCase();
   if (wouldAccept) {
-    // note: One call answers both halves of this precondition: the branch resolves the
-    // TARGET workspace's plan (only a `free` one is gated) and reads the counter
-    // only for such a workspace — so a paid acceptance counts nothing.
     const verdict = await checkEntitlement({
       db,
       mode,
@@ -2288,9 +1619,6 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
     if (!verdict.ok) return inviteMutationResponse(c, INVITE_FREE_SLOT_REFUSAL, 409);
   }
 
-  // note: The read above is fast-fail UX; `acceptInvite` re-checks the slot inside
-  // its membership insert, and its refusal is the same 409 body with the
-  // invite left pending (statement 3 only consumes it for an admitted login).
   let outcome: AcceptInviteOutcome;
   try {
     outcome = await acceptInvite(db, inviteId, user.github_login, now, mode);
@@ -2314,20 +1642,6 @@ const inviteAcceptRoute = async (c: DashboardContext) => {
   }
 };
 
-/**
- * note: Remove a member from this workspace (`owner`/`admin`; AC5 table).
- * The role boundary is checked on the TARGET's workspace role: an `admin` may
- * only remove a plain `member` — an `owner` or another `admin` is 403, even
- * when that owner is the last one (the 403 answers before any 409 could).
- * Removing a non-member of this workspace is 404 — the same answer an unknown
- * id gets.
- *
- * Self-removal is refused (400: a manager must not lock themselves out), but
- * the last-owner conflict answers FIRST — the plan pins 409 for an `owner`
- * removing or demoting the last owner, and the sole owner is exactly the actor
- * who reaches themselves. Both refusals write nothing; the store's conditional
- * delete still owns the peer case (409, zero writes).
- */
 const memberRemoveRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2337,11 +1651,6 @@ const memberRemoveRoute = async (c: DashboardContext) => {
   if (!target) {
     return inviteMutationResponse(c, "unknown member", 404);
   }
-  // note: The sole-owner conflict answers FIRST. An `owner` removing the last owner
-  // is necessarily removing themselves, so without this order the generic
-  // self-removal 400 would make the plan's 409 unreachable. An `admin` never
-  // reaches this branch: the role boundary below answers 403 for any owner
-  // target, the last one included.
   if (gate.scope.role === "owner" && target.role === "owner") {
     const owners = (await listWorkspaceMembers(gate.db, gate.scope.workspaceId)).filter(
       (row) => row.role === "owner",
@@ -2353,9 +1662,6 @@ const memberRemoveRoute = async (c: DashboardContext) => {
   if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
     return inviteMutationResponse(c, "You cannot remove yourself.", 400);
   }
-  // note: An `admin` may not remove an `owner` or another `admin`. An `owner` may
-  // remove an `owner` only when they are not the sole one — that is the store's
-  // 409, so the role boundary here stops at the admin case.
   if (gate.scope.role === "admin" && target.role !== "member") {
     return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
   }
@@ -2365,18 +1671,6 @@ const memberRemoveRoute = async (c: DashboardContext) => {
   return inviteMutationResponse(c, "ok", 200);
 };
 
-/**
- * invariant: Retire the current workspace (`owner`-only). One batch (see
- * `deleteWorkspace`): memberships go, pending invites are revoked, the active
- * subscription is canceled and the row is stamped `deleted_at` and stops
- * resolving everywhere — including this route,
- * whose `:workspaceRef` gate answers 404 on a replay.
- *
- * The workspace comes from the resolved tenant scope, never from the body: the
- * path ref already passed the membership gate, so a body id could only name
- * another tenant. `next` names where the SPA goes after the delete — the
- * shell, because the workspace it was on no longer exists.
- */
 const workspaceDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2387,17 +1681,6 @@ const workspaceDeleteRoute = async (c: DashboardContext) => {
   return c.json({ deleted: true, next: "/dashboard" }, 200);
 };
 
-/**
- * invariant: Change a member's workspace role (`owner`-only; AC5 table), including
- * promotion to `owner` — that promotion IS the ownership-transfer path, so
- * there is no separate transfer route.
- *
- * An `admin` may not change any role (403, including a target that is the last
- * owner: the role boundary answers 403, never the 409). The sole-owner demotion
- * refusal is the store's 0-row update (409, zero writes) for a peer owner and,
- * at this level, for the actor demoting THEMSELVES while sole owner — the store
- * predicate cannot tell who the actor is.
- */
 const memberRoleRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2416,10 +1699,6 @@ const memberRoleRoute = async (c: DashboardContext) => {
   }
   if (target.role === role) return inviteMutationResponse(c, "ok", 200);
   if (target.github_login.toLowerCase() === gate.user.github_login.toLowerCase()) {
-    // invariant: Self-demotion, refused only while the actor is the sole owner. The store
-    // predicate cannot see WHO is acting — it refuses a sole-owner demotion
-    // whoever asks — so the actor-aware answer lives here, and its body is what
-    // pins this check (a store refusal answers the generic last-owner text).
     const owners = (await listWorkspaceMembers(gate.db, gate.scope.workspaceId)).filter(
       (row) => row.role === "owner",
     );
@@ -2433,29 +1712,7 @@ const memberRoleRoute = async (c: DashboardContext) => {
   return inviteMutationResponse(c, "ok", 200);
 };
 
-// note: --- Support reads (platform-operator support, 2026-10) ---
-//
-// Two faces, both `read` in the route table so a granted platform operator
-// reaches them and nothing else:
-//   - `/api/support/workspace` — the operator's read-only view: the four
-//     `workspaces` fields, each member's login + role, and the active grants.
-//     Operators ONLY: a member reads the same facts through the ordinary
-//     members face, so this one refuses them (AC2 fixes its exact field set).
-//   - `/api/support/grants` — the members' undismissable notice data (operator
-//     login, `reason`, `expires_at`). Every member sees the whole set; a
-//     granted operator reading this same path sees only their own grant.
-// A granted operator never reaches a member-only handler: the gate refuses
-// every write-classified route before any body runs (AC3).
-//
-// A grant on this workspace can belong to another operator, so the grant list
-// is projected to the CALLER's own row on both operator-reachable faces: AC2
-// describes the single grant that opened this window, not the workspace's
-// other operators' logins and reasons.
 
-/**
- * invariant: An operator sees only their own grant (AC2); the member notice keeps the
- * whole set (AC4). The grant row's compare is NOCASE, so match it the same way.
- */
 const onlyOwnGrant = <T extends { operator_login: string }>(rows: T[], login: string): T[] =>
   rows.filter((row) => row.operator_login.toLowerCase() === login.toLowerCase());
 
@@ -2464,15 +1721,10 @@ const supportWorkspaceRoute = async (c: DashboardContext) => {
   const db = dashboardD1(c.env);
   if (!tenant || tenant.workspaceId === null || !db) return await tenantNotFound(c);
   if (tenant.principal !== "operator-granted") {
-    // why: A member has the ordinary member/App faces for this data, so this one is
-    // not theirs; everyone the gate did not classify as a member gets the same
-    // 404 an outsider does (no grant state leaks either way).
     return tenant.principal === "member"
       ? c.json({ error: "forbidden" }, 403)
       : await tenantNotFound(c);
   }
-  // note: The scope middleware already resolved this workspace's row for the ref the
-  // request named, so the route reads its own scope instead of querying again.
   const workspace = tenant.workspaceRow;
   const login = c.get("authUser")?.github_login;
   if (!workspace || login === undefined) return await tenantNotFound(c);
@@ -2498,18 +1750,11 @@ const supportWorkspaceRoute = async (c: DashboardContext) => {
   });
 };
 
-/**
- * note: The active grants on this workspace — the member notice, and the same fact
- * for a granted operator (the read ceiling admits this path). Every member
- * reads it; an outsider is the tenant 404. It answers an empty list rather
- * than 404 for a member, so the shell renders no notice.
- */
 const supportGrantsRoute = async (c: DashboardContext) => {
   const tenant = c.get("tenant");
   const db = dashboardD1(c.env);
   if (!tenant || !db) return await tenantNotFound(c);
   let workspaceId: string | null;
-  /** invariant: Set for the operator face: only their own grant is theirs to see. */
   let ownLogin: string | null = null;
   if (tenant.principal === "operator-granted") {
     workspaceId = tenant.workspaceId;
@@ -2531,16 +1776,9 @@ const supportGrantsRoute = async (c: DashboardContext) => {
   });
 };
 
-/** why: Rows per audit read when the caller names no `limit`. */
 const AUDIT_DEFAULT_LIMIT = 50;
 const AUDIT_MAX_LIMIT = 200;
 
-/**
- * invariant: The workspace's audit rows — `owner`/`admin` only (a plain `member` gets the
- * members-family 403, an outsider the tenant 404, and a granted operator the
- * gate's 403). Read-only by construction: the store exports no update or
- * delete path, so no caller can rewrite history.
- */
 const auditListRoute = async (c: DashboardContext) => {
   const gate = await requireAdmin(c);
   if (!gate.ok) return gate.response;
@@ -2560,17 +1798,10 @@ const auditListRoute = async (c: DashboardContext) => {
   });
 };
 
-// note: --- Workspace settings: the owner-editable name ---
-//
-// The name is the label the top-bar switcher shows; a workspace's URL is its
-// immutable id, so a rename never moves a page. It stays OWNER-only (unlike the
-// App settings family's owner-or-admin): one label is what every teammate sees.
 const workspaceNameRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
   if (member.scope.role !== "owner") {
-    // note: Same split as the members family: a navigation gets the rendered denial,
-    // a fetch the bare status the SPA parses.
     return wantsHtml(c.req.header("Accept") ?? null)
       ? c.html(forbiddenPage(member.session.login, requestLocale(c)), 403)
       : c.json({ error: "forbidden" }, 403);
@@ -2580,7 +1811,6 @@ const workspaceNameRoute = async (c: DashboardContext) => {
     const body = (await c.req.json()) as { name?: unknown };
     name = typeof body.name === "string" ? body.name.trim() : "";
   } catch {
-    // invariant: malformed body → the shape gates' 400, never a 500
   }
   if (name.length === 0) {
     return c.json({ key: "workspace.nameRequired", message: t("en", "workspace.nameRequired") }, 400);
@@ -2596,21 +1826,10 @@ const workspaceNameRoute = async (c: DashboardContext) => {
     );
   }
   const row = await setWorkspaceName(member.db, member.scope.workspaceId, name);
-  // note: A row retired between the member gate and the UPDATE is the same 404 an
-  // unknown ref gets.
   if (row === null) return await tenantNotFound(c);
   return c.json({ name: row.name });
 };
 
-// note: --- Workspace settings: the review-concurrency cap ---
-//
-// The tenant half of the runtime configuration (iteration spec §1.1): the
-// effective cap is min(system, this), but the system level is platform data —
-// the tenant payload exposes only the workspace's own value and its own
-// maximum. Owner/admin may read and change it; a plain member gets the tenant
-// 404 — the value is not theirs either way. A write is validated against the
-// workspace maximum only: comparing it with the system quota would let the
-// tenant binary-search that number through accepted and refused writes.
 const workspaceConcurrencyGate = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return { ok: false as const, response: member.response };
@@ -2623,9 +1842,6 @@ const workspaceConcurrencyGate = async (c: DashboardContext) => {
 const workspaceConcurrencyReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
-  // invariant: The tenant face reads its own column only: a corrupt platform row must not
-  // blank a workspace whose value is perfectly readable — the tenant can neither
-  // see nor repair that row. Admission still applies min(system, workspace).
   const caps = await getWorkspaceConcurrency(gate.member.db, gate.member.scope.workspaceId);
   return c.json({
     concurrency: caps.concurrency,
@@ -2644,7 +1860,6 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
     const body = (await c.req.json()) as { concurrency?: unknown };
     value = body.concurrency;
   } catch {
-    // invariant: malformed body → the shape gate's 400, never a 500
   }
   if (!isConcurrencyValue(value, WORKSPACE_CONCURRENCY_MAX)) {
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
@@ -2656,10 +1871,6 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
     return c.json({ concurrency: await setWorkspaceConcurrency(db, scope.workspaceId, value, user.github_login) });
   } catch (err) {
     if (!(err instanceof RuntimeConfigError)) throw err;
-    // note: A row retired between the gate and the UPDATE is the same 404 an unknown
-    // ref gets. The range refusal stays mapped even though the route gate
-    // already validated the value: the store owns the accepted range, and a
-    // divergence between the two checks must not surface as a 500.
     if (err.reason === "unknown_workspace") return await tenantNotFound(c);
     return keyed400(c, SETTINGS_400_KEYS.concurrencyInvalid, {
       min: CONCURRENCY_MIN,
@@ -2668,12 +1879,6 @@ const workspaceConcurrencyWriteRoute = async (c: DashboardContext) => {
   }
 };
 
-// note: --- Workspace settings: the default review-gate score floor ---
-//
-// The floor a newly connected App of this workspace starts at. Existing Apps
-// keep their own stored floor (the per-App settings face writes that), so this
-// route never rewrites `review_bots`. Same role gate as the concurrency cap:
-// owner/admin read and write, a plain member gets the tenant 404.
 const workspaceCheckMinScoreReadRoute = async (c: DashboardContext) => {
   const gate = await workspaceConcurrencyGate(c);
   if (!gate.ok) return gate.response;
@@ -2695,7 +1900,6 @@ const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
     const body = (await c.req.json()) as { min_score?: unknown };
     value = body.min_score;
   } catch {
-    // invariant: malformed body → the shape gate's 400, never a 500
   }
   if (!isCheckMinScoreValue(value)) {
     return keyed400(c, SETTINGS_400_KEYS.checkScoreInvalid, {
@@ -2704,8 +1908,6 @@ const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
     });
   }
   try {
-    // note: ONE floor writer: the store function the workspace-defaults face uses,
-    // so this legacy address cannot drift from it (no second SQL).
     await setWorkspaceReviewDefaults(db, scope.workspaceId, { checkMinScore: value }, user.github_login);
     return c.json({ min_score: value });
   } catch (err) {
@@ -2718,13 +1920,6 @@ const workspaceCheckMinScoreWriteRoute = async (c: DashboardContext) => {
   }
 };
 
-// note: --- Workspace settings: shared-bot review usage ---
-//
-// The card's read (spec bot-scope-and-claiming § Review usage): two counts for
-// the current UTC month plus the shared-bot row's state. Every member may read
-// it — it is the workspace's own spend, not a setting — and the workspace is
-// the resolved tenant scope, never a path value: the store's `?3` is that id,
-// so no request can name another tenant.
 const reviewUsageReadRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -2738,10 +1933,7 @@ const reviewUsageReadRoute = async (c: DashboardContext) => {
     createReviewBotsStore(db).listSharedBots(scope.workspaceId),
   ]);
   const row = rows[0];
-  // note: Retired between the gate and the read: the same 404 an unknown ref gets.
   if (!row) return await tenantNotFound(c);
-  // invariant: The credit block is `saas` only: `self-hosted` has no ceiling to report and
-  // renders no quota card, so no profile or month RP is read in that mode.
   const quota =
     mode === "saas" ? await readWorkspaceQuota(db, scope.workspaceId, plan.id, now) : null;
   return c.json({
@@ -2753,16 +1945,6 @@ const reviewUsageReadRoute = async (c: DashboardContext) => {
   });
 };
 
-// --- Apps list + per-App management (spec § Multi-App 契约,
-// Clarify #6, architect-pinned POST action paths) ---
-//
-// The per-request guard above has already verified membership on every route
-// here, and the route-local gate below reuses the row it resolved. List =
-// every member; disable/enable/soft-delete = the workspace owner/admin
-// (invite-only team trust model).
-// POSTs ride the existing session cookie (same discipline as the members
-// routes) — no new token scheme. Routes are the pinned action-path POSTs:
-// the zero-JS `<form method="post">` convention cannot emit a DELETE verb.
 
 /**
  * Route-local member gate shared by every workspace App route. Exported so a
@@ -2786,19 +1968,8 @@ export async function requireMember(c: DashboardContext): Promise<
   if (!session) return { ok: false, response: c.redirect("/dashboard/login", 302) };
   const db = dashboardD1(c.env);
   if (!db) return { ok: false, response: c.text("dashboard storage is not configured", 500) };
-  // note: The session guard already resolved this row for the request and failed
-  // closed on a removed login, so reuse it. Only a mount without that
-  // middleware reads for itself.
   const user = c.get("authUser") ?? (await getUserByLogin(db, session.login));
-  // why: Fail closed: no row (removed between guard and here) → 403, the 403 view
-  // carries zero membership data.
   if (!user) return { ok: false, response: c.html(forbiddenPage(session.login, requestLocale(c)), 403) };
-  // note: The workspace resolution itself is the workspace-scope middleware's job
-  // (ordering-contract step 3). This gate only turns its verdict into the
-  // route shape: no scope on a workspace path IS the outsider 404 — the same
-  // surface an unknown workspace answers, so there is no existence oracle.
-  // Every route mounted below carries a `:workspaceRef`, so a missing tenant
-  // or scope is that same 404 rather than a "deployment-level" request.
   const tenant = c.get("tenant");
   const scope = c.get("workspaceScope") ?? null;
   if (!tenant || scope === null || tenant.principal !== "member") {
@@ -2807,7 +1978,6 @@ export async function requireMember(c: DashboardContext): Promise<
   return { ok: true, session, db, user, scope };
 }
 
-/** note: Manage = workspace `owner`/`admin`. */
 function canManageRole(role: WorkspaceRole | null): boolean {
   return role === "owner" || role === "admin";
 }
@@ -2816,26 +1986,6 @@ function canManageApp(scope: WorkspaceScope): boolean {
   return canManageRole(scope.role);
 }
 
-/**
- * note: Bot-scope WRITE authority — the ONE predicate every bot-owned mutation
- * checks: lifecycle (disable / enable / delete), the settings family's
- * bot-scoped ops (providers, chains, keys, sandbox image), provider-key
- * verification and the forced metadata refresh.
- *
- * It is deliberately INDEPENDENT of the App resolver. The resolver admits a
- * workspace's retained target on another workspace's bot (the revoked-share
- * read), but a target grants its own review configuration, never the bot:
- * the caller's workspace must be the bot's OWNING workspace (its
- * `bot_workspaces` mapping), read off the same joined row. Scope is NOT part
- * of the decision: sharing decides who else may USE the bot, never who may
- * configure it, so an owning workspace keeps every write while the bot is
- * `shared` and a consuming workspace is still refused. The platform
- * operator's own write path is `/_internal_admin`, which no member route
- * reaches.
- *
- * Target-owned settings (trigger mode, depth, Check gate, allowlist, pause,
- * park) do NOT use this predicate: the target's workspace role governs them.
- */
 function canWriteBotScope(
   app: Pick<GithubAppRow, "workspace_id" | "scope">,
   scope: WorkspaceScope,
@@ -2843,12 +1993,6 @@ function canWriteBotScope(
   return app.workspace_id === scope.workspaceId;
 }
 
-/**
- * note: Bot-scope READ authority for the one bot-owned operation that consumes the
- * bot's stored credentials without writing (`POST /keys/usage`): the owning
- * workspace, or a `shared` bot any workspace may use. A retained target on
- * another workspace's `owned` bot grants neither.
- */
 function canReadBotScope(
   app: Pick<GithubAppRow, "workspace_id" | "scope">,
   scope: WorkspaceScope,
@@ -2856,18 +2000,6 @@ function canReadBotScope(
   return app.workspace_id === scope.workspaceId || app.scope === "shared";
 }
 
-/**
- * note: Resolve the App addressed by an App route. The segment is GitHub's immutable
- * numeric App id — the only App identifier an operator sees that never changes.
- * A non-numeric segment, a soft-deleted row, a bot the workspace neither owns
- * nor holds a live target on, and an App with no target in the session
- * workspace are all equally invisible (404).
- *
- * The resolve is bot-scope aware (the store's `getScopedAppByGithubId`): a
- * workspace reaches the target it created on a `shared` bot, and the target it
- * still holds after a share was revoked, while another workspace's `owned` bot
- * is never widened.
- */
 async function resolveScopedApp(
   apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
@@ -2878,10 +2010,6 @@ async function resolveScopedApp(
   return apps.getScopedAppByGithubId(githubAppId, scope.workspaceId);
 }
 
-/**
- * invariant: The bot's LIVE targets in this workspace, newest-first ordering left to the
- * store. The App settings read tells "none" from "several" off this list.
- */
 async function liveTargetsForBot(
   db: DashboardD1,
   workspaceId: string,
@@ -2892,23 +2020,12 @@ async function liveTargetsForBot(
   );
 }
 
-/**
- * note: The App's operator-facing label (D6): GitHub's current name, then its slug,
- * then the immutable numeric ids. Every settings notice and dialog name the
- * App this way, so a rename shows up wherever the App is mentioned.
- */
 function appDisplayName(
   app: Pick<GithubAppRow, "github_name" | "github_slug" | "github_app_id">,
 ): string {
   return app.github_name ?? app.github_slug ?? String(app.github_app_id);
 }
 
-/**
- * note: Whether the target's bot still serves it, derived on every read: a bot that
- * is `owned` by ANOTHER workspace no longer reviews this target (the
- * resolver's guard). Nothing stores this — a re-share clears it on the next
- * read, and keeping a projection would be a second source of truth.
- */
 type BlockedReason = "bot_not_shared";
 
 function blockedReasonFor(
@@ -2953,14 +2070,10 @@ async function appsListWithHealth(
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
-/** why: SPA JSON face — same requireMember gate and appsListWithHealth assembly as the retired GET /apps. Encrypted columns and row PKs stay off the payload. */
 const appListRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const apps = createReviewBotsStore(gate.db);
-  // note: The workspace's live targets, keyed by bot: the list reads THIS
-  // workspace's pause state per bot, and a shared bot's row is in the list
-  // exactly because one of these targets exists.
   const targetByBot = new Map(
     (await createTargetsStore(gate.db).listLive(gate.scope.workspaceId)).map((target) => [
       target.bot_id,
@@ -2968,20 +2081,12 @@ const appListRoute = async (c: DashboardContext) => {
     ]),
   );
   const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
-  // note: The pause the list renders is the TARGET's business pause — the one the
-  // pause/resume routes write. A bot has one target today, so the map is
-  // one-to-one. A bot with no live target emits NO `review_enabled`: the row
-  // carries no pause state, and inventing one would show a switch position the
-  // database does not hold.
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
       return {
-        // note: App id + the cached GitHub facts (D6): the list links and labels by
-        // the immutable id, and renders whatever GitHub currently calls the App.
         github_app_id: app.github_app_id,
-        // note: The local bot UID: the add-repository POST names it as `bot_id`.
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -3002,21 +2107,10 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
-    // note: The creation chooser's official mode: the `shared` bots this workspace
-    // may put a target on, each with its own live-target count here. Additive
-    // and always present — `[]` when the platform shares none.
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
   });
 };
 
-/**
- * note: One handler for the three pinned action routes. Unknown and soft-deleted
- * apps are equally invisible (the list never shows them) → 404, zero writes.
- * The Apps list is SPA-owned, so the response is a plain 2xx the
- * SPA's postForm treats as success (it refetches the JSON face); the
- * re-rendered HTML page is retired. The store write still happens exactly
- * once; the `changed` result only shaped the retired notice copy.
- */
 async function appStatusAction(
   c: DashboardContext,
   action: "disable" | "enable" | "delete",
@@ -3027,8 +2121,6 @@ async function appStatusAction(
   const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", gate.scope);
   if (!app) return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404);
   if (!canManageApp(gate.scope)) return c.html(forbiddenPage(gate.session.login, requestLocale(c)), 403);
-  // note: A bot's lifecycle belongs to its OWNING workspace, whatever the bot's
-  // scope: a target on it is consumption, not authority over it.
   if (!canWriteBotScope(app, gate.scope)) return botReadOnlyResponse(c);
   if (action === "delete") {
     await apps.softDeleteApp(app.id);
@@ -3038,29 +2130,6 @@ async function appStatusAction(
   return pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "ok");
 }
 
-// --- Per-App AI configuration settings (spec § Per-App BYOK) ---
-//
-// The settings family for one App: provider API keys (BYOK, masked list) and
-// the model chain. Authorization = the same canManageApp rule as the status
-// actions above (owner-or-admin, Clarify #6); unknown/soft-deleted App → 404;
-// the per-request guard has already verified membership. POSTs ride the
-// session cookie (same discipline as the members and apps action routes — no
-// new token scheme). Route shapes per the plan brief: POST
-// /dashboard/apps/:appId/settings — the POST carries an explicit `op`
-// discriminator (add-key | save-chain | save-roles) because the zero-JS page
-// has three forms on one action path — and the delete-key action path
-// …/settings/key/delete (the HTML-form convention cannot emit a DELETE verb).
-// The family's native-form answers are a 302 to the App's ONE repository detail
-// (or the overview when it has none/several — `repositoryLandingPath`), because
-// the policy moved to the target surface and a target id is not an App id; the
-// POST family keeps its own paths.
-//
-// Encryption-dependent reads AND writes: masking needs plaintext (the last-4
-// tail), so a missing/malformed DASHBOARD_ENCRYPTION_KEY fails the whole
-// family closed with 5xx (spec § Crypto envelope) — never a partial page,
-// never a stored key. The settings page is SPA-owned (the JSON
-// face below serves the SPA); the DESIGN-token appSettingsPage view in
-// src/dashboard/views.ts is retired.
 
 type AppSettingsGate =
   | {
@@ -3068,32 +2137,13 @@ type AppSettingsGate =
       session: SessionPayload;
       db: DashboardDb;
       app: GithubAppRow;
-      /**
-       * note: The bot's ONE review target in this workspace — where the
-       * workspace-owned review configuration lives. `null` = the workspace
-       * holds no repository under this App yet (a real state since the
-       * repository surface owns creation), OR it holds several
-       * (`targets_many`): the App is still a valid settings subject, and its
-       * target-owned facts are simply absent.
-       */
       target: ReviewTargetRow | null;
-      /**
-       * why: True when the bot holds two or more live targets here. The App page
-       * owns no target policy, so this names the state instead of refusing the
-       * whole App (its provider keys, chains, seats and sandbox are App-owned).
-       */
       targets_many: boolean;
       user: DashboardUserRow;
       scope: WorkspaceScope;
     }
   | { ok: false; response: Response };
 
-/**
- * note: (spec §2 read face): any member may load the App detail data face — the
- * non-manager payload is the identity-only set; the full base+health and
- * settings payloads (masked keys, chains, providers) stay owner/admin via the
- * GET handler's canManageApp branch below; writes go through requireAppSettings.
- */
 async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> {
   const member = await requireMember(c);
   if (!member.ok) return member;
@@ -3103,12 +2153,6 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
     member.scope,
   );
   if (!app) return { ok: false, response: pinnedPostMutationResponse(c, DASHBOARD_SHELL_REDIRECT, "unknown app", 404) };
-  // why: Visibility is the APP's: the repository surface creates targets now, so a
-  // workspace may open an App it has added no repository to yet (or several —
-  // the App page owns no target policy, so its provider keys, chains, seats
-  // and sandbox must stay reachable). `target` answers only when the workspace
-  // holds EXACTLY ONE repository under the App; anything else is `null` plus
-  // `targets_many`, and the target-owned facts render as absent.
   const live = await liveTargetsForBot(member.db, member.scope.workspaceId, app.id);
   return {
     ok: true,
@@ -3122,11 +2166,6 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   };
 }
 
-/**
- * note: Route-local owner-or-admin gate shared by the settings WRITE family.
- * Encryption-dependent because masking needs plaintext — a missing master key
- * still fails closed with 5xx (spec § Crypto envelope).
- */
 async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate;
@@ -3142,7 +2181,6 @@ async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate>
   return gate;
 }
 
-/** note: Same structured-log convention as logOAuthFailure / logManifestFailure. */
 function logSettingsFailure(stage: string, appId: string, err: unknown): void {
   console.warn(
     JSON.stringify({
@@ -3155,52 +2193,20 @@ function logSettingsFailure(stage: string, appId: string, err: unknown): void {
   );
 }
 
-/** why: 500 fail-closed message: key misconfiguration vs storage rejection (commit-route copy style). */
 function settingsFailureNotice(err: unknown): string {
   return err instanceof SecretboxKeyError
     ? "This deployment has no valid DASHBOARD_ENCRYPTION_KEY for its stored keys — ask the operator to configure it, then resubmit."
     : "The dashboard database rejected the change — nothing was stored. You can resubmit.";
 }
 
-/**
- * note: The App-selected-image eligibility gate — ONE derivation shared
- * by the settings display face (provider_catalog eligibility stamping) and
- * the add-key/verify POST prechecks, so the UI and the server-side precheck
- * can never disagree. Fail-closed: an unknown image id yields an undefined
- * runtime → not omp → every provider row unavailable / every provider
- * ineligible. Deliberately mirrors the display predicate only — `enabled` is
- * the save-sandbox-image route's value domain and stays outside this gate.
- */
 function isOmpRuntimeImage(sandboxImageId: string): boolean {
   return getSandboxImage(sandboxImageId)?.runtime === "omp";
 }
 
-/**
- * note: Where a settings answer sends a native form navigation: the App's ONE
- * repository detail when this workspace holds exactly one live target under
- * it, else the repository overview.
- *
- * The settings family is addressed by the GitHub App id, which is NOT a target
- * id (`targets-store` mints those with `crypto.randomUUID()`), so the detail
- * address must be built from the RESOLVED target row. `null` = the overview:
- * zero targets (nothing to open) or several (`targets_many` — no single page
- * owns the policy), both of which the gate already states.
- */
 function repositoryLandingPath(gate: { target: ReviewTargetRow | null }): string | null {
   return gate.target === null ? null : `${REPOS_LIST_REDIRECT}/${gate.target.id}`;
 }
 
-/**
- * note: Plain-text settings POST response (the settings page is
- * SPA-owned and read-only today — its forms POST here; the pinned POST
- * paths keep their full validation and mutation, and answer the SPA's
- * postForm contract: 2xx → refetch the JSON face, 4xx/5xx → client error).
- * Native form navigation answers 302 to {@link repositoryLandingPath}, where
- * the controls live.
- * The family's 400s moved to settings400Response (keyed JSON),
- * so this helper now carries only the 2xx faces and the
- * settingsFailureNotice 500s.
- */
 function settingsPostResponse(
   c: DashboardContext,
   landing: string | null,
@@ -3210,13 +2216,6 @@ function settingsPostResponse(
   return pinnedPostMutationResponse(c, landing ?? REPOS_LIST_REDIRECT, message, status);
 }
 
-/**
- * why: A REMOVE route's 2xx face. Native form navigation keeps the pinned 302;
- * every other caller gets `{ changed, message }`, because the tolerant no-op
- * (nothing matched — a stale dialog's row was already gone) and a real removal
- * are both 2xx and the SPA must not render "Changes saved." for the former.
- * `message` keeps the English face the plain-text assertions pin.
- */
 function settingsRemoveResponse(
   c: DashboardContext,
   landing: string | null,
@@ -3229,16 +2228,6 @@ function settingsRemoveResponse(
   return c.json({ changed, message }, 200);
 }
 
-/**
- * note: (audit UI-45-03): machine-readable 400 keys for the settings
- * POST family — ONE inventory of the site→key mapping. Values are
- * `settings.error.*` dictionary paths; settings400Response interpolates the
- * English face from the same dictionary entry, so a mapped 400 body is
- * `{ key, message, params? }` — `message` keeps the English face (the
- * existing English-substring pins and any non-resolving consumer),
- * `params` carries the interpolation data the SPA replays via t() in the
- * operator's locale.
- */
 const SETTINGS_400_KEYS = {
   providerRequired: "settings.error.providerRequired",
   providerUnknown: "settings.error.providerUnknown",
@@ -3292,7 +2281,6 @@ const SETTINGS_400_KEYS = {
   runtimeHarnessUnknown: "settings.error.runtimeHarnessUnknown",
   triggerModeUnknown: "settings.error.triggerModeUnknown",
   reviewLevelUnknown: "settings.error.reviewLevelUnknown",
-  /** note: Review gate + owner allowlist (migration 0045). */
   checkScoreInvalid: "settings.error.checkScoreInvalid",
   checkVerdictUnknown: "settings.error.checkVerdictUnknown",
   allowlistToggleInvalid: "settings.error.allowlistToggleInvalid",
@@ -3301,35 +2289,20 @@ const SETTINGS_400_KEYS = {
   fieldDuplicated: "settings.error.fieldDuplicated",
   unknownOperation: "settings.error.unknownOperation",
   githubMetadataRefreshFailed: "settings.error.githubMetadataRefreshFailed",
-  /** note: Workspace review-concurrency cap (iteration spec §2.3). */
   concurrencyInvalid: "settings.error.concurrencyInvalid",
-  /** note: Per-key usage probe: the declaration points away from the vendor's quota host. */
   usageProbeOffVendorHost: "settings.error.usageProbeOffVendorHost",
-  /** note: Per-key usage probe: the declaration yields no readable host. */
   usageProbeUnreadableEndpoint: "settings.error.usageProbeUnreadableEndpoint",
 } as const satisfies Record<string, DictionaryKey>;
 
-/** note: The two per-model size fields and the field label a shape refusal names. */
 const MODEL_SIZE_FIELDS = [
   ["contextWindow", "context window"],
   ["maxTokens", "max token count"],
 ] as const;
 
-/**
- * note: The per-model facts an `update-provider-models` form states (compass D10).
- * ONLY what the form states is kept; a blank size is simply not part of the
- * statement. Resolution (declared > catalog > absent) happens on the read side
- * — the stored override never carries a catalog number as if the operator had
- * stated it — and an absent size is NOT a save precondition: the pinned omp
- * runtime back-fills its own default for a model that states none, so storing
- * the model as unstated is the ordinary outcome. A STATED size must still be a
- * positive integer; an out-of-shape one names the field.
- */
 function parseCustomProviderModelsMeta(
   raw: string,
   modelIds: readonly string[],
 ): { meta: CustomProviderModelsMeta } | { error: DictionaryKey; params: Record<string, string> } {
-  // note: A blank overlay is the same EMPTY statement.
   let entries: Record<string, unknown> = {};
   if (raw.trim() !== "") {
     let parsed: unknown;
@@ -3350,8 +2323,6 @@ function parseCustomProviderModelsMeta(
   const meta: CustomProviderModelsMeta = {};
   for (const modelId of modelIds) {
     const entry = entries[modelId];
-    // note: An absent entry is a blank statement, not a second shape: the model
-    // saves as unstated and the runtime default applies.
     if (entry !== undefined && entry !== null && (typeof entry !== "object" || Array.isArray(entry))) {
       return invalid(modelId, "model metadata");
     }
@@ -3359,8 +2330,6 @@ function parseCustomProviderModelsMeta(
     const statement: CustomProviderModelMeta = {};
     for (const [field, label] of MODEL_SIZE_FIELDS) {
       const value = record[field];
-      // invariant: A blank size stays unstated; only a stated one is shape-checked and
-      // kept on the override.
       if (value === undefined || value === null) continue;
       if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
         return invalid(modelId, label);
@@ -3386,26 +2355,14 @@ function parseCustomProviderModelsMeta(
         return invalid(modelId, key);
       }
     }
-    // invariant: Only a stated fact makes an override entry: a model that states no size
-    // stores NOTHING (the store reads that as unstated, the read side
-    // re-resolves declared > catalog > absent, and the runtime default applies).
     if (Object.keys(statement).length > 0) meta[modelId] = statement;
   }
-  // note: An entry for an id the form did not select is unreachable data: the row's
-  // own read gate would reject it, so it is refused here instead.
   for (const modelId of Object.keys(entries)) {
     if (!modelIds.includes(modelId)) return invalid(modelId, "model id");
   }
   return { meta };
 }
 
-/**
- * note: Keyed 400 for the settings POST family: native `<form>`
- * navigation keeps the pinned-POST contract — 302 to the target page, the
- * body is never seen; the SPA's postForm fetch gets the keyed JSON face
- * (`message` = the en dictionary face, so existing English-substring pins
- * keep passing; `params` = the interpolation data for the SPA's t()).
- */
 function settings400Response(
   c: DashboardContext,
   landing: string | null,
@@ -3418,11 +2375,6 @@ function settings400Response(
   return keyed400(c, key, params);
 }
 
-/**
- * note: The keyed 400 body — ONE spelling for every settings refusal, App-scoped or
- * workspace-scoped: `key` for the SPA's locale resolver, `message` = the en
- * face (so an English-substring consumer keeps working), `params` for its t().
- */
 function keyed400(
   c: DashboardContext,
   key: DictionaryKey,
@@ -3431,12 +2383,6 @@ function keyed400(
   return c.json({ key, message: t("en", key, params), ...(params ? { params } : {}) }, 400);
 }
 
-/**
- * why: The pool-bound rejection (`MAX_KEYS_PER_PROVIDER`, thrown by the store when a
- * NEW key would exceed the (App, provider) pool) as the keyed 400 the SPA
- * replays in the operator's locale. ONE mapping shared by every settings path
- * that stores a key, so the cap can never surface as a generic 500.
- */
 function settingsKeyLimitResponse(
   c: DashboardContext,
   landing: string | null,
@@ -3448,8 +2394,6 @@ function settingsKeyLimitResponse(
   });
 }
 
-/** why: The SPA-facing reason subset: `unexpected` folds the parse misses, every
- *  other reason reaches the client under its own name. */
 type MappedVerifyReason =
   | "invalid_key"
   | "quota_exhausted"
@@ -3476,7 +2420,6 @@ function verifyFailCopy(reason: MappedVerifyReason): string {
   return "The provider returned an unexpected response — nothing was stored.";
 }
 
-/** why: 400 for a verify miss: JSON `{ ok, reason, message }` so the SPA maps `reason` via t(); `message` keeps the English face for native posts. */
 function settingsVerifyFailResponse(
   c: DashboardContext,
   landing: string | null,
@@ -3496,7 +2439,6 @@ function membershipFailCopy(selector: string): string {
 
 const MEMBERSHIP_FAIL_CODE = "not_in_verified_models" as const;
 
-/** why: 400 for a membership miss: JSON `{ code, message, selector }` so the SPA maps `code` via t(); `message` keeps the English face for native posts. */
 function settingsMembershipFailResponse(
   c: DashboardContext,
   landing: string | null,
@@ -3509,42 +2451,6 @@ function settingsMembershipFailResponse(
   return c.json({ code: MEMBERSHIP_FAIL_CODE, message, selector }, 400);
 }
 
-/**
- * invariant: The ONE GitHub-metadata refresh core (D4) — the only writer of the
- * migration-0019 profile columns plus `github_slug`, via the single store entry
- * saveGithubMetadata. The leg is decrypt (the per-App secretbox envelope, AAD =
- * the createApp convention) → mint App JWT → GET /app → persist.
- *
- * `force: false` is the settings read path's lazy 24h-TTL refresh (AD-531): a
- * fresh cache is served as-is — EXCEPT while `github_slug` is still NULL, which
- * is "never synced" regardless of the TTL timestamp. Migration 0036 added the
- * column with no backfill, so a row that predates it carries a non-NULL
- * `github_metadata_synced_at` from 0019 with no slug; treating that as fresh
- * would leave the App's bot mention dead forever behind a documented "open the
- * settings page" remedy that fetches nothing.
- *
- * That exception needs its own floor, or an App that can never sync (deleted
- * upstream → 404, rotated key → 401, suspended → 403, slug-less payload) would
- * be re-fetched on EVERY settings read, by every member, paying up to the 5 s
- * timeout each time. `github_metadata_attempted_at` (migration 0037) is that
- * floor: the NULL-slug branch re-attempts at most once per TTL window, and
- * every attempt that persists no slug stamps it. `force: true` is the
- * manager's manual refresh and bypasses both bounds, always calling GitHub.
- *
- * The caller-visible contract differs by entry point, so the RESULT says what
- * happened instead of the failure being swallowed here:
- *   - a missing DASHBOARD_ENCRYPTION_KEY skips the refresh (`skipped`) — the
- *     non-manager read face must never 500 for a display-only extra;
- *   - `{ok:false}` from the fetch (network, timeout, bad key format, non-200)
- *     keeps the cached columns untouched (`failed`);
- *   - a decrypt throw (corrupt envelope / SecretboxKeyError) or a store
- *     rejection is caught here and logged via the logSettingsFailure
- *     convention (error type only — never the PEM, JWT or any header material)
- *     and reported as `failed`.
- * Never throws. `row` is re-read after a successful persist so the caller
- * serves the values actually in D1; on any other outcome it is the input row
- * (nothing was written, so the re-read is skipped).
- */
 type GithubMetadataRefresh =
   | { status: "refreshed"; row: GithubAppRow }
   | { status: "fresh"; row: GithubAppRow }
@@ -3558,24 +2464,12 @@ async function refreshGithubMetadata(
   options: { force: boolean },
 ): Promise<GithubMetadataRefresh> {
   if (!options.force) {
-    // note: A synced row is bounded by its profile TTL; an unsynced one (NULL slug)
-    // by its last ATTEMPT. The attempt marker, not synced_at, decides there:
-    // a row that never synced has synced_at NULL, so OR-ing it in would make
-    // every permanently failing App stale on every read — the very loop the
-    // marker exists to close.
     const stale = isGithubMetadataStale(
       app.github_slug === null ? app.github_metadata_attempted_at : app.github_metadata_synced_at,
     );
     if (!stale) return { status: "fresh", row: app };
   }
   if (!encryptionKey) return { status: "skipped", row: app };
-  /**
-   * note: Record that a fetch attempt left no cached slug (migration 0037). Pure
-   * bookkeeping for the next read's bound, so it never enters this function's
-   * result: a store rejection here is logged and swallowed rather than turned
-   * into a 500 on a fail-open read. A persisted slug needs no marker — the
-   * 0019 synced_at already records the success.
-   */
   const markAttempt = async (stillUnsynced: boolean): Promise<void> => {
     if (!stillUnsynced) return;
     try {
@@ -3584,15 +2478,6 @@ async function refreshGithubMetadata(
       logSettingsFailure("github_metadata_attempt", app.id, err);
     }
   };
-  /**
-   * note: Cache the App's public/private visibility (migration 0045) from the
-   * anonymous probe. It runs ONLY inside a real metadata refresh — the fresh
-   * short-circuit returns before this — so it shares the TTL/`force` bounds
-   * instead of costing one request per settings read. `null` from the probe
-   * is "no answer": the stored value stays. Bookkeeping only, so a store
-   * rejection is logged and swallowed (the markAttempt rule) and can never
-   * turn an already-persisted profile refresh into `failed`.
-   */
   const probeVisibility = async (slug: string | null): Promise<void> => {
     if (slug === null) return;
     try {
@@ -3602,20 +2487,6 @@ async function refreshGithubMetadata(
       logSettingsFailure("github_visibility", app.id, err);
     }
   };
-  /**
-   * note: Reconcile the App's installation rows against GitHub's authoritative list
-   * (`GET /app/installations`) — the repair path for a missed
-   * `installation.deleted` delivery. It runs ONLY inside a real refresh: the
-   * fresh short-circuit above returns first, so it shares the TTL/`force`
-   * bounds instead of costing a request per settings read. Fail-open twice:
-   * `{ok:false}` writes no row, and the whole leg sits in one catch-all, so a
-   * store rejection is logged and can never turn a persisted profile refresh
-   * into `failed`.
-   *
-   * The observation stamp is read BEFORE the listing is fetched: a row created
-   * (or a removal delivered) while the request is in flight is newer than the
-   * snapshot, and the store's guards must leave it alone.
-   */
   const reconcileInstallations = async (decryptedPem: string): Promise<void> => {
     try {
       const observedAt = await apps.currentTimestamp();
@@ -3632,9 +2503,6 @@ async function refreshGithubMetadata(
     );
     const result = await fetchAppMetadata(app.github_app_id, decryptedPem);
     if (!result.ok) {
-      // safety: Secret-free structured warn (the logSettingsFailure shape): no error
-      // object exists here — fetchAppMetadata collapses every failure class
-      // into the reason-less `{ok:false}` on purpose.
       console.warn(
         JSON.stringify({ event: "dashboard_settings", stage: "github_metadata_fetch", app_id: app.id }),
       );
@@ -3642,32 +2510,18 @@ async function refreshGithubMetadata(
       return { status: "failed", row: app };
     }
     await apps.saveGithubMetadata(app.id, result.metadata);
-    // invariant: After the metadata save: the profile write must not be lost to the
-    // reconcile leg, and a reconcile failure leaves every row as it was.
     await reconcileInstallations(decryptedPem);
-    // note: Probe with the slug this refresh just resolved, falling back to the
-    // cached one (saveGithubMetadata COALESCE-preserves it when the payload
-    // has none). Before the re-read so the returned row carries the fresh
-    // visibility.
     await probeVisibility(result.metadata.githubSlug ?? app.github_slug);
     const row = (await apps.getAppById(app.id)) ?? app;
-    // note: A payload that yields no slug persists the profile but leaves the
-    // re-attempt trigger hot; the marker keeps it from looping.
     await markAttempt(row.github_slug === null);
     return { status: "refreshed", row };
   } catch (err) {
-    // safety: The failure stays observable, secret-free; the cached columns serve as-is.
     logSettingsFailure("github_metadata_refresh", app.id, err);
     await markAttempt(app.github_slug === null);
     return { status: "failed", row: app };
   }
 }
 
-/**
- * note: The read path's lazy refresh (AD-531): fail-open BY STRUCTURE — the result
- * is discarded and the row to serve returned, so a metadata failure can never
- * enter the route's outer 500 face.
- */
 async function refreshGithubMetadataForRead(
   app: GithubAppRow,
   apps: ReturnType<typeof createReviewBotsStore>,
@@ -3677,14 +2531,6 @@ async function refreshGithubMetadataForRead(
   return refresh.row;
 }
 
-/**
- * note: The BOT-owned sections of the settings faces: installations, delivery
- * health, provider keys / model chains / custom providers, and the
- * sandbox-image selector. The target's review policy (trigger, depth, gate,
- * allowlist, pause) is not here — it belongs to the workspace's target, so the
- * target detail's payload composes these sections with it and the bot page
- * serves them alone.
- */
 async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionKey: string) {
   const apps = createReviewBotsStore(db);
   const store = createAppConfigStore(db, encryptionKey);
@@ -3701,13 +2547,6 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
     ]);
   const catalog = await providerCatalog();
   const keyRows = [...maskedKeys, ...customKeys];
-  // note: (spec § Provider configuration contract): eligibility is judged
-  // against the App's SELECTED runtime harness, never an inferred filter. The
-  // registry entry's runtime kind is the contract: an omp-selected App
-  // consumes builtin entries via env names and materializes templates
-  // through the custom-provider machinery; any other runtime would leave
-  // every row unavailable (zero such rows today — omp is the only
-  // registry entry, and the persisted id is store-validated against it).
   const ompRuntime = isOmpRuntimeImage(app.sandbox_image_id);
   return {
     installations,
@@ -3722,42 +2561,20 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
         : null,
       rejected24h: deliverySummary.rejected24h,
     },
-    // note: Every stored key row of the App — built-in and custom pools alike:
-    // the add flow lists a selected provider's rows from this face (a
-    // materialized template's pool included), so a custom pool's rows must
-    // ride it too.
     keys: keyRows,
     model_chain: modelChain,
-    // why: (spec §4.4): the role editor's data is now seat → chain
-    // reference (blank = default chain); the chains list carries every
-    // chain (default + named) for the chains management UI.
     model_roles: modelChainSeats,
     model_chains: modelChains,
-    // why: The declaration face of the settings payload keeps its existing shape:
-    // `has_keys` is a membership-gate input for the models / chain faces, not
-    // a UI field, so it never rides this response (the store read is shared).
     custom_providers: customProviders.map(({ provider_id, base_url, api, model_ids, models_meta }) => ({
       provider_id,
       base_url,
       api,
       model_ids: [...model_ids],
-      // note: A declaration still stored under a per-protocol catalog id resolves
-      // to the provider row that absorbed it (label, vocabulary, sizes) —
-      // read-only, so the stored id and its keys are untouched.
       ...(Object.hasOwn(LEGACY_PROVIDER_IDS, provider_id)
         ? { legacy_of: LEGACY_PROVIDER_IDS[provider_id]! }
         : {}),
-      // why: Absent when the owner stated nothing: the sizes are unstated (the
-      // runtime's own default applies), the form seeds them blank, and no
-      // number is invented for the row.
       ...(models_meta === undefined ? {} : { models_meta }),
     })),
-    // invariant: Clean cutover: the App's PERSISTED provider state only — a stored
-    // key (masked tail) or a saved custom-provider declaration. No
-    // plaintext keys, and catalog rows never appear here; an empty array is
-    // the valid unconfigured-App state. Key rows cover BOTH pools: a custom
-    // or template provider's rows are here, each with its own identity, so
-    // one key can be removed without removing the declaration.
     configured_providers: [
       ...keyRows.map((key) => ({
         kind: "key" as const,
@@ -3782,69 +2599,26 @@ async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionK
     ),
     model_role_ids: MODEL_ROLE_IDS,
     custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
-    // note: (spec § Technical interfaces): the manage face's selector
-    // choices — enabled registry entries only, as { id, enabled } rows.
     sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
   };
 }
 
-/** note: SPA JSON face (spec §2 read face): any member can load the face, but the
- * payload splits on `canManageApp` — a non-manager gets the identity-only
- * set (list-face fields + created_at + the cached public GitHub profile)
- * with `can_manage: false`; a manager gets the full base+health payload
- * (app meta, installations, deliveries) plus the settings payload (masked
- * keys, chains, providers). A Blocked target (its bot is `owned` by another
- * workspace) gets a third, target-owned face: same manager gates, but no
- * bot-owned section at all. Writes stay behind requireAppSettings. Both
- * faces are served from D1 after the lazy 24h-TTL refresh above. */
 const appSettingsRoute = async (c: DashboardContext) => {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate.response;
   const apps = createReviewBotsStore(gate.db);
-  // note: Outside the render try on purpose: the refresh leg carries its own
-  // catch-all, so no metadata failure can reach this route's 500 face
-  // (AD-531 fail-open by structure). It is a bot-scope WRITE (the bot row's
-  // profile columns plus the installation reconcile) driven by the bot's own
-  // credentials, so a workspace that reaches the bot only through a retained
-  // target never triggers it — it serves the stored row and gets the Blocked
-  // face below.
   const app = canReadBotScope(gate.app, gate.scope)
     ? await refreshGithubMetadataForRead(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY)
     : gate.app;
-  // invariant: Derived per read, never stored: a target whose bot is `owned` by ANOTHER
-  // workspace reviews nothing (the resolver's guard), and the page has to say
-  // so. The two facts are already in hand — the bot row's scope + owning
-  // workspace and the requesting workspace — so this costs no extra query.
-  // The REQUESTING workspace stands in for the target's: an App with no
-  // repository yet has no target to ask, and the answer is the same one the
-  // target would have given (a workspace only reaches a foreign `owned` bot
-  // through a live target, so target-less implies not Blocked).
   const blockedReason = blockedReasonFor(app, gate.scope.workspaceId);
   const target = gate.target;
   try {
     c.header("Cache-Control", "private, no-store");
     if (!canManageApp(gate.scope)) {
-      // invariant: Identity-only non-manager face: the D4 identity set — the fields the
-      // GET /api/apps list rows already expose (github_app_id, status,
-      // review_enabled, created_by) plus created_at and the cached public
-      // GitHub profile. Everything from the ops stores (installations,
-      // deliveries, sandbox_image_id, review-trigger runtime config) stays
-      // behind the canManageApp branch below. `can_manage: false` is the
-      // discrimination the SPA's detail-face parse keys on.
       return c.json({
         can_manage: false,
-        // note: The stable workspace id the App belongs to — with the local App UID
-        // it composes the webhook delivery URL. Server-resolved, never the
-        // request's path segment (a ref may be a slug).
         workspace_id: gate.scope.workspaceId,
-        // note: The review configuration this App resolved to IN this workspace, and
-        // the pause state that belongs to it. BOTH are absent when the
-        // workspace has added no repository yet: there is no target to name
-        // and no pause to report, and inventing either would state
-        // configuration the database does not hold.
         ...(target === null ? {} : { target_id: target.id }),
-        // why: Why this target reviews nothing, if it does. Both faces carry it:
-        // a member must know why the App is silent, not only the manager.
         blocked: blockedReason !== null,
         blocked_reason: blockedReason,
         app: {
@@ -3855,68 +2629,27 @@ const appSettingsRoute = async (c: DashboardContext) => {
           created_at: app.created_at,
           github_name: app.github_name ?? null,
           github_slug: app.github_slug ?? null,
-          // note: The local App UID — the webhook URL's app segment. It rides this
-          // face for shape parity only (the identity card renders the
-          // delivery URL on the MANAGER face, never here).
           id: app.id,
           github_description: app.github_description ?? null,
           github_html_url: app.github_html_url ?? null,
           github_avatar_url: app.github_avatar_url ?? null,
-          // note: A Blocked target's face omits the bot's own metadata stamp: the
-          // bot's GitHub bookkeeping is the owning workspace's.
           ...(blockedReason === null
             ? { github_metadata_synced_at: app.github_metadata_synced_at ?? null }
             : {}),
         },
       });
     }
-    // note: The bot-owned sections (installations, delivery health, provider
-    // configuration) come from `botScopedSections` below, the same builder the
-    // bot page serves.
-    // The review gate and the owner allowlist are the TARGET's configuration
-    // (the gate resolved with the request); the cached GitHub visibility is a
-    // bot fact. The two nulls do NOT mean the same thing — `getCheckGate` is
-    // null for a target whose stored verdict list is unreadable AND for one
-    // that is gone, while `getAllowlist` reads the target row itself, so its
-    // null can only mean the target is gone. A VANISHED target is the 500
-    // (reading configuration it no longer has is the honest failure); an
-    // unreadable verdict list is not — the face serves `check_gate: null`,
-    // every other field stays readable, and the SPA renders a read-only
-    // notice instead of controls that could not round-trip.
-    // Everything this face reports as the target's review policy is the
-    // EFFECTIVE one (migration 0067): an inheriting target runs on the
-    // workspace answers, so the payload must not play back the inert
-    // placeholder columns its row happens to carry. One read answers all four.
     const githubVisibility = await apps.getGithubVisibility(app.id);
-    // note: The settings surface owns this: a target no longer holds an
-    // installation binding (migration 0067), so the installation block stays
-    // empty until the repository surface replaces this payload.
     const installationPayload = null;
     if (blockedReason !== null) {
-      // note: The Blocked manager face: this workspace's target on another
-      // workspace's bot. It carries the target's OWN review configuration and
-      // the identity needed to name the page — never the bot's sections
-      // (installations, deliveries, provider keys, chains, sandbox image,
-      // metadata), which belong to the owning workspace. The guard is the
-      // Blocked state alone: the bot-owned sections below must never be
-      // reached for a bot this workspace does not own, whatever arm resolved
-      // it. The target-owned fields are the conditional part — a bot this
-      // workspace holds several repositories under has no single policy to
-      // report, and says so with `target_id: null` plus `targets_many`.
       const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
       const checkGate = effective === null ? null : checkGateOf(effective);
-      // note: The level a NULL target column resolves to (migration 0047) — the depth
-      // control's inherit face names it, so a manager never needs the operator
-      // console to know what "follow the operator default" currently runs.
       const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
       return c.json({
         can_manage: true,
         blocked: true,
         blocked_reason: blockedReason,
         workspace_id: gate.scope.workspaceId,
-        // why: The several-repository state: `target_id` is an explicit `null` when
-        // this workspace holds more than one live target under the bot, so the
-        // page can name that state instead of reading it as none.
         targets_many: gate.targets_many,
         target_id: target === null ? null : target.id,
         ...(target === null
@@ -3951,19 +2684,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         installation: installationPayload,
       });
     }
-    // note: The target-owned facts, or nothing at all: a workspace that has added no
-    // repository under this App owns no review configuration yet, so the
-    // payload carries no target id, no pause state and no policy. The whole
-    // slice is all-or-nothing — a partial answer would render a control whose
-    // save the POST family refuses with `404 unknown app`.
     const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
     const checkGate = effective === null ? null : checkGateOf(effective);
     const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
-    // note: The share switch's two render facts, both derived per read (neither is
-    // stored): the bot's workspace IS the platform's official workspace today,
-    // and THIS caller's workspace owns the bot. They are a render gate only —
-    // `setBotScope` re-checks the designation inside its batch, so a stale page
-    // cannot authorize a share.
     const officialWorkspaceId = await readOfficialWorkspaceId(gate.db);
     const targetOwned =
       target === null
@@ -3984,61 +2707,28 @@ const appSettingsRoute = async (c: DashboardContext) => {
             },
           };
     const base = {
-      // note: The stable workspace id the App belongs to (server-resolved scope,
-      // never the request's path segment): with `app.id` it composes the
-      // webhook delivery URL.
       workspace_id: gate.scope.workspaceId,
-      // note: The several-repository state (see AppSettingsGate.targets_many): with
-      // `target_id` absent this is the only thing separating "this App has no
-      // repository yet" from "it has several", and the page narrates them
-      // differently.
       targets_many: gate.targets_many,
       app: {
         github_app_id: app.github_app_id,
         status: app.status,
         created_by: app.created_by,
         last_webhook_at: app.last_webhook_at ?? null,
-        // note: (spec § Technical interfaces): the App's selected runtime
-        // harness — read-only on BOTH faces (registry id only, never
-        // image-local configuration or secrets).
         sandbox_image_id: app.sandbox_image_id,
-        // note: The cached public GitHub profile (migration 0019) —
-        // every field nullable (NULL = never synced / absent upstream, the
-        // old-row degradation) and present on BOTH faces (AC3: the
-        // non-manager payload carries them too). Public profile fields only —
-        // the PEM / webhook secret envelopes never leave the row.
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
-        // why: The cached visibility probe (migration 0045) is an App fact, so it
-        // rides base.app on every manager read — including an App with no
-        // repository (the target-owned slice is the conditional part).
         github_visibility: githubVisibility,
-        // invariant: The bot's scope (migration 0058). MANAGER face only: the install
-        // block and the bind action read it, and only a manager can bind.
         scope: app.scope,
-        // note: The local App UID — with the workspace id it composes the absolute
-        // delivery URL the manager identity card shows (the repoint surface).
         id: app.id,
         github_description: app.github_description ?? null,
         github_html_url: app.github_html_url ?? null,
         github_avatar_url: app.github_avatar_url ?? null,
         github_metadata_synced_at: app.github_metadata_synced_at ?? null,
       },
-      // note: The target's bound installation (`null` = unbound). `removed` is the
-      // `bot_installations.removed_at` stamp: the binding stays, reviews stop.
       installation: installationPayload,
-      // note: The bot's live installations that no live target references — the
-      // target page's bind source. Empty for a bot this workspace may not use,
-      // and always present so the block renders an empty set honestly.
       pending_installations: await apps.listPendingInstallations(app.id, gate.scope.workspaceId),
-      // note: The derived Blocked state (no stored column): see blockedReasonFor.
       blocked: blockedReason !== null,
       blocked_reason: blockedReason,
-      // note: The share switch's two render facts, both derived per read: the bot's
-      // workspace IS the platform's official workspace today, and THIS caller's
-      // workspace OWNS the bot (the one write predicate). A render gate only —
-      // `setBotScope` re-checks the designation inside its batch, so a stale
-      // page cannot authorize a share.
       official_workspace: officialWorkspaceId !== null && officialWorkspaceId === app.workspace_id,
       can_configure_bot: canWriteBotScope(app, gate.scope),
     };
@@ -4059,25 +2749,12 @@ const appSettingsRoute = async (c: DashboardContext) => {
   }
 };
 
-/**
- * invariant: The App-id segment as a GitHub numeric App id: decimal digits only, so one
- * App id has exactly one URL spelling. `Number("")` is 0 and
- * `Number("1001abc")` is NaN, but `Number("0x1f")`, `Number("1e3")` and
- * `Number(" 5 ")` are all finite integers — those spellings would alias one
- * App id under several URLs.
- */
 function parseGithubAppId(appIdParam: string): number | null {
   if (!/^[0-9]+$/.test(appIdParam)) return null;
   const githubAppId = Number(appIdParam);
   return Number.isSafeInteger(githubAppId) && githubAppId > 0 ? githubAppId : null;
 }
 
-/**
- * note: Resolve the bot the bot settings page addresses: the session workspace's own
- * bot, or a `shared` bot the workspace may use. Everything else — a
- * non-numeric segment, a soft-deleted bot, another workspace's `owned` bot — is
- * equally invisible (404).
- */
 async function resolveVisibleBot(
   apps: ReturnType<typeof createReviewBotsStore>,
   appIdParam: string,
@@ -4088,19 +2765,6 @@ async function resolveVisibleBot(
   return apps.getVisibleBotByGithubId(githubAppId, scope.workspaceId);
 }
 
-/**
- * note: `GET /api/apps/:appId/bot` — the bot's own settings face. It carries the
- * bot-owned sections only (credentials health, provider configuration, chains,
- * sandbox image, installations); the workspace-owned review policy stays on the
- * target detail, which links to this page.
- *
- * `can_manage` governs BOT-scoped writes only, and it is the same predicate
- * those writes use: this caller must be a manager of the workspace that OWNS
- * the bot, whatever the bot's scope. A tenant may use a shared bot; it never
- * configures one, and the sharing workspace never loses it. The bot-scoped
- * POST family enforces the same rule server-side — hiding the page's controls
- * is not the gate.
- */
 const appBotRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -4118,7 +2782,6 @@ const appBotRoute = async (c: DashboardContext) => {
     can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
     app: {
       github_app_id: app.github_app_id,
-      // note: The local App UID — the webhook URL's app segment.
       id: app.id,
       status: app.status,
       scope: app.scope,
@@ -4135,18 +2798,6 @@ const appBotRoute = async (c: DashboardContext) => {
   });
 };
 
-/**
- * `PATCH /api/apps/:appId/bot/scope` — the bot's owning workspace marks it
- * shared with every other workspace, or revokes the share (contract § 8.2, the
- * member-side twin of the operator route `PATCH /_internal_admin/api/bots/:id/scope`).
- *
- * The transition table, the official-workspace guard and both audit rows are
- * the store's `setBotScope`, evaluated inside its own batch: this handler only
- * decides whether the CALLER may ask, then maps each outcome. Authorization is
- * the two existing rules and nothing bespoke — owner/admin of the workspace, and
- * that workspace OWNING the bot (`canWriteBotScope`): a target on a shared bot
- * is a consumer, and consumption is not configuration authority.
- */
 const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
@@ -4165,7 +2816,6 @@ const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
     scope = body.scope;
     confirm = body.confirm;
   } catch {
-    // invariant: malformed body → the shape gate's 400, never a 500
   }
   if (scope !== "owned" && scope !== "shared") {
     return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
@@ -4173,7 +2823,6 @@ const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
   const outcome = await setBotScope(gate.db, {
     botId: app.id,
     scope: scope as BotScope,
-    // invariant: Only a literal `true` confirms a revoke; any other value refuses it.
     confirm: confirm === true,
     actor: gate.session.login,
     now: new Date().toISOString(),
@@ -4188,46 +2837,20 @@ const appBotScopeRoute = async (c: DashboardContext): Promise<Response> => {
   return c.json({ scope: outcome.scope, sharedAt: outcome.sharedAt });
 };
 
-/**
- * note: The delivery-status bounds. `limit` is fixed by the tab's page size — the
- * caller pages with `offset`, so a client-chosen page size would only let one
- * request do unbounded work. `offset` is bounded for the same reason the record
- * sections bound theirs: a window past the retention's real row count cannot
- * address a page.
- */
 const DELIVERY_PAGE_LIMIT = 20;
 const DELIVERY_PAGE_OFFSET_MAX = 100_000;
 
-/**
- * why: The widest `since` window the route accepts, in days. The page offers a
- * segmented 1/7/30/90 set and the retention sweep drops rows after 30, so no
- * real row sits past this — anything larger is a caller error, not a window.
- */
 const DELIVERY_SINCE_DAYS_MAX = 3650;
 
 type DeliveryQueryResult =
   | { ok: true; filters: DeliveryFilters }
   | { ok: false; error: string };
 
-/**
- * why: The delivery-status query string: `repo` (exact `owner/name`), `since` (whole
- * days), `type` (the `x-github-event` name) and `offset`.
- *
- * A MALFORMED value is a 400 — a filter the server cannot apply must not answer
- * as an unfiltered table. A well-formed value that happens to match nothing is
- * not: `repo=nobody/nothing` or an event name this App never received is an
- * empty page with a real total of 0, which is the honest answer. `since` takes
- * any whole-day count inside DELIVERY_SINCE_DAYS_MAX, the insights window's own
- * rule (arbitrary integer windows stay legal on the API; the page only offers
- * the segmented set). Absent means "no filter", a real state rather than an
- * error.
- */
 function parseDeliveryQuery(c: DashboardContext): DeliveryQueryResult {
   const repo = c.req.query("repo") ?? "";
   const since = c.req.query("since") ?? "";
   const type = c.req.query("type") ?? "";
   const rawOffset = c.req.query("offset") ?? "0";
-  // invariant: Exactly two non-empty segments (the ledger's own `repo` grammar).
   if (repo !== "" && !/^[^/]+\/[^/]+$/.test(repo)) {
     return { ok: false, error: "invalid repo" };
   }
@@ -4257,17 +2880,6 @@ function parseDeliveryQuery(c: DashboardContext): DeliveryQueryResult {
   };
 }
 
-/**
- * note: `GET /api/apps/:appId/deliveries` — the 投递状态 tab's read face: the bot's
- * webhook deliveries, narrowed by repository / time window / delivery type and
- * paged on the server, with the matching total beside the page.
- *
- * The option sets ride the same response, unnarrowed: a filter whose next value
- * sits outside the current result must stay selectable. A non-manager reads the
- * same rows the tab shows a manager — deliveries are diagnostics, not
- * configuration — but the route is `write`-classed with its App siblings, so a
- * granted platform operator cannot read a tenant's delivery log.
- */
 const appDeliveriesRoute = async (c: DashboardContext) => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -4296,21 +2908,9 @@ const appDeliveriesRoute = async (c: DashboardContext) => {
   });
 };
 
-/**
- * note: (D5) The manager's manual GitHub-metadata refresh: `POST
- * /api/apps/:appId/refresh-metadata`. A rename or a new logo is otherwise
- * invisible for up to the read path's 24h TTL, so this bypasses the TTL and
- * always asks GitHub. Behind requireAppSettings (owner-or-admin + a configured
- * encryption key). Success answers the ordinary settings 2xx (the SPA
- * refetches the JSON face); an upstream failure answers the keyed 400 — never a
- * 5xx, because an unreachable GitHub is a retryable operator-level condition,
- * not a broken server. The cached columns stay untouched on failure.
- */
 const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: The refresh writes the bot row and reconciles its installation list — a
-  // bot-scope mutation, so the owning workspace's manager is required.
   if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const apps = createReviewBotsStore(gate.db);
   const refresh = await refreshGithubMetadata(gate.app, apps, c.env.DASHBOARD_ENCRYPTION_KEY, {
@@ -4322,34 +2922,12 @@ const appRefreshMetadataRoute = async (c: DashboardContext): Promise<Response> =
   return settingsPostResponse(c, repositoryLandingPath(gate), `Refreshed ${appDisplayName(refresh.row)} from GitHub.`);
 };
 
-/**
- * note: I-000644: one DECLARED provider's model vocabulary, fetched from the
- * provider's own `/models` endpoint. Everything about the request lives in
- * `fetchDeclaredProviderModels` (the declare probe's URL derivation, auth shape,
- * parser and failure classifier); this helper owns only what the route layer
- * must decide — which credential to present, and which refusal face each
- * outcome gets.
- *
- * The credential is OPTIONAL BY MEASUREMENT, not by fallback: several template
- * providers publish their directory unauthenticated (commandcode answers its
- * full list to a bare GET), so a stored key is used when the pool has one and
- * the request goes out keyless when it does not. A keyless 401/403 is reported
- * as `providerModelsKeyRequired` — "this endpoint wants a key" — never as an
- * invalid key, because no key was judged.
- *
- * The fetched ids are stored VERBATIM and filtered only by the declaration's own
- * protocol: a provider may serve `org/Model` ids on one endpoint and bare ids on
- * another, so normalizing them would hand the runtime ids the provider rejects.
- * `modelIdsForProtocol` keeps exactly the ids the declared `api` can reach.
- */
 type DeclaredVocabulary =
   | {
       ok: true;
       api: CustomProviderApi;
       baseUrl: string;
-      /** note: What the App runs now — the "replace" arithmetic the confirmation shows. */
       current: readonly string[];
-      /** note: The protocol-filtered vocabulary the write would store. */
       models: string[];
     }
   | { ok: false; response: Response };
@@ -4373,8 +2951,6 @@ async function loadDeclaredVocabulary(
       }),
     };
   }
-  // safety: Any credential of the pool will do: every row decrypts with its own AAD and
-  // they all belong to the same declaration (the endpoint lock guarantees it).
   const keys = await store.listCustomProviderKeys(gate.app.id, providerId);
   const first = keys[0];
   const stored =
@@ -4396,17 +2972,12 @@ async function loadDeclaredVocabulary(
     return { ok: false, response: settingsVerifyFailResponse(c, landing, fetched.reason) };
   }
   const models = modelIdsForProtocol(fetched.entries, declared.api);
-  // note: A provider that answers with an empty list (or an empty list FOR THIS
-  // protocol) leaves the stored declaration untouched: "no models" is a
-  // provider-side condition, never an instruction to wipe a working vocabulary.
   if (models.length === 0) {
     return {
       ok: false,
       response: settings400Response(c, landing, SETTINGS_400_KEYS.providerModelsEmpty, { provider: providerId }),
     };
   }
-  // invariant: The stored bound is reported, never silently applied: a provider that
-  // publishes more than the App can hold says so instead of losing the tail.
   if (models.length > MAX_CUSTOM_PROVIDER_MODEL_IDS) {
     return {
       ok: false,
@@ -4427,14 +2998,6 @@ async function loadDeclaredVocabulary(
   return { ok: true, api: declared.api, baseUrl: declared.base_url, current: declared.model_ids, models };
 }
 
-/**
- * note: I-000644 preview: `GET /api/apps/:appId/provider-models/preview?provider=<id>`
- * answers the list the sync WOULD store, plus the replace arithmetic, and writes
- * nothing. Read-scoped (it mutates nothing and its only outbound request is the
- * same unauthenticated-or-stored-key GET the verify path already performs), so
- * the confirmation dialog can state "44 kept · 6 dropped · 60 new" before the
- * operator commits.
- */
 const appProviderModelsPreviewRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
@@ -4467,7 +3030,6 @@ const providerCatalogRoute = async (c: DashboardContext) => {
     const member = await requireMember(c);
     if (!member.ok) return member.response;
   }
-  // invariant: Serve static vocabulary separately from tenant settings; only a matching v identifies immutable content.
   const catalog = await providerCatalog();
   const etag = `"${catalog.version}"`;
   c.header("ETag", etag);
@@ -4485,9 +3047,6 @@ const providerCatalogRoute = async (c: DashboardContext) => {
 const appModelsRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: Every model this face lists is the bot's own (verified key evidence and
-  // declared providers), so a workspace that reaches the bot only through a
-  // retained target gets nothing — the settings face's same rule.
   if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   try {
@@ -4503,7 +3062,6 @@ const appModelsRoute = async (c: DashboardContext) => {
   }
 };
 
-/** why: Why a key could not join an App's declared-provider pool. */
 type DeclaredKeyAppendOutcome =
   | { status: "appended" }
   | { status: "undeclared" }
@@ -4511,14 +3069,6 @@ type DeclaredKeyAppendOutcome =
   | { status: "limit" }
   | { status: "rejected"; reason: VerifyFailureReason };
 
-/**
- * note: Verify one key against the App's STORED declaration for `providerId`, then
- * append it to that declaration's pool. The declaration is only read: its
- * base_url / api / model_ids are what the pool's keys were verified against, so
- * this path can never move the endpoint (the store's endpoint lock keeps
- * holding). A rejected verify writes nothing, and a declaration removed or
- * re-pointed between the read and the write is refused the same way.
- */
 async function appendDeclaredProviderKey(
   store: AppConfigStore,
   appId: string,
@@ -4547,11 +3097,6 @@ async function appendDeclaredProviderKey(
   return { status: "appended" };
 }
 
-/**
- * note: The verify route's keyed 400: `key` + `params` let the SPA resolve the copy
- * in the operator's locale, and `reason` stays inside the closed enum its
- * fallback already maps.
- */
 function verifyKeyed400(
   c: DashboardContext,
   key: DictionaryKey,
@@ -4560,26 +3105,9 @@ function verifyKeyed400(
   return c.json({ ok: false, reason: "unexpected" as const, key, message: t("en", key, params), params }, 400);
 }
 
-/**
- * note: SPA add-key path: verify the as-typed key, then store. Failure
- * is 400 JSON with a structured reason (invalid_key / quota_exhausted /
- * rate_limited / unreachable / unexpected / unsupported_provider) and ZERO
- * writes. The key is never logged or returned.
- * A BUILTIN id verifies against its catalog endpoint; an App whose selected
- * runtime harness is not omp (unknown id included — fail-closed) is refused
- * with unsupported_provider before any probe, mirroring the display face's
- * eligibility gate. Any other id is a declared (`template` or custom)
- * provider: it verifies against the App's stored declaration and appends to
- * that pool, while an id the App never declared is a keyed 400 with zero
- * writes.
- */
 const appKeyVerifyRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: Verify is a bot-scoped WRITE on both of its paths: the builtin branch
-  // stores the verified key, and the declared/custom branch appends to that
-  // provider's pool. The bot-scope predicate refuses before the body is
-  // parsed — no probe, no store touch.
   if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -4604,10 +3132,6 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     );
   }
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
-  // note: A `template`-tier or custom id is not a builtin: it verifies against the
-  // App's OWN declaration — the endpoint the pool's keys were stored against —
-  // and appends to that pool. An id the App never declared has nothing to
-  // verify against, so it is a keyed 400 with zero writes.
   if (!PROVIDER_IDS.includes(provider)) {
     try {
       const outcome = await appendDeclaredProviderKey(store, gate.app.id, provider, plainKey);
@@ -4632,12 +3156,6 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
       return c.json({ ok: false, reason: "unexpected" as const }, 500);
     }
   }
-  // invariant: Fail-closed server-side precheck: a BUILTIN provider's key is eligible only
-  // under a runtime image that carries an omp runtime — the same gate the
-  // settings display face stamps into provider_catalog (isOmpRuntimeImage).
-  // Unknown image id → not omp → 400. The precheck reuses the existing closed
-  // reason enum (no new value; the optional keyed face lets the SPA render the
-  // runtime-harness copy in the operator's locale); zero writes.
   if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
     return c.json(
       {
@@ -4662,9 +3180,6 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
-    // note: The pool cap (MAX_KEYS_PER_PROVIDER) is a client-side precondition, not a
-    // provider failure: the reason enum stays closed, the keyed face carries
-    // the clear message the SPA resolves in the operator's locale.
     if (err instanceof ProviderKeyLimitError) {
       return verifyKeyed400(c, SETTINGS_400_KEYS.providerKeyLimit, {
         provider,
@@ -4675,24 +3190,9 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   }
 };
 
-/**
- * note: Per-key usage probe: `POST
- * /api/apps/:appId/keys/usage` with form fields `provider` + `keyId` asks the
- * provider's own quota endpoint with ONE stored key and answers the normalized
- * snapshot. A provider with no probe is refused BEFORE any store read or
- * outbound request (`unsupported_provider`); an id neither pool holds for THIS
- * App — another App's id, or a deleted one — is `unknown_key`; a
- * DECLARATION-pool key whose declaration points at a host the probe never calls
- * is refused the same way, still before any outbound request. The plaintext
- * only ever reaches the probe's request header: it is never in the response,
- * and a store/decrypt throw is the closed `unexpected` reason rather than a 5xx.
- */
 const appKeyUsageRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: The probe decrypts the bot's stored key and asks the vendor: usable for
-  // the owning workspace or a shared bot, never for a bot reached only through
-  // a retained target.
   if (!canReadBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
@@ -4705,18 +3205,10 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
   try {
     const stored = await store.getProviderKeyPlaintext(gate.app.id, provider, keyId);
     if (stored === null) return c.json({ ok: false, reason: "unknown_key" as const }, 400);
-    // note: The key's POOL decides whose endpoint matters. A built-in-pool row was
-    // stored against the catalog endpoint and is never judged by a same-id
-    // declaration; only a declaration-pool key carries an operator-chosen base
-    // URL, and the probe always calls the vendor's OWN quota host — so a
-    // declaration pointing elsewhere is refused before any request leaves the
-    // Worker.
     if (stored.custom) {
       const declaredBaseUrl = await store.getCustomProviderBaseUrl(gate.app.id, provider);
       const declaredHost = declaredBaseUrl === null ? null : endpointHost(declaredBaseUrl);
       if (declaredHost === null || !probeHosts.includes(declaredHost)) {
-        // note: No readable host gets its own face: there is no host to name, and the
-        // sentence must not smuggle an English fallback into the zh-CN copy.
         const key =
           declaredHost === null
             ? SETTINGS_400_KEYS.usageProbeUnreadableEndpoint
@@ -4744,53 +3236,6 @@ const appKeyUsageRoute = async (c: DashboardContext) => {
   }
 };
 
-/**
- * note: The settings POST: the operations on the pinned action path, discriminated
- * by the forms' hidden `op` field. add-key = provider allowlist (400 on any
- * other id — the allowlist is the plan's Global Constraint) + the
- * selected-image eligibility precheck (a selected image whose harness
- * is not omp — unknown id included, fail-closed — is a 400 with zero
- * writes, the same gate the display face stamps into provider_catalog) +
- * non-empty key
- * of at most MAX_PROVIDER_KEY_LENGTH characters (input bounds — an
- * oversized key is a 400 with zero writes; the store guard beneath
- * is the backstop), then the store encrypts inside. save-chain = empty →
- * clear the default chain (an unconfigured chain fails that App's reviews
- * closed in the consumer — AL-24-5: no deployment-level
- * chain exists to fall back to), otherwise ≥1 comma-separated selector
- * required and the chain is stored VERBATIM as the 'default' chain row
- * (a `:thinking`-style suffix is legal omp syntax; full selector
- * validation stays omp-side). save-roles (the seat → chain rework) =
- * the Role models editor's full map — one `role_<role>` field per audit
- * seat, blanks = the seat uses the default chain, content = a chain NAME
- * reference, saved through the validate-all-first setModelChainSeats (zero
- * partial writes on any validation failure). add-chain / remove-chain =
- * the named-chains management section: add-chain validates
- * the name grammar (the reserved "default" is rejected) and the selector
- * chain exactly like save-chain; remove-chain deletes the named chain and
- * its seat references atomically (seats fall back to the default chain).
- * add-custom-provider / remove-custom-provider = the
- * custom-provider declarations section: every AL-23-1/AL-23-2 bound (id
- * grammar, https-only baseUrl, three-form api enum, model_ids 1..128 × ≤128,
- * key required ≤4096) is a 400 with zero writes; the key is encrypted
- * inside the store and never echoed. update-provider-models = the declared
- * provider's model-list editor: it rewrites ONE declaration's model_ids in
- * place under the same 1..128 × ≤128 bound, touching neither the endpoint nor
- * the key pool, and answers the same keyed 400 when that declaration is
- * absent. save-sandbox-image = the
- * App's runtime-harness selection (mounted into the sandbox image): only ENABLED
- * src/contracts/sandbox-images.ts registry ids are storable (unknown or
- * disabled → 400, nothing stored). The settings page is
- * SPA-owned — 2xx = the SPA refetches the JSON face, 4xx/5xx = the reason
- * (400s are keyed JSON via settings400Response — native form
- * posts keep the 302); the re-rendered HTML page is retired.
- */
-/**
- * invariant: The BOT-scoped settings ops. They require `canWriteBotScope`: only the bot's
- * OWNING workspace may run one, and the bot's scope never enters that answer —
- * sharing decides who else may USE the bot, not who configures it. A retained
- * target on another workspace's bot grants none of them.
- */
 const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "add-key",
   "save-chain",
@@ -4806,7 +3251,6 @@ const BOT_SCOPED_SETTINGS_OPS: ReadonlySet<string> = new Set([
   "save-sandbox-image",
 ]);
 
-/** invariant: The read-only refusal, in the keyed body the SPA resolves in its locale. */
 function botReadOnlyResponse(c: DashboardContext): Response {
   return c.json({ key: "settings.error.botReadOnly", message: t("en", "settings.error.botReadOnly") }, 403);
 }
@@ -4814,11 +3258,6 @@ function botReadOnlyResponse(c: DashboardContext): Response {
 const appSettingsSaveRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: AL-23-2 (save-roles duplicate fields): parseBody({ all: true }) makes
-  // duplicate keys VISIBLE as string[] (Hono 4.13.4 aggregates; the default
-  // all=false silently last-wins) — the save-roles branch rejects any
-  // array-valued role_* field with 400, and single-value fields keep their
-  // exact current behavior.
   const form = await c.req.parseBody({ all: true });
   const op = typeof form.op === "string" ? form.op : "";
   if (BOT_SCOPED_SETTINGS_OPS.has(op) && !canWriteBotScope(gate.app, gate.scope)) {
@@ -4833,12 +3272,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         ? settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerRequired)
         : settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerUnknown, { provider });
     }
-    // note: Fail-closed server-side precheck: the App's selected
-    // runtime harness must be omp for ANY provider key to be
-    // eligible — the same gate the settings display face stamps into
-    // provider_catalog (isOmpRuntimeImage). Unknown image id → not omp →
-    // 400, zero writes. Plain-text family (native/legacy surface only — the
-    // SPA's add-key path is verify-first via /keys/verify).
     if (!isOmpRuntimeImage(gate.app.sandbox_image_id)) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerUnavailableOnHarness, {
         provider,
@@ -4877,9 +3310,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "save-chain") {
-    // note: AL-23-2: a duplicate model_chain field (parseBody all:true aggregates
-    // it into an array) must be rejected — never treated as the empty-clear
-    // path, which would silently wipe the stored chain.
     if (Array.isArray(form.model_chain)) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.chainFieldDuplicated);
     }
@@ -4916,25 +3346,9 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the model chain for ${appDisplayName(gate.app)}.`);
   }
   if (op === "save-roles") {
-    // why: The seat → chain editor rework (spec §4.4), F-002 (QC wave):
-    // the Role models editor posts one `role_<role>` field per audit seat
-    // (the page always renders all four rows, blank inputs included), so
-    // the submitted map is FULL — a save MISSING any seat key is a stale
-    // or tampered client (omitted seats would silently keep their old
-    // reference rows = drift) → 400 naming the absent roles, zero writes.
-    // Blanks = the seat uses the default chain (the reference row is
-    // cleared), content = a chain NAME reference, all through the
-    // validate-all-first setModelChainSeats bulk face. Any `role_`-prefixed
-    // field naming a role outside MODEL_ROLE_IDS is client tampering → 400,
-    // zero writes; a save with NO role fields at all is equally malformed
-    // (it could not come from this page, and an empty map must never
-    // masquerade as a successful save).
     const refs: Record<string, string> = {};
     for (const [field, value] of Object.entries(form)) {
       if (!field.startsWith("role_")) continue;
-      // note: AL-23-2: with parseBody({ all: true }) a duplicate role_* field
-      // arrives as an ARRAY — explicit 400 rejection (zero
-      // writes), never the silent last-wins the default parseBody had.
       if (Array.isArray(value)) {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleFieldDuplicated, { field });
       }
@@ -4943,16 +3357,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (!MODEL_ROLE_IDS.includes(role)) {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleUnknown, { role });
       }
-      // note: F-001 (QC): canonicalize BEFORE bind — the known-chain check below
-      // and the store's upsert must see the SAME trimmed name, or a crafted
-      // `"fast "` would pass validation and land a dangling reference row
-      // (the per-message consumer read then fails closed for every review
-      // of the App). The store re-canonicalizes as the backstop.
       refs[role] = value.trim();
     }
-    // note: F-002 (QC): enforce the FULL-map contract — every MODEL_ROLE_IDS
-    // seat key must be present. All missing keeps the original "no role
-    // fields" guard; a strict subset names exactly what is absent.
     const missingSeats = MODEL_ROLE_IDS.filter((role) => !(role in refs));
     if (missingSeats.length === MODEL_ROLE_IDS.length) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleFieldsMissingAll);
@@ -4966,12 +3372,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       );
     }
     try {
-      // note: Chain-name validation, role-named for the 4-row form: blank (or the
-      // reserved "default" name) = the seat uses the default chain; content
-      // must name a chain the App actually has (the store re-validates as
-      // the backstop). Zero writes on any failure. The getModelChains read
-      // lives INSIDE the try so a D1 failure gets the same structured
-      // logSettingsFailure 500 as every other settings op (QC wave, seat3).
       const chains = await store.getModelChains(gate.app.id);
       const knownChains = new Set(chains.map((chain) => chain.name));
       for (const [role, chainName] of Object.entries(refs)) {
@@ -4988,10 +3388,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the role models for ${appDisplayName(gate.app)}.`);
   }
   if (op === "add-chain") {
-    // note: (spec §4.4): create or replace one NAMED chain. The name
-    // must be a valid chain name (MODEL_CHAIN_NAME_PATTERN) and NOT the
-    // reserved "default"; the chain value is a selector chain validated
-    // exactly like save-chain (grammar + verified-models membership).
     const name = typeof form.name === "string" ? form.name.trim() : "";
     const chain = typeof form.chain === "string" ? form.chain : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME || !MODEL_CHAIN_NAME_PATTERN.test(name)) {
@@ -5029,10 +3425,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the ${name} model chain for ${appDisplayName(gate.app)}.`);
   }
   if (op === "remove-chain") {
-    // note: (spec §4.4): delete one NAMED chain — seats referencing
-    // it fall back to the default chain (the store cleans the reference
-    // rows in the same atomic batch). The reserved "default" row cannot be
-    // removed here (clear it via save-chain instead).
     const name = typeof form.name === "string" ? form.name.trim() : "";
     if (name === "" || name === DEFAULT_CHAIN_NAME) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.defaultChainRemoveProtected);
@@ -5046,16 +3438,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     return settingsPostResponse(c, repositoryLandingPath(gate), `Removed the ${name} model chain for ${appDisplayName(gate.app)} — seats using it fall back to the default chain.`);
   }
   if (op === "add-custom-provider") {
-    // note: Declare a NON-built-in model provider for the App. Every
-    // AL-23-1/AL-23-2 bound is checked here (400, zero writes —
-    // the store re-validates as the backstop): provider id grammar
-    // `[a-z0-9][a-z0-9-]{0,63}` (uppercased into the consumer's pool env
-    // prefix), no collision with a built-in provider id, at
-    // most MAX_CUSTOM_PROVIDER_COUNT declarations per App (QC wave-1 W-2,
-    // growth-only — updating an existing id always proceeds), baseUrl
-    // https-only ≤2048, api one of the three-form enum, model_ids 1..128
-    // entries × ≤128 chars, key required and ≤ the existing 4096 cap. The
-    // key is encrypted inside the store and never echoed back.
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     const baseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
     const api = typeof form.api === "string" ? form.api.trim() : "";
@@ -5070,9 +3452,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     if (PROVIDER_IDS.includes(providerId)) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerIdBuiltin, { provider: providerId });
     }
-    // invariant: QC wave-1 W-2: declarations per App are capped (growth-only — an
-    // update of an already-declared id never counts against the cap). The
-    // store re-checks the same bound as its backstop.
     const declaredCustomProviders = await store.listCustomProviders(gate.app.id);
     if (
       !declaredCustomProviders.some((p) => p.provider_id === providerId) &&
@@ -5150,21 +3529,14 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       );
     } catch (err) {
       logSettingsFailure("add_custom_provider", gate.app.id, err);
-      // note: A1: an endpoint change while the pool still holds keys verified for the
-      // current endpoint is refused by the store — the keyed 400 the SPA
-      // replays in the operator's locale (nothing was written).
       if (err instanceof ProviderEndpointLockedError) {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: providerId,
         });
       }
-      // PR #10 cap-race fix: the store's atomic cap check can legitimately
-      // throw InvalidCustomProviderError AFTER the route pre-check passed
-      // (a concurrent save won the last slot) — that is a 400, not a 500.
       if (err instanceof InvalidCustomProviderError) {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderDeclRejected);
       }
-      // note: The declaration's key POOL can be full (the cap is per (App, provider)).
       if (err instanceof ProviderKeyLimitError) {
         return settingsKeyLimitResponse(c, repositoryLandingPath(gate), providerId);
       }
@@ -5174,14 +3546,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "add-custom-provider-key") {
-    // note: Append a key to an EXISTING custom declaration — the multi-key pool's
-    // missing entry point (a custom declaration could only grow by
-    // re-submitting the whole declaration form). The declaration is only READ:
-    // its base_url / api / model_ids are what the pool's keys were verified
-    // against, so this path cannot move the endpoint (no declaration rewrite,
-    // and the store's endpoint lock keeps holding for every other path).
-    // Verification runs FIRST: a rejected key returns the existing structured
-    // 400 and writes nothing.
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     const plainKey = typeof form.key === "string" ? form.key.trim() : "";
     if (providerId === "") {
@@ -5205,9 +3569,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
-      // note: The append persists the verify outcome: the store records 'ok' or the
-      // weaker 'reachable' from the SAME derived-URL decision the declaration
-      // path applies, so the row the operator just verified renders its state.
       const outcome = await appendDeclaredProviderKey(store, gate.app.id, providerId, plainKey);
       if (outcome.status === "undeclared") {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderUndeclared, {
@@ -5236,21 +3597,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "add-template-provider") {
-    // note: (spec §5), generalized for catalog breadth (spec § Providers
-    // contract 1b): materialize a template-tier catalog
-    // entry into the EXISTING custom-provider mechanism — zero models.yml /
-    // env injection / selector-grammar changes. The base URL the template
-    // materializes with is the form's `base_url` override when provided,
-    // else the entry's catalog prefill; the account id is demanded only
-    // when the effective base URL carries the {account_id} placeholder
-    // (Workers-AI-shaped URLs) and is substituted into it. A template that
-    // ships several protocols takes the operator's choice (absent = the row's
-    // default), prefills model_ids from THAT protocol's vocabulary, and stores
-    // the key under the
-    // provider's credential-payload pool (under its provider id)
-    // via the same upsertCustomProvider path as add-custom-provider
-    // (verify-first custom probe — every bound below mirrors the
-    // add-custom-provider checks).
     const templateId = typeof form.template_id === "string" ? form.template_id.trim() : "";
     const accountId = typeof form.account_id === "string" ? form.account_id.trim() : "";
     const formBaseUrl = typeof form.base_url === "string" ? form.base_url.trim() : "";
@@ -5259,11 +3605,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     if (template === undefined || template.tier !== "template") {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.templateUnknown);
     }
-    // note: The protocol the operator picked in the add form: absent = the row's
-    // default protocol (its own api/baseUrl/models), present = one of the row's
-    // protocol options, whose endpoint and vocabulary the declaration
-    // materializes with. Any other value is the unsupported-api refusal, before
-    // anything is written.
     const requestedApi = typeof form.api === "string" ? form.api.trim() : "";
     const protocolOptions = template.protocols ?? [
       { api: template.api, baseUrl: template.baseUrl, models: template.models },
@@ -5277,14 +3618,8 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     const baseUrlTemplate = formBaseUrl !== "" ? formBaseUrl : protocol.baseUrl;
     if (baseUrlTemplate === null || baseUrlTemplate === "") {
-      // invariant: Only a template whose catalog base URL is absent AND whose form
-      // override is empty is unmaterializable (breadth rows may ship with a
-      // null snapshot base URL — the editable override covers them).
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.templateIncomplete);
     }
-    // note: The account id demand is conditional on the effective base URL's
-    // {account_id} placeholder — a no-placeholder template materializes
-    // without one.
     if (baseUrlTemplate.includes("{account_id}")) {
       if (accountId === "") {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.accountIdRequired);
@@ -5293,9 +3628,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.accountIdInvalid);
       }
     }
-    // invariant: The template id must not collide with a built-in provider id
-    // (defensive — the catalog's template tier is disjoint from it today, but a
-    // future template must not silently shadow one).
     if (PROVIDER_IDS.includes(templateId)) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.templateIdBuiltin, { template: templateId });
     }
@@ -5310,16 +3642,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       });
     }
     if (!CUSTOM_PROVIDER_API_IDS.includes(protocol.api as (typeof CUSTOM_PROVIDER_API_IDS)[number])) {
-      // note: protocol.api is `string | null` (catalog snapshot shape) — String()
-      // keeps the former `${template.api}` face for the null case verbatim.
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.templateApiUnsupported, {
         api: String(protocol.api),
       });
     }
-    // note: The catalog now carries each template's FULL vocabulary — clip it to the
-    // store's own bound so a widened snapshot can never trip the 400 below (the
-    // operator edits the list afterwards through update-provider-models). For a
-    // chosen protocol this is THAT protocol's vocabulary, not the default's.
     const modelIds = [...protocol.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS);
     if (modelIds.length === 0) {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.templateNoModels);
@@ -5354,16 +3680,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: MAX_CUSTOM_PROVIDER_COUNT,
       });
     }
-    // note: Append against an EXISTING declaration: the stored api/model_ids are
-    // what the already-held keys were verified against and what saved chains
-    // reference, so the submit persists THEM — a catalog template id may
-    // legitimately hold a declaration with different values (only built-in and
-    // capability-host ids are refused at declaration). Re-materializing the
-    // catalog's values here would rewrite the declaration under the operator
-    // (chains referencing the stored ids then fail membership), and a stored
-    // protocol differing from the catalog's would trip the endpoint lock on a
-    // form that displays no protocol control at all. The first-time CREATE
-    // path keeps the catalog materialization.
     const declApi = storedDeclaration?.api ?? (protocol.api as (typeof CUSTOM_PROVIDER_API_IDS)[number]);
     const declModelIds = storedDeclaration?.model_ids ?? modelIds;
     try {
@@ -5387,8 +3703,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       );
     } catch (err) {
       logSettingsFailure("add_template_provider", gate.app.id, err);
-      // note: A1: the template save path materializes the SAME custom-provider
-      // declaration, so it carries the same endpoint lock.
       if (err instanceof ProviderEndpointLockedError) {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.providerEndpointLocked, {
           provider: templateId,
@@ -5406,15 +3720,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "update-provider-models") {
-    // note: Edit ONE declared provider's model vocabulary in place — the settings
-    // face's model list stops being read-only without re-declaring the provider
-    // (base_url / api / the key pool are untouched, so the endpoint lock does
-    // not apply). The bounds mirror add-custom-provider, and the store
-    // re-validates the same 1..128 × ≤128 set as its backstop. The declaration
-    // is deliberately NOT pre-read: the store's UPDATE is gated on the row
-    // existing, so an absent declaration (including one removed while the form
-    // was open) surfaces as the same keyed 400 instead of a read-then-write
-    // race that would report a save nothing holds.
     const providerId = typeof form.provider === "string" ? form.provider.trim() : "";
     const modelIds = parseModelChain(typeof form.model_ids === "string" ? form.model_ids : "");
     if (providerId === "") {
@@ -5437,27 +3742,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         limit: MAX_CUSTOM_PROVIDER_MODEL_ID_LENGTH,
       });
     }
-    // why: Per-model facts (compass D10): shape-checked BEFORE the store so a
-    // malformed statement writes nothing at all (ids included). A blank size
-    // is not a refusal — it stores as unstated (see the parser) — and the
-    // catalog is resolved on the READ side instead: the SPA pre-fill gates it
-    // by endpoint, and the runner synthesis re-resolves it per declaration.
-    //
-    // What a models_meta field MEANS, in one place (the store's contract is
-    // "absent = state nothing"):
-    // - missing          → undefined: the store CARRIES the stored overlay
-    //                      across, pruned to the surviving ids (an id-only row
-    //                      stays id-only). A save that only edits the id list
-    //                      must never wipe sizes the operator never touched.
-    // - string, blank    → undefined: an empty form field is how a browser
-    //                      submits "this form has no size fields filled in", not
-    //                      an instruction to clear what is stored.
-    // - string, JSON obj → the statement, REPLACING the overlay whole ("{}"
-    //                      is the explicit "states nothing for these models").
-    // - anything else    → 400 malformed, zero writes: a repeated field arrives
-    //                      as string[] and a file part as File — a submission
-    //                      this route cannot read is refused, never silently
-    //                      downgraded to "states nothing".
     let statedMeta: CustomProviderModelsMeta | undefined;
     const rawMeta = form.models_meta;
     if (rawMeta !== undefined) {
@@ -5490,24 +3774,10 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "sync-provider-models") {
-    // note: I-000644: replace ONE declaration's model vocabulary with the list its
-    // own endpoint publishes. Replace, not union, is the operator's explicit
-    // ask ("give me the provider's real list"): a union would keep the stale
-    // ids this action exists to retire, and after a dialect change those ids
-    // fail at request time. The confirmation dialog states the arithmetic
-    // (kept / added / dropped) before the operator commits.
-    //
-    // Zero writes on every failure: an undeclared provider, an endpoint that
-    // wants a key, a provider error, an empty list, or a list past the store's
-    // 1..128 × ≤128 bound each answers its keyed 400 with the stored
-    // declaration untouched.
     const providerId = typeof form.provider === "string" ? form.provider.trim() : "";
     try {
       const vocabulary = await loadDeclaredVocabulary(c, gate, store, providerId);
       if (!vocabulary.ok) return vocabulary.response;
-      // note: models_meta is carried across, pruned to the surviving ids — the
-      // store's own rule for every model-list write, so a sync never wipes
-      // sizes the operator stated for an id that survived.
       await store.updateCustomProviderModels(gate.app.id, providerId, vocabulary.models);
       return settingsPostResponse(
         c,
@@ -5533,9 +3803,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
     }
-    // note: Tolerant no-op (the id grammar already bounds what can ever be
-    // stored): an unknown provider id simply has no row — a 2xx, not a 400.
-    // The declaration and every key of its pool go together (removeCustomProvider).
     return settingsRemoveResponse(
       c,
       repositoryLandingPath(gate),
@@ -5546,14 +3813,6 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     );
   }
   if (op === "save-sandbox-image") {
-    // note: (spec § Technical interfaces): save the App's sandbox runtime
-    // image. Only ENABLED registry ids are storable — an unknown or disabled
-    // id is a 400 with zero writes (getSandboxImage distinguishes nothing
-    // user-visible here; both refuse identically). The store re-validates
-    // against the same registry as the backstop (setSandboxImage), refuses
-    // soft-deleted rows, and stamps updated_at (operator mutation). This
-    // whole POST family already runs behind requireAppSettings — the
-    // canManageApp (workspace owner/admin) gate.
     const imageId = typeof form.sandbox_image_id === "string" ? form.sandbox_image_id.trim() : "";
     const image = getSandboxImage(imageId);
     if (!image || !image.enabled) {
@@ -5567,29 +3826,19 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     }
     return settingsPostResponse(c, repositoryLandingPath(gate), `Saved the ${image.id} runtime harness for ${appDisplayName(gate.app)}.`);
   }
-  // note: Review fold-in: an unknown op is a validation failure like any
-  // other — 400 with the reason.
   return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.unknownOperation);
 };
 
 const appKeyDeleteRoute = async (c: DashboardContext) => {
   const gate = await requireAppSettings(c);
   if (!gate.ok) return gate.response;
-  // note: Removing a stored key is a bot-scoped write like any other.
   if (!canWriteBotScope(gate.app, gate.scope)) return botReadOnlyResponse(c);
   const form = await c.req.parseBody();
   const provider = typeof form.provider === "string" ? form.provider.trim() : "";
-  // note: The key identity is the delete target: the (App, provider) pool holds one
-  // row per key, so a provider-only delete would take the sibling keys with it.
   const keyId = typeof form.key_id === "string" ? form.key_id.trim() : "";
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   let removed: boolean;
   try {
-    // note: The pool owner picks the table: a declared custom/template provider's
-    // rows live in the custom pool, every other provider id in the built-in
-    // one. The two id spaces are disjoint by construction (a declaration
-    // colliding with a built-in id is refused),
-    // so the declaration is an exact discriminator, never a guess.
     const declaredCustom = (await store.listCustomProviders(gate.app.id)).some(
       (row) => row.provider_id === provider,
     );
@@ -5600,9 +3849,6 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
   }
-  // note: Tolerant no-op (the allowlist already bounds what can ever be stored):
-  // an unknown provider — or a key id no row matches, including an absent one —
-  // simply has no row: a 2xx, not a 400.
   return settingsRemoveResponse(
     c,
     repositoryLandingPath(gate),
@@ -5613,49 +3859,9 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
   );
 };
 
-// why: The legacy SSR home (`dashboardApp.get("/")` →
-// dashboardPage) is retired. GET /dashboard — every Accept variant — is the
-// SPA workbench, served by spa-dispatch before this app is reached. The
-// manifest-hold resume gate lives on its dedicated route
-// /dashboard/manifest/confirm (the retryable-error page links there).
-// --- Review Health insights summary API -------------------------
-//
-// JSON read face for the insights aggregation (src/dashboard/insights-store.ts
-// — the module-boundary leaf, zero store/pipeline/review imports), scoped to
-// ONE review target: GET /api/targets/:targetId/insights/summary. The former
-// cross-App global endpoint (GET /api/insights/summary) and the App-addressed
-// family (GET /api/apps/:appId/insights/summary) are REMOVED — insights are a
-// target-owned surface, and the store binds the target id set together with
-// the workspace that owns those ids, so one target's reader can never see
-// another target's reviews.
-// Gate (JSON-only face — never an HTML page):
-//   - membership: requireMember (session + live member row);
-//   - target lookup inside the session workspace, same rule as every target
-//     face: unknown, soft-deleted and foreign ids all read `null` → 404;
-//   - the workspace owner/admin role via canManageApp → 403 (target authorship
-//     grants nothing; the manage rule is the workspace role).
-//   All deny bodies are `{ error }` JSON.
-// Params (same parse + 400 semantics the global face had):
-//   - window: pure integer days, default 30. Non-integer (incl. negative and
-//     empty) → 400. Values > 90 are NOT rejected — the single clamp point
-//     caps them at 90, and the response echoes the EFFECTIVE window so
-//     clients see what the aggregation actually used.
-//   - repo: optional owner/repo filter, malformed → 400.
-// Response = the store return plus the two echoed params (snake_case keys).
 const INSIGHTS_REPO_PATTERN = /^[^/\s]+\/[^/\s]+$/;
-/** invariant: The only supported `include` extra (QC F-001). */
 const INSIGHTS_INCLUDE_VALUES = ["repos"] as const;
 
-/**
- * note: Query-param parse for the per-App insights JSON face: window (integer
- * days, default 30) + optional repo owner/repo filter + optional
- * comma-separated `include` extras (`repos` — the window-scoped distinct
- * repo aggregation, opt-in so only consumers that need it pay for it).
- * Returns
- * the parsed values or the 400 reason; the route answers 400 with a JSON
- * error body. The >90 clamp stays in the store — the single clamp point —
- * and the route echoes the EFFECTIVE window.
- */
 type InsightsParams =
   | {
       ok: true;
@@ -5701,12 +3907,6 @@ function parseInsightsParams(query: { window?: string; repo?: string; include?: 
   return { ok: true, windowDays, repoFilter, rawRepo, includeRepos };
 }
 
-/**
- * note: The insights JSON payload, built from an already-resolved tenant scope. TWO
- * routes answer it — the repository scope (one target) and the workspace scope
- * (every live target) — and both must carry the identical key set, so the
- * builder exists once and the routes differ only in the ids they resolve.
- */
 async function insightsSummaryJson(
   c: DashboardContext,
   params: Extract<InsightsParams, { ok: true }>,
@@ -5717,8 +3917,6 @@ async function insightsSummaryJson(
     windowDays: params.windowDays,
     repo: params.repoFilter,
     includeRepos: params.includeRepos,
-    // note: The tenant scope: its SQL binds either the target/workspace pair or the
-    // workspace alone, so another tenant's reviews can never reach this payload.
     ...scope,
   });
   return c.json({
@@ -5728,22 +3926,12 @@ async function insightsSummaryJson(
     findings_by_severity: insights.findingsBySeverity,
     verdict_distribution: insights.verdictDistribution,
     weekly_trend: insights.weeklyTrend,
-    // note: Additive day-bucketed trend (window-bucketing contract, 2026-09-20):
-    // [] on week windows — the frozen weekly_trend key above is untouched.
     daily_trend: insights.dailyTrend,
-    // note: (AD-652): additive per-bucket findings distribution for the
-    // stacked charts. Existing fields are untouched — the only change on
-    // this face is the new key.
     findings_distribution: insights.findingsDistribution,
     repos: insights.repos,
   });
 }
 
-/**
- * note: `GET /api/targets/:targetId/insights/summary` — one review target's own
- * review health. The payload is the one-id set of the same store call the
- * workspace face makes.
- */
 const targetInsightsRoute = async (c: DashboardContext) => {
   const gate = await requireTargetManagerJson(c);
   if (!gate.ok) return gate.response;
@@ -5756,14 +3944,6 @@ const targetInsightsRoute = async (c: DashboardContext) => {
   return insightsSummaryJson(c, params, gate.scope, gate.db);
 };
 
-/**
- * note: The workspace-scope JSON gate: membership, then the manage rule the App
- * faces already carry. It hands back the WORKSPACE scope, which the stores
- * resolve to their own live-target subquery — no id list is built here, so the
- * bind count stays constant however many repositories the workspace reviews.
- * A workspace with no target yet resolves to an empty payload rather than an
- * error (nothing is wrong, there is just no data).
- */
 async function requireWorkspaceManagerJson(
   c: DashboardContext,
 ): Promise<
@@ -5781,11 +3961,6 @@ async function requireWorkspaceManagerJson(
   };
 }
 
-/**
- * note: `GET /api/insights/summary` — the workspace's own review health, aggregated
- * over every live target. Same params and payload keys as the App face; the
- * scope is the whole workspace, so the numbers span its bots and repositories.
- */
 const workspaceInsightsRoute = async (c: DashboardContext) => {
   const gate = await requireWorkspaceManagerJson(c);
   if (!gate.ok) return gate.response;
@@ -5798,25 +3973,7 @@ const workspaceInsightsRoute = async (c: DashboardContext) => {
   return insightsSummaryJson(c, params, gate.scope, gate.db);
 };
 
-// note: The insights HTML panel and the cross-App global JSON endpoint are both
-// retired — /dashboard/insights is SPA-owned (spa-dispatch serves the shell;
-// the SPA reads the JSON faces above). The legacy global handler with no
-// workspace scope is gone; the global URL answers 404.
 
-/**
- * note: The target-scoped JSON read gate: membership, then the target-id
- * resolution inside the session workspace, then the manage rule. `canManageApp`
- * is the WORKSPACE role (owner/admin) — the target's creator gets nothing
- * extra, so "creator-or-admin" would be a lie here.
- *
- * Cross-workspace invisibility is the resolution's own verdict: unknown,
- * soft-deleted and foreign targets all read `null` and share one 404, so a
- * sibling workspace's target leaves no existence oracle.
- *
- * The gate hands back the ledger scope the target resolves to (one id + the
- * owning workspace): these faces read ledger rows that belong to a target, and
- * the store binds both, so a route cannot widen what the SQL refuses.
- */
 async function requireTargetManagerJson(
   c: DashboardContext,
 ): Promise<
@@ -5846,23 +4003,6 @@ async function requireTargetManagerJson(
   };
 }
 
-/**
- * note: `POST /api/apps/:appId/bind-installation` — the target page's bind action:
- * a workspace manager picks one of the bot's live installations and binds it to
- * the workspace's target without leaving the dashboard.
- *
- * The write is the same `bot_installations` upsert the `installation.created`
- * webhook performs (migration 0067: an installation belongs to the App, never
- * to a target). The only guard this route adds on top of the app/member checks
- * is that the named installation must be one the bot actually reported — the
- * upsert is conflict-tolerant and would otherwise accept an id it never saw.
- *
- * Refusals keep the family's vocabulary: an unknown, foreign or soft-deleted
- * App is `404 unknown app`; a caller who cannot manage it is `403 forbidden`;
- * a bot that is not `shared` advertises nothing (`404 bot is not shared`); an
- * unreadable id is `400`; an id the pending read does not answer is
- * `404 unknown installation`.
- */
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -5877,9 +4017,6 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   if (!Number.isSafeInteger(installationId) || installationId <= 0) {
     return c.json({ error: "installationId required" }, 400);
   }
-  // note: The App's live installations are the whole candidate set now (migration
-  // 0067): nothing can already hold one, because no target binds an
-  // installation.
   const pending = await apps.listInstallations(app.id);
   if (!pending.some((row) => row.installation_id === installationId)) {
     return c.json({ error: "unknown installation" }, 404);
@@ -5888,17 +4025,6 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   return c.json({ botId: app.id, installationId });
 };
 
-/**
- * note: The ledger row's wire shape, shared by both PR faces — the list row and the
- * detail's `pull_request` are one row type, so the two handlers must not map
- * its nullable columns twice. The store reports what the tables hold; here the
- * payload becomes total: `title` / `head_sha` are genuinely optional and
- * become "", and `state` is GitHub's own domain — an unexpected value reads as
- * the only state a client knows how to render. `reviewing` rides unchanged:
- * it is already the explicit three-state projection (compass D16), and an
- * `unknown` from a failed inflight read must reach the client as such — a
- * default here would render a read failure as idle.
- */
 function pullRequestWireColumns(row: {
   title: string | null;
   state: string;
@@ -5907,7 +4033,6 @@ function pullRequestWireColumns(row: {
 }) {
   return {
     title: row.title ?? "",
-    // why: The three states a client renders; anything else reads as 'open'.
     state: row.state === "merged" || row.state === "closed" ? row.state : "open",
     head_sha: row.head_sha ?? "",
     reviewing: row.reviewing,
@@ -5918,13 +4043,6 @@ type ParseRepoFilterResult =
   | { ok: true; filter: { owner: string; repo: string } | null }
   | { ok: false };
 
-/**
- * note: `?repo=owner/name` for the ledger list. Absent is no filter. A present value
- * must be exactly two non-empty segments split on the FIRST `/` (a repo name
- * contains none) — so `a/b/c`, `a/`, `/b`, `a` and the empty string are all a
- * 400: a filter the server cannot apply must never answer as an unfiltered
- * ledger, and silently dropping it would show rows the caller did not ask for.
- */
 function parseRepoFilter(c: DashboardContext): ParseRepoFilterResult {
   const raw = c.req.query("repo");
   if (raw === undefined) return { ok: true, filter: null };
@@ -5936,24 +4054,12 @@ function parseRepoFilter(c: DashboardContext): ParseRepoFilterResult {
   return { ok: true, filter: { owner, repo } };
 }
 
-/**
- * note: The PR-ledger list payload. TWO routes answer it — the repository scope (one
- * target) and the workspace scope (every live target) — and both carry the
- * identical key set, so the builder exists once and the routes differ only in
- * the scope they resolve.
- */
 async function pullRequestsJson(
   c: DashboardContext,
   scope: LedgerScope,
   db: DashboardDb,
   filter: { owner: string; repo: string } | null,
 ): Promise<Response> {
-  // note: The filter is applied by the STORE, inside its bounded window: filtering
-  // the returned rows here would only ever search the newest
-  // PULL_REQUEST_LIST_LIMIT rows, which is the defect this face exists to fix.
-  // The option set rides the same batch: the tenant's whole ledger, never a
-  // window over it and never narrowed by the current selection — that is the
-  // only way a repository behind the row cap can be picked at all.
   const { rows, repos } = await createReviewBotsStore(db).listPullRequests(scope, filter ?? undefined);
   return c.json({
     pull_requests: rows.map((row) => ({ ...row, ...pullRequestWireColumns(row) })),
@@ -5962,8 +4068,6 @@ async function pullRequestsJson(
 }
 
 const targetPullRequestsRoute = async (c: DashboardContext) => {
-  // note: Set before the gate: a deny (403) and a 404 are answers about a specific
-  // workspace's data too, so no intermediary may cache them either.
   c.header("Cache-Control", "private, no-store");
   const gate = await requireTargetManagerJson(c);
   if (!gate.ok) return gate.response;
@@ -5972,11 +4076,6 @@ const targetPullRequestsRoute = async (c: DashboardContext) => {
   return pullRequestsJson(c, gate.scope, gate.db, parsed.filter);
 };
 
-/**
- * note: `GET /api/pull-requests` — the workspace's own ledger, listed over every live
- * target. Same params and payload keys as the target face; the scope spans the
- * workspace's targets, so one list covers every repository it reviews.
- */
 const workspacePullRequestsRoute = async (c: DashboardContext) => {
   c.header("Cache-Control", "private, no-store");
   const gate = await requireWorkspaceManagerJson(c);
@@ -5986,28 +4085,12 @@ const workspacePullRequestsRoute = async (c: DashboardContext) => {
   return pullRequestsJson(c, gate.scope, gate.db, parsed.filter);
 };
 
-/** invariant: The record-section paging bounds, enforced here (never a silent default on a bad value). */
 const RECORD_PAGE_LIMIT = { default: 10, min: 1, max: 50 } as const;
 
-/**
- * note: Upper bound on `offset`. A PR's record families are its own history — a few
- * thousand rows at most — so a window past this cannot address a real page:
- * it is a 400 like any other malformed paging, rather than an offset handed to
- * SQLite, which would walk and discard the whole family only to answer empty.
- */
 const RECORD_PAGE_OFFSET_MAX = 100_000;
 
 type ParsePagingResult = { ok: true; offset: number; limit: number } | { ok: false };
 
-/**
- * note: `offset` / `limit` from the query string. Absent means the default; a
- * present value must be plain decimal digits and a safe integer — a malformed
- * one is a 400, so a caller never believes it asked for a page it did not get.
- * An `offset` above RECORD_PAGE_OFFSET_MAX is a 400 for the same reason. A
- * well-formed `limit` outside the bounds is CLAMPED into them (the contract's
- * "defaults to 10, clamped to [1, 50]"), never rejected: a bounded adjustment
- * still answers with a page.
- */
 function parseRecordPaging(c: DashboardContext): ParsePagingResult {
   const rawLimit = c.req.query("limit");
   const rawOffset = c.req.query("offset");
@@ -6021,20 +4104,12 @@ function parseRecordPaging(c: DashboardContext): ParsePagingResult {
   return { ok: true, offset, limit };
 }
 
-/** invariant: The PR number path segment: decimal digits only, a positive safe integer. */
 function pullRequestNumberOf(c: DashboardContext): number | null {
   const raw = c.req.param("number") ?? "";
-  // invariant: Decimal digits only (the App-id segment's rule): `0x1f` / `1e3` are number
-  // spellings that `Number()` would alias onto a real PR number.
   const number = /^[0-9]+$/.test(raw) ? Number(raw) : Number.NaN;
   return Number.isSafeInteger(number) && number > 0 ? number : null;
 }
 
-/**
- * note: The scope gate a ledger face runs before reading: both workspace and target
- * faces answer with the same `{ scope, store }` pair, so ONE handler serves
- * both registrations and the two can never drift apart.
- */
 type LedgerGate = () => Promise<
   | {
       ok: true;
@@ -6045,29 +4120,17 @@ type LedgerGate = () => Promise<
   | { ok: false; response: Response }
 >;
 
-/**
- * note: One PR's head + record totals. TWO routes answer it — the target scope (one
- * repository) and the workspace scope (every live target) — and only the gate
- * differs: the address is the ledger's own key and the store binds the scope.
- */
 const pullRequestDetailRoute = async (c: DashboardContext, gateOf: LedgerGate) => {
   c.header("Cache-Control", "private, no-store");
   const gate = await gateOf();
   if (!gate.ok) return gate.response;
   const number = pullRequestNumberOf(c);
   if (number === null) return c.json({ error: "unknown pull request" }, 404);
-  // note: The address is the ledger's own key — owner AND repo AND number. One
-  // target is one repo, but the store's key includes both segments, so a miss
-  // is a 404, never a same-number row from another repo.
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
   const head = await gate.store.getPullRequestHead(gate.scope, owner, repo, number);
   if (head === null) return c.json({ error: "unknown pull request" }, 404);
   const counts = await gate.store.countPullRequestRecords(gate.scope, owner, repo, number);
-  // note: Same total-shape rule as the list, from the same mapping: the store reports
-  // the tables' actual columns, and this boundary is where a nullable column
-  // becomes "". The record families are paged separately — the head carries
-  // only their totals, in `counts`.
   return c.json({
     pull_request: {
       number: head.pr_number,
@@ -6078,10 +4141,6 @@ const pullRequestDetailRoute = async (c: DashboardContext, gateOf: LedgerGate) =
       last_seen_at: head.last_seen_at,
     },
     counts,
-    // note: The newest review, same nullable-to-"" rule as the section rows: it is
-    // the header's ONE source for verdict and attribution, so a paged
-    // reviews list cannot change it. It rides the ENVELOPE, beside `counts`,
-    // not the head row — the head row's shape is the list's row shape.
     latest_review:
       head.latest_review === null
         ? null
@@ -6097,21 +4156,6 @@ const pullRequestDetailRoute = async (c: DashboardContext, gateOf: LedgerGate) =
 
 type PullRequestRecordSection = "findings" | "reviews" | "failures";
 
-/**
- * note: One paged record family. The section is fixed by the registered literal path
- * (three paths share this handler); `severity` is read for findings only — a
- * `mergeClass` spelling from the shared `FINDING_SEVERITIES` contract, where
- * empty or absent is no filter and the returned `total` is filtered. A
- * spelling outside that set is a 400: it has no predicate, so an empty page
- * would claim a filter that never ran. `unclassified=1` is that filter's
- * complement — the SPA's catch-all bucket — and is a mode of its own, not a
- * fifth severity spelling; combining it with `severity` is a 400.
- * A miss is the detail's 404 on every family (decided inside the family's own
- * batch, so a section read stays one roundtrip); malformed paging is a 400, and
- * an out-of-bounds `limit` is clamped into `[1, 50]`. Every page echoes the
- * `limit` the clamp applied, so the pager strides on the server's page size
- * instead of re-deriving it.
- */
 const pullRequestRecordsRoute = async (
   c: DashboardContext,
   gateOf: LedgerGate,
@@ -6126,28 +4170,15 @@ const pullRequestRecordsRoute = async (
   if (!paging.ok) return c.json({ error: "invalid paging" }, 400);
   const owner = c.req.param("owner") ?? "";
   const repo = c.req.param("repo") ?? "";
-  // note: Each reader decides "PR missing" in the SAME batch that pages the
-  // section (statement 0), so one section read is one roundtrip and `null` is
-  // this route's 404 — a section reader cannot tell an empty section from an
-  // unknown PR on its own.
   const { offset, limit } = paging;
   if (section === "findings") {
     const rawSeverity = c.req.query("severity") ?? "";
     const rawUnclassified = c.req.query("unclassified") ?? "";
-    // note: `unclassified=1` is the catch-all predicate: the rows whose `mergeClass`
-    // is outside `FINDING_SEVERITIES` (the SPA's "Other" bucket). It is a
-    // filter MODE, not a fifth severity spelling — `severity` keeps admitting
-    // the vocabulary only — and the two never combine.
     const unclassified = rawUnclassified === "1";
     const malformed =
       (rawUnclassified !== "" && !unclassified) ||
       (unclassified && rawSeverity !== "") ||
       (rawSeverity !== "" && !isFindingSeverity(rawSeverity));
-    // invariant: A spelling the route refuses must not drive the read: decide it BEFORE
-    // the page query, so the 400 never pays for the count + paged scan it
-    // discards. 404 still outranks 400 — a PR this target never received beats a
-    // malformed filter on it — so the refusal keeps one head probe instead of
-    // the family's batch.
     if (malformed) {
       const head = await gate.store.getPullRequestHead(gate.scope, owner, repo, number);
       if (head === null) return c.json({ error: "unknown pull request" }, 404);
@@ -6198,13 +4229,7 @@ const pullRequestRecordsRoute = async (
   return c.json({ items: page.items, total: page.total, limit });
 };
 
-// note: --- Repository targets: list, add, and the installation's repositories ----
-//
-// The repository surface (product spec J1/J2) reads and writes TARGETS, never
-// Apps: a bot is where a target may live, a repository is what it names. The
-// list is member-visible; the add flow is manager-gated per the family rule.
 
-/** note: One row of `GET /api/targets` — the list face. */
 type TargetListRow = {
   target_id: string;
   repo_id: number | null;
@@ -6215,18 +4240,10 @@ type TargetListRow = {
   review_enabled: number;
   follow_workspace_defaults: number;
   last_reviewed_at: string | null;
-  /** note: Every review this target ran — the row's total column. */
   reviews_total: number;
-  /** note: The reviews of the last 7 days. */
   reviews_7d: number;
 };
 
-/**
- * note: `GET /api/targets` — this workspace's live targets. `repo_id: null` is the
- * 待安装 discriminator (J1): a target migrated before its first delivery names
- * no repository yet. The store's ONE query carries the bot name and the newest
- * review stamp, so the list costs one read whatever its length.
- */
 const targetListRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
@@ -6247,14 +4264,6 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
   return c.json({ targets: rows });
 };
 
-/**
- * note: Walk every live installation of the App ONCE and collect the repositories
- * GitHub grants, deduped by `repo_id`. `failures` counts the installations
- * that gave no usable answer, so a caller can tell "grants nothing" from
- * "could not ask": the dialog reports the former, the write face refuses both.
- * `null` = the walk never ran (no master key, an undecryptable App key, a JWT
- * that cannot be minted).
- */
 async function walkInstallationRepositories(
   db: DashboardDb,
   app: GithubAppRow,
@@ -6280,9 +4289,6 @@ async function walkInstallationRepositories(
   const byRepoId = new Map<number, InstallationRepository>();
   let failures = 0;
   for (const installation of installations) {
-    // invariant: The App JWT authenticates only the `/app/*` mint; the listing itself
-    // needs this installation's own access token. A failed mint is that
-    // installation's failure, not the walk's.
     const token = await mintInstallationAccessToken(installation.installation_id, jwt);
     if (token === null) {
       failures += 1;
@@ -6300,13 +4306,6 @@ async function walkInstallationRepositories(
   return { byRepoId, installations: installations.length, failures };
 }
 
-/**
- * note: `GET /api/apps/:appId/installation-repositories` — the repositories the App's
- * live installations grant, deduped by `repo_id` across installations. One App
- * JWT mints every installation's access token; a failed mint or listing leaves
- * `degraded: true` on an otherwise usable list, and every installation failing
- * is `502` (the dialog cannot offer anything to add).
- */
 const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6321,13 +4320,6 @@ const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Re
   if (walked === null || (walked.installations > 0 && walked.failures === walked.installations)) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
   }
-  // note: The duplicate rule is the BOT's, not this workspace's (the store's
-  // DUPLICATE_REPO): a sibling workspace's live row on the same bot already
-  // holds the repository, so offering it as selectable would invite a POST
-  // whose only possible answer is `duplicates`. Marking the walk's rows against
-  // every live target of the bot is therefore exactly the predicate the insert
-  // will apply — a repo id match, or a still-unclaimed row naming the same
-  // owner/name.
   const liveTargets = await createTargetsStore(member.db).listLiveByBot(app.id);
   const claimedRepoIds = new Set<number>();
   const claimedNames = new Set<string>();
@@ -6348,7 +4340,6 @@ const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Re
   });
 };
 
-/** note: An add-repository body row; anything not shaped like this is a 400. */
 function parseRepositoryBodyRow(value: unknown): { repo_id: number; owner: string; name: string } | null {
   if (typeof value !== "object" || value === null) return null;
   const row = value as { repo_id?: unknown; owner?: unknown; name?: unknown };
@@ -6358,17 +4349,6 @@ function parseRepositoryBodyRow(value: unknown): { repo_id: number; owner: strin
   return { repo_id: row.repo_id, owner: row.owner.trim(), name: row.name.trim() };
 }
 
-/**
- * note: `POST /api/targets` — one target per selected repository, each inheriting the
- * workspace defaults (`follow_workspace_defaults = 1`, J4). Every submitted
- * `repo_id` must be one the App's live installations grant (the add dialog's
- * own list): an unproven id is `400 repository_not_installed` and NOTHING is
- * written, so a manager cannot pre-claim a repository another workspace would
- * then receive deliveries for. The store's duplicate rule is a VALUE, so a
- * repository this BOT already holds lands in `duplicates` while every other row
- * of the same batch stays written: a partial add is reported, never rolled back
- * and never a 409 for the whole batch.
- */
 const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6380,7 +4360,6 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
     botId = typeof body.bot_id === "string" ? body.bot_id.trim() : "";
     rawRepositories = body.repositories;
   } catch {
-    // why: malformed body → the empty-selection 400 below
   }
   const repositories: Array<{ repo_id: number; owner: string; name: string }> = [];
   if (Array.isArray(rawRepositories)) {
@@ -6393,20 +4372,11 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   if (botId === "" || repositories.length === 0) {
     return c.json({ error: "no repositories selected" }, 400);
   }
-  // note: Visibility first, then the manager verdict: the body names a local bot id,
-  // so resolve the row to its GitHub App id and put it through the SAME
-  // workspace-scoped resolve the sibling reads use — owned bots plus shared
-  // bots already holding a live target here (frozen contract, compass
-  // Non-Goal). A bot invisible to that rule is the family's 404, never a write.
   const apps = createReviewBotsStore(member.db);
   const named = await apps.getAppById(botId);
   if (!named || named.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
   const app = await resolveScopedApp(apps, String(named.github_app_id), member.scope);
   if (!app) return c.json({ error: "unknown app" }, 404);
-  // invariant: The repository PROOF: a target binds GitHub's numeric id, so the App must
-  // actually grant it. One walk of the App's live installations; an id outside
-  // that set refuses the WHOLE request before any row is written, and an
-  // incomplete walk proves nothing, so it refuses too (fail closed).
   const walked = await walkInstallationRepositories(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (walked === null || walked.failures > 0) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
@@ -6441,33 +4411,15 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   return c.json({ created, duplicates }, 201);
 };
 
-// note: --- Repository settings: one target, and the workspace defaults -----------
-//
-// The detail page's 评审配置 tab (product spec J4). Both faces read
-// the SAME effective settings every runtime lane reads (`readEffectiveTargetSettings`),
-// so the page can never show a policy the review path does not run with.
 
-/** note: One settings block on the wire — the four policy answers, snake_case keys. */
 type ReviewSettingsPayload = {
   trigger_mode: ReviewTriggerMode;
   review_level: ReviewLevel | null;
   check_min_score: number;
   check_pass_verdicts: PrVerdict[];
-  /**
-   * why: False = the stored verdict array is unreadable, so the empty list above is
-   * a fail-closed placeholder rather than a gate anyone saved. The page renders
-   * its read-only recovery notice instead of an editable gate (the app-settings
-   * face's `check_gate: null` distinction, same meaning).
-   */
   check_pass_verdicts_readable: boolean;
 };
 
-/**
- * note: A TARGET's effective settings: the four policy answers plus the draft switch,
- * which is a target-owned admission fact (D12). The workspace defaults answer
- * no such question, so `reviewSettingsPayload` stays shared and this field
- * rides only the per-target face.
- */
 type TargetEffectivePayload = ReviewSettingsPayload & { reviewDrafts: boolean };
 
 function reviewSettingsPayload(settings: EffectiveTargetSettings): ReviewSettingsPayload {
@@ -6490,7 +4442,6 @@ function workspaceDefaultsPayload(defaults: WorkspaceReviewDefaults): ReviewSett
   });
 }
 
-/** note: One target on the wire — the identity the page names, no policy columns. */
 type TargetSettingsPayload = {
   target_id: string;
   repo_id: number | null;
@@ -6498,12 +4449,10 @@ type TargetSettingsPayload = {
   repo_name: string | null;
   bot_id: string;
   app_name: string;
-  /** why: The bound App's GitHub facts for the identity row; null while no App row resolves. */
   app_id: number | null;
   app_avatar_url: string | null;
   review_enabled: number;
   follow_workspace_defaults: number;
-  /** note: The target-owned draft switch (0070): 0 = hold drafts until ready. */
   review_drafts: 0 | 1;
 };
 
@@ -6531,12 +4480,6 @@ async function targetSettingsPayload(
   };
 }
 
-/**
- * note: `GET /api/targets/:targetId` — one live target of this workspace with what it
- * runs with AND the workspace defaults beside it, so the inheritance toggle can
- * show "following: <value>" without a second read. Another workspace's target
- * and a soft-deleted one are equally invisible (404).
- */
 const targetSettingsReadRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6550,11 +4493,6 @@ const targetSettingsReadRoute = async (c: DashboardContext): Promise<Response> =
   });
 };
 
-/**
- * note: `GET /api/targets/all` — the fixed 所有仓库 entry's settings tab: the workspace
- * defaults themselves (this page IS the default — no inheritance toggle) plus
- * the live target count the list's pill shows.
- */
 const workspaceDefaultsReadRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6564,7 +4502,6 @@ const workspaceDefaultsReadRoute = async (c: DashboardContext): Promise<Response
   });
 };
 
-/** note: A parsed settings body; a refusal is the keyed 400 the SPA replays. */
 type ReviewSettingsPatch = {
   triggerMode?: ReviewTriggerMode;
   level?: ReviewLevel | null;
@@ -6572,7 +4509,6 @@ type ReviewSettingsPatch = {
   checkPassVerdicts?: PrVerdict[];
   follow?: 0 | 1;
   reviewEnabled?: boolean;
-  /** invariant: The target-owned draft switch (0070); target route only. */
   reviewDrafts?: boolean;
 };
 
@@ -6580,12 +4516,6 @@ type ReviewSettingsParse =
   | { ok: true; patch: ReviewSettingsPatch }
   | { ok: false; error: string; key?: DictionaryKey; params?: Record<string, string | number> };
 
-/**
- * note: The one body parser both settings POSTs share. Every value is checked BEFORE
- * any write, using the vocabularies the store re-checks as its backstop, so an
- * off-vocabulary submission is a 400 with zero columns touched. A `null`
- * `review_level` is a real answer (follow the operator default).
- */
 function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSettingsParse {
   if (typeof raw !== "object" || raw === null) return { ok: false, error: "invalid body" };
   const body = raw as Record<string, unknown>;
@@ -6640,13 +4570,10 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
         },
       };
     }
-    // note: The stored set is a SET: a repeated spelling collapses.
     patch.checkPassVerdicts = [...new Set(list as PrVerdict[])];
   }
   if (!withSwitch) return { ok: true, patch };
   if ("review_drafts" in body) {
-    // invariant: A strict boolean: the contract names the toggle as `boolean` only, so a
-    // `0`/`"1"`-shaped value is refused rather than coerced.
     if (typeof body.review_drafts !== "boolean") {
       return { ok: false, error: "invalid review_drafts" };
     }
@@ -6657,9 +4584,6 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
     patch.follow = body.follow;
   }
   if ("review_enabled" in body) {
-    // note: The wire carries what the column holds: the SPA posts `0|1`, a form may
-    // post `"0"|"1"`, and a JSON client may post a boolean. One normalisation
-    // here, so the store keeps its single boolean contract.
     const raw = body.review_enabled;
     const enabled =
       typeof raw === "boolean"
@@ -6675,18 +4599,6 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
   return { ok: true, patch };
 }
 
-/**
- * note: `POST /api/targets/:targetId` — the detail page's ONE save. Manager-gated
- * (the target's workspace role governs target-owned settings); an unknown,
- * foreign or soft-deleted target is the family's 404, never a write.
- *
- * Inheritance (D16, product spec J4): naming any policy column means "this row
- * answers from now on", so `follow` flips to 0 in the SAME statement and every
- * column the caller did not submit is snapshotted from the values the target is
- * running with right now — never the inert DDL placeholders. `follow: 1` sets
- * the flag alone: the row's own columns become inert, so nothing is written to
- * them.
- */
 const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6698,7 +4610,6 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
   try {
     raw = await c.req.json();
   } catch {
-    // invariant: malformed body → the parser's 400, never a 500
   }
   const parsed = parseReviewSettingsBody(raw, true);
   if (!parsed.ok) {
@@ -6712,14 +4623,8 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
     patch.level !== undefined ||
     patch.checkMinScore !== undefined ||
     patch.checkPassVerdicts !== undefined;
-  // why: Supplying a policy column without saying otherwise is an explicit save;
-  // `follow: 1` is the one way to stay (or go back to) inheriting.
   const follow: 0 | 1 | undefined =
     patch.follow ?? (touchesPolicy ? 0 : undefined);
-  // note: An unreadable stored gate (a corrupt `check_pass_verdicts`) has no values
-  // to snapshot, so a policy save would write the fail-closed `[]` over the
-  // manager's list and report success. Refuse every policy column — including
-  // the `follow -> 0` snapshot — and leave the pause switch as the only save.
   const current =
     touchesPolicy || patch.follow !== undefined
       ? await readEffectiveTargetSettings(member.db, target)
@@ -6732,14 +4637,10 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
     level: follow === 1 ? undefined : patch.level,
     checkMinScore: follow === 1 ? undefined : patch.checkMinScore,
     checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
-    // note: Target-owned (D12): written in the same statement whatever `follow` says,
-    // because inheritance never answered this question.
     reviewDrafts: patch.reviewDrafts,
     follow,
   };
   if (follow === 0 && current !== null) {
-    // note: The snapshot: the columns this save does not name take the values the
-    // target runs with now (workspace defaults while it was inheriting).
     config.triggerMode ??= current.triggerMode;
     if (config.level === undefined) config.level = current.level;
     config.checkMinScore ??= current.checkMinScore;
@@ -6751,8 +4652,6 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
       await store.setReviewEnabled(member.scope.workspaceId, target.id, patch.reviewEnabled);
     }
   } catch (err) {
-    // note: The store's own vocabulary guards: unreachable through this route's
-    // parser, so a hit here is a real defect rather than a 400.
     logSettingsFailure("target_settings_save", target.id, err);
     return c.json({ error: "save failed" }, 500);
   }
@@ -6765,13 +4664,6 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
   });
 };
 
-/**
- * note: `POST /api/targets/defaults` — the 所有仓库 entry's settings save: the three
- * `workspaces.default_*` columns plus the gate floor, in ONE store call (the
- * only writer of all four columns; the legacy `PUT /api/settings/check-min-score`
- * delegates to the same function). Manager only. Every value is checked before
- * the first write, so a refusal stores nothing.
- */
 const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -6780,7 +4672,6 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
   try {
     raw = await c.req.json();
   } catch {
-    // invariant: malformed body → the parser's 400, never a 500
   }
   const parsed = parseReviewSettingsBody(raw, false);
   if (!parsed.ok) {
@@ -6811,27 +4702,12 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
   });
 };
 
-// note: --- App + member route table ----------------------------------------------
-//
-// ONE table, ONE registration loop: every route lives under a workspace ref
-// (`/:workspaceRef…`). There is no deployment-level copy — authority is per
-// workspace, so `/dashboard/apps…` and `/api/members` are the same 404 an
-// unmatched path answers. Handlers read the workspace from the request
-// context, so no handler body exists twice.
-//
-// A request that matched `:workspaceRef` without a resolvable scope
-// (`/login/apps…`) falls through to `next()` and lands on the catch-all 404.
 type AppRouteHandler = (c: DashboardContext) => Response | Promise<Response>;
 
 type AppRoute = {
   method: "get" | "post" | "patch";
   path: string;
   handler: AppRouteHandler;
-  /**
-   * note: The operator ceiling's ONE input: `read` admits a granted platform
-   * operator, `write` (the default, so an omission fails closed) answers 403.
-   * Declaring a route here is the only way to mount a workspace face.
-   */
   access?: "read" | "write";
 };
 
@@ -6847,14 +4723,8 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/disable", handler: (c) => appStatusAction(c, "disable"), access: "write" },
   { method: "post", path: "/apps/:appId/enable", handler: (c) => appStatusAction(c, "enable"), access: "write" },
   { method: "post", path: "/apps/:appId/delete", handler: (c) => appStatusAction(c, "delete"), access: "write" },
-  // note: Workspace-scoped target creation on a shared bot — not App-addressed: the
-  // body names the bot, and the route re-checks its scope inside the write.
   { method: "get", path: "/api/targets", handler: targetListRoute, access: "read" },
   { method: "post", path: "/api/targets", handler: targetCreateRoute, access: "write" },
-  // note: The detail page's settings tab. `/api/targets/all` is the
-  // fixed 所有仓库 entry and MUST stay registered before the `:targetId` read:
-  // Hono matches in registration order, so the literal would otherwise be
-  // swallowed as a target UUID.
   { method: "get", path: "/api/targets/all", handler: workspaceDefaultsReadRoute, access: "read" },
   { method: "post", path: "/api/targets/defaults", handler: workspaceDefaultsWriteRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId", handler: targetSettingsReadRoute, access: "read" },
@@ -6867,14 +4737,9 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   },
   { method: "get", path: "/api/apps/:appId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/bot", handler: appBotRoute, access: "write" },
-  // note: The bot page's share switch: the bot's owning workspace marks it shared or
-  // revokes the share. `write` — the transition writes a bot row and audits.
   { method: "patch", path: "/api/apps/:appId/bot/scope", handler: appBotScopeRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/apps/:appId/models", handler: appModelsRoute, access: "write" },
-  // note: `write`-classified like every App JSON read: the preview spends the App's
-  // stored credential on an outbound request, which is not an operator-grant
-  // read.
   {
     method: "get",
     path: "/api/apps/:appId/provider-models/preview",
@@ -6887,31 +4752,18 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/api/apps/:appId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings", handler: appSettingsSaveRoute, access: "write" },
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
-  // note: Target-addressed reads: one repository target's insights and
-  // PR ledger. The workspace-scope siblings below aggregate every live target;
-  // the payload keys are identical, only the scope differs. The detail address
-  // is the ledger's own key — owner/repo/number — and a miss is a 404.
   { method: "get", path: "/api/targets/:targetId/insights/summary", handler: targetInsightsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests", handler: targetPullRequestsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number", handler: (c) => pullRequestDetailRoute(c, () => requireTargetManagerJson(c)), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "findings"), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "reviews"), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/failures", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "failures"), access: "write" },
-  // note: Workspace-scope reads: the same payloads over every live target
-  // of the workspace. Target-owned data reads are `write` in this table (AC3)
-  // — only the workspace-scoped member list is `read`. The detail and its
-  // three record families reuse the target handlers' bodies via the gate
-  // parameter: the SPA emits this same address family for `{kind:"workspace"}`,
-  // so the list's row click must reach the same readers.
   { method: "get", path: "/api/insights/summary", handler: workspaceInsightsRoute, access: "write" },
   { method: "get", path: "/api/pull-requests", handler: workspacePullRequestsRoute, access: "write" },
   { method: "get", path: "/api/pull-requests/:owner/:repo/:number", handler: (c) => pullRequestDetailRoute(c, () => requireWorkspaceManagerJson(c)), access: "write" },
   { method: "get", path: "/api/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "findings"), access: "write" },
   { method: "get", path: "/api/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "reviews"), access: "write" },
   { method: "get", path: "/api/pull-requests/:owner/:repo/:number/failures", handler: (c) => pullRequestRecordsRoute(c, () => requireWorkspaceManagerJson(c), "failures"), access: "write" },
-  // note: The member list is `read` (every member sees it, and the operator's AC2
-  // field set is this same list); every App/settings read and invite face is
-  // `write` (AC3).
   { method: "get", path: "/api/members", handler: memberListRoute, access: "read" },
   { method: "get", path: "/api/members/invites", handler: inviteListRoute, access: "write" },
   { method: "post", path: "/api/members/invites", handler: inviteCreateRoute, access: "write" },
@@ -6919,25 +4771,12 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/api/members/invites/:id/accept", handler: inviteAcceptRoute, access: "write" },
   { method: "post", path: "/members/role", handler: memberRoleRoute, access: "write" },
   { method: "post", path: "/members/remove", handler: memberRemoveRoute, access: "write" },
-  // invariant: Owner-only workspace retirement. `write` (never `read`): a granted platform
-  // operator may inspect, never delete a tenant.
   { method: "post", path: "/api/workspace/delete", handler: workspaceDeleteRoute, access: "write" },
-  // note: Support + audit (platform-operator support, 2026-10): the granted operator's
-  // read-only face, the members' undismissable notice, and the owner/admin audit
-  // read.
   { method: "get", path: "/api/support/workspace", handler: supportWorkspaceRoute, access: "read" },
   { method: "get", path: "/api/support/grants", handler: supportGrantsRoute, access: "read" },
   { method: "get", path: "/api/audit", handler: auditListRoute, access: "write" },
 ];
 
-/**
- * note: Registration wrapper for one workspace route. Hono matches `:workspaceRef`
- * without knowing the reserved set, so a request that reached this
- * registration without a tenant scope (`/login/apps...`, or any path the gate
- * classified `other`) falls through to the next handler — and so to the
- * catch-all 404 — exactly as an unmatched path does. A real workspace route
- * always carries a scope.
- */
 function workspaceOnly(
   handler: AppRouteHandler,
 ): Handler<{ Bindings: Env; Variables: DashboardVariables }> {
@@ -6951,9 +4790,6 @@ for (const route of APP_ROUTES) {
   else dashboardApp.post(path, workspaceOnly(route.handler));
 }
 
-// invariant: The workspace settings family is workspace-only and PUT-shaped (the table
-// above carries GET/POST only): the name is the workspace's own label, so there
-// is no deployment-level copy to register.
 dashboardApp.put("/:workspaceRef/api/settings/name", workspaceOnly(workspaceNameRoute));
 dashboardApp.get(
   "/:workspaceRef/api/settings/concurrency",
@@ -6976,10 +4812,6 @@ dashboardApp.put(
   workspaceOnly(workspaceCheckMinScoreWriteRoute),
 );
 
-// note: Placeholder actions (IA routing table): every POST under /dashboard that is
-// not a wired route above is a placeholder submit and must never succeed —
-// logged out → 302 to login; logged in → 405 (the shell exists, the method
-// does not). Zero secret writes, zero env writes on this path.
 dashboardApp.post("*", async (c) => {
   const sessionSecret = c.env.DASHBOARD_SESSION_SECRET;
   if (!sessionSecret) return c.text("dashboard OAuth is not configured", 500);

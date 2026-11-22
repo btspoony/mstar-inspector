@@ -1,10 +1,3 @@
-/** note: Sign-in decision (`src/dashboard/users.ts`).
- *
- * Sign-in is the only thing a `users` row depends on: there is no deployment
- * allowlist, so any GitHub login is admitted, and admission joins nobody to a
- * workspace. A recorded removal is the ONE refusal, and it is enforced at the
- * write boundary so an in-flight sign-in cannot resurrect a removed login.
- */
 import { describe, expect, test } from "bun:test";
 import {
   createUser,
@@ -17,7 +10,6 @@ import { createWorkspace } from "../../src/dashboard/workspace-store";
 import { createInvite } from "../../src/dashboard/invite-store";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
-/** note: bun:sqlite's `.get()` is untyped — name the row shape once per query. */
 type CountRow = { n: number };
 
 function count(db: TestD1, table: "users" | "workspace_members"): number {
@@ -46,8 +38,6 @@ describe("signInDashboardUser", () => {
       expect(decision.user.role).toBe("member");
     }
     expect((await getUserByLogin(db, "octocat"))?.role).toBe("member");
-    // note: Sign-in joins nobody: membership comes from workspace creation or an
-    // accepted invite, so this row exists with no workspace at all.
     expect(membershipRows(db)).toBe(0);
   });
 
@@ -90,12 +80,9 @@ describe("signInDashboardUser", () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     }, "saas");
 
-    // note: The operator path is a hard DELETE of the users row; a NOT NULL
-    // invited_by would fail the FK here and 500 the operator action.
     expect(await deleteUser(db, inviter.id, "octocat")).toBe(true);
     expect(await getUserByLogin(db, "mallory")).toBeNull();
     expect(await isLoginRemoved(db, "mallory")).toBe(true);
-    // note: The invite outlives its author as anonymous history.
     expect(
       db.raw.query("SELECT invited_by, status FROM workspace_invites WHERE id = ?").get(invite.id),
     ).toEqual({ invited_by: null, status: "pending" });
@@ -123,8 +110,6 @@ describe("createWorkspace (workspace-store)", () => {
     const db = createMigratedTestD1();
     const user = await createUser(db, { login: "deployer", role: "member" });
     const createdAt = new Date().toISOString();
-    // note: 0026's seed owns `default`; a second insert under the same id trips the
-    // UNIQUE slug index, and the batch aborts as a unit.
     expect(
       await createWorkspace(db, {
         id: "default",

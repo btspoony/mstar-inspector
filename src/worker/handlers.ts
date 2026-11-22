@@ -1,38 +1,3 @@
-/**
- * note: Webhook job handlers — structured logging, KV idempotency pre-check,
- * queue enqueue.
- *
- * Hot path: no GitHub API calls, no diff fetch, no review — verify + enqueue
- * only (webhook 5s timeout budget; sha comes from the webhook payload).
- *
- * Idempotency (compass S4):
- * - A `pull_request` job claims its commit in KV (24h TTL); for commit jobs
- *   the D1 UNIQUE constraint stays the durable backstop.
- * - A bot-mention job states no sha, so it claims its `comment_id` in D1
- *   (`comment_trigger_claims`, migration 0048) BEFORE the queue send, with the
- *   KV comment key kept as a 24h fast path. The row's primary key — never a
- *   KV get-then-put — is what makes "one comment id triggers at most one
- *   review" true under concurrent deliveries, and its `payload_json` is the
- *   outbox record the cron sweep re-sends when a claim outlives its send.
- * - KV has no atomic conditional write (`noneMatch` is not in
- *   workers-types), so the commit claim is get-then-put with a race window;
- *   the D1 UNIQUE constraint is the durable fallback for those jobs.
- * - KV read/write failure → conservative pass: log a warning and enqueue
- *   anyway (the D1 fallback covers duplicate commits). A D1 claim failure is
- *   NOT conservative: without the durable claim the at-most-once invariant is
- *   unprovable, so it propagates and GitHub retries.
- * - A refused delivery (the target's plan does not include the shared bot, or
- *   this month's RP ceiling is spent) takes none of the above: no KV
- *   pre-check, no comment claim, no send. Its Check is still attached (the
- *   route chains the `neutral` settlement onto that attach) and the refusal
- *   lands as one terminal failure row of its own stage — see `refuseDelivery`
- *   and {@link DeliveryRefusal}.
- * - Ordering invariant: the D1 comment claim is inserted BEFORE
- *   `REVIEW_QUEUE.send` (so a duplicate is refused before any work) and the
- *   KV key is claimed only AFTER it resolves (so a failed send leaves no KV
- *   key and GitHub's retry re-enqueues instead of being KV-skipped). A failed
- *   send also deletes the D1 claim row, releasing it for that retry.
- */
 import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import {
@@ -74,30 +39,13 @@ export type WebhookStageWarnLog = {
 };
 
 export type HandlerLog = {
-  // note: info widened to the stage-warn shape (AL-23-2): the webhook face's
-  // review_paused line rides info — paused is a legitimate ops state
-  // answering 2xx — with the same structured fields as its warn siblings.
   info: (fields: WorkerEventLog | WebhookStageWarnLog, msg?: string) => void;
   warn: (fields: WorkerEventLog | WebhookStageWarnLog, msg?: string) => void;
 };
 
 export type HandlerDeps = {
-  // invariant: `DB` is required here even though fetch-face `Env.DB` is optional: the
-  // per-App route fails closed on an unbound DB long before this handler runs.
   env: Pick<Env, "IDEMPOTENCY_KV" | "REVIEW_QUEUE"> & { DB: D1Database };
   log: HandlerLog;
-  /**
-   * note: Awaited after the durable claim and immediately BEFORE
-   * `REVIEW_QUEUE.send`, so a best-effort step (the Check attach) has already
-   * created its run by the time the message can be admitted. The caller owns
-   * its own time bound.
-   *
-   * It may return the payload to enqueue: the attach adds its delivery identity
-   * to the message (`attachDeliveryId`), and that field is what lets a later
-   * skip settlement tell this delivery's Check row from another's. A throw is
-   * logged and the enqueue proceeds unchanged: this hook never changes the
-   * outcome.
-   */
   beforeEnqueue?: (payload: ReviewJobPayload) => Promise<ReviewJobPayload | void>;
 };
 
@@ -172,11 +120,6 @@ export async function claimIdempotency(
   }
 }
 
-/**
- * note: Run the delivery's pre-enqueue step (the Check attach) and hand back what it
- * returned. A throw is one warn and changes nothing: the hook never decides an
- * outcome, so both callers continue with the payload they already had.
- */
 async function runBeforeEnqueue(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
@@ -205,13 +148,6 @@ async function runBeforeEnqueue(
 export type DeliveryRefusal =
   | SharedBotRefusal
   | { kind: "quota-exhausted"; limit: number; used: number; cost: number }
-  /**
-   * note: The gate could not answer (a store fault, an empty profile table, a plan
-   * with no ceiling row). Fail-closed: the delivery is skipped rather than
-   * admitted, on the `entitlement` stage — the same stage and the same paging
-   * as a capability refusal, because the failure face's job is "this delivery
-   * ran no review and here is why".
-   */
   | { kind: "entitlement-unreadable" };
 
 /** The `review_failures.stage` a refusal is attributed to. */
@@ -237,23 +173,6 @@ export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
   }
 }
 
-/**
- * note: The refused-delivery tail, in the order the product fixes. The route has
- * already decided the verdict (one call chain, on the reference surface), so
- * nothing here re-derives it:
- *
- * 1. NO KV pre-check and NO `comment_trigger_claims` insert — no claim row
- *    means the cron sweep has no outbox record to re-send.
- * 2. The Check is still attached, exactly as an admitted delivery's would be.
- *    Its `neutral` settlement is NOT started here: the route chains it onto
- *    that attach (which may outlive the webhook's inline wait), so the
- *    settlement can never race the create and the row is never left for the
- *    recovery lane to close as a failure.
- * 3. One terminal failure row of the refusal's own stage (`entitlement` /
- *    `quota`) explains the delivery on the operator face; its `error` is the
- *    same sentence the Check carries.
- * 4. `skipped` — no queue send, no claim, no runner, no spend.
- */
 async function refuseDelivery(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
@@ -267,8 +186,6 @@ async function refuseDelivery(
     "pre-enqueue hook failed — the refusal still holds",
   );
 
-  // note: Best-effort like every other bookkeeping write on the delivery path: the
-  // refusal is already decided and the answer must stay 2xx.
   try {
     await createFailureStore(deps.env.DB).record({
       target_id: payload.targetId,
@@ -276,7 +193,6 @@ async function refuseDelivery(
       owner: payload.owner,
       repo: payload.repo,
       pr_number: payload.pr_number,
-      // note: A refusal can predate any sha (`ReviewFailureInput`'s "" convention).
       head_sha: payload.head_sha ?? "",
       stage: deliveryRefusalStage(refusal),
       error: CHECK_SUMMARIES.skippedByDelivery(deliveryRefusalReason(refusal)),
@@ -313,8 +229,6 @@ export async function handleReviewJob(
 
   if (refusal !== null) return refuseDelivery(payload, deps, fields, refusal);
 
-  // note: A commit job claims its sha; a bot-mention job (no sha) claims its comment
-  // id — KV as a 24h fast path, D1 as the durable claim below.
   const key = payload.head_sha
     ? idemKey({
         installation_id: payload.installation_id,
@@ -341,15 +255,6 @@ export async function handleReviewJob(
     }
   }
 
-  // why: Durable per-comment claim: `ON CONFLICT (…identity…) DO NOTHING`, so the
-  // row's primary key — not this isolate's read — decides which delivery owns
-  // the comment, and `changes === 0` means EXACTLY that duplicate (never a
-  // CHECK/NOT NULL refusal, which must not be logged as one). The losing
-  // delivery skips whatever state the row holds (`queued`, `consumed`,
-  // `expired`): in every case this comment already claimed its one review.
-  //
-  // A D1 failure is NOT caught: without the durable claim the invariant cannot
-  // be proved, so the webhook 500s and GitHub retries.
   const commentId = payload.comment_id;
   if (commentId !== undefined) {
     const nowMs = Date.now();
@@ -376,9 +281,6 @@ export async function handleReviewJob(
     }
   }
 
-  // why: Pre-enqueue step (the Check attach): it runs BEFORE the send so an
-  // admitted message finds the row it will adopt instead of racing its
-  // creator. It never changes the outcome.
   const outgoing = await runBeforeEnqueue(
     payload,
     deps,
@@ -389,15 +291,6 @@ export async function handleReviewJob(
   try {
     await deps.env.REVIEW_QUEUE.send(outgoing);
   } catch (err) {
-    // note: Seven-field structured log on the send failure path (QC F-002): the
-    // operator must be able to map the 500 to the specific event. Rethrow —
-    // the 500 signals GitHub to retry, and no KV key is claimed, so the
-    // retry re-enqueues instead of being KV-skipped (C1 invariant).
-    //
-    // The D1 claim is released so that retry can take it again. If the delete
-    // itself fails the row stays `queued` and the sweep re-sends its stored
-    // payload after the retry window — no lost review either way, and the
-    // pipeline's own claim collapses any duplicate that results.
     if (commentId !== undefined) {
       try {
         await deps.env.DB.prepare(

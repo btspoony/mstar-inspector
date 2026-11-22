@@ -1,14 +1,3 @@
-/** note: The console's quota-versions screen: the version table, and the create form
- * whose publish is gated on the impact preview.
- *
- * The contract under test is the gate the plan settled: publishing stays
- * disabled until a preview exists for the CURRENT form values, editing any
- * number invalidates it (`previewRequired`), and the publish request carries
- * the preview it was shown — so a stale count can never be published.
- *
- * Mounted in happy-dom because the state lives in effects and the date/number
- * inputs are controlled React fields.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -25,7 +14,6 @@ type Respond = (request: Sent) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-/** note: The mounted screen a test drives: wire log, rendered text, event helpers. */
 type Surface = {
   win: Window;
   container: DomElement;
@@ -53,7 +41,6 @@ async function mount(respond: Respond): Promise<Surface> {
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
   await act(async () => root.render(createElement(QuotaVersionsPage, { locale: "en" })));
-  // note: One extra flush drains the read's own continuation (its .then setState).
   await act(async () => {});
 
   return {
@@ -86,7 +73,6 @@ async function mount(respond: Respond): Promise<Surface> {
 const DATA = {
   judgingVersion: 1,
   nextVersion: 2,
-  // invariant: Every plan covered: the page has nothing to warn about.
   uncoveredPlanIds: [],
   plans: [
     { id: "free", name: "Free" },
@@ -111,11 +97,9 @@ const DATA = {
 
 const IMPACT = { count: 2, total: 12, startsOn: "2026-12-01" };
 
-/** invariant: The publish button is the form's only submit control. */
 const publishButton = (surface: Surface): DomElement | null =>
   surface.container.querySelector('button[type="submit"]');
 
-/** invariant: The preview trigger is the only `type="button"` control in the form. */
 const previewButton = (surface: Surface): DomElement | null =>
   surface.container.querySelector('button[type="button"]');
 
@@ -124,10 +108,8 @@ describe("console quota versions page", () => {
     const surface = await mount(() => json(DATA));
     expect(surface.text()).toContain(t("en", "admin.nav.quotaVersions"));
     expect(surface.text()).toContain("v1");
-    // note: The open interval end renders as a dash — no stored `effective_to`.
     expect(surface.text()).toContain("2026-10-24 → —");
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.statusCurrent"));
-    // note: The form opens on the judging version's numbers and the next ordinal.
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.formTitle"));
     expect(surface.text()).toContain("v2");
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewRequired"));
@@ -137,7 +119,6 @@ describe("console quota versions page", () => {
 
   test("a judging version that skips a plan is reported, naming the plan", async () => {
     const surface = await mount(() => json({ ...DATA, uncoveredPlanIds: ["pro"] }));
-    // note: The notice names the version and the PLAN NAME the page already lists.
     expect(surface.text()).toContain(
       t("en", "admin.quotaVersions.uncoveredPlans", { version: 1, plans: "Pro" }),
     );
@@ -149,7 +130,6 @@ describe("console quota versions page", () => {
     expect(surface.text()).not.toContain(
       t("en", "admin.quotaVersions.uncoveredPlans", { version: 1, plans: "Pro" }),
     );
-    // note: Non-vacuity: the page did render its table.
     expect(surface.text()).toContain("v1");
     await surface.close();
   });
@@ -170,8 +150,6 @@ describe("console quota versions page", () => {
 
     const preview = surface.sent.find((request) => request.url.endsWith("/quota-versions/preview"));
     expect(preview?.body).toMatchObject({
-      // note: A new version copies the current numbers, and the form carries the
-      // UTC date as the instant the server stores.
       effectiveFrom: `${new Date().toISOString().slice(0, 10)}T00:00:00.000Z`,
       base: { quick: 1, default: 2, deep: 6 },
       source: { byok: 1, shared: 10 },
@@ -203,10 +181,8 @@ describe("console quota versions page", () => {
     const publish = surface.sent.find(
       (request) => request.method === "POST" && request.url.endsWith("/quota-versions"),
     );
-    // note: The echoed impact is what makes a stale publish impossible server-side.
     expect(publish?.body).toMatchObject({ impact: IMPACT, notes: null });
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.published", { version: 2 }));
-    // why: The list is re-read so the appended version appears.
     expect(surface.sent.filter((request) => request.method === "GET").length).toBeGreaterThan(1);
     await surface.close();
   });
@@ -222,7 +198,6 @@ describe("console quota versions page", () => {
 
     expect(publishButton(surface)?.hasAttribute("disabled")).toBe(true);
     expect(surface.text()).toContain(t("en", "admin.quotaVersions.previewRequired"));
-    // invariant: The old count is gone rather than shown against numbers it never described.
     expect(surface.text()).not.toContain(
       t("en", "admin.quotaVersions.previewCount", { count: 2, total: 12 }),
     );

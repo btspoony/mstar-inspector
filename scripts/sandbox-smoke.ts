@@ -44,8 +44,6 @@ if (!SMOKE_APP_ID || !SMOKE_PRIVATE_KEY) {
   process.exit(2);
 }
 
-// why: No personal defaults: the installation id and the target repository are the
-// caller's own fixture, so both must be supplied explicitly.
 const INSTALLATION_ID = Number(Bun.env.INSTALLATION_ID ?? "");
 const GH_REPO = Bun.env.GH_REPO ?? "";
 if (GH_REPO.split("/").length !== 2 || GH_REPO.split("/").some((part) => part.length === 0)) {
@@ -56,8 +54,6 @@ if (!Number.isInteger(INSTALLATION_ID) || INSTALLATION_ID <= 0) {
   console.error("sandbox-smoke: INSTALLATION_ID env var is required and must be a positive integer");
   process.exit(2);
 }
-// The smoke entry pins the target PR at #1 (its seed branch carries exactly
-// that diffable PR); mirror the same constant when scoping the grant.
 const GH_PR = "1";
 const SMOKE_ROUTE = Bun.env.SMOKE_ROUTE ?? "/smoke";
 const ARK_API_KEY = Bun.env.ARK_API_KEY;
@@ -67,23 +63,14 @@ if (SMOKE_ROUTE === "/smoke-review" && !ARK_API_KEY) {
   process.exit(2);
 }
 
-/** note: Resolve SMOKE_PRIVATE_KEY (inline PEM or path). */
 function resolvePrivateKey(value: string): string {
   if (value.includes("-----BEGIN")) return value;
   const path = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
   return readFileSync(path, "utf8");
 }
 
-/**
- * why: Mint the sandbox-read grant via the SAME purpose-scoped helper the Worker
- * uses (§7.6: the smoke path is migrated off the raw createAppAuth
- * mint), then assert the RETURNED capabilities — repository-scoped,
- * read-only, exactly the requested repository. `appId` is the smoke's local
- * numeric App-id stand-in (the mint itself binds installationId + repo).
- */
 async function mintInstallationToken(appId: string, privateKey: string): Promise<string> {
   const commenter = createReviewCommenter({ APP_ID: appId, PRIVATE_KEY: resolvePrivateKey(privateKey) });
-  // invariant: GH_REPO was validated as owner/repo at startup — `repo` is always present.
   const [owner, repo] = GH_REPO.split("/") as [string, string];
   const grant = await commenter.getInstallationToken({
     scope: { appId, installationId: INSTALLATION_ID, owner, repo, prNumber: Number(GH_PR) },
@@ -93,7 +80,6 @@ async function mintInstallationToken(appId: string, privateKey: string): Promise
   return grant.token;
 }
 
-/** note: Wait for the dev server to accept connections on the given port. */
 async function waitForPort(port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -101,7 +87,6 @@ async function waitForPort(port: number, timeoutMs: number): Promise<void> {
       const res = await fetch(`http://127.0.0.1:${port}/healthz`);
       if (res.ok) return;
     } catch {
-      // note: not up yet
     }
     const { promise, resolve } = Promise.withResolvers<void>();
     setTimeout(resolve, 500);
@@ -116,10 +101,6 @@ console.log("TOKEN_MINTED=yes");
 const port = 8791;
 const varFlags = [`GH_TOKEN:${token}`, `GH_REPO:${GH_REPO}`];
 if (ARK_API_KEY) {
-  // safety: The smoke transports the operator's single key through the SAME stdin
-  // credential payload contract the production consumer builds (one key → the
-  // ark pool); it reaches the Worker as its own var and is never placed in the
-  // container's process environment.
   varFlags.push(`ARK_API_KEY:${ARK_API_KEY}`);
 }
 

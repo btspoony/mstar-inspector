@@ -14,18 +14,15 @@ import { join } from "node:path";
 
 const script = join(import.meta.dir, "check-worktree-install.ts");
 
-/** note: A throwaway tree; the check only ever reads it. */
 function fixture(): { dir: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "worktree-install-"));
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-/** why: A populated install: a directory that holds no packages proves nothing. */
 function modules(dir: string): void {
   mkdirSync(join(dir, "node_modules", "some-pkg"), { recursive: true });
 }
 
-/** note: A bare `node_modules` directory — the shape that used to pass as an install. */
 function emptyModules(dir: string): void {
   mkdirSync(join(dir, "node_modules"), { recursive: true });
 }
@@ -48,7 +45,6 @@ describe("check-worktree-install", () => {
       modules(worktree);
       const { code, out } = run(worktree);
       expect(code).toBe(0);
-      // why: The check reports real paths: macOS resolves /var through /private/var.
       expect(out).toContain(join(realpathSync(worktree), "node_modules"));
     } finally {
       cleanup();
@@ -63,7 +59,6 @@ describe("check-worktree-install", () => {
       mkdirSync(worktree);
       const { code, out } = run(worktree);
       expect(code).toBe(1);
-      // note: Both paths: the directory inspected, and the tree it would inherit.
       expect(out).toContain(realpathSync(worktree));
       expect(out).toContain(join(realpathSync(dir), "node_modules"));
       expect(out).toContain("bun install");
@@ -107,8 +102,6 @@ describe("check-worktree-install", () => {
     try {
       const worktree = join(dir, "a", "worktree");
       mkdirSync(worktree, { recursive: true });
-      // why: The path exists but stat cannot answer (ELOOP): an unreadable answer,
-      // never the neutral "nothing to inherit" pass.
       symlinkSync("node_modules", join(dir, "a", "node_modules"));
       const { code, out } = run(worktree);
       expect(code).toBe(1);
@@ -125,8 +118,6 @@ describe("check-worktree-install", () => {
     try {
       const worktree = join(dir, "a", "worktree");
       mkdirSync(worktree, { recursive: true });
-      // why: A dangling link: nothing is installed there, so the walk must continue
-      // to the neutral pass instead of refusing.
       symlinkSync("missing-target", join(dir, "a", "node_modules"));
       const { code, out } = run(worktree);
       expect(code).toBe(0);
@@ -139,7 +130,6 @@ describe("check-worktree-install", () => {
   test("a local node_modules that resolves outside the worktree is not a pass", () => {
     const { dir, cleanup } = fixture();
     try {
-      // note: the parent tree a link would borrow
       modules(dir);
       const worktree = join(dir, "worktree");
       mkdirSync(worktree, { recursive: true });
@@ -157,7 +147,6 @@ describe("check-worktree-install", () => {
   test("an empty local node_modules does not certify an install", () => {
     const { dir, cleanup } = fixture();
     try {
-      // note: a reachable ancestor tree
       modules(dir);
       const worktree = join(dir, "worktree");
       emptyModules(worktree);
@@ -221,8 +210,6 @@ describe("check-worktree-install", () => {
       const worktree = join(dir, "worktree");
       modules(worktree);
       writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-      // why: The first marker matches the repository; the second one must not be
-      // shadowed by it.
       writeFileSync(join(worktree, "node_modules", ".package-lock.json"), "{}\n");
       writeFileSync(join(worktree, "node_modules", ".modules.yaml"), "\n");
       const { code, out } = run(worktree);
@@ -241,7 +228,6 @@ describe("check-worktree-install", () => {
       const worktree = join(dir, "worktree");
       mkdirSync(worktree, { recursive: true });
       modules(join(worktree, "..deps"));
-      // why: Inside the worktree: only a segment NAME starts with two dots.
       symlinkSync(join("..deps", "node_modules"), join(worktree, "node_modules"));
       const { code, out } = run(worktree);
       expect(code).toBe(0);

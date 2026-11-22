@@ -22,53 +22,12 @@ export type ReviewJobPayload = {
   repo: string;
   pr_number: number;
   head_sha: string | null;
-  /**
-   * note: The PR's `pull_request.updated_at` for the delivery that produced this
-   * job, normalized to UTC ISO-8601 (`…Z`) so it compares as text against the
-   * ledger's `pull_requests.head_at`. It has exactly two uses, both in the
-   * supersede comparison: the payload stamp is the left operand and the
-   * ledger's watermark the right one (skip only when the ledger holds a
-   * strictly newer stamp AND that newer commit owns a queued job — its
-   * idempotency claim). Nothing sorts the queue by it.
-   *
-   * Optional: absent for every `issue_comment` job (no commit stamp) and for a
-   * `pull_request` delivery whose stamp was missing or malformed, exactly as
-   * for messages enqueued before this field existed.
-   */
   head_at?: string;
-  /**
-   * note: The `issue_comment` id that produced this job — the comment trigger's
-   * identity, and the only thing an idempotency claim can key on when
-   * `head_sha` is null (a mention delivery states no commit). Present on
-   * every `issue_comment` job whose payload carried a readable `comment.id`;
-   * absent otherwise, exactly like `head_at`.
-   */
   comment_id?: number;
   action: string;
   triggered_by: "pull_request" | "issue_comment";
   botRef: { appId: string };
-  /** note: The `review_targets` row this job's review configuration comes from. */
   targetId: string;
-  /**
-   * note: The Check attach identity of the DELIVERY that created this job's Check run
-   * (spec §7.9): the id the delivery path used as its holder
-   * (`delivery:<id>`). The queue carries the ID only — never credentials.
-   *
-   * Absent when this delivery's attach found the key already owned (a duplicate
-   * delivery, a queue redelivery) or when its inline budget expired before the
-   * attach finished: such a message never created a row of its own, so its skip
-   * paths must settle nothing rather than take another delivery's run.
-   */
   attachDeliveryId?: string;
-  /**
-   * invariant: The delivery key of the skipped attempt whose observed head this job
-   * reviews — set ONLY on a successor a moved head re-admitted.
-   *
-   * It preserves the delivery's comment identity: the comment claim that
-   * produced the original job was already consumed, so admission must not
-   * re-consume it for the successor. The successor's at-most-once guarantee is
-   * its outbox dedupe key (the observed head) plus this delivery's own handoff
-   * record, never a second comment claim.
-   */
   successor_of?: string;
 };

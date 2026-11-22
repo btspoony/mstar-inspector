@@ -1,13 +1,3 @@
-/** note: SupportNotice — the grant read and its two failure shapes.
- *
- * Rendered in a real DOM (happy-dom) because the whole contract lives in an
- * effect: one read per workspace, reused across navigations, and an inline
- * error with retry when the read fails instead of a silent "no grants".
- *
- * Every test uses its own workspace ref: the fetch-once cache is module-level
- * and keyed by the workspace base, so distinct refs keep the tests independent
- * without a test-only reset hook.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import type { Window } from "happy-dom";
@@ -29,11 +19,9 @@ const grantsBody = () =>
     headers: { "Content-Type": "application/json" },
   });
 
-/** note: Mounts the notice and returns the render + unmount drivers. */
 async function mountNotice(win: Window) {
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
-  // note: happy-dom's element is structurally the DOM Element React DOM accepts.
   const host = container as unknown as Element;
   const root = createRoot(host);
   const boot = { locale: "en" as const, login: "member", name: null };
@@ -61,7 +49,6 @@ describe("SupportNotice", () => {
       expect(notice.container.textContent).toContain("Support access is active");
       expect(notice.container.textContent).toContain("octocat");
       expect(notice.container.textContent).toContain("incident 42");
-      // note: The notice itself carries no control: no dismiss, no end, no edit.
       expect(notice.container.querySelector("button")).toBeNull();
       await notice.unmount();
     } finally {
@@ -83,7 +70,6 @@ describe("SupportNotice", () => {
       const notice = await mountNotice(win);
       await notice.render("/dashboard/beta/apps");
 
-      // note: Not silently "no grants": the failure is stated and retryable.
       expect(notice.container.querySelector('[data-slot="error-state"]')).not.toBeNull();
       expect(notice.container.textContent).toContain("Could not check for active support access.");
       const retry = notice.container.querySelector("button");

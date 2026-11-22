@@ -1,12 +1,3 @@
-/** note: The console's support-grant maintenance (spec operator-admin-surface §3.4).
- *
- * Pinned at the product seams rather than at SQL: a grant created through the
- * console is honoured by the EXISTING support classifier on the next workspace
- * request, a grant deleted through the console stops being usable the same way
- * an expired one does, and each write appends exactly one `audit_events` row
- * carrying the grant's target workspace. Refusal paths are asserted to write
- * nothing.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
@@ -21,7 +12,6 @@ const STAMP = "2026-10-01T00:00:00.000Z";
 const HOUR_MS = 3_600_000;
 const DAY_MS = 24 * HOUR_MS;
 
-// note: --- fixtures (raw writes; the routes and the store read real SQL) ----------
 
 function seed(db: TestD1, sql: string, ...params: Array<string | null>): void {
   db.raw.prepare(sql).run(...params);
@@ -61,7 +51,6 @@ function insertMember(db: TestD1, workspaceId: string, userId: string): void {
   );
 }
 
-/** note: The operator (no membership) plus two workspaces, one owned by MEMBER. */
 function fixture(): TestD1 {
   const db = createMigratedTestD1();
   insertUser(db, OPERATOR);
@@ -72,7 +61,6 @@ function fixture(): TestD1 {
   return db;
 }
 
-/** note: A grant seeded directly — setup for the delete/list cases, not the subject. */
 function seedGrant(db: TestD1, workspaceId: string, ttlMs: number): Promise<{ id: string }> {
   return insertSupportGrant(db, {
     workspaceId,
@@ -113,7 +101,6 @@ async function api(
   );
 }
 
-/** invariant: The workspace's operator-only support view — the existing classifier's face. */
 async function supportView(db: TestD1, login = OPERATOR): Promise<Response> {
   return worker.fetch(
     new Request("https://worker.local/dashboard/acme/api/support/workspace", {
@@ -125,7 +112,6 @@ async function supportView(db: TestD1, login = OPERATOR): Promise<Response> {
 
 type AuditRow = { action: string; actor_login: string; workspace_id: string };
 
-/** note: Every `audit_events` row in insertion order (`created_at` may tie). */
 function auditRows(db: TestD1): AuditRow[] {
   return db.raw
     .prepare("SELECT action, actor_login, workspace_id FROM audit_events ORDER BY rowid")
@@ -146,7 +132,6 @@ const CREATE = (body: Record<string, unknown>) =>
     ...body,
   });
 
-// note: --- create -----------------------------------------------------------------
 
 describe("POST /_internal_admin/api/support-grants", () => {
   test("the created grant is honoured by the existing classifier, and the write appends one audit row", async () => {
@@ -162,13 +147,10 @@ describe("POST /_internal_admin/api/support-grants", () => {
     });
     expect(Date.parse(String(grant.expires_at)) - Date.parse(String(grant.created_at))).toBe(24 * HOUR_MS);
 
-    // invariant: Exactly one row, on the grant's target workspace — no more, no fewer.
     expect(auditRows(db)).toEqual([
       { action: "support.grant.create", actor_login: OPERATOR, workspace_id: "ws-acme" },
     ]);
 
-    // invariant: The operator was a non-member outsider before the grant; now the
-    // workspace's support view answers it, through the unchanged classifier.
     const view = await supportView(db);
     expect(view.status).toBe(200);
     const body = (await view.json()) as { grants: Array<Record<string, unknown>> };
@@ -202,10 +184,6 @@ describe("POST /_internal_admin/api/support-grants", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  /** note: The grant write and its audit row are ONE transaction. A failing audit
-   * append must roll the grant back — a split write leaves the grant live with
-   * no audit row and this assertion fails.
-   */
   test("a failed audit append leaves no live grant", async () => {
     const db = fixture();
     db.raw.exec(
@@ -216,18 +194,14 @@ describe("POST /_internal_admin/api/support-grants", () => {
     const res = await api(db, { method: "POST", path: "/api/support-grants", body: CREATE({}) });
     expect(res.status).toBe(500);
 
-    // invariant: Nothing landed: no grant, no audit row.
     expect(grantCount(db)).toBe(0);
     expect(auditRows(db)).toEqual([]);
 
-    // invariant: The unchanged classifier still answers an outsider 404, so no window
-    // opened behind the failed audit append.
     db.raw.exec("DROP TRIGGER fail_grant_audit");
     expect((await supportView(db)).status).toBe(404);
   });
 });
 
-// note: --- revoke -----------------------------------------------------------------
 
 describe("DELETE /_internal_admin/api/support-grants/:id", () => {
   test("the deleted grant stops being usable, and the delete appends one audit row", async () => {
@@ -239,13 +213,11 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ id: grant.id, workspaceId: "ws-acme" });
 
-    // invariant: Exactly one delete row, on the grant's workspace, and the row is gone.
     expect(auditRows(db).filter((row) => row.action === "support.grant.delete")).toEqual([
       { action: "support.grant.delete", actor_login: OPERATOR, workspace_id: "ws-acme" },
     ]);
     expect(grantCount(db)).toBe(0);
 
-    // note: The same workspace read that answered 200 now answers the outsider 404.
     const after = await supportView(db);
     expect(after.status).toBe(404);
     expect(auditRows(db).map((row) => row.action)).toEqual([
@@ -262,11 +234,6 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     expect(auditRows(db)).toEqual([]);
   });
 
-  /** note: The revocation and its audit row are ONE transaction in BOTH directions. A
-   * refused audit append must roll the delete back: otherwise the grant is gone
-   * with nothing recording who revoked it — what a delete-then-audit split
-   * does, and this assertion fails on that shape.
-   */
   test("a failed audit append rolls the revocation back — the window stays open", async () => {
     const db = fixture();
     const grant = await seedGrant(db, "ws-acme", DAY_MS);
@@ -285,9 +252,6 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     expect((await supportView(db)).status).toBe(200);
   });
 
-  /** note: The opposite direction: a refused delete must roll the audit row back, so
-   * no ledger row claims a revocation that did not happen.
-   */
   test("a failed revocation leaves no audit row claiming one", async () => {
     const db = fixture();
     const grant = await seedGrant(db, "ws-acme", DAY_MS);
@@ -299,7 +263,6 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     const res = await api(db, { method: "DELETE", path: `/api/support-grants/${grant.id}` });
     expect(res.status).toBe(500);
 
-    // invariant: The window is still open and the ledger says nothing about it.
     expect(grantCount(db)).toBe(1);
     expect(auditRows(db)).toEqual([]);
 
@@ -308,14 +271,13 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
   });
 });
 
-// note: --- list -------------------------------------------------------------------
 
 describe("GET /_internal_admin/api/support-grants", () => {
   test("lists live grants across workspaces and drops expired and superseded rows", async () => {
     const db = fixture();
     const live = await seedGrant(db, "ws-other", DAY_MS);
     const superseded = await seedGrant(db, "ws-acme", 2 * DAY_MS);
-    await seedGrant(db, "ws-acme", -DAY_MS); // note: newest for ws-acme, already over
+    await seedGrant(db, "ws-acme", -DAY_MS);
     expect(superseded.id).not.toBe(live.id);
 
     const res = await api(db, { method: "GET", path: "/api/support-grants" });
@@ -326,7 +288,6 @@ describe("GET /_internal_admin/api/support-grants", () => {
   });
 });
 
-// note: --- gate -------------------------------------------------------------------
 
 describe("the grant routes stay behind the operator gate", () => {
   test("a non-operator gets 404 on every verb and nothing is written", async () => {
@@ -340,7 +301,6 @@ describe("the grant routes stay behind the operator gate", () => {
       const res = await api(db, { ...request, login: MEMBER, body: request.method === "POST" ? CREATE({}) : undefined });
       expect(res.status, request.method).toBe(404);
     }
-    // note: The seeded grant is still there and no audit row was appended.
     expect(grantCount(db)).toBe(1);
     expect(auditRows(db)).toEqual([]);
   });

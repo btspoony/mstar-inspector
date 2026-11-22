@@ -1,10 +1,3 @@
-/** note: The workspace-identifier work (2026-10) — the owner-facing slug rename is
- * gone. A workspace's URL is emitted from its immutable `id`, so no owner-side
- * route may rewrite the path segment any more: `PUT …/api/settings/slug` is
- * absent from the route table, every role gets the catch-all 404, and no row
- * changes. The owner's remaining edit is the label (`…/api/settings/name`),
- * which changes no path — covered in `workspace-name.test.ts`.
- */
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -13,7 +6,6 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "slug", "write", "session", "32-bytes!"].join("-");
-/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function envFor(db: TestD1): Env {
@@ -73,9 +65,6 @@ function seedMembership(
   );
 }
 
-/** note: `acme` (slug `acme`, owned by `dana`), `beta` (slug `beta-x`, owned by
- * `dana` too), and an outsider with no membership anywhere.
- */
 function fixture() {
   const db = createMigratedTestD1();
   const dana = seedUser(db, "dana");
@@ -114,10 +103,10 @@ describe("the owner slug route is retired", () => {
   test("no role can rewrite the path segment: owner, admin, member and outsider all 404", async () => {
     const { db } = fixture();
     for (const [ref, login] of [
-      ["acme", "dana"], // note: owner of ws-acme
-      ["acme", "erin"], // note: admin of ws-acme
-      ["beta-x", "dana"], // note: plain member of `beta`
-      ["acme", "mallory"], // note: no membership at all
+      ["acme", "dana"],
+      ["acme", "erin"],
+      ["beta-x", "dana"],
+      ["acme", "mallory"],
     ] as const) {
       const res = await putSlug(db, ref, login, "acme-labs");
       expect(res.status, `${ref} ${login}`).toBe(404);

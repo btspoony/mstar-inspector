@@ -1,5 +1,5 @@
 /**
- * invariant: The operator's review-duration distribution (plan `operator-duration-cap`,
+ * The operator's review-duration distribution (plan `operator-duration-cap`,
  * Task 3): the window, the sample size, percentiles, the three disjoint phase
  * buckets and a candidate cap's observed cutoff.
  *
@@ -46,7 +46,7 @@ const DAY_MS = 86_400_000;
 export type DurationInterval = {
   enqueuedMs: number | null;
   admittedMs: number;
-  /** note: The durable result (or the failure settlement's start); `null` = not measured. */
+  /** The durable result (or the failure settlement's start); `null` = not measured. */
   executionEndMs: number | null;
   settledMs: number | null;
 };
@@ -92,19 +92,19 @@ export type DurationReportExclusions = Record<DurationExclusionReason, number>;
 
 export type DurationReportCutoff = {
   capMs: number;
-  /** note: Complete attempts whose end-to-end interval exceeds the cap. */
+  /** Complete attempts whose end-to-end interval exceeds the cap. */
   over: number;
-  /** note: `over / sampleSize`; `null` when the sample is empty (not `0`). */
+  /** `over / sampleSize`; `null` when the sample is empty (not `0`). */
   share: number | null;
-  /** note: Which phase's cumulative boundary first passed the cap. */
+  /** Which phase's cumulative boundary first passed the cap. */
   crossed: { queueWait: number; execution: number; publication: number };
 };
 
 export type DurationReport = {
   window: { days: number; startMs: number; endMs: number };
-  /** note: Complete intervals — the denominator of every percentile and cutoff. */
+  /** Complete intervals — the denominator of every percentile and cutoff. */
   sampleSize: number;
-  /** note: `null` when nothing completed in the window: an empty sample, not zeros. */
+  /** `null` when nothing completed in the window: an empty sample, not zeros. */
   total: DurationPercentiles | null;
   phases: {
     queueWait: DurationPercentiles | null;
@@ -130,7 +130,7 @@ export function phaseBuckets(interval: DurationInterval): DurationBuckets | null
   return { queueWaitMs, executionMs, publicationMs, totalMs: settledMs - enqueuedMs };
 }
 
-/** invariant: Nearest-rank percentiles: each answer is an observed duration, never an average. */
+/** Nearest-rank percentiles: each answer is an observed duration, never an average. */
 function percentiles(values: readonly number[]): DurationPercentiles | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -153,42 +153,42 @@ function cutoffOf(buckets: readonly DurationBuckets[], capMs: number): DurationR
 }
 
 type DurationRow = {
-  /** note: The handoff's create state: `failed` is a definite create rejection. */
+  /** The handoff's create state: `failed` is a definite create rejection. */
   handoff_state: string;
   enqueued_ms: number | null;
   created_ms: number;
   settling_ms: number | null;
   settled_ms: number | null;
-  /** note: The settlement's completion record — the durable proof it discharged its lane. */
+  /** The settlement's completion record — the durable proof it discharged its lane. */
   settled_effects: string | null;
   persisted_at_ms: number | null;
-  /** invariant: `null` when the attempt never had a launch row. */
+  /** `null` when the attempt never had a launch row. */
   launch_state: string | null;
-  /** note: The Check pair the attempt froze, and that Check row's terminal instant. */
+  /** The Check pair the attempt froze, and that Check row's terminal instant. */
   check_key: string | null;
   check_terminal_ms: number | null;
 };
 
-/** note: The earlier measured end of execution; `null` when no durable result exists. */
+/** The earlier measured end of execution; `null` when no durable result exists. */
 function executionEndOf(row: DurationRow): number | null {
   if (row.persisted_at_ms === null) return null;
   if (row.settling_ms === null) return row.persisted_at_ms;
   return Math.min(row.persisted_at_ms, row.settling_ms);
 }
 
-/** note: Does the row hold the settlement's completion record? */
+/** Does the row hold the settlement's completion record? */
 function hasSettlementRecord(raw: string | null): boolean {
   if (raw === null) return false;
   try {
     return Array.isArray(JSON.parse(raw));
   } catch {
-    // note: An unreadable record is SILENT, not empty: it proves nothing either way.
+    // An unreadable record is SILENT, not empty: it proves nothing either way.
     return false;
   }
 }
 
 /**
- * invariant: Did the Check pair the attempt froze conclude by the instant it settled? An
+ * Did the Check pair the attempt froze conclude by the instant it settled? An
  * attempt that froze no pair has no Check obligation to observe, so the guard
  * passes. Otherwise the frozen pair is the only fact that says a Check exists; a
  * terminal row is the only fact that says it concluded, and it must have
@@ -210,7 +210,7 @@ export async function readReviewDurationReport(
   input: { nowMs: number; capMs: number | null },
 ): Promise<DurationReport> {
   const startMs = input.nowMs - DURATION_REPORT_WINDOW_DAYS * DAY_MS;
-  // invariant: `review_launches.attempt_id` is a primary key and `review_checks` is UNIQUE
+  // `review_launches.attempt_id` is a primary key and `review_checks` is UNIQUE
   // on (attempt_key, generation), so neither join can multiply a handoff row.
   // The pair is the one the attempt FROZE (`attempt_key`/`attempt_generation`),
   // never the owed-settlement columns (`check_*`) those live beside.
@@ -239,7 +239,7 @@ export async function readReviewDurationReport(
   const buckets: DurationBuckets[] = [];
   for (const row of rows.results) {
     if (row.launch_state === null) {
-      // invariant: No launch row: there is no execution boundary to measure from. A
+      // No launch row: there is no execution boundary to measure from. A
       // definite create rejection never reached prepare, so it is named by that
       // fact instead of borrowing the boundary reason.
       if (row.handoff_state === "failed") excluded["pre-prepare"] += 1;
@@ -255,7 +255,7 @@ export async function readReviewDurationReport(
       excluded["check-open-at-settle"] += 1;
       continue;
     }
-    // note: The settlement's start is not an outcome: a row without a durable result
+    // The settlement's start is not an outcome: a row without a durable result
     // has no execution end at all. The launch row's state says whether the
     // attempt ever confirmed one.
     const executionEndMs = executionEndOf(row);
@@ -277,7 +277,7 @@ export async function readReviewDurationReport(
       excluded["no-boundary"] += 1;
       continue;
     }
-    // invariant: The record is the settlement's own statement that the publication
+    // The record is the settlement's own statement that the publication
     // obligation it incurred was discharged: `settled_ms` is written together
     // with it, only when the required set for that lane is complete. It is not a
     // statement about the delivery key. A settled row without one was written

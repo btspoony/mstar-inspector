@@ -1,17 +1,5 @@
-/**
- * note: Spec §7.9 — the successor transition. Capacity and PR ownership move only on
- * an OBSERVATION that the prior attempt's sandbox stopped; a lapsed lease, a
- * quiet Workflow or elapsed time never reassigns them. A request that may
- * already have reached GitHub is reconciled by readback under a fresh claim and
- * is never resent.
- *
- * The store/consumer tests drive the production conditional write and the
- * production reconciler; the doubles only stand in for GitHub and the sandbox.
- */
 import { describe, expect, test } from "bun:test";
 
-// note: Load shim FIRST: a static import of the pipeline would be hoisted above it
-// (consumer → ./sandbox → `cloudflare:workers`, unresolvable in Bun's runner).
 import "../helpers/cloudflare-workers-mock";
 
 import {
@@ -57,7 +45,6 @@ const KEY: InflightKey = {
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 const LATER = "2026-11-03T00:02:00Z";
 
-/** note: Another PR of the same tenant — the one a full system cap must refuse. */
 function otherPr(prNumber: number): InflightKey {
   return { ...KEY, pr_number: prNumber };
 }
@@ -72,7 +59,6 @@ const OPTS: AcquireInflightOptions = {
 };
 
 
-/** note: The PR rows this suite asserts on, in write order. */
 function rowsOf(db: TestD1): string[] {
   const rows = db.raw.query("SELECT attempt_id FROM review_inflight ORDER BY rowid").all() as Array<{
     attempt_id: string;
@@ -84,8 +70,6 @@ describe("§7.9 the successor transition", () => {
   test("expiry alone refuses: the lapsed lease is a fence, not a stopped executor", async () => {
     const db = createMigratedTestD1();
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
-    // note: The prior attempt's row is long expired and its paid state is accounted
-    // for — everything the old rule needed. It is still not evidence.
     expect(await acquireInflight(db, KEY, { ...OPTS, attemptId: "attempt-2", now: LATER })).toEqual({
       ok: false,
       reason: "pr-held",
@@ -101,8 +85,6 @@ describe("§7.9 the successor transition", () => {
     seedPaidAttempt(db, "attempt-1");
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
     const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
-    // note: The successor's evidence step: the attempt's container answered
-    // not-running, and the revocation landed durably.
     expect(await markAttemptRevoked(db, "attempt-1", 5)).toBe(true);
     expect(
       await acquireInflight(db, KEY, {
@@ -113,23 +95,17 @@ describe("§7.9 the successor transition", () => {
         priorStopped: { attemptId: "attempt-1" },
       }),
     ).toEqual({ ok: true });
-    // note: One row, the successor's, and it owns both the PR and a capacity slot
-    // (the caps count only live rows, so the expired predecessor held neither).
     expect(rowsOf(db)).toEqual(["attempt-2"]);
     const [row] = db.raw
       .query("SELECT head_sha FROM review_inflight")
       .all() as Array<{ head_sha: string }>;
     expect(row!.head_sha).toBe(newerSha);
-    // note: The revocation commits in the SAME transaction: the displaced attempt may
-    // never start anything again.
     expect(revokedAtOf(db, "attempt-1")).not.toBeNull();
   });
 
   test("an observation taken for another attempt never replaces this one", async () => {
     const db = createMigratedTestD1();
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
-    // note: The probe named attempt-0; the row belongs to attempt-1. The conditional
-    // write binds the observed id to the row's own attempt_id, so it refuses.
     expect(
       await acquireInflight(db, KEY, {
         ...OPTS,
@@ -157,8 +133,6 @@ describe("§7.9 the successor transition", () => {
         return sandbox as never;
       };
 
-    // note: Fact A: nothing ever activated this attempt, so the guarded claim wins,
-    // the row is written by the claim, and no container is even addressed.
     const empty = createMigratedTestD1();
     expect(await priorAttemptStopEvidence(empty, getSandboxDouble(async () => ({ revoked: true, running: false })), {}, "attempt-1")).toBe(
       "no-container",
@@ -170,30 +144,23 @@ describe("§7.9 the successor transition", () => {
       revoked: true,
     });
 
-    // note: A cleanup-owned row (never activated) is claimed the same way.
     const db = createMigratedTestD1();
     seedUnactivatedAttempt(db, "attempt-2");
     expect(await priorAttemptStopEvidence(db, getSandboxDouble(async () => ({ revoked: true, running: false })), {}, "attempt-2")).toBe(
       "no-container",
     );
 
-    // note: Fact B: the attempt activated, so the claim loses and its OWN container is
-    // asked — on the id the provisioning row minted.
     seedProvisionedAttempt(db, "attempt-1", "review-minted-by-the-claim");
     expect(await priorAttemptStopEvidence(db, getSandboxDouble(async () => ({ revoked: true, running: false })), {}, "attempt-1")).toBe("revoked");
     expect(asked).toEqual(["review-minted-by-the-claim"]);
-    // note: The durable mark landed with the observation.
     expect((await readAttemptActivation(db, "attempt-1"))?.revoked).toBe(true);
 
-    // note: A live container: nothing is revoked and the hold stands.
     seedProvisionedAttempt(db, "attempt-3");
     expect(await priorAttemptStopEvidence(db, getSandboxDouble(async () => ({ revoked: false, running: true })), {}, "attempt-3")).toBe(
       "running",
     );
     expect((await readAttemptActivation(db, "attempt-3"))?.revoked).toBe(false);
 
-    // note: A failed revoke is not a stop; nor is an absent capability, a throw, or a
-    // row that carries no minted handle.
     seedProvisionedAttempt(db, "attempt-4");
     expect(
       await priorAttemptStopEvidence(
@@ -221,21 +188,16 @@ describe("§7.9 the successor transition", () => {
     const db = createMigratedTestD1();
     const deps = { env: { SANDBOX: {}, DB: db }, getSandbox };
 
-    // note: No row: nothing activated, so no container may be addressed.
     await expect(reviewAttemptSandbox(deps, "attempt-1")).rejects.toThrow(/activation/);
     expect(addressed).toEqual([]);
 
-    // note: A row that never activated (a successor's claim, a cleanup claim) is the
-    // same refusal: it exists, and it still may not start anything.
     seedUnactivatedAttempt(db, "attempt-2");
     await expect(reviewAttemptSandbox(deps, "attempt-2")).rejects.toThrow(/activation/);
 
-    // note: Activated and revoked is also a refusal — the successor owns the future.
     seedProvisionedAttempt(db, "attempt-3");
     await claimUnactivatedAttemptFor(db, "attempt-3");
     await expect(reviewAttemptSandbox(deps, "attempt-3")).rejects.toThrow(/revoked/);
 
-    // note: Activated and not revoked: the handle is the id the CLAIM minted.
     seedProvisionedAttempt(db, "attempt-4", "review-minted-by-the-claim");
     await reviewAttemptSandbox(deps, "attempt-4");
     expect(addressed).toEqual(["review-minted-by-the-claim"]);
@@ -243,15 +205,11 @@ describe("§7.9 the successor transition", () => {
 
   test("a provisioned, unobserved attempt holds its slot — `provisioned` is not free", async () => {
     const db = createMigratedTestD1();
-    // note: A container is created BEFORE the paid call, so a provisioning row with
-    // no `launched` row may be running right now.
     seedProvisionedAttempt(db, "attempt-1");
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
     expect(
       await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
     ).toEqual({ ok: false, reason: "system-cap" });
-    // note: Only the observed stop frees it (a successor revoked in the same
-    // transition that moved the PR).
     db.raw.prepare("UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ?").run(T0, "attempt-1");
     expect(
       await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-2", systemCap: 1, now: LATER }),
@@ -311,14 +269,10 @@ describe("§7.9 the successor transition", () => {
       })(ctx, {});
     };
 
-    // note: Still running: the observation is taken, NOTHING is revoked, and the
-    // successor must leave the PR with that holder.
     expect(await sandboxFor(true).revoke()).toEqual({ revoked: false, running: true });
 
     const sandbox = sandboxFor(false);
     expect(await sandbox.revoke()).toEqual({ revoked: true, running: false });
-    // note: The revoked attempt cannot provision a container — every start path goes
-    // through the one gate, and a replay cannot resurrect it.
     await expect(sandbox.runCommand(shellCommand("true"))).rejects.toThrow(/revoked/);
     expect(contexts.at(-1)!.started).toHaveLength(0);
   });
@@ -329,13 +283,8 @@ describe("§7.9 an already-issued request is reconciled, never resent", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const attemptId = attempt.identity.attemptId;
-    // note: The run this attempt already created and proved (the delivery attach's
-    // shape): a terminal update was issued for it, but its reply was lost, so
-    // the row carries the frozen intent and no observation.
     await setCheckCreateState(db, attemptId, lease, "sending", undefined, CLAIM_AT);
     expect(await attachCheckRunId(db, attemptId, lease, 4242, CLAIM_AT)).toBe(true);
-    // note: The terminal update WAS issued and its reply was lost: the frozen intent
-    // and its dispatch mark are durable, so the lane may only read back.
     const frozenText = "the frozen failure text";
     expect(
       await setCheckDesired(
@@ -351,8 +300,6 @@ describe("§7.9 an already-issued request is reconciled, never resent", () => {
 
     const sent: string[] = [];
     const script: AdapterScript = {
-      // note: The request DID land: GitHub already carries the intended conclusion
-      // AND the frozen text.
       fetch: async (identity) => ({
         kind: "found",
         remote: remoteFor(identity, { id: 4242, status: "completed", conclusion: "failure", summary: frozenText }),
@@ -368,21 +315,17 @@ describe("§7.9 an already-issued request is reconciled, never resent", () => {
       fetchImpl: OFFLINE_FETCH,
     });
 
-    // note: Zero resends: the readback decided, and `observed` advanced from it.
     expect(sent).toHaveLength(0);
     expect(summary.completed).toBe(1);
     const row = await rawRow(db, attemptId);
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
-    // note: The reconciliation ran under a FRESH acquisition (epoch bumped), not the
-    // dead consumer lease the row was left on.
     expect(row.holder).toBe("check-reconcile");
     expect(Number(row.lease_epoch)).toBe(lease.epoch + 1);
     expect(EXPIRED_DEADLINE).toBeLessThan(T0);
   });
 });
 
-/** note: The PR `makePayload()` names, as `seedInflight` in the consumer suite holds it. */
 const PRIOR_KEY: InflightKey = {
   installation_id: 123,
   owner: "acme",
@@ -391,7 +334,6 @@ const PRIOR_KEY: InflightKey = {
   workspace_id: "default",
 };
 
-/** note: A provisioning row: the attempt ACTIVATED (so it may start), paid exec unsent. */
 function seedProvisionedAttempt(db: TestD1, attemptId: string, sandboxId = attemptSandboxId(attemptId)): void {
   db.raw
     .prepare(
@@ -401,7 +343,6 @@ function seedProvisionedAttempt(db: TestD1, attemptId: string, sandboxId = attem
     .run(attemptId, 1, sandboxId, 2);
 }
 
-/** note: A row that never activated: a cleanup claim, or a successor's own claim. */
 function seedUnactivatedAttempt(db: TestD1, attemptId: string): void {
   db.raw
     .prepare(
@@ -411,12 +352,10 @@ function seedUnactivatedAttempt(db: TestD1, attemptId: string): void {
     .run(attemptId, attemptSandboxId(attemptId));
 }
 
-/** note: Win the successor claim over an activated attempt (what a prior takeover left). */
 async function claimUnactivatedAttemptFor(db: TestD1, attemptId: string): Promise<void> {
   db.raw.prepare("UPDATE review_launches SET revoked_ms = 3 WHERE attempt_id = ?").run(attemptId);
 }
 
-/** note: A `persisted` launch row: the paid exec returned, and its container may still run. */
 function seedPaidAttempt(db: TestD1, attemptId: string): void {
   db.raw
     .prepare(
@@ -434,10 +373,7 @@ function revokedAtOf(db: TestD1, attemptId: string): number | null {
   return row?.revoked_ms ?? null;
 }
 
-/** note: The prior attempt's admission row, long expired. `activated` also gives it a container. */
 async function seedPriorRow(db: TestD1, { activated = true }: { activated?: boolean } = {}): Promise<void> {
-  // note: Its row IS the precondition an observation needs — and the capacity it took
-  // is not free.
   if (activated) seedProvisionedAttempt(db, "attempt-prior");
   expect(
     await acquireInflight(db, PRIOR_KEY, {
@@ -463,8 +399,6 @@ describe("§7.9 admission is the successor's one gate", () => {
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
-    // note: The row is expired, so only the stop observation stands between this
-    // delivery and a second review of the same PR.
     expect(rowsOf(db)).toEqual(["attempt-prior"]);
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls).toHaveLength(0);
@@ -472,7 +406,6 @@ describe("§7.9 admission is the successor's one gate", () => {
     const refusal = h.logLines.find((line) => line.fields.event === "review_succession_refused");
     expect(refusal?.fields.prior_attempt_id).toBe("attempt-prior");
     expect(refusal?.fields.succession).toBe("running");
-    // note: The observation revoked nothing: the holder keeps its authority.
     expect(revokedAtOf(db, "attempt-prior")).toBeNull();
   });
 
@@ -484,8 +417,6 @@ describe("§7.9 admission is the successor's one gate", () => {
     const addressed: string[] = [];
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // note: The prior attempt's handle may never be addressed: no container was ever
-      // created for it, and the won claim is what says so.
       getSandbox: async (_binding: unknown, id: string) => {
         addressed.push(id);
         if (id === attemptSandboxId("attempt-prior")) throw new Error("that attempt never activated");
@@ -498,7 +429,6 @@ describe("§7.9 admission is the successor's one gate", () => {
     expect(addressed).not.toContain(attemptSandboxId("attempt-prior"));
     expect(h.commenterCalls.length).toBeGreaterThan(0);
     expect(h.messageRetryCalls).toHaveLength(0);
-    // note: The CLAIM wrote the row (abandoned, revoked) — the fact that frees the PR.
     const row = db.raw
       .prepare("SELECT state, activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?")
       .get("attempt-prior") as { state: string; activated_ms: number | null; revoked_ms: number | null };
@@ -542,13 +472,10 @@ describe("§7.9 admission is the successor's one gate", () => {
 
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
 
-    // note: Admitted on evidence: the round ran to a published review instead of the
-    // guard-held retry the expired row used to force.
     expect(h.sandbox.calls.length).toBeGreaterThan(0);
     expect(h.commenterCalls.length).toBeGreaterThan(0);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.logLines.some((line) => line.fields.event === "review_succession_refused")).toBe(false);
-    // note: Observed not-running → revoked and succeeded in ONE transition.
     expect(revokedAtOf(db, "attempt-prior")).not.toBeNull();
   });
 });

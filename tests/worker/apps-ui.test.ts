@@ -1,22 +1,3 @@
-/**
- * Apps management UI tests (spec § Multi-App 契约 + § IA).
- *
- * `GET /dashboard/apps` is member-visible (numeric App id, status,
- * creator — never the encrypted columns or row ids); the pinned POST action
- * paths `/dashboard/default/apps/:appId/disable|enable|delete` (architect: zero-JS
- * `<form method="post">` cannot emit a DELETE verb) are creator-or-admin
- * (Clarify #6). Disable/enable/soft-delete flows are bridged END-TO-END to
- * the T2 webhook face: a disabled or soft-deleted App's webhook route 404s,
- * a re-enabled one resolves again (401 on a bad signature proves the row
- * was found and passed to signature verification).
- *
- * The D1 double is the real bun:sqlite helper over migrations
- * 0001/0002 + 0003–0009 + 0012 (production-shaped, filename order — 0006 backs the
- * per-App config tables the settings page reads; 0008 adds the per-App
- * ops columns behind the pause toggle and the install-health panel; 0009 is
- * bot_model_roles, read on every settings render by the Role
- * models editor; 0022 is the per-App review trigger mode column).
- */
 import { describe, expect, spyOn, test } from "bun:test";
 import { t } from "../../src/i18n";
 import worker from "../../src/worker/index";
@@ -32,20 +13,11 @@ import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const TEST_WEBHOOK_SECRET = ["test", "app", "webhook", "secret"].join("-");
-/** note: Fixture Apps are addressed by their immutable GitHub App id (D0):
- * `mstar-inspector-mallory` / `-ada` are only their webhook paths + labels now.
- */
 const MALLORY_APP_ID = 1001;
 const ADA_APP_ID = 1002;
 
-/** note: Real secretbox envelopes encrypted under TEST_KEY with the row-PK AAD
- * (T1 review pin). The UI routes treat the columns as opaque, but the
- * bridged webhook-face tests decrypt the webhook secret (T2 contract), so
- * the rows must be genuinely decryptable.
- */
 async function encryptedColumns(id: string): Promise<{ privateKeyEnc: string; webhookSecretEnc: string }> {
   const box = createSecretbox(TEST_KEY);
   return {
@@ -68,8 +40,6 @@ async function seedApp(
   db: DashboardD1,
   opts: { slug: string; githubAppId: number; createdBy: string },
 ): Promise<GithubAppRow> {
-  // note: The row id is the webhook URL's app segment: keep it derivable so the
-  // route assertions below can name the App without re-reading the row.
   const id = `app-${opts.slug}`;
   const enc = await encryptedColumns(id);
   const row = await createReviewBotsStore(db).createApp({
@@ -83,10 +53,6 @@ async function seedApp(
     workspaceId: "default",
     maxApps: null,
   });
-  // note: A target IS a repository (migration 0067) and creation no longer writes
-  // one, so the fixture gives each App its single reviewing target: the App
-  // pages' target-owned configuration (pause, trigger mode, gate, depth) reads
-  // that row.
   const created = await createTargetsStore(db).create({
     workspaceId: "default",
     botId: id,
@@ -99,17 +65,12 @@ async function seedApp(
   return row;
 }
 
-/** note: Seeded world (membership semantics + apps):
- *   octocat = admin; mallory owns her App; ada owns hers; hubot owns none.
- */
 async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   const db = createAppsUiD1();
   await seedMember(db, "octocat", "admin");
   await seedMember(db, "mallory", "member");
   await seedMember(db, "ada", "member");
   await seedMember(db, "hubot", "member");
-  // note: Manage is the workspace role: `octocat` and `mallory` are owners, the
-  // others plain members. The App creator column grants nothing.
   db.raw
     .prepare(
       `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
@@ -146,7 +107,6 @@ async function get(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(new Request(`https://worker.local${path}`, { headers: { Cookie: cookie } }), env);
 }
 
-// note: SPA ownership: apps/settings HTML GETs are SPA-owned (shared spa helper).
 
 async function post(path: string, cookie: string, env: Env): Promise<Response> {
   return await worker.fetch(
@@ -155,7 +115,6 @@ async function post(path: string, cookie: string, env: Env): Promise<Response> {
   );
 }
 
-/** note: Form-encoded POST (the trigger-mode route reads a `mode` field from the body). */
 async function postForm(
   path: string,
   cookie: string,
@@ -173,7 +132,6 @@ async function postForm(
   );
 }
 
-/** note: JSON-body POST for the target-addressed settings family. */
 async function postTargetJson(
   path: string,
   cookie: string,
@@ -205,13 +163,10 @@ describe("the Apps page shell (workspace-scoped SPA route)", () => {
     const body = await res.text();
     expect(body).toContain("window.__BOOT__=");
     expect(body).toContain('"login":"hubot"');
-    // invariant: The boot carries the workspace memberships (id + role), never users.role.
     expect(body).toContain('"memberships":[{"id":"default","slug":"default","name":"Default","role":"member","plan":"Unlimited"}]');
   });
 
   test("the retired deployment-level /dashboard/apps spelling is a dashboard root: no session → login", async () => {
-    // note: It is no longer a page and no longer a 404: it is one of the two root
-    // spellings, so an anonymous hit takes the same login bounce `/dashboard` does.
     const db = await seededWorld();
     const res = await get("/dashboard/apps", "", withSpaAssets(makeEnv(db)));
     expect(res.status).toBe(302);
@@ -242,8 +197,6 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, MALLORY_APP_ID)).toBe("disabled");
-    // note: T2 contract through the UI action: the disabled App's webhook 404s
-    // (the webhook-path lookup resolves the row, then the status gate refuses).
     const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(404);
   });
@@ -261,8 +214,6 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(await res.text()).toBe("ok");
     expect(appStatus(db, MALLORY_APP_ID)).toBe("active");
     const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
-    // note: Active + not deleted → the row resolved and the (missing) signature
-    // fails verification: 401, NOT the 404 of an unknown/disabled app.
     expect(webhook.status).toBe(401);
   });
 
@@ -315,15 +266,12 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     const res = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/delete`, cookie, makeEnv(db));
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
-    // Soft delete (Clarify #4): the row remains in D1 with deleted_at stamped.
     const row = db.raw
       .query("SELECT deleted_at FROM review_bots WHERE github_app_id = 1001")
       .get() as { deleted_at: string | null };
     expect(row.deleted_at).not.toBeNull();
-    // note: The brief's bridged AC: the deleted app's webhook route 404s (T2).
     const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
     expect(webhook.status).toBe(404);
-    // note: Managing a deleted app is 404 — it no longer exists for the UI.
     const manage = await post(`/dashboard/default/apps/${MALLORY_APP_ID}/disable`, cookie, makeEnv(db));
     expect(manage.status).toBe(404);
   });
@@ -338,7 +286,6 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
          VALUES ('ws-other', 'ws-other', 'Other', 'octocat', datetime('now'))`,
       )
       .run();
-    // note: The bot belongs to `default`; its configuration claims another tenant.
     db.raw
       .prepare(
         `UPDATE review_targets SET workspace_id = 'ws-other'
@@ -347,9 +294,6 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-    // note: Visibility is the APP's: this workspace owns the bot, so the
-    // App opens even though it holds no repository here. The foreign target is
-    // invisible as target-owned FACT — no id, no pause, no policy.
     const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));
     expect(detail.status).toBe(200);
     const body = (await detail.json()) as Record<string, unknown> & { app: Record<string, unknown> };
@@ -372,8 +316,6 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { apps: Array<Record<string, unknown>> };
     const row = body.apps.find((app) => app.github_app_id === MALLORY_APP_ID)!;
-    // why: The row has no pause state to report, so the wire carries no key (not a
-    // default of "reviewing").
     expect("review_enabled" in row).toBe(false);
     const sibling = body.apps.find((app) => app.github_app_id === ADA_APP_ID)!;
     expect(sibling.review_enabled).toBe(1);
@@ -386,8 +328,6 @@ describe("an App with no repository yet", () => {
 
   test("a manager opens it: 200 with the App's own facts and no target-owned ones", async () => {
     const db = await seededWorld();
-    // note: The repository surface owns target creation now, so an App the
-    // workspace owns routinely has none. Visibility is the APP's.
     db.raw
       .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
       .run(MALLORY_APP_ID);
@@ -397,12 +337,10 @@ describe("an App with no repository yet", () => {
     const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
     expect(body.can_manage).toBe(true);
     expect(body.blocked).toBe(false);
-    // note: Target-owned facts are ABSENT, not defaulted: there is no row to name.
     for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
     for (const key of ["review_enabled", "review_trigger_mode", "review_level", "default_review_level"]) {
       expect(body.app).not.toHaveProperty(key);
     }
-    // invariant: The bot's own sections still render: they never needed a target.
     expect(body.app.sandbox_image_id).toBe("omp");
     expect(body).toHaveProperty("keys");
     expect(body).toHaveProperty("installations");
@@ -423,10 +361,6 @@ describe("an App with no repository yet", () => {
     expect(body.app.created_at).toBeDefined();
   });
 
-  /** note: The add flow routinely gives one App several repositories. The App page
-   * owns no target policy any more, so its own configuration must stay
-   * reachable: the gate answers `target: null` instead of refusing the App.
-   */
   test("an App with SEVERAL repositories still opens, with the target slice absent", async () => {
     const db = await seededWorld();
     db.raw
@@ -445,12 +379,10 @@ describe("an App with no repository yet", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
     expect(body.can_manage).toBe(true);
-    // note: Target-owned facts are ABSENT: two rows name no single configuration.
     for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
     for (const key of ["review_enabled", "review_trigger_mode", "review_level"]) {
       expect(body.app).not.toHaveProperty(key);
     }
-    // note: The App's own sections still render.
     expect(body).toHaveProperty("keys");
     expect(body).toHaveProperty("installations");
   });
@@ -476,16 +408,7 @@ describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => 
   });
 });
 
-/** note: The bot's own settings face: `GET /dashboard/:ref/api/apps/:appId/bot`.
- *
- * The target detail keeps the workspace-owned configuration; the bot page reads
- * the bot-owned sections (credentials health, provider configuration, chains,
- * sandbox image, installations). A bot the caller's workspace does not own is
- * reachable exactly when it is SHARED — and then the face is read-only
- * (`can_manage: false`) whatever the caller's workspace role is.
- */
 describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)", () => {
-  /** note: The second workspace a shared bot is used from (its owner is `hubot`). */
   function seedOtherWorkspace(db: ReturnType<typeof createAppsUiD1>): void {
     db.raw
       .prepare(
@@ -501,7 +424,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
       .run();
   }
 
-  /** invariant: Share one bot WITHOUT the official-workspace designation: only `scope` gates this face. */
   function shareBot(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): void {
     db.raw
       .prepare(`UPDATE review_bots SET scope = 'shared', shared_at = datetime('now') WHERE github_app_id = ?`)
@@ -522,7 +444,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
       expect(res.status).toBe(200);
       const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
       expect(body.can_manage).toBe(true);
-      // note: Bot-scoped sections ride the face…
       for (const key of [
         "installations",
         "delivery_summary",
@@ -543,14 +464,11 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
       expect(body.app.sandbox_image_id).toBe("omp");
       expect(body.app.scope).toBe("owned");
       expect(body.app.github_slug).toBe("mstar-inspector-mallory");
-      // note: …and no target-scoped section does: the workspace's review policy
-      // stays on the target detail.
       for (const key of ["target_id", "check_gate", "allowlist", "installation", "workspace_id"]) {
         expect(body).not.toHaveProperty(key);
       }
       expect(body.app).not.toHaveProperty("review_trigger_mode");
       expect(body.app).not.toHaveProperty("review_level");
-      // invariant: The read face never reaches GitHub: no metadata refresh, no probe.
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
@@ -609,8 +527,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { can_manage: unknown };
-    // invariant: Scope decides who else may USE the bot; it never removes configuration
-    // authority from the workspace that owns it.
     expect(body.can_manage).toBe(true);
   });
 
@@ -638,8 +554,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
   test("a bot-scoped op posted for a shared bot by its owning workspace saves, and a target-scoped op still saves", async () => {
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
-    // invariant: Sharing decides who else may USE the bot, never who configures it: the
-    // owning workspace's manager keeps every bot-scoped write.
     const botSave = await postForm(
       `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -654,8 +568,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
           .get(MALLORY_APP_ID) as { sandbox_image_id: string }
       ).sandbox_image_id,
     ).toBe("omp");
-    // invariant: The target-scoped save stays available — at its OWN address: the target
-    // is what this workspace owns, whatever the bot's scope.
     const targetRow = db.raw
       .query(
         `SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
@@ -690,14 +602,11 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
           makeEnv(db),
           { provider, key: `test-matrix-${provider}` },
         );
-        // invariant: Sharing never removes the owning workspace's write authority, so the
-        // bot-read-only refusal is gone; the failed probe is the route's own.
         expect(res.status, provider).not.toBe(403);
       }
     } finally {
       fetchSpy.mockRestore();
     }
-    // note: No probe reached a provider, so neither pool gained a row.
     expect(
       (db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get() as { n: number }).n,
     ).toBe(0);
@@ -731,10 +640,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
   });
 });
 
-/** note: The list's shared-bot block — the creation chooser's official mode. It is
- * additive: every existing key keeps its value, and the new key is always
- * present, `[]` when the platform shares nothing.
- */
 describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
   type SharedBotPayload = { id: string; github_slug: string | null; name: string; target_count: number };
   type ListBody = {
@@ -789,8 +694,6 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
       expect(body.shared_bots).toEqual([
         { id: "app-platform", github_slug: "platform-app", name: "Platform App", target_count: 0 },
       ]);
-      // invariant: Reading the chooser's list never puts another workspace's bot in
-      // `apps`, and never reaches GitHub for it.
       expect(body.apps.map((app) => app.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
       expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
@@ -799,17 +702,10 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
   });
 });
 
-/** note: A workspace's own target on a SHARED bot — the official creation path — is
- * readable from that workspace: the list carries the row (with this
- * workspace's own target state) and the settings/detail face resolves it.
- * Neither widens to a bot the workspace does not own and holds no target on,
- * and an `owned` bot from another workspace is never widened.
- */
 describe("a target on a shared bot is visible to the workspace that created it", () => {
   const SHARED_APP_ID = 1099;
   const OTHER_WS = "ws-other";
 
-  /** note: `ws-other` owns a bot; `default` holds a live target on it when asked. */
   function seedPlatformBot(
     db: ReturnType<typeof createAppsUiD1>,
     opts: {
@@ -870,8 +766,6 @@ describe("a target on a shared bot is visible to the workspace that created it",
     expect(rows.map((row) => row.github_app_id).sort()).toEqual(
       [MALLORY_APP_ID, ADA_APP_ID, SHARED_APP_ID].sort(),
     );
-    // note: The pause the row carries is the caller's own target — not the bot's
-    // operational switch and not another workspace's target.
     expect(rows.find((row) => row.github_app_id === SHARED_APP_ID)?.review_enabled).toBe(0);
   });
 
@@ -898,9 +792,7 @@ describe("a target on a shared bot is visible to the workspace that created it",
 
   test("a bot the workspace holds no target on stays invisible", async () => {
     const db = await seededWorld();
-    // note: A shared bot nobody in `default` has created a target on...
     seedPlatformBot(db, { id: "app-shared-unused", githubAppId: 1098, targetInDefault: false });
-    // invariant: ...and an owned bot of the other workspace, never shared.
     seedPlatformBot(db, { id: "app-foreign-owned", githubAppId: 1097, scope: "owned", targetInDefault: false });
 
     const rows = await listAppsOn(db);
@@ -916,10 +808,6 @@ describe("a target on a shared bot is visible to the workspace that created it",
   });
 });
 
-/** note: The settings payload's `pending_installations` (target page's bind source):
- * the bot's live installations no live target references, additively beside
- * the keys the payload already carried.
- */
 describe("the settings payload's pending installations", () => {
   const SHARED_APP_ID = 1099;
 
@@ -937,7 +825,6 @@ describe("the settings payload's pending installations", () => {
       .run(`install-${installationId}`, botId, installationId);
   }
 
-  /** note: One shared bot owned by `ws-other`, plus `default`'s live target on it. */
   function seedWorldWithBot(db: ReturnType<typeof createAppsUiD1>): void {
     db.raw
       .prepare(
@@ -982,8 +869,6 @@ describe("the settings payload's pending installations", () => {
     seedWorldWithBot(db);
     seedInstallation(db, "app-platform", 500);
     seedInstallation(db, "app-platform", 600, true);
-    // note: Installations are app-level (migration 0067): another workspace's target
-    // binds nothing, so this one is listed like any other live installation.
     seedInstallation(db, "app-platform", 700);
 
     const body = await settingsOf(db);
@@ -991,7 +876,6 @@ describe("the settings payload's pending installations", () => {
       { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
       { installation_id: 700, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
     ]);
-    // invariant: Additive: the keys the payload already carried are unchanged.
     expect(body.installation).toBeNull();
     expect(body.target_id).toBe("target-default");
     expect(body.workspace_id).toBe("default");
@@ -1002,7 +886,6 @@ describe("the settings payload's pending installations", () => {
     seedWorldWithBot(db);
     expect((await settingsOf(db)).pending_installations).toEqual([]);
 
-    // note: An owned bot the workspace may use answers the same, empty shape.
     const owned = await get(
       `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
@@ -1012,20 +895,9 @@ describe("the settings payload's pending installations", () => {
   });
 });
 
-/** note: Bot-scope WRITE authority is independent of the target read.
- *
- * A workspace that keeps a live target on ANOTHER workspace's bot can read that
- * target (the revoked-share case), but the bot itself — lifecycle, provider
- * configuration, keys, verification, metadata — stays the owning workspace's.
- * The trigger this pins: A owns bot B, C has a live target on B, the platform
- * unshares B, so B is `owned` again while C's target survives. C's manager must
- * not reach a single bot-scoped write; A's manager must keep working, and C's
- * target-scoped settings stay its own.
- */
 describe("a retained target on another workspace's bot grants no bot-scope write", () => {
   const CONSUMER_WS = "ws-consumer";
   const FOREIGN_APP_ID = MALLORY_APP_ID;
-  /** why: The bot-owned tables a bot-scope write would touch. */
   const MUTABLE_BOT_TABLES = [
     "bot_provider_keys",
     "bot_provider_models",
@@ -1036,7 +908,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     "bot_installations",
   ] as const;
 
-  /** note: The revoked-share shape: A's bot, C's surviving target, C's manager. */
   async function crossWorkspaceWorld(): Promise<ReturnType<typeof createAppsUiD1>> {
     const db = await seededWorld();
     db.raw
@@ -1045,18 +916,12 @@ describe("a retained target on another workspace's bot grants no bot-scope write
          VALUES (?, ?, ?, NULL, datetime('now'))`,
       )
       .run(CONSUMER_WS, CONSUMER_WS, CONSUMER_WS);
-    // note: mallory manages BOTH workspaces, so every refusal below is the bot-scope
-    // predicate's — never a membership 404/403.
     db.raw
       .prepare(
         `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
          SELECT ?, id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
       )
       .run(CONSUMER_WS);
-    // invariant: The target C created while the bot was shared. Nothing about the bot
-    // changed except its scope: it was never C's. It carries its OWN
-    // repository identity (0068: one repository belongs to one workspace per
-    // bot, so C's row cannot name the repository A's target already holds).
     db.raw
       .prepare(
         `INSERT INTO review_targets
@@ -1088,7 +953,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       throw new Error("a bot-scope refusal must never reach GitHub");
     }) as unknown as typeof fetch);
     try {
-      // note: Lifecycle: retire/disable another workspace's bot.
       for (const action of ["disable", "enable", "delete"]) {
         const res = await post(`${base}/apps/${FOREIGN_APP_ID}/${action}`, cookie, env);
         expect(res.status, action).toBe(403);
@@ -1097,8 +961,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
           message: t("en", "settings.error.botReadOnly"),
         });
       }
-      // note: The settings family's bot-scoped ops (provider state, chains, keys,
-      // the runtime image) — refused; the target-scoped ops are not.
       const botOps: Array<Record<string, string>> = [
         { op: "save-sandbox-image", sandbox_image_id: "omp" },
         { op: "add-key", provider: "zai", key: "sk-bot-scope-matrix" },
@@ -1110,8 +972,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
         expect(res.status, fields.op).toBe(403);
         expect(((await res.json()) as { key: unknown }).key, fields.op).toBe("settings.error.botReadOnly");
       }
-      // note: Provider-key verification and its usage probe: both consume the bot's
-      // stored credentials, so both are bot-scoped.
       const credentialProbes: Array<[string, Record<string, string>]> = [
         [`${base}/api/apps/${FOREIGN_APP_ID}/keys/verify`, { provider: "anthropic", key: "sk-foreign" }],
         [`${base}/api/apps/${FOREIGN_APP_ID}/keys/usage`, { provider: "zai", keyId: "nope" }],
@@ -1121,8 +981,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
         expect(res.status, path).toBe(403);
         expect(((await res.json()) as { key: unknown }).key, path).toBe("settings.error.botReadOnly");
       }
-      // note: The forced metadata refresh writes the bot row and reconciles its
-      // installation list — bot-scoped.
       const refresh = await post(`${base}/api/apps/${FOREIGN_APP_ID}/refresh-metadata`, cookie, env);
       expect(refresh.status).toBe(403);
       expect(((await refresh.json()) as { key: unknown }).key).toBe("settings.error.botReadOnly");
@@ -1130,7 +988,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     } finally {
       fetchSpy.mockRestore();
     }
-    // invariant: Zero bot writes of any kind, and the bot still belongs to `default`.
     expect(botScopedWriteCounts(db)).toEqual(before);
     expect(appStatus(db, FOREIGN_APP_ID)).toBe("active");
     expect(
@@ -1141,11 +998,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     ).toEqual({ github_metadata_synced_at: null });
   });
 
-  /** note: The payload face of the same rule: a Blocked target carries its OWN
-   * configuration and nothing the bot owns. The seeded rows below are exactly
-   * what used to ride the face — an installation's account, a delivery with
-   * another tenant's repository, the provider/model surfaces.
-   */
   test("the settings and models faces carry only target-owned sections", async () => {
     const db = await crossWorkspaceWorld();
     const botId = (
@@ -1167,8 +1019,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     const env = makeEnv(db);
 
-    // invariant: Reading the face must not reach GitHub: the lazy metadata refresh is a
-    // bot-scope write with the OWNER's credentials.
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
       throw new Error("a Blocked read must never reach GitHub");
     }) as unknown as typeof fetch);
@@ -1186,7 +1036,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown> & { app: Record<string, unknown> };
 
-    // note: The target's own configuration is what the face exists for.
     expect(body.blocked).toBe(true);
     expect(body.blocked_reason).toBe("bot_not_shared");
     expect(typeof body.target_id).toBe("string");
@@ -1197,7 +1046,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(body.app.default_review_level).toBe("default");
     expect(body.app.review_enabled).toBe(true);
 
-    // note: Not one bot-owned section rides the face.
     for (const key of [
       "installations",
       "deliveries",
@@ -1222,13 +1070,10 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     for (const key of ["sandbox_image_id", "last_webhook_at", "github_metadata_synced_at"]) {
       expect(key in body.app, key).toBe(false);
     }
-    // note: Nor through a copied value: the other tenant's installation account and
-    // repository are nowhere in the body.
     const serialized = JSON.stringify(body);
     expect(serialized).not.toContain("acme-org");
     expect(serialized).not.toContain("secret-org/private-repo");
 
-    // note: The models face is bot-owned end to end, so a Blocked target has none.
     expect(
       db.raw.query("SELECT github_metadata_synced_at FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID),
     ).toEqual({ github_metadata_synced_at: null });
@@ -1236,7 +1081,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(models.status).toBe(403);
     expect(((await models.json()) as { key: unknown }).key).toBe("settings.error.botReadOnly");
 
-    // invariant: Nothing changed for the owning workspace: same bot, full face.
     const owner = await get(`/dashboard/default/api/apps/${FOREIGN_APP_ID}/settings`, cookie, env);
     expect(owner.status).toBe(200);
     const ownerBody = (await owner.json()) as Record<string, unknown>;
@@ -1256,8 +1100,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     const db = await crossWorkspaceWorld();
     const env = makeEnv(db);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    // note: Target-scoped: the review depth is this workspace's own target, saved at
-    // the target's own address.
     const saved = await postTargetJson(
       `/dashboard/${CONSUMER_WS}/api/targets/target-consumer`,
       cookie,
@@ -1269,7 +1111,6 @@ describe("a retained target on another workspace's bot grants no bot-scope write
       db.raw.query("SELECT review_level FROM review_targets WHERE id = 'target-consumer'").get(),
     ).toEqual({ review_level: "quick" });
 
-    // note: The owning workspace still manages its own bot.
     const ownerCookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
     expect((await post(`/dashboard/default/apps/${FOREIGN_APP_ID}/disable`, ownerCookie, env)).status).toBe(200);
     expect(appStatus(db, FOREIGN_APP_ID)).toBe("disabled");
@@ -1283,16 +1124,10 @@ describe("a retained target on another workspace's bot grants no bot-scope write
   });
 });
 
-/** note: `GET /dashboard/:ref/api/apps/:appId/deliveries` — the 投递状态 tab's read
- * face. Filters and paging are request parameters, so the server narrows and
- * pages BEFORE the response exists; the response carries the matching total
- * and the unnarrowed option sets the filter controls list.
- */
 describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status read face)", () => {
   const DELIVERIES = (ref: string, githubAppId: number) =>
     `/dashboard/${ref}/api/apps/${githubAppId}/deliveries`;
 
-  /** note: Seed deliveries for the fixture App through the store's own writer. */
   async function seedDeliveries(db: ReturnType<typeof createAppsUiD1>) {
     const botId = (
       db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
@@ -1316,7 +1151,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
         reason: row.outcome === "rejected" ? "signature verification failed" : null,
       });
     }
-    // invariant: The oldest row leaves a 7-day window but stays inside the retained log.
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-30 days')
@@ -1367,11 +1201,8 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
 
     const byWindow = await read("?since=7", db);
     expect(byWindow.body!.total).toBe(3);
-    // invariant: The option sets are the App's whole history, never narrowed by a filter:
-    // a value outside the current result must stay selectable.
     expect(byType.body!.repos).toEqual(["acme/api", "acme/web"]);
     expect(byType.body!.types).toEqual(["check_run", "pull_request"]);
-    // note: A rejected row carries the classifier's reason; every other outcome has none.
     expect(byRepo.body!.deliveries[0]!.reason).toBe("signature verification failed");
     expect(all.body!.deliveries.find((row) => row.outcome === "ok")!.reason).toBeNull();
   });
@@ -1384,8 +1215,6 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
       }
     ).id;
     const store = createReviewBotsStore(db);
-    // note: One second apart, so every row has its own strictly ordered stamp and the
-    // windows are decided by time rather than by the rowid tiebreak alone.
     for (let i = 0; i < 25; i++) {
       await store.recordDelivery({
         appId: botId,
@@ -1405,19 +1234,13 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
 
     const first = await read("?offset=0", db);
     const second = await read("?offset=20", db);
-    // note: The route's page size is fixed; the caller moves the window.
     expect(first.body!.deliveries).toHaveLength(20);
     expect(second.body!.deliveries).toHaveLength(5);
-    // note: The total is the FILTERED size, not the window and not the table size.
     expect(first.body!.total).toBe(25);
     expect(second.body!.total).toBe(25);
-    // note: The windows are disjoint: a page boundary can neither repeat nor skip a
-    // row (the ORDER BY ends in rowid).
     const seen = new Set(first.body!.deliveries.map((row) => row.created_at));
     expect(second.body!.deliveries.every((row) => !seen.has(row.created_at))).toBe(true);
-    // note: The newest row opens the first page: ordering is documented, not implicit.
     expect(first.body!.deliveries[0]!.created_at >= first.body!.deliveries[19]!.created_at).toBe(true);
-    // note: Past the end is an empty page, not an error.
     const past = await read("?offset=40", db);
     expect(past.status).toBe(200);
     expect(past.body!.deliveries).toEqual([]);
@@ -1471,12 +1294,9 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
   test("a plain member reads the log; the tenant boundary is the App's visibility, not the role", async () => {
     const db = await seededWorld();
     await seedDeliveries(db);
-    // note: hubot is a plain member of the workspace that owns the App.
     const res = await read("", db, "hubot");
     expect(res.status).toBe(200);
     expect(res.body!.total).toBe(4);
-    // note: ada's App's log is a different App's: the option sets prove the query
-    // never crossed the bot boundary.
     expect(res.body!.repos).toEqual(["acme/api", "acme/web"]);
   });
 });

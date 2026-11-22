@@ -1,10 +1,3 @@
-/** note: The providers group view: grouping, the per-key status
- * label (AC-10) with its separate timestamp slot (AC-11), the tier badge, the
- * empty state of a keyless declaration, and the model-id disclosure's
- * aria-expanded / aria-controls pairing (AC-20 / I-000208).
- *
- * Static render of the exported card: no DOM runner, no live provider.
- */
 import { describe, expect, test } from "bun:test";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
@@ -106,7 +99,6 @@ function render(payload: SettingsManagePayload & ProviderManagementPayload, loca
   );
 }
 
-/** note: Every key row's markup, in render order. */
 const rowsOf = (html: string): string[] => html.split('data-slot="list-row"').slice(1);
 
 const rowOf = (html: string, last4: string): string => {
@@ -115,7 +107,6 @@ const rowOf = (html: string, last4: string): string => {
   return row as string;
 };
 
-/** note: The whole group card whose title is `label`. */
 const groupOf = (html: string, label: string): string => {
   const at = html.indexOf(`>${label}<`);
   expect(at, `group ${label}`).toBeGreaterThan(-1);
@@ -124,7 +115,6 @@ const groupOf = (html: string, label: string): string => {
   return html.slice(start, next === -1 ? html.length : next);
 };
 
-/** note: The same group's header band — the title, tier badge and header actions. */
 const groupHeaderOf = (html: string, label: string): string => {
   const group = groupOf(html, label);
   const body = group.indexOf('data-slot="card-content"');
@@ -177,16 +167,12 @@ describe("status label and timestamp (AC-10, AC-11)", () => {
         );
         const row = rowOf(html, "tail-1");
         const label = t(locale, `settings.providers.status.${status ?? "unverified"}`);
-        // invariant: One status pill per row — the label, nothing else. Asserted through
-        // the pill's tone attribute, not its design-token classes: a token
-        // rename is not a behaviour change.
         expect(row.split('data-tone="').length - 1).toBe(1);
         expect(row).toContain(`>${label}</span>`);
         for (const other of cases) {
           if ((other.status ?? "unverified") === (status ?? "unverified")) continue;
           expect(row).not.toContain(`>${t(locale, `settings.providers.status.${other.status ?? "unverified"}`)}</span>`);
         }
-        // invariant: AC-11: the time is the meta slot, its own span after the pill.
         const metaAt = row.indexOf('data-slot="list-row-meta"');
         expect(metaAt).toBeGreaterThan(row.indexOf('data-slot="list-row-status"'));
         expect(row.slice(metaAt)).toContain(
@@ -206,7 +192,6 @@ describe("tier badge", () => {
         custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: [] }],
       }),
     );
-    // invariant: Exactly one warning-toned pill on the page: the template tier.
     expect(html.split('data-tone="warn"').length - 1).toBe(1);
     const badgeIn = (label: string) => groupHeaderOf(html, label).match(/data-tone="([a-z]+)"/g);
     expect(badgeIn("workers-ai label"), "template tier").toEqual(['data-tone="warn"']);
@@ -271,8 +256,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
         custom_providers: [{ provider_id: "my-gateway", base_url: "https://gw.test/v1", api: "openai-completions", model_ids: ["m1", "m2"] }],
       }),
     );
-    // note: Collapsed by default: the control states the state and names no region
-    // that does not exist yet.
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("aria-controls");
     expect(html).not.toContain('id="provider-models-my-gateway"');
@@ -284,7 +267,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
     try {
       const container = win.document.createElement("div");
       win.document.body.appendChild(container);
-      // note: happy-dom's element is structurally the DOM Element React DOM accepts.
       const root = createRoot(container as unknown as Element);
       await act(async () => {
         root.render(
@@ -335,9 +317,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
   });
 
   test("a large catalog vocabulary renders fully but the disclosure list carries the scroll bound", async () => {
-    // note: The groupMeta() catalog fallback now carries the full snapshot
-    // vocabulary (hundreds of ids): every id must stay reachable, but the
-    // list must not grow the card unboundedly.
     const modelIds = Array.from({ length: 594 }, (_, i) => `model-${i}`);
     const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
     try {
@@ -379,10 +358,8 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
 
       const region = container.querySelector("#provider-models-workers-ai");
       if (!(region instanceof win.HTMLElement)) throw new Error("the model-id region is missing");
-      // note: House pattern (provider-combobox list): height cap + internal scroll.
       expect(region.classList.contains("max-h-72")).toBe(true);
       expect(region.classList.contains("overflow-y-auto")).toBe(true);
-      // note: Truthfulness: the count line and the rendered list stay in agreement.
       expect(region.children.length).toBe(modelIds.length);
 
       await act(async () => {
@@ -394,12 +371,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
   });
 
   test("the declaration is the authority for both the count and the disclosure list (I-000644)", async () => {
-    // note: The stored declaration is what the App actually runs — and the same list
-    // the model picker seeds from. The catalog's per-protocol bucket is a
-    // third-party snapshot: it may be stale, and its ids may be spelled in a
-    // dialect the provider stopped accepting. Letting it override a stored
-    // declaration is how the card came to report 50 models for a provider
-    // serving 104.
     const stored = ["decl-a", "decl-b", "decl-c", "decl-d", "decl-e"];
     const { win, cleanup } = installDom("http://localhost/dashboard/ws/settings");
     try {
@@ -439,7 +410,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
         );
       });
 
-      // note: The card's count follows the DECLARATION, not the smaller catalog bucket.
       expect(container.textContent).toContain(t("en", "settings.providers.modelCount", { count: stored.length }));
       expect(container.textContent).not.toContain(t("en", "settings.providers.modelCount", { count: 2 }));
 
@@ -453,8 +423,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
 
       const region = container.querySelector("#provider-models-workers-ai");
       if (!(region instanceof win.HTMLElement)) throw new Error("the model-id region is missing");
-      // note: The disclosure and the picker's seed are the SAME list — no silent
-      // disagreement between the card and the dialog.
       expect([...region.querySelectorAll("li")].map((li) => li.textContent)).toEqual(stored);
 
       await act(async () => {
@@ -466,8 +434,6 @@ describe("endpoint meta-line disclosure (AC-20 / I-000208)", () => {
   });
 
   test("a provider with no declaration reports the catalog's vocabulary AS the catalog's", async () => {
-    // note: The catalog bucket is the prefill for a provider the App has not declared
-    // yet; the card must not pass it off as the App's own list.
     const html = render(
       managePayload({
         provider_catalog: [
@@ -498,9 +464,7 @@ describe("model picker trigger", () => {
       }),
     );
     const trigger = `>${t("en", "settings.providers.models.trigger")}</button>`;
-    // note: The template group has a meta line (catalog endpoint) but no declaration — no trigger.
     expect(groupOf(html, "workers-ai label")).not.toContain(trigger);
-    // note: The custom declaration owns the picker flow.
     expect(groupOf(html, "my-gateway")).toContain(trigger);
   });
 });
@@ -515,16 +479,11 @@ describe("remove routes stay intact", () => {
     );
     const row = rowOf(html, "tail-a");
     expect(row).toContain(`>${t("en", "settings.remove")}</button>`);
-    // note: The declaration's remove sits in the group header, outside the rows.
     const header = groupHeaderOf(html, "p");
     expect(header.split(`>${t("en", "settings.remove")}</button>`).length - 1).toBe(1);
   });
 });
 
-/** note: A merged (multi-protocol) catalog row + a declaration stored under one of
- * its collapsed per-protocol ids — the compatibility shape this view reads
- * through `legacy_of`.
- */
 const mergedRow = (): CatalogProvider =>
   catalogEntry("merged-vendor", "template", {
     label: "Merged Vendor",
@@ -599,7 +558,6 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
     const group = groupOf(html, "Merged Vendor");
     expect(group).toContain("anthropic-messages");
     expect(group).toContain("https://api.merged.test/anthropic");
-    // invariant: The collapsed id is the stored identity, never the display name.
     expect(html).not.toContain("merged-vendor-anthropic");
   });
 
@@ -636,8 +594,6 @@ describe("a declaration stored under a collapsed per-protocol id", () => {
       const field = view.win.document.querySelector(
         `input[aria-label="${t("en", "settings.providers.models.fields.contextWindow", { model: "anthropic-a" })}"]`,
       ) as HTMLInputElement | null;
-      // note: The sizes are the model's, not the endpoint's: the same row answers
-      // whatever URL the declaration points at.
       expect(field?.value).toBe("4242");
     } finally {
       await view.cleanup();
@@ -658,7 +614,6 @@ describe("sync trigger (I-000644)", () => {
     );
     const sync = `>${t("en", "settings.providers.sync.trigger")}</button>`;
     expect(groupOf(html, "my-gateway")).toContain(sync);
-    // invariant: A key-only template group has no stored model list to replace.
     expect(groupOf(html, "workers-ai label")).not.toContain(sync);
   });
 });

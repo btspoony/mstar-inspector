@@ -82,7 +82,6 @@ export type VerifyFetch = (input: string | URL | Request, init?: RequestInit) =>
 /** Verification deps (injected for tests): outbound fetch + timeout override. */
 export type VerifyDeps = {
   fetch: VerifyFetch;
-  /** note: Request timeout in ms; defaults to VERIFY_TIMEOUT_MS. Tests shrink it. */
   timeoutMs?: number;
 };
 
@@ -100,11 +99,7 @@ export const verifyFetch: VerifyDeps["fetch"] = (...args) => globalThis.fetch(..
 /** Custom-provider declaration face (subset of AppCustomProvider, spec §6.1). */
 export type CustomVerifyInput = {
   baseUrl: string;
-  /** safety: The declared protocol form — selects the probe's auth shape. */
   api: CustomProviderApi;
-  /** why: Declared model vocabulary, echoed as `models` when the probe 2xxs but
-   *  the body carries no parseable list (spec §6.1: 无抓取 — the vocabulary
-   *  IS the declaration). */
   modelIds: string[];
 };
 
@@ -125,16 +120,10 @@ export type ProviderVerifySpec =
   | { kind: "probe"; url: string; auth: VerifyAuth; keyRejecting?: true }
   | { kind: "unsupported"; note: string };
 
-/** note: omp's `validate "models-endpoint"` entries, by omp provider id (the
- *  vendored snapshot's own header names the source version and rules). */
 const OMP_MODELS_ENDPOINTS: Record<string, { url: string; headersHook?: string }> = Object.fromEntries(
   ompProviderVerify.endpoints.map((entry) => [entry.id, entry]),
 );
 
-/** why: The union alias map (omp provider id → catalog row id) — the SAME map the
- *  provider-catalog generator resolves ids through; read inverted below so an
- *  omp entry filed under `google` / `azure` / `opencode-zen` still reaches the
- *  inspector's `gemini` / `azure-openai` / `opencode`. */
 const OMP_ID_TO_CATALOG_ID: Record<string, string> = ompApiKeyProviders.excluded.alias;
 
 /** The omp provider id whose validate entry covers this inspector builtin
@@ -147,16 +136,9 @@ export function ompProviderIdFor(providerId: string): string {
   return providerId;
 }
 
-/** note: The models-endpoint spec omp's validate data proves for this builtin, or
- *  undefined when omp carries no plain-Bearer entry for it. An entry with a
- *  `headersHook` is skipped: its headers are computed omp-side (a project id
- *  from the environment, a client fingerprint), so a bare dashboard request is
- *  NOT the request omp validated, and the documented entry stays in charge. */
 function ompVerifySpec(providerId: string): Extract<ProviderVerifySpec, { kind: "models" }> | undefined {
   const entry = OMP_MODELS_ENDPOINTS[ompProviderIdFor(providerId)];
   if (entry === undefined || entry.headersHook !== undefined) return undefined;
-  // invariant: omp validates a pasted key against exactly this URL (2xx = valid), so the
-  // entry itself is the evidence that a bogus key is answered non-2xx.
   return { kind: "models", url: entry.url, auth: "bearer", keyRejecting: true };
 }
 
@@ -233,8 +215,6 @@ export const PROVIDER_VERIFY_ENDPOINTS: Record<string, ProviderVerifySpec> = Obj
   PROVIDER_IDS_BUILTIN.map((id) => [id, verifySpecFor(id)]),
 );
 
-/** why: One builtin's spec: omp's vendored validate entry first, else the
- *  documented row. */
 function verifySpecFor(id: string): ProviderVerifySpec {
   const derived = ompVerifySpec(id);
   if (derived !== undefined) return derived;
@@ -247,8 +227,6 @@ function verifySpecFor(id: string): ProviderVerifySpec {
   return documented;
 }
 
-/** safety: Authorization header shape per VerifyAuth. The key NEVER goes elsewhere
- *  (not in the URL — Gemini probes use the header for exactly this reason). */
 function authHeaders(auth: VerifyAuth, key: string): Record<string, string> {
   switch (auth) {
     case "bearer":
@@ -260,23 +238,10 @@ function authHeaders(auth: VerifyAuth, key: string): Record<string, string> {
   }
 }
 
-/** safety: Every verify request's headers: the key's auth shape plus the two headers a
- *  JSON API client sends (some gateways 406 a missing Accept, several WAFs
- *  filter a request with no User-Agent — both read as `unreachable`). */
 function requestHeaders(auth: VerifyAuth, key: string): Record<string, string> {
   return { ...authHeaders(auth, key), accept: "application/json", "user-agent": VERIFY_USER_AGENT };
 }
 
-/**
- * note: Parse the common list-models response shapes into model ids:
- *   - OpenAI shape `{ data: [{ id }] }` (anthropic uses the same `data[].id`)
- *   - Gemini shape `{ models: [{ name: "models/foo" }] }` — the `models/`
- *     prefix is stripped (the selector the pipeline consumes is the bare id)
- * Returns null when the body has NEITHER shape (an error envelope or a shape
- * we do not understand → unexpected_response); [] when the recognized array
- * is present but empty (a valid 2xx with zero models → ok with empty cache).
- * Duplicates are dropped, order preserved.
- */
 function parseModelList(body: unknown): string[] | null {
   if (typeof body !== "object" || body === null) return null;
   const record = body as Record<string, unknown>;
@@ -305,18 +270,10 @@ function parseModelList(body: unknown): string[] | null {
   return null;
 }
 
-/** note: Drop duplicates preserving first-seen order (a provider may list a model
- *  more than once across the two recognized shapes). */
 function dedupeStrings(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-/**
- * invariant: Structured diagnostics for a transport failure or timeout. Carries only the
- * phase, the URL actually requested and the error's name/message: the as-typed
- * key and every request header stay out of logs by construction. A timeout is
- * the same catch with `errName: "TimeoutError"` (AbortSignal.timeout rejects).
- */
 function warnTransportFailure(phase: "models" | "probe" | "custom", url: string, e: unknown): void {
   const err = e as { name?: string; message?: string } | null;
   console.warn("provider-verify", {
@@ -327,14 +284,6 @@ function warnTransportFailure(phase: "models" | "probe" | "custom", url: string,
   });
 }
 
-/**
- * note: Whether the response landed on another ORIGIN than the one requested. A
- * cross-origin redirect is an unexpected response — the requested endpoint's
- * answer is the only evidence a verify may trust, and a gateway that bounces
- * the key elsewhere never proves it. Judged before the status code. A response
- * with no URL (a synthetic Response, never a real fetch result) offers nothing
- * to compare and is decided by its status.
- */
 function responseLeftOrigin(res: Response, requestUrl: string): boolean {
   try {
     return new URL(res.url).origin !== new URL(requestUrl).origin;
@@ -357,24 +306,14 @@ async function fetchSameOrigin(deps: VerifyDeps, url: string, init: RequestInit)
     } catch {
       return res;
     }
-    // note: Fetch's redirect-count limit applies across the same-origin chain too.
     if (next.origin !== origin || redirects === 20) return res;
     await discardFailureBody(res);
     current = next;
   }
 }
 
-/**
- * note: How much of a failure body the quota check may read: provider error JSON is
- * a few hundred bytes, and the cap keeps a huge (or hostile) error page from
- * being buffered just to look for one word.
- */
 const FAILURE_BODY_LIMIT = 512;
 
-/** note: The account-spent vocabulary of a rejection body on the generic arm — the
- *  signal that the provider's ACCOUNT is out of credit rather than the key
- *  being bad. Kept narrow on purpose: an unrelated 400/500 body stays
- *  `unexpected_response`. Never applied to a 403/429 (see `failureReason`). */
 const QUOTA_BODY_SIGNAL = /\b(credits?|quota|billing|payment required|insufficient funds)\b/i;
 
 /**
@@ -402,39 +341,16 @@ export async function failureBodySample(res: Response): Promise<string> {
       sample += decoder.decode(slice, { stream: true });
     }
   } catch {
-    // why: A stream that breaks mid-body keeps what it already delivered: the
-    // provider's error text rides in the first chunk, before the connection
-    // dies, so an empty sample would discard the only evidence there is.
   } finally {
     await reader.cancel().catch(() => {});
   }
   return sample + decoder.decode();
 }
 
-/**
- * note: Release a failure response's body without reading it: the status-decided
- * arms return without consulting the body, but the stream must still be torn
- * down — an unconsumed, uncancelled body pins the provider connection.
- */
 async function discardFailureBody(res: Response): Promise<void> {
   await res.body?.cancel().catch(() => {});
 }
 
-/**
- * why: The ONE classifier every non-2xx verification response goes through, so the
- * three entry points can never disagree. The status decides for every status
- * that carries its own meaning, and only the statuses with none reach the body:
- *   401/403 → invalid_key (the provider refused the key; a 403 billing refusal
- *             is still "this key cannot do this");
- *   402 → quota_exhausted (payment required: the account is spent);
- *   429 → rate_limited (throttled — the key was not judged). The body is never
- *         read here: Gemini answers both a plain throttle and a genuinely
- *         exhausted quota with `RESOURCE_EXHAUSTED` / "Quota exceeded", so no
- *         prose predicate on a 429 can be correct;
- *   any other non-2xx whose bounded body names credits/quota/billing →
- *         quota_exhausted;
- *   anything else → unexpected_response.
- */
 async function failureReason(res: Response): Promise<VerifyFailureReason> {
   if (res.status >= 300 && res.status < 400) {
     await discardFailureBody(res);
@@ -455,12 +371,6 @@ async function failureReason(res: Response): Promise<VerifyFailureReason> {
   return QUOTA_BODY_SIGNAL.test(await failureBodySample(res)) ? "quota_exhausted" : "unexpected_response";
 }
 
-/**
- * note: Verify one BUILT-IN provider key against its list-models endpoint.
- * Non-2xx → the shared `failureReason` classifier; 2xx with an unparseable
- * body → unexpected_response; 2xx with a parseable list (possibly empty) → ok
- * + models. Transport failures/timeouts → unreachable.
- */
 async function verifyModelsEndpoint(
   deps: VerifyDeps,
   spec: Extract<ProviderVerifySpec, { kind: "models" }>,
@@ -498,12 +408,6 @@ async function verifyModelsEndpoint(
   return { ok: true, models };
 }
 
-/**
- * safety: Verify one BUILT-IN provider key by auth probe: a GET on the provider's
- * identity/usage endpoint, where any 2xx proves the key (models stay [] — the
- * probe-only signal). Non-2xx → the shared `failureReason` classifier;
- * transport failures → unreachable.
- */
 async function verifyProbe(
   deps: VerifyDeps,
   spec: Extract<ProviderVerifySpec, { kind: "probe" }>,
@@ -529,15 +433,6 @@ async function verifyProbe(
   return { ok: true, models: [] };
 }
 
-/**
- * invariant: The probe URL a custom provider's declared base URL resolves to: EXACTLY one
- * `…/models` URL. ONE rule, applied to the trailing-slash-stripped path: it
- * already ends in `/models` → kept as is; it ends in `/v1` → `/models`
- * appended; anything else (a bare origin included) → `/v1/models` appended —
- * the standard discovery path for both OpenAI- and Anthropic-protocol
- * providers. Query/fragment take no part in the probe (they would only reach
- * the provider's error paths). null = unparseable, answered as `unreachable`.
- */
 function customModelsUrl(baseUrl: string): URL | null {
   let probe: URL;
   try {
@@ -595,10 +490,7 @@ export const KEY_REJECTING_MODELS_PROBE_URLS: Readonly<Record<string, true>> = O
 
 /** Whether a custom-provider probe on this base URL can REJECT a bogus key. */
 export function customProbeCanRejectKey(baseUrl: string): boolean {
-  // note: Judge the URL the probe will actually request, not the declared host: the
-  // path decides where the key gets sent.
   const probe = customModelsUrl(baseUrl);
-  // note: Unparseable input is unproven (the store refuses such a base URL first).
   if (probe === null) return false;
   return Object.hasOwn(KEY_REJECTING_MODELS_PROBE_URLS, probe.origin + probe.pathname);
 }
@@ -614,24 +506,6 @@ export function builtinProbeCanRejectKey(providerId: string): boolean {
   return spec !== undefined && spec.kind !== "unsupported" && spec.keyRejecting === true;
 }
 
-/**
- * note: Verify one CUSTOM-provider key (spec §6.1/§6.2): probe the declared base
- * URL's models endpoint with the protocol-appropriate auth for the declared
- * `api` form (anthropic-messages → x-api-key + anthropic-version; both
- * openai-* forms and `typesafe` → Bearer — the "declared api protocol
- * equivalent" of the assignment's probe rule). ANY 2xx → ok with models = the
- * declared modelIds, verbatim (the plan's §6.1 echo contract: 成功时 models =
- * 声明 modelIds 回显，无抓取 — the vocabulary IS the declaration; the response
- * body is never scraped); every other non-2xx → the shared `failureReason`
- * classifier (so a spent account is quota_exhausted, a throttled request
- * rate_limited — never unexpected_response);
- * transport failures AND an unparseable base URL → unreachable. Custom
- * providers never write bot_provider_models rows — their
- * dropdown source is the declared model_ids, returned here for callers to
- * display.
- *
- * A 2xx here is NOT always proof of the key: see customProbeCanRejectKey.
- */
 async function verifyCustomProvider(
   deps: VerifyDeps,
   custom: CustomVerifyInput,
@@ -688,10 +562,6 @@ export function protocolInferencePath(api: CustomProviderApi): string | null {
   }
 }
 
-/**
- * note: Whether one fetched entry can serve `api`. An entry stating NO endpoints is
- * kept (unknown, not refused); an entry stating a set decides it.
- */
 function entryServesProtocol(entry: ModelListEntry, api: CustomProviderApi): boolean {
   if (entry.endpoints === null) return true;
   const path = protocolInferencePath(api);
@@ -722,13 +592,6 @@ export type ModelListFetchResult =
   | { ok: true; entries: ModelListEntry[] }
   | { ok: false; reason: VerifyFailureReason; keyless: boolean };
 
-/**
- * note: The `data[]` / `models[]` entry pair `parseModelList` reads, before its id
- * projection: same shapes, same order, same `models/` strip for the Gemini
- * shape (the bare id is what every consumer selects). The ADDITIONAL field is
- * `supported_endpoints` — a provider that publishes no such field answers null
- * for every entry, and the caller must then keep the id rather than assume.
- */
 function parseModelEntries(body: unknown): ModelListEntry[] | null {
   if (typeof body !== "object" || body === null) return null;
   const record = body as Record<string, unknown>;
@@ -760,7 +623,6 @@ function parseModelEntries(body: unknown): ModelListEntry[] | null {
   } else {
     return null;
   }
-  // why: First-seen wins, so a repeated id keeps the endpoints its first entry stated.
   const seen = new Set<string>();
   return out.filter((entry) => (seen.has(entry.id) ? false : (seen.add(entry.id), true)));
 }

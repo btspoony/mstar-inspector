@@ -1,18 +1,3 @@
-/** note: Support page — the platform operator's read-only face.
- *
- * Rendered in a real DOM (happy-dom) because the page's contract lives in its
- * effect: ONE read of the workspace's support view, and the rendered face
- * carries no control over that data. The page is deliberately control-free —
- * every App read, credential, settings write and role change 403s to a granted
- * operator, so a button here could only render something that cannot work. The
- * logout anchor is navigation, not a control on the support data, so the
- * absence pin covers the widget classes (button / form / field) rather than
- * every focusable element.
- *
- * The composition pins live where the faces now live (PageHeader owns the
- * page-title step, FlowSection the section faces, DataTable the table shell +
- * header band) and assert the page keeps no second spelling of them.
- */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +9,6 @@ import { installDom } from "./dom";
 const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/SupportPage.tsx"), "utf8");
 const realFetch = globalThis.fetch;
 
-/** note: The support view's exact AC2 field set (parseSupportView). */
 const VIEW = {
   workspace: { id: "ws_1", name: "Acme", slug: "acme", created_at: "2026-01-01 00:00:00" },
   members: [
@@ -56,15 +40,12 @@ describe("support page", () => {
         ),
       );
 
-      // note: One read, under the addressed workspace's own base.
       expect(calls).toEqual(["/dashboard/acme/api/support/workspace"]);
-      // note: The identity card, the grants card and the member table all render.
       expect(container.textContent).toContain("Acme");
       expect(container.textContent).toContain("ws_1");
       expect(container.textContent).toContain("incident 42");
       expect(container.textContent).toContain("octocat");
       expect(container.textContent).toContain("hubot");
-      // invariant: Read-only by contract: no button, no form, no field.
       expect(container.innerHTML).not.toMatch(/<(button|form|input|select|textarea)[\s>]/);
       expect(container.querySelector('[data-slot="error-state"]')).toBeNull();
 
@@ -104,7 +85,6 @@ describe("support page composition", () => {
     expect(source).toContain("<PageHeader");
     expect(source).toContain("<FlowSection");
     expect(source).toContain("<DataTable");
-    // invariant: The faces moved into the primitives: no second spelling survives here.
     expect(source).not.toContain("text-(length:--typo-heading-24-size)");
     expect(source).not.toContain("text-(length:--typo-heading-16-size)");
     expect(source).not.toContain("bg-(--background-200)");

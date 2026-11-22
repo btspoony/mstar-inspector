@@ -1,16 +1,3 @@
-/**
- * note: The repository detail's 评审配置 tab: one target's review policy, read as what
- * the target RUNS with (`effective`) and, while it inherits, as the workspace
- * defaults beside it (D16 / product spec J4).
- *
- * Two facts decide the whole face:
- * - `follow_workspace_defaults === 1` means the row's own policy columns are
- *   inert, so the four policy controls render read-only over the effective
- *   values; turning inheritance off is itself the save that snapshots them.
- * - every policy save names exactly ONE field and says `follow: 0` — the server
- *   snapshots the fields the body omits from the values the target runs with
- *   now, so this page never has to echo values back.
- */
 import { useEffect, useState, type ReactNode } from "react";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import {
@@ -53,12 +40,6 @@ export type TargetPolicySettings = {
   review_level: ReviewLevel | null;
   check_min_score: number;
   check_pass_verdicts: string[];
-  /**
-   * why: False = the stored verdict array is unreadable, so `check_pass_verdicts`
-   * above is the server's fail-closed placeholder rather than a gate anyone
-   * saved. The gate then renders its read-only recovery copy and nothing on
-   * this face may save a policy (a snapshot would persist the placeholder).
-   */
   check_pass_verdicts_readable: boolean;
 };
 
@@ -80,12 +61,10 @@ export type TargetPolicyPayload = {
     repo_owner: string | null;
     repo_name: string | null;
     app_name: string | null;
-    /** note: The bound App's GitHub facts for the identity row. */
     app_id: number | null;
     app_avatar_url: string | null;
     review_enabled: number;
     follow_workspace_defaults: number;
-    /** note: The target-owned draft switch: 0 = a draft is held until it is ready. */
     review_drafts: 0 | 1;
   };
   effective: TargetPolicyEffective;
@@ -105,7 +84,6 @@ function isPolicySettings(value: unknown): value is TargetPolicySettings {
   );
 }
 
-/** note: The target's effective answers: the policy block plus the draft switch. */
 function isEffectivePolicySettings(value: unknown): value is TargetPolicyEffective {
   if (!isPolicySettings(value)) return false;
   return "reviewDrafts" in value && typeof value.reviewDrafts === "boolean";
@@ -130,7 +108,6 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
   if (appName !== null && typeof appName !== "string") return null;
   const appId = row.app_id;
   const appAvatarUrl = row.app_avatar_url;
-  // note: Missing fields read as null (older payloads), a wrong type rejects.
   if (appId !== undefined && appId !== null && typeof appId !== "number") return null;
   if (appAvatarUrl !== undefined && appAvatarUrl !== null && typeof appAvatarUrl !== "string")
     return null;
@@ -162,31 +139,14 @@ const TRIGGER_LABEL_KEYS: Record<ReviewTriggerMode, DictionaryKey> = {
   manual: "settings.triggerModeManual",
 };
 
-/** note: The switches are native binary controls bound to their label (the house
- *  primitives carry no switch, and a bespoke widget would only duplicate the
- *  keyboard and state handling the platform already gets right). */
 const SWITCH_CLASS = "size-4 accent-(--tone-accent-solid)";
 
-/**
- * note: The policy controls — trigger, depth, the gate score and its verdicts — each
- * inside its own section, shared by the target tab and the workspace-defaults
- * tab, which differ only in what a save says. Every control except the gate
- * saves on selection and reads its value from `settings`, so a failed save
- * simply leaves the stored value on screen. Each control's visible label is
- * its section title, so the controls carry `aria-label`s instead.
- */
 type ReviewPolicyProps = {
   locale: Locale;
   settings: TargetPolicySettings;
-  /** note: The level the depth select's inherit face names as the current default. */
   levelDefault: ReviewLevel | null;
   readOnly: boolean;
-  /**
-   * note: A control the target face owns and the defaults face does not — the draft
-   * switch (D12), rendered with the trigger so it reads as an admission rule.
-   */
   afterTrigger?: ReactNode;
-  /** invariant: The caller's save: the one changed field, and only that field. */
   onSave: (fields: Record<string, unknown>) => Promise<void>;
 };
 
@@ -333,7 +293,6 @@ export function ReviewGateField({
               onClick={() =>
                 void onSave({
                   check_min_score: Number(score),
-                  // note: One entry per checked box, in the vocabulary's order.
                   check_pass_verdicts: PR_VERDICTS.filter((verdict) => verdicts.includes(verdict)),
                 })
               }
@@ -343,9 +302,6 @@ export function ReviewGateField({
           </div>
         </>
       ) : (
-        // why: The stored list is unreadable, so there is no value to edit and no
-        // save that could round-trip it: the same recovery copy the
-        // App-settings face states stands in for the whole gate.
         <p role="status" className="text-sm text-(--tone-warn-fg)">
           {t(locale, "settings.reviewGateUnreadable")}
         </p>
@@ -407,14 +363,6 @@ export function TargetSettingsTab({
 }) {
   const { target, effective, defaults } = payload;
   const inheriting = target.follow_workspace_defaults === 1;
-  /**
-   * note: The stored verdict list is unreadable: `effective.check_pass_verdicts` is
-   * the server's fail-closed placeholder, and EVERY policy save here snapshots
-   * the columns it omits (the server's snapshot rule) — a trigger, depth or
-   * inheritance toggle would write that placeholder over the stored list. The
-   * policy cluster and the inheritance switch are therefore read-only; pause
-   * writes no policy column and stays available.
-   */
   const gateUnreadable = !effective.check_pass_verdicts_readable;
   const [busy, setBusy] = useState(false);
   const path = `${apiBase()}/api/targets/${encodeURIComponent(target.target_id)}`;
@@ -436,17 +384,9 @@ export function TargetSettingsTab({
     }
   }
 
-  /** note: A policy save: the one changed field plus `follow: 0` (the snapshot rule). */
   const savePolicy = (fields: Record<string, unknown>): Promise<void> =>
     save({ ...fields, follow: 0 });
 
-  /**
-   * why: The draft switch (D12): a target-owned admission fact, so it sits beside
-   * the trigger but outside the inheritance read-only group — a repository
-   * following the workspace defaults still owns this answer. Its save names
-   * only `review_drafts` (no `follow`), so it snapshots no policy column and
-   * stays available while the stored gate is unreadable.
-   */
   const draftSwitch = (
     <label className="flex w-fit items-center gap-2 text-sm font-medium">
       <input
@@ -462,8 +402,6 @@ export function TargetSettingsTab({
 
   return (
     <div className="flex flex-col">
-      {/* invariant: Which bot this repository reviews under. Read-only: rebinding a
-          repository to another App is planned, not supported yet. */}
       <FlowSection title={t(locale, "targets.settings.boundApp")}>
         <AppInstallIdentity
           locale={locale}
@@ -491,8 +429,6 @@ export function TargetSettingsTab({
             type="checkbox"
             className={SWITCH_CLASS}
             checked={inheriting}
-            // note: Toggling off snapshots the effective policy into the row, which
-            // would persist the unreadable gate's placeholder.
             disabled={busy || gateUnreadable}
             onChange={(event) => void save({ follow: event.target.checked ? 1 : 0 })}
           />

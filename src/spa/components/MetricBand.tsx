@@ -1,25 +1,9 @@
-/**
- * note: Metric band (DESIGN.md `composition primitives`; compass D4): the r3 strip
- * under a page title, inside the header plane. Each metric is a quiet key
- * over a tabular figure; the strip sits below one hairline and its metrics
- * are separated from each other by one apiece — hairlines are rendered
- * separators, never a trailing edge, so what the band draws never depends on
- * how many metrics a caller passes.
- *
- * Tone is the caller's call, never the band's: an entry carries `tone` only
- * when the page knows the figure means something bad (a refused webhook is a
- * failure; zero of them is not). The band never infers it from the value, so
- * a large healthy count cannot turn red on its own.
- */
 import { Fragment, type ReactNode } from "react";
 import { Separator } from "@design-system";
 
 export type Metric = {
-  /** note: The metric's name — rendered uppercase in the label step. */
   key: ReactNode;
-  /** why: The figure — tabular, so columns of numbers scan. */
   value: ReactNode;
-  /** note: Alert face for the value, on the baseline's `metric bad` rule. */
   tone?: "danger";
 };
 

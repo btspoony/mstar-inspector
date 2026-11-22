@@ -1,18 +1,3 @@
-/**
- * note: The three provider dialogs — the entry points that
- * replaced the inline panels, so the providers list never grows a form
- * (AC-4) and configuring a provider never leaves the settings tab (AC-5).
- *
- * `StepDialog` owns only the shell; every dialog owns its busy state and its
- * failure contract: a rejected submit keeps the dialog open with every typed
- * value and renders the structured reason inline, and only a success dismisses
- * the flow (AC-6/7/8/9). The outcome reaches the card's region on success —
- * the flow has already closed and its local state is gone.
- *
- * One request per submit: the trigger disables while its POST is in flight,
- * and a synchronous ref swallows the second click/Enter that lands before
- * React re-renders the disabled button (I-000207).
- */
 import { useRef, useState } from "react";
 import { t } from "../../i18n";
 import {
@@ -37,15 +22,8 @@ import {
 } from "./data";
 import { NoticeRegion, SaveInFlight, type OpNotice } from "./PageNotice";
 
-/** note: Mirrors `MAX_KEYS_PER_PROVIDER`; the store stays the enforcement point. */
 const KEY_LIMIT = 8;
 
-/**
- * why: A submit prop that REJECTS instead of resolving still has to land in the
- * dialog's own inline region: the never-reject contract belongs to today's
- * callers, so the rejection is caught here rather than surfacing as an
- * unhandled rejection with a disabled form.
- */
 function submitFailed(locale: SpaBoot["locale"]): OpNotice {
   return { kind: "error", message: t(locale, "settings.providers.submitFailed") };
 }
@@ -76,8 +54,6 @@ export function AddProviderDialog({
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [customOpen, setCustomOpen] = useState(false);
-  // note: The catalog entry whose console branch handed over to the declaration
-  // form — its protocol and URL shape seed the custom dialog.
   const [customPrefill, setCustomPrefill] = useState<CatalogProvider | null>(null);
   const selected = selectedCatalogProvider(payload.provider_catalog, selectedId);
   const imageId = payload.app.sandbox_image_id;
@@ -95,8 +71,6 @@ export function AddProviderDialog({
     setNotice(null);
   }
 
-  // note: A failure stays in the dialog (the card's region is behind the overlay);
-  // a success closes the flow and reports to the card, where it survives.
   function report(outcome: OpNotice): void {
     if (outcome.kind === "success") onOutcome(outcome);
     else setNotice(outcome);
@@ -132,8 +106,6 @@ export function AddProviderDialog({
           <div className="flex flex-col gap-3">
             <NoticeRegion notice={notice} />
             {selected.eligibility === "unavailable" ? (
-              // note: Selectable for discovery, unsaveable by construction: no form,
-              // so no submit path exists to reach the store.
               <p className="text-sm text-muted-foreground">
                 {t(locale, "settings.eligibilityUnavailable", { image: imageId })}
               </p>
@@ -155,8 +127,6 @@ export function AddProviderDialog({
                   onOutcome={report}
                   onDone={close}
                   onCustomEndpoint={() => {
-                    // why: The built-in id stays reserved, so the declaration gets
-                    // its own id — the same custom form, seeded from this row.
                     close();
                     setCustomPrefill(selected);
                     setCustomOpen(true);
@@ -188,9 +158,6 @@ export function AddProviderDialog({
                 type="button"
                 variant="outline"
                 onClick={() => {
-                  // invariant: The prototype's secondary entry: the catalog cannot declare
-                  // an id it has never heard of, so the custom flow takes over
-                  // from here with the same payload.
                   close();
                   setCustomPrefill(null);
                   setCustomOpen(true);
@@ -204,7 +171,6 @@ export function AddProviderDialog({
         )}
       </StepDialog>
       <CustomProviderDialog
-        // why: The prefill seeds state at mount, so a new source entry remounts.
         key={customPrefill?.id ?? "custom"}
         locale={locale}
         open={customOpen}
@@ -243,11 +209,8 @@ export function AddKeyDialog({
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** note: The provider id the verify POST names. */
   provider: string;
-  /** note: The group's display label — the dialog title's subject. */
   label: string;
-  /** note: Keys the provider's pool already holds. */
   keyCount: number;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
@@ -355,15 +318,12 @@ export function CustomProviderDialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   payload: ProviderManagementPayload;
-  /** invariant: A console-only catalog entry's declaration seed (protocol + URL shape). */
   prefill?: { label: string; baseUrl: string; api: string | null };
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
 }) {
   const seedApi = prefill?.api ?? payload.custom_provider_api_ids[0] ?? "";
   const [providerId, setProviderId] = useState("");
-  // why: Seeded from the catalog entry the console branch handed over, so the
-  // endpoint shape is never retyped (and never restated as a second copy).
   const [baseUrl, setBaseUrl] = useState(prefill?.baseUrl ?? "");
   const [api, setApi] = useState(seedApi);
   const [modelIds, setModelIds] = useState("");
@@ -525,26 +485,17 @@ export function ProviderConfigForm({
 }: {
   locale: SpaBoot["locale"];
   provider: CatalogProvider;
-  /** note: EVERY stored key of the selected provider — one masked line per row. */
   storedKeys: ProviderKeyRow[];
   custom: ProviderManagementPayload["custom_providers"][number] | undefined;
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onOutcome: (notice: OpNotice) => void;
   onDone: () => void;
-  /** invariant: Console-only rows: hand the declaration to the custom form, prefilled. */
   onCustomEndpoint: () => void;
 }) {
   const [key, setKey] = useState("");
   const [accountId, setAccountId] = useState("");
-  // why: Seeded from the STORED declaration when the provider already has one: the
-  // pool is bound to that endpoint, and re-submitting the catalog default
-  // while adding a key would only trip the store's endpoint lock (the
-  // backstop for a hand-typed override). Catalog prefill covers the first key.
   const [baseUrl, setBaseUrl] = useState(custom?.base_url ?? provider.base_url ?? "");
-  // note: The protocol this declaration materializes. A stored declaration's api is a
-  // stored fact (another protocol means remove-then-add), so the control only
-  // appears on the first-time create; the default is the row's own protocol.
   const protocolOptions = provider.protocols ?? [];
   const [api, setApi] = useState<string>(custom?.api ?? provider.api ?? "");
   const showProtocol = custom === undefined && protocolOptions.length > 1;
@@ -552,8 +503,6 @@ export function ProviderConfigForm({
   const inFlight = useRef(false);
   const formKind = providerFormKind(provider);
 
-  // note: Both add-flow forms report through the dialog that owns them; a rejected
-  // submit keeps the typed input for correction.
   async function submitTemplate(): Promise<void> {
     if (inFlight.current) return;
     inFlight.current = true;
@@ -566,8 +515,6 @@ export function ProviderConfigForm({
           template_id: provider.id,
           base_url: baseUrl,
           account_id: accountId,
-          // invariant: Only a multi-protocol row names one; a single-protocol row's save
-          // takes the server's default protocol.
           ...(showProtocol ? { api } : {}),
           key,
         });
@@ -610,9 +557,6 @@ export function ProviderConfigForm({
   }
 
   if (formKind === "template") {
-    // why: The effective base URL mirrors the save flow: the typed override when
-    // present, else the catalog prefill. The account-id field tracks its
-    // {account_id} placeholder, so an override can add or remove the demand.
     const effectiveBaseUrl = baseUrl.trim() !== "" ? baseUrl.trim() : provider.base_url;
     const needsAccountId = effectiveBaseUrl !== null && effectiveBaseUrl.includes("{account_id}");
     return (
@@ -630,10 +574,6 @@ export function ProviderConfigForm({
                 {custom.base_url} · {custom.api} · {custom.model_ids.join(", ")}
               </p>
             ) : null}
-            {/* note: The pool's existing rows, one line per stored key: submitting
-                below APPENDS (re-submitting a listed key updates its row in
-                place), so the pool a template already holds is visible before
-                another key is added. */}
             {storedKeys.map((stored) => (
               <p key={stored.keyId} className="text-sm text-muted-foreground">
                 {stored.last4
@@ -650,8 +590,6 @@ export function ProviderConfigForm({
               value={api}
               onValueChange={(next) => {
                 setApi(next);
-                // note: The endpoint follows the protocol; the field below stays
-                // editable for a gateway in front of it.
                 const option = protocolOptions.find((candidate) => candidate.api === next);
                 setBaseUrl(option?.base_url ?? "");
               }}
@@ -711,10 +649,6 @@ export function ProviderConfigForm({
   }
 
   if (formKind === "console") {
-    // note: No endpoint field can live on this row: the store refuses a custom
-    // declaration whose id is a built-in id, so the row's own id can never
-    // carry a user endpoint. The action opens the declaration form under a
-    // user-chosen id, prefilled with this row's protocol and URL shape.
     return (
       <div className="flex flex-col gap-3">
         <p className="text-sm text-muted-foreground">{t(locale, "settings.consoleOnly")}</p>
@@ -736,9 +670,6 @@ export function ProviderConfigForm({
         void submitKey();
       }}
     >
-      {/* note: The pool's rows, one line per stored key: submitting the field below
-          APPENDS to this pool (re-submitting a listed key updates its row in
-          place) — no client-side fold, so a second key stays visible. */}
       {storedKeys.map((stored) => (
         <p key={stored.keyId} className="text-sm text-muted-foreground">
           {stored.last4

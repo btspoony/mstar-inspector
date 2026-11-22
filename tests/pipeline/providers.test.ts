@@ -1,15 +1,3 @@
-/**
- * why: Shared provider mapping tests (bugbot BB-2 → AL-24-5;
- * catalog breadth): the allowlist that maps per-App BYOK provider ids to the env
- * var names injected into the review container. The global-env picker
- * (`pickProviderKeys`) was retired with the zero-global-fallback cutover
- * Keys come only from the App's per-App config, so there
- * is nothing to pick from a worker-env-shaped record anymore. The mapping
- * lives in the generated contract src/contracts/provider-catalog.generated.ts
- * (the SSOT); src/pipeline/provider-catalog.ts is the
- * hand-written pipeline face re-exporting it — the export contract
- * (providerEnvName / PROVIDER_ENV_NAMES) is unchanged.
- */
 
 import { describe, expect, test } from "bun:test";
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -32,7 +20,6 @@ import { PROVIDER_VERIFY_ENDPOINTS } from "../../src/dashboard/provider-verify";
 import { buildCatalog } from "../../scripts/generate-provider-catalog";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
-/** note: The vendored omp provider union input (the generator's third input). */
 const OMP_SNAPSHOT = JSON.parse(
   readFileSync(join(REPO_ROOT, "scripts/provider-catalog/generated/omp-api-key-providers.json"), "utf8"),
 ) as {
@@ -56,20 +43,13 @@ const OMP_SNAPSHOT = JSON.parse(
   };
 };
 
-/** note: The union's row ids: one per provider group (records group by
- *  `sourceProviderId ?? id`). Order follows the vendored file. */
 const OMP_ROW_IDS = [...new Set(OMP_SNAPSHOT.providers.map((record) => record.sourceProviderId ?? record.id))];
 
-/** note: The models.dev snapshot the generator reads: the NEWEST dated file in
- *  `inputs/`, since the generator discovers it exactly that way (an ISO date
- *  sorts as a date). Exactly one file lives there (the fetch prunes older ones). */
 const CATALOG_DIR = join(REPO_ROOT, "scripts/provider-catalog/inputs");
 const SNAPSHOT_FILES = readdirSync(CATALOG_DIR).filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name));
 const SNAPSHOT_FILE = [...SNAPSHOT_FILES].sort().at(-1)!;
 const SNAPSHOT_PATH = join(CATALOG_DIR, SNAPSHOT_FILE);
 const GENERATOR_SOURCE = readFileSync(join(REPO_ROOT, "scripts/generate-provider-catalog.ts"), "utf8");
-/** note: The builtin sourceKeys, extracted from the generator's BUILTIN_ORDER
- *  table (the SSOT — a sourceKey change must update this lock in the same commit). */
 const BUILTIN_SOURCE_KEYS = [...GENERATOR_SOURCE.matchAll(/sourceKey: "([^"]+)"/g)].map((m) => m[1]!);
 const DEDUPED_SNAPSHOT_KEYS = ["cloudflare-workers-ai"];
 const SNAPSHOT = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Record<string, {
@@ -78,8 +58,6 @@ const SNAPSHOT = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Record<strin
   doc: string | null;
   model_ids: string[];
 }>;
-/** note: Snapshot keys that become breadth rows: not a builtin sourceKey, not the
- *  curated dedupe, not taken over by a mixed-protocol omp row, id-grammar valid. */
 const BREADTH_KEYS = Object.keys(SNAPSHOT).filter(
   (key) =>
     !BUILTIN_SOURCE_KEYS.includes(key) &&
@@ -103,8 +81,6 @@ describe("shared provider mapping", () => {
   test("ark maps to ARK_API_KEY — the in-image ark base provider's key env (AL-24-5)", () => {
     expect(PROVIDERS["ark"]).toEqual({ envName: "ARK_API_KEY", label: "Ark" });
     expect(providerEnvName("ark")).toBe("ARK_API_KEY");
-    // invariant: The provider set is the SSOT the dashboard PROVIDER_IDS mirror locks
-    // against (tests/worker/app-config.test.ts parity lock).
     expect(Object.keys(PROVIDERS)).toHaveLength(19);
   });
 });
@@ -112,17 +88,12 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
   test("the catalog is 19 builtin + the full template tier (curated + snapshot breadth + omp union)", () => {
     const builtin = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "builtin");
     const template = Object.entries(PROVIDER_CATALOG).filter(([, e]) => e.tier === "template");
-    // invariant: The 19 runner-consumable builtins are immutable (Global
-    // Constraints). The template tier is derived, not restated: every omp
-    // union row (all new, by construction) plus everything that was already
-    // template-tier before the union.
     expect(builtin).toHaveLength(19);
     const unionIds = OMP_ROW_IDS;
     for (const id of unionIds) {
       expect(template.map(([entryId]) => entryId), id).toContain(id);
       expect(PROVIDER_CATALOG[id]!.tier, id).toBe("template");
     }
-    // note: workers-ai + the committed breadth rows + one row per union provider.
     expect(template).toHaveLength(1 + BREADTH_KEYS.length + unionIds.length);
     expect(Object.keys(PROVIDER_CATALOG)).toHaveLength(19 + template.length);
     expect(Object.keys(PROVIDERS)).toEqual(builtin.map(([id]) => id));
@@ -138,8 +109,6 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
       if (entry.tier === "builtin") {
         expect(entry.envName, id).not.toBeNull();
-        // note: A builtin carries an `api` only as the declaration prefill of a
-        // console-only row (the settings face opens the custom form with it).
         if (entry.api !== null) expect([...CUSTOM_PROVIDER_API_IDS] as string[], id).toContain(entry.api);
       } else {
         expect(entry.envName, id).toBeNull();
@@ -149,9 +118,6 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
   });
 
   test("the console-only builtins carry the declaration prefill the settings face derives from", () => {
-    // note: Both are verify-`unsupported` (no probeable host of their own), so the
-    // add-provider console branch opens the custom form with these values
-    // instead of a dead end — one source, never a second hand-copied URL.
     for (const [id, shape] of [
       ["azure-openai", "https://{resource}.openai.azure.com/openai/deployments/{deployment}"],
       ["ai-gateway", "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway}"],
@@ -164,12 +130,6 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
   });
 
   test("a builtin catalog entry carries an `api` prefill exactly where verification is unsupported", () => {
-    // note: The settings face routes a non-verifiable builtin to the add-provider
-    // console branch, and that branch opens the custom form prefilled from the
-    // catalog's `api` + `baseUrl`. The catalog and the verify endpoint map are
-    // built independently, so pin their agreement here: a future hostless
-    // builtin cannot reach the console branch with an empty prefill, and a
-    // verifiable one cannot carry a stray declaration prefill.
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
       if (entry.tier !== "builtin") continue;
       expect(entry.api !== null, id).toBe(PROVIDER_VERIFY_ENDPOINTS[id]?.kind === "unsupported");
@@ -183,8 +143,6 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
     expect(entry!.label).toBe("Cloudflare Workers AI");
     expect(entry!.baseUrl).toBe("https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/v1");
     expect(entry!.api).toBe("openai-completions");
-    // note: The template materializes into a custom-provider declaration at save
-    // time; its key then rides the credential payload under its own id.
     expect(entry!.models.length).toBeGreaterThan(0);
     expect(entry!.doc).toBe("https://developers.cloudflare.com/workers-ai/models/");
   });
@@ -199,10 +157,6 @@ describe("provider catalog tiers (spec §5; breadth)", () => {
 });
 
 describe("PROVIDER_IDS_COMMON display tier (AD-547)", () => {
-  // note: The locked display order: exactly these 5 ids, shown
-  // first in the Add-provider picker; every other entry renders under the
-  // 目录模板 group. Display-only — the runner BYOK allowlist remains
-  // PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
   const COMMON_DISPLAY_ORDER = ["anthropic", "openai", "gemini", "copilot", "xai"];
 
   test("is exactly the 5 locked common ids in the frozen display order", () => {
@@ -220,14 +174,9 @@ describe("PROVIDER_IDS_COMMON display tier (AD-547)", () => {
   });
 
   test("carries zero runner semantics — the BYOK allowlist surfaces and entry shape are untouched", () => {
-    // invariant: The runner contract stays builtin-only (19 ids / 19 env names), and
-    // no generated catalog entry gains a display marker (AD-547 rejected
-    // reshaping the generated entry type for display needs).
     expect(PROVIDER_IDS_BUILTIN).toHaveLength(19);
     expect(PROVIDER_ENV_NAMES).toHaveLength(19);
     for (const [id, entry] of Object.entries(PROVIDER_CATALOG)) {
-      // invariant: `protocols` is the ONLY addition to the seven-key entry shape, and only
-      // where the provider ships more than one protocol.
       const expected =
         entry.protocols === undefined
           ? ["api", "baseUrl", "doc", "envName", "label", "models", "tier"]
@@ -243,25 +192,15 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
   const snapshot = SNAPSHOT;
   const generatorSource = GENERATOR_SOURCE;
   const builtinSourceKeys = BUILTIN_SOURCE_KEYS;
-  // note: Breadth rule (b): snapshot keys deduped into a hand-curated template.
   const dedupedSnapshotKeys = DEDUPED_SNAPSHOT_KEYS;
 
   test("the generator's id-pattern copy is byte-equal to the dashboard CUSTOM_PROVIDER_ID_PATTERN", () => {
-    // why: The generator hardcodes the store's grammar as a literal (zero
-    // generation-time repo imports); drift would silently widen/narrow the
-    // breadth enumeration.
     expect(generatorSource).toContain(`/${CUSTOM_PROVIDER_ID_PATTERN.source}/`);
   });
 
   test("every snapshot key is exactly one of: breadth template row, builtin sourceKey, dedupe, or id-grammar skip", () => {
     const templateIds = new Set(Object.keys(TEMPLATE_PROVIDERS));
     const expectedBreadth = BREADTH_KEYS;
-    // invariant: No excluded snapshot key appears as a TEMPLATE row (rule (a) prevents
-    // duplicate vendor rows like a `google` template beside the `gemini`
-    // builtin; plan-time verification: 18 sourceKey exclusions, 1 dedupe,
-    // 0 additional grammar skips — wafer.ai fails the regex but is already a
-    // sourceKey exclusion). Some sourceKeys coincide with their builtin id
-    // (`anthropic` → `anthropic`) — those live in the builtin tier only.
     for (const key of [...builtinSourceKeys, ...dedupedSnapshotKeys]) {
       expect(templateIds.has(key), key).toBe(false);
     }
@@ -269,7 +208,6 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       expect(templateIds.has(key), key).toBe(true);
       expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
     }
-    // note: breadth rows + 1 curated template + one row per omp provider group.
     expect(templateIds.size).toBe(BREADTH_KEYS.length + 1 + OMP_ROW_IDS.length);
   });
 
@@ -280,17 +218,11 @@ describe("provider catalog breadth enumeration (spec § Providers contract 2)", 
       const entry = PROVIDER_CATALOG[key]!;
       expect(entry.label, key).toBe(source.name);
       expect(entry.envName, key).toBeNull();
-      // note: The snapshot `api` field carries the base URL — shipped verbatim
-      // (may be null or non-https; the save flow's base-URL override makes
-      // such rows materializable).
       expect(entry.baseUrl, key).toBe(source.api ?? null);
-      // note: The snapshot carries NO protocol field — the ecosystem-norm default.
       expect(entry.api, key).toBe("openai-completions");
       expect(entry.models, key).toEqual(source.model_ids);
       expect(entry.doc, key).toBe(source.doc ?? null);
     }
-    // note: The curated workers-ai entry is NOT snapshot-derived — its 8-model
-    // vocabulary is preserved verbatim (the model test above pins it).
     expect(PROVIDER_CATALOG["workers-ai"]!.models.length).toBe(8);
   });
 });
@@ -304,35 +236,25 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     const snapshot = SNAPSHOT as Record<string, unknown>;
     expect(Object.keys(snapshot).length).toBeGreaterThan(0);
     const generator = readFileSync(generatorPath, "utf8");
-    // invariant: The pin is the committed snapshot file — provenance is the vendored
-    // JSON, never a network source. The date is discovered, never restated in
-    // code: exactly one snapshot lives here and it must be the newest match.
     expect(SNAPSHOT_FILES).toHaveLength(1);
     const pinnedDate = SNAPSHOT_FILE.replace(/^models\.dev-/, "").replace(/\.json$/, "");
     expect(pinnedDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    // invariant: The generator has no date constant; it asks the shared discovery module
-    // for the newest snapshot, so a new file needs no code edit.
     expect(generator).not.toMatch(/const SNAPSHOT_DATE =/);
     expect(generator).toContain('from "./provider-catalog/lib/snapshot"');
-    // invariant: Zero authoring-time network: the generator reads only the snapshot.
     expect(generator).not.toMatch(/\bfetch\s*\(/);
   });
 
   test("the generated contract is static pure data — zero imports, zero runtime fetch, snapshot pin disclosed", () => {
     const source = readFileSync(contractPath, "utf8");
     expect(source).not.toMatch(/\bfetch\s*\(/);
-    // invariant: PURE DATA: the dashboard imports this module (Q2 boundary), so it must
-    // not import anything of any kind.
     expect(source).not.toMatch(/^import\s/m);
     expect(source).not.toMatch(/from\s+"[.][.]?\//);
-    // invariant: The provenance header names the pinned snapshot and the authoring path.
     expect(source).toContain(SNAPSHOT_FILE);
     expect(source).toContain("DO NOT EDIT BY");
   });
 
   test("the generated header's skip-count audit names every exclusion rule and its count", () => {
     const source = readFileSync(contractPath, "utf8");
-    // invariant: Every snapshot key is accounted for; each rule names its skip count.
     expect(source).toContain(`${Object.keys(SNAPSHOT).length} snapshot keys → ${BREADTH_KEYS.length} breadth template entries`);
     expect(source).toMatch(/rule \(a\) excluded as a builtin sourceKey \(18/);
     expect(source).toContain("wafer.ai");
@@ -343,14 +265,9 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
 
   test("the pipeline face is the hand-written re-export (contract only), not generated output", () => {
     const face = readFileSync(facePath, "utf8");
-    // note: consumer.ts imports providerEnvName from the face; the re-export chain
-    // must survive any rewiring. The retired custom scalar helper is gone —
-    // no second credential-transport contract survives on this face.
     expect(face).toContain('export * from "../contracts/provider-catalog.generated"');
     expect(face).not.toContain("customProviderEnvName");
     expect(face).not.toContain("CUSTOM_PROVIDER_ENV");
-    // invariant: The face is NOT part of the generated byte-identity compare (below) —
-    // it must not claim to be generated.
     expect(face).not.toContain("GENERATED FILE");
   });
 
@@ -369,15 +286,9 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
     const after = readFileSync(contractPath, "utf8");
     const afterLimits = readFileSync(limitsPath, "utf8");
     try {
-      // invariant: Both runs reproduce both committed artifacts exactly — the committed
-      // modules stay the single source, generated, never hand-edited. (The
-      // hand-written pipeline face is NOT part of this compare.)
       expect(after).toBe(before);
       expect(afterLimits).toBe(beforeLimits);
     } finally {
-      // why: Keep the worktree clean even on a drift failure: restore the
-      // committed bytes so the diff a reviewer sees is the test's report,
-      // not a silently regenerated module.
       if (after !== before) writeFileSync(contractPath, before);
       if (afterLimits !== beforeLimits) writeFileSync(limitsPath, beforeLimits);
     }
@@ -386,9 +297,6 @@ describe("provider catalog provenance + determinism (post-breadth re-target)", (
 
 describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   const repoRoot = join(import.meta.dir, "../..");
-  // note: The committed snapshot, seeded with a colliding breadth-eligible key per
-  // test case. buildCatalog is imported pure (the generator's read/write tail
-  // is gated behind import.meta.main) — no writer spawn, no file I/O.
   const snapshot = JSON.parse(readFileSync(SNAPSHOT_PATH, "utf8")) as Record<
     string,
     { id: string; name: string; env: string[]; api: string | null; doc: string | null; model_ids: string[] }
@@ -399,10 +307,6 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   });
 
   test("a snapshot key colliding with a builtin id throws naming the key, the shadowed entry, and the remediation", () => {
-    // invariant: `gemini` is a builtin catalog id whose sourceKey is `google` — a
-    // refreshed snapshot carrying a `gemini` row survives rules (a)-(c) and
-    // reaches the breadth assignment (no collision exists in the committed
-    // snapshot; the collision is seeded here).
     expect(() => buildCatalog(seeded("gemini", "Gemini Impersonator"))).toThrow(
       'snapshot key "gemini" would overwrite the existing builtin entry "Google Gemini"',
     );
@@ -415,23 +319,16 @@ describe("generator breadth-collision guard (audit DEBT-46-05)", () => {
   });
 
   test("a prototype-chain key (constructor) does not false-positive the guard and lands in the catalog", () => {
-    // safety: `constructor` survives rules (a)-(c) and is an inherited
-    // Object.prototype property — an `in`-based guard would throw a
-    // collision that does not exist. The guard is own-property based, so
-    // the seeded key must pass through as an ordinary breadth template row.
     const { catalog, audit } = buildCatalog(seeded("constructor", "Constructor Impersonator"), OMP_SNAPSHOT);
     const entry = catalog["constructor"] as { tier: string; label: string };
     expect(Object.hasOwn(catalog, "constructor")).toBe(true);
     expect(entry.tier).toBe("template");
     expect(entry.label).toBe("Constructor Impersonator");
-    expect(audit.breadthCount).toBe(BREADTH_KEYS.length + 1); // note: committed breadth rows + the seeded key
+    expect(audit.breadthCount).toBe(BREADTH_KEYS.length + 1);
   });
 
   test("the guard is unreachable with the committed snapshot (audit: no collision today)", () => {
-    // note: Snapshot only: the union pass is a separate, optional input.
     const { catalog, audit } = buildCatalog(snapshot);
-    // invariant: Without the union input, the mixed-protocol omp-owned keys are not
-    // excluded, so the snapshot alone contributes those rows too.
     const snapshotOnlyBreadth = BREADTH_KEYS.length + (OMP_SNAPSHOT.ownsSnapshotKeys ?? []).length;
     expect(Object.keys(catalog)).toHaveLength(19 + 1 + snapshotOnlyBreadth);
     expect(audit.breadthCount).toBe(snapshotOnlyBreadth);
@@ -443,7 +340,6 @@ describe("omp provider union (third generator input)", () => {
   const snapshotOnly = JSON.parse(
     readFileSync(SNAPSHOT_PATH, "utf8"),
   ) as Record<string, never>;
-  /** note: The vendored records grouped by the provider row that carries them. */
   const groups = new Map<string, typeof OMP_SNAPSHOT.providers>();
   for (const record of OMP_SNAPSHOT.providers) {
     const providerId = record.sourceProviderId ?? record.id;
@@ -457,21 +353,13 @@ describe("omp provider union (third generator input)", () => {
       expect(entry!.tier, providerId).toBe("template");
       expect(entry!.envName, providerId).toBeNull();
       expect(CUSTOM_PROVIDER_ID_PATTERN.test(providerId), providerId).toBe(true);
-      // note: The default protocol is the base record (the one whose id is the
-      // provider id) when the group ships one; the generator deliberately falls
-      // back to the first shipped record when it does not, so the row's scalars
-      // are pinned against whichever record that contract chose. (This
-      // snapshot ships every record of every group, so the first record IS the
-      // first shipped one.)
       const defaultRecord = records.find((record) => record.id === providerId) ?? records[0]!;
       expect([...CUSTOM_PROVIDER_API_IDS] as string[], providerId).toContain(defaultRecord.api);
       expect(entry!.api, providerId).toBe(defaultRecord.api);
       expect(entry!.baseUrl, providerId).toBe(defaultRecord.baseUrl);
       expect(entry!.label, providerId).toBe(defaultRecord.label);
       expect(entry!.label.length, providerId).toBeGreaterThan(0);
-      // note: Prefill is the vendored vocabulary verbatim — no prefix cap.
       expect(entry!.models, providerId).toEqual(defaultRecord.models);
-      // invariant: No per-protocol id is a row of its own: the split this shape removes.
       for (const record of records) {
         if (record.id === providerId) continue;
         expect(Object.hasOwn(PROVIDER_CATALOG, record.id), record.id).toBe(false);
@@ -494,20 +382,15 @@ describe("omp provider union (third generator input)", () => {
       const entry = PROVIDER_CATALOG[providerId]!;
       const apis = records.map((record) => record.api);
       if (records.length === 1) {
-        // note: A single-protocol row keeps the seven-key shape: its own scalars ARE
-        // its one option.
         expect(entry.protocols, providerId).toBeUndefined();
         continue;
       }
       multiProtocolGroups += 1;
       const options = entry.protocols!;
       expect(options, providerId).toHaveLength(records.length);
-      // note: The default option is byte-equal to the row's own scalars.
       expect(entry.api, providerId).toBe(options[0]!.api);
       expect(options[0]!.baseUrl, providerId).toBe(entry.baseUrl);
       expect(options[0]!.models, providerId).toEqual(entry.models);
-      // invariant: Every protocol is named exactly once, and the remaining options follow
-      // in code-unit api order — never the snapshot's incidental order.
       expect([...options.map((option) => option.api)].sort(), providerId).toEqual([...apis].sort());
       const rest = options.slice(1).map((option) => option.api);
       expect(rest, providerId).toEqual([...rest].sort());
@@ -517,14 +400,10 @@ describe("omp provider union (third generator input)", () => {
         expect(option.models, `${providerId}/${option.api}`).toEqual(record.models);
       }
     }
-    // why: The committed snapshot really does carry mixed-protocol providers — the
-    // rule above is not vacuously true.
     expect(multiProtocolGroups).toBeGreaterThan(0);
   });
 
   test("the collapsed record ids map back to the provider row that absorbed them", () => {
-    // invariant: Derived from the vendored snapshot, never hand-listed: every record whose
-    // id is not its provider id is collapsed into that provider's row.
     const expected: Record<string, string> = {};
     for (const record of OMP_SNAPSHOT.providers) {
       const providerId = record.sourceProviderId ?? record.id;
@@ -540,7 +419,6 @@ describe("omp provider union (third generator input)", () => {
     const owned = OMP_SNAPSHOT.ownsSnapshotKeys ?? [];
     expect(owned.length).toBeGreaterThan(0);
     for (const key of owned) {
-      // note: A replacement row exists for the key itself or for a per-protocol id.
       const replacement = OMP_SNAPSHOT.providers.filter(
         (record) => record.id === key || record.sourceProviderId === key,
       );
@@ -548,9 +426,6 @@ describe("omp provider union (third generator input)", () => {
       expect(PROVIDER_CATALOG[key], key).toBeDefined();
       expect(PROVIDER_CATALOG[key]!.tier, key).toBe("template");
     }
-    // invariant: Regression lock: `google-vertex` spans several protocols but ships no
-    // API-key env, so it has no replacement record. Taking its models.dev key
-    // over would drop the provider from the catalog entirely.
     expect(owned).not.toContain("google-vertex");
     expect(PROVIDER_CATALOG["google-vertex"]).toMatchObject({
       tier: "template",
@@ -583,16 +458,12 @@ describe("omp provider union (third generator input)", () => {
         },
       ],
     });
-    // invariant: The pre-existing builtin row is untouched and the record is audited.
     expect((catalog["anthropic"] as { tier: string }).tier).toBe("builtin");
     expect(audit.ompAlreadyPresent).toContain("anthropic");
     expect(audit.ompRowCount).toBe(0);
   });
 
   test("an alias whose target is not a catalog row throws instead of silently dropping the provider", () => {
-    // invariant: Rule (b) asserts the provider is covered BY another row; a target that
-    // does not resolve would drop the provider while the generated header kept
-    // claiming coverage.
     expect(() =>
       buildCatalog(snapshotOnly, {
         source: OMP_SNAPSHOT.source,
@@ -603,7 +474,6 @@ describe("omp provider union (third generator input)", () => {
     ).toThrow(
       'omp provider "moonshot" aliases "moonshot-ai-retired", which is not a catalog row — fix scripts/provider-catalog/generated/omp-api-key-providers.json',
     );
-    // note: The same alias with a resolvable target is an ordinary rule-(b) skip.
     const { catalog, audit } = buildCatalog(snapshotOnly, {
       source: OMP_SNAPSHOT.source,
       ompProviderIds: ["moonshot"],
@@ -643,11 +513,6 @@ describe("per-model size table (provider-model-limits.generated)", () => {
   });
 
   test("every catalog provider id resolves in the table or is named in the explicit skip list", () => {
-    // invariant: Skipped by rule, not by accident: a union row whose provider id is not a
-    // models.dev key has no directory row to draw numbers from (a merged row
-    // whose id IS a key draws them, see the next test) and `cursor` is
-    // local-only metadata — the table states no size for either rather than
-    // inventing one.
     const SKIPPED_PROVIDERS = new Set([
       "cursor",
       ...OMP_ROW_IDS.filter((id) => !Object.hasOwn(SNAPSHOT, id)),
@@ -664,8 +529,6 @@ describe("per-model size table (provider-model-limits.generated)", () => {
   });
 
   test("a merged provider row draws sizes from the models.dev key its id names, over every protocol's vocabulary", () => {
-    // invariant: The union owns the vocabulary, the directory only donates numbers, so a
-    // provider that used to ship one row per protocol has real sizes here.
     const owned = OMP_SNAPSHOT.ownsSnapshotKeys ?? [];
     expect(owned.length).toBeGreaterThan(0);
     for (const key of owned) {
@@ -676,8 +539,6 @@ describe("per-model size table (provider-model-limits.generated)", () => {
       expect(sizes.length, key).toBeGreaterThan(0);
       const vocabulary = [...entry.models, ...(entry.protocols ?? []).flatMap((option) => option.models)];
       for (const modelId of sizes) expect(vocabulary, `${key}/${modelId}`).toContain(modelId);
-      // invariant: A non-default protocol's ids are sized too: the table iterates the
-      // union vocabulary, not just the row's own scalar list.
       if (entry.protocols !== undefined) {
         const secondary = new Set(entry.protocols.slice(1).flatMap((option) => option.models));
         expect(sizes.some((modelId) => secondary.has(modelId)), key).toBe(true);

@@ -1,22 +1,3 @@
-/**
- * note: Review concurrency at the queue consumer's admission decision
- * (iteration spec review-concurrency §1.1/§2.2).
- *
- * The runtime-config store (src/dashboard/runtime-config-store.ts) owns the
- * parse, the defaults and the conservative answer; this module is the ONE
- * export the pipeline consumes — `readReviewConcurrency` — so the consumer
- * never imports a dashboard route surface. It adds exactly one thing: the
- * structured warn a degraded read owes the operator.
- *
- * Why the warn lives here: the store answers `degraded: true` instead of
- * throwing (a broken settings read must not admit unlimited reviews), and the
- * consumer's log channel is the one place these lines are read. Exactly one
- * line per degraded read — never per level, never per retry.
- *
- * The log fields are workspace-scoped: the caps read carries no PR identity,
- * so it cannot ride `ConsumerLogFields` (the same reason `SweepLog` exists).
- * A caller adapting its job log keeps its own fields and spreads these.
- */
 import {
   getEffectiveConcurrency,
   type DegradedReason,
@@ -31,11 +12,7 @@ export type { DegradedReason };
 export type ReviewConcurrencyLogFields = {
   event: "review_concurrency_degraded";
   workspace_id: string;
-  /** invariant: The cap the reader answered with — always the conservative 1 when degraded. */
   effective: number;
-  /** invariant: Why the read degraded; the store's cause, never a re-derivation. Its own
-   * key because the consumer channel's `reason` is the closed admission
-   * vocabulary. */
   degraded_reason?: DegradedReason;
 };
 

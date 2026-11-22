@@ -1,15 +1,3 @@
-/**
- * note: GitHub OAuth App (user-to-server) helpers for /dashboard login —
- * authorize URL, code→token exchange, user fetch.
- *
- * These credentials are DISTINCT from the review GitHub App (whose
- * Worker-env secrets APP_ID / PRIVATE_KEY / WEBHOOK_SECRET were retired —
- * per-App credentials now live encrypted in D1; this guard
- * predates that cutover and is unaffected by it): dashboard login uses
- * GITHUB_OAUTH_CLIENT_ID / GITHUB_OAUTH_CLIENT_SECRET only
- * (an OAuth App, distinct from a GitHub App). Scope is locked
- * to `read:user` — identity only (product decision 7).
- */
 
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 
@@ -19,15 +7,8 @@ const GITHUB_HEADERS = {
   Accept: "application/vnd.github+json",
   "User-Agent": "mstar-inspector",
 } as const;
-// note: Upstream GitHub calls are bounded (worker convention: explicit timeout,
-// deterministic failure — consumer.ts EXEC_TIMEOUT_GIT_MS / qc F-001 class).
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
-// safety: GitHub authorization codes are opaque URL-safe tokens. Anything outside
-// this shared shape is rejected BEFORE the upstream exchange (callback entry
-// gate + the in-function gate below) — bounded, predictable upstream calls;
-// defense-in-depth beside the fixed github.com endpoint (the code travels in
-// the POST body, never in a fetched URL).
 
 /**
  * Structured operator log for OAuth verification failures (same convention as
@@ -43,7 +24,6 @@ export function logOAuthFailure(
 }
 
 function errorType(err: unknown): string {
-  // note: DOMException (timeout/abort) and TypeError (network) both carry `name`.
   if (err instanceof Error) return err.name;
   return String(err);
 }
@@ -73,8 +53,6 @@ export async function exchangeCodeForToken(
     res = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
-      // safety: The OAuth token endpoint is NOT the REST API: JSON only with
-      // `Accept: application/json` (vnd.github+json is for api.github.com).
       headers: {
         ...GITHUB_HEADERS,
         Accept: "application/json",
@@ -93,12 +71,10 @@ export async function exchangeCodeForToken(
   }
   if (!res.ok) {
     const githubStatus = res.status;
-    // why: Consume the failed body so the connection is released promptly.
     await res.body?.cancel();
     logOAuthFailure("token_exchange", "http_error", { github_status: githubStatus });
     return null;
   }
-  // invariant: GitHub may still answer form-urlencoded / HTML; never throw on parse.
   const data = (await res.json().catch(() => null)) as { access_token?: unknown } | null;
   if (data && typeof data.access_token === "string" && data.access_token.length > 0) {
     return data.access_token;

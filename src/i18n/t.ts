@@ -1,12 +1,3 @@
-/**
- * why: `t(locale, key, params?)` — server + client isomorphic lookup with
- * `{placeholder}` interpolation.
- *
- * `DictionaryKey` is the dotted-path type derived from the en dictionary
- * (`typeof en`), so a typo in a key is a compile error. A runtime miss
- * (only possible if a dictionary was mutated) returns the key itself —
- * fail-visible in the UI without crashing the page.
- */
 import { en, type Dictionary } from "./en";
 import { zhCN } from "./zh-CN";
 import type { Locale } from "./resolve";

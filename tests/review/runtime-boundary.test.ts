@@ -1,22 +1,12 @@
-/**
- * invariant: Module import matrix guard (+ spec § 模块 import 矩阵):
- * the workerd faces — src/worker, src/pipeline, src/store — must NEVER import
- * the omp SDK (container-only). This is the executable form of the plan
- * verification `grep -n 'from "@oh-my-pi/pi-coding-agent"' src/worker
- * src/pipeline src/store` → no matches; it additionally covers dynamic
- * imports and require() spellings.
- */
 
 import { describe, expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
-/** note: Faces that run on workerd and are barred from the omp SDK. */
 const WORKERD_FACES = ["src/worker", "src/pipeline", "src/store"] as const;
 
 const OMP_SDK_RE = /@oh-my-pi\/pi-coding-agent/;
 
-/** note: Collect every .ts/.js/.tsx file under a directory, recursively. */
 function collectFiles(dir: string): string[] {
   const found: string[] = [];
   for (const entry of readdirSync(dir)) {
@@ -44,8 +34,6 @@ describe("module import matrix — omp SDK is container-only", () => {
     });
   }
 });
-// note: --- in-image module graph (custom-providers regression; recheck amendment;
-// narrowed per P67-QC-015 in QC wave B) ------------------------------------
 
 /**
  * why: The sandbox image ships exactly two package source trees: `packages/runner/src`
@@ -65,10 +53,8 @@ const OMP_DOCKERFILE = join(REPO_ROOT, "sandbox-image", "Dockerfile");
 const RUNNER_SRC = join(REPO_ROOT, "packages", "runner", "src");
 const SHARED_SRC = join(REPO_ROOT, "packages", "shared", "src");
 
-/** note: The only build-context source trees the image may admit. */
 const ADMITTED_FACE = ["packages/runner/src", "packages/shared/src"] as const;
 
-/** note: Split one instruction body on whitespace, honouring quoted arguments. */
 function splitArgs(body: string): string[] {
   const args: string[] = [];
   let current = "";
@@ -88,12 +74,6 @@ function splitArgs(body: string): string[] {
   return args;
 }
 
-/**
- * why: Every build-context source a `COPY [flags] <src…> <dest>` instruction ships.
- * The destination is the last argument whether absolute or relative, and every
- * source is recorded — not just the first. A form this guard cannot classify
- * throws instead of being skipped: a silent skip leaves the face guard blind.
- */
 function dockerfileCopySources(text: string): string[] {
   const sources: string[] = [];
   let pending = "";
@@ -118,7 +98,6 @@ function dockerfileCopySources(text: string): string[] {
       }
       args = parsed as string[];
     } else args = splitArgs(body);
-    // note: Flags (`--from=…`, `--chown=…`, `--chmod=…`, `--link`) precede the paths.
     const paths = args.filter((arg) => !arg.startsWith("--"));
     if (paths.length < 2) throw new Error(`unparseable COPY instruction: ${instruction}`);
     sources.push(...paths.slice(0, -1));
@@ -127,16 +106,8 @@ function dockerfileCopySources(text: string): string[] {
   return sources;
 }
 
-/**
- * why: The source trees a `COPY` line ships, repo-relative. A single-file source
- * (manifest, lockfile, script) is not a face, so anything else — including a
- * tree that does not exist in the build context — counts as one and must be
- * one of the two admitted packages.
- */
 function admittedFaces(sources: string[]): string[] {
   const faces = sources.filter(
-    // why: An absolute source belongs to another image (`COPY --from=…`), not the
-    // build context.
     (spec) =>
       !spec.startsWith("/") &&
       !statSync(join(REPO_ROOT, spec), { throwIfNoEntry: false })?.isFile(),
@@ -150,25 +121,14 @@ function admittedSharedFiles(sources: string[]): string[] {
   for (const spec of sources) {
     if (spec !== "packages/shared/src" && !spec.startsWith("packages/shared/src/")) continue;
     const abs = join(REPO_ROOT, spec);
-    // why: A directory COPY is deliberate here (one coherent package), so the
-    // admitted set is enumerated and every member is asserted individually.
     if (statSync(abs).isDirectory()) admitted.push(...collectFiles(abs));
     else admitted.push(abs);
   }
   return admitted.sort();
 }
 
-/**
- * why: Relative import specifiers (`./…` / `../…`) in any import/require spelling
- * (static import, side-effect import, dynamic import, require, re-export).
- */
 const RELATIVE_IMPORT_RE = /(?:from\s+|import\s*|require\s*\()\s*['"](\.\.?\/[^'"]+)['"]/g;
 
-/**
- * why: Drop `//` and block comments — the package documents its own type-only
- * imports in prose, and a `from "…"` inside that prose is not an import.
- * Scans (not regexes) so a `//` inside a specifier is never a comment.
- */
 function stripComments(text: string): string {
   let out = "";
   for (let i = 0; i < text.length; i++) {
@@ -192,37 +152,18 @@ function stripComments(text: string): string {
   return out;
 }
 
-/**
- * why: The real file a relative specifier resolves to (Bun/TS extensionless
- * imports), or the unresolved base when nothing exists there — which then
- * fails the admission test rather than passing on a phantom path.
- */
 function resolveModuleTarget(specifier: string, fromFile: string): string {
   const base = resolve(dirname(fromFile), specifier);
   const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.js`, `${base}.mjs`, join(base, "index.ts")];
   return candidates.find((candidate) => existsSync(candidate)) ?? base;
 }
 
-/**
- * why: Runtime (non-erased) module specifiers in one source text, in every
- * import/require/re-export spelling. `import type` and an all-`type` named
- * clause are erased, so they are not runtime edges.
- *
- * The clause is matched as `[^;'"]` OR a complete quoted string in either
- * delimiter: a named clause may be quoted (`export { "Hono" as Hono } from
- * "hono"` / `export { 'Hono' as Hono } from "hono"`, the ES2022 arbitrary
- * module-namespace spelling), and a quote-blind class ended the clause there
- * and dropped the edge silently.
- */
 function runtimeSpecifiers(source: string): string[] {
   const specs: string[] = [];
   for (const [, modifier, clause = "", specifier = ""] of source.matchAll(
     /\b(?:import|export)\s+(type\s+)?((?:[^;'"]|"[^"]*"|'[^']*')*?)from\s*["']([^"']+)["']/g,
   )) {
     const named = clause.match(/\{([\s\S]*)\}/)?.[1];
-    // why: Only the `type ` keyword erases a specifier, and it can never sit inside
-    // a quoted name — so a comma-split of a quoted name still yields a
-    // non-`type` item and the edge is recorded rather than dropped.
     const specifiers = named?.split(",").map((s) => s.trim()).filter(Boolean) ?? [];
     const typeOnly =
       modifier !== undefined ||
@@ -243,18 +184,10 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   const rootSrcCopies = copySources.filter(
     (spec) => spec === "src" || spec.startsWith("src/"),
   );
-  /**
-   * why: The admission boundary: a module may ship from the runner tree or from a
-   * shared file one of the COPY lines carries. The runner-import scan and the
-   * admission test below evaluate THIS predicate, so a widening shows up in
-   * both directions instead of being restated per test.
-   */
   const isAdmittedModule = (target: string): boolean =>
     target.startsWith(`${RUNNER_SRC}/`) || admittedShared.includes(target);
 
   test("the Dockerfile admits exactly the two package source trees", () => {
-    // why: Derived, not restated: the assertion pins the derivation against the
-    // Dockerfile, so a third admitted tree (or a retired package) fails here.
     expect(admittedFaces(copySources)).toEqual([...ADMITTED_FACE]);
   });
 
@@ -273,13 +206,10 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   });
 
   test("no COPY line ships the repository root src/ tree", () => {
-    // why: The split's regression: the image once shipped src/review + src/contracts.
     expect(rootSrcCopies).toEqual([]);
   });
 
   test("every COPY source is recorded, including relative-destination lines", () => {
-    // why: `COPY <src…> ./` (the image's own runner manifest line) must contribute
-    // both sources, not just the first, and must not be skipped as relative.
     expect(copySources).toContain("packages/runner/package.json");
     expect(copySources).toContain("packages/runner/bun.lock");
   });
@@ -289,24 +219,18 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       dockerfileCopySources(text).filter((spec) => spec === "src" || spec.startsWith("src/"));
     expect(rootSrc("COPY src ./")).toEqual(["src"]);
     expect(rootSrc("COPY src/a src/b ./")).toEqual(["src/a", "src/b"]);
-    // note: A non-admitted tree after a legal first source is still a face.
     const mixed = dockerfileCopySources("COPY packages/runner/package.json packages/extra/src ./");
     expect(mixed).toEqual(["packages/runner/package.json", "packages/extra/src"]);
     expect(admittedFaces(mixed)).not.toEqual([...ADMITTED_FACE]);
   });
 
   test("negative controls — an unparseable COPY form fails loudly", () => {
-    // why: Fail loud, never skip: a skipped line leaves the face guard blind.
     expect(() => dockerfileCopySources("COPY --chown=0:0 src")).toThrow(/unparseable COPY/);
     expect(() => dockerfileCopySources('COPY ["src", ')).toThrow();
     expect(() => dockerfileCopySources("COPY src ./ \\")).toThrow(/unterminated COPY/);
   });
 
   test("every shared module the runner imports is admitted, and the boundary refuses a widened COPY set", () => {
-    // why: Direction 1 — ADMIT: every shared module the runner graph actually
-    // imports resolves to a real file in the build context AND is one the
-    // Dockerfile copies, so the image's module graph is closed by construction
-    // (an import of an uncopied file fails the build, not this test).
     const importedShared = new Set<string>();
     for (const file of collectFiles(RUNNER_SRC)) {
       for (const match of readFileSync(file, "utf8").matchAll(RELATIVE_IMPORT_RE)) {
@@ -319,11 +243,6 @@ describe("in-image module graph — the image ships packages/runner/src plus the
       expect(existsSync(target), `${target} is not in the image build context`).toBe(true);
       expect(isAdmittedModule(target), `${target} is imported but no COPY line ships it`).toBe(true);
     }
-    // why: Direction 2 — REFUSE, driven through the guard's own derivation rather
-    // than a hand-called predicate on a phantom path: the repository root
-    // `src/` tree is refused as a face by `admittedFaces`, so the admission
-    // test and the "no COPY line ships src/" pin refuse the SAME input. A
-    // Dockerfile that started copying `src` would flip both.
     const widened = dockerfileCopySources(`${readFileSync(OMP_DOCKERFILE, "utf8")}\nCOPY src /opt/runner/src\n`);
     expect(admittedFaces(widened)).toContain("src");
     expect(admittedFaces(widened)).not.toEqual([...ADMITTED_FACE]);
@@ -343,11 +262,6 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   });
 
   test("every admitted shared file stays runtime-dependency-free", () => {
-    // why: Admission condition: a shared module rides the image ONLY because it is
-    // dependency-free at runtime (spec §7.3). `import type` is erased, and a
-    // relative import may stay as long as it resolves inside the package; a
-    // runtime bare specifier or an escaping path invalidates the admission —
-    // narrow the boundary instead of widening this rule.
     expect(admittedShared.length).toBeGreaterThan(0);
     const offenders: string[] = [];
     const check = (file: string, specifier: string): void => {
@@ -367,24 +281,17 @@ describe("in-image module graph — the image ships packages/runner/src plus the
   });
 
   test("negative control — the scan flags a re-exported bare specifier", () => {
-    // why: The pre-fix scan matched `import … from` only, so `export … from` — the
-    // exact spelling that adds a runtime edge — passed unseen.
     expect(runtimeSpecifiers('import { a } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export { a } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export * from "hono";')).toEqual(["hono"]);
-    // why: A quoted export name is the same runtime edge: the quote-blind clause
-    // class ended at the `"` and dropped it silently.
     expect(runtimeSpecifiers('export { "Hono" as Hono } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers("export { 'Hono' as Hono } from 'hono';")).toEqual(["hono"]);
     expect(runtimeSpecifiers('import { "default" as Hono } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export type { T } from "hono";')).toEqual([]);
     expect(runtimeSpecifiers('import type { T } from "hono";')).toEqual([]);
-    // why: A quoted name is never a `type` marker, so it stays a runtime edge.
     expect(runtimeSpecifiers('export { type T } from "hono";')).toEqual([]);
     expect(runtimeSpecifiers('export { "type" as T } from "hono";')).toEqual(["hono"]);
     expect(runtimeSpecifiers('export { a } from "./credential-key";')).toEqual(["./credential-key"]);
-    // why: Relative targets stay captured, in either delimiter — they are excluded
-    // by the admission check above, never by dropping the edge here.
     expect(runtimeSpecifiers("export { x } from './local';")).toEqual(["./local"]);
     expect(runtimeSpecifiers('export { "Hono" as Hono } from "../../../src/worker/index";')).toEqual([
       "../../../src/worker/index",

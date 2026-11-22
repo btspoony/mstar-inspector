@@ -27,11 +27,8 @@ import {
   type ArtifactStore,
 } from "@mstar-harness/engine";
 
-/** invariant: Persist keys are a single safe path component (engine `assertSafePathComponent`). */
 const KEY_RE = /^[A-Za-z0-9._-]+$/;
-/** invariant: Plan-shaped keys route to `sdd/<key>/review/report.json`; a review key must never match. */
 const PLAN_KEY_RE = /^[0-9]{8}-[a-z0-9-]+$/;
-/** why: Lone surrogates encode to U+FFFD, so `\uD800` and `\uFFFD` would alias one key. */
 const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 /** `<installation>/<owner>/<repo>/<pr>/<sha>` — either `/` or `:` separators. */
@@ -42,7 +39,6 @@ export function deriveReviewKey(idem: string): string {
       `--idem must be <installation>/<owner>/<repo>/<pr>/<sha> (5 non-empty, well-formed Unicode parts, "/" or ":" separators) — got ${JSON.stringify(idem)}`,
     );
   }
-  // why: Hex segments are injective: no part can forge a separator or another tuple's key.
   const key = `r-${parts.map((part) => Buffer.from(part, "utf8").toString("hex")).join("-")}`;
   if (!KEY_RE.test(key) || PLAN_KEY_RE.test(key)) {
     throw new Error(`derived persist key ${JSON.stringify(key)} must match ${KEY_RE} and not ${PLAN_KEY_RE}`);

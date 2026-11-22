@@ -12,7 +12,6 @@
 import { describe, expect, test } from "bun:test";
 import { probeSeatFailover } from "../../packages/runner/src/seat-failover-probe";
 
-/** note: The capability host a defaulted App's synthesized models.yml carries. */
 const HOSTS = [
   {
     id: "ark",
@@ -34,7 +33,6 @@ const HOSTS = [
   },
 ] as const;
 
-/** note: A custom declaration (the post-037a shape) the synthesized file carries. */
 const DECL = {
   provider_id: "my-gateway",
   base_url: "https://gateway.example.invalid/v1",
@@ -57,8 +55,6 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
     expect(ghost.gate).toBe("registry");
     expect(ghost.registry.resolved).toBe(false);
     expect(ghost.registry.metadata).toBeNull();
-    // why: An unresolved selector never reached the context gate: it reports "not
-    // evaluated" (null), never "measured, does not fit".
     expect(ghost.context.fits).toBeNull();
     expect(report.droppedCandidate?.selector).toBe("nowhere-provider/ghost-model");
   });
@@ -76,7 +72,6 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
     expect(verdict.registry.resolved).toBe(true);
     expect(verdict.registry.metadata?.id).toBe("model-a");
     expect(verdict.poolKey.configured).toBe(false);
-    // note: It never reached the context gate: the earlier gate already decided.
     expect(verdict.context.fits).toBe(true);
   });
 
@@ -103,8 +98,6 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
   });
 
   test("eligible: resolved, keyed and fitting — and missing metadata alone does NOT drop", async () => {
-    // why: Compass D12: the pinned registry back-fills its own defaults for absent
-    // metadata keys, so "the owner stated nothing" must not be read as "drop".
     const report = await probeSeatFailover({
       chain: "my-gateway/model-b",
       capabilityHosts: HOSTS,
@@ -143,10 +136,7 @@ describe("seat failover probe — the three gates stay distinguishable", () => {
       "context",
       "eligible",
     ]);
-    // invariant: Every gate reports the evidence it used, and only that evidence fails.
     expect([missing.selectors[0]!.registry.resolved, unkeyed.selectors[0]!.registry.resolved]).toEqual([false, true]);
-    // why: The unresolved entry's context is NOT EVALUATED (null); every entry that
-    // DID resolve carries a measured verdict, whichever gate then drops it.
     expect(missing.selectors[0]!.context.fits).toBeNull();
     expect(unkeyed.selectors[0]!.context.fits).toBe(true);
     expect(oversized.selectors[0]!.context.fits).toBe(false);

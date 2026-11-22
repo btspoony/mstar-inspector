@@ -100,11 +100,6 @@ export async function loadAppDetail(base: string, appId: string): Promise<Settin
   return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
 }
 
-/**
- * invariant: The App's model options, which the chain editors name. A manager's read only
- * — a member never reaches those editors — and a failed read leaves the
- * editors' selectors empty rather than failing the whole page.
- */
 async function loadModelGroups(base: string, appId: string): Promise<ModelOptionGroup[]> {
   try {
     return (
@@ -139,11 +134,6 @@ async function loadModelGroups(base: string, appId: string): Promise<ModelOption
  */
 export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string }) {
   const locale = boot.locale;
-  // note: Read per render (the AppsPage precedent): the switcher navigates with
-  // pushState + popstate, so no new document re-injects the boot — the page
-  // base must track the URL it is actually on. `/dashboard/acme/apps/demo` →
-  // `/dashboard/beta/apps/12345` keeps the appId, so a base pinned at mount
-  // would leave the previous workspace's settings and model chain on screen.
   const base = apiBase();
   const [payload, setPayload] = useState<SettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
@@ -152,21 +142,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
-  // note: Mount-time URL state, re-derived on every popstate. `navigate()`
-  // pushStates then dispatches a synthetic popstate (router.tsx), and
-  // history traversal fires the native event, so push and history both land
-  // here.
   const [search, setSearch] = useState<AppDetailSearch>(() =>
     parseAppDetailSearch(window.location.search),
   );
 
-  // why: Background reloads (op-triggered refreshes) keep the loaded card tree
-  // mounted: they must not flip state back to "loading" — that unmount would
-  // destroy Add Provider's open/selection state and every form's typed input
-  // (QC fix wave 1, F-001). A failed background refresh surfaces the
-  // error through the notice channel instead of the page-level error state.
-  // Resolves whether a fresh payload landed, so callers can tell a completed
-  // refresh from a failed one (the draft create must not close on failure).
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
       const sequence = ++loadSequence.current;
@@ -195,9 +174,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           setGroups([]);
           setModelsLoading(false);
         }
-        // note: A healthy page has no page-level failure: any successful load —
-        // foreground or background — clears the banner a failed background
-        // reload left behind (the bugbot fix).
         setNotice(null);
         return true;
       } catch {
@@ -214,8 +190,6 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   useEffect(() => {
     cancelledRef.current = false;
     void load();
-    // note: An appId or workspace push re-derives the URL state too (the address bar
-    // moved).
     setSearch(parseAppDetailSearch(window.location.search));
     return () => {
       cancelledRef.current = true;
@@ -228,14 +202,11 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  /** invariant: URL := state (replaceState — never fires popstate, loop-free). */
   function commitSearch(next: AppDetailSearch): void {
     window.history.replaceState(null, "", `${window.location.pathname}${appDetailSearchQuery(next)}`);
     setSearch(next);
   }
 
-  // why: Every face keeps the wayfinding link — loading included, so a slow read
-  // never strands the operator on a page with no exit.
   if (state === "loading") {
     return (
       <AppDetailShell locale={locale}>
@@ -283,11 +254,6 @@ export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; 
   );
 }
 
-/**
- * note: The derived Blocked state's copy: the server names the one cause it can
- * derive, and the banner prints that name. A closed map, so a new reason
- * cannot render silently as nothing.
- */
 const BLOCKED_REASON_KEYS = {
   bot_not_shared: "appDetail.blockedBotNotShared",
 } as const satisfies Record<BlockedReason, string>;
@@ -308,21 +274,11 @@ export function TargetHeader({
   payload: SettingsPayload;
 }) {
   const pill = appStatusPill(locale, payload.app);
-  // why: Why this target reviews nothing, if it does. The server derives it on
-  // every read (no stored status), so the banner cannot go stale.
   const blockedMessage =
     payload.blocked && payload.blocked_reason
       ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
       : null;
 
-  // invariant: Header band metrics — only what the landed payload proves (compass
-  // D13): the four figures the manager payload carries — installations,
-  // provider keys, model chains, and refused webhooks in the last 24h. The
-  // refusal count is the one figure here that reports a failure, so it — and
-  // only it — wears the alert face, and only when non-zero, exactly as the
-  // Apps list face (`AppsPage`) already rules it. A Blocked face carries none
-  // of the four (they are the bot's), so the band renders nothing rather than
-  // four fabricated zeros.
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
@@ -343,10 +299,6 @@ export function TargetHeader({
         description={t(locale, "apps.by", { login: payload.app.created_by })}
         actions={
           <>
-            {/* note: The settings face is this page's own now, but a target detail
-                still reaches it from here — and a Blocked target's bot page is
-                not readable (the bot serves another workspace now), so the dead
-                link is not offered. */}
             {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
@@ -358,11 +310,6 @@ export function TargetHeader({
   );
 }
 
-/**
- * note: The App's repository-count states — no repository at all, or several — both
- * state the fact. No link: the repository surface is not reachable backwards
- * from here, and a dead reference would be worse than the sentence alone.
- */
 function RepositoriesNotice({
   locale,
   copy,
@@ -373,14 +320,6 @@ function RepositoriesNotice({
   return <p className="py-3 text-sm text-muted-foreground">{t(locale, copy)}</p>;
 }
 
-/**
- * note: The ops zone (pause/resume, disable/enable, delete) with the confirm dialog
- * that guards it: the section renders the rows and this wrapper owns the one
- * pending action and its outcome. Bot-scoped lifecycle rows render only for
- * the workspace that owns an `owned` bot — the server refuses them otherwise.
- * The review pause is the repository's own (target policy): this App-scoped
- * surface never renders it.
- */
 function TargetOpsZone({
   locale,
   payload,
@@ -402,9 +341,6 @@ function TargetOpsZone({
     try {
       setNotice(
         action.kind === "delete"
-          // note: Irreversible outcome with its own copy: "Changes saved." reads
-          // wrong after a delete, and refetching the deleted App's settings GET
-          // is a guaranteed 404, so it would overwrite the outcome.
           ? await postPinnedOutcome(`${appPath}/delete`, {}, locale, () => onReload({ background: true }), {
               successMessage: t(locale, "settings.deleteSuccess"),
               refetch: false,
@@ -485,7 +421,6 @@ export function AppDetailView({
   locale: SpaBoot["locale"];
   appId: string;
   payload: SettingsPayload;
-  /** note: The chain editors' model options — empty for a member. */
   groups: ModelOptionGroup[];
   modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
@@ -493,8 +428,6 @@ export function AppDetailView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
-  // note: D4: a non-manager's whole face is the identity card — the review policy
-  // is not theirs to read, and it lives on the review-target surface.
   if (!payload.can_manage) {
     return (
       <div className="flex flex-col gap-6">
@@ -505,9 +438,6 @@ export function AppDetailView({
     );
   }
 
-  // note: A Blocked read carries no bot-owned section at all — those belong to the
-  // owning workspace — and a target-less one has no review policy: the ops
-  // zone and the bot's own configuration are each conditional on their facts.
   const target = hasTargetFacts(payload) ? payload : null;
   const bot = payload.blocked ? null : payload;
 
@@ -521,14 +451,6 @@ export function AppDetailView({
       <TargetHeader locale={locale} appId={appId} payload={payload} />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={search.tab} onValueChange={onTabChange}>
-        {/* note: Page-level tab face (DESIGN.md ### Tabs, line-tab idiom): the
-            shell's bar is full-width over a bottom hairline (border-border
-            → gray-alpha-400) with left-aligned, sized-up triggers — 16px
-            heading-16 token step on a 40px bar. The trigger face is the
-            primitive's line variant, so a change to that variant reaches this
-            page like every other; only the bar itself — full width, hairline,
-            40px — is the page's choice. The chains-panel segmented pill keeps
-            variant="default". */}
         <TabsList
           variant="line"
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
@@ -537,13 +459,6 @@ export function AppDetailView({
           <TabsTrigger value="delivery">{t(locale, "appDetail.tabDelivery")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
         </TabsList>
-        {/* note: forceMount on the two STATEFUL panels (mount-once tab switching):
-            the settings tab's typed input and the install block's state
-            survive a switch — no unmount, no refetch. Radix does NOT hide
-            forced-mounted inactive panels itself; the panel's
-            `data-[state=inactive]:hidden` carries the one-visible-panel
-            invariant (ui-bugs knowledge pin). The delivery panel has no typed
-            state and reads on open, so it deliberately does not forceMount. */}
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
             {target === null ? (
@@ -568,9 +483,6 @@ export function AppDetailView({
             )}
           </div>
         </TabsContent>
-        {/* note: NOT forceMount: this panel holds no typed state, and mounting it
-            eagerly would fire its read on every App settings visit. It reads
-            when opened, which is when its data is wanted. */}
         <TabsContent value="delivery">
           <div className="flex flex-col">
             {bot === null ? (
@@ -598,10 +510,6 @@ export function AppDetailView({
               blocked={payload.blocked}
               onReload={onReload}
             />
-            {/* note: The roster reads `bot`'s own array — the same one the header
-                band counts — and a Blocked face carries no installation rows at
-                all (they belong to the owning workspace), so it renders no
-                table rather than a false "none". */}
             {bot === null ? null : (
               <AppInstallationsSection locale={locale} installations={bot.installations} />
             )}

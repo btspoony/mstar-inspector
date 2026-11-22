@@ -1,48 +1,3 @@
-/**
- * why: Ledger target alignment — the third registered operator data upgrade
- * (spec operator-data-upgrade § Ledger target alignment item).
- *
- * Every ledger row carries `target_id`, and the repository detail page reads by
- * target: a row whose target names another repository is invisible on its own
- * repository's page while the workspace-wide aggregate still counts it.
- * Staging showed the shape this item exists for: 137 rows of
- * `btspoony/mstar-inspector` — and nine other repositories — pointed at the
- * `btspoony/mstar-harness` target, so the inspector page listed 3 rows.
- *
- * `orphan-ledger-attribution` cannot help (it fills NULL targets) and
- * `repo-backfill` cannot help either (it merges duplicate targets of one
- * repository, never re-points a row at a DIFFERENT repository).
- *
- * The worklist is every ledger row whose target names another repository,
- * grouped by `lower(owner) || '/' || lower(repo)` — the case-folded spelling the
- * store's own resolution uses. Identity is the GROUP: the four tables hold rows
- * for one repository and they must land on ONE target.
- *
- * The bot comes from the row's target: a mismatched row always has one, and it
- * names the tenant the row is visible in today — so aligning a row never moves
- * it into a workspace that did not already count it. Rows whose targets name
- * different bots are disagreement, not a tie to break, and the group is left
- * alone. Within the bot, the group's home is its one live target naming the
- * repository (case-insensitive); two of them are ambiguous and move nothing;
- * none of them means one is created in the bot's workspace with `repo_id` NULL,
- * the unclaimed shape 0067 documents.
- *
- * Binding. A target named only by owner/name waits for the repository's first
- * delivery to claim its `repo_id` (D15). When the repository's owner still has a
- * LIVE installation of that bot, this item asks GitHub instead of waiting: mint
- * an installation token, list that installation's repositories once, match
- * `owner/name`, and write the numeric id. No live installation (a removed one is
- * a genuine reason to stay unclaimed), a repository the installation does not
- * grant, or a GitHub failure leaves `repo_id` NULL and is counted — never thrown,
- * so the batch completes and the walk resumes.
- *
- * A batch is ONE `db.batch` transaction over at most GROUPS_PER_BATCH groups, in
- * a cursor over the case-folded group key. The binding calls run AFTER it
- * commits: a network call inside the transaction would hold the write lock for
- * its whole timeout. The worklist predicate is the mismatch itself and every
- * UPDATE re-tests it, so a replay over aligned rows writes nothing and no row is
- * ever deleted.
- */
 import type { DashboardD1, DashboardD1Statement } from "../../dashboard/users";
 import { bindRepository } from "./bind";
 import type {
@@ -53,32 +8,15 @@ import type {
   UpgradeRunContext,
 } from "../data-upgrades";
 
-/** note: Repository groups per step. */
 const GROUPS_PER_BATCH = 20;
 
-/** note: The four tables that carry `target_id` (all four hold `owner`/`repo`). */
 const LEDGER_TABLES = ["pull_requests", "reviews", "review_findings", "review_failures"] as const;
 
-/**
- * why: The row's live target names another repository — the worklist predicate, and
- * the guard every UPDATE re-tests inside the transaction so a row another writer
- * just fixed is left as it is. A target with no identity (the 0067 leftover
- * shape) is NOT a mismatch: `repo-backfill` owns those rows and runs first.
- */
 const misaligned = (alias: string) => `t.deleted_at IS NULL
       AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
       AND (t.repo_owner <> ${alias}.owner COLLATE NOCASE
            OR t.repo_name <> ${alias}.repo COLLATE NOCASE)`;
 
-/**
- * why: The group's home target already holds a `pull_requests` row at this number:
- * `idx_pull_requests_target_pr` is unique on `(target_id, owner, repo,
- * pr_number)`, so re-pointing this row would abort the whole batch. The row is
- * left where it is and reported (`conflicting_ledger_rows`) — deleting one of
- * the two copies is the operator's call, exactly as `repo-backfill` treats its
- * own duplicate losers. Only `pull_requests` can collide: the other three
- * ledgers are unique on their installation/app keys, not on the target.
- */
 const prConflict = (alias: string) => `EXISTS (
   SELECT 1 FROM review_targets h JOIN pull_requests o ON o.target_id = h.id
    WHERE h.deleted_at IS NULL
@@ -123,20 +61,6 @@ const misalignedRows = (after: string) => {
    WHERE ${misaligned("x")}${floor("x")}`;
 };
 
-/**
- * note: One row per group: the spelling to write, the bot that owns it, the one live
- * target naming the repository, and whether GitHub could bind that target.
- *
- * `bots` counts the DISTINCT bots the group's rows' targets name: more than one
- * is disagreement, so `bot_id` stays NULL and nothing is written. `homes` is
- * scoped by the same CASE, so such a group matches no target rather than
- * adopting one across tenants.
- *
- * `unbound` predicts the binding outcome for preflight: the group is actionable,
- * its home target has no `repo_id`, and the owner has no live installation of
- * that bot — a removed installation is history, so the first delivery, not this
- * item, claims the id.
- */
 const alignmentGroups = (after: string) => `
   WITH live(src, id, bot_id, owner, repo, group_key) AS (${misalignedRows(after)}),
   named(group_key, owner, repo) AS (
@@ -169,38 +93,14 @@ const alignmentGroups = (after: string) => `
       JOIN claim c ON c.group_key = n.group_key
       LEFT JOIN homes h ON h.group_key = n.group_key)`;
 
-/**
- * note: A group this item can act on: one known bot, at most one live target naming
- * the repository, and — when none does — a tenant to create it in. Everything
- * else is left alone and reported; `{alias}` qualifies the columns where the CTE
- * is joined to another one.
- */
 const actionable = (alias: string) =>
   `${alias}bot_id IS NOT NULL AND ${alias}targets <= 1
    AND (${alias}targets = 1 OR ${alias}workspace_id IS NOT NULL)`;
 
-/** note: The group's one live target naming the repository. Bound as (bot, owner, repo). */
 const homeTarget = `SELECT t.id FROM review_targets t
    WHERE t.deleted_at IS NULL AND t.bot_id = ?1
      AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE`;
 
-/**
- * why: Create the group's target — ONLY when no live target of that bot names the
- * repository, judged INSIDE the batch transaction: an operator who added the
- * repository after the worklist read has already written the row this insert
- * would duplicate, and `repo_id IS NULL` sits outside 0068's unique index.
- *
- * The workspace comes from `bot_workspaces` inside the same statement, so a bot
- * re-homed between planning and commit writes into its current tenant, and a bot
- * that lost its tenant writes nothing at all.
- *
- * `follow_workspace_defaults = 1` is the UI-create rule (J4): a repository this
- * item creates is an ordinary repository, so it inherits the workspace's review
- * answers exactly as one added through the add-repository dialog does, and the
- * row's own policy columns stay inert placeholders until an operator overrides
- * them. Setting 0 here would permanently opt the repository out of the
- * workspace defaults without anyone choosing that.
- */
 const INSERT_TARGET = `
   INSERT INTO review_targets
     (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
@@ -210,13 +110,6 @@ const INSERT_TARGET = `
    WHERE w.bot_id = ?1
      AND NOT EXISTS (${homeTarget})`;
 
-/**
- * why: Re-point the group's rows — ONLY while the row's target still names another
- * repository and exactly one live target of this bot names the repository. Both
- * halves re-read inside the transaction, so a target created or retired after
- * planning decides what this writes instead of being written past; two matches
- * write nothing at all rather than the oldest one winning.
- */
 const repointGroup = (table: string) => `
   UPDATE ${table} SET target_id = (${homeTarget})
    WHERE owner = ?2 COLLATE NOCASE AND repo = ?3 COLLATE NOCASE
@@ -227,27 +120,21 @@ const repointGroup = (table: string) => `
            WHERE t.deleted_at IS NULL AND t.bot_id = ?1
              AND t.repo_owner = ?2 COLLATE NOCASE AND t.repo_name = ?3 COLLATE NOCASE) = 1`;
 
-/** note: One resolved group, as the plan read states it. */
 type Group = {
   group_key: string;
   owner: string;
   repo: string;
   bot_id: string | null;
   workspace_id: string | null;
-  /** note: Live targets of this bot naming the repository: 0 (create), 1 (adopt), 2+ (ambiguous). */
   targets: number;
   repo_id: number | null;
-  /** note: Preflight only: 1 when nothing live could bind the target's numeric id. */
   unbound: number;
 };
 
-/** note: One group's writes, as positions in `Plan.statements`. */
 type GroupWrite = { insert: number | null; updates: number[]; group: Group };
 
-/** note: A planned batch: the statements to commit, and what they do. */
 type Plan = {
   statements: DashboardD1Statement[];
-  /** note: The last group key this batch walked; `null` when the walk ended. */
   cursor: string | null;
   done: boolean;
   groups: number;
@@ -256,12 +143,6 @@ type Plan = {
   writes: GroupWrite[];
 };
 
-/**
- * why: Plan one batch. The target a group lands on is decided by the STATEMENTS,
- * inside the transaction — each re-reads the bot's live targets naming the
- * repository, so a target an operator created, renamed or retired between this
- * read and the commit is what the batch acts on rather than a stale plan.
- */
 async function planBatch(
   db: DashboardD1,
   cursor: UpgradeCursor | null,
@@ -309,7 +190,6 @@ async function planBatch(
             group.repo,
             crypto.randomUUID(),
             `${group.owner}/${group.repo}`,
-            // note: The row must name who caused it; the runner always supplies the operator.
             actor ?? "data-upgrade",
           ),
       );
@@ -338,7 +218,6 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
   requiresDowntime: false,
   order: 21,
 
-  /** note: Six counts the operator sees before starting: no writes. */
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
     const counts = await db
       .prepare(
@@ -367,18 +246,6 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
     };
   },
 
-  /**
-   * why: ONE transaction per call; a replay over aligned rows processes nothing.
-   *
-   * The counts come from the batch's own statement results, not from the plan: a
-   * group whose target an operator retired between the read and the commit had
-   * its guarded updates match nothing, and reporting it as aligned would hide
-   * that from the operator until verify blocked on it.
-   *
-   * `processed` is the LEDGER ROWS the batch moved (`UpgradeBatch.processed`'s
-   * contract); `log.aligned` stays the count of groups, the unit the walk pages
-   * in.
-   */
   async runBatch(
     db: DashboardD1,
     cursor: UpgradeCursor | null,
@@ -395,8 +262,6 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
       const changes = (index: number) => results[index]?.meta.changes ?? 0;
       for (const write of plan.writes) {
         if (write.insert !== null && changes(write.insert) > 0) created += 1;
-        // why: The four updates are per-table and disjoint, so their sum is the rows
-        // this group moved — zero when the guards stood the group down.
         const touched = write.updates.reduce((sum, index) => sum + changes(index), 0);
         if (touched > 0) {
           aligned += 1;
@@ -406,13 +271,10 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
       }
     }
 
-    // why: Bind AFTER the moves commit: a GitHub call inside the transaction would
-    // hold the write lock for its whole timeout.
     let bound = 0;
     let unbound = 0;
     let bindingFailed = 0;
     for (const { group } of moved) {
-      // why: An adopted target that already carries its id needs no call at all.
       if (group.targets === 1 && group.repo_id !== null) continue;
       if (group.bot_id === null) {
         unbound += 1;
@@ -445,13 +307,6 @@ export const ledgerTargetAlignment: DataUpgradeItem = {
     };
   },
 
-  /**
-   * why: Read-only checks. `misaligned_ledger_rows` is the crash residual: a row
-   * whose group the item CAN act on is work a completed run should have moved,
-   * so it blocks. A group the item cannot act on — two live targets naming the
-   * repository, or rows naming different bots — is not its failure: the operator
-   * resolves that and re-runs, so it is only counted, by group, as advisory.
-   */
   advisoryChecks: ["ambiguous_groups", "unattributable_groups", "conflicting_ledger_rows"],
 
   async verify(db: DashboardD1): Promise<UpgradeCounts> {

@@ -27,24 +27,12 @@ import {
   type DeliveryStatusRow,
 } from "./data";
 
-/**
- * note: The 投递状态 tab of an App detail page: the bot's webhook deliveries — what
- * arrived, from which repository, of which type, what happened, and why it was
- * refused.
- *
- * Two faces in one module: the stateful tab (filters, paging, the read) and the
- * pure view it paints, so the table and the filter row are assertable without a
- * DOM runner. Filters and paging are REQUEST parameters — the server narrows
- * and pages before answering — so no frame hides rows it already holds (the PR
- * ledger's own rule).
- */
 
 /** The window segments the tab offers, in whole days; "all" is the whole history. */
 export const DELIVERY_WINDOWS = ["1", "7", "30", "90"] as const;
 
 const EMPTY_FILTERS: DeliveryFilters = { repo: "", since: "", type: "" };
 
-/** note: The "no filter" sentinel: the Select primitive refuses "" as an item value. */
 const ALL = "all";
 
 /** The last-verified line the credentials panel used to carry, now this tab's. */
@@ -90,7 +78,6 @@ export function AppDeliveryTab({
     };
   }, [appId, filters, offset, reloadNonce]);
 
-  /** why: A filter change resets to the first page: page 3 of the old filter addresses nothing. */
   function applyFilter(next: Partial<DeliveryFilters>): void {
     setFilters((previous) => ({ ...previous, ...next }));
     setOffset(0);
@@ -160,7 +147,6 @@ export function DeliveryStatusView({
     },
     {
       header: t(locale, "appDetail.delivery.columnTime"),
-      // note: The raw SQLite UTC stamp stays reachable as the native tooltip.
       cell: (row) => (
         <span className="text-muted-foreground tabular-nums" title={row.created_at}>
           {formatRelativeTime(row.created_at, locale)}
@@ -179,8 +165,6 @@ export function DeliveryStatusView({
     },
     {
       header: t(locale, "appDetail.delivery.columnReason"),
-      // why: A refusal's reason is the one cell that explains a failure; every other
-      // outcome has none, so the cell stays empty rather than inventing copy.
       cell: (row) =>
         row.reason === null ? null : <span className="text-muted-foreground">{row.reason}</span>,
     },
@@ -188,11 +172,6 @@ export function DeliveryStatusView({
 
   const repoOptions = page?.repos ?? [];
   const typeOptions = page?.types ?? [];
-  // note: I-000649: nothing is known until the first read RESOLVES. Reading a null
-  // page as "zero rows" painted the empty state under the in-flight line, so
-  // the operator was told the bot never received a webhook mid-request. The
-  // table and its pager therefore render only once a page is in hand; the
-  // in-flight line above is the first read's face.
   const resolved = page !== null;
   const total = page?.total ?? 0;
   const from = total === 0 ? 0 : Math.min(offset + 1, total);

@@ -1,13 +1,3 @@
-/** note: GroupCard — DESIGN.md `group-card`: the ui/card surface with Card's
- * symmetric padding split into a header band and a body, title + badge,
- * summary and action slots.
- *
- * Static render: every input is a prop, so the emitted markup is asserted for
- * the slot composition, the rendered text and the padding hand-off — never a
- * design-token class. The surface and hairline colour are the Card primitive's
- * contract, asserted in `tests/design-system/surface-idioms.test.ts` where the
- * token vocabulary lives.
- */
 import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -32,7 +22,6 @@ const html = renderToStaticMarkup(
   ),
 );
 
-/** note: Markup between two slots, so a slot's children are checked in place. */
 const between = (from: string, to: string) => {
   const start = html.indexOf(from);
   const end = to ? html.indexOf(to) : html.length;

@@ -1,9 +1,9 @@
-// note: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over) see tests/spa/tokens.test.ts.
 import { cn } from "../cn"
 
 function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
   return (
-    // why: The pulse is a semantic loading indicator (allowed infinite loop), and
+    // The pulse is a semantic loading indicator (allowed infinite loop), and
     // motion-reduce:animate-none folds it under prefers-reduced-motion —
     // the token-level duration fold cannot cover this raw-duration keyframe.
     <div

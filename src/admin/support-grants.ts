@@ -1,26 +1,3 @@
-/**
- * why: Support-grant maintenance for `/_internal_admin` (spec
- * operator-admin-surface §3.4).
- *
- * A grant is the operator's time-boxed cross-workspace access aid, so the
- * console REVOKES it by deleting the row rather than appending a tombstone,
- * and every write appends exactly one `audit_events` row carrying the grant's
- * target workspace (§4: support-grant writes stay in the workspace-scope
- * ledger, whose `workspace_id` the target always satisfies).
- *
- * Each write is ONE `db.batch`, so the grant (or its deletion) and its audit
- * row commit together or not at all: a failed audit append rolls the grant
- * write back, and a failed write appends nothing. That makes the §4 invariant
- * ("no admin action loses its audit trail"; one audit row per successful
- * write) mechanical rather than best-effort. Both statements are owned by
- * `../dashboard/operator-store` (the `support_grants` / `audit_events`
- * authority) — this module only classifies the outcome for the console.
- *
- * The existing support classifier is untouched — it keeps reading grants
- * through `hasValidGrant` / `listActiveSupportGrants`, so a created grant is
- * honoured on the next request and a deleted one stops matching exactly like
- * an expired row.
- */
 import type { DashboardD1 } from "../dashboard/users";
 import {
   deleteSupportGrantWithAudit,
