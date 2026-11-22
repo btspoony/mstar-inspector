@@ -2205,23 +2205,23 @@ describe("the SEC-01 publish gate", () => {
     });
 
     test(`the publish gate refuses an outgoing body carrying a ${name} echo`, async () => {
-      // The write-time host did NOT hold the key (the resumed-collection shape).
-      const { deps, db, ref, prepared } = await reviewedEcho(echo, false);
-      // Inject the echo into the persisted paid result.
-      const launch = db.raw
-        .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
-        .get(ATTEMPT_ID) as { result_json: string };
-      const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
-      const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
-      output.findings[0]!.body = `echo ${echo}`;
-      execution.run.stdout = JSON.stringify(output);
-      db.raw
-        .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
-        .run(JSON.stringify(execution), ATTEMPT_ID);
+      // RESUME-SHAPED: the paying step seals the session's OWN set onto the attempt
+      // row, and the collector keeps nothing but the database — no in-process cache,
+      // no re-sealed fixture. The credential must come back from that row.
+      const { db, resumed, ref, prepared } = await paidThenResumed(echo, KEY);
+      expect(resumed.credentials.size).toBe(0);
+      expect(await openStoredGateSecrets(db)).toContain(KEY);
+      // The settlement mark the gate writes lives on the attempt's handoff row.
+      await reserveAttemptHandoff(db as never, {
+        deliveryKey: deliveryKeyOf(ref.payload),
+        attemptId: ATTEMPT_ID,
+        payload: ref.payload,
+        nowMs: Date.now(),
+        enqueuedMs: 500,
+        deadlineMs: ref.deadlineMs,
+      });
 
-      // The row's sealed set is the credential the writer did not hold.
-      await sealStoredGateSecrets(db, [KEY]);
-      expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+      expect(await collectAttempt(resumed, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
 
       const staged = db.raw
         .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
@@ -2236,7 +2236,10 @@ describe("the SEC-01 publish gate", () => {
       const failure = db.raw
         .prepare("SELECT error FROM review_failures WHERE head_sha = ?")
         .all(SHA) as { error: string }[];
-      expect(failure.some((row) => row.error.includes("publish gate refused"))).toBe(true);
+      // The refusal names the ECHO — never the unrecoverable-set path — so this
+      // case proves the gate actually scanned the recovered session credential.
+      expect(failure.some((row) => row.error.includes("the outgoing body carries a credential echo"))).toBe(true);
+      expect(failure.some((row) => row.error.includes("predates the sealed credential set"))).toBe(false);
       const handoff = db.raw
         .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
         .get(ATTEMPT_ID) as { settled_ms: number | null };
