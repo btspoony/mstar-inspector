@@ -1,5 +1,4 @@
-/**
- * The console's six screens: each screen's loading, error,
+/** note: The console's six screens: each screen's loading, error,
  * empty and populated states, plus the writes they own — the flag toggle, the
  * per-row plan picker (exactly ONE PATCH) and the support-grant create/revoke.
  *
@@ -27,7 +26,7 @@ type Respond = (request: Sent) => Response | Promise<Response>;
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-/** The mounted screen a test drives: wire log, DOM text and the event helpers. */
+/** note: The mounted screen a test drives: wire log, DOM text and the event helpers. */
 type Surface = {
   win: Window;
   container: DomElement;
@@ -40,7 +39,7 @@ type Surface = {
   close: () => Promise<void>;
 };
 
-/** Mount one screen with a stubbed console API and settle its first read. */
+/** note: Mount one screen with a stubbed console API and settle its first read. */
 async function mount(element: ReactElement, respond: Respond): Promise<Surface> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin");
   const sent: Sent[] = [];
@@ -58,7 +57,7 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
   win.document.body.appendChild(container);
   const root = createRoot(container as unknown as Element);
   await act(async () => root.render(element));
-  // One extra flush drains the read's own continuation (its .then setState).
+  // note: One extra flush drains the read's own continuation (its .then setState).
   await act(async () => {});
 
   return {
@@ -66,14 +65,14 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
     container,
     sent,
     text: () => container.textContent ?? "",
-    /** Click a node, then drain the write and its continuation. */
+    /** note: Click a node, then drain the write and its continuation. */
     async click(node: DomElement | null) {
       await act(async () => {
         node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       await act(async () => {});
     },
-    /** Open a Radix Select trigger (pointerdown is what Radix listens for). */
+    /** note: Open a Radix Select trigger (pointerdown is what Radix listens for). */
     async openSelect(trigger: DomElement | null) {
       await act(async () => {
         trigger?.dispatchEvent(
@@ -82,7 +81,7 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
         trigger?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
     },
-    /** Choose the portalled option whose text is exactly `label`. */
+    /** invariant: Choose the portalled option whose text is exactly `label`. */
     async pickOption(label: string) {
       const option = [...win.document.querySelectorAll('[role="option"]')].find(
         (node) => node.textContent === label,
@@ -96,9 +95,9 @@ async function mount(element: ReactElement, respond: Respond): Promise<Surface> 
       await act(async () => {});
       return option ?? null;
     },
-    /** Type into a controlled input the way React's value tracker expects. */
+    /** note: Type into a controlled input the way React's value tracker expects. */
     async type(selector: string, value: string) {
-      // A Radix dialog portals outside the mount container, so fall back to the document.
+      // note: A Radix dialog portals outside the mount container, so fall back to the document.
       const input = container.querySelector(selector) ?? win.document.querySelector(selector);
       const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
       await act(async () => {
@@ -122,8 +121,7 @@ async function runtimeScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): P
   return mount(createElement(RuntimePage, { locale }), respond);
 }
 
-/**
- * The runtime payload the workspaces page reads beside its table — the
+/** note: The runtime payload the workspaces page reads beside its table — the
  * official-workspace card's own read. Absent groups (check budgets, sweep, …)
  * are what an older Worker answers, so this stays the table tests' fixture too.
  */
@@ -132,14 +130,13 @@ const RUNTIME = {
   min: 1,
   max: 250,
   degraded: false,
-  // No designation: a name on the card would leak into the page text these
+  // safety: No designation: a name on the card would leak into the page text these
   // table tests assert on ("Acme" after a filter). The card's own tests below
   // set the designation they need.
   officialWorkspaceId: null as string | null,
 };
 
-/**
- * The workspaces page reads TWO faces: the table's rows and the runtime
+/** note: The workspaces page reads TWO faces: the table's rows and the runtime
  * payload the official-workspace card needs. `respond` answers the table and
  * its writes; the runtime read is answered here so a table test never trips
  * over the card's own states.
@@ -169,10 +166,10 @@ async function usageScreen(respond: Respond, locale: "en" | "zh_CN" = "en"): Pro
 const never = () => new Promise<Response>(() => {});
 const failed = () => new Response("boom", { status: 500 });
 
-/** A held-response latch: the test resolves it when the in-flight write may land. */
+/** note: A held-response latch: the test resolves it when the in-flight write may land. */
 type Gate = { promise: Promise<Response>; resolve: (value: Response) => void };
 
-/** The table row that carries `needle`, so a control is located by its row. */
+/** note: The table row that carries `needle`, so a control is located by its row. */
 function rowContaining(surface: Surface, needle: string): DomElement | null {
   return [...surface.container.querySelectorAll("tr")].find((row) => row.textContent?.includes(needle)) ?? null;
 }
@@ -183,7 +180,7 @@ const FLAGS = [
   { key: "workspace_creation_open", enabled: false },
 ];
 
-/** The seats cell: column 4 of Workspace | Owner | Members | Seats | Plan | Created. */
+/** note: The seats cell: column 4 of Workspace | Owner | Members | Seats | Plan | Created. */
 function seatsCell(surface: Surface, needle: string): string {
   const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
   return cells[3]?.textContent ?? "";
@@ -211,13 +208,13 @@ const WORKSPACES = [
     pendingInviteCount: 0,
     planId: "unlimited",
     planName: "Unlimited",
-    // NULL is no seat cap: the cell must read "—", never "5 / 0".
+    // invariant: NULL is no seat cap: the cell must read "—", never "5 / 0".
     includedMembers: null,
     createdAt: "2026-09-18T09:00:00.000Z",
   },
 ];
 
-/** Two bots in the official workspace (one shared) and one outside it. */
+/** note: Two bots in the official workspace (one shared) and one outside it. */
 const BOTS = [
   {
     botId: "bot-1",
@@ -318,7 +315,7 @@ describe("Flags screen", () => {
     expect(surface.text()).toContain("review_global");
     expect(surface.text()).toContain("signup_open");
     expect(surface.text()).toContain("workspace_creation_open");
-    // The spec's cancellation note belongs to review_global only.
+    // invariant: The spec's cancellation note belongs to review_global only.
     expect(surface.text()).toContain("Queued work is not cancelled.");
     expect(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]')?.textContent).toBe("ON");
     expect(
@@ -374,13 +371,13 @@ describe("Flags screen", () => {
       );
       expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
 
-      // Short-lived by contract: still there just before its own deadline…
+      // invariant: Short-lived by contract: still there just before its own deadline…
       await act(async () => {
         jest.advanceTimersByTime(2999);
       });
       expect(rowContaining(surface, "review_global")?.textContent).toContain("Saved.");
 
-      // …and gone once it passes, so a stale confirmation never lies.
+      // invariant: …and gone once it passes, so a stale confirmation never lies.
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
@@ -392,7 +389,7 @@ describe("Flags screen", () => {
   });
 
   test("unmounting the screen cancels the note's pending auto-clear", async () => {
-    // A surviving timer would call setSavedKey into an unmounted tree.
+    // why: A surviving timer would call setSavedKey into an unmounted tree.
     jest.useFakeTimers();
     const surface = await flagsScreen((request) =>
       request.method === "PATCH" ? json({ key: "review_global", enabled: false }) : json({ flags: FLAGS }),
@@ -406,7 +403,7 @@ describe("Flags screen", () => {
       );
       const armed = jest.getTimerCount();
       await surface.close();
-      // The teardown removed exactly one timer: the one this save armed.
+      // invariant: The teardown removed exactly one timer: the one this save armed.
       expect(jest.getTimerCount()).toBe(armed - 1);
     } finally {
       jest.useRealTimers();
@@ -419,7 +416,7 @@ describe("Flags screen", () => {
       await surface.click(rowContaining(surface, "review_global")?.querySelector('[data-slot="toggle"]') ?? null);
       const dialog = surface.win.document.querySelector('[role="alertdialog"]');
       const focused = surface.win.document.activeElement;
-      // A stray Enter or a blind keypress must land on the harmless control.
+      // invariant: A stray Enter or a blind keypress must land on the harmless control.
       expect(focused?.textContent).toBe("Cancel");
       expect(focused !== null && dialog?.contains(focused)).toBe(true);
     } finally {
@@ -531,7 +528,7 @@ describe("Runtime screen", () => {
     expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
       { url: "/_internal_admin/api/runtime", method: "PATCH", body: { concurrency: 40 } },
     ]);
-    // The accepted value replaces the stored one without a second read.
+    // note: The accepted value replaces the stored one without a second read.
     expect((surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement).value).toBe(
       "40",
     );
@@ -554,13 +551,13 @@ describe("Runtime screen", () => {
 
     expect(surface.text()).toContain("Could not change the system concurrency.");
     expect(surface.text()).toContain("body must be { concurrency: <integer in 1..256> }");
-    // The rejected write leaves the stored value as it was.
+    // note: The rejected write leaves the stored value as it was.
     expect(surface.text()).toContain("Effective on the next review: 24.");
     await surface.close();
   });
 
   test("a degraded read warns instead of presenting the fallback as the stored cap", async () => {
-    // The store answered the conservative 1 because the row could not be read.
+    // why: The store answered the conservative 1 because the row could not be read.
     // Showing 1 as a normal value would invite saving a number nobody stored.
     let degraded = true;
     const surface = await runtimeScreen(() =>
@@ -569,7 +566,7 @@ describe("Runtime screen", () => {
     expect(surface.text()).toContain(
       "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
     );
-    // The form stays — a save is the only way to repair an unreadable row — but
+    // invariant: The form stays — a save is the only way to repair an unreadable row — but
     // its field starts EMPTY and the "effective" line is withheld, so neither
     // presents the fallback as the stored cap.
     const input = surface.container.querySelector("#system-concurrency") as unknown as HTMLInputElement;
@@ -577,7 +574,7 @@ describe("Runtime screen", () => {
     expect(input.value).toBe("");
     expect(surface.text()).not.toContain("Effective on the next review: 1.");
 
-    // The offered recovery is the read, and it clears the warning once it works.
+    // note: The offered recovery is the read, and it clears the warning once it works.
     degraded = false;
     const retry = [...surface.container.querySelectorAll("button")].find(
       (button) => button.textContent === "Retry",
@@ -590,7 +587,7 @@ describe("Runtime screen", () => {
   });
 
   test("a typed value repairs a degraded read; an empty submit writes nothing", async () => {
-    // `data.concurrency` is the conservative fallback, not a stored value: an
+    // note: `data.concurrency` is the conservative fallback, not a stored value: an
     // empty draft must never write it. A typed value is the repair path.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
@@ -602,7 +599,7 @@ describe("Runtime screen", () => {
       (surface.container.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled,
     ).toBe(false);
 
-    // An untouched form submits nothing — the fallback is not a value anyone
+    // invariant: An untouched form submits nothing — the fallback is not a value anyone
     // stored.
     const form = surface.container.querySelector("form")!;
     await act(async () => {
@@ -621,7 +618,7 @@ describe("Runtime screen", () => {
   });
 
   test("an older server without checkBudgets still renders the concurrency card", async () => {
-    // A previously deployed Worker behind this bundle: the field is absent, so
+    // note: A previously deployed Worker behind this bundle: the field is absent, so
     // the budget card is hidden and the concurrency card is untouched.
     const surface = await runtimeScreen(() =>
       json({ concurrency: 24, min: 1, max: 256, degraded: false }),
@@ -633,7 +630,7 @@ describe("Runtime screen", () => {
   });
 
   test("the runtime page carries no review-depth control", async () => {
-    // Review depth is a per-repository default now: the runtime parameters
+    // note: Review depth is a per-repository default now: the runtime parameters
     // screen must not offer a third place to set it, even when an older Worker
     // still reports the group.
     const surface = await runtimeScreen(() =>
@@ -645,7 +642,7 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector("#default-review-level")).toBeNull();
     expect(surface.text()).not.toContain("Default review depth");
     expect(surface.text()).not.toContain("Review depth");
-    // The rest of the page is untouched.
+    // invariant: The rest of the page is untouched.
     expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
     expect(surface.container.querySelector("#check-terminalize-budget")).not.toBeNull();
     await surface.close();
@@ -669,7 +666,7 @@ describe("Runtime screen", () => {
 
     await surface.type("#check-terminalize-budget", "12000");
     await surface.type("#check-update-budget", "7000");
-    // The second form's submit button is the budget save.
+    // note: The second form's submit button is the budget save.
     const budgetForm = surface.container.querySelector("#check-terminalize-budget")!.closest("form")!;
     await surface.click(budgetForm.querySelector('button[type="submit"]'));
 
@@ -688,7 +685,7 @@ describe("Runtime screen", () => {
   });
 
   test("a refused budget pair reports the server's relation text inside the budget card", async () => {
-    // The store owns the terminalize>update rule; the card surfaces its text
+    // note: The store owns the terminalize>update rule; the card surfaces its text
     // next to the fields that produced it, not as a page-wide banner.
     const surface = await runtimeScreen((request) =>
       request.method === "PATCH"
@@ -707,7 +704,7 @@ describe("Runtime screen", () => {
 
     expect(surface.text()).toContain("Could not change the check budgets.");
     expect(surface.text()).toContain("the terminalize timeout must be greater than the check update budget");
-    // The rejected write never replaced the stored pair.
+    // invariant: The rejected write never replaced the stored pair.
     expect(surface.text()).toContain("Effective on the next review: terminalize 10000 ms, update 5000 ms.");
     await surface.close();
   });
@@ -724,7 +721,7 @@ describe("Runtime screen", () => {
     await surface.type("#claim-retry-budget", "60000");
     await surface.type("#claim-attempts-budget", "5");
     await surface.type("#claim-outbox-budget", "10");
-    // The third form's submit button is the claim save.
+    // note: The third form's submit button is the claim save.
     const claimForm = surface.container.querySelector("#claim-retry-budget")!.closest("form")!;
     await surface.click(claimForm.querySelector('button[type="submit"]'));
 
@@ -749,7 +746,7 @@ describe("Runtime screen", () => {
         admissionDrops24h: { "pr-held": 3, "system-cap": 1, "workspace-cap": 2, error: 0 },
       }),
     );
-    // The card names its window, so a number is never read as "all time".
+    // invariant: The card names its window, so a number is never read as "all time".
     expect(surface.text()).toContain("Admission drops (last 24 hours)");
     const rendered = Object.fromEntries(
       [...surface.container.querySelectorAll("[data-admission-drops]")].map((node) => [
@@ -758,14 +755,14 @@ describe("Runtime screen", () => {
       ]),
     );
     expect(rendered).toEqual({ "pr-held": "3", "system-cap": "1", "workspace-cap": "2", error: "0" });
-    // Every reason is labelled, not only numbered.
+    // invariant: Every reason is labelled, not only numbered.
     for (const label of ["PR in flight", "System cap", "Workspace cap", "Storage error"]) {
       expect(surface.text()).toContain(label);
     }
     await surface.close();
   });
 
-  /** The queue card's read cells, keyed by their `data-queue` field. */
+  /** note: The queue card's read cells, keyed by their `data-queue` field. */
   function queueCells(surface: Surface): Record<string, string | null> {
     return Object.fromEntries(
       [...surface.container.querySelectorAll("[data-queue]")].map((node) => [
@@ -808,12 +805,12 @@ describe("Runtime screen", () => {
     );
     expect(surface.text()).toContain("GitHub secondary limits (24 h)");
     expect(queueCells(surface)["rate-limited"]).toBe("7");
-    // An empty queue names its own state instead of rendering an absence.
+    // note: An empty queue names its own state instead of rendering an absence.
     expect(queueCells(surface).oldest).toBe("Empty");
     await surface.close();
   });
 
-  /** The maintenance card's read cells, keyed by their `data-maintenance` field. */
+  /** note: The maintenance card's read cells, keyed by their `data-maintenance` field. */
   function maintenanceCells(surface: Surface): Record<string, string | null> {
     return Object.fromEntries(
       [...surface.container.querySelectorAll("[data-maintenance]")].map((node) => [
@@ -829,7 +826,7 @@ describe("Runtime screen", () => {
     );
     expect(surface.text()).toContain("Maintenance mode");
     expect(maintenanceCells(surface)).toEqual({ state: "Off — the platform is serving" });
-    // The toggle is the operator's write surface, and the reason field is inert
+    // note: The toggle is the operator's write surface, and the reason field is inert
     // while the platform is open (a reopen writes no reason).
     expect(surface.container.querySelector("#maintenance-reason")).not.toBeNull();
     expect(
@@ -858,7 +855,7 @@ describe("Runtime screen", () => {
         ? json({ maintenance: { enabled: true, reason: "repository backfill", since } })
         : json({ ...RUNTIME, maintenance: { enabled: false, reason: null, since: null } }),
     );
-    // The toggle opens the reason field, then the save writes the window.
+    // note: The toggle opens the reason field, then the save writes the window.
     await surface.click(surface.container.querySelector('button[aria-label="Maintenance mode Off — the platform is serving"]'));
     await surface.type("#maintenance-reason", "repository backfill");
     await surface.click(
@@ -874,11 +871,11 @@ describe("Runtime screen", () => {
         body: { maintenance: { enabled: true, reason: "repository backfill" } },
       },
     ]);
-    // The accepted echo replaces the stored window without a second read.
+    // note: The accepted echo replaces the stored window without a second read.
     const cells = maintenanceCells(surface);
     expect(cells.state).toBe("On — the platform is closed");
     expect(cells.reason).toBe("repository backfill");
-    // The server stamps `since`; the card renders it, never the request value.
+    // invariant: The server stamps `since`; the card renders it, never the request value.
     expect(cells.since).not.toBeNull();
     expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(1);
     expect(surface.text()).toContain("Saved.");
@@ -922,9 +919,9 @@ describe("Workspaces screen", () => {
     expect(acme?.textContent).toContain("3");
     expect(acme?.textContent).toContain("1 pending");
     expect(acme?.textContent).toContain("2026-10-02");
-    // The picker labels the tier with the catalogue's display name.
+    // note: The picker labels the tier with the catalogue's display name.
     expect(acme?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Free");
-    // Headroom is used/cap, and an owner-less row reads "—" rather than blank.
+    // note: Headroom is used/cap, and an owner-less row reads "—" rather than blank.
     expect(seatsCell(surface, "Acme")).toBe("3 / 5");
     expect(rowContaining(surface, "Guild")?.textContent).toContain("—");
     await surface.close();
@@ -932,7 +929,7 @@ describe("Workspaces screen", () => {
 
   test("an unlimited seat cap renders as —, never 0", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
-    // Guild holds the NULL-cap tier at 5 members: "5 / 0" would be the defect.
+    // why: Guild holds the NULL-cap tier at 5 members: "5 / 0" would be the defect.
     expect(seatsCell(surface, "Guild")).toBe("—");
     expect(surface.text()).not.toContain("/ 0");
     await surface.close();
@@ -946,7 +943,7 @@ describe("Workspaces screen", () => {
         written = true;
         return json({ workspaceId: "ws_1", planId: "pro" });
       }
-      // The accepted write re-reads, so the cap follows the server.
+      // why: The accepted write re-reads, so the cap follows the server.
       return json({ workspaces: written ? [after] : WORKSPACES });
     });
     const row = rowContaining(surface, "Acme");
@@ -959,7 +956,7 @@ describe("Workspaces screen", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/plan");
     expect(patches[0]?.body).toEqual({ planId: "pro" });
-    // The accepted plan is what the row now shows.
+    // note: The accepted plan is what the row now shows.
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("Pro");
     await surface.close();
   });
@@ -967,15 +964,15 @@ describe("Workspaces screen", () => {
   test("search filters the loaded rows and shows the N / M counter", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }));
     expect(surface.text()).toContain("2 / 2");
-    // "guild" matches the name (and the slug) but not the other row.
+    // note: "guild" matches the name (and the slug) but not the other row.
     await surface.type('input[type="search"]', "guild");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("Guild");
-    // The TABLE lost the row. The page as a whole still names every workspace:
+    // note: The TABLE lost the row. The page as a whole still names every workspace:
     // the official-workspace card's selector lists them all.
     expect(surface.container.querySelector("tbody")?.textContent).not.toContain("Acme");
     expect(surface.text()).toContain("1 / 2");
-    // A query matching only the owner login keeps the matching row.
+    // invariant: A query matching only the owner login keeps the matching row.
     await surface.type('input[type="search"]', "octocat");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("Acme");
@@ -1000,7 +997,7 @@ describe("Workspaces screen", () => {
   test("an empty list plus a typed query keeps the page empty state", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: [] }));
     await surface.type('input[type="search"]', "zzz");
-    // Nothing was loaded, so the query has nothing to fail to match.
+    // why: Nothing was loaded, so the query has nothing to fail to match.
     const empty = surface.container.querySelector('[data-slot="empty-state"]');
     expect(empty?.textContent).toContain("No workspaces");
     expect(empty?.textContent).not.toContain("No matches");
@@ -1026,7 +1023,7 @@ describe("Workspaces screen", () => {
     const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
       (node) => node.textContent,
     );
-    // Only the unknown id falls back to the server-provided English name.
+    // invariant: Only the unknown id falls back to the server-provided English name.
     expect(labels).toContain("Legacy Tier");
     expect(labels).toContain("专业版");
     expect(labels).toContain("无限版");
@@ -1036,13 +1033,13 @@ describe("Workspaces screen", () => {
   test("a zh_CN render localises the plan picker's catalogue labels", async () => {
     const surface = await workspacesScreen(() => json({ workspaces: WORKSPACES }), "zh_CN");
     const trigger = rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]') ?? null;
-    // The selected row's own plan renders the zh catalogue label, not the server's English name.
+    // note: The selected row's own plan renders the zh catalogue label, not the server's English name.
     expect(trigger?.textContent).toBe("免费版");
     await surface.openSelect(trigger);
     const labels = [...surface.win.document.querySelectorAll('[role="option"]')].map(
       (node) => node.textContent,
     );
-    // The row's own option is the zh catalogue label; the rest of the catalogue is Chinese too.
+    // note: The row's own option is the zh catalogue label; the rest of the catalogue is Chinese too.
     expect(labels).toContain("免费版");
     expect(labels).toContain("专业版");
     expect(labels).toContain("无限版");
@@ -1062,10 +1059,10 @@ describe("Workspaces screen", () => {
     await surface.pickOption("专业版");
 
     const alert = surface.container.querySelector('[role="alert"]');
-    // The generic zh failure is primary; the server's English `{error}` is detail only.
+    // invariant: The generic zh failure is primary; the server's English `{error}` is detail only.
     expect(alert?.textContent).toContain("无法更改 Acme 的套餐。");
     expect(alert?.textContent).toContain("服务器返回：seat limit reached");
-    // The refused optimistic change is rolled back.
+    // note: The refused optimistic change is rolled back.
     expect(rowContaining(surface, "Acme")?.querySelector('[data-slot="select-trigger"]')?.textContent).toBe("免费版");
     await surface.close();
   });
@@ -1086,7 +1083,7 @@ describe("Workspaces screen", () => {
       (button) => button.textContent === "Edit slug",
     );
     await surface.click(action ?? null);
-    // The dialog opens with the row's current slug, and opening it writes nothing.
+    // invariant: The dialog opens with the row's current slug, and opening it writes nothing.
     const input = surface.win.document.querySelector('[data-slot="dialog-content"] input') as DomElement | null;
     expect((input as unknown as HTMLInputElement | null)?.value).toBe("acme");
     expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
@@ -1103,7 +1100,7 @@ describe("Workspaces screen", () => {
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/workspaces/ws_1/slug");
     expect(patches[0]?.body).toEqual({ slug: "acme-hq" });
-    // The dialog closes and the row shows the accepted slug.
+    // note: The dialog closes and the row shows the accepted slug.
     expect(surface.win.document.querySelector('[data-slot="dialog-content"]')).toBeNull();
     expect(rowContaining(surface, "Acme")?.textContent).toContain("acme-hq");
     await surface.close();
@@ -1120,7 +1117,7 @@ describe("Workspaces screen", () => {
       [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
         (button) => button.textContent === "Save slug",
       ) as unknown as HTMLButtonElement | undefined;
-    // The dialog opens prefilled, so an unchanged submit would write an audit
+    // why: The dialog opens prefilled, so an unchanged submit would write an audit
     // row with identical before/after.
     expect(save()?.disabled).toBe(true);
     await surface.type('[data-slot="dialog-content"] input', "acme-hq");
@@ -1150,7 +1147,7 @@ describe("Workspaces screen", () => {
 
     const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
     expect(dialog).not.toBeNull();
-    // The refusal must live INSIDE the dialog: the modal overlay covers the
+    // invariant: The refusal must live INSIDE the dialog: the modal overlay covers the
     // page-level notice, so a page notice is unreadable while it stays open.
     const alert = dialog?.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("无法更改 Acme 的 slug。");
@@ -1162,10 +1159,10 @@ describe("Workspaces screen", () => {
 });
 
 describe("Workspaces screen — official workspace card", () => {
-  /** The card's own read; the table keeps the file's fixtures. */
+  /** note: The card's own read; the table keeps the file's fixtures. */
   const runtimeWith = (officialWorkspaceId: string | null) => ({ ...RUNTIME, officialWorkspaceId });
 
-  /** Mount the page with a stub that answers BOTH of its reads. */
+  /** note: Mount the page with a stub that answers BOTH of its reads. */
   async function page(
     runtime: "ok" | "failed",
     officialWorkspaceId: string | null,
@@ -1181,7 +1178,7 @@ describe("Workspaces screen — official workspace card", () => {
     );
   }
 
-  /** The card's current-value node, keyed by the designation it reports. */
+  /** note: The card's current-value node, keyed by the designation it reports. */
   const designation = (surface: Surface): string =>
     surface.container.querySelector("[data-official-workspace]")?.textContent ?? "";
 
@@ -1203,14 +1200,14 @@ describe("Workspaces screen — official workspace card", () => {
     expect(
       surface.container.querySelector('[data-official-workspace="none"]')?.textContent,
     ).toBe("Not specified");
-    // Clearing nothing is not an action: the server refuses an empty save.
+    // invariant: Clearing nothing is not an action: the server refuses an empty save.
     expect((button(surface, "Clear") as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
     await surface.close();
   });
 
   test("Save writes the selected workspace with one PATCH and updates the card", async () => {
     const surface = await page("ok", "ws_1");
-    // Save is inert until the selection moves off the stored designation.
+    // note: Save is inert until the selection moves off the stored designation.
     expect((button(surface, "Save") as unknown as HTMLButtonElement | null)?.disabled).toBe(true);
 
     await surface.openSelect(surface.container.querySelector("#official-workspace"));
@@ -1239,7 +1236,7 @@ describe("Workspaces screen — official workspace card", () => {
     expect(
       surface.container.querySelector('[data-official-workspace="none"]')?.textContent,
     ).toBe("Not specified");
-    // The copy keeps the consequence: an existing share stays revocable.
+    // invariant: The copy keeps the consequence: an existing share stays revocable.
     expect(surface.container.querySelector('[role="status"]')?.textContent).toContain(
       "Shares already granted stay revocable.",
     );
@@ -1257,7 +1254,7 @@ describe("Workspaces screen — official workspace card", () => {
     const alert = surface.container.querySelector('[role="alert"]');
     expect(alert?.textContent).toContain("Could not change the official workspace.");
     expect(alert?.textContent).toContain("Server: workspace not found");
-    // A refusal leaves the stored designation on screen.
+    // note: A refusal leaves the stored designation on screen.
     expect(designation(surface)).toBe("Acme");
     await surface.close();
   });
@@ -1267,7 +1264,7 @@ describe("Workspaces screen — official workspace card", () => {
     expect(surface.container.querySelector('[role="alert"]')?.textContent).toContain(
       "Could not load the official workspace.",
     );
-    // The table's own read is a different face: it still renders.
+    // note: The table's own read is a different face: it still renders.
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(2);
     await surface.close();
   });
@@ -1275,13 +1272,13 @@ describe("Workspaces screen — official workspace card", () => {
 
 
 describe("Bots screen", () => {
-  /** The row action of `needle`'s row, located by its label. */
+  /** note: The row action of `needle`'s row, located by its label. */
   const rowAction = (surface: Surface, needle: string, label: string): DomElement | null =>
     [...(rowContaining(surface, needle)?.querySelectorAll("button") ?? [])].find(
       (node) => node.textContent === label,
     ) ?? null;
 
-  /** The dialog's confirm button — Cancel leads, so it is never the first. */
+  /** why: The dialog's confirm button — Cancel leads, so it is never the first. */
   const confirmButton = (surface: Surface): DomElement | null =>
     [...surface.win.document.querySelectorAll('[data-slot="dialog-content"] button')].find(
       (node) => node.textContent === "Confirm",
@@ -1312,21 +1309,21 @@ describe("Bots screen", () => {
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(3);
 
     const shared = rowContaining(surface, "mstar-inspector");
-    // The bot cell is composite: the name over the GitHub App id.
+    // note: The bot cell is composite: the name over the GitHub App id.
     expect(shared?.textContent).toContain("app 4803300");
     expect(shared?.textContent).toContain("Acme");
-    // The official marker rides only the workspace that is the designation.
+    // invariant: The official marker rides only the workspace that is the designation.
     expect(shared?.querySelector('[data-slot="status-badge"]')?.textContent).toBe("official");
     expect(shared?.textContent).toContain("shared");
     expect(shared?.textContent).toContain("2026-11-15 12:03");
     expect(shared?.textContent).toContain("2");
-    // A bot outside the designation carries the scope pill ALONE: no marker.
+    // note: A bot outside the designation carries the scope pill ALONE: no marker.
     expect(
       [...(rowContaining(surface, "team-a-reviewer")?.querySelectorAll('[data-slot="status-badge"]') ?? [])].map(
         (node) => node.textContent,
       ),
     ).toEqual(["owned"]);
-    // An owned bot shows no stamp, never an invented one.
+    // invariant: An owned bot shows no stamp, never an invented one.
     expect(rowContaining(surface, "acme-bot")?.textContent).toContain("—");
     await surface.close();
   });
@@ -1336,7 +1333,7 @@ describe("Bots screen", () => {
     const action = rowAction(surface, "team-a-reviewer", "Sharing unavailable");
     expect(action).not.toBeNull();
     expect((action as unknown as HTMLButtonElement).disabled).toBe(true);
-    // A dead control the operator cannot explain is a dead end.
+    // note: A dead control the operator cannot explain is a dead end.
     expect(rowContaining(surface, "team-a-reviewer")?.textContent).toContain(
       "Only bots in the official workspace can be shared.",
     );
@@ -1344,7 +1341,7 @@ describe("Bots screen", () => {
   });
 
   test("a share that outlived the designation stays revocable", async () => {
-    // The designation was re-pointed after this bot was shared. Sharing INTO
+    // invariant: The designation was re-pointed after this bot was shared. Sharing INTO
     // the platform is refused there, but stranding the share would make it
     // unrevocable from every console — the server allows the unshare, so the
     // page must offer it.
@@ -1364,16 +1361,16 @@ describe("Bots screen", () => {
 
     const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
     expect(dialog?.textContent).toContain("Share acme-bot platform-wide?");
-    // Nothing is written until the operator confirms.
+    // invariant: Nothing is written until the operator confirms.
     expect(surface.sent.filter((request) => request.method === "PATCH")).toHaveLength(0);
     await surface.click(confirmButton(surface));
 
     const patches = surface.sent.filter((request) => request.method === "PATCH");
     expect(patches).toHaveLength(1);
     expect(patches[0]?.url).toBe("/_internal_admin/api/bots/bot-3/scope");
-    // A share is not destructive, so it carries no confirmation body.
+    // why: A share is not destructive, so it carries no confirmation body.
     expect(patches[0]?.body).toEqual({ scope: "shared" });
-    // The accepted write re-reads: `sharedAt` is the server's stamp.
+    // note: The accepted write re-reads: `sharedAt` is the server's stamp.
     expect(surface.sent.filter((request) => request.method === "GET")).toHaveLength(2);
     await surface.close();
   });
@@ -1456,7 +1453,7 @@ describe("Users screen", () => {
     expect(rowContaining(surface, "octocat")?.textContent).toContain("2026-08-26");
     expect(rowContaining(surface, "ops")?.textContent).toContain("Support (2)");
     expect(rowContaining(surface, "yuki")?.textContent).toContain("User");
-    // One accent request: the operator identity. The console's plain variant is
+    // note: One accent request: the operator identity. The console's plain variant is
     // the surface re-map, not a second tone choice at the call site, so this
     // pill names the emphasis and no other row does. The painted pair is
     // resolved in admin-surface.test.ts; here the call site is what shows.
@@ -1473,7 +1470,7 @@ describe("Users screen", () => {
     await surface.type('input[type="search"]', "yuki");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(surface.text()).toContain("1 / 3");
-    // Case-insensitive: the query matches the login in another case.
+    // safety: Case-insensitive: the query matches the login in another case.
     await surface.type('input[type="search"]', "OCTO");
     expect(surface.container.querySelectorAll("tbody tr")).toHaveLength(1);
     expect(rowContaining(surface, "octocat")).not.toBeNull();
@@ -1491,7 +1488,7 @@ describe("Users screen", () => {
   test("an empty list plus a typed query keeps the page empty state", async () => {
     const surface = await usersScreen(() => json({ users: [] }));
     await surface.type('input[type="search"]', "zzz");
-    // Nothing was loaded, so the query has nothing to fail to match.
+    // why: Nothing was loaded, so the query has nothing to fail to match.
     const empty = surface.container.querySelector('[data-slot="empty-state"]');
     expect(empty?.textContent).toContain("No users");
     expect(empty?.textContent).not.toContain("No matches");
@@ -1547,7 +1544,7 @@ describe("Support access screen", () => {
     const row = rowContaining(surface, "incident 42");
     expect(row?.textContent).toContain("ops");
     expect(row?.textContent).toContain("Acme");
-    // The stamp is UTC (the column is `toISOString`), so it says so — a bare
+    // why: The stamp is UTC (the column is `toISOString`), so it says so — a bare
     // `2026-10-26 09:00` reads as local time to an operator outside UTC.
     expect(row?.textContent).toContain("2026-10-26 09:00 UTC");
     await surface.close();
@@ -1587,7 +1584,7 @@ describe("Support access screen", () => {
       ttlHours: 24,
     });
 
-    // The list is the server's answer, so the created row arrives by re-read.
+    // why: The list is the server's answer, so the created row arrives by re-read.
     expect(rowContaining(surface, "incident 42")?.textContent).toContain("Acme");
 
     const revoke = [...surface.container.querySelectorAll("button")].find(
@@ -1685,7 +1682,7 @@ describe("Support access screen", () => {
     gates.get("/_internal_admin/api/support-grants/g1")?.resolve(json({ id: GRANT.id, workspaceId: GRANT.workspace_id }));
     await act(async () => {});
     expect(rowContaining(surface, "incident 42")).toBeNull();
-    // Row B is still flying: its freshly rendered button stays disabled.
+    // invariant: Row B is still flying: its freshly rendered button stays disabled.
     expect(rowContaining(surface, "incident 43")?.querySelector("button")?.disabled).toBe(true);
 
     gates.get("/_internal_admin/api/support-grants/g2")?.resolve(json({ id: GRANT2.id, workspaceId: GRANT2.workspace_id }));
@@ -1709,7 +1706,7 @@ describe("Support access screen", () => {
   });
 });
 
-/** `GET /api/usage`: three live workspaces on a fixed month. */
+/** note: `GET /api/usage`: three live workspaces on a fixed month. */
 const USAGE = {
   month: "2026-11",
   workspaces: [
@@ -1719,7 +1716,7 @@ const USAGE = {
   ],
 };
 
-/** The two count cells of a usage row: Shared bot | Own bots. */
+/** note: The two count cells of a usage row: Shared bot | Own bots. */
 function usageCells(surface: Surface, needle: string): [string, string] {
   const cells = rowContaining(surface, needle)?.querySelectorAll("td") ?? [];
   return [cells[1]?.textContent ?? "", cells[2]?.textContent ?? ""];
@@ -1734,7 +1731,7 @@ describe("Usage screen", () => {
 
   test("rows carry the workspace and the two counts, zeros included", async () => {
     const surface = await usageScreen(() => json(USAGE));
-    // The decided columns, in order — no identity column and no total.
+    // note: The decided columns, in order — no identity column and no total.
     expect([...surface.container.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
       "Workspace",
       "Shared bot",

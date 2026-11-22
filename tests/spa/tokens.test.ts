@@ -1,5 +1,4 @@
-/**
- * The token covenant, rewritten for v0.5: source → fixture → DESIGN.md.
+/** note: The token covenant, rewritten for v0.5: source → fixture → DESIGN.md.
  *
  * Locked contract:
  * - DESIGN.md's frontmatter agrees with the generated fixture — proven here
@@ -51,9 +50,9 @@ const TOKENS_CSS = new URL("../../src/spa/styles/tokens.css", import.meta.url);
 const FIXTURE_PATH = new URL("../../src/design-system/fixture.json", import.meta.url);
 const VIEWS = new URL("../../src/dashboard/views.ts", import.meta.url);
 
-/** The DESIGN.md theme mechanism — frontmatter top level and themes: stay equal. */
+/** note: The DESIGN.md theme mechanism — frontmatter top level and themes: stay equal. */
 const THEME_MECHANISM = "manual data-theme override (navbar toggle); unset = dark default";
-/** Dated user authorization reversing the "no toggle" lock. */
+/** note: Dated user authorization reversing the "no toggle" lock. */
 const SUPERSEDE_NOTE = "Supersedes the earlier theme lock (2026-09-04, user instruction)";
 
 const TYPO_FIELDS = ["fontFamily", "fontSize", "fontWeight", "lineHeight", "letterSpacing"] as const;
@@ -65,12 +64,12 @@ const TYPO_PROP: Readonly<Record<string, string>> = {
   tracking: "letterSpacing",
 };
 const COLOR = /^(?:#[0-9a-f]{3,8}|oklch\()/i;
-/** A palette step declaration in the stylesheet: `background-100`, `gray-alpha-400`, `teal-700`. */
+/** note: A palette step declaration in the stylesheet: `background-100`, `gray-alpha-400`, `teal-700`. */
 const PALETTE_STEP = /^(?:background-\d00|gray-\d{3,4}|gray-alpha-\d{3,4}|brand-\d00|blue-\d00|red-\d{3,4}|amber-\d{3,4}|green-\d{3,4}|teal-\d00|purple-\d{3,4}|pink-\d{3,4})$/;
-/** The frontmatter reference grammar (design-md-spec §6): `{group.key}`, no component-to-component or spacing refs. */
+/** note: The frontmatter reference grammar (design-md-spec §6): `{group.key}`, no component-to-component or spacing refs. */
 const REF = /^\{([a-z]+)\.([^}]+)\}$/;
 
-/** sRGB channels of a `#rrggbb` literal, 0–1. */
+/** note: sRGB channels of a `#rrggbb` literal, 0–1. */
 const srgb = (value: string): [number, number, number] => {
   const [r, g, b] = [1, 3, 5].map((i) => parseInt(value.slice(i, i + 2), 16) / 255) as [number, number, number];
   return [r, g, b];
@@ -87,7 +86,7 @@ const contrast = (a: string, b: string): number => {
   const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
   return (hi + 0.05) / (lo + 0.05);
 };
-/** Resolve `var(--x)` chains against one theme's declarations. */
+/** note: Resolve `var(--x)` chains against one theme's declarations. */
 const resolve = (vars: Record<string, string>, name: string): string => {
   let value = vars[name]!;
   for (let hop = 0; hop < 8 && value.startsWith("var("); hop += 1) {
@@ -97,7 +96,7 @@ const resolve = (vars: Record<string, string>, name: string): string => {
 };
 
 type DesignFrontmatter = {
-  /** YAML keeps `0.5` a number and `0.5.0` a string. */
+  /** note: YAML keeps `0.5` a number and `0.5.0` a string. */
   version: string | number;
   description: string;
   defaultTheme: string;
@@ -120,15 +119,15 @@ type DesignFrontmatter = {
 const THEMES = ["dark", "light"] as const;
 const FIXTURE = parseFixture(readFileSync(FIXTURE_PATH, "utf8"));
 
-/** Non-nullable layer snapshots; a missing layer fails the first comparison. */
+/** note: Non-nullable layer snapshots; a missing layer fails the first comparison. */
 const DARK_SEMANTIC = FIXTURE.dark?.semantic!;
 const LIGHT_SEMANTIC = FIXTURE.light?.semantic!;
 const DARK_PRIMITIVE = FIXTURE.dark?.primitive!;
 const LIGHT_PRIMITIVE = FIXTURE.light?.primitive!;
-/** The component layer's geometry (heights, paddings) — theme-invariant. */
+/** note: The component layer's geometry (heights, paddings) — theme-invariant. */
 const DARK_COMPONENT = FIXTURE.dark?.component!;
 
-/** Fixture colour values per theme: the two colour-bearing layers merged. */
+/** note: Fixture colour values per theme: the two colour-bearing layers merged. */
 const FIXTURE_COLORS: Record<(typeof THEMES)[number], Record<string, string>> = {
   dark: { ...DARK_PRIMITIVE, ...DARK_SEMANTIC },
   light: { ...LIGHT_PRIMITIVE, ...LIGHT_SEMANTIC },
@@ -142,9 +141,9 @@ async function loadFrontmatter(): Promise<DesignFrontmatter> {
 }
 
 
-/** The fixture's live colour names for one theme: primitive + semantic layers. */
+/** note: The fixture's live colour names for one theme: primitive + semantic layers. */
 function liveColorNames(theme: (typeof THEMES)[number]): string[] {
-  // The component layer has no frontmatter slot; it never enters the map.
+  // invariant: The component layer has no frontmatter slot; it never enters the map.
   const entries =
     theme === "dark"
       ? [...Object.entries(DARK_PRIMITIVE), ...Object.entries(DARK_SEMANTIC)]
@@ -160,8 +159,7 @@ function cssCustomProperties(block: string): Record<string, string> {
   return out;
 }
 
-/**
- * Extract a balanced `{ ... }` block by its opening token (selector or
+/** note: Extract a balanced `{ ... }` block by its opening token (selector or
  * at-rule including the `{`). The open token must be the block form —
  * comment mentions of the selector carry no brace and are skipped by
  * the brace requirement.
@@ -192,13 +190,13 @@ describe("source → fixture → DESIGN.md chain", () => {
     for (const theme of THEMES) {
       const declared = fm.themes[theme].colors;
       const live = liveColorNames(theme);
-      // Both directions: nothing dropped, nothing invented.
+      // invariant: Both directions: nothing dropped, nothing invented.
       expect(Object.keys(declared).sort(), `${theme} names`).toEqual([...live].sort());
       for (const name of live) {
         expect(declared[name], `${theme} ${name}`).toBe(FIXTURE_COLORS[theme][name]);
       }
     }
-    // Top-level colors: mirrors the dark default so {colors.X} refs resolve
+    // note: Top-level colors: mirrors the dark default so {colors.X} refs resolve
     // to the runtime default.
     expect(fm.colors).toEqual(fm.themes.dark.colors);
   });
@@ -215,7 +213,7 @@ describe("source → fixture → DESIGN.md chain", () => {
     const sem = DARK_SEMANTIC;
     const light = LIGHT_SEMANTIC;
 
-    // Typography: every typo-* token lands on its role + property, exact value.
+    // note: Typography: every typo-* token lands on its role + property, exact value.
     for (const [name, value] of Object.entries(sem)) {
       const typo = /^typo-(.+)-(family|size|weight|line|tracking)$/.exec(name);
       if (!typo) continue;
@@ -225,7 +223,7 @@ describe("source → fixture → DESIGN.md chain", () => {
       expect(held, name).toBeDefined();
       expect(String(held), name).toBe(value);
     }
-    // And nothing extra: the roles are exactly the fixture's.
+    // invariant: And nothing extra: the roles are exactly the fixture's.
     const roles = new Set<string>();
     for (const name of Object.keys(sem)) {
       const role = /^typo-(.+)-(?:family|size|weight|line|tracking)$/.exec(name)?.[1];
@@ -279,7 +277,7 @@ describe("source → fixture → DESIGN.md chain", () => {
         expect(Object.hasOwn(groups[group as keyof typeof groups], key), `${name}: ${value}`).toBe(true);
       }
     }
-    // The v0.5 entry set the document owns (the component layer's faces plus
+    // note: The v0.5 entry set the document owns (the component layer's faces plus
     // the pattern faces it documents). button-xs is the brief's named entry.
     for (const name of [
       "button-primary", "button-secondary", "button-ghost", "button-danger", "button-disabled",
@@ -290,7 +288,7 @@ describe("source → fixture → DESIGN.md chain", () => {
   });
 
   test("the button size faces restate the component layer's geometry", async () => {
-    // `documentSync` reports the component layer and control heights as
+    // note: `documentSync` reports the component layer and control heights as
     // unexpressed — `components:` is variant-shaped, and the spec has no size
     // group — so nothing else stops the document restating a face the source
     // does not have (I-000215). The size entries are compared here instead:
@@ -310,9 +308,9 @@ describe("source → fixture → DESIGN.md chain", () => {
 describe("DESIGN.md theme and version contract", () => {
   test("dotted version, matching change-note, dark default, manual toggle", async () => {
     const fm = await loadFrontmatter();
-    // YAML keeps `0.5` a number and `0.5.0` a string; both read the same.
+    // note: YAML keeps `0.5` a number and `0.5.0` a string; both read the same.
     const version = String(fm.version);
-    // The version pin is STRUCTURAL, not a literal: DESIGN.md's own version is
+    // note: The version pin is STRUCTURAL, not a literal: DESIGN.md's own version is
     // a dotted numeric version, and its description carries the matching
     // `v<version>` change-note. A bump edits the document only.
     expect(version).toMatch(/^\d+\.\d+(?:\.\d+)?$/);
@@ -330,7 +328,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
   test("dark :root and the stored-light branch match the fixture palettes (no OS fallback)", async () => {
     const css = await Bun.file(TOKENS_CSS).text();
 
-    // v0.3.4 (2026-09-16): the prefers-color-scheme OS-light fallback is
+    // note: v0.3.4 (2026-09-16): the prefers-color-scheme OS-light fallback is
     // deleted — unset renders dark in every browser; light applies only
     // via the stored-choice attribute branch.
     const darkBlock = extractBlock(css, ":root {");
@@ -344,7 +342,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     const darkVars = cssCustomProperties(darkBlock);
     const lightVars = cssCustomProperties(lightBlock);
 
-    // The stylesheet is generated from the same source as the fixture, and
+    // note: The stylesheet is generated from the same source as the fixture, and
     // the document equals the fixture — so all three sites agree through
     // the one shared truth, not by pairwise copying.
     const darkPrimitive = FIXTURE.dark.primitive;
@@ -367,12 +365,12 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     expect(rootVars["radius-control"]).toBe("8px");
     expect(rootVars["radius-container"]).toBe("12px");
     expect(rootVars["typo-heading-24-size"]).toBe("24px");
-    // Component tokens name the semantic layer, never a palette step — this is
+    // invariant: Component tokens name the semantic layer, never a palette step — this is
     // the whole point of the re-point: the palette becomes droppable.
     expect(rootVars["button-primary-bg"]).toBe("var(--tone-accent-solid)");
     expect(rootVars["button-primary-fg"]).toBe("var(--on-brand)");
     expect(rootVars["card-bg"]).toBe("var(--surface-card)");
-    // The pre-redesign radius aliases left with the page stylesheet that was
+    // note: The pre-redesign radius aliases left with the page stylesheet that was
     // their last reader (2026-11-01); the earlier alias groups left with the SSR
     // face. A name coming back here would make a second vocabulary live again.
     expect(rootVars["rounded-sm"]).toBeUndefined();
@@ -387,14 +385,14 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
     const darkVars = cssCustomProperties(extractBlock(css, ":root {"));
     const lightVars = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
 
-    // Motion is theme-independent on :root; elevation carries dark on :root
+    // note: Motion is theme-independent on :root; elevation carries dark on :root
     // and light on the stored-light branch.
     expect(darkVars["duration-fast"]).toBe("120ms");
     expect(darkVars["ease-in-out"]).toBe("cubic-bezier(0.65, 0, 0.35, 1)");
     expect(darkVars["shadow-pop"]).toBe("0 8px 24px #02061799, 0 2px 6px #02061766");
     expect(lightVars["shadow-pop"]).toBe("0 8px 24px #1019281f, 0 2px 6px #10192814");
 
-    // Reduced-motion fold: durations collapse to 1ms.
+    // note: Reduced-motion fold: durations collapse to 1ms.
     const reduceVars = cssCustomProperties(extractBlock(css, "@media (prefers-reduced-motion: reduce) {"));
     expect(reduceVars["duration-fast"]).toBe("1ms");
     expect(reduceVars["duration-base"]).toBe("1ms");
@@ -403,7 +401,7 @@ describe("src/spa/styles/tokens.css ↔ fixture ↔ DESIGN.md", () => {
 });
 
 describe("Appendix A contrast dispositions (D16)", () => {
-  // Ratios are computed over the document's own frontmatter (proven equal to
+  // note: Ratios are computed over the document's own frontmatter (proven equal to
   // the fixture above), on the face each pair actually sits on.
   const lum = (hex: string): number => {
     const [r, g, b] = [0, 2, 4]
@@ -424,7 +422,7 @@ describe("Appendix A contrast dispositions (D16)", () => {
       for (const token of ["text-primary", "text-secondary", "text-muted"]) {
         expect(ratio(c[token]!, c["surface-card"]!), `${theme} ${token}`).toBeGreaterThanOrEqual(4.5);
       }
-      // Faint is below 4.5 on the card face (3.76 dark / 4.47 light) — the
+      // note: Faint is below 4.5 on the card face (3.76 dark / 4.47 light) — the
       // documented "tertiary marks only, never body copy" constraint — and
       // still clears the 3:1 bar it is held to.
       expect(ratio(c["text-faint"]!, c["surface-card"]!), `${theme} text-faint on card`).toBeLessThan(4.5);
@@ -445,7 +443,7 @@ describe("Appendix A contrast dispositions (D16)", () => {
 
   test("tone solid pairs: dark passes; light carries the recorded below-4.5 exceptions", async () => {
     const fm = await loadFrontmatter();
-    // The label on a tone solid is the page ink (the tone fg is chosen to sit
+    // note: The label on a tone solid is the page ink (the tone fg is chosen to sit
     // on the tint, not on its own solid step).
     for (const meaning of ["neutral", "accent", "success", "warn", "danger"]) {
       const dark = fm.themes.dark.colors;
@@ -454,7 +452,7 @@ describe("Appendix A contrast dispositions (D16)", () => {
     const light = fm.themes.light.colors;
     expect(ratio(light["surface-page"]!, light["tone-accent-solid"]!), "light accent solid").toBeGreaterThanOrEqual(4.5);
     expect(ratio(light["surface-page"]!, light["tone-danger-solid"]!), "light danger solid").toBeGreaterThanOrEqual(4.5);
-    // D16's approved below-4.5 light solids: badge-scale faces, never
+    // invariant: D16's approved below-4.5 light solids: badge-scale faces, never
     // running text — held to at least the 3:1 bar.
     for (const meaning of ["neutral", "success", "warn"]) {
       const r = ratio(light["surface-page"]!, light[`tone-${meaning}-solid`]!);
@@ -468,7 +466,7 @@ describe("Appendix A contrast dispositions (D16)", () => {
     for (const theme of THEMES) {
       const c = fm.themes[theme].colors;
       for (let n = 1; n <= 6; n++) {
-        // Light chart-2-mark is the corrected number: 3.30 on v0.5's white
+        // note: Light chart-2-mark is the corrected number: 3.30 on v0.5's white
         // surface-card (D16's 3.02 measured the old background-200 card).
         expect(ratio(c[`chart-${n}-mark`]!, c["surface-card"]!), `${theme} chart-${n}-mark`).toBeGreaterThanOrEqual(3);
       }
@@ -479,13 +477,13 @@ describe("Appendix A contrast dispositions (D16)", () => {
 describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   const BRIDGE = new URL("../../src/spa/styles/shadcn-theme.css", import.meta.url);
   const PRIMITIVES_DIR = fileURLToPath(new URL("../../src/design-system/primitives/", import.meta.url));
-  /** A5 sensitive subset — the only primitives allowed to drift from the copy-in. */
+  /** safety: A5 sensitive subset — the only primitives allowed to drift from the copy-in. */
   const SUBSET = ["button", "card", "input", "table", "skeleton", "tabs", "sidebar", "select", "dropdown-menu", "dialog"];
 
   test("the theme entry names the design-system tier Tailwind cannot scan on its own", async () => {
     const css = await Bun.file(BRIDGE).text();
     const directives = [...css.matchAll(/@source\s+"([^"]+)"/g)].map((match) => match[1] ?? "");
-    // This line is the only content path outside the entry's own directory
+    // invariant: This line is the only content path outside the entry's own directory
     // (the Vite root, `src/spa`). Deleting it keeps the DOM and drops every
     // utility the migrated primitives wear, with a green build — so the check
     // is that the directive exists, and that it points at a tree the scanner
@@ -497,7 +495,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       fileURLToPath(target).startsWith(fileURLToPath(new URL("../../src/spa/", import.meta.url))),
       `${target} sits inside the automatic scan base, so the directive is a no-op`,
     ).toBe(false);
-    // Both component tiers must be reachable: a path that lands one level off
+    // invariant: Both component tiers must be reachable: a path that lands one level off
     // (or on a file) would scan nothing and fail the same silent way.
     for (const tier of ["primitives", "patterns"]) {
       const child = new URL(`${directive}/${tier}/index.ts`, BRIDGE);
@@ -508,7 +506,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("bridge re-point: every value is a semantic token; focus stays on the blue duty", async () => {
     const css = await Bun.file(BRIDGE).text();
     const rootVars = cssCustomProperties(extractBlock(css, ":root {"));
-    // The task-3 re-point: the bridge never names a palette step. The action
+    // invariant: The task-3 re-point: the bridge never names a palette step. The action
     // pair goes through the component layer (`--primary` → `button-primary-bg`
     // → `tone-accent-solid`), which is what lets the D15 ops variant reach the
     // painted control; the next test proves that hop is invisible on the
@@ -521,17 +519,17 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(rootVars["border"]).toBe("var(--border-default)");
     expect(rootVars["destructive"]).toBe("var(--tone-danger-solid)");
     expect(rootVars["sidebar-primary"]).toBe("var(--tone-accent-solid)");
-    // Link/focus duty stays blue (AD-571) — including the sidebar ring
+    // invariant: Link/focus duty stays blue (AD-571) — including the sidebar ring
     // (QC round 1 F-003 revert); brand cyan never takes focus, and alerts
     // keep red/amber/green.
     expect(rootVars["ring"]).toBe("var(--focus-ring)");
     expect(rootVars["sidebar-ring"]).toBe("var(--focus-ring)");
 
-    // No palette step may appear in the bridge: referencing one keeps that
+    // note: No palette step may appear in the bridge: referencing one keeps that
     // step alive past the plan that removes it.
     expect(css).not.toMatch(/var\(--(?:background|gray|brand|red|blue|amber|green|teal|pink|purple)-/);
 
-    // The destructive hover derives from the solid rather than naming a step
+    // note: The destructive hover derives from the solid rather than naming a step
     // (the palette reduction removed the step the old hover used). An engine
     // without `color-mix` must still get a valid value, so the plain solid is
     // declared first and the derived face overrides it behind @supports.
@@ -539,7 +537,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const guarded = extractBlock(css, "@supports (color: color-mix(in srgb, red, blue)) {");
     expect(cssCustomProperties(guarded)["destructive-hover"]).toContain("color-mix(");
 
-    // Theme coupling (QC round 1 F-001): the hover steps must exist as
+    // invariant: Theme coupling (QC round 1 F-001): the hover steps must exist as
     // --color-* keys in `@theme inline`. Tailwind v4 CSS-first config
     // generates utilities from theme keys only, so an unmapped :root var
     // leaves hover:bg-primary-hover (and the secondary/destructive
@@ -549,41 +547,41 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(themeVars["color-primary-hover"]).toBe("var(--primary-hover)");
     expect(themeVars["color-secondary-hover"]).toBe("var(--secondary-hover)");
     expect(themeVars["color-destructive-hover"]).toBe("var(--destructive-hover)");
-    // (AD-622): the hover tint consumes the sidebar-accent key at
+    // note: (AD-622): the hover tint consumes the sidebar-accent key at
     // /40 opacity — same dead-class trap, so the mapping is pinned too.
     expect(themeVars["color-sidebar-accent"]).toBe("var(--sidebar-accent)");
   });
 
   test("every reference the hand-written stylesheets, shells and modules consume still names a token", () => {
-    // The set is derived from the tree, so the assertion below covers whatever
+    // why: The set is derived from the tree, so the assertion below covers whatever
     // stylesheet, HTML shell and TSX/TS module exists — not the two this link
     // first listed.
     const walk = consumerWalk();
     const consumers = walk.files;
     expect(consumers.length).toBeGreaterThan(0);
-    // A walk that stopped at the old extension set would still pass the loop
+    // why: A walk that stopped at the old extension set would still pass the loop
     // below, so the module half of the coverage is stated on its own.
     expect(consumers.some((file) => file.endsWith(".tsx"))).toBe(true);
-    // A readable-but-partly-unreadable tree would silently pass the link below
+    // why: A readable-but-partly-unreadable tree would silently pass the link below
     // (every file it did read is fine), so the walk's own read failures are
     // part of the live-tree claim.
     expect(walk.failures).toEqual([]);
-    // The predicate itself, on a root it must reject: an empty or missing root
+    // invariant: The predicate itself, on a root it must reject: an empty or missing root
     // is the drift (moved, renamed, emptied) the link exists to catch. Stated
     // explicitly, so the rule is proven even while the live tree is healthy.
     const root = fileURLToPath(new URL("../../", import.meta.url));
     const missing = join(root, "src/does-not-exist");
     expect(rootsWithoutConsumers(consumerWalk([missing]).roots)).toEqual(["src/does-not-exist"]);
-    // A root with a consumer contributes nothing to that list.
+    // invariant: A root with a consumer contributes nothing to that list.
     expect(rootsWithoutConsumers(consumerWalk([SPA_ROOT]).roots)).toEqual([]);
-    // A relative root would resolve against the CWD and read as empty: loud
+    // why: A relative root would resolve against the CWD and read as empty: loud
     // failure instead, so a caller bug cannot masquerade as a moved tree.
     expect(() => consumerWalk(["src/spa"])).toThrow(/must be absolute/);
     for (const file of consumers) {
       const css = readFileSync(new URL(`../../${file}`, import.meta.url), "utf8");
       expect(danglingReferences(file, css), file).toEqual([]);
     }
-    // The teeth, in one probe: `--retired-900` is mentioned by a commented-out
+    // note: The teeth, in one probe: `--retired-900` is mentioned by a commented-out
     // declaration AND consumed with a fallback. Neither may excuse it — a
     // comment declares nothing, and `var(--x, #fff)` still names `x`. Drop
     // either half of the matcher and the finding disappears.
@@ -603,7 +601,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       "dark:retired-900",
       "light:retired-900",
     ]);
-    // The HTML shells are the other grammar: a retired name quoted in an HTML
+    // note: The HTML shells are the other grammar: a retired name quoted in an HTML
     // comment is prose, while the same name in the shell's body is live. A
     // `<style>` block inside the shell is CSS again, comments included.
     const htmlNames = (html: string) => [
@@ -616,7 +614,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       htmlNames("<style>/* var(--retired-900) */ .a { color: var(--surface-page); }</style>"),
     ).toEqual([]);
-    // The TSX module is the third grammar: the shorthand names the same token,
+    // note: The TSX module is the third grammar: the shorthand names the same token,
     // typed (`text-(length:--x)`) or not, and a name computed at runtime is not
     // one a static walk can check — matching its truncated prefix would invent
     // a violation instead of reporting one.
@@ -627,7 +625,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(moduleNames('a = "text-(length:--typo-label-12-size)"')).toEqual([]);
     expect(moduleNames('a = "bg-(--retired-900)"')).toEqual(["retired-900"]);
     expect(moduleNames('a = "border-l-(--tone-${tone}-fg)"')).toEqual([]);
-    // A script's comments are not classified, so a name only a comment carries
+    // invariant: A script's comments are not classified, so a name only a comment carries
     // is reported. That is the direction this gate can afford — the opposite one
     // erased live references three times — and it is what keeps the reference
     // read total with no lexer to get wrong.
@@ -639,7 +637,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(
       moduleNames('const t = `${x /* bg-(--retired-900) */}`; k = "bg-(--surface-page)"'),
     ).toEqual(["retired-900"]);
-    // A declaration a comment wrote excuses nothing: the declaration view drops
+    // invariant: A declaration a comment wrote excuses nothing: the declaration view drops
     // every declaration its comment spans touch, whole — a block comment, a
     // line tail, and a multi-line block alike.
     expect(moduleNames('/* --retired-900: #fff; */ a = "bg-(--retired-900)"')).toEqual([
@@ -651,20 +649,20 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(moduleNames('/*\n --retired-900: #fff;\n*/\na = "bg-(--retired-900)"')).toEqual([
       "retired-900",
     ]);
-    // A `//` inside a URL literal takes no reference with it: nothing is
+    // invariant: A `//` inside a URL literal takes no reference with it: nothing is
     // stripped from a script, so the reference on that line stays.
     expect(
       moduleNames('const u = "https://api.example.com"; const k = "bg-(--retired-900)";'),
     ).toEqual(["retired-900"]);
     expect(moduleNames('const u = " // "; const k = "bg-(--retired-900)";')).toEqual(["retired-900"]);
     expect(moduleNames("const u = ' // '; const k = 'bg-(--retired-900)';")).toEqual(["retired-900"]);
-    // A template literal is string text too, `${ … }` expression included.
+    // note: A template literal is string text too, `${ … }` expression included.
     expect(moduleNames('const t = `a // b`; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
-    // A regex literal is not a comment either: `[ //]` is a character class,
+    // note: A regex literal is not a comment either: `[ //]` is a character class,
     // and reading its slashes as a comment start swallowed the live reference
     // beside it.
     expect(moduleNames('const r = /[ //]/; const k = "bg-(--retired-900)"')).toEqual(["retired-900"]);
-    // The retired scanner's division-then-comment shapes, plus the two a bare
+    // note: The retired scanner's division-then-comment shapes, plus the two a bare
     // tokenizer still reads as a comment — a template's middle text and JSX
     // child text. Every one keeps the reference it used to erase.
     expect(moduleNames('if (ok) /[//]/.test(value); const k = "bg-(--retired-900)"')).toEqual([
@@ -682,7 +680,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(moduleNames('<p>a // b</p><div className="bg-(--retired-900)" />')).toEqual([
       "retired-900",
     ]);
-    // The three boundaries a comment-stripping pass got wrong (qc1-rereview3): a
+    // note: The three boundaries a comment-stripping pass got wrong (qc1-rereview3): a
     // template line that starts with `//` and carries a real class, block
     // delimiters inside ordinary strings, and a declaration value holding a URL
     // — where truncating the value at the `//` excused that value's own cycle.
@@ -700,7 +698,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("an unreadable consumer is a reported failure, never a thrown run", () => {
-    // The link's header promises every file is checked even when one is
+    // note: The link's header promises every file is checked even when one is
     // broken: a broken symlink (a stat failure independent of the runner's
     // uid) is named in `failures` and the readable sibling is still returned.
     const dir = mkdtempSync(join(tmpdir(), "consumer-root-"));
@@ -717,7 +715,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("the walk and the stripper read an extension's case the same way (I-000352)", () => {
-    // One rule, lower-cased before either side reads it: a mixed-case
+    // invariant: One rule, lower-cased before either side reads it: a mixed-case
     // stylesheet is admitted by the walk and its block comment is prose to the
     // stripper. A walk that spelled extensions case-sensitively skipped the
     // file entirely, leaving the two rules free to disagree again.
@@ -736,7 +734,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("an unreadable root reports unreadability, never emptiness", () => {
-    // A declared root that exists but cannot be listed must not read as a
+    // invariant: A declared root that exists but cannot be listed must not read as a
     // moved/emptied tree: that names the wrong cause and would green-light a
     // link that never saw the tree. A file stands in for the unreadable root
     // because it fails to list with ENOTDIR whatever the runner's uid.
@@ -751,7 +749,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(walk.roots[0]?.failure).toContain("unreadable");
       expect(walk.failures).toHaveLength(1);
       expect(walk.failures[0]).toContain("unreadable");
-      // The emptiness predicate leaves it out; the failure names it instead.
+      // note: The emptiness predicate leaves it out; the failure names it instead.
       expect(rootsWithoutConsumers(walk.roots)).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -761,16 +759,16 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("a declaration no longer excuses its own dangling reference (I-000248)", () => {
     const names = (css: string) =>
       danglingReferences("probe.css", css).map(({ theme, name }) => `${theme}:${name}`);
-    // Before this rule the declaration set excused every name it declared, so
+    // invariant: Before this rule the declaration set excused every name it declared, so
     // a guaranteed-invalid cycle passed the gate green: `--x: var(--x)` paints
     // nothing while the reference reads as locally satisfied.
     expect(names(":root { --x: var(--x); }")).toEqual(["dark:x", "light:x"]);
     expect(names(":root { --x: var(--x, #fff); }")).toEqual(["dark:x", "light:x"]);
-    // A genuine intra-file reference still passes, and a name that also has a
+    // note: A genuine intra-file reference still passes, and a name that also has a
     // genuine declaration in the file still excuses its references.
     expect(names(":root { --genuine: #fff; } .a { color: var(--genuine); }")).toEqual([]);
     expect(names(":root { --x: var(--x); --x: #fff; } .a { color: var(--x); }")).toEqual([]);
-    // Whitespace inside the call is the same cycle and the same reference: the
+    // note: Whitespace inside the call is the same cycle and the same reference: the
     // canonical `var(` spelling missed both, so the spaced cycle kept its vote
     // and a spaced retired name was never seen at all.
     expect(names(":root { --x: var( --x ); }")).toEqual(["dark:x", "light:x"]);
@@ -783,7 +781,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("the primary bridge resolves to the accent pair off the ops surface", async () => {
-    // The extra component hop exists for the D15 variant. Off that surface it
+    // note: The extra component hop exists for the D15 variant. Off that surface it
     // must be invisible, and that is a value claim: resolve both themes through
     // the real files and compare against the pair the bridge used to name.
     const bridge = cssCustomProperties(extractBlock(await Bun.file(BRIDGE).text(), ":root {"));
@@ -803,7 +801,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const themeVars = cssCustomProperties(extractBlock(css, "@theme inline {"));
     expect(themeVars["radius-sm"]).toBe("var(--radius-control)");
     expect(themeVars["radius-md"]).toBe("var(--radius-container)");
-    // lg/xl re-point onto the container step so copy-in card faces land
+    // note: lg/xl re-point onto the container step so copy-in card faces land
     // without hand edits.
     expect(themeVars["radius-lg"]).toBe("var(--radius-container)");
     expect(themeVars["radius-xl"]).toBe("var(--radius-container)");
@@ -815,7 +813,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("the destructive hover is a distinct face in both themes, and keeps its label readable", async () => {
-    // The derivation is a colour relationship, so assert the relationship:
+    // note: The derivation is a colour relationship, so assert the relationship:
     // mixing toward the label face must move the fill away from the resting
     // colour and keep the label above 4.5:1 on it, in both themes.
     // The label is read from the component's own class list, not assumed: the
@@ -827,7 +825,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     const light = { ...dark, ...cssCustomProperties(extractBlock(tokens, ':root[data-theme="light"] {')) };
     const destructiveVariant = /destructive:\s*\n?\s*"([^"]+)"/.exec(await Bun.file(join(PRIMITIVES_DIR, "button.tsx")).text())?.[1];
     if (destructiveVariant === undefined) throw new Error("button.tsx declares no destructive variant");
-    // `bg-destructive` / `text-destructive-foreground` in the class list are the
+    // note: `bg-destructive` / `text-destructive-foreground` in the class list are the
     // rendered faces; a raw colour (`text-white`) has no bridge key and fails here.
     const fillClass = /(?:^|\s)bg-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
     const labelClass = /(?:^|\s)text-([a-z][a-z0-9-]*)(?=\s|$)/.exec(destructiveVariant)?.[1];
@@ -838,7 +836,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       "no authored `dark:` split — the token cascade is the one theme mechanism; the variant would follow data-theme but still bypass the tokens",
     ).not.toContain("dark:");
 
-    // The derived face lives in the @supports block; the plain solid in `:root`
+    // note: The derived face lives in the @supports block; the plain solid in `:root`
     // is its fallback.
     const hoverExpression =
       cssCustomProperties(
@@ -846,13 +844,13 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       )["destructive-hover"]!;
     const weightPercent = /color-mix\(in srgb,\s*var\(--tone-danger-solid\)\s+(\d+)%,\s*var\(--text-primary\)\)/
       .exec(hoverExpression)?.[1];
-    // The derivation is a colour relationship; pinning the numbers would let a
+    // why: The derivation is a colour relationship; pinning the numbers would let a
     // hand-written hex pass as "derived".
     expect(weightPercent, "destructive hover must derive from the solid and the label face").toBeDefined();
     expect(bridgeVars["destructive"]).toBe("var(--tone-danger-solid)");
     expect(bridgeVars["destructive-hover"]).toBe("var(--tone-danger-solid)");
 
-    /** The mix the browser performs at paint time, computed. */
+    /** note: The mix the browser performs at paint time, computed. */
     const blend = (solid: string, label: string, weight: number): string => {
       const [s, t] = [srgb(solid), srgb(label)];
       return `#${s
@@ -861,7 +859,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     };
 
     for (const vars of [dark, light]) {
-      // One map per theme: a bridge key points at a token, a token points at a
+      // note: One map per theme: a bridge key points at a token, a token points at a
       // primitive, and the chain ends in the hex the browser paints.
       const chain = { ...vars, ...bridgeVars };
       expect(chain[fillClass!], `bg-${fillClass} must name a bridge key`).toBeDefined();
@@ -877,7 +875,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("the link variant keeps its label readable on the page plane", async () => {
-    // The link face paints no fill, so its contrast duty is the page plane.
+    // note: The link face paints no fill, so its contrast duty is the page plane.
     // The label is read from the face's own class list and resolved to the hex
     // the browser paints: pinning the class would prove the spelling, not the
     // ratio the link duty exists for.
@@ -904,7 +902,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("restyled subset carries v0.3 form: supersede marker, control radius, elevation on the overlay faces only, token-eased transitions", async () => {
     for (const name of SUBSET) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
-      // Copy-in supersede marker — a future regen must not clobber silently.
+      // invariant: Copy-in supersede marker — a future regen must not clobber silently.
       expect(source, name).toContain("Locally revised shadcn/ui copy-in (v0.3 restyle;");
       // Hard constraint #7 (architect tighten-up): transition-all is
       // narrowed to explicit property lists across the subset.
@@ -916,21 +914,21 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
     expect(button).not.toContain("rounded-md");
     expect(button).toContain("duration-(--duration-base)");
     expect(button).toContain("ease-(--ease-in-out)");
-    // The link duty stays on the focus blue even though --primary is the accent
+    // invariant: The link duty stays on the focus blue even though --primary is the accent
     // tone. Asserted as "names no palette step" rather than as the class that
     // carries it: the link face resolves through `focus-ring`, and re-pinning
     // that class name would rebuild the oracle this migration removes.
     expect(button).not.toMatch(/--(?:background|gray|brand|blue|red|amber|green|purple|teal|pink)-/);
 
     const card = await Bun.file(join(PRIMITIVES_DIR, "card.tsx")).text();
-    // r3 card rule (2026-10-31): definition is the hairline plus the
+    // note: r3 card rule (2026-10-31): definition is the hairline plus the
     // surface step, so the resting card declares no box-shadow at all —
     // elevation is the overlays' (asserted below, on the overlay faces).
     expect(card).not.toMatch(/(?:^|["\s])shadow-/);
 
     for (const name of ["dropdown-menu", "select", "dialog"]) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
-      // The overlay faces carry the elevation namespace; a raw shadow step is
+      // note: The overlay faces carry the elevation namespace; a raw shadow step is
       // the retired spelling.
       expect(source, name).toMatch(/shadow-\(--[a-z0-9-]+\)/);
       expect(source, name).not.toMatch(/shadow-(md|lg)\b/);
@@ -938,7 +936,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
 
     const input = await Bun.file(join(PRIMITIVES_DIR, "input.tsx")).text();
     expect(input).toContain("rounded-sm");
-    // DESIGN.md "Input — States: hover holds the edge" governs every field
+    // note: DESIGN.md "Input — States: hover holds the edge" governs every field
     // face, and the select trigger is a field (`border-input`, control
     // height, control radius), not an action: it holds its edge through
     // hover. Asserted as the absence of a hover edge on both, whichever
@@ -948,7 +946,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
       expect(source, name).not.toMatch(/hover:border-/);
     }
 
-    // QC round 1 F-004: raw `transition-opacity` faces ride the duration +
+    // note: QC round 1 F-004: raw `transition-opacity` faces ride the duration +
     // easing tokens so the prefers-reduced-motion fold reaches them too.
     const dialog = await Bun.file(join(PRIMITIVES_DIR, "dialog.tsx")).text();
     expect(dialog).toMatch(/transition-opacity[^"\n]*duration-\(--duration-[a-z0-9-]+\)[^"\n]*ease-\(--ease-[a-z0-9-]+\)/);
@@ -962,7 +960,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   });
 
   test("further locally revised copy-ins carry the supersede marker (banned-free pin)", async () => {
-    // Coverage strengthening for the shadcn copy-in marker (QC S-2 follow-up,
+    // note: Coverage strengthening for the shadcn copy-in marker (QC S-2 follow-up,
     // 2026-09-20): toggle/sheet were revised in the motion-token sweep,
     // outside the v0.3 subset above, so their supersede markers were
     // unpinned. The pin is banned-free by construction — it asserts the
@@ -978,7 +976,7 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
 describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
   const FONTS_CSS = new URL("../../src/spa/styles/fonts.css", import.meta.url);
   const FONT_DIR = fileURLToPath(new URL("../../src/spa/assets/fonts/", import.meta.url));
-  /** Geist first; the system entries keep zh and fallback-glyph duty. */
+  /** note: Geist first; the system entries keep zh and fallback-glyph duty. */
   const GEIST_STACK = '"Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
   const MONO_STACK = "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace";
   const VENDORED = ["geist-sans-latin-400.woff2", "geist-sans-latin-500.woff2", "geist-sans-latin-600.woff2"];
@@ -995,7 +993,7 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
       expect(block).toContain('format("woff2")');
       expect(block).toContain('url("../assets/fonts/geist-sans-latin-');
       weights.push(Number(block.match(/font-weight:\s*(\d+)/)?.[1]));
-      // zh text must never select this face: no declared range may cover
+      // invariant: zh text must never select this face: no declared range may cover
       // CJK, kana, or fullwidth codepoints (probes: ideographic space,
       // hiragana, the first CJK ideograph, fullwidth comma). zh runs then
       // render on the system stack and pure-zh pages never download.
@@ -1030,7 +1028,7 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
 
     expect(cssCustomProperties(extractBlock(css, ":root {"))["font-sans"]).toBe(GEIST_STACK);
 
-    // The SSR face declares the stack from the generated table, so the third
+    // why: The SSR face declares the stack from the generated table, so the third
     // site is the stylesheet it renders, not a literal in its source.
     const html = errorPage("boom");
     const style = html.slice(html.indexOf("<style>"), html.indexOf("</style>"));
@@ -1044,11 +1042,11 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
     let total = 0;
     for (const file of VENDORED) {
       const path = join(FONT_DIR, file);
-      // woff2 magic — guards against a placeholder/error-page binary.
+      // note: woff2 magic — guards against a placeholder/error-page binary.
       expect(readFileSync(path).subarray(0, 4).toString("latin1")).toBe("wOF2");
       total += statSync(path).size;
     }
-    // AD-572 budget: 150KB read decimal — the stricter of the two readings.
+    // note: AD-572 budget: 150KB read decimal — the stricter of the two readings.
     expect(total, `${total} bytes of woff2 vs the 150KB budget`).toBeLessThanOrEqual(150_000);
   });
 });
@@ -1056,18 +1054,18 @@ describe("DESIGN.md self-hosted Geist Sans typeface (AD-572)", () => {
 describe("DESIGN.md theme contract", () => {
   test("manual navbar-toggle override documented with the dated supersede note", async () => {
     const md = await Bun.file(DESIGN).text();
-    // The toggle contract: storage key + pre-paint application, in body prose.
+    // note: The toggle contract: storage key + pre-paint application, in body prose.
     expect(md).toContain('localStorage["mstar.dashboard.theme"]');
     expect(md).toContain("documentElement.dataset.theme");
     expect(md).toContain(SUPERSEDE_NOTE);
-    // v0.3.4: the cascade is the stored-light branch only — the OS-fallback
+    // invariant: v0.3.4: the cascade is the stored-light branch only — the OS-fallback
     // selector is gone from every theme location.
     expect(md).toContain(':root[data-theme="light"]');
     expect(md).not.toContain(':root:not([data-theme="dark"])');
-    // The lock wording is gone from every theme location.
+    // note: The lock wording is gone from every theme location.
     expect(md).not.toContain("No independent theme toggle");
     expect(md).not.toContain("navbar theme button");
-    // Narrowed: `switcher` alone is legitimate — the
+    // note: Narrowed: `switcher` alone is legitimate — the
     // WorkspaceSwitcher control — so this pin names only the retired
     // theme-toggle wording (case-insensitively, so a re-capitalised
     // restatement cannot slip past the literal pins above).
@@ -1079,7 +1077,7 @@ describe("DESIGN.md theme contract", () => {
 });
 
 describe("SSR STYLE token parity", () => {
-  /** The stylesheet the SSR faces actually ship — rendered, never read from source. */
+  /** invariant: The stylesheet the SSR faces actually ship — rendered, never read from source. */
   async function ssrStyle(): Promise<string> {
     const { errorPage } = await import("../../src/dashboard/views");
     const html = errorPage("boom");
@@ -1090,7 +1088,7 @@ describe("SSR STYLE token parity", () => {
     return html.slice(start, end);
   }
 
-  /** The dark block and the stored-light overrides, as the face declares them. */
+  /** note: The dark block and the stored-light overrides, as the face declares them. */
   function ssrBlocks(style: string): { dark: Record<string, string>; light: Record<string, string> } {
     const lightAt = style.indexOf(':root[data-theme="light"] {');
     expect(lightAt).toBeGreaterThan(0);
@@ -1108,9 +1106,9 @@ describe("SSR STYLE token parity", () => {
     const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
     const lightCascade = { ...cssRoot, ...cssLight };
 
-    // `--focus-halo` is the face's own composed shadow, not a token.
+    // note: `--focus-halo` is the face's own composed shadow, not a token.
     const names = Object.keys(ssrDark).filter((name) => name !== "focus-halo");
-    // The property a bare count stood in for: the face declares a value for
+    // note: The property a bare count stood in for: the face declares a value for
     // every token its own stylesheet paints with — no paint left unthemed —
     // and every name it declares really is a token the fixture carries in that
     // theme, so a typo cannot pass by resolving to nothing.
@@ -1127,7 +1125,7 @@ describe("SSR STYLE token parity", () => {
       const dark = ssrDark[name] as string;
       const light = ssrLight[name];
       expect(resolve(cssRoot, name), `dark --${name}`).toBe(dark);
-      // Light re-declares only the names whose value differs; everything else
+      // invariant: Light re-declares only the names whose value differs; everything else
       // must be genuinely theme-invariant, never a dropped override.
       if (light === undefined) {
         expect(resolve(lightCascade, name), `light --${name} (not re-declared)`).toBe(dark);
@@ -1153,7 +1151,7 @@ describe("SSR STYLE token parity", () => {
     const cssLight = cssCustomProperties(extractBlock(css, ':root[data-theme="light"] {'));
     const lightCascade = { ...cssRoot, ...cssLight };
 
-    // Neither face names the fill directly any more: the SPA reads the
+    // note: Neither face names the fill directly any more: the SPA reads the
     // component token and the SSR face inlines the value it resolves to. Both
     // must land on the same colour in both themes.
     expect(cssRoot["button-primary-bg"]).toBe("var(--tone-accent-solid)");

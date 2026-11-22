@@ -1,5 +1,4 @@
-/**
- * The repository surface's rendered faces (product spec J1/J2).
+/** note: The repository surface's rendered faces (product spec J1/J2).
  *
  * Static SSR pins what the page shows, not how it wires:
  *   - the fixed 所有仓库 aggregate row first, with the live count and the
@@ -74,7 +73,7 @@ const installations = (
   ],
 ): InstallationsState => ({ state: "ok", installations: rows });
 
-/** An offered repository row; `claimed` defaults to the common free case. */
+/** note: An offered repository row; `claimed` defaults to the common free case. */
 const offered = (
   row: InstallationRepositoryOption,
   claimed = false,
@@ -118,8 +117,7 @@ function renderBody(props: {
   );
 }
 
-/**
- * One table row's own markup, cut at the next row so a string the band or the
+/** note: One table row's own markup, cut at the next row so a string the band or the
  * header band also renders (待安装 is a filter label too) cannot satisfy an
  * assertion about that row.
  */
@@ -130,12 +128,12 @@ function rowMarkup(markup: string, identity: string): string {
   return found;
 }
 
-/** The table's header labels, in order. */
+/** note: The table's header labels, in order. */
 function headers(markup: string): string[] {
   return [...markup.matchAll(/<th [^>]*>([\s\S]*?)<\/th>/g)].map((cell) => (cell[1] ?? "").trim());
 }
 
-/** The metric band as `{ key: value }`, read off the rendered markup. */
+/** note: The metric band as `{ key: value }`, read off the rendered markup. */
 function metricValues(markup: string): Record<string, string> {
   const pairs = markup.matchAll(
     /data-slot="metric-key"[^>]*>([^<]*)<\/span>.*?data-slot="metric-value"[^>]*>([^<]*)<\/span>/gs,
@@ -143,8 +141,7 @@ function metricValues(markup: string): Record<string, string> {
   return Object.fromEntries([...pairs].map((match) => [match[1] ?? "", match[2] ?? ""]));
 }
 
-/**
- * The confirm button's disabled state, read off the rendered markup. React SSR
+/** note: The confirm button's disabled state, read off the rendered markup. React SSR
  * writes the attribute as `disabled=""`; the button's class list also mentions
  * `disabled:` variants, so only the bare attribute proves the state.
  */
@@ -157,7 +154,7 @@ function confirmDisabled(markup: string): boolean {
 }
 
 describe("repository list (static SSR)", () => {
-  /** The loaded list under the page's own base, with the rows as given. */
+  /** note: The loaded list under the page's own base, with the rows as given. */
   const renderView = (targets: TargetListRow[]): string =>
     withLocation("/dashboard/acme/repos", () =>
       renderToStaticMarkup(
@@ -170,17 +167,17 @@ describe("repository list (static SSR)", () => {
       row({ target_id: "t-1", repo_name: "api", last_reviewed_at: "2026-01-01 00:00:00" }),
       row({ target_id: "t-2", repo_id: 502, repo_name: "web", review_enabled: 0 }),
     ]);
-    // The fixed row comes first, then the repositories in payload order.
+    // note: The fixed row comes first, then the repositories in payload order.
     expect(markup.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(markup.indexOf("acme/api"));
     expect(markup).toContain(t("en", "targets.allRepositoriesMeta"));
     expect(markup).toContain("2 repositories");
     expect(markup).toContain('href="/dashboard/acme/repos/all"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-1"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-2"');
-    // Status pills: reviewing and paused.
+    // note: Status pills: reviewing and paused.
     expect(markup).toContain(t("en", "targets.status.reviewing"));
     expect(markup).toContain(t("en", "targets.status.paused"));
-    // The row is the destination, as on the Apps table.
+    // note: The row is the destination, as on the Apps table.
     expect(markup).toContain("cursor-pointer");
   });
 
@@ -193,7 +190,7 @@ describe("repository list (static SSR)", () => {
       t("en", "targets.columnReviews7d"),
       t("en", "targets.columnLastReview"),
     ]);
-    // The App name is the composite cell's secondary line, as on the Apps list.
+    // note: The App name is the composite cell's secondary line, as on the Apps list.
     const targetRow = rowMarkup(markup, "acme/api");
     expect(targetRow).toContain("acme/api");
     expect(targetRow).toContain("Acme Inspector");
@@ -212,22 +209,22 @@ describe("repository list (static SSR)", () => {
   test("a 待安装 row reports the discriminator instead of an invented name", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
     expect(markup).toContain(t("en", "targets.status.uninstalled"));
-    // `null`/`null` must not render as a repository named "null/null".
+    // invariant: `null`/`null` must not render as a repository named "null/null".
     expect(markup).not.toContain("null/null");
   });
 
   test("a target without repo_id but with owner/name renders the name, not a dash", () => {
-    // The staging shape: a target that lost its installation still names the
+    // note: The staging shape: a target that lost its installation still names the
     // repository it was reviewed under. `repo_id` stays the 待安装 badge's key,
     // but it must not erase the identity.
     const markup = renderView([row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })]);
     expect(markup).toContain("42ch-dev/nexus");
-    // The badge is asserted on the ROW's own subtree: the filter renders the
+    // note: The badge is asserted on the ROW's own subtree: the filter renders the
     // same label, so a page-wide `toContain` would pass even without a badge.
     const targetRow = rowMarkup(markup, "42ch-dev/nexus");
     expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
     expect(targetRow).toContain('data-tone="warn"');
-    // No row fell back to the dash: the one target row named its repository.
+    // note: No row fell back to the dash: the one target row named its repository.
     expect(targetRow).not.toContain(">—</a>");
   });
 
@@ -235,7 +232,7 @@ describe("repository list (static SSR)", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
     const targetRow = rowMarkup(markup, "—</a>");
     expect(targetRow).toContain(">—</a>");
-    // The same installation axis: no repo_id means the 待安装 pill.
+    // note: The same installation axis: no repo_id means the 待安装 pill.
     expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
   });
 
@@ -253,18 +250,18 @@ describe("repository list (static SSR)", () => {
       }),
       row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
     ]);
-    // The one explanatory block — no second endpoint, no second paragraph.
+    // note: The one explanatory block — no second endpoint, no second paragraph.
     expect(markup).toContain(t("en", "targets.headingDescription"));
-    // The figure and the pill are the SAME axis: t-2 names a repository but
+    // note: The figure and the pill are the SAME axis: t-2 names a repository but
     // carries no repo_id, and both read it as 待安装.
     expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
-    // Three figures, all summed from the loaded payload.
+    // note: Three figures, all summed from the loaded payload.
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "3",
       [t("en", "targets.metricReviews")]: "13",
       [t("en", "targets.metricReviews7d")]: "5",
     });
-    // 待安装 is no longer a metric (I-000640): read the band's OWN key list, so a
+    // note: 待安装 is no longer a metric (I-000640): read the band's OWN key list, so a
     // future band that re-adds it under any label fails here. The band renders
     // exactly the three review-volume figures and nothing else.
     expect(Object.keys(metricValues(markup))).toEqual([
@@ -272,7 +269,7 @@ describe("repository list (static SSR)", () => {
       t("en", "targets.metricReviews"),
       t("en", "targets.metricReviews7d"),
     ]);
-    // The count of unbound rows survives only as the filter's label.
+    // invariant: The count of unbound rows survives only as the filter's label.
     expect(markup).toContain(t("en", "targets.filterUninstalled", { count: 2 }));
   });
 
@@ -311,7 +308,7 @@ describe("the 待安装 filter (mounted)", () => {
       root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
     );
     try {
-      // The filter control names the count — it is a filter, not a metric.
+      // note: The filter control names the count — it is a filter, not a metric.
       const segment = [...container.querySelectorAll("button")].find(
         (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
       );
@@ -320,14 +317,14 @@ describe("the 待安装 filter (mounted)", () => {
       await act(async () => {
         segment?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
-      // Only the unbound row survives, and the aggregate row stays first.
+      // invariant: Only the unbound row survives, and the aggregate row stays first.
       const text = container.textContent ?? "";
       expect(text).toContain("acme/web");
       expect(text).not.toContain("acme/api");
       expect(text).not.toContain("acme/docs");
       expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
 
-      // Clearing restores every row in the payload's order.
+      // note: Clearing restores every row in the payload's order.
       const all = [...container.querySelectorAll("button")].find(
         (node) => node.textContent === t("en", "targets.filterAll"),
       );
@@ -353,7 +350,7 @@ describe("list helpers", () => {
   });
 
   test("a paused target outranks its missing repository identity only after it", () => {
-    // 待安装 is the first discriminator: a row with no repo_id is awaiting its
+    // note: 待安装 is the first discriminator: a row with no repo_id is awaiting its
     // delivery whatever its pause column says.
     expect(targetStatusPill("en", row({ repo_id: null })).label).toBe(t("en", "targets.status.uninstalled"));
     expect(targetStatusPill("en", row({ review_enabled: 0 })).label).toBe(t("en", "targets.status.paused"));
@@ -362,7 +359,7 @@ describe("list helpers", () => {
 });
 
 describe("add-repository dialog (static SSR)", () => {
-  /** The three step headings, in order — the flow's own skeleton. */
+  /** note: The three step headings, in order — the flow's own skeleton. */
   const steps = (markup: string): number[] =>
     [t("en", "targets.addDialog.stepApp"), t("en", "targets.addDialog.stepInstall"), t("en", "targets.addDialog.stepRepos")].map(
       (step) => markup.indexOf(step),
@@ -373,13 +370,13 @@ describe("add-repository dialog (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.addDialog.noApps"));
     expect(markup).toContain(t("en", "targets.addDialog.goToApps"));
     expect(markup).toContain('href="/dashboard/acme/apps"');
-    // No steps: there is nothing to choose, and no way to proceed.
+    // invariant: No steps: there is nothing to choose, and no way to proceed.
     expect(markup).not.toContain(t("en", "targets.addDialog.stepApp"));
     expect(confirmDisabled(markup)).toBe(true);
   });
 
   test("the App step is ALWAYS rendered, even with exactly one App", () => {
-    // I-000642: a single App used to bind silently to apps[0]. The choice is
+    // note: I-000642: a single App used to bind silently to apps[0]. The choice is
     // now explicit — the combobox names the one App instead of a sentence
     // standing in for it.
     const single = renderBody({ apps: [app()] });
@@ -398,7 +395,7 @@ describe("add-repository dialog (static SSR)", () => {
     });
     expect(markup).toContain(t("en", "targets.addDialog.stepApp"));
     expect(markup).toContain('role="combobox"');
-    // The coming shared scope is stated, not built.
+    // note: The coming shared scope is stated, not built.
     expect(markup).toContain(t("en", "targets.addDialog.sharedScopeComing"));
   });
 
@@ -417,14 +414,14 @@ describe("add-repository dialog (static SSR)", () => {
   test("no installation: exactly one GitHub install link plus a re-check, confirm disabled", () => {
     const markup = renderBody({ apps: [app()], installs: installations([]) });
     expect(markup).toContain(t("en", "targets.addDialog.noInstallations"));
-    // The installation step offers the install entry exactly once — the shared
+    // invariant: The installation step offers the install entry exactly once — the shared
     // identity link in the left column; the right column adds no second link.
     const step =
       markup.split('data-slot="add-step-installations"')[1]?.split('data-slot="add-step-repositories"')[0] ?? "";
     expect(step.match(/href="https:\/\/github\.com\/apps\/acme-inspector\/installations\/new"/g)).toHaveLength(1);
     expect(markup).toContain(t("en", "targets.addDialog.recheck"));
     expect(confirmDisabled(markup)).toBe(true);
-    // The repository step is not offered: there is nothing to search.
+    // invariant: The repository step is not offered: there is nothing to search.
     expect(markup).not.toContain('id="add-repository-search"');
   });
 
@@ -439,7 +436,7 @@ describe("add-repository dialog (static SSR)", () => {
 
   test("a failed installation read offers its own retry", () => {
     const markup = renderBody({ apps: [app()], installs: { state: "error" } });
-    // The copy's apostrophe is HTML-escaped in static markup; the prefix is
+    // note: The copy's apostrophe is HTML-escaped in static markup; the prefix is
     // the assertion that matters.
     expect(markup).toContain("Could not read this App");
     expect(markup).toContain(t("en", "common.retry"));
@@ -447,7 +444,7 @@ describe("add-repository dialog (static SSR)", () => {
   });
 
   test("nothing repository-wise renders before a query", () => {
-    // I-000642: the dialog used to dump 40 rows before anyone typed. The
+    // invariant: I-000642: the dialog used to dump 40 rows before anyone typed. The
     // search box is there; the results are not.
     const markup = renderBody({
       apps: [app()],
@@ -503,15 +500,15 @@ describe("add-repository dialog (static SSR)", () => {
   });
 });
 
-// --- mounted (stateful dialog + page) --------------------------------------
+// note: --- mounted (stateful dialog + page) --------------------------------------
 
 type Wire = { url: string; method: string; body: string | null };
 
 const wireJson = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-/** One installation listing, as the dialog's read consumes it. */
-/** One installation listing; `claimed` defaults to the free case. */
+/** note: One installation listing, as the dialog's read consumes it. */
+/** note: One installation listing; `claimed` defaults to the free case. */
 const listing = (rows: Array<{ repo_id: number; owner: string; name: string; claimed?: boolean }>) =>
   wireJson({
     repositories: rows.map((row) => ({ claimed: false, ...row })),
@@ -526,8 +523,7 @@ const BOOT: SpaBoot = {
   memberships: [{ id: "acme", slug: "acme", name: "Acme", role: "owner", plan: "Free" }],
 };
 
-/**
- * Mount `element` on the targets URL with a recorded fetch stub. Teardown
+/** note: Mount `element` on the targets URL with a recorded fetch stub. Teardown
  * unmounts, restores `fetch` and removes the window, including on a throw.
  */
 async function mountTargets(
@@ -557,7 +553,7 @@ async function mountTargets(
   return {
     win,
     sent,
-    /** Re-render the page (a workspace switch re-derives its base from the URL). */
+    /** note: Re-render the page (a workspace switch re-derives its base from the URL). */
     rerender: async (next: ReturnType<typeof createElement>) => {
       await act(async () => root.render(next));
       await settle();
@@ -570,7 +566,7 @@ async function mountTargets(
       });
       await settle();
     },
-    /** Open a Radix Select (pointerdown is what it listens for), then pick by label. */
+    /** note: Open a Radix Select (pointerdown is what it listens for), then pick by label. */
     pickApp: async (label: string) => {
       const trigger = win.document.querySelector('[role="combobox"]');
       await act(async () => {
@@ -614,14 +610,14 @@ const confirmButton = (win: DomWindow): DomElement | null => {
   return buttons.find((button) => button.textContent === t("en", "targets.addDialog.confirm")) ?? null;
 };
 
-/** The settings payload's installation section — the dialog's step 2 read. */
+/** note: The settings payload's installation section — the dialog's step 2 read. */
 const settingsWith = (
   rows: Array<{ installation_id: number; account_login: string | null; seen_at: string }>,
 ) => wireJson({ can_manage: true, installations: rows });
 
 const INSTALLED = [{ installation_id: 901, account_login: "acme", seen_at: "2026-01-01 00:00:00" }];
 
-/** Type into the dialog's search input the way a user's keystroke arrives. */
+/** note: Type into the dialog's search input the way a user's keystroke arrives. */
 async function filter(win: DomWindow, value: string): Promise<void> {
   const input = win.document.querySelector("#add-repository-search");
   const setValue = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
@@ -632,7 +628,7 @@ async function filter(win: DomWindow, value: string): Promise<void> {
   for (let flush = 0; flush < 2; flush += 1) await act(async () => {});
 }
 
-/** `count` repositories named `repo-0`…`repo-<count-1>` under one owner. */
+/** note: `count` repositories named `repo-0`…`repo-<count-1>` under one owner. */
 const many = (count: number) =>
   Array.from({ length: count }, (_, index) => ({
     repo_id: 500 + index,
@@ -640,7 +636,7 @@ const many = (count: number) =>
     name: `repo-${index}`,
   }));
 
-/** The dialog's rendered repository rows, read off their checkbox labels. */
+/** note: The dialog's rendered repository rows, read off their checkbox labels. */
 const listed = (win: DomWindow): string[] =>
   [...win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
     (node) => node.parentElement?.textContent ?? "",
@@ -671,12 +667,12 @@ describe("add-repository dialog (mounted)", () => {
       },
     );
     try {
-      // Switch to the second App while the first App's walk is still in flight.
+      // note: Switch to the second App while the first App's walk is still in flight.
       await view.pickApp("Second App");
       await filter(view.win, "web");
       expect(view.dialog()?.textContent ?? "").toContain("acme/web");
 
-      // The slow answer for the App the user left lands last and must be dropped.
+      // invariant: The slow answer for the App the user left lands last and must be dropped.
       releaseFirst();
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
       await filter(view.win, "api");
@@ -688,7 +684,7 @@ describe("add-repository dialog (mounted)", () => {
   });
 
   test("a duplicate refusal keeps the dialog open with its notice across the refresh", async () => {
-    // The refresh the add triggers is held open: a reload that put the page back
+    // note: The refresh the add triggers is held open: a reload that put the page back
     // on its skeleton would unmount the dialog (and its notice) right here.
     let releaseRefresh: () => void = () => {};
     const heldRefresh = new Promise<Response>((resolve) => {
@@ -725,7 +721,7 @@ describe("add-repository dialog (mounted)", () => {
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]') as unknown as DomElement | null);
       await view.click(confirmButton(view.win));
 
-      // While the list refresh is still in flight the dialog is still mounted
+      // note: While the list refresh is still in flight the dialog is still mounted
       // and still carries the refusal notice.
       const pending = view.dialog();
       expect(pending).not.toBeNull();
@@ -734,7 +730,7 @@ describe("add-repository dialog (mounted)", () => {
       );
       expect(view.win.document.querySelector('[data-slot="page-skeleton"]')).toBeNull();
 
-      // ...and it survives the refresh landing.
+      // invariant: ...and it survives the refresh landing.
       releaseRefresh();
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
       const landed = view.dialog();
@@ -766,13 +762,13 @@ describe("add-repository dialog (mounted)", () => {
             : wireJson({}),
     );
     try {
-      // Query-first: the search box exists, the 45 grants do not render.
+      // note: Query-first: the search box exists, the 45 grants do not render.
       expect(view.win.document.querySelector("#add-repository-search")).not.toBeNull();
       expect(listed(view.win)).toHaveLength(0);
 
       await filter(view.win, "  repo-4  ");
       const narrowed = listed(view.win);
-      // repo-4 and repo-40…repo-44 — trimmed and case-insensitive.
+      // safety: repo-4 and repo-40…repo-44 — trimmed and case-insensitive.
       expect(narrowed).toHaveLength(6);
       expect(narrowed.some((label) => label.includes("acme/repo-44"))).toBe(true);
       expect(narrowed.some((label) => label.includes("acme/repo-3"))).toBe(false);
@@ -780,7 +776,7 @@ describe("add-repository dialog (mounted)", () => {
         t("en", "targets.addDialog.resultsCount").replace("{count}", "6"),
       );
 
-      // Upper case is the same query: one case fold, not two code paths.
+      // note: Upper case is the same query: one case fold, not two code paths.
       await filter(view.win, "REPO-4");
       expect(listed(view.win)).toEqual(narrowed);
 
@@ -809,7 +805,7 @@ describe("add-repository dialog (mounted)", () => {
             : wireJson({}),
     );
     try {
-      // "repo-" matches all 45 rows; the dialog mounts 40 and says so.
+      // note: "repo-" matches all 45 rows; the dialog mounts 40 and says so.
       await filter(view.win, "repo-");
       expect(listed(view.win)).toHaveLength(REPOSITORY_LIST_CAP);
       expect(view.dialog()?.textContent ?? "").toContain(
@@ -845,7 +841,7 @@ describe("add-repository dialog (mounted)", () => {
       );
       await view.click(addButton);
       await filter(view.win, "repo-0");
-      // Tick the first row, then narrow it out of sight.
+      // note: Tick the first row, then narrow it out of sight.
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
       await filter(view.win, "repo-44");
       expect(listed(view.win)).toHaveLength(1);
@@ -912,7 +908,7 @@ describe("add-repository dialog (mounted)", () => {
             : wireJson({}),
     );
     try {
-      // repo-41 sits past the 40-row cap, so the query is what brings it back.
+      // why: repo-41 sits past the 40-row cap, so the query is what brings it back.
       await filter(view.win, "repo-41");
       const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
         (node) => node as unknown as HTMLInputElement,
@@ -926,7 +922,7 @@ describe("add-repository dialog (mounted)", () => {
   });
 
   test("a repository the bot already holds elsewhere renders claimed, never selectable", async () => {
-    // I-000642 follow-up: the duplicate predicate is the BOT's, so a row a
+    // note: I-000642 follow-up: the duplicate predicate is the BOT's, so a row a
     // sibling workspace holds can only fail the POST. The server marks it and
     // the dialog must not offer it as a choice — while the free row stays open.
     const view = await mountTargets(
@@ -985,7 +981,7 @@ describe("add-repository dialog (mounted)", () => {
     try {
       await filter(view.win, "acme/");
       const text = view.dialog()?.textContent ?? "";
-      // Two reasons, two labels — "already existed" must not stand for
+      // invariant: Two reasons, two labels — "already existed" must not stand for
       // "another workspace reviews it".
       expect(text).toContain(t("en", "targets.addDialog.alreadyAdded"));
       expect(text).toContain(t("en", "targets.addDialog.claimedElsewhere"));
@@ -995,7 +991,7 @@ describe("add-repository dialog (mounted)", () => {
   });
 
   test("a successful add leaves nothing selected for the next open", async () => {
-    // The created repository is checked+disabled on the next open, so a
+    // note: The created repository is checked+disabled on the next open, so a
     // surviving selection would keep Confirm enabled over a row that cannot be
     // submitted — and pressing it would report "already existed" for an add the
     // operator never made.
@@ -1005,7 +1001,7 @@ describe("add-repository dialog (mounted)", () => {
         added = true;
         return wireJson({ created: [{ target_id: "t-new", repo_id: 501, repo_owner: "acme", repo_name: "api" }], duplicates: [] }, 201);
       }
-      // After the add the list carries the new target, so a stale selection
+      // invariant: After the add the list carries the new target, so a stale selection
       // would line up with a disabled row.
       if (wire.url.endsWith("/api/targets")) {
         return wireJson({ targets: added ? [row({ repo_id: 501, repo_name: "api" })] : [] });
@@ -1035,18 +1031,18 @@ describe("add-repository dialog (mounted)", () => {
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
       expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(false);
       await view.click(confirmButton(view.win));
-      // The all-created path closed the dialog.
+      // note: The all-created path closed the dialog.
       expect(view.dialog()).toBeNull();
 
       await openDialog();
-      // Reopened with the repository now taken by this workspace: no row can be
+      // note: Reopened with the repository now taken by this workspace: no row can be
       // selected, so Confirm must be disabled rather than carry the old tick.
       await filter(view.win, "api");
       const boxes = [...view.win.document.querySelectorAll('[role="dialog"] input[type="checkbox"]')].map(
         (node) => node as unknown as HTMLInputElement,
       );
       expect(boxes).toHaveLength(1);
-      expect(boxes[0]?.checked).toBe(true); // the Added face
+      expect(boxes[0]?.checked).toBe(true); // note: the Added face
       expect(boxes[0]?.disabled).toBe(true);
       expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
     } finally {
@@ -1088,7 +1084,7 @@ describe("add-repository dialog (mounted)", () => {
       await openDialog();
       await filter(view.win, "api");
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
-      // Cancel: the selection must not survive into the next open.
+      // invariant: Cancel: the selection must not survive into the next open.
       const cancel = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
         (button) => button.textContent === t("en", "common.cancel"),
       );
@@ -1097,7 +1093,7 @@ describe("add-repository dialog (mounted)", () => {
       await filter(view.win, "api");
       expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
 
-      // A refused batch, on the other hand, keeps what the server did not
+      // note: A refused batch, on the other hand, keeps what the server did not
       // write so the operator can see it.
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
       await view.click(confirmButton(view.win));
@@ -1170,7 +1166,7 @@ describe("target create parser", () => {
 
 describe("the list failure face", () => {
   test("a workspace switch mid-read drops the answer for the workspace left behind", async () => {
-    // The first workspace's read is held open across the navigation, so it
+    // note: The first workspace's read is held open across the navigation, so it
     // lands last — after the new workspace's rows are already on screen.
     let releaseStale: () => void = () => {};
     const staleRead = new Promise<Response>((resolve) => {
@@ -1198,7 +1194,7 @@ describe("the list failure face", () => {
   });
 
   test("a late-arriving App list adopts: the App step preselects it, never blank", async () => {
-    // BUG-01 regression: the page settles the target list BEFORE reading apps,
+    // invariant: BUG-01 regression: the page settles the target list BEFORE reading apps,
     // so the dialog first mounts against `apps === []`. The selection must
     // derive from the list, not a lazy initialiser that freezes `""`.
     let releaseApps: () => void = () => {};
@@ -1222,14 +1218,14 @@ describe("the list failure face", () => {
       return wireJson({});
     });
     try {
-      // The list painted while the App list is still in flight.
+      // note: The list painted while the App list is still in flight.
       expect(view.text()).not.toContain(t("en", "common.loadFailed"));
       const addButton = [...view.win.document.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "targets.add"),
       );
       expect(addButton).toBeDefined();
 
-      // Open BEFORE the App list lands: the empty-application face, not a blank
+      // invariant: Open BEFORE the App list lands: the empty-application face, not a blank
       // select stuck in loading.
       await view.click(addButton as unknown as DomElement | undefined);
       expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.noApps"));
@@ -1237,7 +1233,7 @@ describe("the list failure face", () => {
       releaseApps();
       for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
 
-      // The arriving list adopts: the combobox names it and both reads ran.
+      // note: The arriving list adopts: the combobox names it and both reads ran.
       const text = view.dialog()?.textContent ?? "";
       expect(text).not.toContain(t("en", "targets.addDialog.noApps"));
       const combobox = view.win.document.querySelector('[role="dialog"] [role="combobox"]');
@@ -1250,7 +1246,7 @@ describe("the list failure face", () => {
   });
 
   test("an ordinary load preselects the first App and enables Confirm once a row is chosen", async () => {
-    // The same ordering, without holding the read: this is the everyday path the
+    // note: The same ordering, without holding the read: this is the everyday path the
     // regression broke — blank select, both reads parked, Confirm dead forever.
     const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
       if (wire.url.endsWith("/api/apps")) {
@@ -1276,13 +1272,13 @@ describe("the list failure face", () => {
       );
       await view.click(addButton as unknown as DomElement | undefined);
 
-      // The first App is preselected and the installation step resolved.
+      // note: The first App is preselected and the installation step resolved.
       const combobox = view.win.document.querySelector('[role="dialog"] [role="combobox"]');
       expect(combobox?.textContent ?? "").toContain("Acme Inspector");
       await filter(view.win, "api");
       expect(listed(view.win)).toHaveLength(1);
 
-      // Choosing a row is all Confirm needs — no second click on the App step.
+      // note: Choosing a row is all Confirm needs — no second click on the App step.
       expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(true);
       await view.click(view.win.document.querySelector('[role="dialog"] input[type="checkbox"]'));
       expect(confirmButton(view.win)?.hasAttribute("disabled")).toBe(false);
@@ -1292,7 +1288,7 @@ describe("the list failure face", () => {
   });
 
   test("a failed Apps read degrades the add panel instead of blanking the list", async () => {
-    // `/api/apps` feeds only the add dialog: a transient failure there must not
+    // invariant: `/api/apps` feeds only the add dialog: a transient failure there must not
     // replace a successfully read repository list with the page error face.
     const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
       if (wire.url.endsWith("/api/apps")) return wireJson({ error: "boom" }, 500);
@@ -1302,17 +1298,17 @@ describe("the list failure face", () => {
       return wireJson({});
     });
     try {
-      // The list rendered: the row is there and the load error is not.
+      // note: The list rendered: the row is there and the load error is not.
       expect(view.text()).toContain("acme/api");
       expect(view.text()).not.toContain(t("en", "common.loadFailed"));
-      // The panel says what is unavailable and offers a retry.
+      // note: The panel says what is unavailable and offers a retry.
       expect(view.text()).toContain(t("en", "targets.appsReadFailed"));
       expect(
         [...view.win.document.querySelectorAll("button")].some(
           (button) => button.textContent === t("en", "common.retry"),
         ),
       ).toBe(true);
-      // The dialog is still reachable; it explains the missing App list itself.
+      // note: The dialog is still reachable; it explains the missing App list itself.
       const addButton = [...view.win.document.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "targets.add"),
       );
@@ -1341,8 +1337,7 @@ describe("the list failure face", () => {
   });
 });
 
-/**
- * The 评审配置 tab (D16 / product spec J4): what the target RUNS
+/** note: The 评审配置 tab (D16 / product spec J4): what the target RUNS
  * with while inheriting, and the same controls editable once it opts out. The
  * only DOM facts asserted are the ones a reader would check — read-only
  * controls, the follow line, the two switches.
@@ -1369,7 +1364,7 @@ function targetPayload(
       trigger_mode: "every_push" as const,
       review_level: "deep" as const,
       check_min_score: 45,
-      // An unreadable stored list arrives as the server's empty placeholder.
+      // note: An unreadable stored list arrives as the server's empty placeholder.
       check_pass_verdicts: readable ? ["ship it"] : [],
       check_pass_verdicts_readable: readable,
       reviewDrafts: overrides.reviewDrafts ?? true,
@@ -1404,7 +1399,7 @@ function renderSettingsTab(
   );
 }
 
-/** The disabled inputs of a rendered face (SSR writes the bare attribute). */
+/** note: The disabled inputs of a rendered face (SSR writes the bare attribute). */
 function disabledInputs(markup: string): number {
   return [...markup.matchAll(/<input[^>]*>/g)].filter((match) => /\sdisabled=""/.test(match[0])).length;
 }
@@ -1412,11 +1407,11 @@ function disabledInputs(markup: string): number {
 describe("target settings tab (static SSR)", () => {
   test("an inheriting target shows the effective values read-only plus the follow line", () => {
     const markup = renderSettingsTab(1);
-    // The effective policy, not the workspace default beside it.
+    // note: The effective policy, not the workspace default beside it.
     expect(markup).toContain("Every push");
     expect(markup).toContain("Deep");
     expect(markup).toContain('value="45"');
-    // The policy cluster's controls are all disabled — the score field and the
+    // note: The policy cluster's controls are all disabled — the score field and the
     // four verdict boxes — while the three admission switches (draft,
     // inheritance, pause) stay operable: 8 inputs, 5 of them disabled. The
     // draft switch is target-owned (D12), so inheriting does not lock it.
@@ -1435,15 +1430,15 @@ describe("target settings tab (static SSR)", () => {
   });
 
   test("the tab names the bound App and says rebinding is not supported yet", () => {
-    // I-000642: the user asked for the bot binding to be visible here. It is a
+    // note: I-000642: the user asked for the bot binding to be visible here. It is a
     // labelled row plus one informational line — never a rebind control.
     const markup = renderSettingsTab(1);
     expect(markup).toContain(t("en", "targets.settings.boundApp"));
     expect(markup).toContain("Acme Inspector");
     expect(markup).toContain(t("en", "targets.settings.boundAppPlanned"));
-    // No control offers the change: the row is copy.
+    // note: No control offers the change: the row is copy.
     expect(markup).not.toContain('aria-label="' + t("en", "targets.settings.boundApp") + '"');
-    // The bound-App block is identity only: it never offers the install page.
+    // invariant: The bound-App block is identity only: it never offers the install page.
     const bound = markup
       .split(t("en", "targets.settings.boundApp"))[1]
       ?.split(t("en", "settings.triggerMode"))[0] ?? "";
@@ -1458,14 +1453,14 @@ describe("target settings tab (static SSR)", () => {
   });
 
   test("an unreadable stored gate states the recovery copy and offers no save", () => {
-    // The server sent the fail-closed placeholder, so the gate has no value to
+    // why: The server sent the fail-closed placeholder, so the gate has no value to
     // edit — and no policy save may round-trip (a snapshot would persist it).
     const markup = renderSettingsTab(0, 1, false);
-    // The copy's apostrophe is HTML-escaped in the markup.
+    // note: The copy's apostrophe is HTML-escaped in the markup.
     expect(markup).toContain("stored review gate could not be read");
     expect(markup).not.toContain(t("en", "settings.reviewGateSave"));
     expect(markup).not.toContain('type="number"');
-    // Three switches survive — draft, inheritance, pause — and inheritance is
+    // note: Three switches survive — draft, inheritance, pause — and inheritance is
     // locked: turning it off snapshots the placeholder into the row. The draft
     // switch names no policy column, so it stays operable.
     const inputs = [...markup.matchAll(/<input[^>]*>/g)];
@@ -1476,8 +1471,7 @@ describe("target settings tab (static SSR)", () => {
   });
 });
 
-/**
- * The detail page's wiring: the three tabs, the
+/** note: The detail page's wiring: the three tabs, the
  * not-found face a 404 renders, and the settings tab reading the payload the
  * page loaded. Asserted on the page, not the tab component — the tab's own
  * faces are pinned above.
@@ -1512,7 +1506,7 @@ async function mountDetail(
   return {
     win,
     sent,
-    /** Re-render the page on another address segment (the switcher's navigation). */
+    /** note: Re-render the page on another address segment (the switcher's navigation). */
     rerender: async (next: string) => {
       await act(async () => root.render(createElement(TargetDetailPage, { boot: BOOT, targetId: next })));
       await settle();
@@ -1530,7 +1524,7 @@ async function mountDetail(
 
 describe("repository detail page (mounted)", () => {
   test("the draft switch posts only review_drafts and survives the reload while inheriting", async () => {
-    // The D12 face: the switch is target-owned, so its save names exactly one
+    // invariant: The D12 face: the switch is target-owned, so its save names exactly one
     // field, never `follow`, and an inheriting target keeps the new value.
     let draftOn = true;
     const view = await mountDetail((wire) => {
@@ -1544,14 +1538,14 @@ describe("repository detail page (mounted)", () => {
         ? wireJson(targetPayload(1, { reviewDrafts: draftOn }))
         : wireJson({}, 500);
     });
-    /** The draft switch, found by the label it is bound to. */
+    /** note: The draft switch, found by the label it is bound to. */
     const draftSwitch = (): HTMLInputElement | null =>
       [...view.win.document.querySelectorAll("label")]
         .find((node) => node.textContent === t("en", "settings.reviewDrafts"))
         ?.querySelector('input[type="checkbox"]') as unknown as HTMLInputElement | null;
     try {
       expect(draftSwitch()?.checked).toBe(true);
-      // Inheriting locks the policy cluster, not this admission switch.
+      // note: Inheriting locks the policy cluster, not this admission switch.
       expect(draftSwitch()?.disabled).toBe(false);
 
       await act(async () => {
@@ -1562,7 +1556,7 @@ describe("repository detail page (mounted)", () => {
       for (let flush = 0; flush < 6; flush += 1) await act(async () => {});
 
       expect(view.sent.filter((wire) => wire.method === "POST")).toHaveLength(1);
-      // The reload painted the stored off value with `follow` still 1.
+      // note: The reload painted the stored off value with `follow` still 1.
       expect(draftSwitch()?.checked).toBe(false);
       expect(view.text()).toContain("Following the workspace defaults");
     } finally {
@@ -1580,7 +1574,7 @@ describe("repository detail page (mounted)", () => {
         t("en", "targets.tabInsights"),
         t("en", "targets.tabPullRequests"),
       ]);
-      // The settings panel is the default face and renders the payload's
+      // note: The settings panel is the default face and renders the payload's
       // EFFECTIVE policy (Every push / 45), not the defaults beside it.
       expect(view.text()).toContain("Every push");
       const score = view.win.document.querySelector('input[type="number"]');
@@ -1591,7 +1585,7 @@ describe("repository detail page (mounted)", () => {
   });
 
   test("a read for the target the operator left cannot paint over the one now open", async () => {
-    // The first target's read is held open across the navigation; its answer
+    // note: The first target's read is held open across the navigation; its answer
     // lands last and must be dropped rather than shown under the new address.
     let releaseStale: () => void = () => {};
     const staleRead = new Promise<Response>((resolve) => {
@@ -1601,7 +1595,7 @@ describe("repository detail page (mounted)", () => {
       wire.url.endsWith("/api/targets/t-1") ? staleRead : wireJson(workspaceDefaults()),
     );
     try {
-      // Navigate to the fixed 所有仓库 entry while t-1 is still in flight.
+      // note: Navigate to the fixed 所有仓库 entry while t-1 is still in flight.
       await view.rerender("all");
       expect(view.text()).toContain(t("en", "targets.allRepositories"));
 
@@ -1618,7 +1612,7 @@ describe("repository detail page (mounted)", () => {
     const view = await mountDetail(() => wireJson({ error: "unknown target" }, 404));
     try {
       expect(view.text()).toContain(t("en", "common.error.notFoundTitle"));
-      // No retry: the address names no target of this workspace, so the only
+      // why: No retry: the address names no target of this workspace, so the only
       // way out is the list.
       expect(view.text()).not.toContain(t("en", "common.retry"));
       expect(view.win.document.querySelector("a")?.getAttribute("href")).toBe("/dashboard/acme/repos");
@@ -1628,8 +1622,7 @@ describe("repository detail page (mounted)", () => {
   });
 });
 
-/**
- * The fixed 所有仓库 entry (`…/repos/all`, product spec J1/J4): the workspace
+/** note: The fixed 所有仓库 entry (`…/repos/all`, product spec J1/J4): the workspace
  * defaults form — no inheritance switch, no pause — over the workspace-scoped
  * 洞察 / 拉取请求 tabs, with the live count in the header.
  */
@@ -1659,7 +1652,7 @@ describe("all-repositories detail (mounted)", () => {
         t("en", "targets.tabInsights"),
         t("en", "targets.tabPullRequests"),
       ]);
-      // The workspace defaults, editable — and the two per-target switches are
+      // note: The workspace defaults, editable — and the two per-target switches are
       // absent, because neither inherits nor pauses anything at this level.
       // The draft switch is target-owned (D12), so it is absent too.
       expect(view.text()).toContain(t("en", "settings.triggerModeOpen"));
@@ -1724,7 +1717,7 @@ describe("all-repositories detail (mounted)", () => {
       for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
       const post = view.sent.find((wire) => wire.method === "POST");
       expect(post?.url).toBe("/dashboard/acme/api/targets/defaults");
-      // No `follow` companion: nothing at this level inherits.
+      // invariant: No `follow` companion: nothing at this level inherits.
       expect(JSON.parse(post?.body ?? "null")).toEqual({ trigger_mode: "manual" });
     } finally {
       await view.unmount();
