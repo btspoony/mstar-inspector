@@ -1,5 +1,4 @@
-/**
- * The review-trigger vocabulary across the bundle boundary (spec
+/** note: The review-trigger vocabulary across the bundle boundary (spec
  * review-trigger-policy §2): the SPA's copy of the frozen migration-0022 enum
  * must match the store's, and the guard must refuse everything else. The
  * control itself lives on the repository detail's settings tab
@@ -11,7 +10,7 @@ import { REVIEW_TRIGGER_MODES, isReviewTriggerMode } from "../../src/spa/pages/d
 
 describe("review trigger vocabulary (duplication lock)", () => {
   test("the SPA vocabulary mirrors the store's frozen migration-0022 enum (drift fails here)", () => {
-    // Same duplication-lock convention as DEFAULT_CHAIN_NAME: data.ts mirrors
+    // note: Same duplication-lock convention as DEFAULT_CHAIN_NAME: data.ts mirrors
     // the store across the bundle boundary (documented, deliberately not
     // imported) — a one-sided rename would desync the wire values the policy
     // POSTs from the values the DB CHECK admits. (Store declares
@@ -22,7 +21,7 @@ describe("review trigger vocabulary (duplication lock)", () => {
     expect(isReviewTriggerMode("open")).toBe(true);
     expect(isReviewTriggerMode("every_push")).toBe(true);
     expect(isReviewTriggerMode("manual")).toBe(true);
-    // Radix's type="single" deselect emits "" — the guard must refuse it.
+    // invariant: Radix's type="single" deselect emits "" — the guard must refuse it.
     expect(isReviewTriggerMode("")).toBe(false);
     expect(isReviewTriggerMode("EVERY_PUSH")).toBe(false);
     expect(isReviewTriggerMode("whenever")).toBe(false);

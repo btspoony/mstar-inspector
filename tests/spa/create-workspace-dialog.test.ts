@@ -1,5 +1,4 @@
-/**
- * Create-workspace from the switcher menu.
+/** note: Create-workspace from the switcher menu.
  *
  * Before this surface the enabled "New workspace" item sent the browser to
  * `/dashboard`, which served the creation form only for a `needsWorkspace`
@@ -33,11 +32,11 @@ const boot: SpaBoot = {
 
 type Post = { url: string; method: string; body: string };
 
-/** The refusal copy the server sends on a 409 (English-only, both locales). */
+/** invariant: The refusal copy the server sends on a 409 (English-only, both locales). */
 const FREE_SLOT_REFUSAL =
   "This workspace was not created. You already belong to a free workspace, and you can belong to only one at a time. Delete that workspace if you own it. If you do not, an owner or admin of that workspace must remove you. Then create this one.";
 
-/** Mount the switcher, open its menu, and hand back the mounted surface. */
+/** note: Mount the switcher, open its menu, and hand back the mounted surface. */
 async function openMenu(
   respond: (post: Post) => Response,
   overrides: Partial<SpaBoot> = {},
@@ -86,9 +85,9 @@ async function openMenu(
     act,
     item,
     itemText: item?.textContent,
-    /** Select the new-workspace row (Radix items select on click). */
+    /** note: Select the new-workspace row (Radix items select on click). */
     clickNewWorkspace: async () => {
-      // The menu unmounts its content once an item is chosen; reopen before a
+      // invariant: The menu unmounts its content once an item is chosen; reopen before a
       // second selection so a test can close the dialog and come back.
       if (win.document.querySelector('[data-slot="dropdown-menu-item"]') === null) {
         await act(async () => {
@@ -102,7 +101,7 @@ async function openMenu(
         row?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
     },
-    /** Dismiss the dialog with its Cancel button. */
+    /** note: Dismiss the dialog with its Cancel button. */
     cancel: async () => {
       const target = [...win.document.querySelectorAll('[role="dialog"] button')].find(
         (button) => button.textContent === t("en", "common.cancel"),
@@ -112,7 +111,7 @@ async function openMenu(
       });
     },
     dialog: () => win.document.querySelector('[role="dialog"]'),
-    /** Type the name and submit the dialog's form. */
+    /** note: Type the name and submit the dialog's form. */
     submit: async (name: string) => {
       const input = win.document.querySelector("#create-workspace-name");
       const form = win.document.querySelector('[role="dialog"] form');
@@ -124,7 +123,7 @@ async function openMenu(
       await act(async () => {
         form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }));
       });
-      // Drain the POST continuation (fetch → response text → state) in the
+      // note: Drain the POST continuation (fetch → response text → state) in the
       // same deterministic flush React itself uses; no wall-clock wait.
       await act(async () => {});
     },
@@ -151,7 +150,7 @@ describe("create from the switcher menu", () => {
       expect(surface.dialog()).toBeNull();
       await surface.clickNewWorkspace();
       expect(surface.dialog()).not.toBeNull();
-      // The dialog names what it does; the form carries exactly one field.
+      // invariant: The dialog names what it does; the form carries exactly one field.
       expect(surface.dialog()?.textContent).toContain(t("en", "workspace.setupHeading"));
       expect(surface.dialog()?.querySelectorAll("input")).toHaveLength(1);
 
@@ -161,7 +160,7 @@ describe("create from the switcher menu", () => {
       expect(surface.posts[0]?.url).toBe("/dashboard/api/workspaces");
       expect(surface.posts[0]?.method).toBe("POST");
       expect(surface.posts[0]?.body).toBe("name=New+one");
-      // The 201 names the landing: a full navigation, so the fresh boot lists
+      // why: The 201 names the landing: a full navigation, so the fresh boot lists
       // the new membership (the in-memory one cannot).
       expect(surface.assigned).toEqual(["/dashboard/ws_new/repos"]);
     } finally {
@@ -175,7 +174,7 @@ describe("create from the switcher menu", () => {
       await surface.clickNewWorkspace();
       await surface.submit("Second one");
 
-      // The client never pre-judges the slot: it posted, and the rule the
+      // invariant: The client never pre-judges the slot: it posted, and the rule the
       // server refused for is the rule the disabled menu row already states.
       expect(surface.posts).toHaveLength(1);
       expect(surface.dialog()).not.toBeNull();
@@ -236,7 +235,7 @@ describe("create from the switcher menu", () => {
   });
 
   test("a non-409 body never renders verbatim — it reads as the localized failure copy", async () => {
-    // Each of these bodies is NOT this dialog's copy: the 400 validation text,
+    // note: Each of these bodies is NOT this dialog's copy: the 400 validation text,
     // the 500 storage error, and the login page an expired session's fetch
     // follows the 302 to. On a zh-CN page all three must read in Chinese
     // (I-000161).
@@ -272,7 +271,7 @@ describe("create from the switcher menu", () => {
       await surface.cancel();
       expect(surface.dialog()).toBeNull();
 
-      // Every close path resets: Cancel included, not just ESC and the overlay.
+      // note: Every close path resets: Cancel included, not just ESC and the overlay.
       await surface.clickNewWorkspace();
       expect(surface.dialog()).not.toBeNull();
       expect((surface.dialog()?.querySelector("#create-workspace-name") as HTMLInputElement | null)?.value).toBe("");

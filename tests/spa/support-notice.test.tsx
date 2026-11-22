@@ -1,5 +1,4 @@
-/**
- * SupportNotice — the grant read and its two failure shapes.
+/** note: SupportNotice — the grant read and its two failure shapes.
  *
  * Rendered in a real DOM (happy-dom) because the whole contract lives in an
  * effect: one read per workspace, reused across navigations, and an inline
@@ -30,11 +29,11 @@ const grantsBody = () =>
     headers: { "Content-Type": "application/json" },
   });
 
-/** Mounts the notice and returns the render + unmount drivers. */
+/** note: Mounts the notice and returns the render + unmount drivers. */
 async function mountNotice(win: Window) {
   const container = win.document.createElement("div");
   win.document.body.appendChild(container);
-  // happy-dom's element is structurally the DOM Element React DOM accepts.
+  // note: happy-dom's element is structurally the DOM Element React DOM accepts.
   const host = container as unknown as Element;
   const root = createRoot(host);
   const boot = { locale: "en" as const, login: "member", name: null };
@@ -62,7 +61,7 @@ describe("SupportNotice", () => {
       expect(notice.container.textContent).toContain("Support access is active");
       expect(notice.container.textContent).toContain("octocat");
       expect(notice.container.textContent).toContain("incident 42");
-      // The notice itself carries no control: no dismiss, no end, no edit.
+      // note: The notice itself carries no control: no dismiss, no end, no edit.
       expect(notice.container.querySelector("button")).toBeNull();
       await notice.unmount();
     } finally {
@@ -84,7 +83,7 @@ describe("SupportNotice", () => {
       const notice = await mountNotice(win);
       await notice.render("/dashboard/beta/apps");
 
-      // Not silently "no grants": the failure is stated and retryable.
+      // note: Not silently "no grants": the failure is stated and retryable.
       expect(notice.container.querySelector('[data-slot="error-state"]')).not.toBeNull();
       expect(notice.container.textContent).toContain("Could not check for active support access.");
       const retry = notice.container.querySelector("button");

@@ -1,5 +1,4 @@
-/**
- * Shell landmarks and client-side navigation announcements.
+/** note: Shell landmarks and client-side navigation announcements.
  *
  * Three gaps this pins: the sidebar is a navigation landmark (it used to be a
  * bare div whose `aria-label` named nothing), the shell offers a skip link that
@@ -33,7 +32,7 @@ const shell = (pathname: string) =>
     children: createElement("p", null, "Page"),
   });
 
-/** Narrow structural view of the happy-dom window: its Element is not the DOM lib's. */
+/** note: Narrow structural view of the happy-dom window: its Element is not the DOM lib's. */
 type DomWindow = { document: { getElementById(id: string): unknown } };
 
 const mainOf = (win: DomWindow): unknown => win.document.getElementById("main");
@@ -54,13 +53,13 @@ describe("dashboard shell accessibility", () => {
       expect(landmarks).toHaveLength(1);
       expect(landmarks[0]?.getAttribute("aria-label")).toBe(t("en", "nav.primary"));
 
-      // The skip link is the FIRST focusable element in the shell, ahead of
+      // note: The skip link is the FIRST focusable element in the shell, ahead of
       // every sidebar link it exists to skip.
       const focusables = container.querySelectorAll('a[href], button, [tabindex]:not([tabindex="-1"])');
       expect((focusables[0] as unknown as Element | undefined)?.getAttribute("href")).toBe("#content");
       expect(focusables[0]?.textContent).toBe(t("en", "nav.skipToContent"));
 
-      // The target is the content column, not `<main>`: `<main>` also holds the
+      // note: The target is the content column, not `<main>`: `<main>` also holds the
       // toolbar, so skipping to it would still leave the switcher, theme,
       // locale and logout controls ahead of the page.
       const content = win.document.getElementById("content");
@@ -84,7 +83,7 @@ describe("dashboard shell accessibility", () => {
     const root = createRoot(container as unknown as Element);
     try {
       await act(async () => root.render(shell("/dashboard/acme/apps")));
-      // First paint: the Worker already titled the document and focus is
+      // note: First paint: the Worker already titled the document and focus is
       // wherever the browser put it.
       expect(win.document.title).toBe("");
       expect(win.document.activeElement === mainOf(win)).toBe(false);
@@ -93,7 +92,7 @@ describe("dashboard shell accessibility", () => {
       expect(win.document.title).toBe(title(t("en", "nav.members")));
       expect(win.document.activeElement === mainOf(win)).toBe(true);
 
-      // A second navigation keeps both channels working (no one-shot latch).
+      // note: A second navigation keeps both channels working (no one-shot latch).
       await act(async () => root.render(shell("/dashboard/acme/settings")));
       expect(win.document.title).toBe(title(t("en", "nav.settings")));
       expect(win.document.activeElement === mainOf(win)).toBe(true);
@@ -121,7 +120,7 @@ describe("dashboard shell accessibility", () => {
   });
 
   test("StrictMode's development double mount still leaves the first paint alone", async () => {
-    // React 19 re-runs a mount effect setup→cleanup→setup with refs intact.
+    // note: React 19 re-runs a mount effect setup→cleanup→setup with refs intact.
     // A one-shot latch would miss the skip on the second pass and announce
     // (stealing focus) on arrival; the pathname comparison cannot.
     const { win, cleanup } = installDom("http://localhost/dashboard/acme/apps");
@@ -147,7 +146,7 @@ describe("dashboard shell accessibility", () => {
   });
 
   test("a page rendered instead of the route's own names itself in the title", async () => {
-    // A support-grant operator is served at `<ref>/apps` but sees SupportPage;
+    // note: A support-grant operator is served at `<ref>/apps` but sees SupportPage;
     // the title must follow the rendered page, not the path.
     const supportBoot: SpaBoot = { ...boot, login: null, supportOnly: true, memberships: undefined };
     const faceShell = (pathname: string) =>

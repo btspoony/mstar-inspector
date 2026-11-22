@@ -1,5 +1,4 @@
-/**
- * I-000645: chain rows can be reordered. The stored order IS the chain string
+/** note: I-000645: chain rows can be reordered. The stored order IS the chain string
  * (`bot_model_chains.chain`, no ordinal column), so a move is a pure swap in the
  * UNSAVED local array and the existing `chain.join(", ")` save persists it — no
  * route, no schema change, and the same local-edit-then-save rule 移除 follows.
@@ -115,7 +114,7 @@ describe("chain row reordering (I-000645)", () => {
     try {
       expect(view.rowSelectors()).toEqual(["anthropic/a", "anthropic/b", "anthropic/c"]);
 
-      // Move the SECOND row up: a local edit, nothing posted yet.
+      // invariant: Move the SECOND row up: a local edit, nothing posted yet.
       await view.click(view.labelled(t("en", UP))[1]!);
       expect(view.rowSelectors()).toEqual(["anthropic/b", "anthropic/a", "anthropic/c"]);
       expect(view.saved).toEqual([]);
@@ -171,7 +170,7 @@ describe("chain row reordering (I-000645)", () => {
       control.focus();
       expect((view.win.document.activeElement as unknown) === control).toBe(true);
       await view.click(control);
-      // The same DOM node still holds focus: the row is keyed by its selector,
+      // note: The same DOM node still holds focus: the row is keyed by its selector,
       // so React moves the existing node instead of remounting it.
       const after = view.labelled(t("en", UP))[0]!;
       expect((view.win.document.activeElement as unknown) === after).toBe(true);

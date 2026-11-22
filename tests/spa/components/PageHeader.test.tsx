@@ -1,5 +1,4 @@
-/**
- * PageHeader — the single spelling of the page header band (compass D4).
+/** note: PageHeader — the single spelling of the page header band (compass D4).
  *
  * Static render (props-only, no hooks): the band exposes the title, the
  * optional subtitle line, the action slot, the wayfinding link and the
@@ -43,7 +42,7 @@ describe("PageHeader", () => {
     });
     expect(html).toContain('<button type="submit">Create App</button>');
     expect(html.indexOf("</h1>")).toBeLessThan(html.indexOf("Create App"));
-    // The action and the title share one row; the subtitle is the next line.
+    // note: The action and the title share one row; the subtitle is the next line.
     expect(html.indexOf("Create App")).toBeLessThan(html.indexOf("One per repository"));
   });
 

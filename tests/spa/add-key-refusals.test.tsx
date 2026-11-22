@@ -1,5 +1,4 @@
-/**
- * The add-key dialog's refusals, end to end: a per-status response reaches the
+/** note: The add-key dialog's refusals, end to end: a per-status response reaches the
  * operator as its own sentence, never as one generic "unexpected response"
  * (I-000573).
  *
@@ -69,8 +68,7 @@ function payload(): BotSettingsPayload {
   };
 }
 
-/**
- * The verify POST's answer, one per case: either a response or a rejection
+/** note: The verify POST's answer, one per case: either a response or a rejection
  * (the network failure). Every other POST succeeds so the page never blocks
  * on an unrelated channel.
  */

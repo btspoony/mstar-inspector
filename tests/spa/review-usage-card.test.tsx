@@ -1,5 +1,4 @@
-/**
- * The workspace usage card (spec bot-scope-and-claiming § Review usage).
+/** note: The workspace usage card (spec bot-scope-and-claiming § Review usage).
  *
  * Mounted on its own — the card fetches its own payload — so the contract
  * under test is the card's: the credit block (the used/limit pair, the source
@@ -21,7 +20,7 @@ import { installDom } from "./dom";
 const json = (body: unknown, status = 200): Response =>
   new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 
-/** Mount the card with one stubbed read and return its rendered text. */
+/** note: Mount the card with one stubbed read and return its rendered text. */
 async function mountCard(
   respond: () => Response,
   deploymentMode?: "self-hosted" | "saas",
@@ -44,7 +43,7 @@ async function mountCard(
   };
 }
 
-/** The credit block under the ceiling: 750 of 2000 RP, both sources spending. */
+/** note: The credit block under the ceiling: 750 of 2000 RP, both sources spending. */
 const QUOTA = {
   usedRp: 750,
   limitRp: 2000,
@@ -63,24 +62,24 @@ describe("workspace review usage card", () => {
     const card = await mountCard(() => json(SAAS));
     expect(card.text()).toContain(t("en", "workspace.quotaWindow", { month: "2026-11" }));
     expect(card.text()).toContain(t("en", "workspace.quotaCreditsLabel"));
-    // 750 / 20 and 2000 / 20, two decimals — the value is the bare pair.
+    // note: 750 / 20 and 2000 / 20, two decimals — the value is the bare pair.
     expect(card.text()).toContain("37.50 / 100.00");
     expect(card.text()).toContain(t("en", "workspace.quotaSplitLabel"));
     expect(card.text()).toContain(t("en", "workspace.quotaSharedBot"));
-    // 620 / 20 and 130 / 20: the split reads the same unit as the pair above.
+    // note: 620 / 20 and 130 / 20: the split reads the same unit as the pair above.
     expect(card.text()).toContain("31.00");
     expect(card.text()).toContain(t("en", "workspace.quotaByok"));
     expect(card.text()).toContain("6.50");
     expect(card.text()).toContain(
       t("en", "workspace.quotaVersion", { version: "v2", date: "2026-11-01" }),
     );
-    // The two-counter statement is on the surface, and under the ceiling there
+    // note: The two-counter statement is on the surface, and under the ceiling there
     // is no banner to explain.
     expect(card.text()).toContain(t("en", "workspace.quotaBasis"));
     expect(card.text()).not.toContain(
       t("en", "workspace.quotaOverCeiling", { month: "2026-11", reset: "2026-12-01" }),
     );
-    // The wire's raw unit never reaches the operator.
+    // invariant: The wire's raw unit never reaches the operator.
     expect(card.text()).not.toMatch(/\bRP\b/);
     await card.close();
   });
@@ -92,7 +91,7 @@ describe("workspace review usage card", () => {
     expect(card.text()).toContain(t("en", "workspace.usageOwnReviews"));
     expect(card.text()).toContain("0");
     expect(card.text()).toContain(t("en", "workspace.usageAvailable"));
-    // The available state offers no hint: nothing needs explaining.
+    // invariant: The available state offers no hint: nothing needs explaining.
     expect(card.text()).not.toContain(t("en", "workspace.usageNotInPlanHint"));
     await card.close();
   });
@@ -105,7 +104,7 @@ describe("workspace review usage card", () => {
       const card = await mountCard(() => json({ ...SAAS, quota: { ...QUOTA, usedRp } }));
       const banner = t("en", "workspace.quotaOverCeiling", { month: "2026-11", reset: "2026-12-01" });
       expect(card.text()).toContain(banner);
-      // The measurement is never hidden: a workspace over its ceiling can see
+      // invariant: The measurement is never hidden: a workspace over its ceiling can see
       // by how much.
       expect(card.text()).toContain(`${(usedRp / 20).toFixed(2)} / 100.00`);
       await card.close();
@@ -118,11 +117,11 @@ describe("workspace review usage card", () => {
       json({ ...SAAS, quota: { ...QUOTA, limitRp: null, usedRp: 620 } }),
     );
     expect(card.text()).toContain(t("en", "workspace.quotaNoLimit"));
-    // The spend still reads in credits for the same month.
+    // note: The spend still reads in credits for the same month.
     expect(card.text()).toContain("31.00");
     expect(card.text()).not.toContain("620 / 0");
     expect(card.text()).not.toContain("31.00 / 0");
-    // No ceiling means no over-ceiling state to report.
+    // note: No ceiling means no over-ceiling state to report.
     expect(card.text()).not.toContain(t("en", "workspace.quotaOverCeiling", { month: "2026-11", reset: "2026-12-01" }));
     await card.close();
   });
@@ -140,7 +139,7 @@ describe("workspace review usage card", () => {
     const card = await mountCard(() => json({ ...SAAS, sharedBot: "not-designated" }));
     expect(card.text()).toContain(t("en", "workspace.usageNotDesignated"));
     expect(card.text()).toContain(t("en", "workspace.usageNotDesignatedHint"));
-    // The two unavailable states must not share copy: one is the reader's plan
+    // invariant: The two unavailable states must not share copy: one is the reader's plan
     // to change, the other waits for a platform operator.
     expect(card.text()).not.toContain(t("en", "workspace.usageNotInPlanHint"));
     await card.close();
@@ -154,7 +153,7 @@ describe("workspace review usage card", () => {
     expect(card.text()).toContain(t("en", "workspace.usageOwnReviews"));
     expect(card.text()).toContain("7");
     expect(card.text()).not.toContain(t("en", "workspace.usageSharedStatus"));
-    // No quota block at all: there is no ceiling to report in this mode.
+    // note: No quota block at all: there is no ceiling to report in this mode.
     expect(card.text()).not.toContain(t("en", "workspace.quotaHeading"));
     expect(card.text()).not.toContain(t("en", "workspace.quotaCreditsLabel"));
     expect(card.text()).not.toContain(t("en", "workspace.quotaSplitLabel"));
