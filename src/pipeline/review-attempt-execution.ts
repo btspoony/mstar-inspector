@@ -2375,13 +2375,13 @@ export type ProcessDeps = {
    */
   checkSettlements: Map<string, CheckSettlement>;
   /**
-   * The attempt's re-derived session credential, cached on the host channel so
-   * the inline route mints once: `prepare` registers the token it minted, the
-   * paid step replaces the entry with the session's full exact-value set. Only a
-   * host that ran the paid step has one — a resumed host reads the sealed set
-   * from the attempt row instead. No token ever crosses a phase boundary.
+   * The purpose-scoped token this host minted for the attempt, cached so the
+   * prepare and review phases of ONE invocation never mint twice. It carries no
+   * gate credential set: the publish gate scans the sealed envelope on the
+   * attempt row, and only that, so no in-process value can stand in for the
+   * paid session's own. No token ever crosses a phase boundary.
    */
-  credentials: Map<string, { token: string; secretValues: string[] }>;
+  credentials: Map<string, string>;
 };
 
 /**
@@ -3732,7 +3732,7 @@ async function preparePhase(
   // caller froze a DIFFERENT head, and that attempt settles as skipped.
   // The host caches the credential it just minted, so the phases of THIS
   // invocation never re-mint; a resumed host starts empty and mints again.
-  deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
+  deps.credentials.set(attemptId, token);
 
   const key: IdempotencyKey = {
     installation_id: payload.installation_id,
@@ -4814,6 +4814,12 @@ export async function reviewAttempt(
   prepared: PreparedAttempt,
 ): Promise<ReviewOutcome> {
   const { payload, attemptId, level } = ref;
+  // A callback replayed after this attempt's paid result became durable owns
+  // nothing here: the credentials the model saw are sealed on the row, and a
+  // set derived from today's config would be a DIFFERENT one. Return the row's
+  // state before minting a token, resolving a config or caching anything.
+  const prior = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
+  if (prior.kind === "persisted") return { state: "persisted", persistedAtMs: prior.persistedAtMs };
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
   // The live objects are this phase's own. The container is resolved by attempt
@@ -4821,8 +4827,9 @@ export async function reviewAttempt(
   // form inside `runReviewAttempt`: ONE request proves the attempt's marker and
   // executes, so there is no proof-then-act window to race.
   const sandbox = await reviewAttemptSandbox(deps, attemptId);
-  const cached = deps.credentials.get(attemptId);
-  const token = cached?.token ?? (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
+  const token =
+    deps.credentials.get(attemptId) ??
+    (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
   const fields = attemptFields(payload, level, attemptId, prepared.headSha, prepared.budget);
   try {
     await runReviewAttempt({
@@ -4850,10 +4857,6 @@ export async function reviewAttempt(
       progress,
       attemptId,
     });
-    // The session's full exact-value set, for the phases that redact its
-    // output without having run it (and for a resumed collect, which has no
-    // progress of its own).
-    deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
   } catch (err) {
     throw phaseFailure("review", err, {
       stage: progress.failureStage,
@@ -4932,15 +4935,14 @@ function modelTexts(
 
 /**
  * The credential values the publish gate scans for: the paid session's own set,
- * sealed onto the attempt row (its transported provider keys and its minted
- * installation token), or the set this host holds because it ran the paid step.
- * There is no third source: `null` means the row predates the sealed set, and
- * the gate refuses to publish a body it cannot scan. A store fault throws, so
- * the attempt retries rather than publishes unscanned.
+ * sealed onto the attempt row by the paid step. That envelope is the ONLY
+ * source — an in-process value could only ever restate it, and a replayed or
+ * re-derived set must never stand in for the credentials the model actually
+ * saw. `null` means the row carries none (paid before the seal existed): the
+ * gate refuses rather than publish a body it cannot scan. A store fault throws,
+ * so the attempt retries rather than publishes unscanned.
  */
 async function attemptGateSecrets(deps: ProcessDeps, ref: AttemptRef): Promise<string[] | null> {
-  const cached = deps.credentials.get(ref.attemptId);
-  if (cached !== undefined) return cached.secretValues;
   const sealed = await readGateSecretsEnvelope(deps.env.DB, ref.attemptId);
   if (sealed === null) return null;
   return openGateSecrets(deps.env.DASHBOARD_ENCRYPTION_KEY, ref.attemptId, sealed);

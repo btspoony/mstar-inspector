@@ -85,7 +85,7 @@ const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipel
 const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedReviewWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
   "../../src/pipeline/comment"
 );
-const { RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
+const { RoundBudgetSpent, openGateSecrets, sealGateSecrets } = await import("../../src/pipeline/review-attempt");
 const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
 const { TERMINAL_FAILURE_TEXT, createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 import type { ChecksOctokit } from "../../src/pipeline/checks";
@@ -2211,8 +2211,8 @@ describe("the SEC-01 publish gate", () => {
         .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
         .run(JSON.stringify(execution), ATTEMPT_ID);
 
-      // This host holds the credential the writer did not.
-      deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+      // The row's sealed set is the credential the writer did not hold.
+      await sealStoredGateSecrets(db, [KEY]);
       expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
 
       const staged = db.raw
@@ -2267,7 +2267,7 @@ describe("the SEC-01 publish gate", () => {
     if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
     const prepared = JSON.parse(JSON.stringify(step.prepared)) as PreparedAttempt;
     await reviewAttempt(paying, ref, prepared);
-    const session = paying.credentials.get(ATTEMPT_ID)?.secretValues ?? [];
+    const session = await openStoredGateSecrets(db);
     // The echo is in the PAID RESULT. Write-time redaction removes every form of
     // the values the paying host held, so a form it did not is written here —
     // which is exactly the body the gate exists to catch.
@@ -2275,6 +2275,25 @@ describe("the SEC-01 publish gate", () => {
     const { deps: resumed } = await makeDeps({ db });
     resumed.runnerConfigs.clear();
     return { db, resumed, ref, prepared, session };
+  }
+
+  /**
+   * note: Plant the gate set on the attempt row through the paid step's own seal —
+   * the envelope is the ONLY source the gate reads.
+   */
+  async function sealStoredGateSecrets(db: TestD1, values: string[]): Promise<void> {
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, values);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+  }
+
+  /** The sealed set on the row, opened for assertions. */
+  async function openStoredGateSecrets(db: TestD1): Promise<string[]> {
+    const row = db.raw
+      .prepare("SELECT gate_secrets_enc FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { gate_secrets_enc: string };
+    return openGateSecrets(TEST_KEY, ATTEMPT_ID, row.gate_secrets_enc);
   }
 
   /** Rewrite the persisted paid result's first finding to carry `echo`. */
@@ -2326,6 +2345,31 @@ describe("the SEC-01 publish gate", () => {
 
     expect(await collectAttempt(resumed, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
 
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+  });
+
+  test("a replayed paid step mints and caches nothing, and the gate scans the sealed set", async () => {
+    // note: The review step RE-RUNS after the paid result is durable, on a host whose
+    // current config resolves a different key and whose commenter would mint a new
+    // token. It owns nothing: no token mint, no cache write — and collect still scans
+    // the credentials the paid session actually handed the model.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, prepared } = await paidThenResumed(echo, paidKey);
+    h.commenterState.token = "ghs_rotated_installation_token";
+    // The step that would spend resolves the config first, exactly as the workflow
+    // does; only the CREDENTIALS must stay untouched.
+    await ensureRunnerConfig(ref.payload, resumed);
+    const mintsBefore = h.commenterCalls.filter((call) => call.op === "token").length;
+
+    await reviewAttempt(resumed, ref, prepared);
+
+    expect(h.commenterCalls.filter((call) => call.op === "token")).toHaveLength(mintsBefore);
+    expect(resumed.credentials.size).toBe(0);
+
+    expect(await collectAttempt(resumed, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
     expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
@@ -2485,8 +2529,8 @@ describe("the SEC-01 publish gate", () => {
   test("a short key equal to trusted marker text is not refused", async () => {
     // The body always carries `mstar-inspector` markers; the raw spelling of a
     // short key is exact-leaf redaction's job, never the publish gate's.
-    const { deps, ref, prepared } = await reviewedEcho("plain text", false);
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: ["mstar"] });
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    await sealStoredGateSecrets(db, ["mstar"]);
     const collected = await collectAttempt(deps, ref, prepared);
     expect(collected.kind).toBe("collected");
     expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
@@ -2497,7 +2541,7 @@ describe("the SEC-01 publish gate", () => {
     const key = String.fromCharCode(0x01, 0x23, 0x45);
     expect(Buffer.from(key, "utf8").toString("hex")).toBe(SHA.slice(0, 6));
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+    await sealStoredGateSecrets(db, [key]);
 
     const collected = await collectAttempt(deps, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
@@ -2517,7 +2561,7 @@ describe("the SEC-01 publish gate", () => {
       await seedPriorPublication(seedDb);
       await seedOpenTarget(seedDb, { original: { title: `prior echo ${echo}` } });
     });
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    await sealStoredGateSecrets(db, [KEY]);
 
     expect(prepared.targets.some((target) => target.original.title.includes(echo))).toBe(true);
     expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
@@ -2628,7 +2672,7 @@ describe("the SEC-01 publish gate", () => {
 
   test("the degraded publish path refuses a body carrying an encoded echo", async () => {
     const { deps, db, ref, prepared } = await brokenStdout(ECHOES.base64);
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    await sealStoredGateSecrets(db, [KEY]);
     expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
 
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
@@ -2644,9 +2688,8 @@ describe("the SEC-01 publish gate", () => {
 
   test("a resumed degraded publish runs the gate from the paid session's sealed set", async () => {
     const { deps, ref, prepared } = await brokenStdout(ECHOES.base64);
-    // note: This host keeps no cache entry; the attempt row carries the paid
-    // session's own set, whose keys the echo does not encode — so it publishes.
-    deps.credentials.delete(ATTEMPT_ID);
+    // note: The attempt row carries the paid session's own set, whose keys the
+    // echo does not encode — so it publishes.
     const collected = await collectAttempt(deps, ref, prepared);
     expect(collected.kind).toBe("settled");
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
@@ -2660,7 +2703,7 @@ describe("the SEC-01 publish gate", () => {
     const echo = Buffer.from(key).toString("base64url");
     expect(echo).toBe("ew");
     const { deps, db, ref, prepared } = await brokenStdout(echo, true);
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+    await sealStoredGateSecrets(db, [key]);
 
     expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
@@ -2683,7 +2726,7 @@ describe("the SEC-01 publish gate", () => {
       .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
       .run(JSON.stringify(execution), ATTEMPT_ID);
 
-    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    await sealStoredGateSecrets(db, [KEY]);
     // A live launch row plus an unwritable failure row: the failure settlement
     // returns `unknown` instead of certifying an outcome it cannot prove.
     deps.failureStore = {
