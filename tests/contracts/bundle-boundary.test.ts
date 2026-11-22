@@ -25,7 +25,7 @@ const RUNNER_ENTRY = join(REPO_ROOT, "packages", "runner", "src", "runner.ts");
 /**
  * note: Resolved input paths of one bundle.
  *
- * shortcut: under `bun test` (Bun 1.4.0) the session's first build of a
+ * Shortcut limit: under `bun test` (Bun 1.4.0) the session's first build of a
  * repo-resident entry fails to resolve a plain relative import
  * (`../version`); the identical second build succeeds. Retry once so a real
  * resolution failure still fails twice; upgrade: when Bun fixes it.

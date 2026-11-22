@@ -1,5 +1,5 @@
 /**
- * The operator's one write control for the platform review cap.
+ * note: The operator's one write control for the platform review cap.
  *
  * These cases pin the three properties the control has to keep:
  *  - a value outside the accepted range is refused with that range named and
@@ -30,7 +30,7 @@ import { readReviewAttemptCapMs } from "../../src/review-budget";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
 
-// The consumer module loads only after the workerd shim above is registered.
+// note: The consumer module loads only after the workerd shim above is registered.
 const { createReviewConsumer, WorkflowCreateFailedError } = await loadConsumer();
 
 const SESSION_SECRET = ["test", "attempt", "cap", "write", "session", "32-bytes!"].join("-");
@@ -51,7 +51,7 @@ function envFor(db: TestD1): Env {
   } as unknown as Env;
 }
 
-/** The seeded double plus the operator the admin gate requires. */
+/** note: The seeded double plus the operator the admin gate requires. */
 async function fixture(): Promise<TestD1> {
   const db = await createSeededTestD1();
   db.raw
@@ -75,7 +75,7 @@ function patchCap(db: TestD1, capMs: unknown): Promise<Response> {
   return adminFetch(db, "/runtime", { method: "PATCH", body: JSON.stringify({ attemptCap: { capMs } }) });
 }
 
-/** Every stored attempt-cap row — the "one key" property, read from the table itself. */
+/** note: Every stored attempt-cap row — the "one key" property, read from the table itself. */
 function capRows(db: TestD1): Array<{ key: string; value: string }> {
   return db.raw
     .query("SELECT key, value FROM review_runtime_settings WHERE key LIKE 'review.attempt%' ORDER BY key")
@@ -101,7 +101,7 @@ describe("the attempt cap's operator read", () => {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: false,
     });
-    // The flag is not cosmetic: the table really holds no attempt-cap row.
+    // note: The flag is not cosmetic: the table really holds no attempt-cap row.
     expect(capRows(db)).toEqual([]);
     expect(await getReviewAttemptCapSetting(db as never)).toEqual({
       capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
@@ -129,7 +129,7 @@ describe("a saved cap is the value enforcement uses", () => {
     const db = await fixture();
     const h = createConsumerHarness();
     const seen: AttemptRef[] = [];
-    // A DEFINITE create failure keeps the handoff row and releases admission,
+    // note: A DEFINITE create failure keeps the handoff row and releases admission,
     // so the next delivery can be measured without running a review.
     const startAttempt = async (_deps: unknown, ref: AttemptRef): Promise<void> => {
       seen.push(ref);
@@ -146,14 +146,14 @@ describe("a saved cap is the value enforcement uses", () => {
       for (const [index, capMs] of ends.entries()) {
         const answer = await patchCap(db, capMs);
         expect(answer.status).toBe(200);
-        // The route answers the value it stored, not the one it was sent.
+        // note: The route answers the value it stored, not the one it was sent.
         expect(await answer.json()).toEqual({ attemptCap: { capMs } });
 
         const payload = makePayload({ pr_number: 70 + index });
         await consumer(h.makeBatch(payload)).catch(() => {});
-        // The enforcement read admission performs answers the saved number…
+        // note: The enforcement read admission performs answers the saved number…
         expect(await readReviewAttemptCapMs(db as never, { warn: () => {} })).toBe(capMs);
-        // …and the instant it freezes into the attempt is that number.
+        // note: …and the instant it freezes into the attempt is that number.
         expect(seen.at(-1)?.deadlineMs).toBe(admittedAt + capMs);
         expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.deadlineMs).toBe(
           admittedAt + capMs,
@@ -161,7 +161,7 @@ describe("a saved cap is the value enforcement uses", () => {
       }
     });
 
-    // One acknowledged save, one row, one audit entry per save — no second key.
+    // note: One acknowledged save, one row, one audit entry per save — no second key.
     expect(capRows(db)).toEqual([{ key: REVIEW_ATTEMPT_CAP_KEY, value: String(REVIEW_ATTEMPT_CAP_MAX_MS) }]);
     expect(auditRows(db)).toHaveLength(2);
     const [first] = auditRows(db);
@@ -185,7 +185,7 @@ describe("the attempt cap's write gate", () => {
       const body = (await answer.json()) as { error: string };
       expect(body.error).toContain(RANGE);
     }
-    // A refused write lands nothing: no row, no audit entry.
+    // note: A refused write lands nothing: no row, no audit entry.
     expect(capRows(db)).toEqual([]);
     expect(auditRows(db)).toHaveLength(0);
   });

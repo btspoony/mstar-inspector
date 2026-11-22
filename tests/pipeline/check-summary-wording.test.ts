@@ -1,5 +1,5 @@
 /**
- * Task 2 — the Check summary carries the persisted APPROVED wording, and only
+ * note: Task 2 — the Check summary carries the persisted APPROVED wording, and only
  * counts as delivered when that wording actually reached the run (spec §7.9,
  * plan "Persistence and reconciliation contract").
  *
@@ -43,12 +43,12 @@ import type { TestD1 } from "../store/helpers";
 const APPROVED = TERMINAL_FAILURE_TEXT["cap-stop"];
 
 /**
- * A due row whose terminal intent is already frozen — the shape an unconfirmed
+ * note: A due row whose terminal intent is already frozen — the shape an unconfirmed
  * send leaves behind: the approved text and category are durable, the remote
  * update is not proven.
  */
 async function frozenCapStop(db: TestD1): Promise<string> {
-  // Past its own execution deadline: the point at which a frozen failure is
+  // note: Past its own execution deadline: the point at which a frozen failure is
   // the conclusion the lane owes (a live row still waits for its proof).
   const { attempt, lease } = await claim(db, {
     nowMs: CLAIM_AT,
@@ -56,7 +56,7 @@ async function frozenCapStop(db: TestD1): Promise<string> {
     executionDeadlineMs: EXPIRED_DEADLINE,
   });
   const id = attempt.identity.attemptId;
-  // Setup writes ride the claim's own lease: the reconciler's clock (T0) is
+  // note: Setup writes ride the claim's own lease: the reconciler's clock (T0) is
   // past it, which is exactly why recovery owns the row by then.
   const setupAt = CLAIM_AT + 1;
   await setCheckCreateState(db, id, lease, "sending", undefined, setupAt);
@@ -82,7 +82,7 @@ describe("the Check summary carries the approved wording", () => {
       const summary = await run(db, {
         now: () => T0 + 1,
         credentials: scriptedCredentials(db, {
-          // The run exists and is still running: the terminal write is due.
+          // note: The run exists and is still running: the terminal write is due.
           fetch: async (identity, checkRunId) => ({
             kind: "found",
             remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
@@ -100,7 +100,7 @@ describe("the Check summary carries the approved wording", () => {
     } finally {
       fetchStub.restore();
     }
-    // The send is the PERSISTED approval — not a re-decision, not a formatter.
+    // note: The send is the PERSISTED approval — not a re-decision, not a formatter.
     expect(sent).not.toBeNull();
     expect(sent!.summary).toBe(APPROVED);
     expect(sent!.failureStatus).toBe("cap-stop");
@@ -120,7 +120,7 @@ describe("the Check summary carries the approved wording", () => {
       const summary = await run(db, {
         now: () => T0 + 1,
         credentials: scriptedCredentials(db, {
-          // What the run looks like when the earlier update LANDED and only its
+          // note: What the run looks like when the earlier update LANDED and only its
           // reply was lost: completed, same conclusion, same approved text.
           fetch: async (identity, checkRunId) => ({
             kind: "found",
@@ -141,7 +141,7 @@ describe("the Check summary carries the approved wording", () => {
     } finally {
       fetchStub.restore();
     }
-    // Reading back what already landed is progress; re-sending it is a wasted
+    // note: Reading back what already landed is progress; re-sending it is a wasted
     // request against the same run.
     expect(updates).toBe(0);
     const row = await rawRow(db, id);
@@ -161,7 +161,7 @@ describe("the Check summary carries the approved wording", () => {
       const summary = await run(db, {
         now: () => T0 + 1,
         credentials: scriptedCredentials(db, {
-          // Same conclusion, but the run's own text is an OLDER wording (an
+          // note: Same conclusion, but the run's own text is an OLDER wording (an
           // earlier writer's, or none at all): the user never read the
           // approved one.
           fetch: async (identity, checkRunId) => ({
@@ -191,7 +191,7 @@ describe("the Check summary carries the approved wording", () => {
     expect(sent!.summary).toBe(APPROVED);
     expect(sent!.failureStatus).toBe("cap-stop");
     const row = await rawRow(db, id);
-    // The SAME run is corrected — never replaced by a fresh one.
+    // note: The SAME run is corrected — never replaced by a fresh one.
     expect(row.check_run_id).toBe(4242);
     expect(row.observed).toBe("failure");
     expect(row.desired_summary).toBe(APPROVED);
@@ -216,7 +216,7 @@ describe("the Check summary carries the approved wording", () => {
           },
         }),
       });
-      // The mismatch spends a recovery attempt and backs off; it is never
+      // note: The mismatch spends a recovery attempt and backs off; it is never
       // recorded as this row's outcome and never rewritten from here.
       expect(summary.completed).toBe(0);
     } finally {
@@ -235,7 +235,7 @@ describe("the Check summary carries the approved wording", () => {
     let updates = 0;
     const fetchStub = stubFetch();
     try {
-      // Pass 1: the update is dispatched, and its reply carries this attempt's
+      // note: Pass 1: the update is dispatched, and its reply carries this attempt's
       // conclusion with NO readable output. The wording is what the user reads,
       // so this reply proves nothing.
       const first = await run(db, {
@@ -264,11 +264,11 @@ describe("the Check summary carries the approved wording", () => {
       expect(afterFirst.observed).not.toBe("failure");
       expect(afterFirst.terminal_ms).toBeNull();
       expect(afterFirst.desired_summary).toBe(APPROVED);
-      // Still owed, and still bound to the SAME run.
+      // note: Still owed, and still bound to the SAME run.
       expect(afterFirst.check_run_id).toBe(4242);
       expect(afterFirst.next_attempt_ms).not.toBeNull();
 
-      // Pass 2: the run STILL lacks the text, so the frozen intent is sent to
+      // note: Pass 2: the run STILL lacks the text, so the frozen intent is sent to
       // that same run — never to a replacement check.
       const second = await run(db, {
         now: () => T0 + 61_000,
@@ -310,7 +310,7 @@ describe("the Check summary carries the approved wording", () => {
 
   test("a waiting attempt keeps no failure text and is never examined", async () => {
     const db = seededDb();
-    // The review is still running: the row wants `in_progress` and its own
+    // note: The review is still running: the row wants `in_progress` and its own
     // execution deadline has not passed.
     const { attempt } = await claim(db, { executionDeadlineMs: T0 + 900_000 });
     const id = attempt.identity.attemptId;
@@ -328,7 +328,7 @@ describe("the Check summary carries the approved wording", () => {
     expect(row.terminal_failure_status).toBeNull();
     expect(row.desired_summary).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // The recovery lease the live attempt holds was never taken.
+    // note: The recovery lease the live attempt holds was never taken.
     expect(row.lease_until_ms).toBeGreaterThan(T0 + CHECK_RECOVERY_LEASE_MS - 1);
   });
 });

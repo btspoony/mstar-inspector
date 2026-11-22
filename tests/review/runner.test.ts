@@ -247,14 +247,14 @@ function parseFixtureResult(value: unknown): Omit<PtyRun, "ended" | "output"> | 
 }
 
 /**
- * Drive the REAL runner entry (the default stdin reader) inside a real pty, so
+ * why: Drive the REAL runner entry (the default stdin reader) inside a real pty, so
  * the child genuinely sees `process.stdin.isTTY === true` — the documented
  * local `bun run packages/runner/src/runner.ts …` path, which has no pipe and therefore
  * no EOF. The fixture reports the resulting exit code, that the stdin really
  * was a terminal, and what the per-run credential directory held while the
  * runtime ran versus after main() returned. A run that never ends (the pre-fix
  * read waiting for Ctrl-D) reports `ended: false`.
- * shortcut: POSIX pty only — the interactive path this guards exists on
+ * Shortcut limit: POSIX pty only — the interactive path this guards exists on
  * macOS/Linux; upgrade: if a Windows CI target ever appears.
  */
 async function runRealStdinInPty(inputPath: string): Promise<PtyRun> {

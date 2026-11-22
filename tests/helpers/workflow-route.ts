@@ -1,5 +1,5 @@
 /**
- * The `WorkflowStep` double every suite shares. The production composition is
+ * note: The `WorkflowStep` double every suite shares. The production composition is
  * driven with an in-place step: `step.do` runs its callback immediately and
  * ignores the durable-step config, because the tests own no step store. The
  * phases, handoffs, settlement and successor hand-off all stay production code.
