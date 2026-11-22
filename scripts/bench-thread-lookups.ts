@@ -61,7 +61,10 @@ for (const threads of [5_000, 20_000, 80_000]) {
       for (const sql of statements) {
         const stmt = handle.prepare(sql);
         const bound = sql.includes("LIMIT ?") ? stmt.bind(...ids, 50) : stmt.bind(...ids);
-        seen.push(...(await bound.all()).results);
+        const results = (await bound.all<{ id: string }>()).results;
+        // note: Only the binding read orders its rows; the others are compared as sets.
+        if (!sql.includes("ORDER BY")) results.sort((a, b) => a.id.localeCompare(b.id));
+        seen.push(...results);
       }
       db.exec("SAVEPOINT round");
       for (const id of ids) seen.push((await handle.prepare(supersede).bind("pub-new", 2, id, "pub-new").run()).meta.changes);
