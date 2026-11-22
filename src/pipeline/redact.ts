@@ -45,6 +45,107 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
+/** Marker replacing every transformed occurrence of a secret. */
+const TRANSFORMED_REDACTED = "[redacted]";
+
+/**
+ * The BOUNDED transform set of one secret: the forms a session can echo when it
+ * reflects a credential it holds back through a serialization step. Anything
+ * outside this list stays unredacted (see `redactTransformed`'s limit line).
+ */
+export type SecretTransforms = {
+  raw: string;
+  /** `JSON.stringify` escaping: `"`→`\"`, `\`→`\\`, controls→`\n`/`\uXXXX`. */
+  jsonEscaped: string;
+  /** The same escaping with `/` as `\/` (legal JSON; `JSON.stringify` omits it). */
+  slashEscaped: string;
+  /** Every UTF-16 code unit as `\uXXXX` (surrogate pairs included). */
+  unicodeEscaped: string;
+  urlEncoded: string;
+  base64: string;
+  /** RFC 4648 §5: `-`/`_` alphabet, padding stripped. */
+  base64url: string;
+  hex: string;
+};
+
+/** The transforms of one secret. Pure; the transform set IS this function. */
+export function secretTransforms(secret: string): SecretTransforms {
+  const bytes = new TextEncoder().encode(secret);
+  let binary = "";
+  let unicodeEscaped = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  for (let index = 0; index < secret.length; index += 1) {
+    unicodeEscaped += `\\u${secret.charCodeAt(index).toString(16).padStart(4, "0")}`;
+  }
+  const base64 = btoa(binary);
+  const jsonEscaped = JSON.stringify(secret).slice(1, -1);
+  return {
+    raw: secret,
+    jsonEscaped,
+    slashEscaped: jsonEscaped.replaceAll("/", "\\/"),
+    unicodeEscaped,
+    urlEncoded: encodeURIComponent(secret),
+    base64,
+    base64url: base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
+    hex: [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  };
+}
+
+/** Every distinct non-empty form of every secret, longest first. */
+function transformedForms(secrets: readonly string[]): string[] {
+  const forms = new Set<string>();
+  const add = (form: string): void => {
+    if (form === "") return;
+    forms.add(form);
+    // A JSON text leaf (the runner's stdout) escapes the escape itself: the
+    // `\/` a model printed is stored as `\\/`, `\uXXXX` as `\\uXXXX`.
+    forms.add(JSON.stringify(form).slice(1, -1));
+  };
+  for (const secret of new Set(secrets)) {
+    if (secret === "") continue;
+    for (const form of Object.values(secretTransforms(secret))) add(form);
+  }
+  // A shorter form that is a substring of a longer one must not shred the
+  // longer match first.
+  return [...forms].sort((left, right) => right.length - left.length);
+}
+
+/**
+ * Replace every occurrence of every transform of every secret in the STRING
+ * LEAVES of `value` with a fixed `[redacted]` token. Arrays, Sets and plain
+ * objects are walked; numbers, booleans, null and every other non-string leaf
+ * pass through by identity. Structure, keys and serialization order are
+ * preserved, so an envelope's identity fields stay byte-identical.
+ *
+ * Idempotent by construction: the token is not a transform of any realistic
+ * credential, so a second pass finds nothing.
+ *
+ * Shape patterns (`redactSecrets`) stay OUT of this pass: their long-hex rule
+ * rewrites the envelope's `head_sha` and turns a valid row unreadable.
+ */
+// limit: a secret split across two leaves, or a form outside `SecretTransforms`, is missed.
+export function redactTransformed<T>(value: T, secrets: readonly string[]): T {
+  const forms = transformedForms(secrets);
+  return forms.length === 0 ? value : redactValue(value, forms);
+}
+
+function redactValue<T>(value: T, forms: readonly string[]): T {
+  if (typeof value === "string") {
+    let out: string = value;
+    for (const form of forms) out = out.split(form).join(TRANSFORMED_REDACTED);
+    return out as T;
+  }
+  // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
+  if (value instanceof Set) return new Set([...value].map((item) => redactValue(item, forms))) as T;
+  if (Array.isArray(value)) return value.map((item) => redactValue(item, forms)) as T;
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactValue(item, forms)]),
+    ) as T;
+  }
+  return value;
+}
+
 /** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
 type IncompleteFact = NonNullable<ReviewOutput["incomplete"]>;
 

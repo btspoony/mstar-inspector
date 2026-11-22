@@ -20,7 +20,7 @@ import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
-import { redactExactSecrets, redactSecrets } from "./redact";
+import { redactExactSecrets, redactSecrets, redactTransformed } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -893,32 +893,6 @@ function encodeExecution(execution: ReviewAttemptExecution): string {
     report: execution.report,
     appliedProvider: execution.appliedProvider,
   });
-}
-
-/**
- * The paid result with every string it carries made safe to store: the exact
- * values this session's exec was given are removed from the stdout envelope,
- * the recheck document and status, and the report. The walk is over the WHOLE
- * value rather than a field list, so a field added later is covered without an
- * edit here; it runs ONCE, before both the durable write and the return, so a
- * caller cannot publish the raw stream either.
- *
- * Exact-only, deliberately: `redactSecrets` would also rewrite the envelope's
- * long hex `head_sha` and turn valid output into a parse failure (R3-1 in the
- * plan-QC fix report). `[REDACTED]` carries no quote, backslash or control
- * character, so a replaced value can never invalidate the document.
- */
-function redactExecution<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
-  if (typeof value === "string") return redactExactSecrets(value, secrets) as T;
-  if (value instanceof Set) return new Set([...value].map((item) => redactExecution(item, secrets))) as T;
-  if (Array.isArray(value)) return value.map((item) => redactExecution(item, secrets)) as T;
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactExecution(item, secrets)]),
-    ) as T;
-  }
-  return value;
 }
 
 function decodeExecution(attemptId: string, json: string): ReviewAttemptExecution {
@@ -2453,10 +2427,12 @@ export async function runReviewAttempt(input: {
   // rejected write is explicitly unknown: it may have landed.
   //
   // NO runner output crosses the persistence boundary unredacted. The exact
-  // values this session's own exec received are removed HERE, on the host that
-  // holds them; the stored and the returned value are this one sanitized
-  // object, so nothing downstream can publish the raw stream either.
-  const execution = redactExecution(
+  // values this session's own exec received, and every bounded transform of
+  // them, are removed HERE, on the host that holds them; the stored and the
+  // returned value are this one sanitized object, so nothing downstream can
+  // publish the raw stream either. String leaves only: the envelope's
+  // `head_sha` and every numeric leaf stay byte-identical.
+  const execution = redactTransformed(
     {
       run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
       recheck,

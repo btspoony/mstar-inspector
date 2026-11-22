@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { MarkedRun } from "../../src/pipeline/sandbox";
 import type { D1Like } from "../../src/store/types";
+import { secretTransforms } from "../../src/pipeline/redact";
 import { failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -454,7 +455,7 @@ describe("no runner output reaches durable storage before redaction", () => {
     });
 
     expect(execution.run.stdout).not.toContain(secret);
-    expect(execution.run.stdout).toContain("[REDACTED]");
+    expect(execution.run.stdout).toContain("[redacted]");
     expect(execution.report?.overview).not.toContain(secret);
     expect(execution.report?.overview).toContain("[REDACTED]");
     // The durable copy — what a later collect and a later host can read — is
@@ -469,6 +470,81 @@ describe("no runner output reaches durable storage before redaction", () => {
     };
     expect(row.run.stdout).toBe(execution.run.stdout);
     expect(row.report?.overview).toBe(execution.report?.overview);
+  });
+
+  test("every transformed echo of the key is gone from the stored payload", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    // A slash makes the JSON-escaped form distinct from the raw one.
+    const secret = "sk-live/9f2a44c1d3";
+    const forms = secretTransforms(secret);
+    const echoes = [
+      forms.raw,
+      forms.slashEscaped,
+      forms.urlEncoded,
+      forms.base64,
+      forms.base64url,
+      forms.hex,
+    ];
+    const stdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      head_sha: SHA,
+      attempt_id: ATTEMPT,
+      score: 0.5,
+      blocked: false,
+      echoes,
+    });
+
+    const execution = await runReviewAttempt({
+      ...executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db),
+      appCfg: { keys: { ark: [secret] }, modelChain: "ark/deepseek-v4-flash" },
+    });
+
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    const row = JSON.parse(stored.result_json) as { run: { stdout: string; exitCode: number } };
+    const envelope = JSON.parse(row.run.stdout) as {
+      head_sha: string;
+      attempt_id: string;
+      score: number;
+      blocked: boolean;
+      echoes: string[];
+    };
+    expect(envelope.echoes).toEqual(Array(6).fill("[redacted]"));
+    // Identity and non-string leaves are the unredacted bytes.
+    expect(envelope.head_sha).toBe(SHA);
+    expect(envelope.attempt_id).toBe(ATTEMPT);
+    expect(envelope.score).toBe(0.5);
+    expect(envelope.blocked).toBe(false);
+    expect(row.run.exitCode).toBe(0);
+    expect(execution.run.stdout).toBe(row.run.stdout);
+  });
+
+  test("a payload carrying no secret serializes byte-identically", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const stdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      head_sha: SHA,
+      attempt_id: ATTEMPT,
+      score: 1,
+      blocked: false,
+    });
+
+    await runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db));
+
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    expect(stored.result_json).toBe(
+      JSON.stringify({
+        run: { stdout, exitCode: 0 },
+        recheck: null,
+        report: null,
+        appliedProvider: null,
+      }),
+    );
   });
 });
 

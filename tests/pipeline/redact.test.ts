@@ -6,7 +6,15 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { REDACTED, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "../../src/pipeline/redact";
+import {
+  REDACTED,
+  redactExactSecrets,
+  redactReviewOutput,
+  redactReviewOutputExact,
+  redactSecrets,
+  redactTransformed,
+  secretTransforms,
+} from "../../src/pipeline/redact";
 import { buildReviewBody } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
 import { sk, gh, AWS_CANARY_KEY, pemBanner } from "../helpers/fake-secrets";
@@ -96,6 +104,65 @@ describe("redactExactSecrets", () => {
     const out = redactExactSecrets(`leaked ${uuid} here`, [uuid]);
     expect(out).not.toContain(uuid);
     expect(out).toContain(REDACTED);
+  });
+});
+
+describe("redactTransformed", () => {
+  // A credential with a slash so the JSON-escaped form differs from the raw one.
+  const SECRET = "sk-live/paid-session-secret-01";
+  const forms = secretTransforms(SECRET);
+
+  test("secretTransforms names the bounded set", () => {
+    const one = secretTransforms("p/a b");
+    expect(one.raw).toBe("p/a b");
+    expect(one.jsonEscaped).toBe("p/a b");
+    expect(one.slashEscaped).toBe("p\\/a b");
+    expect(one.unicodeEscaped).toBe("\\u0070\\u002f\\u0061\\u0020\\u0062");
+    expect(one.urlEncoded).toBe("p%2Fa%20b");
+    expect(one.base64).toBe("cC9hIGI=");
+    expect(one.base64url).toBe("cC9hIGI");
+    expect(one.hex).toBe("702f612062");
+  });
+
+  test("removes all six injected forms from nested leaves, leaving non-strings untouched", () => {
+    const injected = [
+      forms.raw,
+      forms.slashEscaped,
+      forms.urlEncoded,
+      forms.base64,
+      forms.base64url,
+      forms.hex,
+    ];
+    const payload = {
+      run: { stdout: `echo ${injected.join(" ")}`, exitCode: 0 },
+      recheck: { rejected: new Set(injected.map((form, index) => `row${index}:${form}`)), rows: injected },
+      report: null,
+      passed: true,
+      score: 0.5,
+    };
+
+    const redacted = redactTransformed(payload, [SECRET]);
+
+    expect(redacted.run.stdout).toBe("echo " + Array(6).fill("[redacted]").join(" "));
+    expect([...redacted.recheck.rejected]).toEqual(injected.map((_, index) => `row${index}:[redacted]`));
+    expect(redacted.recheck.rows).toEqual(Array(6).fill("[redacted]"));
+    expect(redacted.run.exitCode).toBe(0);
+    expect(redacted.passed).toBe(true);
+    expect(redacted.score).toBe(0.5);
+    expect(redacted.report).toBeNull();
+  });
+
+  test("is idempotent", () => {
+    const payload = { text: `raw ${forms.raw} and hex ${forms.hex}`, n: 1 };
+    const once = redactTransformed(payload, [SECRET]);
+    const twice = redactTransformed(once, [SECRET]);
+    expect(twice).toEqual(once);
+  });
+
+  test("no secret values → the value itself, unchanged", () => {
+    const payload = { text: `raw ${forms.raw}`, n: 1, ok: true };
+    expect(redactTransformed(payload, [])).toBe(payload);
+    expect(redactTransformed(payload, [""])).toBe(payload);
   });
 });
 
