@@ -1,5 +1,5 @@
 /**
- * `scripts/validate-release-version.ts` unit tests (D4 / D11;
+ * why: `scripts/validate-release-version.ts` unit tests (D4 / D11;
  * the ts-const rework adds the src/version.ts surface + drift case).
  *
  * Pins the release gate against temp repos (real `git init` where tag state
@@ -26,7 +26,7 @@ import {
 } from "../../scripts/validate-release-version";
 import { disposeTempRoot, git, makeTempRoot, writeAt, writeVersionTs } from "./helpers";
 
-/** Init a git repo with one commit so lightweight tags resolve. */
+/** note: Init a git repo with one commit so lightweight tags resolve. */
 function initGitRepo(root: string): void {
   git(root, "init", "-q");
   git(root, "config", "user.email", "test@example.com");
@@ -95,7 +95,7 @@ describe("validateReleaseVersion gate", () => {
     const root = makeTempRoot();
     try {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
-      writeVersionTs(root, "0.1.0"); // stale: the bump missed this surface
+      writeVersionTs(root, "0.1.0"); // note: stale: the bump missed this surface
       initGitRepo(root);
 
       const result = await validateReleaseVersion("v1.0.0", root);
@@ -159,7 +159,7 @@ describe("validateReleaseVersion gate", () => {
       writeVersionTs(root, "1.0.0");
       initGitRepo(root);
       git(root, "tag", "-a", "v1.0.0", "-m", "release");
-      // a newer commit lands after the tag: the tag no longer points at HEAD
+      // why: a newer commit lands after the tag: the tag no longer points at HEAD
       writeAt(root, "later.txt", "");
       git(root, "add", "-A");
       git(root, "commit", "-q", "-m", "later");
@@ -180,7 +180,7 @@ describe("validateReleaseVersion gate", () => {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       writeVersionTs(root, "1.0.0");
       initGitRepo(root);
-      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // single commit == HEAD
+      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // note: single commit == HEAD
 
       const result = await validateReleaseVersion("v1.0.0", root);
       expect(result.ok).toBe(true);
@@ -215,10 +215,10 @@ describe("resolveTagCommit / headCommit (git rev-parse)", () => {
       writeAt(root, "package.json", `{\n  "version": "1.0.0"\n}\n`);
       initGitRepo(root);
       expect(resolveTagCommit("1.0.0", root)).toBeUndefined();
-      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // annotated tag shape
+      git(root, "tag", "-a", "v1.0.0", "-m", "release"); // note: annotated tag shape
       const head = headCommit(root);
       expect(head).toMatch(/^[0-9a-f]{40}$/);
-      expect(resolveTagCommit("1.0.0", root)).toBe(head); // peeled to the commit
+      expect(resolveTagCommit("1.0.0", root)).toBe(head); // note: peeled to the commit
     } finally {
       disposeTempRoot(root);
     }

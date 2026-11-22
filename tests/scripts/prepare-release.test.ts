@@ -1,5 +1,5 @@
 /**
- * `scripts/prepare-release.ts` unit tests (D3 / D11).
+ * why: `scripts/prepare-release.ts` unit tests (D3 / D11).
  *
  * Pins the release-prepare contract against throwaway repo layouts:
  *
@@ -116,7 +116,7 @@ describe("buildSectionBody (bilingual assembly)", () => {
     const body = buildSectionBody("cn", frags);
     expect(body).toContain("- CN A1。");
     expect(body).toContain("- CN B1。");
-    expect(body).toContain("- EN C1 (no category, no CN)."); // fallback
+    expect(body).toContain("- EN C1 (no category, no CN)."); // note: fallback
     expect(body).not.toContain("<!-- CN -->");
   });
 });
@@ -144,7 +144,7 @@ describe("insertSection", () => {
     expect(() => insertSection(changelog, "0.0.9", "2026-09-07", "- Again.")).toThrow(
       "Changelog already has a section for [0.0.9] — refusing to duplicate.",
     );
-    // exact bracket match: 1.0.0 must NOT trip on a 1.0.0-alpha.1 section
+    // why: exact bracket match: 1.0.0 must NOT trip on a 1.0.0-alpha.1 section
     const withPre = insertSection(changelog, "1.0.0-alpha.1", "2026-09-07", "- Pre.");
     expect(() => insertSection(withPre, "1.0.0-alpha.1", "2026-09-07", "- Pre.")).toThrow(
       "already has a section for [1.0.0-alpha.1]",
@@ -157,7 +157,7 @@ describe("insertSection", () => {
   test("`## [Unreleased]` as final line without trailing newline appends below it (QC A2)", () => {
     const bare = "# Changelog\n\nIntro.\n\n## [Unreleased]";
     const next = insertSection(bare, "1.0.0", "2026-09-07", "- New.");
-    expect(next.startsWith("# Changelog")).toBe(true); // title not displaced
+    expect(next.startsWith("# Changelog")).toBe(true); // note: title not displaced
     const iUn = next.indexOf("## [Unreleased]");
     const iNew = next.indexOf("## [1.0.0] - 2026-09-07");
     expect(iUn).toBeGreaterThan(-1);
@@ -205,13 +205,13 @@ describe("prepareRelease (end to end on a temp repo)", () => {
       const cn = await Bun.file(join(root, "CHANGELOG_CN.md")).text();
       expect(cn).toContain("## [1.0.0] - 2026-09-07");
       expect(cn).toContain("- CN 基线要点。");
-      expect(cn).toContain("- EN fix bullet (no CN block)."); // CN-missing fallback
+      expect(cn).toContain("- EN fix bullet (no CN block)."); // note: CN-missing fallback
       expect(cn).not.toContain("EN baseline bullet.");
 
       const pkg = (await Bun.file(join(root, "package.json")).json()) as { version: string };
       expect(pkg.version).toBe("1.0.0");
 
-      // prepare bumps BOTH surfaces from the one VERSION_SURFACES
+      // why: prepare bumps BOTH surfaces from the one VERSION_SURFACES
       // list — src/version.ts is regenerated at the new version.
       const versionTs = await Bun.file(join(root, "src", "version.ts")).text();
       expect(versionTs).toBe(renderVersionTs("1.0.0"));
@@ -291,7 +291,7 @@ describe("prepareRelease (end to end on a temp repo)", () => {
       await expect(
         prepareRelease({ version: "0.0.9", bump: "patch", allowEmpty: false, root, date: "2026-09-07" }),
       ).rejects.toThrow("Version 0.0.9 must be greater than current 0.1.0.");
-      // first cut 1.0.0 > 0.1.0 passes
+      // note: first cut 1.0.0 > 0.1.0 passes
       await expect(
         prepareRelease({ version: "1.0.0", bump: "patch", allowEmpty: false, root, date: "2026-09-07" }),
       ).resolves.toMatchObject({ version: "1.0.0" });
@@ -317,7 +317,7 @@ describe("prepareRelease (end to end on a temp repo)", () => {
     try {
       setupReleaseRepo(root);
       await prepareRelease({ version: "1.0.0-alpha.1", bump: "patch", allowEmpty: false, root, date: "2026-09-07" });
-      // half-applied shape: the changelog section landed, but the bump was
+      // why: half-applied shape: the changelog section landed, but the bump was
       // reverted and the fragment never moved — as if the run died between
       // writes. Retrying the same version must fail closed, not duplicate.
       writeAt(

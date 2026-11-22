@@ -1,5 +1,5 @@
 /**
- * `scripts/provider-catalog/lib/overrides.ts` — the hand-measured override layer.
+ * why: `scripts/provider-catalog/lib/overrides.ts` — the hand-measured override layer.
  *
  * The vendored snapshot used to be the package's vocabulary verbatim. That made
  * the generated catalog wrong whenever the package and the vendor's live
@@ -30,7 +30,7 @@ const OVERRIDE: Override = {
 
 describe("applyOverrides — a measured bucket replaces the package's", () => {
   test("the named bucket is replaced wholesale, not unioned with the package", () => {
-    // The package holds an id the provider rejects: a union would publish it.
+    // why: The package holds an id the provider rejects: a union would publish it.
     const before = [row("commandcode-completions", "openai-completions", ["org/pkg-only", "org/a"])];
     const { records, applied } = applyOverrides(before, { commandcode: OVERRIDE });
 
@@ -48,7 +48,7 @@ describe("applyOverrides — a measured bucket replaces the package's", () => {
   });
 
   test("the primary protocol is matched by the plain provider id", () => {
-    // The extraction names the most common protocol `<provider>`, every other
+    // why: The extraction names the most common protocol `<provider>`, every other
     // one `<provider>-<suffix>`; both spellings must resolve.
     const before = [row("commandcode", "openai-responses", ["pkg-1", "pkg-2"])];
     const { records } = applyOverrides(before, {
@@ -65,7 +65,7 @@ describe("applyOverrides — a measured bucket replaces the package's", () => {
     });
     expect(applied).toEqual([]);
     expect(unmatched).toEqual(["commandcode anthropic-messages"]);
-    // Nothing was added: the record set is exactly what the package shipped.
+    // note: Nothing was added: the record set is exactly what the package shipped.
     expect(records.map((r) => r.api)).toEqual(["openai-completions"]);
   });
 });
@@ -77,7 +77,7 @@ describe("applyOverrides — an absent override changes nothing", () => {
     const { records, applied, unmatched } = applyOverrides([untouched, overridden], {
       commandcode: OVERRIDE,
     });
-    // Only the provider the file names moved; the sibling is byte-identical.
+    // note: Only the provider the file names moved; the sibling is byte-identical.
     expect(records[0]).toEqual(untouched);
     expect(records[1]!.models).toEqual(["org/a", "b"]);
     expect(applied).toHaveLength(1);
