@@ -114,7 +114,7 @@ async function readLiveTarget(db: DashboardD1, failureId: string): Promise<Maint
   const row = await db
     // shortcut: tenant-bypass — internal maintenance read (operator route and sweep
     // retry); it returns no identity or ownership column, and the workspace join is
-    // the tenant gate. Upgrade: tenant-filter it once the maintenance replay becomes
+    // the tenant gate. upgrade: tenant-filter it once the maintenance replay becomes
     // workspace-scoped.
     .prepare(
       `SELECT t.id AS target_id, t.bot_id AS bot_id

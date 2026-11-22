@@ -176,7 +176,7 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
  * Shape patterns (`redactSecrets`) stay OUT: their long-hex rule rewrites a
  * host-written `head_sha`.
  */
-// safety: limit: a credential split across two leaves, or one the model double-escaped (it decodes to literal `\uXXXX` text), is missed.
+// limit: a credential split across two leaves, or one the model double-escaped (it decodes to literal `\uXXXX` text), is missed.
 export function redactDocument<T>(
   value: T,
   secrets: readonly string[],
