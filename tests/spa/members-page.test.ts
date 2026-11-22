@@ -1,5 +1,4 @@
-/**
- * Members page rebuilt on shadcn Table + invite toolbox bar +
+/** note: Members page rebuilt on shadcn Table + invite toolbox bar +
  * confirm dialogs.
  *
  * Executed contract: the page's read/refusal/visibility seams
@@ -50,7 +49,7 @@ const invite = (): InviteRow => ({
   expires_at: "2026-01-08T00:00:00Z",
 });
 
-/** The members payload's workspace summary — one free workspace, two attempts. */
+/** note: The members payload's workspace summary — one free workspace, two attempts. */
 const WORKSPACE = {
   plan: { id: "free", name: "Free" },
   memberLimit: 5,
@@ -78,7 +77,7 @@ describe("members page shadcn rebuild", () => {
       return new Response(JSON.stringify({ invites: [] }), { status: 200 });
     }) as unknown as typeof fetch;
     try {
-      // A plain member costs ONE request: the manager-only pending list is
+      // invariant: A plain member costs ONE request: the manager-only pending list is
       // never asked for, so no 403 reaches the page.
       const member = await loadMembersPage("/dashboard/acme");
       expect(member).toEqual({
@@ -111,7 +110,7 @@ describe("members page shadcn rebuild", () => {
         { url: "/dashboard/acme/members/role", method: "POST" },
         { url: "/dashboard/acme/members/remove", method: "POST" },
       ]);
-      // The workspace-only route family dropped the deployment-level copies;
+      // invariant: The workspace-only route family dropped the deployment-level copies;
       // posting there would answer 404.
       for (const { url } of calls) {
         expect(url.startsWith("/dashboard/acme/")).toBe(true);
@@ -158,7 +157,7 @@ describe("members page shadcn rebuild", () => {
   });
 
   test("the pending table is a manager-only, non-empty affordance", () => {
-    // Behaviour, not the render expression: only owner/admin see the section,
+    // invariant: Behaviour, not the render expression: only owner/admin see the section,
     // and never an empty one.
     expect(showsPendingInvites("owner", [invite()])).toBe(true);
     expect(showsPendingInvites("admin", [invite()])).toBe(true);
@@ -168,13 +167,13 @@ describe("members page shadcn rebuild", () => {
   });
 
   test("the pending invite 409 surfaces as a warning, not a retryable error", () => {
-    // The server's refusal grammar decides the notice, not the code spelling.
+    // note: The server's refusal grammar decides the notice, not the code spelling.
     expect(inviteFailureNotice(409, "invite.pending_exists", false)).toEqual({
       kind: "warn",
       key: "notice.warn.invitePending",
     });
     expect(inviteFailureNotice(409, "invite.pending_exists", true).kind).toBe("warn");
-    // An already-member target warns; anything else is a real failure.
+    // note: An already-member target warns; anything else is a real failure.
     expect(inviteFailureNotice(409, "already a member", true).kind).toBe("warn");
     expect(inviteFailureNotice(500, "", false)).toEqual({
       kind: "error",
@@ -204,45 +203,45 @@ describe("members page shadcn rebuild", () => {
   });
 
   test("page-level states ride the shared state trio; op notices keep the PageNotice channel", () => {
-    // Loading is the table skeleton; page-load failure is the composed
+    // note: Loading is the table skeleton; page-load failure is the composed
     // error with retry wired to the page's own load callback.
     expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
     expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
     expect(source).not.toContain("LoadingNotice");
     expect(source).not.toContain("LoadFailedNotice");
-    // Channel boundary (AD-582): op-outcome notices stay on PageNotice.
+    // note: Channel boundary (AD-582): op-outcome notices stay on PageNotice.
     expect(source).toContain('<PageNotice kind={notice.kind} message={notice.message} />');
   });
 
   test("no page-level admin-only face: the member list is visible to every member", () => {
-    // Plan AC4 — a plain member sees the list; only the manager actions and
+    // invariant: Plan AC4 — a plain member sees the list; only the manager actions and
     // the pending list are gated (client-side mirror; the server decides).
     expect(source).not.toContain("members.adminOnly");
     expect(source).toContain("emptyDescriptionMember");
   });
 
   test("op-triggered reloads are background — only the initial load gates the skeleton (F-58-1)", () => {
-    // background-reload contract (mirrors SettingsPage): `load` flips
+    // note: background-reload contract (mirrors SettingsPage): `load` flips
     // to "loading" (the PageSkeleton gate) on foreground loads only.
     expect(source).toContain('if (!background) setState("loading")');
-    // Every op path (invite submit, dialog confirm, refused delete) reloads in
+    // note: Every op path (invite submit, dialog confirm, refused delete) reloads in
     // the background.
     expect(source.split("load({ background: true })").length - 1).toBe(3);
-    // No bare foreground await remains: a bare `await load()` would flip the
+    // why: No bare foreground await remains: a bare `await load()` would flip the
     // page into the skeleton state mid-op and blink out the op PageNotice.
     expect(source).not.toContain("await load()");
   });
 
   test("empty member list renders the no-action EmptyState guidance", () => {
     expect(source).toContain('t(locale, "members.emptyTitle")');
-    // The description differs for a manager (an invite form is present) and a
+    // note: The description differs for a manager (an invite form is present) and a
     // plain member (it is not), so it is chosen by the same capability guard.
     expect(source).toContain(
       'canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember"',
     );
     const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);
     expect(emptyCall).not.toBeNull();
-    // No action slot: the invite form above is the path.
+    // note: No action slot: the invite form above is the path.
     expect(emptyCall![0]).not.toContain("action=");
   });
 
@@ -299,7 +298,7 @@ describe("members list (rendered)", () => {
   };
 
   test("one list row per member, carrying the login, role, join time and its absolute tooltip", () => {
-    // Day granularity: the bucket cannot roll over inside one test run.
+    // note: Day granularity: the bucket cannot roll over inside one test run.
     const relative = formatRelativeTime(ROW.created_at, "en");
     expect(relative).toMatch(/\d+ days ago$/);
     const html = renderToStaticMarkup(
@@ -312,12 +311,12 @@ describe("members list (rendered)", () => {
         onAction: () => {},
       }),
     );
-    // One row per member on the group-card / list-row patterns.
+    // note: One row per member on the group-card / list-row patterns.
     expect(html.match(/data-slot="list-row"/g)).toHaveLength(1);
     expect(html).toContain('data-slot="group-card"');
     expect(html).toContain(`>${ROW.github_login}`);
     expect(html).toContain(t("en", `members.role.${ROW.role}`));
-    // Both faces of the join time: the copy a reader sees, and the exact stamp
+    // note: Both faces of the join time: the copy a reader sees, and the exact stamp
     // the tooltip must still expose (losing the title is the silent regression
     // this covers).
     expect(html).toContain(`title="${ROW.created_at}"`);
@@ -366,7 +365,7 @@ describe("workspace settings block", () => {
     expect(html).toContain(t("en", "members.reviewAttemptsLabel"));
     expect(html).toContain("128");
     expect(html).toContain("Counted, not limited.");
-    // The upgrade position stays empty by design — no price, purchase or billing.
+    // invariant: The upgrade position stays empty by design — no price, purchase or billing.
     expect(html).not.toMatch(/upgrade|price|billing|purchase/i);
   });
 
@@ -392,7 +391,7 @@ describe("workspace settings block", () => {
   });
 
   test("the plan label is whatever the workspace prop says (P2 mode split guard)", () => {
-    // `saas` renders `workspace.plan` verbatim — no client-side plan naming —
+    // note: `saas` renders `workspace.plan` verbatim — no client-side plan naming —
     // so a plan change only has to change the payload.
     const html = renderToStaticMarkup(
       createElement(WorkspacePanel, {
@@ -439,7 +438,7 @@ describe("workspace settings block", () => {
       createElement(WorkspacePanel, {
         locale: "en",
         deploymentMode: "self-hosted",
-        // The real self-hosted payload: every workspace resolves `unlimited`.
+        // note: The real self-hosted payload: every workspace resolves `unlimited`.
         workspace: { ...FREE, memberLimit: null },
         memberCount: 4,
       }),
@@ -447,12 +446,12 @@ describe("workspace settings block", () => {
     expect(html).toContain(t("en", "members.workspaceHeading"));
     expect(html).not.toContain(t("en", "members.planLabel"));
     expect(html).not.toContain("Free");
-    // A plain count plus the no-limit note — no quota, no countdown.
+    // note: A plain count plus the no-limit note — no quota, no countdown.
     expect(html).toContain(">4<");
     expect(html).toContain(t("en", "members.noMemberLimit"));
     expect(html).not.toContain("4 / 5");
     expect(html).not.toMatch(/slots? left|No seats left/);
-    // The meter is mode-independent.
+    // note: The meter is mode-independent.
     expect(html).toContain(t("en", "members.reviewAttemptsLabel"));
     expect(html).toContain("128");
   });
@@ -462,7 +461,7 @@ describe("workspace settings block", () => {
       createElement(WorkspacePanel, {
         locale: "en",
         deploymentMode: "saas",
-        // `pro` / `unlimited` carry a NULL `included_members`.
+        // note: `pro` / `unlimited` carry a NULL `included_members`.
         workspace: { ...FREE, plan: { id: "unlimited", name: "Unlimited" }, memberLimit: null },
         memberCount: 4,
       }),
@@ -521,7 +520,7 @@ describe("workspace settings block", () => {
       expect(calls).toEqual([{ url: "/dashboard/acme/api/workspace/delete", method: "POST" }]);
       expect(redirects).toEqual(["/dashboard"]);
 
-      // F-2: the boot read consumes the flash; the landing shell renders it
+      // note: F-2: the boot read consumes the flash; the landing shell renders it
       // through the notice exactly once, then nothing remains.
       const line = "Workspace deleted. Its Apps are not reviewed.";
       const landing = renderToStaticMarkup(
@@ -561,7 +560,7 @@ describe("workspace settings block", () => {
       removeItem: (key: string) => void store.delete(key),
     } as unknown as Storage;
     try {
-      // The refusal is terminal and the write itself neither navigates nor
+      // note: The refusal is terminal and the write itself neither navigates nor
       // flashes — the page's 404 branch hands over to the terminal move below.
       expect(deleteRefusal(404)).toEqual({ next: "leave" });
       expect(await deleteWorkspace("/dashboard/acme")).toBe(404);
@@ -570,7 +569,7 @@ describe("workspace settings block", () => {
 
       leaveWorkspaceForDashboard();
       expect(redirects).toEqual(["/dashboard"]);
-      // The landing states it once from the flash and consumes the key.
+      // note: The landing states it once from the flash and consumes the key.
       const line = "This workspace is no longer available to you.";
       const landing = renderToStaticMarkup(
         createElement(Layout, {
@@ -582,7 +581,7 @@ describe("workspace settings block", () => {
       );
       expect(landing.split(line).length - 1).toBe(1);
       expect(store.has(FLASH_STORAGE_KEY)).toBe(false);
-      // No reload: the delete was the only request issued.
+      // invariant: No reload: the delete was the only request issued.
       expect(calls).toEqual(["/dashboard/acme/api/workspace/delete"]);
     } finally {
       globalThis.fetch = realFetch;
@@ -595,7 +594,7 @@ describe("workspace settings block", () => {
     const { win, cleanup } = installDom("http://localhost/dashboard");
     const paints: string[] = [];
     try {
-      // Records every committed paint: layout effects run after the DOM
+      // invariant: Records every committed paint: layout effects run after the DOM
       // mutation and before the pathname-keyed flash-clear re-renders, so the
       // painted frames stay observable even though act() flushes effects on
       // return.
@@ -623,14 +622,14 @@ describe("workspace settings block", () => {
         act(async () => root.render(createElement(Shell, { pathname })));
 
       await render("/dashboard");
-      // A plain re-render of the same pathname must keep showing it: the copy
+      // invariant: A plain re-render of the same pathname must keep showing it: the copy
       // is cleared by navigation, never by a mount/render pass.
       await render("/dashboard");
       const line = "Workspace deleted. Its Apps are not reviewed.";
       expect(paints[0]!.split(line).length - 1).toBe(1);
       expect(paints[1]!.split(line).length - 1).toBe(1);
 
-      // The first move away spends it, so the walk back shows nothing.
+      // why: The first move away spends it, so the walk back shows nothing.
       await render("/dashboard/apps");
       await render("/dashboard");
       expect(paints.at(-1)!.split(line).length - 1).toBe(0);
@@ -641,20 +640,20 @@ describe("workspace settings block", () => {
   });
 
   test("a refused delete picks copy and next move by status", () => {
-    // 403: not the owner — stay, reload in the background, name the cause.
+    // note: 403: not the owner — stay, reload in the background, name the cause.
     expect(deleteRefusal(403)).toEqual({
       next: "reload",
       kind: "warn",
       key: "members.deleteWorkspaceNotOwner",
     });
-    // 404: the workspace is gone OR this viewer lost the membership — leave
+    // note: 404: the workspace is gone OR this viewer lost the membership — leave
     // for the dashboard; the copy rides the flash instead of an inline notice.
     expect(deleteRefusal(404)).toEqual({ next: "leave" });
     expect(t("en", "members.deleteWorkspaceNotOwner")).toBe("Only the workspace owner can delete it.");
     expect(t("en", "notice.warn.workspaceUnavailable")).toBe(
       "This workspace is no longer available to you.",
     );
-    // A 5xx keeps the generic wording and leaves the page untouched; a network
+    // invariant: A 5xx keeps the generic wording and leaves the page untouched; a network
     // failure throws before it ever reaches this mapping.
     expect(deleteRefusal(500)).toEqual({
       next: "stay",

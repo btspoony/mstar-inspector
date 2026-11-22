@@ -1,5 +1,4 @@
-/**
- * I-000647: the chain editor's action row anchored left, so it drifted away
+/** note: I-000647: the chain editor's action row anchored left, so it drifted away
  * from the panel's trailing edge and could run past the container.
  *
  * Pinned structurally over the rendered panel: the picker, 加入模型链, 保存模型链
@@ -39,7 +38,7 @@ describe("I-000647: the chain editor's action row hangs off the trailing edge", 
       expect(save).not.toBeNull();
       expect(add).not.toBeNull();
       expect(picker).not.toBeNull();
-      // The row is the container the save button sits in; the picker (inside
+      // note: The row is the container the save button sits in; the picker (inside
       // its own width clamp) and the add button must be its direct children
       // too, or the save has drifted into a row of its own.
       const shared = save!.parentElement!;
@@ -48,11 +47,11 @@ describe("I-000647: the chain editor's action row hangs off the trailing edge", 
       return { classes: [...shared.classList], label: save!.textContent };
     });
 
-    // Trailing-edge anchor + wrapping: every wrapped line stays right-aligned,
+    // invariant: Trailing-edge anchor + wrapping: every wrapped line stays right-aligned,
     // so the controls cannot start at the left edge or pass the container.
     expect(row.classes).toContain("justify-end");
     expect(row.classes).toContain("flex-wrap");
-    // 保存模型链 remains the row's primary face.
+    // invariant: 保存模型链 remains the row's primary face.
     expect(row.label).toBe(t("en", "settings.saveChain"));
   });
 });

@@ -1,5 +1,4 @@
-/**
- * The three-role boundary and the two structural refusals.
+/** note: The three-role boundary and the two structural refusals.
  *
  * Everything here goes through the real worker mount — routing gate, session
  * guard, workspace resolution, route-local role check, then the store's
@@ -50,8 +49,7 @@ function seedMembership(db: TestD1, userId: string, role: Actor | "owner"): void
     .run(WORKSPACE, userId, role, new Date().toISOString());
 }
 
-/**
- * Two workspaces' worth of world, in one (`acme`): one actor per role, one
+/** note: Two workspaces' worth of world, in one (`acme`): one actor per role, one
  * plain member as the default target, and — separately — a second `admin` and
  * a second `owner` so the target-class sweep can address each.
  */
@@ -59,12 +57,12 @@ function world() {
   const db = createMigratedTestD1();
   seedWorkspace(db, WORKSPACE, "acme");
   const ids = {
-    dana: seedUser(db, "dana"), // actor: owner
-    olive: seedUser(db, "olive"), // target: second owner
-    carol: seedUser(db, "carol"), // actor: admin
-    ivan: seedUser(db, "ivan"), // target: second admin
-    mallory: seedUser(db, "mallory"), // actor: member
-    hubot: seedUser(db, "hubot"), // target: plain member
+    dana: seedUser(db, "dana"), // note: actor: owner
+    olive: seedUser(db, "olive"), // note: target: second owner
+    carol: seedUser(db, "carol"), // note: actor: admin
+    ivan: seedUser(db, "ivan"), // note: target: second admin
+    mallory: seedUser(db, "mallory"), // note: actor: member
+    hubot: seedUser(db, "hubot"), // note: target: plain member
   };
   seedMembership(db, ids.dana, "owner");
   seedMembership(db, ids.olive, "owner");
@@ -72,7 +70,7 @@ function world() {
   seedMembership(db, ids.ivan, "admin");
   seedMembership(db, ids.mallory, "member");
   seedMembership(db, ids.hubot, "member");
-  // The role matrix is not a member-cap test: its six role fixtures plus a
+  // note: The role matrix is not a member-cap test: its six role fixtures plus a
   // live invite already exceed the `free` plan's five seats, so the world buys
   // enough seats and the cap keeps its own cases in membership.test.ts.
   db.raw.prepare("UPDATE plans SET included_members = 10 WHERE id = 'pro'").run();
@@ -84,7 +82,7 @@ function world() {
   return { db, ids };
 }
 
-/** Exactly one `owner` (`dana`) plus one `admin` and one `member`. */
+/** invariant: Exactly one `owner` (`dana`) plus one `admin` and one `member`. */
 function soleOwnerWorld() {
   const db = createMigratedTestD1();
   seedWorkspace(db, WORKSPACE, "acme");
@@ -135,7 +133,7 @@ async function post(
   );
 }
 
-/** One live pending invite, so the `revoke` row has something to revoke. */
+/** why: One live pending invite, so the `revoke` row has something to revoke. */
 async function seedPendingInvite(db: TestD1, invitedBy: string): Promise<string> {
   const now = new Date();
   const invite = await createInvite(db, {
@@ -149,7 +147,7 @@ async function seedPendingInvite(db: TestD1, invitedBy: string): Promise<string>
   return invite.id;
 }
 
-/** One workspace member's stored role. */
+/** note: One workspace member's stored role. */
 function roleOf(db: TestD1, userId: string): string | null {
   const row = db.raw
     .prepare("SELECT role FROM workspace_members WHERE workspace_id = ? AND user_id = ?")
@@ -204,7 +202,7 @@ describe("role matrix: {owner, admin, member} × {invite, revoke, change_role, r
 
       expect(res.status).toBe(expected);
       if (expected !== 200) {
-        // A refusal writes nothing: same member count, same target role.
+        // invariant: A refusal writes nothing: same member count, same target role.
         expect(memberCount(db)).toBe(before.members);
         expect(roleOf(db, ids.hubot)).toBe(before.target);
       } else if (action === "change_role") {
@@ -250,7 +248,7 @@ describe("target-class boundary: admin may not touch an owner or another admin",
     expect(roleOf(db, ids.ivan)).toBe("member");
     expect((await post(db, `${BASE}/members/remove`, "dana", { userId: ids.ivan })).status).toBe(200);
     expect(roleOf(db, ids.ivan)).toBeNull();
-    // Two owners exist, so removing the peer leaves the workspace with one.
+    // note: Two owners exist, so removing the peer leaves the workspace with one.
     expect((await post(db, `${BASE}/members/remove`, "dana", { userId: ids.olive })).status).toBe(200);
     expect(roleOf(db, ids.olive)).toBeNull();
     expect(roleOf(db, ids.dana)).toBe("owner");
@@ -262,7 +260,7 @@ describe("target-class boundary: admin may not touch an owner or another admin",
     expect(remove.status).toBe(403);
     const demote = await post(db, `${BASE}/members/role`, "carol", { userId: ids.dana, role: "member" });
     expect(demote.status).toBe(403);
-    // The role boundary answers first: the owner row is untouched either way.
+    // invariant: The role boundary answers first: the owner row is untouched either way.
     expect(roleOf(db, ids.dana)).toBe("owner");
   });
 });
@@ -273,7 +271,7 @@ describe("promote is the ownership-transfer path (no separate route)", () => {
     const promote = await post(db, `${BASE}/members/role`, "dana", { userId: ids.hubot, role: "owner" });
     expect(promote.status).toBe(200);
     expect(roleOf(db, ids.hubot)).toBe("owner");
-    // Ownership has moved far enough that the original owner may step down.
+    // note: Ownership has moved far enough that the original owner may step down.
     const stepDown = await post(db, `${BASE}/members/role`, "dana", { userId: ids.dana, role: "member" });
     expect(stepDown.status).toBe(200);
     expect(roleOf(db, ids.dana)).toBe("member");
@@ -301,7 +299,7 @@ describe("last_owner: the workspace can never lose its final owner", () => {
     const { db, ids } = soleOwnerWorld();
     expect(await updateWorkspaceMemberRole(db, WORKSPACE, ids.dana, "member")).toBe(false);
     expect(roleOf(db, ids.dana)).toBe("owner");
-    // Promote a peer, then the same demotion lands.
+    // note: Promote a peer, then the same demotion lands.
     expect(await updateWorkspaceMemberRole(db, WORKSPACE, ids.carol, "owner")).toBe(true);
     expect(await updateWorkspaceMemberRole(db, WORKSPACE, ids.dana, "member")).toBe(true);
     expect(roleOf(db, ids.dana)).toBe("member");
@@ -310,7 +308,7 @@ describe("last_owner: the workspace can never lose its final owner", () => {
   test("the sole owner removing themselves is the last-owner 409, zero writes", async () => {
     const { db, ids } = soleOwnerWorld();
     const res = await post(db, `${BASE}/members/remove`, "dana", { userId: ids.dana });
-    // The last-owner conflict wins over the generic self-removal 400.
+    // note: The last-owner conflict wins over the generic self-removal 400.
     expect(res.status).toBe(409);
     expect(await res.text()).toContain("last owner");
     expect(roleOf(db, ids.dana)).toBe("owner");
@@ -319,7 +317,7 @@ describe("last_owner: the workspace can never lose its final owner", () => {
 
   test("an owner who is not the last one removing themselves is the self-removal 400, zero writes", async () => {
     const { db, ids } = world();
-    // `dana` and `olive` are both owners, so the last-owner guard does not fire.
+    // why: `dana` and `olive` are both owners, so the last-owner guard does not fire.
     const res = await post(db, `${BASE}/members/remove`, "dana", { userId: ids.dana });
     expect(res.status).toBe(400);
     expect(roleOf(db, ids.dana)).toBe("owner");
@@ -333,7 +331,7 @@ describe("self_demote: an owner may step down only after another owner exists", 
     for (const role of ["admin", "member"] as const) {
       const res = await post(db, `${BASE}/members/role`, "dana", { userId: ids.dana, role });
       expect(res.status, role).toBe(409);
-      // The actor-aware refusal, not the store's generic last-owner 409: the
+      // note: The actor-aware refusal, not the store's generic last-owner 409: the
       // store predicate cannot see who is acting, so this body is what pins
       // the handler-level check.
       expect(await res.text()).toContain("only owner");
@@ -343,7 +341,7 @@ describe("self_demote: an owner may step down only after another owner exists", 
 
   test("after a second owner exists the same self-demotion is allowed", async () => {
     const { db, ids } = world();
-    // `dana` and `olive` are both owners here.
+    // note: `dana` and `olive` are both owners here.
     const res = await post(db, `${BASE}/members/role`, "dana", { userId: ids.dana, role: "admin" });
     expect(res.status).toBe(200);
     expect(roleOf(db, ids.dana)).toBe("admin");

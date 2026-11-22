@@ -1,5 +1,5 @@
 /**
- * invariant: The hidden platform console — `/_internal_admin`.
+ * note: The hidden platform console — `/_internal_admin`.
  *
  * Registration: `src/worker/index.ts` mounts this app on the `saas` router
  * only, beside `dashboardApp` and outside `APP_ROUTES`. Admin paths must never
@@ -39,6 +39,7 @@ import {
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
+  getReviewRouteWorkflowGate,
   getSweepSettings,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -51,6 +52,7 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
+  setReviewRouteWorkflow,
   setSweepSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -209,7 +211,7 @@ async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<Ru
 }
 
 /**
- * invariant: The system review-concurrency cap — the operator half of the runtime
+ * note: The system review-concurrency cap — the operator half of the runtime
  * configuration (iteration spec §1.1). One row in `review_runtime_settings`,
  * absent = the documented default; the leaf store owns the parse, the
  * 1..SYSTEM_CONCURRENCY_MAX range and the audit row, so this handler only
@@ -230,6 +232,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     level,
     recheck,
     attemptCap,
+    routeWorkflow,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
@@ -242,6 +245,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
+    getReviewRouteWorkflowGate(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
@@ -252,7 +256,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     min: CONCURRENCY_MIN,
     max: SYSTEM_CONCURRENCY_MAX,
     degraded: system.degraded,
-    // note: The one workspace whose bots may be shared; `null` = none designated,
+    // invariant: The one workspace whose bots may be shared; `null` = none designated,
     // which disables new shares and nothing else.
     officialWorkspaceId,
     // note: §7.10 Check budgets: global, absent-row defaults documented in the store.
@@ -298,6 +302,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
+    // safety: The review route's operating switch as the gate reads it: `mode` is the
+    // answer the queue handler acts on, `saved` and `rejected` say what the row
+    // holds behind it (a hand-edited value reads `off` with `reason: untrusted`).
+    routeWorkflow,
     // invariant: Admission drops the pipeline already records as `review_failures` rows,
     // grouped by the reason token of the drop prefix over the last 24h — the
     // sub-threshold signal the failure sweep cannot page on.
@@ -315,7 +323,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
 }
 
 /**
- * invariant: The duration analysis report (`GET /api/runtime/duration-report`): the
+ * why: The duration analysis report (`GET /api/runtime/duration-report`): the
  * observed distribution an operator reads before choosing the attempt cap.
  * `capMs` is a candidate for the "what would this cut off" read only — this
  * handler writes nothing and owns no configuration key. The report module owns
@@ -357,7 +365,7 @@ function commentClaimBody(value: unknown): CommentClaimValues | null {
 }
 
 /**
- * invariant: The accepted `reviewLevel` body shape: the `value` of the GET group, with any
+ * note: The accepted `reviewLevel` body shape: the `value` of the GET group, with any
  * `levels` / `degraded` alongside it ignored — the read result is a valid save
  * body as-is. The store owns the vocabulary and the refusal message.
  */
@@ -365,6 +373,16 @@ function reviewLevelValue(value: unknown): string | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { value: level } = value as { value?: unknown };
   return typeof level === "string" ? level : null;
+}
+
+/**
+ * note: The accepted `routeWorkflow` body shape: the `value` of the store's strict
+ * vocabulary. Any other string is the store's 400; a non-string is a shape 400.
+ */
+function routeWorkflowValue(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { value: mode } = value as { value?: unknown };
+  return typeof mode === "string" ? mode : null;
 }
 
 /** note: The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
@@ -397,6 +415,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawLevel: unknown;
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
+  let rawRouteWorkflow: unknown;
   let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
@@ -407,6 +426,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
       attemptCap?: unknown;
+      routeWorkflow?: unknown;
       maintenance?: unknown;
     };
     concurrency = body.concurrency;
@@ -416,6 +436,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
+    rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
   } catch {
     // invariant: malformed body → the shape gate's 400, never a 500
@@ -431,13 +452,14 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawLevel,
       rawRecheck,
       rawAttemptCap,
+      rawRouteWorkflow,
       rawMaintenance,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | routeWorkflow | maintenance",
       },
       400,
     );
@@ -484,7 +506,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { recheckAssignment: { maxBytes } }" }, 400);
     }
     try {
-      // invariant: The store owns the accepted range and the refusal message.
+      // note: The store owns the accepted range and the refusal message.
       return c.json({
         recheckAssignment: {
           maxBytes: await setRecheckAssignmentMaxBytes(db, maxBytes, login),
@@ -504,8 +526,22 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { attemptCap: { capMs } }" }, 400);
     }
     try {
-      // invariant: The store owns the accepted range and names it in the refusal.
+      // note: The store owns the accepted range and names it in the refusal.
       return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawRouteWorkflow !== undefined) {
+    const value = routeWorkflowValue(rawRouteWorkflow);
+    if (value === null) {
+      return c.json({ error: "body must be { routeWorkflow: { value } }" }, 400);
+    }
+    try {
+      // invariant: The store owns the `on` | `off` vocabulary and answers the gate's own
+      // read-back as `effective`, so the console never has to guess.
+      return c.json({ routeWorkflow: await setReviewRouteWorkflow(db, value, login) });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
@@ -517,7 +553,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ error: "body must be { reviewLevel: { value } }" }, 400);
     }
     try {
-      // invariant: The store owns the vocabulary and the refusal message.
+      // note: The store owns the vocabulary and the refusal message.
       return c.json({
         reviewLevel: { value: await setDefaultReviewLevel(db, level as ReviewLevel, login) },
       });
@@ -582,7 +618,7 @@ async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
       }),
     });
   } catch (error) {
-    // invariant: An unknown, retired or malformed id: nothing was written, nothing was
+    // note: An unknown, retired or malformed id: nothing was written, nothing was
     // audited. The refusal names the condition, not the value.
     if (error instanceof UnknownWorkspaceError) return c.json({ error: "workspace not found" }, 400);
     throw error;
@@ -616,7 +652,7 @@ async function assignBotScope(c: AdminContext): Promise<Response> {
   const outcome = await setBotScope(db, {
     botId,
     scope,
-    // invariant: Only a literal `true` confirms a revoke; any other value refuses it.
+    // note: Only a literal `true` confirms a revoke; any other value refuses it.
     confirm: confirm === true,
     actor: login,
     now: new Date().toISOString(),
@@ -691,7 +727,7 @@ async function readUsage(c: AdminContext): Promise<Response> {
 }
 
 /**
- * invariant: Every known user with its SQL-side counts — one statement. `isOperator` comes
+ * safety: Every known user with its SQL-side counts — one statement. `isOperator` comes
  * from the env allowlist through `isPlatformOperator`, the same predicate the
  * gate uses, so the listed flag and the authorization decision cannot diverge.
  */
@@ -747,7 +783,7 @@ async function assignPlan(c: AdminContext): Promise<Response> {
 }
 
 /**
- * note: Set one workspace's slug. Slug authoring is a platform decision: the value is
+ * why: Set one workspace's slug. Slug authoring is a platform decision: the value is
  * the readable part of a workspace URL that the owner can no longer edit, so it
  * carries the same grammar, reserved-word and collision rules the deleted owner
  * route enforced. The store's guarded write and its audit row are ONE `batch`.
@@ -794,7 +830,7 @@ async function setSlug(c: AdminContext): Promise<Response> {
 }
 
 /**
- * invariant: Every stored quota version with its derived interval, the marker on the one
+ * note: Every stored quota version with its derived interval, the marker on the one
  * judging this month and the ceilings it sets per plan — one read per table,
  * composed by `./quota-versions`. The console only needs this list to render
  * history, the current version and anything scheduled.
@@ -901,7 +937,7 @@ async function publishQuotaVersion(c: AdminContext): Promise<Response> {
 }
 
 /**
- * why: Every open support window across workspaces — one statement, newest append
+ * note: Every open support window across workspaces — one statement, newest append
  * per (workspace, operator), expired rows excluded. The console's list reads
  * are deliberately unaudited (spec §4): audit rows attach to writes.
  */
@@ -937,7 +973,7 @@ async function createGrant(c: AdminContext): Promise<Response> {
     // invariant: malformed body → the shape gate's 400, never a 500
   }
   const invalid = (detail: string) => c.json({ error: `invalid support grant: ${detail}` }, 400);
-  // note: A JSON root that is not an object (a bare `null` included) is the shape
+  // why: A JSON root that is not an object (a bare `null` included) is the shape
   // gate's 400: reading fields off it would throw out of the handler.
   if (parsed === null || typeof parsed !== "object") return invalid("body must be a JSON object");
   const { workspaceId, operatorLogin: targetLogin, reason, ttlHours } = parsed as GrantBody;
@@ -1054,7 +1090,7 @@ async function dataUpgradeAction(c: AdminContext): Promise<Response> {
 }
 
 /**
- * invariant: Replay one maintenance-deferred delivery (`POST
+ * note: Replay one maintenance-deferred delivery (`POST
  * /api/maintenance-deferred/:failureId/replay`).
  *
  * The state machine and the one queue send live in `./maintenance-replay`; this
@@ -1078,7 +1114,7 @@ async function replayMaintenanceDeferred(c: AdminContext): Promise<Response> {
       now: new Date().toISOString(),
     });
   } catch {
-    // note: The request batch itself did not commit: nothing durable was written, so
+    // why: The request batch itself did not commit: nothing durable was written, so
     // the operator may simply press replay again.
     return c.json({ error: "replay_request_failed" }, 500);
   }
@@ -1097,7 +1133,7 @@ async function serveDocument(c: AdminContext): Promise<Response> {
   if (!login) return c.notFound();
   const document = await c.env.ASSETS?.fetch(new URL("/admin.html", c.req.url));
   if (!document?.ok) return c.notFound();
-  // invariant: Minimal admin boot: identity and locale only. None of the workspace boot
+  // note: Minimal admin boot: identity and locale only. None of the workspace boot
   // reads (memberships, invites, support redirects) run for this document.
   const locale = resolveLocale(c.req.raw);
   const html = localizeDocument(

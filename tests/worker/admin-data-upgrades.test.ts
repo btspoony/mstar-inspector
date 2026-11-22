@@ -1,5 +1,4 @@
-/**
- * The operator data-upgrade runner and its console routes (spec
+/** note: The operator data-upgrade runner and its console routes (spec
  * operator-data-upgrade § Upgrade registry and state machine, D8).
  *
  * No item ships in this plan's task 2, so these cases register a FIXTURE item
@@ -37,8 +36,7 @@ const OPERATOR = "Support-Bot";
 const ITEM_ID = "fixture-upgrade";
 const MOVED_KEY = "fixture.upgrade.moved";
 
-/**
- * The fixture item: `server_flags` rows keyed `fixture.upgrade.*` with
+/** note: The fixture item: `server_flags` rows keyed `fixture.upgrade.*` with
  * `enabled = 0` are un-migrated. One batch flips up to two of them, so a
  * three-row worklist needs two steps — the paging the cursor exists for.
  */
@@ -61,7 +59,7 @@ function fixtureItem(overrides: Partial<DataUpgradeItem> = {}): DataUpgradeItem 
         .prepare("SELECT key FROM server_flags WHERE key LIKE 'fixture.upgrade.%' AND enabled = 0 ORDER BY key")
         .all<{ key: string }>();
       const keys = pending.results.slice(0, 2).map((row) => row.key);
-      // ONE transaction: the flip and its audit row land together or not at all.
+      // note: ONE transaction: the flip and its audit row land together or not at all.
       await db.batch(
         keys.map((key) =>
           db.prepare("UPDATE server_flags SET enabled = 1 WHERE key = ?1").bind(key),
@@ -91,7 +89,7 @@ function seedFlag(db: TestD1, key: string, enabled: 0 | 1): void {
     .run(key, enabled, "2026-11-17T00:00:00.000Z");
 }
 
-/** The operator account plus `count` un-migrated fixture rows. */
+/** note: The operator account plus `count` un-migrated fixture rows. */
 function fixture(count = 3): TestD1 {
   const db = createMigratedTestD1();
   db.raw
@@ -128,7 +126,7 @@ async function api(
   );
 }
 
-/** Register `item` for this case; `afterEach` restores the shipped registry. */
+/** note: Register `item` for this case; `afterEach` restores the shipped registry. */
 const SHIPPED_UPGRADES = [...DATA_UPGRADES];
 
 function register(item: DataUpgradeItem): void {
@@ -154,7 +152,7 @@ function movedCount(db: TestD1): number {
   return row.n;
 }
 
-/** The claim token on the fixture row, or `null` when no claim is held. */
+/** note: The claim token on the fixture row, or `null` when no claim is held. */
 function claimToken(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT claim_token FROM operator_data_upgrades WHERE id = ?")
@@ -162,7 +160,7 @@ function claimToken(db: TestD1): string | null {
   return row?.claim_token ?? null;
 }
 
-/** A row that already carries a claim: the helpers below are called directly. */
+/** note: A row that already carries a claim: the helpers below are called directly. */
 function seedClaimedRow(
   db: TestD1,
   opts: { status: string; maintenanceOwned: 0 | 1; startedAt: string; token: string },
@@ -191,7 +189,7 @@ describe("the data-upgrade runner", () => {
     expect(secondBody.batch).toMatchObject({ cursor: null, processed: 1, done: true });
     expect(movedCount(db)).toBe(3);
 
-    // The replay: an empty batch moves nothing and keeps the item `running`
+    // invariant: The replay: an empty batch moves nothing and keeps the item `running`
     // until an explicit verify (an empty batch is not a completion).
     const replay = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
     expect(replay.status).toBe(200);
@@ -199,7 +197,7 @@ describe("the data-upgrade runner", () => {
     expect(replayBody.batch).toMatchObject({ cursor: null, processed: 0, done: true });
     expect(await state(db)).toEqual({ status: "running", processed: 3, cursor_json: "null" });
     expect(movedCount(db)).toBe(3);
-    // Every batch's entry survives, including the empty replay.
+    // invariant: Every batch's entry survives, including the empty replay.
     const logged = db.raw
       .prepare("SELECT log_json FROM operator_data_upgrades WHERE id = ?")
       .get(ITEM_ID) as { log_json: string };
@@ -217,7 +215,7 @@ describe("the data-upgrade runner", () => {
       db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ maintenance_owned: 1 });
 
-    // The operator opened the platform again mid-upgrade: the item must not
+    // invariant: The operator opened the platform again mid-upgrade: the item must not
     // keep stepping outside a window it can no longer claim as its own.
     await setMaintenanceMode(db, { enabled: false, actor: OPERATOR }, "2026-11-17T01:00:00.000Z");
     const refused = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
@@ -241,7 +239,7 @@ describe("the data-upgrade runner", () => {
     expect(body.state.finishedAt).toBeNull();
     expect(await state(db)).toEqual({ status: "failed", processed: 1, cursor_json: "null" });
 
-    // `failed` is not a step-able state: the operator resets first.
+    // note: `failed` is not a step-able state: the operator resets first.
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(409);
   });
 
@@ -253,14 +251,14 @@ describe("the data-upgrade runner", () => {
 
     const res = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`);
     expect(res.status).toBe(200);
-    // The claim is dropped, so no later `completed` could close the window: it
+    // note: The claim is dropped, so no later `completed` could close the window: it
     // must be closed now rather than stranded open.
     expect((await getMaintenanceMode(db)).enabled).toBe(false);
     expect(
       db.raw.prepare("SELECT maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ maintenance_owned: 0 });
 
-    // An operator-opened window survives a reset: the runner never owned it.
+    // invariant: An operator-opened window survives a reset: the runner never owned it.
     const operatorDb = fixture(3);
     await setMaintenanceMode(
       operatorDb,
@@ -279,7 +277,7 @@ describe("the data-upgrade runner", () => {
     const entered = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const inner = fixtureItem();
-    // Hold the first batch in flight so the second request provably overlaps it.
+    // why: Hold the first batch in flight so the second request provably overlaps it.
     register({
       ...inner,
       async runBatch(dbApi, cursor, actor) {
@@ -295,7 +293,7 @@ describe("the data-upgrade runner", () => {
     expect(second.status).toBe(409);
     const refusal = (await second.json()) as { error: string };
     expect(refusal.error).toBe("upgrade_running");
-    // The refused caller ran no batch: only the claim holder's page moved.
+    // invariant: The refused caller ran no batch: only the claim holder's page moved.
     expect(movedCount(db)).toBe(0);
 
     release.resolve();
@@ -303,7 +301,7 @@ describe("the data-upgrade runner", () => {
     expect(movedCount(db)).toBe(2);
     expect(await state(db)).toEqual({ status: "running", processed: 2, cursor_json: '{"offset":2}' });
 
-    // The claim was released, so the walk continues immediately.
+    // why: The claim was released, so the walk continues immediately.
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
     expect(movedCount(db)).toBe(3);
   });
@@ -312,7 +310,7 @@ describe("the data-upgrade runner", () => {
     const db = fixture(3);
     const successorStamp = "2026-11-17T04:00:00.000Z";
     const inner = fixtureItem();
-    // The takeover lands AFTER `runBatch` returned and BEFORE the progress
+    // invariant: The takeover lands AFTER `runBatch` returned and BEFORE the progress
     // write: a successor now holds the row under its own token.
     register({
       ...inner,
@@ -329,7 +327,7 @@ describe("the data-upgrade runner", () => {
     expect(step.status).toBe(409);
     const refusal = (await step.json()) as { error: string };
     expect(refusal.error).toBe("upgrade_running");
-    // The successor's claim stands and the stale step wrote no progress: no
+    // note: The successor's claim stands and the stale step wrote no progress: no
     // cursor, no counter, no log entry.
     expect(db.raw.prepare("SELECT * FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID)).toMatchObject({
       status: "running",
@@ -339,7 +337,7 @@ describe("the data-upgrade runner", () => {
       cursor_json: null,
       log_json: null,
     });
-    // A refusal writes no ledger row either.
+    // note: A refusal writes no ledger row either.
     expect(
       db.raw.prepare("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'upgrade.step'").get(),
     ).toEqual({ n: 0 });
@@ -358,7 +356,7 @@ describe("the data-upgrade runner", () => {
     });
 
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(500);
-    // The claim is gone with the failed batch: the retry is not a 5-minute
+    // note: The claim is gone with the failed batch: the retry is not a 5-minute
     // `upgrade_running` wait for a lease nobody holds.
     failing = false;
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
@@ -385,7 +383,7 @@ describe("the data-upgrade runner", () => {
     expect(refused.status).toBe(409);
     const refusal = (await refused.json()) as { error: string };
     expect(refusal.error).toBe("upgrade_running");
-    // The verify ran no check: the step still owns the row.
+    // note: The verify ran no check: the step still owns the row.
     expect(await state(db)).toMatchObject({ status: "running" });
 
     release.resolve();
@@ -416,7 +414,7 @@ describe("the data-upgrade runner", () => {
     const body = (await refused.json()) as { error: string; state: { status: string } };
     expect(body.error).toBe("upgrade_running");
     expect(body.state.status).toBe("verifying");
-    // Nothing was cleared: the cursor and the moved rows survive the refusal.
+    // invariant: Nothing was cleared: the cursor and the moved rows survive the refusal.
     expect(await state(db)).toEqual({ status: "verifying", processed: 1, cursor_json: "null" });
     expect(movedCount(db)).toBe(1);
 
@@ -429,18 +427,18 @@ describe("the data-upgrade runner", () => {
     const db = fixture(1);
     const stamp = "2026-11-17T03:00:00.000Z";
     const token = "claim-verify";
-    // A verify owns the row: `verifying` plus its claim, and the window it opened.
+    // note: A verify owns the row: `verifying` plus its claim, and the window it opened.
     seedClaimedRow(db, { status: "verifying", maintenanceOwned: 1, startedAt: stamp, token });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    // Step 1 lands the status but KEEPS the claim, so the row is not yet claimable.
+    // why: Step 1 lands the status but KEEPS the claim, so the row is not yet claimable.
     expect(await settleVerifyState(db, ITEM_ID, "completed", null, stamp, token)).toBe("ok");
     expect(db.raw.prepare("SELECT status, started_at FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID)).toEqual({
       status: "completed",
       started_at: stamp,
     });
 
-    // The reset is refused: it cannot observe a released claim mid-cleanup.
+    // note: The reset is refused: it cannot observe a released claim mid-cleanup.
     const reset = await resetDataUpgrade(db, fixtureItem(), OPERATOR, "2026-11-17T03:00:30.000Z");
     expect(reset.kind).toBe("refused");
     expect(
@@ -448,7 +446,7 @@ describe("the data-upgrade runner", () => {
     ).toEqual({ status: "completed", maintenance_owned: 1, started_at: stamp });
     expect((await getMaintenanceMode(db)).enabled).toBe(true);
 
-    // Steps 2 and 3 finish the verify: window closed, ownership cleared, claim released.
+    // note: Steps 2 and 3 finish the verify: window closed, ownership cleared, claim released.
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, token)).toBe("ok");
     expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp, token)).toBe("ok");
     expect((await getMaintenanceMode(db)).enabled).toBe(false);
@@ -463,14 +461,14 @@ describe("the data-upgrade runner", () => {
     seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-owner" });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    // Another claim's token: the guard matches nothing, so nothing is released.
+    // why: Another claim's token: the guard matches nothing, so nothing is released.
     expect(
       await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-other"),
     ).toBe("refused");
     expect(
       db.raw.prepare("SELECT status, maintenance_owned FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
     ).toEqual({ status: "completed", maintenance_owned: 1 });
-    // The stale claim closed no window: that window now belongs to the newer run.
+    // note: The stale claim closed no window: that window now belongs to the newer run.
     expect((await getMaintenanceMode(db)).enabled).toBe(true);
   });
 
@@ -480,14 +478,14 @@ describe("the data-upgrade runner", () => {
     seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-lost" });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    // A takeover that reused the stamp: `started_at` still matches the loser's
+    // note: A takeover that reused the stamp: `started_at` still matches the loser's
     // read, so only the token tells the two claims apart.
     db.raw
       .prepare("UPDATE operator_data_upgrades SET claim_token = ? WHERE id = ?")
       .run("claim-winner", ITEM_ID);
 
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-lost")).toBe("refused");
-    // The winner's window stands, its ownership flag stands, and no audit row appeared.
+    // note: The winner's window stands, its ownership flag stands, and no audit row appeared.
     expect(await getMaintenanceMode(db)).toEqual({
       enabled: true,
       reason: "data upgrade: fixture",
@@ -502,7 +500,7 @@ describe("the data-upgrade runner", () => {
         .prepare("SELECT COUNT(*) AS n FROM platform_audit_events WHERE action = 'platform.maintenance.set'")
         .get(),
     ).toEqual({ n: 1 });
-    // The lost claim's release is refused too: it cannot clear the winner's claim.
+    // note: The lost claim's release is refused too: it cannot clear the winner's claim.
     expect(await releaseUpgradeClaim(db, ITEM_ID, "completed", stamp, "claim-lost")).toBe("refused");
     expect(
       db.raw.prepare("SELECT started_at, claim_token FROM operator_data_upgrades WHERE id = ?").get(ITEM_ID),
@@ -516,7 +514,7 @@ describe("the data-upgrade runner", () => {
     seedClaimedRow(db, { status: "completed", maintenanceOwned: 1, startedAt: stamp, token: "claim-old" });
     await setMaintenanceMode(db, { enabled: true, reason: "data upgrade: fixture", actor: OPERATOR }, stamp);
 
-    // The lease is taken over BETWEEN the helper's read and its batch.
+    // note: The lease is taken over BETWEEN the helper's read and its batch.
     const racing: DashboardD1 = {
       prepare: (sql) => db.prepare(sql),
       async batch(statements) {
@@ -528,7 +526,7 @@ describe("the data-upgrade runner", () => {
     };
     expect(await settleUpgradeMaintenance(racing, ITEM_ID, "completed", OPERATOR, stamp, "claim-old")).toBe("refused");
 
-    // The newer run's window stands, and its first statement moved no row.
+    // note: The newer run's window stands, and its first statement moved no row.
     const mode = await getMaintenanceMode(db);
     expect(mode).toEqual({
       enabled: true,
@@ -553,7 +551,7 @@ describe("the data-upgrade runner", () => {
     await setMaintenanceMode(db, { enabled: true, reason: "planned incident", actor: OPERATOR }, stamp);
 
     expect(await settleUpgradeMaintenance(db, ITEM_ID, "completed", OPERATOR, stamp, "claim-operator")).toBe("ok");
-    // An operator's window is not the runner's to close.
+    // note: An operator's window is not the runner's to close.
     expect(await getMaintenanceMode(db)).toEqual({
       enabled: true,
       reason: "planned incident",
@@ -630,10 +628,10 @@ describe("the data-upgrade runner", () => {
     const body = (await res.json()) as { state: { status: string; ended?: string; finishedAt: string | null } };
     expect(body.state.status).toBe("completed");
     expect(body.state.finishedAt).not.toBeNull();
-    // The runner owned the window, so it closes it and drops its claim.
+    // why: The runner owned the window, so it closes it and drops its claim.
     expect((await getMaintenanceMode(db)).enabled).toBe(false);
 
-    // An operator-enabled window stays on: it was never the runner's to close.
+    // invariant: An operator-enabled window stays on: it was never the runner's to close.
     const operatorDb = fixture(1);
     await setMaintenanceMode(
       operatorDb,
@@ -658,10 +656,10 @@ describe("the data-upgrade runner", () => {
     const body = (await res.json()) as { state: { status: string; processed: number; cursor: unknown } };
     expect(body.state).toMatchObject({ status: "pending", processed: 0, cursor: null, startedAt: null });
     expect(movedCount(db)).toBe(2);
-    // The release clears the claim's identity with its stamp: no token outlives it.
+    // note: The release clears the claim's identity with its stamp: no token outlives it.
     expect(claimToken(db)).toBeNull();
 
-    // The re-run is a no-op pass over the moved rows: the worklist excludes them.
+    // note: The re-run is a no-op pass over the moved rows: the worklist excludes them.
     const rerun = await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`);
     const rerunBody = (await rerun.json()) as { batch: { processed: number } };
     expect(rerunBody.batch.processed).toBe(1);
@@ -674,7 +672,7 @@ describe("the data-upgrade runner", () => {
     register({
       ...inner,
       async runBatch(dbApi, cursor, actor) {
-        // The claim is in flight while the batch runs: a token names it.
+        // note: The claim is in flight while the batch runs: a token names it.
         expect(claimToken(db)).not.toBeNull();
         return inner.runBatch(dbApi, cursor, actor);
       },
@@ -699,7 +697,7 @@ describe("the data-upgrade routes", () => {
         preflight: Record<string, number>;
       }>;
     };
-    // The shipped registry renders beside the fixture item: every shipped item.
+    // note: The shipped registry renders beside the fixture item: every shipped item.
     expect(body.upgrades.map((item) => item.id).sort()).toEqual([
       "fixture-upgrade",
       "ledger-target-alignment",
@@ -710,9 +708,9 @@ describe("the data-upgrade routes", () => {
     const listed = body.upgrades.find((item) => item.id === ITEM_ID)!;
     expect(listed.state.status).toBe("pending");
     expect(listed.preflight).toEqual({ pending: 2 });
-    // The card's impact line comes from the item, never from the console.
+    // invariant: The card's impact line comes from the item, never from the console.
     expect(listed.impact).toBe("Flips fixture flag rows. Never deletes a flag.");
-    // Every shipped item states what it changes AND what it never touches.
+    // invariant: Every shipped item states what it changes AND what it never touches.
     // The backfill DOES drop duplicate `pull_requests` rows, so its card may
     // never claim it deletes no ledger row (spec B13).
     const backfill = body.upgrades.find((item) => item.id === "repo-backfill")!.impact;
@@ -721,7 +719,7 @@ describe("the data-upgrade routes", () => {
     expect(body.upgrades.find((item) => item.id === "orphan-ledger-attribution")!.impact).toContain(
       "Never rewrites a row that already has one.",
     );
-    // The alignment item re-points rows onto their own repository's target; it
+    // note: The alignment item re-points rows onto their own repository's target; it
     // deletes nothing either.
     expect(body.upgrades.find((item) => item.id === "ledger-target-alignment")!.impact).toContain(
       "Never deletes a ledger row",
@@ -760,7 +758,7 @@ describe("the runner's run-start stamp", () => {
     const stamped = runStart(db);
     expect(stamped).not.toBeNull();
 
-    // A later step of the SAME run must not move the boundary: rows retired by
+    // invariant: A later step of the SAME run must not move the boundary: rows retired by
     // the first batch are this run's, however late the verify reads them.
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/step`)).status).toBe(200);
     expect(runStart(db)).toBe(stamped);
@@ -799,7 +797,7 @@ describe("the runner's run-start stamp", () => {
     const body = (await res.json()) as { state: { status: string; lastError: string | null }; checks: Record<string, number> };
     expect(body.state.status).toBe("completed");
     expect(body.state.lastError).toBeNull();
-    // The number is still reported: it is evidence, not a failure.
+    // note: The number is still reported: it is evidence, not a failure.
     expect(body.checks.historical_rows).toBe(7);
   });
 
@@ -811,7 +809,7 @@ describe("the runner's run-start stamp", () => {
     expect(stamped).not.toBeNull();
 
     expect((await api(db, "POST", `/api/data-upgrades/${ITEM_ID}/reset`)).status).toBe(200);
-    // The run start is the item's lifetime boundary, not a per-attempt value.
+    // note: The run start is the item's lifetime boundary, not a per-attempt value.
     expect(runStart(db)).toBe(stamped);
     expect(await state(db)).toEqual({ status: "pending", processed: 0, cursor_json: null });
   });

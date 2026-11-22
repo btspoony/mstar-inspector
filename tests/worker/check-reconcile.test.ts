@@ -1,5 +1,5 @@
 /**
- * M7 Check recovery reconciler tests (spec review-lifecycle
+ * note: M7 Check recovery reconciler tests (spec review-lifecycle
  * §7.11.2 + §7.11 composition) — `src/worker/check-reconcile.ts` over the REAL
  * migration DDL (bun:sqlite D1 double, tests/store/helpers.ts) with the
  * credential/adapter surface injected (no GitHub, no credentials in tests).
@@ -49,6 +49,8 @@ import {
   listCheckReconcileBatch,
   releaseAttachedCheck,
   releaseCheckClaim,
+  recordCheckObservation,
+  recordTerminalDispatch,
   reopenTerminalCorrection,
   retryCheckRecovery,
   setCheckCreateState,
@@ -126,7 +128,7 @@ import type { AdapterScript, AdoptOutcome, BeginOutcome, CompleteOutcome, FetchO
 
 const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 
-// The run's transport bounds every request with a REAL 5 s timeout, so a pass
+// note: The run's transport bounds every request with a REAL 5 s timeout, so a pass
 // that reaches the network makes the suite's runtime depend on GitHub's latency:
 // the same file redded on CI with 8-10 unrelated assertions timing out at 5002ms
 // and passed on a rerun. Nothing here inspects a real response — the adapter
@@ -141,7 +143,7 @@ afterAll(() => {
   globalThis.fetch = REAL_FETCH;
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -158,12 +160,12 @@ describe("budget and selector constants (spec §7.11.2)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
 
 /**
- * The consumer's `terminalize` over a scripted adapter: it records every
+ * note: The consumer's `terminalize` over a scripted adapter: it records every
  * terminal conclusion it is asked to send and answers either a VALIDATED
  * completion (the ordinary success path) or an unavailable send. Its gate is
  * only what the consumer's own decision reads; the reconcile lane re-reads the
@@ -185,7 +187,7 @@ function terminalizeHarness(
       completeCheck: async ({ identity, conclusion }) => {
         sent.push(conclusion);
         return send === "completed"
-          // Delivery is the conclusion AND the frozen text (spec §7.9): the
+          // note: Delivery is the conclusion AND the frozen text (spec §7.9): the
           // scripted run echoes the text it was asked to store.
           ? { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) }
           : { kind: "unavailable", reason: "checks update unavailable", requests: 1 };
@@ -195,7 +197,7 @@ function terminalizeHarness(
   });
 }
 
-/** The run the attempt already created and proved — the delivery attach's shape. */
+/** note: The run the attempt already created and proved — the delivery attach's shape. */
 async function attachProvenRun(db: TestD1, attemptId: string, lease: Lease, atMs: number): Promise<void> {
   await setCheckCreateState(db, attemptId, lease, "sending", undefined, atMs);
   if (!(await attachCheckRunId(db, attemptId, lease, 4242, atMs))) {
@@ -204,7 +206,7 @@ async function attachProvenRun(db: TestD1, attemptId: string, lease: Lease, atMs
 }
 
 /**
- * One Check that reached its TERMINAL record as an unconfirmed failure linked
+ * note: One Check that reached its TERMINAL record as an unconfirmed failure linked
  * to a publication still without proof — the shape the proof-free send leaves
  * behind (the ordinary path `I-000671` reports). Returns the attempt id.
  */
@@ -231,10 +233,71 @@ async function markedUnconfirmed(db: TestD1, headSha: string, publicationId: str
   return attemptId;
 }
 
+/**
+ * The §7.9a shape a correction is owed from: a TERMINAL unconfirmed failure
+ * linked to its OWN publication, which has since confirmed. The score decides
+ * the owed conclusion against the App's gate. Returns the attempt id, its
+ * publication id and the confirmation instant.
+ */
+async function owedCorrectionFixture(
+  db: TestD1,
+  scorePct = 96,
+): Promise<{ attemptId: string; journalId: string; confirmedAt: number }> {
+  const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+  const attemptId = attempt.identity.attemptId;
+  await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+  const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+  await terminalizeHarness(db, () => CLAIM_AT + 1_000, []).terminalize({
+    handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+    publicationId: journalId,
+    outcome: "publication-unknown",
+  });
+  db.raw
+    .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+    .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", scorePct)), journalId);
+  const confirmedAt = CLAIM_AT + 61_000;
+  const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
+  if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+  expect(
+    await recordPublicationProof(db as never, journalId, proofLease, {
+      publicationId: journalId,
+      scope: SCOPE,
+      headSha: SHA,
+      kind: "review",
+      round: 3,
+      commentId: 9001,
+      bodySha256: "a".repeat(64),
+      confirmedMs: confirmedAt,
+    }),
+  ).toBe(true);
+  return { attemptId, journalId, confirmedAt };
+}
+
+/**
+ * The §7.11.2 budget deferral a correction can hit: the credential resolution
+ * burns the row's whole request allowance, so the first remote call after the
+ * claim is refused BEFORE dispatch and the pass gives the claim straight back —
+ * no attempt spent, every durable field left as the reopen wrote it.
+ */
+function deferredCorrectionCredentials(db: TestD1): CheckCredentialFactory {
+  const resolution = scriptedCredentials(db, {
+    fetch: async (identity) => ({
+      kind: "found",
+      remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+    }),
+  });
+  return async (input) => {
+    for (let i = 0; i < CHECK_ROW_MAX_REQUESTS; i += 1) {
+      await input.transport.fetchImpl("https://api.github.com/checks");
+    }
+    return resolution(input);
+  };
+}
+
 describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
   test("the reconciler takes it at the attach grace and never creates a second run", async () => {
     const db = seededDb();
-    // The delivery path attached the run and released the row with its grace.
+    // note: The delivery path attached the run and released the row with its grace.
     const { attempt, lease } = await claim(db, {
       nowMs: T0,
       holder: "delivery:attach",
@@ -248,12 +311,12 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
 
     const fetchStub = stubFetch();
     try {
-      // Before the grace the lane does not even select it: the one-hour window
+      // note: Before the grace the lane does not even select it: the one-hour window
       // is no longer what decides when recovery may look.
       const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(early.examined).toBe(0);
 
-      // AT the grace it is due: the pass claims it and gives the claim back to
+      // note: AT the grace it is due: the pass claims it and gives the claim back to
       // wait for the publication proof. No create, no second run, no request.
       const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.examined).toBe(1);
@@ -264,7 +327,7 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
       fetchStub.restore();
     }
 
-    // One row, the SAME run, still nonterminal: recovery adopted nothing new
+    // note: One row, the SAME run, still nonterminal: recovery adopted nothing new
     // and created nothing — it is now merely due again on the first rung.
     const count = db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get() as { n: number };
     expect(count.n).toBe(1);
@@ -279,7 +342,7 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
 describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
   test("the reconciler sends the frozen neutral intent on the next tick", async () => {
     const db = seededDb();
-    // What the paused (or any credential-less) skip path does: take the attach
+    // note: What the paused (or any credential-less) skip path does: take the attach
     // row, freeze the neutral intent, give the lease back. No commenter and no
     // remote call happen on that path (architect lock L4).
     const { attempt, lease } = await claim(db, { nowMs: T0, holder: "skip:settler", executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS });
@@ -307,13 +370,13 @@ describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
     };
     const fetchStub = stubFetch();
     try {
-      // A frozen intent is due immediately — no due time and no publication to
+      // note: A frozen intent is due immediately — no due time and no publication to
       // wait for — so the very next pass sends its one update instead of
       // deferring it to the deadline.
       const summary = await run(db, { now: () => T0 + 1, credentials: scriptedCredentials(db, script) });
       expect(summary.completed).toBe(1);
       expect(summary.deferred).toBe(0);
-      // At least the one update request: the intent was already frozen, so the
+      // note: At least the one update request: the intent was already frozen, so the
       // pass spends its budget on the send, not on deciding again.
       expect(fetchStub.urls.length).toBeGreaterThanOrEqual(1);
     } finally {
@@ -329,7 +392,7 @@ describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
 describe("due selection (spec §7.11.2 predicate)", () => {
   test("a LIVE lease is never examined, claimed or mutated by a stale reconciler", async () => {
     const db = seededDb();
-    // The consumer still holds an unexpired claim lease.
+    // note: The consumer still holds an unexpired claim lease.
     const { attempt, lease } = await claim(db, { executionDeadlineMs: T0 + 900_000 });
     const fetchStub = stubFetch();
     try {
@@ -349,7 +412,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
 
   test("an expired ATTEMPT under a live LEASE stays protected (expiry is not a takeover)", async () => {
     const db = seededDb();
-    // The execution deadline has passed, but the recovery lease the claim
+    // note: The execution deadline has passed, but the recovery lease the claim
     // carries is still live: an expired attempt is not an expired lease.
     const { attempt } = await claim(db, { nowMs: T0, executionDeadlineMs: T0 + 900_000 });
     const fetchStub = stubFetch();
@@ -365,7 +428,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
   test("an unreleased in_progress attempt is not due before its EXECUTION deadline", async () => {
     const db = seededDb();
     const { attempt } = await claim(db, { nowMs: T0, executionDeadlineMs: T0 + 900_000 });
-    // Nobody released this row to recovery (no due time was ever recorded), so
+    // note: Nobody released this row to recovery (no due time was ever recorded), so
     // nothing but the deadline can make it due — bookkeeping is not release.
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = 1 WHERE id = ?`)
@@ -383,17 +446,17 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     });
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, { desired: "success", title: CHECK_NAME, summary: "done" }, null, T0);
-    // The dead consumer's lease is still LIVE to the execution deadline: the
+    // note: The dead consumer's lease is still LIVE to the execution deadline: the
     // claim writes the whole 900s window, and nothing releases a dead holder.
     expect((await rawRow(db, id)).lease_until_ms).toBe(T0 + 900_000);
 
-    // Silent for less than the stale window: still the row's owner.
+    // note: Silent for less than the stale window: still the row's owner.
     expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS - 1)).toHaveLength(0);
-    // Silent for the window: the frozen conclusion no longer waits for it.
+    // note: Silent for the window: the frozen conclusion no longer waits for it.
     expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS)).toHaveLength(1);
     const taken = await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS);
     expect(taken).not.toBeNull();
-    // The epoch bump is what fences the old holder out.
+    // note: The epoch bump is what fences the old holder out.
     expect(taken!.epoch).toBe(lease.epoch + 1);
     expect((await rawRow(db, id)).holder).toBe("reconciler");
   });
@@ -406,7 +469,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       executionDeadlineMs: T0 + 900_000,
     });
     const id = attempt.identity.attemptId;
-    // The model may still be running, so only the execution deadline governs.
+    // note: The model may still be running, so only the execution deadline governs.
     expect(await listCheckReconcileBatch(db, T0 + CHECK_STALE_HOLDER_MS + 1)).toHaveLength(0);
     expect(await claimCheckRecovery(db, id, "reconciler", T0 + CHECK_STALE_HOLDER_MS + 1)).toBeNull();
     expect((await rawRow(db, id)).holder).toBe("consumer:x");
@@ -421,7 +484,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     });
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: "gate" }, null, T0);
-    // A holder mid-`completeCheck` has frozen the intent seconds ago: taking the
+    // note: A holder mid-`completeCheck` has frozen the intent seconds ago: taking the
     // row now would race a send that is still in flight.
     expect(await listCheckReconcileBatch(db, T0 + 30_000)).toHaveLength(0);
   });
@@ -455,7 +518,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     const { attempt, lease } = await claim(db);
     const fetchStub = stubFetch();
     try {
-      // The row is due when selected; before this lane can claim it, another
+      // note: The row is due when selected; before this lane can claim it, another
       // invocation acquires a live lease (the credentials step runs in that
       // window). The conditional reacquire must then refuse, and the lane must
       // write NOTHING — selection alone grants no ownership (§7.11.2 step 1).
@@ -491,7 +554,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       fetchStub.restore();
     }
     const row = await rawRow(db, attempt.identity.attemptId);
-    // The other holder's lease, epoch and timestamps are untouched.
+    // note: The other holder's lease, epoch and timestamps are untouched.
     expect(row.holder).toBe("other-run");
     expect(row.lease_epoch).toBe(9);
     expect(row.lease_until_ms).toBe(T0 + CHECK_RECOVERY_LEASE_MS);
@@ -519,7 +582,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Proof-based terminal conclusions for an expired attempt
 // ---------------------------------------------------------------------------
 
@@ -528,7 +591,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const db = seededDb();
     const { attempt } = await claim(db);
     const proof = proofFor(attempt.identity, "review");
-    // The gate reads the review THIS publication carried, never the scope/SHA
+    // note: The gate reads the review THIS publication carried, never the scope/SHA
     // `reviews` projection (see `readPublishedReview`), so the envelope lives in
     // the publication payload. The publication is the one THIS attempt linked
     // in its own intent write — a head-matched proof alone decides nothing.
@@ -543,7 +606,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
-            // The lane must never hand an `in_progress` value to the update,
+            // note: The lane must never hand an `in_progress` value to the update,
             // and the shipped text is the frozen proof-derived intent.
             expect(conclusion.desired).toBe("success");
             expect(conclusion.title).toBe(CHECK_NAME);
@@ -613,7 +676,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            // No publication row was ever staged for this attempt: the frozen
+            // note: No publication row was ever staged for this attempt: the frozen
             // text is the approved category wording, and the missing evidence
             // rides the reconciler's own log line, never a visible field.
             expect(conclusion.failureStatus).toBe("unknown-failure");
@@ -632,14 +695,14 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a persistent gate/review read failure still terminalizes the attempt (QC3-F-001)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // Seed a CONFIRMED publication proof plus a readable review envelope inside
+    // note: Seed a CONFIRMED publication proof plus a readable review envelope inside
     // it, so the decision actually reaches the gate: without them the lane
     // concludes from the absent proof alone and never issues the two reads this
     // case is about.
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 96));
     linkPublication(db, attempt.identity.attemptId, proof.publicationId);
-    // The gate and the review payload are the two reads a failing D1 keeps
+    // note: The gate and the review payload are the two reads a failing D1 keeps
     // failing; after migration 0045 a corrupt `check_pass_verdicts` no longer
     // throws either — `getCheckGate` reports it as null, the same UNREADABLE
     // input. Neither is a reason to skip the terminal conclusion: an attempt
@@ -677,7 +740,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("a newly discovered proof CORRECTS a persisted unknown failure to success on the same run", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
-    // The consumer already froze an unconfirmed failure, linking the publication
+    // note: The consumer already froze an unconfirmed failure, linking the publication
     // whose send came back unknown (`terminalizeCheck(publicationId,
     // "publication-unknown")`) — that link is the ONLY way the proof can still
     // turn up for this attempt.
@@ -714,13 +777,13 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.desired).toBe("success");
     expect(row.publication_id).toBe(proof.publicationId);
-    // The correction happened on the SAME owned run — no second generation.
+    // note: The correction happened on the SAME owned run — no second generation.
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
   });
 
   test("§7.9a: a TERMINAL unconfirmed failure is revised once from its own publication's confirmation", async () => {
     const db = seededDb();
-    // The consumer holds a LIVE lease on the attached run, and the publication
+    // note: The consumer holds a LIVE lease on the attached run, and the publication
     // it was about to send is staged without a proof yet.
     const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
     const attemptId = attempt.identity.attemptId;
@@ -730,7 +793,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const sent: CheckConclusion[] = [];
     const lifecycle = terminalizeHarness(db, () => clock, sent);
 
-    // The ORDINARY success path — the terminal update lands, nothing fails.
+    // note: The ORDINARY success path — the terminal update lands, nothing fails.
     await lifecycle.terminalize({
       handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
       publicationId: journalId,
@@ -743,12 +806,12 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.desired_summary).toBe(UNCONFIRMED);
     expect(row.observed).toBe("failure");
     expect(row.publication_id).toBe(journalId);
-    // Terminal — the published record — but marked as an UNCONFIRMED outcome
+    // note: Terminal — the published record — but marked as an UNCONFIRMED outcome
     // whose own publication can still contradict it.
     expect(row.terminal_ms).not.toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
 
-    // That publication then confirms through the normal proof path.
+    // note: That publication then confirms through the normal proof path.
     db.raw
       .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
       .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
@@ -780,7 +843,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            // Delivery needs the frozen text too (spec §7.9).
+            // note: Delivery needs the frozen text too (spec §7.9).
             return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
@@ -790,7 +853,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       fetchStub.restore();
     }
 
-    // The proof-derived conclusion REPLACED the unconfirmed text, on the same
+    // note: The proof-derived conclusion REPLACED the unconfirmed text, on the same
     // owned run.
     expect(pushed).toHaveLength(1);
     expect(pushed[0]!.desired).toBe("success");
@@ -804,7 +867,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.terminal_ms).not.toBeNull();
     expect(row.recovery_state).toBe("done");
 
-    // EXACTLY once: the mark is consumed, so another pass selects nothing and
+    // note: EXACTLY once: the mark is consumed, so another pass selects nothing and
     // the guarded transition refuses the row a second time.
     const second = await run(db, {
       now: () => clock + 60_000,
@@ -815,7 +878,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       }),
     });
     expect(second.examined).toBe(0);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
   });
 
@@ -829,7 +892,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     const sent: CheckConclusion[] = [];
     const lifecycle = terminalizeHarness(db, () => clock, sent);
 
-    // The ordinary path: the unconfirmed failure reaches GitHub, so the run
+    // note: The ordinary path: the unconfirmed failure reaches GitHub, so the run
     // itself already shows `failure` with the fallback text.
     await lifecycle.terminalize({
       handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
@@ -843,7 +906,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
     expect(row.recovery_state).toBe("remote-unconfirmed");
 
-    // Its own publication then confirms with an evaluable verdict.
+    // note: Its own publication then confirms with an evaluable verdict.
     db.raw
       .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
       .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
@@ -872,7 +935,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         credentials: scriptedCredentials(db, {
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          // The run GitHub carries is ALREADY a completed failure — the record
+          // note: The run GitHub carries is ALREADY a completed failure — the record
           // this row published when the outcome was unknown.
           fetch: async (identity) => ({
             kind: "found",
@@ -889,7 +952,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       fetchStub.restore();
     }
 
-    // The correction reached the run that carried the failure — not just D1.
+    // note: The correction reached the run that carried the failure — not just D1.
     expect(pushed).toHaveLength(1);
     expect(pushed[0]!.desired).toBe("success");
     expect(pushed[0]!.summary).toContain('verdict "ship it"');
@@ -898,9 +961,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("success");
     expect(row.recovery_state).toBe("done");
 
-    // EXACTLY once: the consumed mark cannot be reopened, and a later pass
+    // note: EXACTLY once: the consumed mark cannot be reopened, and a later pass
     // sends nothing more.
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     const second = await run(db, {
       now: () => clock + 60_000,
       credentials: scriptedCredentials(db, {
@@ -911,6 +974,538 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     });
     expect(second.examined).toBe(0);
     expect(pushed).toHaveLength(1);
+  });
+
+  test("§7.9a: a correction the request budget defers is delivered on the NEXT pass", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      // First pass: the reopen happens, but the row's ≤6 requests are spent on
+      // the readback, so the UPDATE is refused BEFORE dispatch.
+      const first = await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+          }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(first.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    // OWED, not delivered: the correction survives the deferral on the row.
+    let row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
+
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(second.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect(pushed[0]!.summary).toContain('verdict "ship it"');
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+    // The successful send settled the debt.
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: two deferrals in a row still deliver the correction once", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const deferring = () =>
+      scriptedCredentials(db, {
+        requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      });
+    const fetchStub = stubFetch();
+    try {
+      for (const at of [clock, clock + 60_000]) {
+        const deferred = await run(db, { now: () => at, credentials: deferring() });
+        expect(deferred.completed).toBe(0);
+      }
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+
+    const delivered = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect((await rawRow(db, attemptId)).observed).toBe("success");
+  });
+
+  test("§7.9a: an owed correction whose target generation moved sends nothing", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      // Defer the correction so the row leaves that pass with the corrected
+      // conclusion frozen and the obligation still owed.
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    const owed = await rawRow(db, attemptId);
+    expect(owed.correction_generation).toBe(1);
+    // The row carries the corrected intent a fall-through could send.
+    expect(owed.desired).toBe("success");
+
+    // The generation the obligation targeted has moved: it is no longer this
+    // row's correction to deliver.
+    db.raw.prepare(`UPDATE review_checks SET generation = generation + 1 WHERE id = ?`).run(attemptId);
+
+    const summary = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        // The run is NOT already complete: only the drop-and-stop can keep the
+        // frozen `success` from reaching it.
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async () => {
+          throw new Error("a stale correction must not be sent");
+        },
+      }),
+    });
+    expect(summary.completed).toBe(0);
+    expect(summary.errors).toBe(0);
+    // Dropped, unfrozen and parked by ONE write: no intermediate non-terminal
+    // state is observable, and the debt and the intent it froze are gone.
+    const row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    expect(row.desired).toBe("in_progress");
+    expect(row.observed).toBe("failure");
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("local-error");
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.last_error).toContain("no longer targets this row");
+    // The selection query cannot see it at all — neither branch.
+    const selected = await listCheckReconcileBatch(db, clock + 60_000, CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
+    expect(selected.map((candidate) => candidate.identity.attemptId)).not.toContain(attemptId);
+
+    // The pass AFTER the dropping pass sends nothing: the parked row is not
+    // selected at all.
+    const after = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        complete: async () => {
+          throw new Error("a parked correction must not be sent");
+        },
+      }),
+    });
+    expect(after.examined).toBe(0);
+    expect(after.completed).toBe(0);
+  });
+
+  test("§7.9a: an unreadable gate on a deferred pass keeps the owed correction", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+
+    // A gate read that FAILS is not changed evidence: the pass must hold the
+    // obligation instead of re-deciding, clearing or self-delivering it.
+    const degraded = withFailingReads(db, /FROM review_targets/);
+    const held = await run(degraded, {
+      now: () => clock + 30_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async () => {
+          throw new Error("a held correction must not be sent");
+        },
+      }),
+    });
+    expect(held.completed).toBe(0);
+    expect(held.errors).toBe(0);
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
+    expect(row.attempts).toBe(0);
+    expect(row.holder).toBeNull();
+
+    // The next pass reads the gate and delivers the same owed conclusion once.
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.correction_generation).toBeNull();
+    expect(row.observed).toBe("success");
+  });
+
+  test("§7.9a: an unreadable gate never records a correction the row did not earn", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const degraded = withFailingReads(db, /FROM review_targets/);
+    const fetchStub = stubFetch();
+    try {
+      const first = await run(degraded, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(first.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    let row = await rawRow(db, attemptId);
+    // The terminal record stands exactly as published: neither reopened nor
+    // carrying an obligation decided from a read that never happened.
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // The next pass reads the gate, records the real correction and sends it.
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(second.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("success");
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: a lowered score floor re-decides the owed correction instead of dropping it", async () => {
+    const db = seededDb();
+    // The debt is decided under a 90-point floor; the proof scores 80.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      const deferred = await run(db, { now: () => clock, credentials: deferredCorrectionCredentials(db) });
+      expect(deferred.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBe("failure");
+    expect(row.correction_dispatched_ms).toBeNull();
+
+    // The operator lowers the floor: the SAME proof now decides success. Nothing
+    // was sent, so the authorization to replace GitHub's failure MUST survive —
+    // dropping it here is what left the Check red for good.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+
+    const pushed: CheckConclusion[] = [];
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_dispatched_ms).toBeNull();
+  });
+
+  test("§7.9a: a possibly-dispatched revision is read back, never rewritten", async () => {
+    const db = seededDb();
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, { now: () => clock, credentials: deferredCorrectionCredentials(db) });
+    } finally {
+      fetchStub.restore();
+    }
+    expect((await rawRow(db, attemptId)).correction_desired).toBe("failure");
+
+    // A send for that revision was attempted: the adapter stamps the dispatch
+    // intent before the request, so the revision may be on GitHub.
+    const lease = await claimCheckRecovery(db, attemptId, "correction-guard", clock + 30_000);
+    if (lease === null) throw new Error("fixture: the row was not claimable");
+    expect(await recordTerminalDispatch(db, attemptId, lease, clock + 30_000)).toBe(true);
+    expect(await releaseCheckClaim(db, attemptId, lease, clock + 31_000)).toBe(true);
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_dispatched_ms).not.toBeNull();
+
+    // The floor drops, so the same proof now decides success — but a possibly
+    // sent revision is never rewritten.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+    const pushed: CheckConclusion[] = [];
+    const dropping = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(dropping.completed).toBe(0);
+    expect(pushed).toHaveLength(0);
+    row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    // The dispatch intent is retained: that revision may still be on the run.
+    expect(row.terminal_dispatch_ms).not.toBeNull();
+
+    // The following pass reads the run back and sends no second update.
+    const readback = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async () => {
+          throw new Error("a possibly-sent correction must never be re-sent");
+        },
+      }),
+    });
+    expect(readback.completed).toBe(0);
+  });
+
+  test("§7.9a: agreeing with an older failure never settles an owed success", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    // Force the row back to the intent the deferred pass never replaced: the
+    // unconfirmed failure that is ALREADY on the run. The owed SUCCESS was
+    // never sent, so agreement with this failure must not settle the debt.
+    db.raw
+      .prepare(`UPDATE review_checks SET desired = 'failure', desired_title = ?, desired_summary = ? WHERE id = ?`)
+      .run(CHECK_NAME, UNCONFIRMED, attemptId);
+    const lease = await claimCheckRecovery(db, attemptId, "correction-guard", clock + 30_000);
+    if (lease === null) throw new Error("fixture: the row was not claimable");
+    const attempt = await getCheckAttempt(db, attemptId);
+    if (attempt === null) throw new Error("fixture: the row vanished");
+    expect(
+      await recordCheckObservation(
+        db,
+        attemptId,
+        lease,
+        remoteFor(attempt.identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        clock + 30_000,
+      ),
+    ).toBe(true);
+    let row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("failure");
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
+    // Still RETRYABLE: agreement with the old intent must not close the row, or
+    // the debt could never be delivered (a `done` row is only ever selected
+    // through the `remote-unconfirmed` reopen shape).
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+
+    // The next pass carries the debt and sends the success exactly once.
+    expect(await releaseCheckClaim(db, attemptId, lease, clock + 31_000)).toBe(true);
+    const pushed: CheckConclusion[] = [];
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("success");
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: a positive intent the evidence denies is never sent", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    // A confirmed publication that MISSES the gate, while the row already froze
+    // `success`: the monotonic freeze refuses to lower it, and the readback
+    // finds nothing delivered.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "needs work", 10));
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        { desired: "success", title: CHECK_NAME, summary: "all good" },
+        proof.publicationId,
+        CLAIM_AT,
+      ),
+    ).toBe(true);
+
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    const row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.last_error).toContain("could not be replaced by failure");
   });
 
   test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {
@@ -927,7 +1522,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       outcome: "publication-unknown",
     });
 
-    // ANOTHER publication for the same head — the degraded row — confirms.
+    // note: ANOTHER publication for the same head — the degraded row — confirms.
     seedPublication(
       db,
       SCOPE,
@@ -946,7 +1541,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       reviewPayload(SCOPE, SHA, "ship it", 96),
     );
 
-    // Examined (the mark makes it selectable) but NOT revised: the proof is
+    // note: Examined (the mark makes it selectable) but NOT revised: the proof is
     // read through the row's OWN link, which carries none.
     const fetchStub = stubFetch();
     try {
@@ -963,17 +1558,17 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     } finally {
       fetchStub.restore();
     }
-    // Both the foreign id and the row's own still-unproven link are refused by
+    // note: Both the foreign id and the row's own still-unproven link are refused by
     // the guarded transition itself.
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
 
     let row = await rawRow(db, attemptId);
     expect(row.terminal_ms).not.toBeNull();
     expect(row.desired_summary).toBe(UNCONFIRMED);
     expect(row.recovery_state).toBe("remote-unconfirmed");
 
-    // Now the row's OWN link confirms. The revision is bound to THAT id alone:
+    // note: Now the row's OWN link confirms. The revision is bound to THAT id alone:
     // a foreign id is still refused although the row is otherwise eligible, the
     // own link is accepted, and the consumed mark refuses the second call.
     const ownProofLease = await claimPublication(db as never, journalId, "proof-lane", clock + 90_000, "sending");
@@ -990,12 +1585,12 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         confirmedMs: clock + 90_000,
       }),
     ).toBe(true);
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 120_000)).toBe(false);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(true);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 120_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 120_000)).toBe(true);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 120_000)).toBe(false);
     row = await rawRow(db, attemptId);
     expect(row.terminal_ms).toBeNull();
-    // Reopened, not yet revised: the frozen text still asserts the unconfirmed
+    // note: Reopened, not yet revised: the frozen text still asserts the unconfirmed
     // outcome until the proof-derived conclusion is sent.
     expect(row.desired_summary).toBe(UNCONFIRMED);
   });
@@ -1013,7 +1608,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       outcome: "publication-unknown",
     });
 
-    // Nothing links the record to a publication, so nothing can contradict it:
+    // note: Nothing links the record to a publication, so nothing can contradict it:
     // it is closed the ordinary way and carries no revisable mark.
     const row = await rawRow(db, attemptId);
     expect(row.terminal_ms).not.toBeNull();
@@ -1025,11 +1620,11 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       credentials: scriptedCredentials(db, { complete: async () => { throw new Error("no send expected"); } }),
     });
     expect(summary.examined).toBe(0);
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 60_000)).toBe(false);
   });
 
   test("§7.9a: the revision is fenced on the TERMINAL record itself", async () => {
-    // Every other condition of the transition is met here — the unconfirmed
+    // note: Every other condition of the transition is met here — the unconfirmed
     // marker, the row's own link, that link's proof — so `terminal_ms IS NOT
     // NULL` is the discriminator. A record that never reached GitHub belongs to
     // the ordinary recovery lane, never to this revision.
@@ -1048,11 +1643,11 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     db.raw
       .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
       .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
-    // Clear ONLY the terminal mark: the unconfirmed marker, the row's own link
+    // note: Clear ONLY the terminal mark: the unconfirmed marker, the row's own link
     // and that link's proof all still hold, so `terminal_ms IS NOT NULL` is the
     // condition refusing this call.
     db.raw.prepare(`UPDATE review_checks SET terminal_ms = NULL WHERE id = ?`).run(attemptId);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
   });
 
   test("§7.9a: a record SUPERSEDED by a newer open generation is never reopened", async () => {
@@ -1068,16 +1663,16 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       publicationId: journalId,
       outcome: "publication-unknown",
     });
-    // A re-trigger of the same head: a generation that ended without proof is
+    // note: A re-trigger of the same head: a generation that ended without proof is
     // retryable, so the next one is minted and now owns the live Check.
     const next = await claim(db, { nowMs: CLAIM_AT + 2_000, executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS + 2_000 });
     expect(next.attempt.identity.generation).toBe(2);
     db.raw
       .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
       .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
-    // Refused: revising the superseded record would re-send an older run and
+    // note: Refused: revising the superseded record would re-send an older run and
     // collide with the one-open-row index the new generation holds.
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     const row = await rawRow(db, attemptId);
     expect(row.terminal_ms).not.toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
@@ -1097,25 +1692,25 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       outcome: "publication-unknown",
     });
 
-    // The record never reached GitHub, so it is NOT terminal: the ordinary
+    // note: The record never reached GitHub, so it is NOT terminal: the ordinary
     // recovery lane owns it, and the terminal-only transition refuses it.
     const row = await rawRow(db, attemptId);
     expect(row.terminal_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.desired_summary).toBe(UNCONFIRMED);
-    // Its own link is given the proof, so the ONLY condition refusing the
+    // note: Its own link is given the proof, so the ONLY condition refusing the
     // revision here is that this record never became terminal.
     db.raw
       .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
       .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 1)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 1)).toBe(false);
   });
 
   test("§7.9a: a mark that never confirms cannot displace one that is ready", async () => {
     const db = seededDb();
     const OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98";
     const DUE_SHA = "0123456789abcdef0123456789abcdef0123456f";
-    // A stale mark (its publication never confirms), a mark that is ready (its
+    // note: A stale mark (its publication never confirms), a mark that is ready (its
     // own publication already confirmed) and one ordinary DUE attempt.
     const staleId = await markedUnconfirmed(db, SHA, "publication-stale");
     const readyId = await markedUnconfirmed(db, OTHER_SHA, "publication-ready");
@@ -1136,12 +1731,12 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         "publication-ready",
       );
 
-    // A bound of two takes the ready mark and the due attempt — never the stale
+    // note: A bound of two takes the ready mark and the due attempt — never the stale
     // mark, whose only cost is a read on the passes that still have room.
     const two = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 2);
     expect(two.map((row) => row.identity.attemptId)).toEqual([readyId, expect.any(String)]);
     expect(two.map((row) => row.identity.attemptId)).not.toContain(staleId);
-    // With room for all three, the stale mark is still last.
+    // note: With room for all three, the stale mark is still last.
     const three = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 3);
     expect(three).toHaveLength(3);
     expect(three[0]!.identity.attemptId).toBe(readyId);
@@ -1151,7 +1746,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   test("§7.9a: the ordering class is exactly the transition's precondition", async () => {
     const db = seededDb();
     const CORRUPT_SHA = "fedcba9876543210fedcba9876543210fedcba99";
-    // A marked row whose own link carries a valid proof — but a newer unfinished
+    // note: A marked row whose own link carries a valid proof — but a newer unfinished
     // generation of the same key already owns the live Check, so the transition
     // refuses it. MINTED FIRST: with the proof in place the key could not claim
     // the next generation.
@@ -1173,17 +1768,17 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         }),
         "publication-blocked",
       );
-    // A corrupt proof is equally uncorrectable: the reader cannot parse it.
+    // note: A corrupt proof is equally uncorrectable: the reader cannot parse it.
     const corruptId = await markedUnconfirmed(db, CORRUPT_SHA, "publication-corrupt");
     db.raw
       .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
       .run("{not json", "publication-corrupt");
 
-    // At LIMIT 1 the due generation is chosen — never a mark the transition
+    // note: At LIMIT 1 the due generation is chosen — never a mark the transition
     // would refuse.
     const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 1);
     expect(one.map((row) => row.identity.attemptId)).toEqual([next.attempt.identity.attemptId]);
-    // The marks appear only when nothing better is left.
+    // note: The marks appear only when nothing better is left.
     const all = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, CHECK_MAX_ATTEMPTS, 5);
     expect(all[0]!.identity.attemptId).toBe(next.attempt.identity.attemptId);
     expect(all.slice(1).map((row) => row.identity.attemptId).sort()).toEqual([blockedId, corruptId].sort());
@@ -1207,7 +1802,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         }),
         "publication-disabled",
       );
-    // The lane would never reopen a record of an App D1 reports as unusable
+    // note: The lane would never reopen a record of an App D1 reports as unusable
     // (§7.6 pair gate), so the mark belongs behind work that can run.
     db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
     const other = await claim(db, {
@@ -1229,7 +1824,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
     const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
     const clock = CLAIM_AT + 1_000;
-    // The consumer's terminal update never landed: the row is open, linked and
+    // note: The consumer's terminal update never landed: the row is open, linked and
     // unconfirmed — the state the ORDINARY lane now owns.
     await terminalizeHarness(db, () => clock, [], "unavailable").terminalize({
       handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
@@ -1237,7 +1832,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       outcome: "publication-unknown",
     });
 
-    // Past the execution deadline with no proof, the lane concludes `expired`
+    // note: Past the execution deadline with no proof, the lane concludes `expired`
     // itself. That record asserts an outcome too, so it must be revisable the
     // same way — not closed `done`.
     const atDeadline = CLAIM_AT + CHECK_LEASE_MS + 1_000;
@@ -1250,7 +1845,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            // Delivery needs the frozen text too (spec §7.9).
+            // note: Delivery needs the frozen text too (spec §7.9).
             return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
@@ -1264,7 +1859,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.publication_id).toBe(journalId);
     expect(row.recovery_state).toBe("remote-unconfirmed");
 
-    // Its own publication then confirms, and the same revision path corrects it.
+    // note: Its own publication then confirms, and the same revision path corrects it.
     db.raw
       .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
       .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
@@ -1293,7 +1888,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            // Delivery needs the frozen text too (spec §7.9).
+            // note: Delivery needs the frozen text too (spec §7.9).
             return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
@@ -1311,7 +1906,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   });
 
   test("the gate reads the attempt's OWN publication, not the scope/SHA reviews row", async () => {
-    // `reviews` holds ONE row per scope/SHA (UNIQUE key, first write wins) and
+    // note: `reviews` holds ONE row per scope/SHA (UNIQUE key, first write wins) and
     // the journal holds ONE review publication per scope/SHA, so under RL-12 a
     // later attempt re-uses that publication while the `reviews` projection can
     // still be the FIRST attempt's result — or not applied at all. The gate
@@ -1376,7 +1971,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Adopt before create
 // ---------------------------------------------------------------------------
 
@@ -1384,7 +1979,7 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
   test("a possibly-sent create is resolved by read-only adoption, never a second create", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // A create was attempted (durable `sending`) and its run exists remotely.
+    // note: A create was attempted (durable `sending`) and its run exists remotely.
     db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
     let creates = 0;
     const fetchStub = stubFetch();
@@ -1477,7 +2072,7 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
   test("a possibly-sent create with an OBSERVED absence is still never re-created (uncertain stays remote-unconfirmed)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // `sending` means a create request may have reached GitHub. An absence in
+    // note: `sending` means a create request may have reached GitHub. An absence in
     // the listForRef window is NOT proof none was created — GitHub's own
     // listing is bounded — so the honest answer is read-only recovery only.
     db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
@@ -1530,7 +2125,7 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Response validation / stale epoch
 // ---------------------------------------------------------------------------
 
@@ -1546,7 +2141,7 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          // The remote closed with a DIFFERENT conclusion (a manual close or
+          // note: The remote closed with a DIFFERENT conclusion (a manual close or
           // another writer) — evidence of something else, never an observation
           // of this attempt's intended outcome.
           complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: "cancelled" }) }),
@@ -1576,7 +2171,7 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
-            // Between the validated response and the local write, another
+            // note: Between the validated response and the local write, another
             // invocation's recovery claim takes the row over (new epoch).
             db.raw
               .prepare(`UPDATE review_checks SET lease_epoch = lease_epoch + 1 WHERE id = ?`)
@@ -1589,7 +2184,7 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
       fetchStub.restore();
     }
     const row = await rawRow(db, attempt.identity.attemptId);
-    // The stale writer advanced neither `observed` nor terminality.
+    // note: The stale writer advanced neither `observed` nor terminality.
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
   });
@@ -1624,7 +2219,7 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Backoff and give-up
 // ---------------------------------------------------------------------------
 
@@ -1681,7 +2276,7 @@ describe("backoff and honest give-up (spec §7.11.2 steps 4–5)", () => {
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.recovery_state).toBe("local-error");
     expect(row.terminal_ms).toBe(T0);
-    // Nothing dropped, nothing cleared, no false closure claimed.
+    // note: Nothing dropped, nothing cleared, no false closure claimed.
     expect(row.check_run_id).toBe(777);
     expect(row.external_id).toBe(attempt.identity.externalId);
     expect(row.generation).toBe(attempt.identity.generation);
@@ -1710,12 +2305,12 @@ describe("backoff and honest give-up (spec §7.11.2 steps 4–5)", () => {
     }
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.recovery_state).toBe("remote-unconfirmed");
-    expect(row.next_attempt_ms).toBe(T0 + CHECK_BACKOFF_MS[3]!); // 8 minutes
+    expect(row.next_attempt_ms).toBe(T0 + CHECK_BACKOFF_MS[3]!); // note: 8 minutes
     expect(row.terminal_ms).toBeNull();
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Budgets
 // ---------------------------------------------------------------------------
 
@@ -1725,7 +2320,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
     try {
-      // Each adapter call issues 4 real requests, so the row's flow would need
+      // note: Each adapter call issues 4 real requests, so the row's flow would need
       // 8 (adopt + create) — the per-row bound must refuse the last two
       // BEFORE dispatch.
       const summary = await run(db, {
@@ -1743,7 +2338,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
     }
     expect(fetchStub.urls).toHaveLength(CHECK_ROW_MAX_REQUESTS);
     const row = await rawRow(db, attempt.identity.attemptId);
-    // The deferral mutated NOTHING and spent NO attempt: the row stays due.
+    // note: The deferral mutated NOTHING and spent NO attempt: the row stays due.
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
@@ -1796,7 +2391,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
       clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS - 10;
       expect(transport.boundMs()).toBe(10);
       clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS;
-      expect(transport.boundMs()).toBe(1); // never zero or negative
+      expect(transport.boundMs()).toBe(1); // note: never zero or negative
     } finally {
       fetchStub.restore();
     }
@@ -1808,7 +2403,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
     let clock = T0;
     const fetchStub = stubFetch();
     try {
-      // The run's deadline is computed at the pass's start (T0), then the clock
+      // note: The run's deadline is computed at the pass's start (T0), then the clock
       // jumps past it: no request can be admitted, so nothing is claimed.
       const summary = await run(db, {
         now: () => {
@@ -1831,7 +2426,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Tenant / App isolation and re-enable
 // ---------------------------------------------------------------------------
 
@@ -1840,7 +2435,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     const db = seededDb();
     const good = await claim(db, { action: "good" });
     const bad = await claim(db, { scope: SCOPE_B, githubAppId: NUMERIC_APP_B, action: "bad" });
-    // The bad pair's row carries a remote run id, so its suspension path is
+    // note: The bad pair's row carries a remote run id, so its suspension path is
     // reached without any create/adopt for a pair that has no credentials.
     db.raw
       .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 42 WHERE id = ?`)
@@ -1857,7 +2452,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     const badRow = await rawRow(db, bad.attempt.identity.attemptId);
     expect(badRow.recovery_state).toBe("suspended");
     expect(badRow.terminal_ms).toBeNull();
-    // The suspended row kept its whole identity for a later inspection.
+    // note: The suspended row kept its whole identity for a later inspection.
     expect(badRow.external_id).toBe(bad.attempt.identity.externalId);
     expect(badRow.bot_id).toBe(APP_B);
     expect(badRow.attempts).toBe(0);
@@ -1867,7 +2462,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     const db = seededDb();
     const healthy = await claim(db, { action: "healthy" });
     const disabled = await claim(db, { scope: SCOPE_B, githubAppId: NUMERIC_APP_B, action: "disabled" });
-    // Both rows carry a status-resumable `disabled` suspension.
+    // note: Both rows carry a status-resumable `disabled` suspension.
     for (const id of [healthy.attempt.identity.attemptId, disabled.attempt.identity.attemptId]) {
       db.raw
         .prepare(
@@ -1875,7 +2470,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
         )
         .run(checkSuspensionReason("disabled", "app disabled"), id);
     }
-    // The second row's App row is NOT active: its suspension must survive even
+    // note: The second row's App row is NOT active: its suspension must survive even
     // though its recorded kind is the status-resumable one.
     db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP_B);
     const asked: string[] = [];
@@ -1888,7 +2483,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
           return { kind: "unavailable", reason: "missing" };
         },
       });
-      // Only the healthy pair was examined. The not-active App's row stayed
+      // note: Only the healthy pair was examined. The not-active App's row stayed
       // suspended and was never claimed, asked about, or terminalized.
       expect(summary.examined).toBe(1);
     } finally {
@@ -1902,7 +2497,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Throw-proofing
 // ---------------------------------------------------------------------------
 
@@ -1918,7 +2513,7 @@ describe("throw-proofing (spec §7.11 composition)", () => {
         throw new Error("token mint exploded");
       },
     });
-    // A throwing credential path is an unusable PAIR (M8's precedent): the row
+    // note: A throwing credential path is an unusable PAIR (M8's precedent): the row
     // is suspended durably and nothing propagates out of the pass.
     expect(summary.suspended).toBe(1);
     expect(summary.errors).toBe(0);
@@ -1942,7 +2537,7 @@ describe("throw-proofing (spec §7.11 composition)", () => {
 
   test("a throwing adapter on one row never stops the other due row", async () => {
     const db = seededDb();
-    // The other row must be IN FLIGHT durably for adoption to be legal on it.
+    // note: The other row must be IN FLIGHT durably for adoption to be legal on it.
     const first = await claim(db, { action: "first" });
     const second = await claim(db, { action: "second", triggeredBy: "other", headSha: `f${SHA.slice(1)}` });
     db.raw
@@ -1978,12 +2573,12 @@ describe("throw-proofing (spec §7.11 composition)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Scheduled composition (spec §7.11)
 // ---------------------------------------------------------------------------
 
 /**
- * Capture each stage's own structured log sink. The three stages report
+ * note: Capture each stage's own structured log sink. The three stages report
  * through three different default sinks, and each emits its terminal line
  * exactly once per pass — so the ORDER of those lines is direct evidence of
  * the composition order (§7.11) rather than an assertion about wiring.
@@ -2015,7 +2610,7 @@ async function captureComposition(env: ScheduledEnv, cron = ""): Promise<string[
 describe("scheduled composition (spec §7.11)", () => {
   test("the quarter-hour expression composes runSweep → reconcileReviewLifecycle, WITHOUT the Check lane", async () => {
     const db = seededDb();
-    // A breached failure window makes the sweep stage emit its alert line; the
+    // note: A breached failure window makes the sweep stage emit its alert line; the
     // Check lane must leave no trace at all in this expression.
     const store = db.raw;
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i += 1) {
@@ -2026,7 +2621,7 @@ describe("scheduled composition (spec §7.11)", () => {
         )
         .run(`boom-${i}`);
     }
-    // A due Check row exists, yet this expression must not touch it.
+    // note: A due Check row exists, yet this expression must not touch it.
     const { attempt } = await claim(db);
 
     const events = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
@@ -2035,11 +2630,11 @@ describe("scheduled composition (spec §7.11)", () => {
     const lifecycleAt = events.indexOf("ops_lifecycle_reconcile");
     expect(sweepAt).toBeGreaterThanOrEqual(0);
     expect(lifecycleAt).toBeGreaterThan(sweepAt);
-    // The Check lane belongs to the MINUTE expression alone: both fire on
+    // note: The Check lane belongs to the MINUTE expression alone: both fire on
     // :00/:15/:30/:45, so running it here would duplicate every pass (and its
     // suspension/backoff writes) in that minute.
     expect(events).not.toContain("ops_check_reconcile");
-    // This pass therefore touched nothing Check-side.
+    // note: This pass therefore touched nothing Check-side.
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.terminal_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
@@ -2049,7 +2644,7 @@ describe("scheduled composition (spec §7.11)", () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
-    // A broken DB makes the sweep's own D1 read throw and both reconcilers'
+    // note: A broken DB makes the sweep's own D1 read throw and both reconcilers'
     // internal catch fire — one stage's failure never becomes another's.
     // The maintenance window read is the ONE exception: answered OPEN so the
     // expression reaches its lanes at all (an unreadable window fails closed).
@@ -2068,10 +2663,10 @@ describe("scheduled composition (spec §7.11)", () => {
     expect(events[0]).toBe("retention_swept_failed");
     expect(events).toContain("ops_sweep_failed");
     expect(events).toContain("ops_lifecycle_reconcile_failed");
-    // The Check lane is not part of this expression at all.
+    // note: The Check lane is not part of this expression at all.
     expect(events).not.toContain("ops_check_reconcile");
 
-    // And with a working DB both later lanes still reach their terminal lines.
+    // note: And with a working DB both later lanes still reach their terminal lines.
     const events2 = await captureComposition({ DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE });
     expect(events2).toContain("ops_lifecycle_reconcile");
     expect(events2).not.toContain("ops_check_reconcile");
@@ -2079,7 +2674,7 @@ describe("scheduled composition (spec §7.11)", () => {
 
   test("routes by controller.cron: the minute expression runs the Checks lane ALONE", async () => {
     const db = seededDb();
-    // A breached failure window (the sweep WOULD alert) plus a due Check row
+    // note: A breached failure window (the sweep WOULD alert) plus a due Check row
     // (the minute lane must act on it): the two effects discriminate routing.
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i += 1) {
       db.raw
@@ -2094,7 +2689,7 @@ describe("scheduled composition (spec §7.11)", () => {
     const env = { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 
     const minute = await captureComposition(env, "* * * * *");
-    // The Check lane alone — none of the other stages' lines — and it really
+    // note: The Check lane alone — none of the other stages' lines — and it really
     // ran (its durable suspension is present).
     expect(minute).not.toContain("ops_sweep_alert");
     expect(minute).not.toContain("ops_lifecycle_reconcile");
@@ -2104,19 +2699,19 @@ describe("scheduled composition (spec §7.11)", () => {
     const quarter = await captureComposition(env, "*/15 * * * *");
     expect(quarter).toContain("ops_sweep_alert");
     expect(quarter).toContain("ops_lifecycle_reconcile");
-    // The minute expression is the ONLY Check driver — the quarter hour must
+    // note: The minute expression is the ONLY Check driver — the quarter hour must
     // not run the same lane a second time.
     expect(quarter).not.toContain("ops_check_reconcile");
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // L2 fix 1 — claim eligibility, live-safe suspension, pause, budget release
 // ---------------------------------------------------------------------------
 
 describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => {
   /**
-   * Drive one pass while mutating a row into an ineligible state AFTER the
+   * note: Drive one pass while mutating a row into an ineligible state AFTER the
    * selector produced it. The mutation rides the credential step, which is the
    * real window between selection and claim.
    */
@@ -2171,7 +2766,7 @@ describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => 
     expect(summary.completed).toBe(0);
     expect(summary.unconfirmed).toBe(0);
     expect(urls).toHaveLength(0);
-    // Nothing mutated: no timestamp, no attempt, no lease taken.
+    // note: Nothing mutated: no timestamp, no attempt, no lease taken.
     expect(row.lease_epoch).toBe(1);
     expect(row.lease_until_ms).toBe(EXPIRED_DEADLINE);
     expect(row.attempts).toBe(0);
@@ -2186,7 +2781,7 @@ describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => 
     expect(summary.examined).toBe(1);
     expect(summary.gaveUp).toBe(0);
     expect(urls).toHaveLength(0);
-    expect(row.attempts).toBe(CHECK_MAX_ATTEMPTS); // not incremented further
+    expect(row.attempts).toBe(CHECK_MAX_ATTEMPTS); // note: not incremented further
     expect(row.holder).toBe("consumer-run");
     expect(row.terminal_ms).toBeNull();
   });
@@ -2232,7 +2827,7 @@ describe("claim repeats the selector's eligibility (L2 fix 1 finding 1)", () => 
 describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
   test("a live holder/lease on the same pair survives suspension untouched", async () => {
     const db = seededDb();
-    // Row A: released, terminal intent — suspendable.
+    // note: Row A: released, terminal intent — suspendable.
     const free = await claim(db, { action: "free" });
     await setCheckDesired(db, free.attempt.identity.attemptId, free.lease, {
       desired: "failure",
@@ -2244,7 +2839,7 @@ describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
       nextAttemptMs: T0,
       reason: "release",
     }, T0);
-    // Row B: same pair, LIVE lease held by another invocation mid-operation.
+    // note: Row B: same pair, LIVE lease held by another invocation mid-operation.
     const live = await claim(db, { action: "live", triggeredBy: "other", nowMs: T0, executionDeadlineMs: T0 + 900_000 });
     const before = await rawRow(db, live.attempt.identity.attemptId);
 
@@ -2254,7 +2849,7 @@ describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
       "app disabled",
       T0,
     );
-    // Only the free row was suspended; the live one was left completely alone.
+    // note: Only the free row was suspended; the live one was left completely alone.
     expect(suspended).toBe(1);
     expect((await rawRow(db, free.attempt.identity.attemptId)).recovery_state).toBe("suspended");
     const after = await rawRow(db, live.attempt.identity.attemptId);
@@ -2263,7 +2858,7 @@ describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
     expect(after.lease_until_ms).toBe(before.lease_until_ms);
     expect(after.updated_ms).toBe(before.updated_ms);
     expect(after.recovery_state).toBe("pending");
-    // Its fenced write still works — proof the lease was never erased.
+    // note: Its fenced write still works — proof the lease was never erased.
     expect(
       await setCheckCreateState(db, live.attempt.identity.attemptId, live.lease, "unknown", "still down", T0),
     ).toBe(true);
@@ -2277,7 +2872,7 @@ describe("suspension is fenced to free rows (L2 fix 1 finding 2)", () => {
       title: CHECK_NAME,
       summary: "unconfirmed",
     }, null, CLAIM_AT);
-    // The claim lease is past; the row is nobody's in-flight work.
+    // note: The claim lease is past; the row is nobody's in-flight work.
     const suspended = await suspendCheckRecovery(
       db,
       { appId: APP, installationId: SCOPE.installationId },
@@ -2296,7 +2891,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
   test("a paused App TERMINALIZES an already-known Check (read-only adoption then update)", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // A create was attempted and its run exists: pause must not strand it.
+    // note: A create was attempted and its run exists: pause must not strand it.
     db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
     let creates = 0;
     const fetchStub = stubFetch();
@@ -2353,7 +2948,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
     }
     expect(creates).toBe(0);
     const row = await rawRow(db, attempt.identity.attemptId);
-    // P68-QC-006: the row is deferred OUT of the due batch through a durable
+    // note: P68-QC-006: the row is deferred OUT of the due batch through a durable
     // `paused` suspension — no attempt spent, no lease withheld, identity kept.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
@@ -2363,7 +2958,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
     expect(row.create_state).toBe("not-sent");
     expect(row.check_run_id).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // NOT immediately due: the deferral is what stops the every-pass credential
+    // note: NOT immediately due: the deferral is what stops the every-pass credential
     // mint + adoption re-walk this finding names.
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
   });
@@ -2404,7 +2999,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
 describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
   test("an exhausted RUN budget leaves later rows unclaimed and completely untouched", async () => {
     const db = seededDb();
-    // 20 due rows on DISTINCT pairs (distinct installation ids). Each pair
+    // note: 20 due rows on DISTINCT pairs (distinct installation ids). Each pair
     // spends 5 probe + 6 row requests before its create, so 20 pairs are far
     // more than the ≤100 per-RUN cap — the exact shape the run-level ceiling
     // exists for. Nothing that was refused may be left claimed, charged or
@@ -2437,7 +3032,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       const summary = await run(db, {
         now: () => T0,
         credentials: async ({ transport }) => {
-          // Burn 5 of the row's ≤6 allowance in the credential probe (the real
+          // note: Burn 5 of the row's ≤6 allowance in the credential probe (the real
           // cost of a mint + identity proof), then hand back the adapter double
           // so every further call is metered through the same transport.
           for (let i = 0; i < 5; i += 1) {
@@ -2467,13 +3062,13 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       fetchStub.restore();
     }
 
-    // The run ceiling held exactly, which is what makes the claims below
+    // note: The run ceiling held exactly, which is what makes the claims below
     // meaningful rather than vacuous.
     expect(fetchStub.urls.length).toBe(CHECK_RECONCILE_MAX_REQUESTS);
-    // The ceiling stopped work BEFORE any create could leave.
+    // note: The ceiling stopped work BEFORE any create could leave.
     expect(creates).toBe(0);
 
-    // No row was left claimed, leased or terminal by a refused operation, and
+    // note: No row was left claimed, leased or terminal by a refused operation, and
     // no attempt was charged for one.
     for (const row of rows) {
       const after = await rawRow(db, row.id);
@@ -2484,7 +3079,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       expect(after.recovery_state).toBe("pending");
     }
 
-    // And the rows the run never even reached are byte-identical.
+    // note: And the rows the run never even reached are byte-identical.
     const unreached: string[] = [];
     for (const row of rows) {
       if (JSON.stringify(await rawRow(db, row.id)) === JSON.stringify(row.before)) unreached.push(row.id);
@@ -2497,7 +3092,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
     try {
-      // The credential probe costs nothing; each adapter call costs 5, so the
+      // note: The credential probe costs nothing; each adapter call costs 5, so the
       // row's second operation is refused by the ≤6 per-row bound AFTER the
       // claim was taken — the exact window finding 4 describes.
       const summary = await run(db, {
@@ -2515,17 +3110,17 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       fetchStub.restore();
     }
     const row = await rawRow(db, attempt.identity.attemptId);
-    // Released, not withheld: due again immediately, no attempt charged.
+    // note: Released, not withheld: due again immediately, no attempt charged.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.recovery_state).toBe("pending");
-    expect(row.desired).not.toBe("in_progress"); // intent still persisted
-    // The load-bearing assertion: the selector sees the row due at the very
+    expect(row.desired).not.toBe("in_progress"); // note: intent still persisted
+    // note: The load-bearing assertion: the selector sees the row due at the very
     // clock instant the refusal happened. A withheld 120s recovery lease would
     // hide it here, which is precisely the defect finding 4 names.
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
-    // …and a SECOND pass in the same window can claim it again immediately.
+    // note: …and a SECOND pass in the same window can claim it again immediately.
     const reclaim = await claimCheckRecovery(db, attempt.identity.attemptId, "reconciler", T0);
     expect(reclaim, "the released row must be immediately reclaimable").not.toBeNull();
   });
@@ -2535,7 +3130,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
     try {
-      // One more request than the row allows: the 7th is refused INSIDE the
+      // note: One more request than the row allows: the 7th is refused INSIDE the
       // adoption call itself, so the refusal must unwind through that branch.
       await run(db, {
         now: () => T0,
@@ -2558,7 +3153,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
   test("a refusal inside the owned-run FETCH releases the claim too", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // A known run id: adoption is skipped, so the fetch is the first operation.
+    // note: A known run id: adoption is skipped, so the fetch is the first operation.
     db.raw
       .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
       .run(attempt.identity.attemptId);
@@ -2579,14 +3174,14 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
     expect(row.lease_until_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.recovery_state).toBe("pending");
-    expect(row.check_run_id).toBe(321); // identity retained
+    expect(row.check_run_id).toBe(321); // note: identity retained
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
   });
 
   test("a refusal inside the terminal UPDATE releases the claim too", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // Known run id and a non-terminal remote read, so the flow reaches the
+    // note: Known run id and a non-terminal remote read, so the flow reaches the
     // update — where the 7th request is refused.
     db.raw
       .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321 WHERE id = ?`)
@@ -2596,7 +3191,7 @@ describe("budget refusal releases the claim (L2 fix 1 finding 4)", () => {
       await run(db, {
         now: () => T0,
         credentials: scriptedCredentials(db, {
-          // adoption is skipped (id known): fetch spends 1, the update the rest.
+          // note: adoption is skipped (id known): fetch spends 1, the update the rest.
           requestsPerCall: CHECK_ROW_MAX_REQUESTS,
           fetch: async (identity) => ({
             kind: "found",
@@ -2631,7 +3226,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
         credentials: scriptedCredentials(db, {
           adopt: async () => ({ kind: "absent" }),
           begin: async () => {
-            // Mirror the live post-`sending`, pre-call lease fence: no Checks
+            // note: Mirror the live post-`sending`, pre-call lease fence: no Checks
             // callable ever runs, so the adapter proves zero dispatch.
             creates += 1;
             return { kind: "unavailable", reason: "lease expired before the create request", requests: 0 };
@@ -2640,27 +3235,27 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
       });
       expect(summary.completed).toBe(0);
       expect(summary.gaveUp).toBe(0);
-      // NOT a spent attempt: nothing ran.
+      // note: NOT a spent attempt: nothing ran.
       expect(summary.unconfirmed).toBe(0);
       expect(summary.errors).toBe(0);
     } finally {
       fetchStub.restore();
     }
-    // The adapter's rollback of the `sending` mark: nothing is possibly-sent.
+    // note: The adapter's rollback of the `sending` mark: nothing is possibly-sent.
     const row = await rawRow(db, id);
     expect(row.create_state).toBe("not-sent");
     expect(row.check_run_id).toBeNull();
-    // No attempt, backoff or error mutation.
+    // note: No attempt, backoff or error mutation.
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // T3 released its own claim, so the row is selector-due AT THIS INSTANT…
+    // note: T3 released its own claim, so the row is selector-due AT THIS INSTANT…
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
-    // …and immediately reclaimable.
+    // note: …and immediately reclaimable.
     expect(await claimCheckRecovery(db, id, "reconciler", T0)).not.toBeNull();
     void creates;
   });
@@ -2669,7 +3264,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
     const db = seededDb();
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
-    // T3's recovery lease runs 120s from its claim. A slow credential step or
+    // note: T3's recovery lease runs 120s from its claim. A slow credential step or
     // adapter call can push the clock past it, at which point a liveness-fenced
     // release would write NOTHING and the row would stay leased — not "left
     // due" as §7.11.2 step 5 requires. The identity fence is what makes the
@@ -2682,7 +3277,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
         credentials: scriptedCredentials(db, {
           adopt: async () => ({ kind: "absent" }),
           begin: async () => {
-            // The call outlives T3's own recovery lease.
+            // note: The call outlives T3's own recovery lease.
             clock = T0 + CHECK_RECOVERY_LEASE_MS + 1;
             return { kind: "unavailable", reason: "lease expired before the create request", requests: 0 };
           },
@@ -2696,13 +3291,13 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
     const row = await rawRow(db, id);
     expect(row.create_state).toBe("not-sent");
     expect(row.check_run_id).toBeNull();
-    // Released despite the expiry, with nothing else moved.
+    // note: Released despite the expiry, with nothing else moved.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
-    // Immediately selector-due and reclaimable at that same instant.
+    // note: Immediately selector-due and reclaimable at that same instant.
     expect(await listCheckReconcileBatch(db, clock)).toHaveLength(1);
     expect(await claimCheckRecovery(db, id, "reconciler", clock)).not.toBeNull();
   });
@@ -2725,7 +3320,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
       fetchStub.restore();
     }
     const row = await rawRow(db, id);
-    // RL-12 honesty: a dispatched create may have landed, so the row keeps its
+    // note: RL-12 honesty: a dispatched create may have landed, so the row keeps its
     // `sending` mark for read-only adoption and pays an attempt + backoff.
     expect(row.create_state).toBe("sending");
     expect(row.recovery_state).toBe("remote-unconfirmed");
@@ -2751,7 +3346,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
       fetchStub.restore();
     }
     const row = await rawRow(db, id);
-    // No `requests` field: treated as possibly sent, never as a zero-dispatch
+    // note: No `requests` field: treated as possibly sent, never as a zero-dispatch
     // refusal, so the row cannot be made createable on a guess.
     expect(row.create_state).toBe("sending");
     expect(row.recovery_state).toBe("remote-unconfirmed");
@@ -2762,7 +3357,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // The adapter's rollback loses: a newer claim bumped the epoch after the
+    // note: The adapter's rollback loses: a newer claim bumped the epoch after the
     // `sending` write, so the identity fence refuses and T3's release misses.
     // Written inside the claim lease (the claim's own clock), then taken over.
     expect(await setCheckCreateState(db, id, lease, "sending", undefined, CLAIM_AT)).toBe(true);
@@ -2772,7 +3367,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
 
     expect(await rollbackCheckCreateDispatch(db, id, lease, CLAIM_AT)).toBe(false);
     const row = await rawRow(db, id);
-    // The newer holder's ownership and state are exactly as it left them.
+    // note: The newer holder's ownership and state are exactly as it left them.
     expect(row.holder).toBe("other-run");
     expect(row.lease_epoch).toBe(lease.epoch + 1);
     expect(row.create_state).toBe("sending");
@@ -2781,7 +3376,7 @@ describe("zero-dispatch create refusal is left due (integrated seam fix 2)", () 
 });
 
 describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", () => {
-  // The observed production shape: the terminal update's client resolution
+  // note: The observed production shape: the terminal update's client resolution
   // failed five times (token mint), each charged as a spent attempt, so the row
   // gave up to `local-error` while GitHub still showed the Check
   // `in_progress` — and nothing ever revisited it.
@@ -2797,7 +3392,7 @@ describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", ()
       const summary = await run(db, {
         now: () => T0,
         credentials: scriptedCredentials(db, {
-          // Adoption is skipped (id known); the read proves a running run, so
+          // note: Adoption is skipped (id known); the read proves a running run, so
           // the flow reaches the terminal update.
           fetch: async (identity) => ({
             kind: "found",
@@ -2816,13 +3411,13 @@ describe("zero-dispatch fetch/complete refusals stay due (no attempt spent)", ()
       fetchStub.restore();
     }
     const row = await rawRow(db, id);
-    // Nothing ran remotely, so nothing is charged: no attempt, backoff or error.
+    // note: Nothing ran remotely, so nothing is charged: no attempt, backoff or error.
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
     expect(row.terminal_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
-    // The frozen terminal intent survives, and the claim went back.
+    // note: The frozen terminal intent survives, and the claim went back.
     expect(row.desired).toBe("failure");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
@@ -2869,7 +3464,7 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
     const db = seededDb();
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
-    // The lane observed the run as running (a validated non-terminal payload),
+    // note: The lane observed the run as running (a validated non-terminal payload),
     // then exhausted its attempts and gave up. That durable `in_progress`
     // observation must not strand the row — it is exactly the "external run
     // still pending" state the spec's operator retry exists for.
@@ -2877,7 +3472,7 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
       .prepare(`UPDATE review_checks SET create_state = 'known', check_run_id = 321, observed = 'in_progress', recovery_state = 'local-error', terminal_ms = ?, attempts = ? WHERE id = ?`)
       .run(T0, CHECK_MAX_ATTEMPTS, id);
 
-    // A live lease is still refused.
+    // note: A live lease is still refused.
     const reacquired = await claimCheckRecovery(db, id, "reconciler", T0 - 1);
     expect(reacquired).toBeNull();
 
@@ -2886,12 +3481,12 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
     expect(row.recovery_state).toBe("pending");
     expect(row.terminal_ms).toBeNull();
     expect(row.attempts).toBe(0);
-    expect(row.check_run_id).toBe(321); // remote identity retained
+    expect(row.check_run_id).toBe(321); // note: remote identity retained
     expect(row.external_id).toBe(attempt.identity.externalId);
     expect(row.generation).toBe(attempt.identity.generation);
-    // The observation is RETAINED, never rewritten to a fake completion.
+    // note: The observation is RETAINED, never rewritten to a fake completion.
     expect(row.observed).toBe("in_progress");
-    // …and the row is a selector candidate again.
+    // note: …and the row is a selector candidate again.
     expect(await listCheckReconcileBatch(db, T0)).toHaveLength(1);
   });
 
@@ -2910,12 +3505,12 @@ describe("operator retry accepts a recorded in-progress observation (L2 fix 1 fi
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // QC zero-residual fix wave — P68-QC-003/004/005/006
 // ---------------------------------------------------------------------------
 
 describe("credential suspension is durable, not churn (P68-QC-003)", () => {
-  /** Seed a suspended pair whose row records `kind` and `fingerprint`. */
+  /** note: Seed a suspended pair whose row records `kind` and `fingerprint`. */
   async function seedSuspended(
     db: TestD1,
     kind: Parameters<typeof checkSuspensionReason>[0],
@@ -2935,7 +3530,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
-    // The digest the production factory would derive from the STORED envelope —
+    // note: The digest the production factory would derive from the STORED envelope —
     // so the next pass's comparison is exercising the real value, not a fiction.
     const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
@@ -2950,7 +3545,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     } finally {
       fetchStub.restore();
     }
-    // Without the digest on the row, the next pass cannot tell "same
+    // note: Without the digest on the row, the next pass cannot tell "same
     // credentials, same failure" from "the operator corrected them" — which is
     // the whole mechanism that stops the churn. So the persisted value is the
     // contract, not an implementation detail.
@@ -2958,7 +3553,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     expect(row.recovery_state).toBe("suspended");
     expect(checkSuspensionKindOf(row.last_error as string)).toBe("identity-mismatch");
     expect(row.last_error).toContain(`cred=${DIGEST}`);
-    // And the pair is then skipped with NO probe while the envelope is unchanged.
+    // note: And the pair is then skipped with NO probe while the envelope is unchanged.
     let probes = 0;
     const second = stubFetch();
     try {
@@ -2979,7 +3574,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("an UNCHANGED credential failure is never re-probed and never re-enters the batch", async () => {
     const db = seededDb();
-    // The row records an identity-mismatch proven against the digest of the
+    // note: The row records an identity-mismatch proven against the digest of the
     // envelope currently stored on the App row.
     const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
       private_key_enc: string;
@@ -2990,7 +3585,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     let probes = 0;
     const fetchStub = stubFetch();
     try {
-      // TWO passes: the second is the one that used to churn.
+      // note: TWO passes: the second is the one that used to churn.
       for (const at of [T0, T0 + 15 * 60_000]) {
         const summary = await run(db, {
           now: () => at,
@@ -3005,14 +3600,14 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     } finally {
       fetchStub.restore();
     }
-    // ZERO credential probes across both passes: the digest proved the
+    // note: ZERO credential probes across both passes: the digest proved the
     // credentials were untouched, so no identity question was reopened.
     expect(probes).toBe(0);
     expect(fetchStub.urls).toHaveLength(0);
     const row = await rawRow(db, id);
     expect(row.recovery_state).toBe("suspended");
     expect(row.attempts).toBe(0);
-    // And it never occupied the bounded batch.
+    // note: And it never occupied the bounded batch.
     expect(await listCheckReconcileBatch(db, T0 + 15 * 60_000)).toHaveLength(0);
   });
 
@@ -3023,7 +3618,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     };
     const oldDigest = await sha256Hex(envelope.private_key_enc);
     const id = await seedSuspended(db, "identity-mismatch", oldDigest);
-    // The operator replaces the credentials.
+    // note: The operator replaces the credentials.
     db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
 
     let probes = 0;
@@ -3036,7 +3631,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
           return scriptedCredentials(db, agreeingScript(db))(input);
         },
       });
-      // The changed digest earned exactly ONE proof, and the pair resumed.
+      // note: The changed digest earned exactly ONE proof, and the pair resumed.
       expect(probes).toBeGreaterThanOrEqual(1);
       expect(summary.completed).toBe(1);
     } finally {
@@ -3044,12 +3639,12 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     }
     const row = await rawRow(db, id);
     expect(row.observed).toBe("failure");
-    // The SAME historical identity — never a new generation or a new id.
+    // note: The SAME historical identity — never a new generation or a new id.
     expect(row.generation).toBe(1);
     expect(row.external_id).toBe((await rawRow(db, id)).external_id);
   });
 
-  /** Suspends one Check per pair for an unchanged identity mismatch; the last pair's credential is then rotated. */
+  /** note: Suspends one Check per pair for an unchanged identity mismatch; the last pair's credential is then rotated. */
   async function seedSuspendedBacklog(db: TestD1, unchanged: number) {
     const suspend = async (appId: string, githubAppId: number, installationId: number) => {
       seedApp(db, appId, githubAppId, { installationId });
@@ -3123,7 +3718,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
     expect(passes).toBe(Math.ceil((backlog + 1) / CHECK_RECONCILE_LIMIT));
     expect((await rawRow(db, repairedId)).recovery_state).toBe("done");
-    // The pass that reached the repaired pair wrapped and filled its page from the start.
+    // note: The pass that reached the repaired pair wrapped and filled its page from the start.
     const wrappedPairs = passes * CHECK_RECONCILE_LIMIT - (backlog + 1);
     const cursor = db.raw.prepare(`SELECT installation_id FROM check_reenable_cursor`).get() as { installation_id: number };
     expect(cursor.installation_id).toBe(200 + wrappedPairs - 1);
@@ -3152,11 +3747,11 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
           return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: newDigest };
         },
       });
-      // The corrected envelope earned exactly ONE proof; the still-failing pair
+      // note: The corrected envelope earned exactly ONE proof; the still-failing pair
       // is re-stamped rather than returned to the due batch.
       expect(probes).toBe(1);
       expect(summary.examined).toBe(0);
-      // Second pass on the now-stamped digest: D1-only, no probe at all.
+      // note: Second pass on the now-stamped digest: D1-only, no probe at all.
       const second = await run(db, {
         now: () => T0 + 15 * 60_000,
         credentials: async () => {
@@ -3171,7 +3766,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     }
     const row = await rawRow(db, id);
     expect(row.recovery_state).toBe("suspended");
-    // The re-stamp carries the NEW digest, so the next pass is D1-only.
+    // note: The re-stamp carries the NEW digest, so the next pass is D1-only.
     expect(checkSuspensionKindOf(row.last_error as string)).toBe("identity-mismatch");
     expect(row.last_error).toContain(newDigest);
   });
@@ -3193,8 +3788,8 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     } finally {
       fetchStub.restore();
     }
-    // Status was the proof, so no separate re-enable probe was issued.
-    expect(probes).toBe(1); // only the row loop's own resolution
+    // note: Status was the proof, so no separate re-enable probe was issued.
+    expect(probes).toBe(1); // note: only the row loop's own resolution
     expect((await rawRow(db, id)).observed).toBe("failure");
   });
 });
@@ -3224,10 +3819,10 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
       expect(row.recovery_state).toBe("suspended");
       expect(row.attempts).toBe(0);
       expect(checkSuspensionKindOf(row.last_error as string)).toBe("paused");
-      // Out of the batch — the per-pass churn is gone.
+      // note: Out of the batch — the per-pass churn is gone.
       expect(await listCheckReconcileBatch(db, T0)).toHaveLength(0);
 
-      // A SECOND paused pass costs nothing: the row is not even selected, so no
+      // note: A SECOND paused pass costs nothing: the row is not even selected, so no
       // credential resolution and no adoption walk is issued for it.
       let probes = 0;
       const second = await run(db, {
@@ -3241,7 +3836,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
       expect(probes).toBe(0);
       expect(creates).toBe(0);
 
-      // The kill switch lifts: the SAME row resumes and creates under a fresh
+      // note: The kill switch lifts: the SAME row resumes and creates under a fresh
       // claim, addressing the SAME historical identity.
       db.raw.prepare(`UPDATE review_bots SET review_enabled = 1 WHERE id = ?`).run(APP);
       const resumed = await run(db, {
@@ -3270,7 +3865,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
     const row = await rawRow(db, id);
     expect(row.external_id).toBe(externalId);
     expect(row.generation).toBe(1);
-    expect(row.attempts).toBe(0); // the pause never charged an attempt
+    expect(row.attempts).toBe(0); // note: the pause never charged an attempt
     expect(row.observed).toBe("failure");
   });
 
@@ -3318,7 +3913,7 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
   test("the lane's own transport throws the SHARED marker, which the adapter classifies as zero-dispatch", async () => {
     const db = seededDb();
     await claim(db);
-    // Capture the transport the lane builds and refuse at its first admission.
+    // note: Capture the transport the lane builds and refuse at its first admission.
     let transport: CheckTransport | undefined;
     const fetchStub = stubFetch();
     try {
@@ -3330,11 +3925,11 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
         },
       });
       expect(transport).toBeDefined();
-      // Exhaust the run budget so the NEXT admission is refused pre-dispatch.
+      // note: Exhaust the run budget so the NEXT admission is refused pre-dispatch.
       for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
         await transport!.fetchImpl("https://api.github.com/probe");
       }
-      // The refusal must be the UPSTREAM marker class, not a local look-alike:
+      // note: The refusal must be the UPSTREAM marker class, not a local look-alike:
       // `sendRequests` walks the error chain for that exact class by identity.
       const err = await transport!.fetchImpl("https://api.github.com/checks").then(
         () => null,
@@ -3357,11 +3952,11 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
         now: () => T0,
         credentials: scriptedCredentials(db, {
           adopt: async () => ({ kind: "absent" }),
-          // A create whose REQUEST left the process and failed: one request.
+          // note: A create whose REQUEST left the process and failed: one request.
           begin: async () => ({ kind: "unavailable", reason: "check create failed: socket hang up", requests: 1 }),
         }),
       });
-      // Not a deferral: the row pays an attempt and takes a backoff rung,
+      // note: Not a deferral: the row pays an attempt and takes a backoff rung,
       // because GitHub may hold a run this lane cannot see.
       expect(summary.unconfirmed).toBe(1);
       expect(summary.completed).toBe(0);
@@ -3369,7 +3964,7 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
       fetchStub.restore();
     }
     const row = await rawRow(db, id);
-    // The `sending` mark is RETAINED (never rolled back) and recovery is
+    // note: The `sending` mark is RETAINED (never rolled back) and recovery is
     // adopt-only — the RL-12 posture a possibly-sent create demands.
     expect(row.create_state).toBe("sending");
     expect(row.check_run_id).toBeNull();
@@ -3380,18 +3975,18 @@ describe("pre-dispatch refusal is typed end to end (P68-QC-005)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // QC3 revalidation — F-004 admission-gated re-enable probe
 // ---------------------------------------------------------------------------
 
 describe("the re-enable probe is admission-gated and never invents a verdict (F-004)", () => {
-  /** A suspended pair whose recorded digest does NOT match the stored envelope. */
+  /** note: A suspended pair whose recorded digest does NOT match the stored envelope. */
   async function correctedPair(db: TestD1): Promise<{ id: string; before: Record<string, string | number | null> }> {
     const { attempt, lease } = await claim(db, { action: "corrected" });
     const id = attempt.identity.attemptId;
     await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: "unconfirmed" }, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
-    // Recorded digest is stale, so the CURRENT one differs and a proof is owed.
+    // note: Recorded digest is stale, so the CURRENT one differs and a proof is owed.
     expect(
       await suspendCheckRecovery(db, { appId: APP, installationId: SCOPE.installationId },
         checkSuspensionReason("identity-mismatch", "mismatch", "a".repeat(64)), T0),
@@ -3402,7 +3997,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
   test("an unaffordable probe is skipped: zero factory calls, zero writes, prior state intact", async () => {
     const db = seededDb();
     const { id, before } = await correctedPair(db);
-    // A DISTRACTOR pair with a LOWER installation id, so the scan probes it
+    // note: A DISTRACTOR pair with a LOWER installation id, so the scan probes it
     // first and it spends the run's entire request budget. The clock stays
     // FIXED: the refusal must come from the spent cap, never from a
     // side-effecting `now`.
@@ -3432,7 +4027,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
         log: { warn: (fields) => void warned.push(fields), info: () => {} },
         credentials: async ({ scope, transport }) => {
           if (scope.installationId === DISTRACTOR) {
-            // Burn the whole run cap here; the last request is refused before
+            // note: Burn the whole run cap here; the last request is refused before
             // dispatch, which stops the loop.
             for (let i = 0; i < CHECK_RECONCILE_MAX_REQUESTS + 5; i += 1) {
               try {
@@ -3447,7 +4042,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
           return { kind: "unavailable", reason: "identity-mismatch", credentialFingerprint: "b".repeat(64) };
         },
       });
-      // The pass RAN and left the target pair queued: the sibling warn names it.
+      // note: The pass RAN and left the target pair queued: the sibling warn names it.
       expect(summary.errors).toBe(0);
       expect(summary.examined).toBe(0);
       expect(
@@ -3458,7 +4053,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     } finally {
       fetchStub.restore();
     }
-    // NOT ONE factory call for the target pair: its stored state is
+    // note: NOT ONE factory call for the target pair: its stored state is
     // byte-identical, so a later pass with budget retries it. Writing a verdict
     // here is F-004.
     expect(factoryCalls).toBe(0);
@@ -3476,26 +4071,26 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
         log: { warn: (fields) => void warned.push(fields), info: () => {} },
         credentials: async ({ scope, transport }) => {
           if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
-          // Refuse the probe's own request BEFORE dispatch: the shared transport
+          // note: Refuse the probe's own request BEFORE dispatch: the shared transport
           // throws the typed marker, which the factory must NOT swallow into a
           // credential verdict.
           throw new CheckRequestNotDispatched("test: probe refused before dispatch");
         },
       });
-      // Positive signal: the pass ran and reported the pair as deferred.
+      // note: Positive signal: the pass ran and reported the pair as deferred.
       expect(summary.errors).toBe(0);
       expect(warned.map((entry) => entry.event)).toContain("ops_check_reconcile_reenable_probe_deferred");
     } finally {
       fetchStub.restore();
     }
-    // No re-stamp: the recorded digest and reason are exactly as before, and the
+    // note: No re-stamp: the recorded digest and reason are exactly as before, and the
     // pair was reported as deferred rather than as a credential failure.
     const after = await rawRow(db, id);
     expect(after).toEqual(before);
     expect(after.recovery_state).toBe("suspended");
     expect(after.last_error).toBe(before.last_error);
     expect(warned.some((entry) => entry.event === "ops_check_reconcile_reenable_probe_deferred")).toBe(true);
-    // The next pass is still free to prove it.
+    // note: The next pass is still free to prove it.
     expect(
       await listReenableableCheckPairs(db, [
         { appId: APP, installationId: SCOPE.installationId, currentFingerprint: "b".repeat(64) },
@@ -3514,10 +4109,10 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
         log: { warn: (fields) => void warned.push(fields), info: () => {} },
         credentials: async ({ scope, transport }) => {
           if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
-          // The realistic shape: the transport refuses the probe's request, the
+          // note: The realistic shape: the transport refuses the probe's request, the
           // factory catches it and answers `unavailable` rather than rethrowing.
           try {
-            // One MORE than the run's whole allowance, so the last request is
+            // note: One MORE than the run's whole allowance, so the last request is
             // refused before dispatch and the budget flag is set.
             for (let i = 0; i <= CHECK_RECONCILE_MAX_REQUESTS; i += 1) {
               await transport.fetchImpl("https://api.github.com/probe");
@@ -3531,7 +4126,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     } finally {
       fetchStub.restore();
     }
-    // The refusal must NOT be recorded as a credential verdict: the row keeps
+    // note: The refusal must NOT be recorded as a credential verdict: the row keeps
     // its exact prior reason and digest, and the pass reports a deferral.
     expect(await rawRow(db, id)).toEqual(before);
     expect(warned.some((entry) => entry.event === "ops_check_reconcile_reenable_probe_deferred")).toBe(true);
@@ -3583,7 +4178,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
 
 describe("configured Check update budget (spec §7.10)", () => {
   /**
-   * The budget is read ONCE per run and handed to the credential lane, which
+   * note: The budget is read ONCE per run and handed to the credential lane, which
    * forwards it into the Checks adapter. Capturing at that seam pins the two
    * halves this lane owns: the store read and the threading (the adapter's own
    * honoring of `updateBudgetMs` is `tests/pipeline/checks.test.ts`'s case).
@@ -3635,20 +4230,20 @@ describe("configured Check update budget (spec §7.10)", () => {
     });
     expect(seen).toEqual([CHECK_UPDATE_DEFAULT]);
     expect(warns.filter((event) => event === "ops_check_reconcile_budgets_degraded")).toHaveLength(1);
-    // A degraded settings read never fails the pass.
+    // note: A degraded settings read never fails the pass.
     expect(summary.errors).toBe(0);
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Abandonment is not a conclusion: the wait for the persisted proof
 // ---------------------------------------------------------------------------
 
-/** The attempt's own execution deadline — the wait's hard stop. */
+/** note: The attempt's own execution deadline — the wait's hard stop. */
 const FUTURE_DEADLINE = T0 + 900_000;
 
 /**
- * The row a REAL abandonment leaves behind, driven through the production seam.
+ * note: The row a REAL abandonment leaves behind, driven through the production seam.
  * `createCheckLifecycle.begin` creates the run, finds its own latch already
  * tripped (the consumer's begin budget elapsed while the create ran) and hands
  * the attempt to recovery: the run id is attached so recovery adopts it,
@@ -3699,14 +4294,14 @@ async function abandonedAttempt(db: TestD1, deadlineMs: number = FUTURE_DEADLINE
   const attempt = await getCheckAttempt(db, id);
   if (attempt === null) throw new Error("the abandoned begin left no readable attempt");
 
-  // The real post-abandonment state this suite is about — no hand-set intent.
+  // note: The real post-abandonment state this suite is about — no hand-set intent.
   expect(attempt.desired).toBe("in_progress");
   expect(attempt.createState).toBe("known");
   expect(attempt.recoveryState).toBe("remote-unconfirmed");
   return { attempt, id };
 }
 
-/** A script that creates the run, finds it in progress and records the send. */
+/** note: A script that creates the run, finds it in progress and records the send. */
 function publishingScript(sent: { desired?: string; summary?: string }): AdapterScript {
   return {
     adopt: async () => ({ kind: "absent" }),
@@ -3718,7 +4313,7 @@ function publishingScript(sent: { desired?: string; summary?: string }): Adapter
     complete: async (identity, _runId, conclusion) => {
       sent.desired = conclusion.desired;
       sent.summary = conclusion.summary;
-      // Delivery needs the frozen TEXT too (spec §7.9), so the ACK a landed
+      // note: Delivery needs the frozen TEXT too (spec §7.9), so the ACK a landed
       // update produces echoes what was sent.
       return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
     },
@@ -3726,7 +4321,7 @@ function publishingScript(sent: { desired?: string; summary?: string }): Adapter
 }
 
 /**
- * One `review_failures` row for this suite's scope/head. `createdAtMs` pins the
+ * note: One `review_failures` row for this suite's scope/head. `createdAtMs` pins the
  * row's instant — the column's default is the wall clock — so a caller can put
  * a drop where a real consumer would have written it.
  */
@@ -3745,7 +4340,7 @@ function recordFailure(db: TestD1, stage: string, error: string, createdAtMs: nu
       SHA,
       stage,
       error,
-      // The column's own form — SQLite `datetime('now')` text, second precision.
+      // note: The column's own form — SQLite `datetime('now')` text, second precision.
       new Date(createdAtMs).toISOString().slice(0, 19).replace("T", " "),
     );
 }
@@ -3754,7 +4349,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("no proof and a future deadline: the pass claims, gives the claim back and spends no attempt", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
-    // The whole point of the released-row eligibility: a row whose intent is
+    // note: The whole point of the released-row eligibility: a row whose intent is
     // still `in_progress` is SELECTED long before its execution deadline.
     expect(await listCheckReconcileBatch(db, T0 + 120_000)).toHaveLength(1);
     const stub = stubFetch();
@@ -3770,7 +4365,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
         },
       });
       expect(summary.examined).toBe(1);
-      // No journal row and no link: the wait is terminal for this pass, and it
+      // note: No journal row and no link: the wait is terminal for this pass, and it
       // still takes the claim-and-give-back defer (spec §7.11.2 step 2).
       expect(summary.deferred).toBe(1);
       expect(summary.completed).toBe(0);
@@ -3779,7 +4374,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Nothing was minted and no attempt was spent: the row is simply not
+    // note: Nothing was minted and no attempt was spent: the row is simply not
     // concludable while the head can still publish, and abandonment froze no
     // conclusion of its own.
     expect(factoryCalls).toBe(0);
@@ -3793,13 +4388,13 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("unknown");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    // The claim was taken and given straight back on the FIRST rung: no attempt
+    // note: The claim was taken and given straight back on the FIRST rung: no attempt
     // spent, and the row stops holding the head of the due batch — it is
     // re-probed about a minute later, so a publication that lands is seen on the
     // next pass rather than minutes from now (spec §7.11.2 step 2).
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
 
-    // The wait line names the probe's answer: nothing was staged for this
+    // note: The wait line names the probe's answer: nothing was staged for this
     // attempt.
     const deferred = events.filter((fields) => fields.event === "check_recovery_deferred_pending_publication");
     expect(deferred).toHaveLength(1);
@@ -3808,12 +4403,12 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
   test("a deadline inside the deferred rung selects the row on the pass after it, not only after next_attempt_ms", async () => {
     const db = seededDb();
-    // The execution deadline falls INSIDE the first rung the wait pushes the
+    // note: The execution deadline falls INSIDE the first rung the wait pushes the
     // due time to: a rung that ignores it would hold the row past its own
     // hard stop.
     const deadline = T0 + 150_000;
     const deferredAt = T0 + 120_000;
-    // The premise this case rests on: the deadline is strictly inside the rung.
+    // note: The premise this case rests on: the deadline is strictly inside the rung.
     expect(deadline).toBeLessThan(deferredAt + CHECK_BACKOFF_MS[0]!);
     const { id } = await abandonedAttempt(db, deadline);
     const stub = stubFetch();
@@ -3823,10 +4418,10 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
         credentials: scriptedCredentials(db),
       });
       expect(waiting.deferred).toBe(1);
-      // The due time the wait pushes never outlives the deadline.
+      // note: The due time the wait pushes never outlives the deadline.
       expect((await rawRow(db, id)).next_attempt_ms).toBe(deadline);
 
-      // The pass AFTER the deadline — the rung has not elapsed yet — must
+      // note: The pass AFTER the deadline — the rung has not elapsed yet — must
       // already select the row and conclude it.
       expect(await listCheckReconcileBatch(db, deadline + 1_000)).toHaveLength(1);
       const summary = await run(db, {
@@ -3851,7 +4446,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const { attempt, id } = await abandonedAttempt(db);
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
-    // The link the attempt's own intent write records. Without it the proof
+    // note: The link the attempt's own intent write records. Without it the proof
     // below is just a head-matched row and proves nothing about this attempt.
     linkPublication(db, id, proof.publicationId);
 
@@ -3869,7 +4464,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // The unconfirmed fallback is NOT what ships: the proof decided, and the
+    // note: The unconfirmed fallback is NOT what ships: the proof decided, and the
     // row's intent was still `in_progress` when the pass selected it.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("success");
@@ -3882,14 +4477,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("an applied payload that fails the gate decides, not a passing live score", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The live projection for this head: a PASSING review. It is not what this
+    // note: The live projection for this head: a PASSING review. It is not what this
     // attempt published — `reviews` is a first-write-wins projection that can
     // belong to an earlier attempt for the same SHA, so it must never decide.
     seedReview(db, SCOPE, SHA, "ship it", 95);
-    // The projection is read per App; the helper leaves `bot_id` unset, so
+    // note: The projection is read per App; the helper leaves `bot_id` unset, so
     // stamp it the way the apply write does.
     db.raw.prepare(`UPDATE reviews SET bot_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
-    // THIS attempt's own applied publication: its payload's envelope fails the
+    // note: THIS attempt's own applied publication: its payload's envelope fails the
     // gate, and that verdict is immutable. The link is what attributes it.
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "needs fixes", 40));
@@ -3907,7 +4502,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // The published payload decides: a gate miss, never the passing row the
+    // note: The published payload decides: a gate miss, never the passing row the
     // scope/SHA projection happens to hold.
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toContain("Review gate missed");
@@ -3921,7 +4516,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("an admission-drop row never ends the wait: the publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The drop row the consumer wrote for this head. It acks FIRST and records
+    // note: The drop row the consumer wrote for this head. It acks FIRST and records
     // the row AFTER, best-effort and with no attempt identity, so nothing ties
     // it to THIS attempt — a prior or interleaved attempt's drop looks exactly
     // like this one and says nothing about whether this attempt can publish.
@@ -3948,7 +4543,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred on the first rung and not concluded: the drop proved nothing, so
+    // note: Deferred on the first rung and not concluded: the drop proved nothing, so
     // no conclusion was frozen, no attempt was spent and no credential was
     // minted.
     expect(factoryCalls).toBe(0);
@@ -3958,7 +4553,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // The publication lands and decides the row — linked by this attempt, which
+    // note: The publication lands and decides the row — linked by this attempt, which
     // is what makes it this attempt's proof at all.
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
@@ -3988,7 +4583,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a reviews row from an EARLIER attempt never ends the wait: this attempt's own proof decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // `reviews` holds ONE row per scope/SHA and is written at publication — but
+    // note: `reviews` holds ONE row per scope/SHA and is written at publication — but
     // it carries no attempt identity. On a re-trigger of the SAME head this row
     // is the PRIOR attempt's, and nothing distinguishes it from the row THIS
     // attempt would write: reading it as "the publication already landed" would
@@ -4012,7 +4607,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred on the first rung and not concluded: the earlier row proved
+    // note: Deferred on the first rung and not concluded: the earlier row proved
     // nothing about THIS attempt, so no conclusion was frozen and nothing was
     // minted.
     expect(factoryCalls).toBe(0);
@@ -4023,7 +4618,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired_summary).toBeNull();
     expect(waitingRow.observed).toBe("unknown");
 
-    // THIS attempt's own publication lands its proof, whose envelope is the one
+    // note: THIS attempt's own publication lands its proof, whose envelope is the one
     // the gate reads — not the stale `reviews` row above. It decides only
     // because this attempt linked it.
     const proof = proofFor(attempt.identity);
@@ -4055,7 +4650,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a PRIOR attempt's proof never ends the wait: only a proof linked to this attempt can", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // Attempt A published this head and its proof is applied and readable. This
+    // note: Attempt A published this head and its proof is applied and readable. This
     // attempt is a same-SHA re-trigger abandoned pre-publication, with no
     // `publication_id` link — so nothing ties A's proof to it. Adopting that
     // envelope would freeze THIS Check on a review this attempt never produced,
@@ -4079,7 +4674,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Nothing frozen and nothing minted: the prior proof ended no wait — the row
+    // note: Nothing frozen and nothing minted: the prior proof ended no wait — the row
     // took the claim-and-give-back defer — spent no attempt and never became
     // this attempt's evidence.
     expect(factoryCalls).toBe(0);
@@ -4090,7 +4685,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // Offering the same prior proof at the next rung changes nothing: the row
+    // note: Offering the same prior proof at the next rung changes nothing: the row
     // is waiting again, one rung later.
     const secondStub = stubFetch();
     try {
@@ -4109,7 +4704,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(factoryCalls).toBe(0);
     expect((await rawRow(db, id)).terminal_ms).toBeNull();
 
-    // THIS attempt's own publication lands and is linked: now it decides. One
+    // note: THIS attempt's own publication lands and is linked: now it decides. One
     // publication per scope/head/kind exists, so a same-head re-trigger owns the
     // degraded row (its review row could only ever be the prior attempt's). The
     // conclusion is that row's — failure for a degraded publication — and never
@@ -4142,7 +4737,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a re-trigger publishing on a pre-existing journal row concludes success from its last write", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The head's publication row predates this attempt: an earlier generation
+    // note: The head's publication row predates this attempt: an earlier generation
     // inserted it, so its `created_ms` is BEFORE admission. The proof lands
     // afterwards — the row's LAST WRITE is what attributes it, and only that
     // write makes its proof the one this Check may conclude from.
@@ -4154,7 +4749,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       proof,
       "applied",
       reviewPayload(SCOPE, SHA, "ship it", 85),
-      // Created before admission; the helper's own write stamp lands 10s later.
+      // note: Created before admission; the helper's own write stamp lands 10s later.
       T0 - 5_000,
     );
 
@@ -4172,7 +4767,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // The wait ENDED on the post-admission write: the applied proof decided a
+    // note: The wait ENDED on the post-admission write: the applied proof decided a
     // gate-derived success instead of waiting out the deadline.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("success");
@@ -4185,7 +4780,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a re-trigger whose journal row was never written after admission stays unconfirmed at the deadline", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The same pre-existing applied proof, but EVERY stamp predates admission.
+    // note: The same pre-existing applied proof, but EVERY stamp predates admission.
     // The row was never written after this attempt was admitted, so it proves
     // nothing about it — attribution is the last write, never a head match.
     const proof = proofFor(attempt.identity);
@@ -4196,7 +4791,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     let deferred = -1;
     try {
       const summary = await run(db, {
-        now: () => FUTURE_DEADLINE + 60_000, // past the attempt's own deadline
+        now: () => FUTURE_DEADLINE + 60_000, // note: past the attempt's own deadline
         credentials: scriptedCredentials(db, publishingScript(sent)),
       });
       deferred = summary.deferred;
@@ -4205,7 +4800,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // No attribution: the unwritten row ended no wait, so the deadline path
+    // note: No attribution: the unwritten row ended no wait, so the deadline path
     // concludes the approved wording and never adopts that proof.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("failure");
@@ -4219,7 +4814,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a re-trigger whose pre-existing journal row is claimed mid-wait never concludes from it", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
-    // Counterexample (b): this head's journal row was INSERTED before the
+    // note: Counterexample (b): this head's journal row was INSERTED before the
     // attempt was admitted, and an earlier generation CLAIMED it afterwards —
     // the claim stamps `updated_ms` and moves `prepared` to `sending`
     // (`claimPublication`). No proof is ever recorded. The post-admission write
@@ -4238,14 +4833,14 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           return scriptedCredentials(db)(input);
         },
       });
-      // Inside the deadline nothing is concludable: deferred, not completed.
+      // note: Inside the deadline nothing is concludable: deferred, not completed.
       expect(summary.deferred).toBe(1);
       expect(summary.completed).toBe(0);
     } finally {
       stub.restore();
     }
 
-    // No attempt spent and no credential minted: the earlier generation's
+    // note: No attempt spent and no credential minted: the earlier generation's
     // claim-only write attributed no conclusion to this attempt.
     expect(factoryCalls).toBe(0);
     const waitingRow = await rawRow(db, id);
@@ -4255,7 +4850,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // At the attempt's own deadline the wait ends unconfirmed: a `sending` row
+    // note: At the attempt's own deadline the wait ends unconfirmed: a `sending` row
     // with no proof never becomes a success, and the row is never adopted.
     const sent: { desired?: string; summary?: string } = {};
     const deadlineStub = stubFetch();
@@ -4273,7 +4868,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    // A staged row exists (it was claimed after admission) but no proof ever
+    // note: A staged row exists (it was claimed after admission) but no proof ever
     // landed on it: the deadline concludes the approved wording, never a
     // proof-less success.
     expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
@@ -4286,7 +4881,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   test("a parse-stage failure row stays open: the degraded publication still decides", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
-    // The parse branch records this row FIRST and only then publishes the
+    // note: The parse branch records this row FIRST and only then publishes the
     // degraded comment. With no journal yet it proves nothing about the head.
     recordFailure(db, "parse", "model output failed validation");
 
@@ -4306,7 +4901,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // Deferred and not concluded: no conclusion was frozen, no attempt spent,
+    // note: Deferred and not concluded: no conclusion was frozen, no attempt spent,
     // and the row is due again on the first rung.
     expect(factoryCalls).toBe(0);
     const deferredRow = await rawRow(db, id);
@@ -4316,7 +4911,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(deferredRow.desired_summary).toBeNull();
     expect(deferredRow.observed).toBe("unknown");
 
-    // The degrade path lands its publication: applied proof, linked by the
+    // note: The degrade path lands its publication: applied proof, linked by the
     // attempt that published it.
     const degraded = proofFor(attempt.identity, "degraded");
     seedPublication(db, SCOPE, SHA, degraded, "applied");
@@ -4337,7 +4932,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       secondStub.restore();
     }
 
-    // The proof decides — a degraded publication never passes the gate.
+    // note: The proof decides — a degraded publication never passes the gate.
     expect(secondDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
@@ -4369,7 +4964,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.terminal_ms).toBeNull();
     expect(row.attempts).toBe(1);
     expect(row.observed).toBe("unknown");
-    // Still open for a retry: with no journal row the wait is terminal for this
+    // note: Still open for a retry: with no journal row the wait is terminal for this
     // pass, so the claim is given straight back on the first rung and the wait
     // line says nothing was staged for this attempt.
     expect(
@@ -4379,10 +4974,10 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
   test("an elapsed deadline still concludes failure/unconfirmed (existing semantics)", async () => {
     const db = seededDb();
-    // The abandoned claim's own deadline has already passed: no wait applies.
+    // note: The abandoned claim's own deadline has already passed: no wait applies.
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // Both writes are fenced on the claim's OWN live lease, so they land at the
+    // note: Both writes are fenced on the claim's OWN live lease, so they land at the
     // claim instant, before that lease runs out.
     expect(
       await setCheckDesired(db, id, lease, { desired: "failure", title: CHECK_NAME, summary: UNCONFIRMED }, null, CLAIM_AT),
@@ -4421,7 +5016,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
   test("a category frozen under the recovery lease is DELIVERED, never re-decided as unknown", async () => {
     const db = seededDb();
-    // The consumer's own lease died with the attempt deadline, so the stop it
+    // note: The consumer's own lease died with the attempt deadline, so the stop it
     // knew could only be frozen under the recovery lease — the same one this
     // test takes, the way `freezeKnownStop` does at the stop site.
     const { attempt } = await claim(db);
@@ -4457,7 +5052,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
       stub.restore();
     }
 
-    // The approved wording of the category the stop recorded — not the generic
+    // note: The approved wording of the category the stop recorded — not the generic
     // unknown failure an expired lease would otherwise produce.
     expect(sent.desired).toBe("failure");
     expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
@@ -4467,7 +5062,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // The deadline conclusion names the proof it could not read (spec §7.9)
 // ---------------------------------------------------------------------------
 
@@ -4475,7 +5070,7 @@ describe("the deadline conclusion carries the approved wording", () => {
   test("(b) a staged journal row without proof concludes the approved wording, never a proof-less success", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // The hand-off shape: this attempt linked the row it was handed off to,
+    // note: The hand-off shape: this attempt linked the row it was handed off to,
     // and the deadline arrived before that row recorded its proof.
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
     linkPublication(db, attempt.identity.attemptId, journalId);
@@ -4501,7 +5096,7 @@ describe("the deadline conclusion carries the approved wording", () => {
     const { attempt } = await claim(db);
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
     linkPublication(db, attempt.identity.attemptId, journalId);
-    // The row exists, but every proof read on the journal fails: the deadline
+    // note: The row exists, but every proof read on the journal fails: the deadline
     // must say the proof could not be read, never that nothing was staged.
     const unreadable = withFailingReads(db, /SELECT proof_json FROM review_publications/);
 
@@ -4524,7 +5119,7 @@ describe("the deadline conclusion carries the approved wording", () => {
   test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then concludes the approved wording", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
-    // The attributed shape the probe admits — the row's last write lands after
+    // note: The attributed shape the probe admits — the row's last write lands after
     // admission — with proof bytes that are NOT JSON: present, but undecodable.
     // The attempt has no `publication_id` link of its own.
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
@@ -4542,7 +5137,7 @@ describe("the deadline conclusion carries the approved wording", () => {
           return scriptedCredentials(db)(input);
         },
       });
-      // Before the deadline a corrupt envelope is still "not readable yet":
+      // note: Before the deadline a corrupt envelope is still "not readable yet":
       // the wait continues and nothing is frozen.
       expect(summary.deferred).toBe(1);
       expect(summary.completed).toBe(0);
@@ -4558,7 +5153,7 @@ describe("the deadline conclusion carries the approved wording", () => {
     expect(waitingRow.desired).toBe("in_progress");
     expect(waitingRow.observed).toBe("unknown");
 
-    // Past the attempt's own deadline the proof bytes exist but cannot be
+    // note: Past the attempt's own deadline the proof bytes exist but cannot be
     // read: the deadline names THAT cause, never "the proof never landed" and
     // never a proof-less success.
     const sent: { desired?: string; summary?: string } = {};
@@ -4598,7 +5193,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
       )
       .run(T0, "key-with-no-check-row", 1, launchId);
 
-    // No Check row matches the mark: nothing concluded, so nothing is cleared.
+    // note: No Check row matches the mark: nothing concluded, so nothing is cleared.
     expect(await clearConcludedCheckOwed(db)).toBe(0);
     const still = db.raw
       .prepare("SELECT check_owed_ms FROM review_launches WHERE attempt_id = ?")
@@ -4628,7 +5223,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
       .run(T0 + 60_000, identity.attempt_key, identity.generation, launchId);
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(1);
 
-    // One failed recovery attempt advances the obligation exactly as the Check
+    // note: One failed recovery attempt advances the obligation exactly as the Check
     // row's own `next_attempt_ms` advances.
     expect(await bumpCheckOwed(db, attemptId, T0 + 120_000)).toBe(true);
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
@@ -4640,14 +5235,14 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     const db = seededDb();
     const { attempt } = await claim(db, { nowMs: T0, executionDeadlineMs: FUTURE_DEADLINE });
     const attemptId = attempt.identity.attemptId;
-    // Nobody released this row to recovery: with no due time and a live-window
+    // note: Nobody released this row to recovery: with no due time and a live-window
     // deadline, only the owed marker can make it eligible.
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, attempts = 1 WHERE id = ?`)
       .run(attemptId);
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
 
-    // The resumed publication could not adopt the Check and recorded the
+    // note: The resumed publication could not adopt the Check and recorded the
     // obligation on the ATTEMPT row (never on the Check row). The two sides are
     // generated INDEPENDENTLY — the attempt row's id is its own random value,
     // the Check's id is another — and only the shared `attempt_key` pairs them.
@@ -4668,7 +5263,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
 
     expect((await listCheckReconcileBatch(db, T0 + 60_000)).map((row) => row.identity.attemptId)).toEqual([attemptId]);
 
-    // The publication it concluded from is already durable.
+    // note: The publication it concluded from is already durable.
     const proof = proofFor(attempt.identity, "review");
     seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85));
     linkPublication(db, attemptId, proof.publicationId);
@@ -4701,7 +5296,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     }
     expect(completeCalls).toBe(1);
 
-    // The Check concluded, and the obligation it carried is cleared.
+    // note: The Check concluded, and the obligation it carried is cleared.
     const row = await rawRow(db, attemptId);
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).toBe(T0 + 60_000);
@@ -4711,7 +5306,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
     expect(launch.check_owed_ms).toBeNull();
     expect(launch.check_key).toBeNull();
     expect(launch.check_generation).toBeNull();
-    // And the cleared attempt no longer occupies the due batch.
+    // note: And the cleared attempt no longer occupies the due batch.
     expect(await listCheckReconcileBatch(db, T0 + 60_000)).toHaveLength(0);
   });
 });

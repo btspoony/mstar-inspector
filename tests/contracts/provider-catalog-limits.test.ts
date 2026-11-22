@@ -4,7 +4,7 @@ import { LEGACY_PROVIDER_IDS, PROVIDER_CATALOG } from "../../src/contracts/provi
 import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generated";
 
 /**
- * A catalog row this test can work with: the size table covers it and it has at
+ * why: A catalog row this test can work with: the size table covers it and it has at
  * least one sized model. Derived at runtime — no vendor id or number is pinned.
  */
 const covered = (() => {
@@ -33,7 +33,7 @@ describe("catalogLimitsFor — a model's sizes belong to the model, not to an en
 });
 
 /**
- * A collapsed per-protocol id AND the merged row it was absorbed into — both
+ * why: A collapsed per-protocol id AND the merged row it was absorbed into — both
  * found together at runtime, so the pair is never half-satisfied: a regenerated
  * catalog whose first sized multi-protocol row lost its alias cannot pick that
  * row and then fail on the alias. No vendor id or URL is pinned.
@@ -51,7 +51,7 @@ const aliasRow = (() => {
 
 describe("catalogLimitsFor — one row per provider, every collapsed id follows it", () => {
   test("the committed catalog carries a sized multi-protocol row with a collapsed id", () => {
-    // Non-vacuity guard for the case below: a LEGACY_PROVIDER_IDS map that no
+    // why: Non-vacuity guard for the case below: a LEGACY_PROVIDER_IDS map that no
     // longer names an alias of a sized multi-protocol row must fail here
     // instead of skipping it.
     expect(aliasRow, "a collapsed id of a sized multi-protocol catalog row").not.toBeNull();

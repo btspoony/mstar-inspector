@@ -78,7 +78,7 @@ function setScope(target: TestD1, botId: string, scope: "owned" | "shared"): voi
     .run(scope, scope === "shared" ? "2026-01-05T00:00:00.000Z" : null, botId);
 }
 
-/** `default` is the official workspace; `ws-other` holds a target on its bot. */
+/** note: `default` is the official workspace; `ws-other` holds a target on its bot. */
 function world(): TestD1 {
   const target = createMigratedTestD1();
   insertUser(target, "dana");
@@ -91,7 +91,7 @@ function world(): TestD1 {
   seedOfficialWorkspace(target, OFFICIAL);
   seedOwnedBot(target, "bot-home", HOME_BOT, OFFICIAL);
   seedOwnedBot(target, "bot-other", OTHER_BOT, OTHER);
-  // The consuming workspace's ONLY way to the bot is its own live target.
+  // invariant: The consuming workspace's ONLY way to the bot is its own live target.
   seedTarget(target, "bot-home", { workspaceId: OTHER, repoOwner: "acme", repoName: "widgets" });
   return target;
 }
@@ -198,7 +198,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
   test("revoking is NOT gated on the designation: a stale share stays revocable", async () => {
     db = world();
     setScope(db, "bot-other", "shared");
-    // The designation is on `default`, so `ws-other` no longer holds the
+    // note: The designation is on `default`, so `ws-other` no longer holds the
     // official bot — its own stale share must still be revocable.
     const res = await patch(OTHER, OTHER_BOT, "erin", JSON.stringify({ scope: "owned", confirm: true }));
 
@@ -220,7 +220,7 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
   test("a target on a shared bot grants no configuration authority", async () => {
     db = world();
     setScope(db, "bot-home", "shared");
-    // `erin`'s workspace reaches the default bot only through the target it
+    // invariant: `erin`'s workspace reaches the default bot only through the target it
     // created on it: using a shared bot is not configuring it.
     for (const scope of ["owned", "shared"] as const) {
       const res = await patch(OTHER, HOME_BOT, "erin", JSON.stringify({ scope, confirm: true }));

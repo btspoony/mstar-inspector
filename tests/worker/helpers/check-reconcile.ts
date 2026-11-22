@@ -1,5 +1,4 @@
-/**
- * Shared fixtures for the Check recovery suites (`check-reconcile.test.ts` and
+/** note: Shared fixtures for the Check recovery suites (`check-reconcile.test.ts` and
  * `check-reconcile-journal.test.ts`): the migrated D1 double with its seeded
  * Apps, the claim/publication/review builders, the scripted adapter double with
  * its real dispatch meter, and the run helper.
@@ -65,7 +64,7 @@ export function seedApp(
     install?: boolean;
     installationId?: number;
     status?: string;
-    /** The target's repository cache — the Check lane's gate lookup key. */
+    /** note: The target's repository cache — the Check lane's gate lookup key. */
     repoOwner?: string;
     repoName?: string;
   } = {},
@@ -85,7 +84,7 @@ export function seedApp(
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
     .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
-  // One review target per bot, keyed by the repository it reviews (migration
+  // note: One review target per bot, keyed by the repository it reviews (migration
   // 0067): the gate the reconcile lane re-reads lives there.
   db.raw
     .prepare(
@@ -116,7 +115,7 @@ export function seededDb(): TestD1 {
   return db;
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -150,7 +149,7 @@ export function remoteFor(identity: CheckIdentity, overrides: Partial<CheckRemot
     app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
     status: overrides.status ?? "completed",
     conclusion: overrides.conclusion === undefined ? "success" : overrides.conclusion,
-    // No text is the honest default: a run whose wording was never proven is
+    // note: No text is the honest default: a run whose wording was never proven is
     // NOT a delivered one, so a fixture that means "already delivered" passes
     // the row's own frozen summary through this field.
     summary: overrides.summary === undefined ? null : overrides.summary,
@@ -342,7 +341,7 @@ export async function rawRow(db: TestD1, id: string): Promise<Record<string, str
   >;
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Scripted adapter double + real dispatch meter
 // ---------------------------------------------------------------------------
 
@@ -359,8 +358,7 @@ export type CompleteOutcome =
   | { kind: "unavailable"; reason: string; requests?: number };
 
 export type AdapterScript = {
-  /**
-   * REAL requests each adapter call issues through the run transport before
+  /** note: REAL requests each adapter call issues through the run transport before
    * answering. 1 mirrors a single-request operation; a higher value simulates
    * the multi-request shapes the live adapter can produce (a paginated
    * adoption walk, a token mint plus a call), which is what the per-row
@@ -430,13 +428,13 @@ export function scriptedCredentials(
  */
 export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: CheckTransport): ChecksAdapter {
   const perCall = script.requestsPerCall ?? 1;
-  /** True when every scripted request for this call actually dispatched. */
+  /** note: True when every scripted request for this call actually dispatched. */
   const spend = async (): Promise<boolean> => {
     for (let i = 0; i < perCall; i += 1) {
       try {
         await transport.fetchImpl("https://api.github.com/checks");
       } catch {
-        // Refused BEFORE dispatch. The live adapter surfaces this as
+        // invariant: Refused BEFORE dispatch. The live adapter surfaces this as
         // `unavailable` and never would have reached GitHub, so the script must
         // not run either: a double that answered anyway would fake a request
         // the budget already refused.
@@ -451,13 +449,13 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
       return script.adopt === undefined ? { kind: "absent" } : script.adopt(identity);
     },
     beginCheck: async ({ identity, lease }) => {
-      // Mirror the live adapter: `sending` is persisted BEFORE the request.
+      // invariant: Mirror the live adapter: `sending` is persisted BEFORE the request.
       // One millisecond inside the recovery lease is a valid fence instant for
       // every clock these tests use.
       const markedAt = lease.untilMs - 1;
       await setCheckCreateState(db, identity.attemptId, lease, "sending", undefined, markedAt);
       if (!(await spend())) {
-        // The transport refused BEFORE dispatch — the live adapter's
+        // invariant: The transport refused BEFORE dispatch — the live adapter's
         // `refused(...)` shape, which reports zero invoked Checks calls. (The
         // caller short-circuits on `budget.refused` before reading a count.)
         return { kind: "unavailable", reason: "request budget refused before dispatch", requests: 0 };
@@ -465,14 +463,14 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
       if (script.begin === undefined) return { kind: "unavailable", reason: "no create scripted", requests: 1 };
       const begun = await script.begin(identity);
       if (begun.kind !== "unavailable") return begun;
-      // Mirror the live adapter's additive contract: a script that does not say
+      // note: Mirror the live adapter's additive contract: a script that does not say
       // otherwise describes a dispatched call, so it reports a positive count.
       const requests = begun.requests ?? 1;
       if (requests === 0) {
-        // A provably undispatched create: the adapter undoes its own mark.
+        // note: A provably undispatched create: the adapter undoes its own mark.
         await rollbackCheckCreateDispatch(db, identity.attemptId, lease, markedAt);
       }
-      // `requests` LAST so the declared `number` wins over the script type's
+      // why: `requests` LAST so the declared `number` wins over the script type's
       // optional field — identical value at runtime.
       return { ...begun, requests };
     },
@@ -485,7 +483,7 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
       }
       const fetched = await script.fetch(identity, checkRunId);
       if (fetched.kind !== "unavailable") return fetched;
-      // Same additive contract as `completeCheck`: a script that does not say
+      // note: Same additive contract as `completeCheck`: a script that does not say
       // otherwise describes a dispatched read, so it reports a positive count.
       return { ...fetched, requests: fetched.requests ?? 1 };
     },
@@ -496,7 +494,7 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
       if (script.complete === undefined) return { kind: "unavailable", reason: "no complete scripted", requests: 1 };
       const completed = await script.complete(identity, checkRunId, conclusion);
       if (completed.kind !== "unavailable") return completed;
-      // Same additive contract as `beginCheck`: a script that does not say
+      // note: Same additive contract as `beginCheck`: a script that does not say
       // otherwise describes a dispatched update, so it reports a positive count.
       return { ...completed, requests: completed.requests ?? 1 };
     },
@@ -546,7 +544,7 @@ export function agreeingScript(
 export const OFFLINE_FETCH = (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch;
 
 export function run(db: TestD1, deps: CheckReconcileDeps = {}) {
-  // The caller's log wins when supplied (tests that assert on warn events);
+  // note: The caller's log wins when supplied (tests that assert on warn events);
   // silence is only the default. The transport's fetch is resolved at CALL time
   // from `globalThis.fetch`, so `stubFetch()` keeps metering a run while the
   // file-level offline stand-in covers every case that does not stub it.

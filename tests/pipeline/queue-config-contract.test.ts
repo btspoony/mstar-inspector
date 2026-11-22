@@ -1,5 +1,5 @@
 /**
- * The retry budget is one number in two places: `QUEUE_MAX_ATTEMPTS` decides
+ * why: The retry budget is one number in two places: `QUEUE_MAX_ATTEMPTS` decides
  * when the FINAL delivery stamps its idempotency key `failed`, and wrangler's
  * `max_retries` decides how many deliveries the platform actually makes.
  *
@@ -14,12 +14,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// Load shim, FIRST: `src/pipeline/consumer.ts` statically imports the sandbox
+// why: Load shim, FIRST: `src/pipeline/consumer.ts` statically imports the sandbox
 // adapter, whose `cloudflare:workers` builtin Bun's test runner cannot resolve.
 import "../helpers/cloudflare-workers-mock";
 import { stripJsonComments } from "../../scripts/check-image-inputs";
 
-// Dynamic, like every other consumer suite: the shim above must be registered
+// why: Dynamic, like every other consumer suite: the shim above must be registered
 // before the module graph evaluates.
 const { QUEUE_MAX_ATTEMPTS } = await import("../../src/pipeline/consumer");
 
@@ -31,7 +31,7 @@ const config = JSON.parse(
   env?: { production?: { queues?: { consumers?: Array<{ queue?: string; max_retries?: number }> } } };
 };
 
-/** Every deployed consumer block that runs the review pipeline. */
+/** note: Every deployed consumer block that runs the review pipeline. */
 function reviewConsumers(): Array<[string, { queue?: string; max_retries?: number }]> {
   const blocks: Array<[string, { queue?: string; max_retries?: number }]> = [];
   for (const [label, list] of [
@@ -52,7 +52,7 @@ describe("queue retry budget ↔ QUEUE_MAX_ATTEMPTS", () => {
     for (const [label, consumer] of blocks) {
       const retries = consumer.max_retries;
       expect(typeof retries, `wrangler.jsonc: ${label} review consumer max_retries`).toBe("number");
-      // One initial delivery plus `max_retries` retries.
+      // note: One initial delivery plus `max_retries` retries.
       expect(
         QUEUE_MAX_ATTEMPTS - 1,
         `wrangler.jsonc: ${label} max_retries must be QUEUE_MAX_ATTEMPTS - 1 ` +

@@ -1,5 +1,4 @@
-/**
- * The ledger target alignment item (spec operator-data-upgrade § Ledger target
+/** note: The ledger target alignment item (spec operator-data-upgrade § Ledger target
  * alignment item).
  *
  * The fixture is the shape staging carries: ledger rows that HAVE a target, and
@@ -63,7 +62,7 @@ function seedInstallation(
     .run(`inst-${botId}-${installationId}`, botId, installationId, accountLogin, removedAt);
 }
 
-/** A PR row whose target is `targetId`. `owner`/`repo` are the row's OWN repository. */
+/** note: A PR row whose target is `targetId`. `owner`/`repo` are the row's OWN repository. */
 function seedPr(
   db: TestD1,
   id: string,
@@ -82,7 +81,7 @@ function seedPr(
     .run(id, botId, owner, repo, prNumber, targetId);
 }
 
-/** A review row whose target is `targetId`. */
+/** note: A review row whose target is `targetId`. */
 function seedReview(db: TestD1, id: string, owner: string, repo: string, targetId: string): void {
   db.raw
     .prepare(
@@ -109,7 +108,7 @@ function targetRow(
     .get(id) as never;
 }
 
-/** Step until the item reports done; returns every batch. */
+/** note: Step until the item reports done; returns every batch. */
 async function drain(db: TestD1, lookup?: RepoLookup): Promise<UpgradeBatch[]> {
   const batches: UpgradeBatch[] = [];
   for (let cursor: UpgradeCursor | null = null; ; ) {
@@ -120,8 +119,7 @@ async function drain(db: TestD1, lookup?: RepoLookup): Promise<UpgradeBatch[]> {
   }
 }
 
-/**
- * One bot in one workspace. The harness target (the row's own repository is the
+/** note: One bot in one workspace. The harness target (the row's own repository is the
  * inspector) is the misattribution staging carries; `target-inspector` is the
  * live target the inspector rows belong on.
  */
@@ -142,7 +140,7 @@ describe("ledger-target-alignment item", () => {
     expect(ledgerTargetAlignment.order).toBeGreaterThan(
       DATA_UPGRADES.find((item) => item.id === "orphan-ledger-attribution")!.order,
     );
-    // The card states what it never touches.
+    // invariant: The card states what it never touches.
     expect(ledgerTargetAlignment.impact).toContain("Never deletes a ledger row");
   });
 
@@ -163,7 +161,7 @@ describe("ledger-target-alignment item", () => {
     expect(batch.log).toMatchObject({ groups: 1, aligned: 1, created: 0 });
     expect(targetOf(db, "pull_requests", "pr-inspector")).toBe("target-inspector");
     expect(targetOf(db, "reviews", "rv-inspector")).toBe("target-inspector");
-    // The harness target keeps its own rows: nothing was deleted or emptied.
+    // invariant: The harness target keeps its own rows: nothing was deleted or emptied.
     expect(targetRow(db, "target-harness")).toMatchObject({ repo_name: "mstar-harness" });
   });
 
@@ -189,7 +187,7 @@ describe("ledger-target-alignment item", () => {
 
     const created = targetOf(db, "pull_requests", "pr-nexus")!;
     expect(created).not.toBe("target-harness");
-    // No fabricated id: the first delivery claims it (0067).
+    // note: No fabricated id: the first delivery claims it (0067).
     expect(targetRow(db, created)).toEqual({
       id: created,
       bot_id: BOT,
@@ -201,7 +199,7 @@ describe("ledger-target-alignment item", () => {
 
   test("a created target inherits the workspace's review defaults", async () => {
     const db = fixture();
-    // The workspace answers `manual` at depth `deep` with an 90 gate: a target
+    // note: The workspace answers `manual` at depth `deep` with an 90 gate: a target
     // this item creates is an ordinary repository, so those answers are what it
     // must run with.
     db.raw
@@ -227,7 +225,7 @@ describe("ledger-target-alignment item", () => {
       checkPassVerdicts: ["ship it", "needs fixes"],
     });
 
-    // Inheriting, not snapshotted: a later change to the workspace's answers
+    // note: Inheriting, not snapshotted: a later change to the workspace's answers
     // moves the repository with it.
     db.raw
       .prepare("UPDATE workspaces SET default_review_trigger_mode = 'open' WHERE id = 'default'")
@@ -250,7 +248,7 @@ describe("ledger-target-alignment item", () => {
     expect(second).toMatchObject({ processed: 0, done: true, cursor: null });
     expect(second.log).toMatchObject({ aligned: 0, created: 0 });
     expect(db.raw.prepare("SELECT id, target_id FROM pull_requests ORDER BY id").all()).toEqual(aligned);
-    // One created target, not two.
+    // note: One created target, not two.
     expect(
       db.raw.prepare("SELECT COUNT(*) AS n FROM review_targets WHERE repo_name = 'nexus'").get(),
     ).toEqual({ n: 1 });
@@ -258,7 +256,7 @@ describe("ledger-target-alignment item", () => {
 
   test("two live targets naming the repository leave the group untouched and count as ambiguous", async () => {
     const db = fixture();
-    // A second live row for the inspector repository: the store's own resolver
+    // note: A second live row for the inspector repository: the store's own resolver
     // refuses the pair instead of picking one, and so does the item.
     db.raw
       .prepare(
@@ -280,7 +278,7 @@ describe("ledger-target-alignment item", () => {
     expect(batch).toMatchObject({ processed: 0, done: true });
     expect(batch.log).toMatchObject({ ambiguous: 1, aligned: 0 });
     expect(targetOf(db, "pull_requests", "pr-inspector")).toBe("target-harness");
-    // The group is reported, never a failure: no later pass could repair it.
+    // invariant: The group is reported, never a failure: no later pass could repair it.
     expect(await ledgerTargetAlignment.verify(db, { runStartedAt: null })).toMatchObject({
       misaligned_ledger_rows: 0,
       ambiguous_groups: 1,
@@ -289,7 +287,7 @@ describe("ledger-target-alignment item", () => {
 
   test("a live installation binds repo_id; a removed one leaves the group unbound", async () => {
     const db = fixture();
-    // `btspoony` has a live installation, `42ch-dev`'s is removed.
+    // note: `btspoony` has a live installation, `42ch-dev`'s is removed.
     seedInstallation(db, BOT, 177552922, "42ch-dev", "2026-09-01T00:00:00.000Z");
     seedPr(db, "pr-todo", "btspoony", "todo-bots", "target-harness", 3);
     seedPr(db, "pr-nexus", "42ch-dev", "nexus", "target-harness", 4);
@@ -312,7 +310,7 @@ describe("ledger-target-alignment item", () => {
     const nexus = targetRow(db, targetOf(db, "pull_requests", "pr-nexus")!);
     expect(nexus).toMatchObject({ repo_owner: "42ch-dev", repo_name: "nexus", repo_id: null });
 
-    // A second mismatched row for the now-bound repository adopts that target
+    // note: A second mismatched row for the now-bound repository adopts that target
     // and asks GitHub nothing: the claim is already there.
     seedPr(db, "pr-todo-2", "btspoony", "todo-bots", "target-harness", 8);
     const again: number[] = [];
@@ -339,7 +337,7 @@ describe("ledger-target-alignment item", () => {
     expect(batch.log).toMatchObject({ created: 1, aligned: 1, binding_failed: 1, bound: 0 });
     const created = targetRow(db, targetOf(db, "pull_requests", "pr-todo")!);
     expect(created).toMatchObject({ repo_name: "todo-bots", repo_id: null });
-    // The row moved: the failure is the binding's, not the alignment's.
+    // note: The row moved: the failure is the binding's, not the alignment's.
     expect(await ledgerTargetAlignment.verify(db, { runStartedAt: null })).toMatchObject({
       misaligned_ledger_rows: 0,
     });
@@ -347,7 +345,7 @@ describe("ledger-target-alignment item", () => {
 
   test("a PR the destination already holds is left alone and reported, never a failed batch", async () => {
     const db = fixture();
-    // The inspector target already holds PR 42; the harness copy would violate
+    // why: The inspector target already holds PR 42; the harness copy would violate
     // `(target_id, owner, repo, pr_number)`, so it is not moved and is reported.
     seedPr(db, "pr-dupe", "btspoony", "mstar-inspector", "target-harness", 42);
     db.raw
@@ -426,7 +424,7 @@ describe("ledger-target-alignment item", () => {
     const db = fixture();
     seedBot(db, "bot-2", 7002);
     seedTarget(db, "bot-2", { id: "target-other", repoOwner: "acme", repoName: "elsewhere" });
-    // One repository, two bots' rows, each on a target naming another
+    // note: One repository, two bots' rows, each on a target naming another
     // repository: no single tenant these rows belong to.
     seedPr(db, "pr-beta", "acme", "beta", "target-other", 6, "bot-2");
     seedReview(db, "rv-beta", "acme", "beta", "target-harness");
@@ -454,7 +452,7 @@ describe("ledger-target-alignment item", () => {
     );
     expect((await resetDataUpgrade(db, ledgerTargetAlignment, OPERATOR, RUN_START)).kind).toBe("ok");
 
-    // A row planted after the run is picked up by the next one: the worklist is
+    // invariant: A row planted after the run is picked up by the next one: the worklist is
     // the mismatch itself, not a snapshot of it.
     seedPr(db, "pr-late", "btspoony", "mstar-inspector", "target-harness", 9);
     expect((await stepDataUpgrade(db, ledgerTargetAlignment, OPERATOR, RUN_START)).kind).toBe("ok");

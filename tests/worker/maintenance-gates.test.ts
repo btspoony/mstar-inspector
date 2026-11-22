@@ -1,5 +1,4 @@
-/**
- * The maintenance window's pipeline gates (D20) — the half the dashboard gate
+/** note: The maintenance window's pipeline gates (D20) — the half the dashboard gate
  * does not cover. With the window on:
  *
  *   - the per-App webhook answers 503 BEFORE the signature is verified, so
@@ -65,7 +64,7 @@ async function seedApp(db: TestD1): Promise<string> {
        VALUES (?, 'default', ?, ?, ?, ?, ?, 'every_push', 'tester', datetime('now'), datetime('now'))`,
     )
     .run(`target-${id}`, id, id, 5100, "btspoony", "mstar-inspector");
-  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // note: The route's operating switch: ON here (the acceptance gate is OFF by
   // default per spec § Deployment gate; this suite exercises maintenance).
   db.raw
     .prepare(
@@ -91,7 +90,7 @@ const PR_PAYLOAD = {
   repository: { id: 5100, name: "mstar-inspector", owner: { login: "btspoony" } },
 };
 
-/** Deliver a correctly SIGNED pull_request event, the way GitHub does. */
+/** note: Deliver a correctly SIGNED pull_request event, the way GitHub does. */
 async function deliver(appId: string, env: Env): Promise<Response> {
   const body = JSON.stringify(PR_PAYLOAD);
   return worker.fetch(
@@ -120,10 +119,10 @@ describe("the webhook maintenance gate", () => {
     const env = makeEnv(db);
     const response = await deliver(appId, env);
     expect(response.status).toBe(503);
-    // Short body, no window detail: the delivery was not admitted, so there is
+    // note: Short body, no window detail: the delivery was not admitted, so there is
     // nothing to explain and no operator reason to disclose to GitHub.
     expect(await response.text()).toBe("maintenance in progress");
-    // Nothing was classified, recorded or enqueued.
+    // invariant: Nothing was classified, recorded or enqueued.
     expect(db.raw.prepare("SELECT * FROM webhook_deliveries").all()).toHaveLength(0);
     expect(db.raw.prepare("SELECT * FROM pull_requests").all()).toHaveLength(0);
   });
@@ -150,13 +149,13 @@ describe("the webhook maintenance gate", () => {
 
     const response = await deliver(appId, makeEnv(db));
     expect(response.status).toBe(200);
-    // A verified job lands its delivery row: the gate added no cost or change.
+    // note: A verified job lands its delivery row: the gate added no cost or change.
     expect(db.raw.prepare("SELECT * FROM webhook_deliveries").all()).toHaveLength(1);
   });
 });
 
 describe("an unreadable window", () => {
-  /** Every `platform.maintenance.*` read throws: the state is unknowable. */
+  /** note: Every `platform.maintenance.*` read throws: the state is unknowable. */
   function brokenWindow(db: TestD1): TestD1 {
     return {
       ...db,
@@ -224,12 +223,12 @@ describe("the cron maintenance gate", () => {
       globalThis.fetch = originalFetch;
       defaultSweepLog.warn = originalWarn;
     }
-    // No sweep, no alert: the only line is the skip itself.
+    // invariant: No sweep, no alert: the only line is the skip itself.
     expect(fetchCalls).toBe(0);
     expect(warns).toHaveLength(1);
     expect(warns[0]).toMatchObject({ event: "maintenance_skip", detail: "cron=*/15 * * * *" });
 
-    // A closed window also holds the Check lane expression back.
+    // note: A closed window also holds the Check lane expression back.
     const checkWarns: Array<Record<string, unknown>> = [];
     defaultSweepLog.warn = (fields) => void checkWarns.push(fields as Record<string, unknown>);
     try {
@@ -243,7 +242,7 @@ describe("the cron maintenance gate", () => {
 
   test("the absent-row default still runs the sweep", async () => {
     const db = createMigratedTestD1();
-    // One stale delivery row: the sweep's own retention delete is the positive
+    // note: One stale delivery row: the sweep's own retention delete is the positive
     // proof it reached the store, so an early return cannot pass silently.
     seedBot(db, "bot-sweep", 7001);
     db.raw
@@ -267,10 +266,10 @@ describe("the cron maintenance gate", () => {
       } finally {
         defaultSweepLog.warn = originalWarn;
       }
-      // A quiet sweep raises no alert: zero POSTs and no skip line.
+      // invariant: A quiet sweep raises no alert: zero POSTs and no skip line.
       expect(fetchCalls).toBe(0);
       expect(warns.map((call) => call.event)).not.toContain("maintenance_skip");
-      // ...but it did reach the store: the stale row is gone.
+      // note: ...but it did reach the store: the stale row is gone.
       expect(db.raw.prepare("SELECT COUNT(*) AS n FROM webhook_deliveries").get()).toEqual({ n: 0 });
       expect(warns.map((call) => call.event)).toContain("retention_swept");
     } finally {

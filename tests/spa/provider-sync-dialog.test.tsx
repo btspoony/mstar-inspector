@@ -1,5 +1,4 @@
-/**
- * I-000644: the sync dialog is the operator's way to replace a stale catalog
+/** note: I-000644: the sync dialog is the operator's way to replace a stale catalog
  * vocabulary with the list the provider actually serves. Three faces must stay
  * distinguishable — "not fetched", "the provider refuses / answered nothing",
  * and "fetched N, here is what the replace costs you" — and the confirm button is
@@ -196,7 +195,7 @@ describe("the provider model sync dialog (I-000644)", () => {
         t("en", "settings.providers.sync.summary", { fetched: 104, kept: 44, added: 60, dropped: 6 }),
       );
       expect(view.byText(t("en", "settings.providers.sync.confirm"))?.disabled).toBe(false);
-      // Still nothing written: the count came from a read.
+      // invariant: Still nothing written: the count came from a read.
       expect(view.outcomes).toEqual([]);
     } finally {
       await view.cleanup();

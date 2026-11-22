@@ -1,5 +1,5 @@
 /**
- * Tailwind's own colour palette — the vocabulary a surface must never name.
+ * why: Tailwind's own colour palette — the vocabulary a surface must never name.
  *
  * One list in one place, because a guard's coverage is the list it carries. Two
  * copies of this alternation already drifted: the both-theme pass carried all 22
@@ -14,7 +14,7 @@
  * is exactly why a consumer writing `gray-800` reads as a palette step.
  */
 
-/** The 22 colour families Tailwind ships, each with numeric steps. */
+/** note: The 22 colour families Tailwind ships, each with numeric steps. */
 const FAMILIES = [
   "slate",
   "gray",
@@ -41,7 +41,7 @@ const FAMILIES = [
 ] as const;
 
 /**
- * The utilities whose value is a colour — `bg-`, `text-`, `ring-`, … Every
+ * why: The utilities whose value is a colour — `bg-`, `text-`, `ring-`, … Every
  * v4 family that takes a colour, not only the ones a surface happens to use:
  * a guard's coverage is its list, and a prefix missing here is a utility that
  * paints a palette step unseen (`I-000247`).
@@ -77,7 +77,7 @@ const COLOUR_UTILITIES = [
 ] as const;
 
 /**
- * The side/span spellings Tailwind v4 generates between a colour prefix and
+ * why: The side/span spellings Tailwind v4 generates between a colour prefix and
  * its value: `border-{t,r,b,l,s,e,x,y}-`, `divide-{x,y}-`. Without them
  * `border-t-red-500` and `divide-x-red-500` matched no guard at all while
  * painting a raw palette colour.
@@ -95,9 +95,9 @@ const COLOUR_AXIS = `(?:border-[trblsexy]|divide-[xy])`;
  */
 export const PALETTE_UTILITY_SOURCE =
   `(?<![\\w-])(?:${COLOUR_UTILITIES.join("|")})-(?:${FAMILIES.join("|")})-\\d{2,3}(?![\\w-])` +
-  // The side/span spelling the families take too: `border-t-red-500`.
+  // why: The side/span spelling the families take too: `border-t-red-500`.
   `|(?<![\\w-])${COLOUR_AXIS}-(?:${FAMILIES.join("|")})-\\d{2,3}(?![\\w-])` +
-  // `black`/`white` are colours in the same series, so every prefix above takes
+  // why: `black`/`white` are colours in the same series, so every prefix above takes
   // them — `shadow-black`, `caret-white`, `scrollbar-thumb-black` included, not
   // the nine-prefix subset this clause used to carry. The side/span axis joins
   // the same clause through `COLOUR_AXIS`: `border-t-black`, `divide-x-black`.

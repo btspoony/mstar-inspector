@@ -1,5 +1,5 @@
 /**
- * note: English dictionary — the i18n source of truth.
+ * English dictionary — the i18n source of truth.
  *
  * Contract:
  *   - `Dictionary` is derived from this object via `typeof en`; `zh-CN.ts`
@@ -33,7 +33,7 @@ export const en = {
     language: "中文",
     /** note: First focusable control in the shell: skips the sidebar straight to `<main>`. */
     skipToContent: "Skip to content",
-    /** invariant: Theme toggle: icon-only button; state + action live in the aria copy. */
+    /** note: Theme toggle: icon-only button; state + action live in the aria copy. */
     /** note: {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
     themeDark: "dark",
@@ -142,7 +142,7 @@ export const en = {
     },
   },
   /**
-   * invariant: App detail page: the tabbed shell. The review policy that used to be its
+   * why: App detail page: the tabbed shell. The review policy that used to be its
    * settings tab lives on the review-target surface (`targets.*`), so the
    * tabs here are the App's own faces only.
    */
@@ -175,7 +175,7 @@ export const en = {
       columnTime: "Time",
       columnOutcome: "Outcome",
       columnReason: "Reason",
-      /** note: A delivery whose payload carried no repository (install / bypass events). */
+      /** safety: A delivery whose payload carried no repository (install / bypass events). */
       unknownRepo: "unknown repository",
       /** note: A delivery whose request carried no x-github-event header. */
       unknownType: "unknown type",
@@ -198,7 +198,7 @@ export const en = {
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
-   * note: The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
+   * why: The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
    * a workspace's claim on a bot, listed and edited on its own page. Its detail
    * body keeps the `settings.*` labels of the tab it was moved from.
    */
@@ -226,7 +226,7 @@ export const en = {
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
     /**
-     * invariant: The 评审配置 tab's own copy; `heading` doubles as the tab label.
+     * why: The 评审配置 tab's own copy; `heading` doubles as the tab label.
      * `boundApp` names the bot the repository reviews under — read-only, since
      * rebinding is not supported yet.
      */
@@ -312,7 +312,7 @@ export const en = {
     sandboxCopy: "The runtime harness every review of this bot runs under.",
     providersNone: "No provider key or custom provider yet.",
     chainsCopy: "The model chains this bot's reviews select their models from.",
-    /** invariant: The share switch. Rendered only for the official workspace's manager. */
+    /** note: The share switch. Rendered only for the official workspace's manager. */
     shareTitle: "Share this bot",
     shareCopy:
       "Let other workspaces use this bot on their own repositories. Its credentials and model chains stay configured here.",
@@ -326,7 +326,7 @@ export const en = {
     confirmUnshareTitle: "Stop sharing {name}?",
     confirmUnshareBody:
       "Targets other workspaces hold on this bot become Blocked — they stop reviewing — until it is shared again.",
-    // invariant: The share route's two recoverable refusals.
+    // note: The share route's two recoverable refusals.
     shareOutsideOfficial:
       "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
     shareForbidden: "Only an owner or admin of this workspace can share its bot.",
@@ -338,11 +338,11 @@ export const en = {
    */
   pullRequests: {
     backToList: "Back to list",
-    /** invariant: Toolbar row above the ledger (list face only). */
+    /** note: Toolbar row above the ledger (list face only). */
     filterRepo: "Repository",
     filterRepoAll: "All repositories",
     refreshAria: "Refresh the pull request list",
-    /** invariant: The list table's columns — the row's own facts only. */
+    /** note: The list table's columns — the row's own facts only. */
     columnPr: "Pull request",
     columnState: "State",
     columnVerdict: "Latest verdict",
@@ -579,7 +579,7 @@ export const en = {
     pendingInvites: "{count} pending invitations",
     reviewAttemptsLabel: "Review attempts this month",
     reviewAttemptsHint: "Counted, not limited.",
-    /** invariant: Owner-only workspace deletion: entry, confirmation body and refusal. */
+    /** note: Owner-only workspace deletion: entry, confirmation body and refusal. */
     deleteWorkspace: "Delete workspace",
     deleteWorkspaceTitle: "Delete this workspace?",
     deleteWorkspaceBody:
@@ -621,7 +621,7 @@ export const en = {
     emptyDescriptionMember: "This workspace has no other members yet.",
   },
   /**
-   * invariant: Workspace creation — the signed-in landing for a login that belongs to no
+   * note: Workspace creation — the signed-in landing for a login that belongs to no
    * workspace yet. Sign-in joins nobody, so this is the only path
    * into a first workspace besides accepting an invitation.
    */
@@ -661,11 +661,11 @@ export const en = {
     inviteAcceptFailed: "Could not accept the invitation — try again.",
     /** note: The manager gate on `/dashboard/<ref>/settings` — a plain member sees it. */
     settingsOwnerOnly: "Only workspace owners and admins can change these settings.",
-    /** invariant: The two tabs: the read-only spend, then the settings a manager may write. */
+    /** note: The two tabs: the read-only spend, then the settings a manager may write. */
     tabQuota: "Quota",
     tabConfiguration: "Configuration",
     /**
-     * invariant: The read-only usage card (spec bot-scope-and-claiming § Review usage):
+     * why: The read-only usage card (spec bot-scope-and-claiming § Review usage):
      * this UTC month, the two counts, and the shared-bot row's state. The two
      * unavailable states keep distinct copy — one is the reader's plan to
      * change, the other waits for a platform operator.
@@ -691,7 +691,7 @@ export const en = {
      * never "12 credits".
      */
     quotaHeading: "Credit usage",
-    /** invariant: {month} = the UTC calendar month, e.g. 2026-11. The card's only month label. */
+    /** note: {month} = the UTC calendar month, e.g. 2026-11. The card's only month label. */
     quotaWindow: "This month · {month} (UTC)",
     quotaCreditsLabel: "Credits",
     /** note: {used} / {limit} in credits, two decimals. */
@@ -707,7 +707,7 @@ export const en = {
     quotaBasis:
       "Credits weigh the same started reviews the members page counts as attempts; the review counts below are published reviews.",
     /**
-     * note: At or past the ceiling the used/limit pair above stays and this banner
+     * invariant: At or past the ceiling the used/limit pair above stays and this banner
      * states the consequence and the reset. {month} = YYYY-MM; {reset} = the
      * next UTC month's first instant (YYYY-MM-DD).
      */
@@ -747,7 +747,7 @@ export const en = {
       "The stored review concurrency could not be read, so reviews may be running one at a time. The numbers shown are a fallback. Saving a value from {min} to {max} sets this workspace's value, and retrying the read refreshes it; if the warning returns after a reload, ask your platform operator.",
   },
   /**
-   * invariant: Platform-operator support (2026-10): the operator's read-only face and the
+   * safety: Platform-operator support (2026-10): the operator's read-only face and the
    * tenant's undismissable grant notice. The notice states who is looking, why,
    * and until when — and offers no action, because the tenant can neither end
    * nor edit a grant.
@@ -761,7 +761,7 @@ export const en = {
     grantLine: "{login} has support access until {expires} — {reason}",
     tableLogin: "GitHub login",
     tableRole: "Role",
-    /** invariant: The tenant's always-on notice; not dismissible, carries no action. */
+    /** safety: The tenant's always-on notice; not dismissible, carries no action. */
     noticeHeading: "Support access is active",
     noticeLine: "{login} can read this workspace's members until {expires} — {reason}",
     noticeError: "Could not check for active support access.",
@@ -799,7 +799,7 @@ export const en = {
     disconnected: "This App is disconnected — enable it to review.",
     lastWebhook: "Last webhook: {time}",
     /**
-     * invariant: The installations section of the settings flow: heading, count subtitle
+     * note: The installations section of the settings flow: heading, count subtitle
      * and the table's columns. `installations.length` is the only installation
      * figure the product carries (compass D13); the settings payload has no
      * per-installation repository count, so there is no repository column.
@@ -811,7 +811,7 @@ export const en = {
     installationsId: "Installation ID",
     installationsLastSync: "Last sync",
     /**
-     * invariant: The roster's state column. The settings read carries LIVE rows only
+     * why: The roster's state column. The settings read carries LIVE rows only
      * (`bot_installations.removed_at IS NULL`), so the column states that
      * filter: an uninstalled installation is not silently omitted from a table
      * that would otherwise read as the full history.
@@ -934,21 +934,21 @@ export const en = {
       fieldDuplicated:
         "The {field} field was submitted more than once — resubmit the form with one value. Nothing was saved.",
       unknownOperation: "Unknown settings operation — resubmit one of this page's forms.",
-      /** invariant: A bot-scoped write against a `shared` bot: the page is read-only. */
+      /** note: A bot-scoped write against a `shared` bot: the page is read-only. */
       botReadOnly: "This bot is shared — its configuration is read-only here.",
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
-      /** invariant: Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
+      /** note: Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
       usageProbeOffVendorHost:
         "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at {host}.",
-      /** invariant: Same refusal when the declaration yields no readable host at all. */
+      /** note: Same refusal when the declaration yields no readable host at all. */
       usageProbeUnreadableEndpoint:
         "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at an endpoint that cannot be read.",
     },
     ops: "Operations",
     opsCopy: "These actions change how this App answers incoming deliveries.",
-    // note: The danger zone's per-action rows: the row says what its control does to
+    // why: The danger zone's per-action rows: the row says what its control does to
     // deliveries; the confirm dialogs keep their own proceed-or-not bodies.
     opsReviewsTitle: "Review deliveries",
     opsReviewsCopy:
@@ -972,7 +972,7 @@ export const en = {
      * never a workspace default. On = review a draft like any other PR.
      */
     reviewDrafts: "Review draft pull requests",
-    // invariant: Review depth (migration 0047): the four faces of the App's depth select.
+    // safety: Review depth (migration 0047): the four faces of the App's depth select.
     // Wire values stay quick/default/deep (plus the inherit face's own
     // sentinel); only the labels localize. "Standard" is the `default` enum's
     // tenant-facing name — a degree word beside Quick and Deep.
@@ -1082,7 +1082,7 @@ export const en = {
         sizesUnstated:
           "No size stated — this model saves as unstated and the runtime's own defaults apply.",
         /**
-         * note: A provider with no catalog row at all: the sizes are UNKNOWN, not
+         * invariant: A provider with no catalog row at all: the sizes are UNKNOWN, not
          * zero. This replaces the requirements line (which would credit a
          * snapshot with numbers this provider does not have) — blank stays the
          * ordinary, savable answer and neither field is a precondition.
@@ -1241,7 +1241,7 @@ export const en = {
     confirmRemoveCustomBody:
       "The provider and every key in its pool are removed. To free one slot only, remove that key's own row. Chains referencing its models fail on save.",
     /**
-     * why: The review trigger — TARGET-scoped: when a delivery starts a review. The
+     * note: The review trigger — TARGET-scoped: when a delivery starts a review. The
      * bot's sandbox image now lives on the bot page (`botSettings`), so this
      * section carries the mention + mode controls alone.
      */
@@ -1254,7 +1254,7 @@ export const en = {
     runtimeHarnessValue: "Reviews for this App run under the {id} runtime harness.",
     saveRuntimeHarness: "Save runtime harness",
     /**
-     * invariant: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
+     * why: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
      * synced profile name, the numeric App id, and a relative synced-at time
      * (formatRelativeTime output) — nullable server fields degrade per-field,
      * so each key renders only when its value exists.
@@ -1266,7 +1266,7 @@ export const en = {
     // note: The local row id — the webhook URL's second segment, shown next to the
     // GitHub App id so both URL segments are readable from the card.
     appInfoLocalId: "Local App ID: {id}",
-    // invariant: Manager-only: the absolute delivery URL a webhook repoint needs. The
+    // note: Manager-only: the absolute delivery URL a webhook repoint needs. The
     // deploy doc sends the operator to this card for it.
     appInfoDeliveryUrl: "Webhook URL:",
     appInfoViewOnGithub: "View {name} on GitHub",
@@ -1275,7 +1275,7 @@ export const en = {
     // "view". Member face keeps appInfoViewOnGithub.
     appInfoManageOnGithub: "Manage {name} on GitHub",
     appInfoSynced: "Synced {time}",
-    // invariant: Manager-only force refresh (D5): re-fetches the cached GitHub profile
+    // safety: Manager-only force refresh (D5): re-fetches the cached GitHub profile
     // bypassing the 24h TTL; the success notice confirms the cache reloaded.
     appInfoRefresh: "Refresh from GitHub",
     appInfoRefreshDone: "Identity refreshed from GitHub.",
@@ -1397,7 +1397,7 @@ export const en = {
     },
   },
   /**
-   * invariant: Platform console (`/_internal_admin`) — the operator surface. Bilingual
+   * safety: Platform console (`/_internal_admin`) — the operator surface. Bilingual
    * through the same locale cookie as the workspace shell: `main.tsx` reads
    * `boot.locale`, every screen takes it as a prop, and page copy resolves
    * via `t(locale, …)`. These keys are operator-facing and never reuse the
@@ -1548,7 +1548,7 @@ export const en = {
       attemptCapDescription:
         "The whole attempt stops at this cap: queue wait, execution and publication together. A review stopped by it is terminal and is not re-run automatically.",
       attemptCapLabel: "Maximum duration (ms)",
-      /** invariant: {min}/{max} in ms plus minutes; a refusal names the same range. */
+      /** note: {min}/{max} in ms plus minutes; a refusal names the same range. */
       attemptCapRange:
         "Accepted range: {min}–{max} ms ({minMinutes}–{maxMinutes} minutes). A value outside it is refused.",
       attemptCapSave: "Save",
@@ -1575,7 +1575,30 @@ export const en = {
       /** invariant: No attempt is admitted while the stored cap cannot be read. */
       attemptCapUnreadable:
         "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
-      /** invariant: Admission refusals the pipeline recorded over the trailing 24h. */
+      /** note: The review route's operating switch — the gate that admits deliveries. */
+      routeWorkflowTitle: "Review route",
+      routeWorkflowDescription:
+        "Whether a queued review delivery creates a Workflow instance. Off refuses every delivery; a change applies to the next batch.",
+      routeWorkflowStoredLabel: "Stored value",
+      routeWorkflowEffectiveLabel: "Effective now",
+      /** note: {value} = the stored `on` / `off`. */
+      routeWorkflowStoredSaved: "{value} — saved",
+      /** note: No row: the read path's absent-row answer. */
+      routeWorkflowStoredAbsent: "off — no value saved",
+      /** note: {value} = the rejected raw row, quoted — a hand-edited value. */
+      routeWorkflowStoredUntrusted: "off — untrusted (stored value {value})",
+      /** note: The stored row could not be read at all. */
+      routeWorkflowStoredUnreadable: "off — unreadable",
+      routeWorkflowEffectiveOn: "on — deliveries create a Workflow instance",
+      routeWorkflowEffectiveOff: "off — deliveries are refused and nothing is created",
+      routeWorkflowSave: "Save",
+      routeWorkflowSaved: "Saved.",
+      /** note: Fallback when the write fails with an unrecognised error. */
+      routeWorkflowFailed: "Could not change the review route.",
+      /** note: A save landed but neither its echo nor a re-read confirmed the mode. */
+      routeWorkflowUnconfirmed:
+        "The save could not be confirmed: its response carried no readable gate answer and the re-read failed, so the stored mode is unknown. Reload to read it back.",
+      /** note: Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",
@@ -1633,7 +1656,7 @@ export const en = {
       durationSettlementBasis:
         "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
       durationCandidateLabel: "Candidate cap (ms)",
-      /** invariant: The analysis range, stated only when a typed candidate falls outside it. */
+      /** note: The analysis range, stated only when a typed candidate falls outside it. */
       durationCandidateRange: "The analysis accepts an integer from {min} to {max} ms.",
       durationCandidateApply: "Show cutoff",
       durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",
@@ -1660,7 +1683,7 @@ export const en = {
       workspaceColumn: "Workspace",
       ownerColumn: "Owner",
       membersColumn: "Members",
-      /** invariant: {count} = pending invite count (rendered only when > 0). */
+      /** note: {count} = pending invite count (rendered only when > 0). */
       pendingInvites: "{count} pending",
       seatsColumn: "Seats",
       planColumn: "Plan",
@@ -1686,7 +1709,7 @@ export const en = {
       /** note: Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
       /**
-       * invariant: The official-workspace card above the table: the one tenant whose bots
+       * safety: The official-workspace card above the table: the one tenant whose bots
        * may be offered platform-wide. Clearing is its own action, never an
        * empty save, and it does not revoke a share already granted.
        */
@@ -1890,7 +1913,7 @@ export const en = {
       statusVerifying: "Verifying",
       statusCompleted: "Completed",
       statusFailed: "Failed",
-      /** invariant: The item refuses a second batch outside the maintenance window. */
+      /** note: The item refuses a second batch outside the maintenance window. */
       downtimeBadge: "Needs downtime",
       /** note: A folded completed row: the rows it processed and when it last ran. */
       completedSummary: "{count} rows · last run {time}",
@@ -1904,16 +1927,16 @@ export const en = {
       startAction: "Start upgrade",
       continueAction: "Continue",
       verifyAction: "Verify",
-      /** invariant: Only live during a run: it lands after the batch in flight. */
+      /** note: Only live during a run: it lands after the batch in flight. */
       stopAction: "Stop",
-      /** invariant: An in-flight run's only exit: the state row returns to pending. */
+      /** note: An in-flight run's only exit: the state row returns to pending. */
       resetAction: "Return to pending",
       /** note: A failed item's one recovery, and what that recovery does not undo. */
       restartAction: "Restart upgrade",
       restartConsequence: "Rows already migrated are not rolled back.",
-      /** note: Every preflight counter is zero: a run would move nothing. */
+      /** why: Every preflight counter is zero: a run would move nothing. */
       nothingToMigrate: "Nothing to migrate — this upgrade has no work left.",
-      /** invariant: {title} = the item's title; the server's refusal rides as detail. */
+      /** note: {title} = the item's title; the server's refusal rides as detail. */
       preflightFailed: "Could not run the preflight for {title}.",
       stepFailed: "The batch for {title} was refused.",
       verifyFailed: "Could not verify {title}.",

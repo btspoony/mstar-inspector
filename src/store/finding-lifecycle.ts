@@ -135,7 +135,9 @@ export const PUBLICATION_LEASE_MS = 120_000;
 /** `line_dispatch_ms` value for a row that predates the column: its intent is
  *  UNKNOWN (the batch may have been sent), so it is discovery-only forever. */
 export const LINE_DISPATCH_UNKNOWN = -1;
-/** Recovery attempt cap — rows at/after this count leave the selectors. */
+/** Recovery attempt cap — rows at/after this count leave the selectors. The
+ *  line batch's discovery bound reuses it: a readback that captured nothing is
+ *  the same kind of attempt as any other lifecycle recovery. */
 export const LIFECYCLE_MAX_ATTEMPTS = 5;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
 export const PUBLICATION_MAX_BYTES = 1_048_576;
@@ -1374,28 +1376,41 @@ export async function releaseUnspentPublicationClaim(
   return result.meta.changes > 0;
 }
 
-/** One applied publication's post-apply line batch: is work still pending, and
- *  has a dispatch intent already been recorded (the batch may have been sent)? */
-export type LineBatchState = { pending: boolean; dispatched: boolean };
+/** One applied publication's post-apply line batch: is work still pending, has
+ *  a dispatch intent already been recorded (the batch may have been sent), and
+ *  how many of its associations carry a captured comment id. */
+export type LineBatchState = { pending: boolean; dispatched: boolean; captures: number };
 
 /**
  * Read the batch's durable state. `dispatched` is the §7.9a evidence question:
  * an intent means some lane took the send right for this exact batch, so the
  * only remaining work is read-only discovery — never a second send. A row that
  * predates the column carries `LINE_DISPATCH_UNKNOWN` and is treated the same
- * way: its intent is unknown, not absent.
+ * way: its intent is unknown, not absent. `captures` is the optimistic token a
+ * failure observation carries: it must still match when the failure is
+ * recorded, or a concurrent capture (full or partial) invalidates it. It is
+ * DERIVED from the thread rows, so re-writing an already-captured id moves it
+ * not at all — only a NEW id does.
  */
 export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
   const row = await db
     .prepare(`SELECT line_dispatch_ms FROM review_publications WHERE id = ?`)
     .bind(id)
     .first<{ line_dispatch_ms: number | null }>();
-  if (row === null) return { pending: false, dispatched: false };
-  const pending = await db
-    .prepare(`SELECT 1 AS hit FROM review_threads WHERE publication_id = ? AND review_id IS NULL LIMIT 1`)
+  if (row === null) return { pending: false, dispatched: false, captures: 0 };
+  const counts = await db
+    .prepare(
+      `SELECT SUM(CASE WHEN review_id IS NULL THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN review_id IS NOT NULL THEN 1 ELSE 0 END) AS captures
+         FROM review_threads WHERE publication_id = ?`,
+    )
     .bind(id)
-    .first<{ hit: number }>();
-  return { pending: pending !== null, dispatched: row.line_dispatch_ms !== null };
+    .first<{ pending: number | null; captures: number | null }>();
+  return {
+    pending: (counts?.pending ?? 0) > 0,
+    dispatched: row.line_dispatch_ms !== null,
+    captures: counts?.captures ?? 0,
+  };
 }
 
 /**
@@ -1464,10 +1479,93 @@ export async function releaseLineDispatch(
   return released.meta.changes > 0;
 }
 
+/** One discovery pass's durable outcome: the failed-readback count after it,
+ *  and whether that pass left the batch unresolvable. */
+export type LineDiscoveryOutcome = { attempts: number; unresolvable: boolean };
+
+/**
+ * ONE discovery pass that persisted no progress, recorded durably on the batch.
+ * The count therefore means CONSECUTIVE discovery attempts that saved nothing
+ * (not lifetime attempts, and not attempts that merely left comments missing);
+ * a write that threw saved nothing and counts. The count is monotone because a
+ * clock-based bound would re-admit the row on every slow pass; at `bound`
+ * failures the batch leaves the eligible set with the reason the LAST pass
+ * observed, so an operator can see why recovery stopped. The row, its count
+ * and its reason stay (leaving the set is not deletion), and a row already
+ * unresolvable returns `null` — the caller has nothing new to report.
+ *
+ * The write is OPTIMISTIC on the capture state this attempt observed
+ * (`readLineBatchState().captures`, derived from the thread rows): a concurrent
+ * pass that saved a NEW comment id moves it, so this stale observation changes
+ * nothing — not the count, not the marker — instead of retiring a batch that is
+ * still making progress. The same predicate keeps a completed batch unmarkable.
+ *
+ * It deliberately does NOT stamp `updated_ms`. Attribution of a reused
+ * same-head journal row is that column's LAST WRITE (the Check wait's probe),
+ * and a bookkeeping count is not a write by any attempt: stamping it would let
+ * a recovery pass hand an old publication's proof to a newer generation.
+ */
+export async function recordLineDiscoveryFailure(
+  db: D1Like,
+  id: string,
+  reason: string,
+  observedCaptures: number,
+  nowMs: number,
+  bound: number = LIFECYCLE_MAX_ATTEMPTS,
+): Promise<LineDiscoveryOutcome | null> {
+  const result = await db
+    .prepare(
+      `UPDATE review_publications
+          SET line_discovery_attempts = line_discovery_attempts + 1,
+              line_unresolvable_ms =
+                CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_ms END,
+              line_unresolvable_reason =
+                CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_reason END
+        WHERE id = ? AND phase = 'applied' AND line_unresolvable_ms IS NULL
+          AND (SELECT COUNT(*) FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NOT NULL) = ?
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
+        RETURNING line_discovery_attempts, line_unresolvable_ms`,
+    )
+    .bind(bound, nowMs, bound, reason, id, id, observedCaptures, id)
+    .run<{ line_discovery_attempts: number; line_unresolvable_ms: number | null }>();
+  const written = result.results[0];
+  if (written === undefined) return null;
+  return {
+    attempts: written.line_discovery_attempts,
+    unresolvable: written.line_unresolvable_ms !== null,
+  };
+}
+
+/**
+ * A discovery pass that PERSISTED at least one NEW comment id clears the count —
+ * a partial capture is progress, even while other comments stay missing, so the
+ * batch must not carry earlier misses toward a cap it no longer deserves. Only
+ * the counter moves (no `updated_ms` stamp — see `recordLineDiscoveryFailure`);
+ * an unresolvable batch is never selected, so its marker columns cannot be
+ * cleared from here.
+ */
+export async function resetLineDiscoveryFailures(db: D1Like, id: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE review_publications
+          SET line_discovery_attempts = 0
+        WHERE id = ? AND line_discovery_attempts > 0 AND line_unresolvable_ms IS NULL`,
+    )
+    .bind(id)
+    .run();
+}
+
 /**
  * Persist the captured line-comment ids against their associations (the §7.7
  * step 10 capture). Replay-safe and scoped to the publication, so a discovery
  * pass in another lane can complete what a send could not read back.
+ *
+ * Only an UNC captured association is written: a re-listed id is not progress,
+ * and rewriting it must not look like any. Returns how many associations this
+ * call NEWLY captured — the caller's only "progress" signal, and the value the
+ * derived capture count (the optimistic token) moves by. The publication row is
+ * deliberately not touched: this is not a write any attempt should be
+ * attributed by (see `recordLineDiscoveryFailure`).
  */
 export async function captureLineComments(
   db: D1Like,
@@ -1475,28 +1573,37 @@ export async function captureLineComments(
   reviewId: number | null,
   posted: readonly { associationId: string; commentId: number }[],
   nowMs: number,
-): Promise<void> {
-  if (posted.length === 0) return;
-  await db.batch(
+): Promise<number> {
+  if (posted.length === 0) return 0;
+  const results = await db.batch(
     posted.map((p) =>
       db
-        .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ? AND publication_id = ?`)
+        .prepare(
+          `UPDATE review_threads
+              SET review_id = ?, comment_id = ?, updated_ms = ?
+            WHERE id = ? AND publication_id = ? AND review_id IS NULL`,
+        )
         .bind(reviewId, p.commentId, nowMs, p.associationId, publicationId),
     ),
   );
+  return results.reduce((captured, result) => captured + result.meta.changes, 0);
 }
 
 /**
  * The post-apply line lane's selection: applied rows that still carry an
  * uncaptured line intent and no live holder. `line_dispatch_ms` is deliberately
  * not filtered — a dispatched row is returned so the recovery lane can run the
- * read-only discovery the intent allows.
+ * read-only discovery the intent allows. A batch marked UNRESOLVABLE by the
+ * discovery bound is not returned at all: it can never resolve, so leaving it
+ * in the bounded selection would only starve newer batches. Within the
+ * resolvable set the order stays oldest-first.
  */
 export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
   const rows = await db
     .prepare(
       `SELECT * FROM review_publications p
         WHERE p.phase = 'applied'
+          AND p.line_unresolvable_ms IS NULL
           AND (p.lease_until_ms IS NULL OR p.lease_until_ms <= ?)
           AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
         ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id

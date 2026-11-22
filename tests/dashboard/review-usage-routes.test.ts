@@ -1,5 +1,5 @@
 /**
- * The workspace usage read through the real worker mount:
+ * why: The workspace usage read through the real worker mount:
  * `GET /dashboard/<ref>/api/settings/review-usage`
  * (spec bot-scope-and-claiming § Review usage).
  *
@@ -78,7 +78,7 @@ function seedWorkspace(db: TestD1, id: string, slug: string): void {
   );
 }
 
-/** One review stamped in the route's own month (the current instant). */
+/** note: One review stamped in the route's own month (the current instant). */
 function seedReviewNow(db: TestD1, id: string, prNumber: number, targetId: string, botId: string): void {
   seed(
     db,
@@ -104,7 +104,7 @@ async function getUsage(db: TestD1, ref: string, login: string | null): Promise<
 }
 
 /**
- * `ws-acme` (owner `dana`, plain member `frank`) with a `pro` subscription, a
+ * note: `ws-acme` (owner `dana`, plain member `frank`) with a `pro` subscription, a
  * `shared` bot and an own bot, each with one target. `ws-other` (`olga` is its
  * member) carries four own-bot reviews of its own.
  */
@@ -155,7 +155,7 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
       sharedReviews: 2,
       ownReviews: 1,
       sharedBot: "available",
-      // The credit block: the judging profile (v1), its `pro` ceiling and the
+      // why: The credit block: the judging profile (v1), its `pro` ceiling and the
       // month's spend in RP. Nothing was metered in this fixture, so 0 is a
       // real answer, not a missing field.
       quota: {
@@ -169,14 +169,14 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
         resetOn: month.endIso.slice(0, 10),
       },
     });
-    // ws-other's four reviews stay out of this payload entirely.
+    // why: ws-other's four reviews stay out of this payload entirely.
     expect(JSON.stringify(body)).not.toContain("ws-other");
   });
 
   test("the credit block reads the month's RP, its source split and the judging profile", async () => {
     const db = fixture();
     const month = quotaMonth(new Date());
-    // A shared Deep review (6 x 10) and a BYOK Standard one (2 x 1), both
+    // why: A shared Deep review (6 x 10) and a BYOK Standard one (2 x 1), both
     // started inside the reported month.
     for (const [reviewId, rp, source] of [
       ["usage-shared", 60, "shared"],
@@ -201,7 +201,7 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
       limitRp: 20000,
       sharedRp: 60,
       byokRp: 2,
-      // Credits are presentation: the ratio rides the payload so the card never
+      // why: Credits are presentation: the ratio rides the payload so the card never
       // carries a constant of its own.
       rpPerCredit: 20,
     });
@@ -223,7 +223,7 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
 
   test("self-hosted reports no quota block at all — and reads no profile", async () => {
     const db = fixture();
-    // Deleting every profile proves the mode short-circuits: a `saas` read of
+    // why: Deleting every profile proves the mode short-circuits: a `saas` read of
     // the same database would throw on the empty table, so a 200 here is the
     // "no ceiling is resolved" contract rather than a silently-swallowed error.
     seed(db, "DELETE FROM quota_profile_plans");
@@ -243,7 +243,7 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
 
   test("a caller who is not a member of the addressed workspace gets the tenant 404", async () => {
     const db = fixture();
-    // A member of ws-other addressing ws-acme, and a member of ws-acme
+    // why: A member of ws-other addressing ws-acme, and a member of ws-acme
     // addressing ws-other: neither can read the other tenant's row.
     expect((await getUsage(db, "ws-acme", "olga")).status).toBe(404);
     expect((await getUsage(db, "ws-other", "frank")).status).toBe(404);
@@ -262,15 +262,15 @@ describe("GET /dashboard/<ref>/api/settings/review-usage", () => {
       return body.sharedBot;
     };
 
-    // `pro` plus a live `shared` bot.
+    // note: `pro` plus a live `shared` bot.
     expect(await stateOf("ws-acme")).toBe("available");
 
-    // The capability without a designated shared bot: no operator has shared
+    // why: The capability without a designated shared bot: no operator has shared
     // one, so the reader has nothing to buy.
     seed(db, "UPDATE review_bots SET scope = 'owned', shared_at = NULL WHERE id = 'bot-shared'");
     expect(await stateOf("ws-acme")).toBe("not-designated");
 
-    // A plan without the capability: the reader's own plan is the fix.
+    // why: A plan without the capability: the reader's own plan is the fix.
     seed(db, "DELETE FROM workspace_subscriptions WHERE workspace_id = 'ws-acme'");
     expect(await stateOf("ws-acme")).toBe("not-in-plan");
   });

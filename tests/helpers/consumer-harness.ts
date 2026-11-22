@@ -1,5 +1,5 @@
 /**
- * Runtime harness shared by the consumer pipeline suites: one `createConsumerHarness()`
+ * note: Runtime harness shared by the consumer pipeline suites: one `createConsumerHarness()`
  * per test owns the injected sandbox, commenter, KV and log doubles plus the
  * queue-message builders, so two suites — or two cases in one suite — can never
  * clear each other's recorders.
@@ -33,13 +33,13 @@ import {
   TEST_REPO,
 } from "./consumer-fixtures";
 
-// Load shim only: consumer.ts statically imports ./sandbox → the workerd
+// note: Load shim only: consumer.ts statically imports ./sandbox → the workerd
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner). The
 // consumer never calls the sandbox — every test injects the fake via
 // createReviewConsumer overrides.
 import "./cloudflare-workers-mock";
 
-// Type-only: erased at compile time, so this import cannot run before the
+// note: Type-only: erased at compile time, so this import cannot run before the
 // workerd shim above. `loadConsumer()` is the only runtime route to the module.
 import type * as consumerModuleNs from "../../src/pipeline/consumer";
 
@@ -70,13 +70,13 @@ export function loadConsumer(): Promise<ConsumerModule> {
   return consumerLoad;
 }
 
-// The diff bound lives with the command that enforces it (gitops), not on the
+// note: The diff bound lives with the command that enforces it (gitops), not on the
 // consumer — the double reproduces that read, so it takes the same one.
 export { DIFF_PREFETCH_MAX_BYTES } from "../../src/pipeline/gitops";
 
 /** Every per-test double, recorder and builder one harness instance owns. */
 export type ConsumerHarness = {
-  /** The injected sandbox double and the mutable state it reads. */
+  /** note: The injected sandbox double and the mutable state it reads. */
   fakeSandbox: {
     state: FakeSandboxState;
     runCommand: (cmd: string, opts?: unknown) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
@@ -90,42 +90,42 @@ export type ConsumerHarness = {
     destroy: () => Promise<void>;
   };
   sandbox: FakeSandboxState;
-  /** Every commenter op the round issued, in order. */
+  /** note: Every commenter op the round issued, in order. */
   commenterCalls: CommenterCall[];
-  /** Per-test commenter behaviour switches. */
+  /** note: Per-test commenter behaviour switches. */
   commenterState: FakeCommenterState;
-  /** The commenter double itself, injected through `overrides`. */
+  /** note: The commenter double itself, injected through `overrides`. */
   fakeCommenter: ReviewCommenter;
-  /** The per-call `createReviewConsumer` overrides this instance injects. */
+  /** note: The per-call `createReviewConsumer` overrides this instance injects. */
   overrides: {
     createAppCommenter: () => ReviewCommenter;
     getSandbox: (binding: unknown, id: string) => Promise<ReviewSandbox>;
     startAttempt: AttemptStarter;
   };
-  /** Every head a moved-head skip re-admitted through the queue (the successor). */
+  /** note: Every head a moved-head skip re-admitted through the queue (the successor). */
   successorEnqueues: ReviewJobPayload[];
-  /** Every structured log line the round emitted, in order. */
+  /** note: Every structured log line the round emitted, in order. */
   logLines: TestLogLine[];
   testLog: ConsumerLog;
-  /** Per-case KV behaviour: absent-key answer, per-key claims, failing read/write. */
+  /** note: Per-case KV behaviour: absent-key answer, per-key claims, failing read/write. */
   kvState: {
     getValue: string | null;
     getError: Error | undefined;
     entries: Map<string, string>;
     putError: Error | undefined;
   };
-  /** Every KV write, in order (the idempotency/completion contract). */
+  /** note: Every KV write, in order (the idempotency/completion contract). */
   kvPuts: Array<{ key: string; value: string; options?: unknown }>;
-  /** Delivery attempt the next `makeBatch` reports (the retry/DLQ counter). */
+  /** note: Delivery attempt the next `makeBatch` reports (the retry/DLQ counter). */
   queueState: { attempts: number };
-  /** Every ack/retry the consumer asked of this instance's batch, in order. */
+  /** note: Every ack/retry the consumer asked of this instance's batch, in order. */
   messageRetryCalls: Array<{ attempts: number; delaySeconds?: number }>;
   messageAckCalls: Array<{ attempts: number }>;
-  /** The env this instance's KV double is wired into (DB default: a seeded D1). */
+  /** note: The env this instance's KV double is wired into (DB default: a seeded D1). */
   makeEnv: (envOverrides?: Partial<PipelineEnv>) => Promise<PipelineEnv>;
-  /** A batch whose acks/retries land on this instance and whose gitops commands are declared on this instance's sandbox. */
+  /** note: A batch whose acks/retries land on this instance and whose gitops commands are declared on this instance's sandbox. */
   makeBatch: (payload: ReviewJobPayload) => MessageBatch<ReviewJobPayload>;
-  /** Run a scripted failing stage and prove the credential is redacted everywhere the round publishes. */
+  /** note: Run a scripted failing stage and prove the credential is redacted everywhere the round publishes. */
   expectFailureRedacted: (
     consumer: (batch: MessageBatch<ReviewJobPayload>) => Promise<void>,
     db: TestD1,
@@ -139,16 +139,16 @@ export type ConsumerHarness = {
  * and write only this instance's state.
  */
 export function createConsumerHarness(): ConsumerHarness {
-  // --- sandbox fake (injected via createReviewConsumer overrides) -----------
+  // note: --- sandbox fake (injected via createReviewConsumer overrides) -----------
   const fakeSandbox = createFakeSandbox();
   const sandbox = fakeSandbox.state;
 
-  // --- commenter fake (injected via createReviewConsumer overrides) --------
+  // note: --- commenter fake (injected via createReviewConsumer overrides) --------
   const commenterCalls: CommenterCall[] = [];
   const commenterState = initialFakeCommenterState();
   const fakeCommenter = createFakeCommenter(commenterState, commenterCalls);
 
-  // --- the execution route ------------------------------------------------
+  // note: --- the execution route ------------------------------------------------
   // The harness runs the PRODUCTION step composition with an in-place step:
   // the phases, handoffs, settlement and successor hand-off are the real ones,
   // only the platform's durable step store is replaced.
@@ -159,11 +159,11 @@ export function createConsumerHarness(): ConsumerHarness {
     startAttempt: inlineWorkflowStarter(successorEnqueues),
   };
 
-  // --- test log sink (injected via the consumer's optional log param) ------
+  // note: --- test log sink (injected via the consumer's optional log param) ------
   const { lines: logLines, log: testLog } = createTestLog();
 
   /**
-   * Per-case KV behaviour: the answer for keys absent from `entries` (the
+   * note: Per-case KV behaviour: the answer for keys absent from `entries` (the
    * completion marker), per-key claims (what the worker wrote for ONE commit),
    * and a failing read/write.
    */
@@ -173,7 +173,7 @@ export function createConsumerHarness(): ConsumerHarness {
     entries: new Map(),
     putError: undefined,
   };
-  /** Every KV write, in order (the idempotency/completion contract). */
+  /** note: Every KV write, in order (the idempotency/completion contract). */
   const kvPuts: ConsumerHarness["kvPuts"] = [];
   const kv = {
     get: mock(async (key: string) => {
@@ -193,7 +193,7 @@ export function createConsumerHarness(): ConsumerHarness {
 
   async function makeEnv(envOverrides: Partial<PipelineEnv> = {}): Promise<PipelineEnv> {
     return {
-      // `??` short-circuits, so the seeded double is built ONLY when the case
+      // note: `??` short-circuits, so the seeded double is built ONLY when the case
       // does not bring its own DB — every recheck suite seeds one and the
       // migrated + App-seeded default was pure cost there.
       DB: envOverrides.DB ?? ((await createSeededTestD1()) as never),
@@ -205,7 +205,7 @@ export function createConsumerHarness(): ConsumerHarness {
   }
 
   function makeBatch(payload: ReviewJobPayload): MessageBatch<ReviewJobPayload> {
-    // Declare the payload's own commands before the consumer can exec them.
+    // note: Declare the payload's own commands before the consumer can exec them.
     registerGitOpsCommands(sandbox, payload);
     return {
       queue: "review-queue",
@@ -227,7 +227,7 @@ export function createConsumerHarness(): ConsumerHarness {
   }
 
   /**
-   * Run the consumer over a scripted failing stage and prove the exact
+   * note: Run the consumer over a scripted failing stage and prove the exact
    * credential is gone from every surface the round publishes: the thrown
    * message — whose non-secret `tail` really arrived, so a redaction that
    * blanked the message cannot pass — and the failure row it wrote. Returns
@@ -273,7 +273,7 @@ export function createConsumerHarness(): ConsumerHarness {
   };
 }
 
-// --- pure helpers (no recorder, no shared mutable state) --------------------
+// note: --- pure helpers (no recorder, no shared mutable state) --------------------
 
 export function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   return {
@@ -284,7 +284,7 @@ export function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJo
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // The seeded App and the target `createSeededTestD1` gives it — the two
+    // note: The seeded App and the target `createSeededTestD1` gives it — the two
     // ids every job names (a test that wants another App overrides both).
     botRef: { appId: TEST_APP_ID },
     targetId: `target-${TEST_APP_ID}`,

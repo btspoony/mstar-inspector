@@ -1,5 +1,4 @@
-/**
- * DataTable — the one table shell, header face, composite cell and empty slot.
+/** note: DataTable — the one table shell, header face, composite cell and empty slot.
  *
  * The assertions name the rendered structure, the slot attributes and the text:
  * the header band, the body rows, the alignment contract and both composite
@@ -27,17 +26,17 @@ const rows: Row[] = [
 const render = (props: Parameters<typeof DataTable<Row>>[0]) =>
   renderToStaticMarkup(createElement(DataTable<Row>, props));
 
-/** A header cell's class list, located by its rendered label. */
+/** note: A header cell's class list, located by its rendered label. */
 const headClass = (html: string, label: string) =>
   html.match(new RegExp(`<th [^>]*class="([^"]*)">${label}</th>`))?.[1] ?? "";
 
-/** A body cell's class list, located by its rendered content. */
+/** note: A body cell's class list, located by its rendered content. */
 const cellClass = (html: string, content: string) =>
   html.match(new RegExp(`<td [^>]*class="([^"]*)">${content}</td>`))?.[1] ?? "";
 
 const rowTags = (html: string) => [...html.matchAll(/<tr[^>]*>/g)].map((m) => m[0]);
 
-/** A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
+/** note: A primitive palette step: `--gray-700`, `--background-200`, `--blue-700`. */
 const PRIMITIVE_STEP = /--(?:background|gray|gray-alpha|brand|blue|red|amber|green|purple)-[0-9a-z]+/;
 
 describe("DataTable", () => {
@@ -100,13 +99,13 @@ describe("DataTable", () => {
       rows,
       rowKey: (row) => row.slug,
     });
-    // One composite per row — the plain column stays a bare cell.
+    // invariant: One composite per row — the plain column stays a bare cell.
     expect((html.match(/data-slot="cell-composite"/g) ?? []).length).toBe(rows.length);
     const primary = html.indexOf('data-slot="cell-primary"');
     const meta = html.indexOf('data-slot="cell-meta"');
     expect(primary).toBeGreaterThan(-1);
     expect(primary).toBeLessThan(meta);
-    // Both lines are assertable, in place: the primary content above, the
+    // note: Both lines are assertable, in place: the primary content above, the
     // meta line below.
     expect(html.slice(primary, meta)).toContain("demo");
     expect(html.slice(meta)).toContain("App 3");

@@ -1,5 +1,4 @@
-/**
- * The SPA resolves server-emitted 400 message keys in the
+/** note: The SPA resolves server-emitted 400 message keys in the
  * operator's locale with a fail-visible fallback. Pins the shared key
  * validator, both-locale dictionary faces for the `settings.error.*`
  * family, and the source contract on both SettingsPage render paths
@@ -35,7 +34,7 @@ describe("isDictionaryKey", () => {
     expect(isDictionaryKey("settings.error.providerUnknown")).toBe(true);
     expect(isDictionaryKey("settings.membership.not_in_verified_models")).toBe(true);
     expect(isDictionaryKey("settings.error.not_a_real_key")).toBe(false);
-    expect(isDictionaryKey("settings.error")).toBe(false); // non-leaf node
+    expect(isDictionaryKey("settings.error")).toBe(false); // note: non-leaf node
     expect(isDictionaryKey("totally.unrelated")).toBe(false);
   });
 
@@ -73,15 +72,15 @@ describe("settings.error dictionary faces", () => {
 
 describe("SPA 400-body resolution contract", () => {
   test("settingsErrorMessage resolves a known key first; unknown keys fall through to the English face", () => {
-    // The key-first branch (the audit's UI-45-03 fix).
+    // note: The key-first branch (the audit's UI-45-03 fix).
     expect(settingsPage).toContain("isDictionaryKey(parsed.key)");
-    // English face fallback for an unknown key, then the raw never-blank floor.
+    // invariant: English face fallback for an unknown key, then the raw never-blank floor.
     expect(settingsPage).toContain("parsed.message.trim()");
     expect(settingsPage).toContain('body.trim() || t(locale, "common.loadFailed")');
   });
 
   test("every op channel routes through the one shared outcome resolver (settings POST, pinned ops, workspace name)", () => {
-    // submitSettings, postPinnedOutcome and the workspace name card resolve
+    // note: submitSettings, postPinnedOutcome and the workspace name card resolve
     // through settingsOpOutcome — a mapped 4xx, the remove routes' no-change
     // 2xx face and the saved notice all take the same path (pinned ops used to
     // be the raw body.trim() path the audit called out). The manager refresh
@@ -98,14 +97,14 @@ describe("SPA 400-body resolution contract", () => {
 
   test("zh noConfiguredProviders copy drift (audit rejected-list note): zh references the Add Provider button like en", () => {
     expect(t("en", "settings.noConfiguredProviders")).toContain("use Add Provider");
-    // The zh button label unified on 模型提供方 (supersedes the
+    // note: The zh button label unified on 模型提供方 (supersedes the
     // 「添加 Provider」 pin).
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("「添加模型提供方」");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
   });
 });
 describe("malformed refusal params (both readers)", () => {
-  // A params map whose values are objects or arrays cannot be interpolated:
+  // note: A params map whose values are objects or arrays cannot be interpolated:
   // String({...}) is "[object Object]" and an array matches no placeholder, so
   // both readers must refuse the keyed face and render their generic copy.
   const malformed: unknown[] = [{ provider: { id: "acme" } }, ["acme"]];
@@ -154,7 +153,7 @@ describe("add-key refusal: status first, body second", () => {
     expect(face(400, JSON.stringify({ ok: false, reason: "quota_exhausted" }))).toBe(
       t("en", "settings.verify.quota_exhausted"),
     );
-    // A body naming a key this page knows wins over the reason.
+    // note: A body naming a key this page knows wins over the reason.
     expect(face(400, JSON.stringify({ key: "settings.error.providerKeyLimit", params: { provider: "acme", limit: 8 } }))).toBe(
       t("en", "settings.error.providerKeyLimit", { provider: "acme", limit: 8 }),
     );
@@ -164,7 +163,7 @@ describe("add-key refusal: status first, body second", () => {
     for (const body of ["", "not json at all", "<html>nope</html>"]) {
       expect(face(400, body)).toBe(t("en", "settings.providers.addKeyRefused"));
     }
-    // A reason this page does not know still resolves through the reason face.
+    // note: A reason this page does not know still resolves through the reason face.
     expect(face(400, JSON.stringify({ reason: "brand_new_reason" }))).toBe(t("en", "settings.verify.unexpected"));
   });
 
@@ -172,7 +171,7 @@ describe("add-key refusal: status first, body second", () => {
     expect(face(403, JSON.stringify({ key: "settings.error.botReadOnly" }))).toBe(
       t("en", "settings.error.botReadOnly"),
     );
-    // The non-manager refusal is an HTML page: different cause, own remedy.
+    // note: The non-manager refusal is an HTML page: different cause, own remedy.
     const page = face(403, "<!doctype html><title>Forbidden</title>");
     expect(page).toBe(t("en", "settings.providers.addKeyForbidden"));
     expect(page).not.toBe(t("en", "settings.error.botReadOnly"));
@@ -208,7 +207,7 @@ describe("add-key refusal: status first, body second", () => {
     expect(unreadable).toBe(t("en", "settings.providers.addKeyUnreadable"));
     expect(unreadable).toContain("Worker log");
     expect(unreadable).not.toBe(t("en", "settings.verify.unexpected"));
-    // A body that IS readable still resolves inside the unclassified family.
+    // note: A body that IS readable still resolves inside the unclassified family.
     expect(face(418, JSON.stringify({ ok: false, reason: "unexpected" }))).toBe(
       t("en", "settings.verify.unexpected"),
     );
@@ -250,7 +249,7 @@ describe("add-key refusal: status first, body second", () => {
       expect(t("zh_CN", `settings.providers.${key}` as never)).not.toBe(`settings.providers.${key}`);
       expect(providers(key)).not.toContain("unexpected response");
     }
-    // The one family whose remedy is a config fix rather than a retry still
+    // note: The one family whose remedy is a config fix rather than a retry still
     // states the outcome; the rest all end in what happened to the data.
     for (const key of keys.filter((candidate) => candidate !== "addKeyNoMasterKey")) {
       expect(t("en", `settings.providers.${key}` as never)).toMatch(

@@ -1,5 +1,5 @@
 /**
- * Review comment assembly tests (Phase 5 B1/B4 + postdeploy feedback T5) —
+ * why: Review comment assembly tests (Phase 5 B1/B4 + postdeploy feedback T5) —
  * pure functions (the posting wiring is covered with a mock octokit; see
  * "postReview wiring" below).
  *
@@ -86,24 +86,24 @@ describe("truncateSummary", () => {
   test("truncates over-budget summaries to the 8000-char budget", () => {
     const long = "x".repeat(SUMMARY_MD_LIMIT + 100);
     const truncated = truncateSummary(long);
-    expect(truncated.length).toBe(SUMMARY_MD_LIMIT); // budget incl. ellipsis
+    expect(truncated.length).toBe(SUMMARY_MD_LIMIT); // note: budget incl. ellipsis
     expect(truncated.startsWith("x".repeat(SUMMARY_MD_LIMIT - 1))).toBe(true);
     expect(truncated.endsWith("…")).toBe(true);
   });
 
   test("a cut between the halves of an emoji at the budget edge posts readable text", () => {
-    // The pair straddles the 8000-char cut: a raw slice keeps its high half and
+    // invariant: The pair straddles the 8000-char cut: a raw slice keeps its high half and
     // the posted body carries a replacement character.
     const narrative = `${"x".repeat(SUMMARY_MD_LIMIT - 2)}😀${"y".repeat(200)}`;
     const truncated = truncateSummary(narrative);
     expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
     expect(truncated.endsWith("…")).toBe(true);
-    // Well-formed text survives an encode/decode round trip; a lone surrogate does not.
+    // invariant: Well-formed text survives an encode/decode round trip; a lone surrogate does not.
     expect(new TextDecoder().decode(new TextEncoder().encode(truncated))).toBe(truncated);
   });
 
   test("a cut between the halves of an emoji behind a fence closer posts readable text", () => {
-    // The second cut moves back by the closer's length and lands mid-pair.
+    // invariant: The second cut moves back by the closer's length and lands mid-pair.
     const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 10)}😀${"y".repeat(200)}`;
     const truncated = truncateSummary(narrative);
     expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
@@ -117,7 +117,7 @@ describe("truncateSummary", () => {
     const fenceLines = truncated.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
     expect(truncated.length).toBe(SUMMARY_MD_LIMIT);
     expect(truncated.endsWith("…")).toBe(true);
-    // Opening fence plus the closer the cut appends — an odd count would render
+    // invariant: Opening fence plus the closer the cut appends — an odd count would render
     // everything after the summary as code.
     expect(fenceLines).toHaveLength(2);
   });
@@ -126,7 +126,7 @@ describe("truncateSummary", () => {
     const narrative = `<details>\n<summary>Plan</summary>\n\n\`\`\`md\n${"step\n".repeat(3000)}\`\`\`\n</details>`;
     const truncated = truncateSummary(narrative);
     expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
-    // The fence opened inside the fold, so it has to close first.
+    // note: The fence opened inside the fold, so it has to close first.
     expect(truncated.endsWith("```\n\n</details>…")).toBe(true);
     expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
   });
@@ -135,7 +135,7 @@ describe("truncateSummary", () => {
     const narrative = `<details>\n<summary>Plan</summary>\n\n~~~md\n${"step\n".repeat(3000)}~~~\n</details>`;
     const truncated = truncateSummary(narrative);
     expect(truncated.length).toBeLessThanOrEqual(SUMMARY_MD_LIMIT);
-    // A tilde fence closes with tildes: a backticked closer would leave the
+    // invariant: A tilde fence closes with tildes: a backticked closer would leave the
     // block open and hide the fold that answers it.
     expect(truncated.endsWith("~~~\n\n</details>…")).toBe(true);
     expect((truncated.match(/<details>/g) ?? []).length).toBe((truncated.match(/<\/details>/g) ?? []).length);
@@ -147,12 +147,12 @@ describe("truncateSummary", () => {
   });
 
   test("an unclosed fence under the budget is closed too", () => {
-    // No cut means no ellipsis, but the fence still has to end before the body continues.
+    // invariant: No cut means no ellipsis, but the fence still has to end before the body continues.
     expect(truncateSummary("Intro\n```\ncmd")).toBe("Intro\n```\ncmd\n```");
   });
 
   test("the closer counts against the budget even when the narrative alone fits", () => {
-    // At the limit with an open fence: the passthrough would overshoot by the
+    // invariant: At the limit with an open fence: the passthrough would overshoot by the
     // closer's own length, so the head has to give up that much.
     const narrative = `\`\`\`\n${"x".repeat(SUMMARY_MD_LIMIT - 4)}`;
     expect(narrative).toHaveLength(SUMMARY_MD_LIMIT);
@@ -199,9 +199,9 @@ describe("buildReviewBody", () => {
     expect(body).not.toContain("fixed code here");
     expect(body).toContain("Before the fence.");
     expect(body).toContain("After the fence.");
-    // never mutates the caller's findings: the fence stays for the inline path
+    // invariant: never mutates the caller's findings: the fence stays for the inline path
     expect(fenced.findings[0]!.body).toBe(stored.findings[0]!.body);
-    // fence-free bodies stay byte-identical: the exact pre-change rendering
+    // invariant: fence-free bodies stay byte-identical: the exact pre-change rendering
     expect(buildReviewBody(output)).toBe(
       "## \u26a0\ufe0f Verdict: \u0060needs fixes\u0060\n\n## \ud83d\udccb Review\n\nTwo issues found in the diff.\n\n### Findings\n\n#### \ud83d\udfe0 Fractional expiry comparison\n\n- **Evidence**: \u0060Fractional expiry comparison\u0060 body.\n- **Location**: \u0060src/auth.ts:21\u0060\n- **Category**: logic\n- **Merge class**: should-fix",
     );
@@ -227,7 +227,7 @@ describe("buildReviewBody", () => {
     });
     const findingsAt = body.indexOf("### Findings");
     expect(findingsAt).toBeGreaterThan(-1);
-    // The fence has to be balanced before the findings: an open one would
+    // invariant: The fence has to be balanced before the findings: an open one would
     // render them, and the rest of the review, as code.
     const fenceLines = body.slice(0, findingsAt).split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
     expect(fenceLines).toHaveLength(2);
@@ -278,7 +278,7 @@ describe("buildReviewBody", () => {
   });
 
   test("finding blocks keep the envelope's order, never re-sorted by merge class", () => {
-    // Seats rank by impact-if-shipped; a class re-sort would override that.
+    // invariant: Seats rank by impact-if-shipped; a class re-sort would override that.
     const body = buildReviewBody({
       ...output,
       findings: [finding("nit", "First by impact"), finding("must-fix", "Second by impact")],
@@ -294,7 +294,7 @@ describe("buildReviewBody", () => {
 
   test("carries NO line-comment fields (overall review body only)", () => {
     const body = buildReviewBody(output);
-    // The posting path is the Issues comments API (T5) — a single overall
+    // note: The posting path is the Issues comments API (T5) — a single overall
     // comment body, never line-comment structure.
     expect(body).not.toContain("line_comment");
     expect(body).not.toContain('"position"');
@@ -386,7 +386,7 @@ describe("buildReviewBody", () => {
   });
 
   test("the fact-line cut never leaves a lone surrogate", () => {
-    // A run of astral-plane characters (each two UTF-16 units) sized so the
+    // invariant: A run of astral-plane characters (each two UTF-16 units) sized so the
     // budget cut lands between a pair unless the slice backs off.
     const reason = "\u{1F600}".repeat(400);
     const body = buildReviewBody({
@@ -396,7 +396,7 @@ describe("buildReviewBody", () => {
       incomplete: { reason, unscanned: ["a.ts"] },
     });
     const line = body.split("\n").find((l) => l.startsWith("cause: "))!;
-    // A lone surrogate is a high half with no low half after it, or a low half
+    // invariant: A lone surrogate is a high half with no low half after it, or a low half
     // with no high half before it. slice() produces one; the guard does not.
     expect(line).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
     expect(line).not.toMatch(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/);
@@ -437,7 +437,7 @@ describe("buildReviewBody", () => {
   });
 
   test("a narrative over the summary budget is cut, so the tail survives the body clamp", () => {
-    // The runner fits its coverage notes to SUMMARY_MD_LIMIT and relies on this
+    // why: The runner fits its coverage notes to SUMMARY_MD_LIMIT and relies on this
     // publisher keeping the head from there; without the cut the body clamp —
     // which also keeps the head — would be what removes the footer.
     const body = buildReviewBody({ ...output, summary_md: "x".repeat(REVIEW_BODY_LIMIT * 2) }, 3);
@@ -486,7 +486,7 @@ describe("buildReviewBody", () => {
     expect(body).toContain("cause: runner timed out\nunscanned: tests/a.ts, src/b.ts");
     expect(body.match(/^cause:/gm)).toHaveLength(1);
     expect(body.match(/^unscanned:/gm)).toHaveLength(1);
-    // Engine order: head, fact pair, review section.
+    // note: Engine order: head, fact pair, review section.
     expect(body.indexOf("Verdict: `incomplete`")).toBeLessThan(body.indexOf("cause: runner timed out"));
     expect(body.indexOf("cause: runner timed out")).toBeLessThan(body.indexOf("## 📋 Review"));
   });
@@ -500,13 +500,13 @@ describe("buildReviewBody", () => {
   });
 
   test("a settled verdict publishes a narrative that looks like a fact pair verbatim", () => {
-    // The echo strip is scoped to an envelope that CARRIES `incomplete`. A
+    // invariant: The echo strip is scoped to an envelope that CARRIES `incomplete`. A
     // settled verdict's seat narrative is model text, not a restatement of a
     // rendered pair, so those lines stay exactly as the model wrote them.
     const narrative = "Runner recovered.\n\ncause: runner timed out\nunscanned: tests/a.ts";
     const body = buildReviewBody({ ...output, verdict: "needs fixes", findings: [], summary_md: narrative });
     expect(body).toContain(narrative);
-    // No pair is rendered above the review section: one line each, and both
+    // invariant: No pair is rendered above the review section: one line each, and both
     // come from the narrative.
     expect(body.match(/^cause: /gm)).toHaveLength(1);
     expect(body.match(/^unscanned: /gm)).toHaveLength(1);
@@ -539,7 +539,7 @@ describe("review comment upsert (T5)", () => {
     });
   });
 
-  // F-002: a marker comment is only PATCHable when a bot account (our
+  // safety: F-002: a marker comment is only PATCHable when a bot account (our
   // GitHub App user) authored it. Any PR participant can plant the marker
   // text on a human account — such comments are misses, never update
   // targets; excluded ids model the 403/404 recovery replan.
@@ -632,7 +632,7 @@ describe("review comment upsert (T5)", () => {
       expect(lines[lines.length - 2]).toBe("Review 2 · commit 0123456");
       expect(body).toContain("## ⛔ Verdict: `blocked`");
       expect(body).toContain("One must-fix blocks the merge.");
-      // The header sits after the body it describes, and the marker follows it
+      // invariant: The header sits after the body it describes, and the marker follows it
       // immediately — the trusted trailer stays visibly a trailer.
       expect(body.indexOf("One must-fix blocks the merge.")).toBeLessThan(
         body.indexOf("Review 2 · commit 0123456"),
@@ -664,7 +664,7 @@ describe("review comment upsert (T5)", () => {
         headSha: "abc1234",
         publicationMarker,
       });
-      // Exactly ONE publication marker survives — the trusted appended one.
+      // invariant: Exactly ONE publication marker survives — the trusted appended one.
       expect(body.split(publicationMarker).length - 1).toBe(1);
       expect(body).not.toContain("id=00000000-0000-4000-8000-000000000000");
     });
@@ -723,7 +723,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(md).toContain("| A \\| b | addressed (verified-fix) | current-code | not yet resolved |");
     expect(md).toContain("| C | dismissed (non-fix-dismissal) | - | - |");
     expect(md).toContain("| D | unverifiable (no-evidence) | - | - |");
-    // The line's identity: assessed + invalid-output + omitted === selected.
+    // invariant: The line's identity: assessed + invalid-output + omitted === selected.
     expect(buildRevalidatedSection({ ...coverage, invalidOutput: 1, omitted: 0 }, rows)).toContain(
       "Reassessed 1/2 prior finding(s) this round · 1 invalid-output · 0 omitted",
     );
@@ -740,13 +740,13 @@ describe("report sections (mstar.report/v1 side document)", () => {
       },
     ];
     const revalidated = buildRevalidatedSection(coverage, rows);
-    // The row text is escaped like a report field, so the cell stays text and
+    // safety: The row text is escaped like a report field, so the cell stays text and
     // no tag can fold the rest of the comment.
     expect(revalidated).toContain("&lt;details>&lt;summary>prior&lt;/summary>");
     expect(revalidated.match(/<details>/g)).toHaveLength(1);
     expect(revalidated).not.toContain("<details><summary>prior");
 
-    // `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
+    // safety: `planToFix: "none"` keeps the fix-plan fold out, so any raw `<details>`
     // left in the body would be the injected one.
     const body = buildReviewBody(
       {
@@ -771,7 +771,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(body.match(/<\/details>/g)).toHaveLength(1);
     const injected = body.indexOf("&lt;details>");
     expect(injected).toBeGreaterThan(-1);
-    // Every section that follows the table is still outside the (escaped)
+    // invariant: Every section that follows the table is still outside the (escaped)
     // fold text — the escape is in place, not just somewhere in the body.
     expect(body.indexOf("### Findings")).toBeLessThan(
       body.indexOf("<summary>Revalidated findings</summary>"),
@@ -791,7 +791,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       { title: "C", disposition: "dismissed", reason: "non-fix-dismissal", evidenceKind: null, thread: "-" },
     ];
     const revalidated = buildRevalidatedSection(coverage, rows);
-    // The table renders THIS row's words: it may not claim the defect still
+    // invariant: The table renders THIS row's words: it may not claim the defect still
     // stands, because the store closed it as a non-fix dismissal.
     expect(revalidated).not.toContain("still present");
     expect(revalidated).toContain("| C | dismissed (non-fix-dismissal) |");
@@ -807,7 +807,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     }));
     const md = buildRevalidatedSection(coverage, rows);
     expect(md).toContain(`*(+2 more prior finding(s) over the ${CLOSURE_MAX_ROWS}-row display cap)*`);
-    // The dropped rows are counted, never silently absent.
+    // invariant: The dropped rows are counted, never silently absent.
     expect(md).not.toContain(`| finding ${CLOSURE_MAX_ROWS} |`);
   });
 
@@ -856,7 +856,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       0,
       { report, revalidated: buildRevalidatedSection(coverage, rows) },
     );
-    // ONE rendering of the rows, the coverage line and the thread state.
+    // invariant: ONE rendering of the rows, the coverage line and the thread state.
     expect(body.match(/\| finding \| disposition \| evidence \| thread \|/g)).toHaveLength(1);
     expect(body.match(/Reassessed /g)).toHaveLength(1);
     expect(body).toContain("| Fractional expiry comparison | addressed (verified-fix) | diff | - |");
@@ -897,7 +897,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const positions = order.map((needle) => body.indexOf(needle));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    // The plan is a collapsible, copyable block.
+    // note: The plan is a collapsible, copyable block.
     expect(body).toContain(
       "<details><summary>Expand fix plan</summary>\n\n```md\n1. Add the guard.\n2. Rerun the suite.\n```\n\n</details>",
     );
@@ -918,7 +918,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     expect(renderReviewMarkdown(output)).not.toContain("### Findings");
     const body = buildReviewBody(output, 0, { report, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" });
     expect(body).toContain("<summary>Revalidated findings</summary>");
-    // Revalidated FIRST, then the added heading — the fixed template order.
+    // invariant: Revalidated FIRST, then the added heading — the fixed template order.
     expect(body.indexOf("### Findings")).toBeLessThan(body.indexOf("<summary>Revalidated findings</summary>"));
     expect(body).toContain("### Linked-issue AC");
   });
@@ -953,7 +953,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
-    // Escaped in place, so the ONLY `### Findings` line is the engine's — the
+    // invariant: Escaped in place, so the ONLY `### Findings` line is the engine's — the
     // revalidated table still lands directly above it.
     expect(body).toContain("\\### Findings");
     expect(body).toContain("\\#### 🟠 Injected");
@@ -979,7 +979,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
         revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
       },
     );
-    // The indent is kept and only the marker escaped, so the field stays text
+    // invariant: The indent is kept and only the marker escaped, so the field stays text
     // and the engine's own headings keep their positions.
     expect(body).toContain("   \\### Findings");
     expect(body).toContain("   \\#### 🟠 Injected");
@@ -1006,7 +1006,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     );
     expect(body).toContain("\\## 📋 Review");
     expect(body).toContain("\\---");
-    // One review heading only, so the overview's anchor stayed unambiguous.
+    // invariant: One review heading only, so the overview's anchor stayed unambiguous.
     expect(body.split("\n").filter((line) => line === "## 📋 Review")).toHaveLength(1);
     expect(body).toContain("**What this PR does**: Adds an expiry guard");
   });
@@ -1017,7 +1017,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       headSha: "0123456789abcdef0123456789abcdef01234567",
       kind: "review",
     });
-    // An unclosed `<details>` routes everything after it into a collapsed
+    // safety: An unclosed `<details>` routes everything after it into a collapsed
     // block — plan and publication marker included — so the tag must stay text.
     for (const html of ["<details>fold the tail", "<details open>\nfold the tail"]) {
       const body = buildPreparedReviewBody({
@@ -1032,21 +1032,21 @@ describe("report sections (mstar.report/v1 side document)", () => {
         },
       });
       expect(body).toContain("&lt;details");
-      // Two folds (revalidated + plan), both closed: nothing the field said
+      // invariant: Two folds (revalidated + plan), both closed: nothing the field said
       // can swallow the sections below it.
       expect(body.match(/<details/g)).toHaveLength(2);
       expect(body.match(/<\/details>/g)).toHaveLength(2);
       expect(body.indexOf("### 🗑️ Considered & rejected")).toBeGreaterThan(body.indexOf("&lt;details"));
       expect(body.indexOf("## 🛠️ Plan to fix")).toBeGreaterThan(body.indexOf("### 🗑️ Considered & rejected"));
       expect(body.trimEnd().endsWith(publicationMarker)).toBe(true);
-      // `&` is escaped too, so an entity the field already carried stays
+      // invariant: `&` is escaped too, so an entity the field already carried stays
       // visible text instead of being re-read as markup.
       expect(body).toContain("R&amp;D &amp;lt;details&amp;gt;");
     }
   });
 
   test("an unclosed code fence in a report field cannot swallow the sections after it", () => {
-    // `~~~` opens a block exactly like backticks: left unclosed it runs to the
+    // safety: `~~~` opens a block exactly like backticks: left unclosed it runs to the
     // end of the comment, the sections and the marker lines after it included.
     for (const fence of ["~~~", "```"]) {
       const body = buildReviewBody(
@@ -1057,9 +1057,9 @@ describe("report sections (mstar.report/v1 side document)", () => {
           revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
-      // Escaped in place: the opener stays text and the field is still readable.
+      // invariant: Escaped in place: the opener stays text and the field is still readable.
       expect(body).toContain(`\n\\${fence}\ntail\n`);
-      // No line of the body can open a block at all.
+      // invariant: No line of the body can open a block at all.
       expect(body.split("\n").filter((line) => /^ {0,3}(`{3,}|~{3,})/.test(line))).toHaveLength(0);
       const escaped = body.indexOf(`\\${fence}`);
       for (const section of ["### 🗑️ Considered & rejected", "## 🛠️ Plan to fix"]) {
@@ -1069,7 +1069,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("a GFM delimiter row and a bare ATX heading are neutralized as structure", () => {
-    // One dash already delimits a cell; pipes are optional at either end. The
+    // invariant: One dash already delimits a cell; pipes are optional at either end. The
     // escape must land on the marker so no header row can pair with it.
     const cases: Array<[string, string]> = [
       ["Name | Value\n-|-", "\\-|-"],
@@ -1105,7 +1105,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       );
       expect(body).toContain(`\\${rule}`);
     }
-    // A two-dash run is text, not a break: it stays untouched.
+    // invariant: A two-dash run is text, not a break: it stays untouched.
     const safe = buildReviewBody(
       { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
       0,
@@ -1118,28 +1118,28 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("CRLF and lone-CR line endings are normalized before neutralization", () => {
-    // A CR is a line break to markdown too. Left in place it is the line's last
+    // invariant: A CR is a line break to markdown too. Left in place it is the line's last
     // character, so every end-anchored form misses it and `---`, `===` or `-`
     // still renders as a break, a setext underline or a list item.
     const cases: Array<[string, string]> = [
       ["suite green\r\n---\r\ntail", "\\---"],
       ["suite green\r\n===\r\ntail", "\\==="],
       ["suite green\r\n-\r\ntail", "\\-"],
-      // Every break in the field is a bare CR.
+      // note: Every break in the field is a bare CR.
       ["suite green\r---\rtail", "\\---"],
     ];
     for (const [field, escaped] of cases) {
       const body = buildReviewBody(
         { schema: "mstar.review/v1", verdict: "ship it", findings: [] },
         0,
-        // `planToFix: "none"` keeps the fenced plan (whose own `1.` lines are
+        // note: `planToFix: "none"` keeps the fenced plan (whose own `1.` lines are
         // code, not markdown) out of the structural scan below.
         { report: { ...report, verified: field, planToFix: "none" }, revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>" },
       );
-      // Escaped in place: the field's text survives and opens no structure.
+      // invariant: Escaped in place: the field's text survives and opens no structure.
       expect(body).toContain(`\n${escaped}\ntail\n`);
       expect(body.split("\n").filter((line) => /^ {0,3}([-=]+[ \t]*$|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
-      // The engine's headings keep their structure and order.
+      // invariant: The engine's headings keep their structure and order.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
@@ -1153,7 +1153,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
   });
 
   test("a block marker in a report field is text: a table row, quote or list item cannot absorb the lines under it", () => {
-    // The field STARTS with the marker, so the lines a block would absorb are
+    // safety: The field STARTS with the marker, so the lines a block would absorb are
     // the ones right below it: the field's own tail, then the engine's
     // sections. `planToFix` stays out of the field so the body carries no
     // other list line and the scan below is about the field alone.
@@ -1165,7 +1165,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
       ["+ bullet\nabsorbed", ["\\+ bullet"]],
       ["1. step\nabsorbed", ["1\\. step"]],
       ["1) step\nabsorbed", ["1\\) step"]],
-      // A marker alone on its line opens a block too; the shipped rule accepts
+      // safety: A marker alone on its line opens a block too; the shipped rule accepts
       // line end, so the scan below must as well.
       ["-\nabsorbed", ["\\-"]],
       ["*\nabsorbed", ["\\*"]],
@@ -1182,11 +1182,11 @@ describe("report sections (mstar.report/v1 side document)", () => {
           revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
-      // Escaped in place: the field's text survives and opens no block.
+      // invariant: Escaped in place: the field's text survives and opens no block.
       for (const line of escaped) expect(body).toContain(`\n${line}\n`);
-      // No line of the body still starts a table row, quote or list item.
+      // invariant: No line of the body still starts a table row, quote or list item.
       expect(body.split("\n").filter((line) => /^ {0,3}([|>]|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$))/.test(line))).toHaveLength(0);
-      // The engine's sections keep their structure: nothing was absorbed.
+      // invariant: The engine's sections keep their structure: nothing was absorbed.
       expect(body.split("\n").filter((line) => /^ {0,3}#{1,6} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
@@ -1211,10 +1211,10 @@ describe("report sections (mstar.report/v1 side document)", () => {
           revalidated: "<details><summary>Revalidated findings</summary>\n\nnone\n\n</details>",
         },
       );
-      // Escaped in place, indent kept: the divider stays text, never a heading.
+      // invariant: Escaped in place, indent kept: the divider stays text, never a heading.
       expect(body).toContain(`\n${indent}\\${marker}\ntail\n`);
       expect(body.split("\n").filter((line) => /^ {0,3}[-=]+\s*$/.test(line))).toHaveLength(0);
-      // The sections after the field keep their levels: no line became setext.
+      // invariant: The sections after the field keep their levels: no line became setext.
       expect(body.split("\n").filter((line) => /^#{2,4} /.test(line))).toEqual([
         "## ✅ Verdict: `ship it`",
         "## 📋 Review",
@@ -1232,7 +1232,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const originalWarn = console.warn;
     console.warn = (message: string) => warns.push(String(message));
     try {
-      // The overview is anchored under `## 📋 Review`, so it lands inside the
+      // invariant: The overview is anchored under `## 📋 Review`, so it lands inside the
       // engine's layout and never above it — that is what the anchor-miss guard
       // protects. The shipped composer reaches the guard only if the engine
       // drops its heading, so the reachable half is pinned here: nothing is
@@ -1297,7 +1297,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
     const body = buildPreparedReviewBody(input);
     expect(body).not.toContain("### Linked-issue AC");
     expect(body).not.toContain("<summary>Revalidated findings</summary>");
-    // `since` absent too: a full round's header is unchanged.
+    // note: `since` absent too: a full round's header is unchanged.
     expect(body).toContain("Review 1 · commit 0123456\n");
   });
 
@@ -1320,7 +1320,7 @@ describe("report sections (mstar.report/v1 side document)", () => {
 });
 
 describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
-  /** Lines that open or close a fenced block (the plan's renderer is the only source). */
+  /** note: Lines that open or close a fenced block (the plan's renderer is the only source). */
   const fenceLines = (text: string): string[] => text.split("\n").filter((line) => /^ {0,3}`{3,}/.test(line));
 
   const output: ReviewOutput = {
@@ -1350,7 +1350,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
   });
 
   test("a cut inside the fix plan closes its fence before the fold, header and marker intact", () => {
-    // The plan renders last, so an over-budget body cuts INSIDE its fenced
+    // invariant: The plan renders last, so an over-budget body cuts INSIDE its fenced
     // block: closing only the fold would still let the fence swallow the
     // trailer. A validated document caps planToFix at 6000 chars, so the plan
     // has to be inflated directly to reach the cut this clamp must survive.
@@ -1372,13 +1372,13 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const reportParts = { report, revalidated: "Reassessed 0/0 prior finding(s) this round" };
     const small: ReviewOutput = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "Clamped.", findings: [] };
 
-    // Both clamp sites: the inner body clamp and the prepared-body clamp.
+    // invariant: Both clamp sites: the inner body clamp and the prepared-body clamp.
     const inner = buildReviewBody(small, 0, reportParts);
     const prepared = buildPreparedReviewBody({ output: small, omittedFindings: 0, round: 7, headSha, publicationMarker, reportParts });
     for (const clamped of [inner, prepared]) {
       expect(clamped.length).toBeLessThan(65536);
       expect(clamped).toContain("…");
-      // Opening fence plus the closer the clamp appends — an odd count means
+      // invariant: Opening fence plus the closer the clamp appends — an odd count means
       // the rest of the comment renders as code, marker lines included.
       expect(fenceLines(clamped)).toHaveLength(2);
       expect((clamped.match(/<details>/g) ?? []).length).toBe(1);
@@ -1389,7 +1389,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
   });
 
   test("a clamp cut inside a tilde fence closes it", () => {
-    // A finding body renders verbatim, so its tilde fence reaches the clamp
+    // invariant: A finding body renders verbatim, so its tilde fence reaches the clamp
     // exactly like the fix plan's backticked one.
     const body = buildReviewBody({
       schema: "mstar.review/v1",
@@ -1407,17 +1407,17 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     });
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body).toContain("…");
-    // Opener plus the closer the cut appends: an odd count means the trailer
+    // invariant: Opener plus the closer the cut appends: an odd count means the trailer
     // and the publication marker render inside the block.
     expect(body.split("\n").filter((line) => /^ {0,3}~{3,}/.test(line))).toHaveLength(2);
   });
 
-  // A lone surrogate is a high half with no low half after it, or a low half
+  // invariant: A lone surrogate is a high half with no low half after it, or a low half
   // with no high half before it.
   const loneSurrogate = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
   test("a clamp cut between the halves of an emoji leaves no lone surrogate", () => {
-    // The clamp keeps `REVIEW_BODY_LIMIT - 1` units of the rendered core, so the
+    // invariant: The clamp keeps `REVIEW_BODY_LIMIT - 1` units of the rendered core, so the
     // cut index is fixed. One probe build locates the finding body inside that
     // core; the emoji is then placed exactly on the cut. A finding body renders
     // verbatim, so both builds share the same renderer prefix and cut index.
@@ -1432,26 +1432,26 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const bodyAt = review(`${AT}${"y".repeat(REVIEW_BODY_LIMIT)}`).indexOf(AT);
     expect(bodyAt).toBeGreaterThan(0);
     const pad = "y".repeat(REVIEW_BODY_LIMIT);
-    // Body-relative index of the first unit the cut drops.
+    // note: Body-relative index of the first unit the cut drops.
     const firstDropped = REVIEW_BODY_LIMIT - 1 - bodyAt;
-    // Two units swapped for the pair, so the total length — and the cut — hold.
+    // note: Two units swapped for the pair, so the total length — and the cut — hold.
     const withEmoji = (highAt: number): string => `${pad.slice(0, highAt)}😀${pad.slice(highAt + 2)}`;
-    // The cut keeps the high half and drops the low one.
+    // note: The cut keeps the high half and drops the low one.
     const split = review(withEmoji(firstDropped - 1));
     expect(split.endsWith("…")).toBe(true);
-    // Nothing but the cut marker is reserved here, so the back-off shortens the
+    // invariant: Nothing but the cut marker is reserved here, so the back-off shortens the
     // body by exactly one unit — the pin that says this case really took the cut.
     expect(split.length).toBe(REVIEW_BODY_LIMIT - 1);
     expect(split).not.toMatch(loneSurrogate);
 
-    // The boundary case: the pair ends exactly on the last kept unit, so it survives whole.
+    // invariant: The boundary case: the pair ends exactly on the last kept unit, so it survives whole.
     const whole = review(withEmoji(firstDropped - 2));
     expect(whole).toContain("😀");
     expect(whole).not.toMatch(loneSurrogate);
   });
 
   test("a clamp cut inside an open fence leaves no lone surrogate", () => {
-    // The head's closers come out of the budget, so an open fence routes the cut
+    // invariant: The head's closers come out of the budget, so an open fence routes the cut
     // through the SECOND slice; without one the clamp returns before it. The
     // fence sits in a first, short finding; the pair straddles the end of a long
     // second body, where that slice lands.
@@ -1467,7 +1467,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const pad = "y".repeat(REVIEW_BODY_LIMIT);
     const bodyAt = review([fence, `${AT}${pad}`]).indexOf(AT);
     expect(bodyAt).toBeGreaterThan(0);
-    // The closers' length comes out of the budget, so the second cut's index is
+    // invariant: The closers' length comes out of the budget, so the second cut's index is
     // measured rather than assumed: a body without the pair shows the last unit
     // it keeps, and the tail shows the closer really came out of the budget.
     const plain = review([fence, pad]);
@@ -1536,12 +1536,12 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     expect(body).toContain("…");
     for (const heading of reportTailHeadings) expect(body).toContain(heading);
-    // The plan is the LAST section, so its closed fold proves the tail survived.
+    // invariant: The plan is the LAST section, so its closed fold proves the tail survived.
     expect(body.endsWith("</details>")).toBe(true);
   });
 
   test("an over-budget body keeps the omitted-findings footer and the sections that disclose what was cut", () => {
-    // The fixture uses the product's own maxima: a narrative at
+    // note: The fixture uses the product's own maxima: a narrative at
     // SUMMARY_MD_LIMIT and finding bodies at FINDING_BODY_MAX (the consumer
     // clamps each body to that; it never rejects the review). 27 findings at
     // those sizes is the smallest set that fills the 65000-char body.
@@ -1577,12 +1577,12 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
       },
     });
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
-    // The cut happened, so the fixture really is over budget.
+    // invariant: The cut happened, so the fixture really is over budget.
     expect(body).toContain("…");
-    // The finding tail is what the head clamp drops; the footer is the only
+    // invariant: The finding tail is what the head clamp drops; the footer is the only
     // line that says the review is a Top-N subset, so it must survive.
     expect(body).toContain("*(+3 more findings omitted)*");
-    // The closure is reserved with the other preserved parts, so the cut
+    // invariant: The closure is reserved with the other preserved parts, so the cut
     // cannot take it.
     expect(body).toContain("<summary>Revalidated findings</summary>");
     for (const heading of reportTailHeadings) expect(body).toContain(heading);
@@ -1597,12 +1597,12 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     expect(body.length).toBeLessThanOrEqual(REVIEW_BODY_LIMIT);
     for (const heading of reportTailHeadings) expect(body).toContain(heading);
     expect(body).toContain("…");
-    // Fence and fold stay balanced: opener plus closer each, nothing swallowed.
+    // invariant: Fence and fold stay balanced: opener plus closer each, nothing swallowed.
     expect(fenceLines(body)).toHaveLength(2);
     expect((body.match(/<details>/g) ?? []).length).toBe(
       (body.match(/<\/details>/g) ?? []).length,
     );
-    // The closure and the plan fold both survive the oversized plan.
+    // invariant: The closure and the plan fold both survive the oversized plan.
     expect(body).toContain("<summary>Revalidated findings</summary>");
     expect(body).toContain("<summary>Expand fix plan</summary>");
   });
@@ -1629,7 +1629,7 @@ describe("REVIEW_BODY_LIMIT clamp (qc2 F-003 / qc3 F-304)", () => {
     const positions = reportTailHeadings.map((heading) => body.indexOf(heading));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect(positions).toEqual([...positions].sort((left, right) => left - right));
-    // No body quietly vanished: the three section bodies this limit cannot
+    // invariant: No body quietly vanished: the three section bodies this limit cannot
     // afford render the marker under their headings, and the plan block has no
     // room left for a balanced fence and fold.
     expect(body.split(TRUNCATION_MARKER)).toHaveLength(4);
@@ -1699,7 +1699,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
           }),
           createComment: mock(async (params: Record<string, unknown>) => {
             calls.createParams = params;
-            // Real octokit returns the created comment — the publication
+            // note: Real octokit returns the created comment — the publication
             // proof needs its id (§7.7).
             return { data: { id: 101 } };
           }),
@@ -1760,7 +1760,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
   });
 
   test("send: the frozen instant is checked AFTER the scan, at the mutation itself", async () => {
-    // The caller can only check before this call; the marker scan is the
+    // note: The caller can only check before this call; the marker scan is the
     // unbounded await inside it. A check taken before the send would pass —
     // this deadline is still ~20ms away — and the scan spends it, so only a
     // check carried INTO the mutation can refuse, and the refusal is the last
@@ -1774,7 +1774,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
       postPreparedReviewWithOctokit(octokit, { ...sendInput, notAfterMs: Date.now() + 20 }),
     ).rejects.toBeInstanceOf(PublicationDeadlineSpent);
 
-    // Nothing was sent: neither verb ran, at any stage of the send.
+    // note: Nothing was sent: neither verb ran, at any stage of the send.
     expect(calls.updateParams).toBeUndefined();
     expect(calls.createParams).toBeUndefined();
   });
@@ -1856,7 +1856,7 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
   });
 
   test("updateComment 403 with retry-after (secondary rate limit) → rethrows unchanged, never a CREATE fallback", async () => {
-    // A throttled PATCH is not a dead target: a CREATE here would publish the
+    // invariant: A throttled PATCH is not a dead target: a CREATE here would publish the
     // round twice, so the rejection must reach the consumer's tagging catch.
     const limited = Object.assign(new Error("You have exceeded a secondary rate limit"), {
       status: 403,
@@ -1928,9 +1928,9 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Degraded chain (architect AL-1)
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 const botReviewMarker = (id: number, round: number) => ({
   id,
@@ -1961,7 +1961,7 @@ describe("parseDegradedRound / findDegradedComment / planDegradedUpsert", () => 
   });
 
   test("chain separation: a real review marker is a MISS for the degraded scan and vice versa", () => {
-    // The degraded prefix never starts with `review:v1` and the review scan
+    // invariant: The degraded prefix never starts with `review:v1` and the review scan
     // never matches `review-degraded:v1` — the chains cannot cross.
     expect(findDegradedComment([botReviewMarker(7, 2)])).toBeNull();
     expect(findReviewComment([degradedBotMarker(7, 2)])).toBeNull();
@@ -1970,14 +1970,14 @@ describe("parseDegradedRound / findDegradedComment / planDegradedUpsert", () => 
   });
 
   test("bot-authorship gate + prefix restriction + create/update plan mirror the review chain", () => {
-    // Human-planted degraded marker → miss; bot marker → update round=N+1.
+    // safety: Human-planted degraded marker → miss; bot marker → update round=N+1.
     expect(findDegradedComment([{ id: 9, body: "<!-- mstar-inspector:review-degraded:v1 round=5 -->\nplanted", user: { type: "User" } }])).toBeNull();
     expect(planDegradedUpsert([degradedBotMarker(7, 5)])).toEqual({ action: "update", commentId: 7, round: 6 });
     expect(planDegradedUpsert([{ id: 8, body: "a human comment", user: { type: "User" } }])).toEqual({
       action: "create",
       round: 1,
     });
-    // Excluded ids (403/404 recovery) are skipped.
+    // note: Excluded ids (403/404 recovery) are skipped.
     expect(planDegradedUpsert([degradedBotMarker(7, 2), degradedBotMarker(8, 1)], new Set([7]))).toEqual({
       action: "update",
       commentId: 8,
@@ -1986,13 +1986,13 @@ describe("parseDegradedRound / findDegradedComment / planDegradedUpsert", () => 
   });
 
   test("findDegradedComments collects ALL bot-authored degraded markers (Bugbot round-2 fix)", () => {
-    // The delete path must clean every stale marker, not just the first —
+    // invariant: The delete path must clean every stale marker, not just the first —
     // after a 403/404 miss-and-replan recovery the PR can carry TWO.
     expect(findDegradedComments([degradedBotMarker(7, 2), degradedBotMarker(8, 1)])).toEqual([
       { id: 7, body: degradedBotMarker(7, 2).body },
       { id: 8, body: degradedBotMarker(8, 1).body },
     ]);
-    // Bot-authorship gate + prefix restriction hold per match.
+    // invariant: Bot-authorship gate + prefix restriction hold per match.
     expect(
       findDegradedComments([
         { id: 1, body: "a human comment", user: { type: "User" } },
@@ -2020,11 +2020,11 @@ describe("buildDegradedBody", () => {
 
   test("excerpt is REDACTED BEFORE truncation — a secret never survives, whole or partial (AL-1)", () => {
     const secret = "ghp_" + "a".repeat(36);
-    // Secret INSIDE the excerpt window → redaction marker, never the token.
+    // safety: Secret INSIDE the excerpt window → redaction marker, never the token.
     const inside = buildDegradedBody({ ...input, rawOutput: `${"x".repeat(500)} ${secret} ${"y".repeat(2000)}` });
     expect(inside).not.toContain(secret);
     expect(inside).toContain("[REDACTED]");
-    // Secret STRADDLING the 1000-char cut → redact-first leaves no partial
+    // safety: Secret STRADDLING the 1000-char cut → redact-first leaves no partial
     // token (a truncate-first order would leak the token's first chars).
     const straddling = buildDegradedBody({ ...input, rawOutput: `${"x".repeat(980)} ${secret}` });
     expect(straddling).not.toContain(secret);
@@ -2032,7 +2032,7 @@ describe("buildDegradedBody", () => {
   });
 
   test("the ERROR line is redacted too — a zod `received` token never reaches the body (AL-1)", () => {
-    // parseReviewOutput zod errors can echo the offending value, e.g. an
+    // safety: parseReviewOutput zod errors can echo the offending value, e.g. an
     // enum failure on verdict — the received span rides the error line
     // ABOVE the details fold, so it must be redactSecrets'd like the
     // excerpt (redact-then-truncate keeps the order safe).
@@ -2049,13 +2049,13 @@ describe("buildDegradedBody", () => {
   test("excerpt ≤ 1000 chars; over-budget output is truncated with an ellipsis", () => {
     const body = buildDegradedBody({ ...input, rawOutput: "y".repeat(5000) });
     const excerpt = body.slice(body.indexOf("```\n") + 4, body.lastIndexOf("\n```"));
-    expect(excerpt.length).toBe(DEGRADED_EXCERPT_LIMIT); // budget incl. ellipsis
+    expect(excerpt.length).toBe(DEGRADED_EXCERPT_LIMIT); // note: budget incl. ellipsis
     expect(excerpt.endsWith("…")).toBe(true);
   });
 
   test("the code fence sizes past the excerpt's longest backtick run (runner prints fenced JSON)", () => {
     const body = buildDegradedBody({ ...input, rawOutput: "```json\n{\"broken\": true}\n```" });
-    // The excerpt contains ``` runs — the surrounding fence must be longer.
+    // invariant: The excerpt contains ``` runs — the surrounding fence must be longer.
     expect(body).toContain("````");
     const excerpt = body.slice(body.indexOf("````\n") + 5, body.lastIndexOf("\n````"));
     expect(excerpt).toContain('```json');
@@ -2205,7 +2205,7 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
           }),
           deleteComment: mock(async (params: Record<string, unknown>) => {
             calls.deleteParams.push(params);
-            // A per-match failure: throw on the FIRST delete only, so the
+            // note: A per-match failure: throw on the FIRST delete only, so the
             // remaining matches are still attempted (skip-and-continue).
             if (deleteError && calls.deleteParams.length === 1) throw deleteError;
             return {};
@@ -2246,7 +2246,7 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
       Object.assign(new Error("forbidden"), { status: 403 }),
     );
     const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
-    // Both matches are attempted; the 403 is skipped, the second is deleted.
+    // invariant: Both matches are attempted; the 403 is skipped, the second is deleted.
     expect(calls.deleteParams).toEqual([
       { owner: "acme", repo: "widgets", comment_id: 7 },
       { owner: "acme", repo: "widgets", comment_id: 8 },
@@ -2261,7 +2261,7 @@ describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => 
     });
     const { calls, octokit } = mockOctok([degradedBotMarker(7, 2), degradedBotMarker(8, 1)], limited);
     const outcome = await deleteDegradedCommentWithOctokit(octokit, degradeInput);
-    // Both matches are still attempted; the throttled one is neither a skip
+    // invariant: Both matches are still attempted; the throttled one is neither a skip
     // nor an error — the consumer persists it as a continuation event.
     expect(calls.deleteParams).toEqual([
       { owner: "acme", repo: "widgets", comment_id: 7 },
@@ -2351,7 +2351,7 @@ describe("createReviewCommenter — bounded transport seam + live App identity (
   const SCOPE = { appId: "app-1", installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 
   type SeamCall = { url: string; method: string; signal: AbortSignal | null };
-  /** Records every request and answers the two upstream shapes involved. */
+  /** note: Records every request and answers the two upstream shapes involved. */
   function recordingFetch(): { calls: SeamCall[]; impl: CommenterFetch } {
     const calls: SeamCall[] = [];
     const impl: CommenterFetch = async (input, init) => {
@@ -2377,7 +2377,7 @@ describe("createReviewCommenter — bounded transport seam + live App identity (
     return { calls, impl };
   }
 
-  /** Global fetch is severed: anything bypassing the seam throws loudly. */
+  /** safety: Global fetch is severed: anything bypassing the seam throws loudly. */
   const realFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = realFetch;
@@ -2397,7 +2397,7 @@ describe("createReviewCommenter — bounded transport seam + live App identity (
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://api.github.com/app");
     expect(calls[0]!.method).toBe("GET");
-    // Memoized: a second probe issues no further request.
+    // invariant: Memoized: a second probe issues no further request.
     expect(await commenter.getAppIdentity!()).toEqual({ githubAppId: 1001, slug: "acme-inspector" });
     expect(calls).toHaveLength(1);
   });
@@ -2431,7 +2431,7 @@ describe("createReviewCommenter — bounded transport seam + live App identity (
   });
 
   test("without the seam the instance still uses the runtime global fetch (consumer default unchanged)", async () => {
-    // The seam is OPT-IN: an instance built by the consumer (no `fetchImpl`)
+    // invariant: The seam is OPT-IN: an instance built by the consumer (no `fetchImpl`)
     // must keep issuing through the global fetch. Stubbing the global proves
     // the default route without touching the network.
     const globalCalls: string[] = [];

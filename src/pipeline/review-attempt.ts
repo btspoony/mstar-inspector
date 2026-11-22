@@ -20,7 +20,7 @@ import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
-import { redactExactSecrets, redactSecrets } from "./redact";
+import { redactDocument, redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -308,7 +308,7 @@ WHERE attempt_id = ? AND state = 'launched'
 `;
 
 /**
- * invariant: The attempt's terminal NO-RESULT outcome, as one conditional statement: only
+ * why: The attempt's terminal NO-RESULT outcome, as one conditional statement: only
  * a `launched` row moves to `failed`, so a replay or duplicate settle changes
  * nothing. It carries `result_outcome` in the same statement (the schema
  * refuses the timestamp without it).
@@ -334,7 +334,7 @@ ON CONFLICT (attempt_id) DO UPDATE
 `;
 
 /**
- * invariant: The attempt's owed Check settlement, recorded on the ATTEMPT row and nowhere
+ * why: The attempt's owed Check settlement, recorded on the ATTEMPT row and nowhere
  * else. The association is the open Check row's own `attempt_key` AND its
  * `generation` — a key alone names the attempt, so an older generation's mark
  * could match a newer row — and `check_owed_ms` is the obligation's own due
@@ -832,7 +832,7 @@ export async function readReviewLaunch(db: D1Like, attemptId: string): Promise<R
             checkOwedMs: row.check_owed_ms,
           };
     case "launched":
-      // invariant: No outcome on a launched row: an outcome IS the transition, so this
+      // note: No outcome on a launched row: an outcome IS the transition, so this
       // arm is the only `unknown` and only it holds container and capacity.
       return row.launched_at_ms === null || row.result_outcome !== null
         ? unreadable()
@@ -895,38 +895,12 @@ function encodeExecution(execution: ReviewAttemptExecution): string {
   });
 }
 
-/**
- * safety: The paid result with every string it carries made safe to store: the exact
- * values this session's exec was given are removed from the stdout envelope,
- * the recheck document and status, and the report. The walk is over the WHOLE
- * value rather than a field list, so a field added later is covered without an
- * edit here; it runs ONCE, before both the durable write and the return, so a
- * caller cannot publish the raw stream either.
- *
- * Exact-only, deliberately: `redactSecrets` would also rewrite the envelope's
- * long hex `head_sha` and turn valid output into a parse failure (R3-1 in the
- * plan-QC fix report). `[REDACTED]` carries no quote, backslash or control
- * character, so a replaced value can never invalidate the document.
- */
-function redactExecution<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
-  if (typeof value === "string") return redactExactSecrets(value, secrets) as T;
-  if (value instanceof Set) return new Set([...value].map((item) => redactExecution(item, secrets))) as T;
-  if (Array.isArray(value)) return value.map((item) => redactExecution(item, secrets)) as T;
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactExecution(item, secrets)]),
-    ) as T;
-  }
-  return value;
-}
-
 function decodeExecution(attemptId: string, json: string): ReviewAttemptExecution {
   let parsed: unknown = null;
   try {
     parsed = JSON.parse(json);
   } catch {
-    // invariant: Falls through to the one shape check below — an unreadable row is the
+    // note: Falls through to the one shape check below — an unreadable row is the
     // same refusal as a row that does not carry a paid outcome.
   }
   const stored = parsed as
@@ -1067,7 +1041,7 @@ export function boundedStepTimeout(
 }
 
 /**
- * invariant: Payload text of one bounded read, plus WHY it yielded nothing. A missing
+ * why: Payload text of one bounded read, plus WHY it yielded nothing. A missing
  * flag line or overflow beyond the byte bound are both "no payload" to the
  * caller, but they are different D1 causes, so the failure is named rather
  * than collapsed into a bare null. Shared by the recheck document and status
@@ -1092,7 +1066,7 @@ export function parseBoundedRead(stdout: string, provesAbsence = false): ReportB
   const split = out.lastIndexOf("\n");
   if (split < 0) return { text: null, failure: "unreadable" };
   const flag = out.slice(split + 1).trim();
-  // invariant: Absence is claimed only where the command PROVED it; for every other read
+  // why: Absence is claimed only where the command PROVED it; for every other read
   // a stray `2` keeps its old meaning (over the byte bound).
   if (provesAbsence && flag === BOUNDED_READ_ABSENT_FLAG) return { text: null, failure: "absent" };
   if (flag !== "0") return { text: null, failure: "overflow" }; // note: beyond the byte bound
@@ -1243,7 +1217,7 @@ async function readRecheckDoc(
     boundedRead(sandbox, marker, readRecheckStatusCommand(), POST_RUNNER_READ_TIMEOUT_MS),
   ]);
   let doc: RecheckDoc | null = null;
-  // note: A zero-byte payload is the seat writing nothing: absent, not malformed.
+  // why: A zero-byte payload is the seat writing nothing: absent, not malformed.
   // Parsing it would throw and report the round as a JSON fault instead.
   const docText = docRead.text !== null && docRead.text.trim() !== "" ? docRead.text : null;
   let docFailure: string | null =
@@ -1571,7 +1545,7 @@ function buildRunnerCredentials(
   fields?: AttemptLogFields,
   customProviders?: readonly CustomProviderConsumerConfig[],
 ): { payload: string | undefined; keyValues: string[] } {
-  // invariant: Log only when the caller supplied BOTH the sink and the identity fields
+  // note: Log only when the caller supplied BOTH the sink and the identity fields
   // (the consumer flow does; direct unit calls may omit them).
   const emit = log !== undefined && fields !== undefined;
   const pools: CredentialPools = {};
@@ -1674,7 +1648,7 @@ function runnerFailureDetail(
 }
 
 /**
- * note: Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
+ * invariant: Base64-encode UTF-8 text for the in-image JSON write step (workerd-safe).
  * Byte→char conversion is CHUNKED (qc3 F-303): a plain per-byte `+=` loop
  * is O(n²) and this sits in the worker hot path; 0x8000 chars per
  * `String.fromCharCode` call stays far below the engine arg-count cliff.
@@ -1729,7 +1703,7 @@ async function runPreparedCommand(
     );
   }
   if (read.kind === "deadline-spent") {
-    // invariant: The DO checked the absolute deadline again, immediately before starting
+    // note: The DO checked the absolute deadline again, immediately before starting
     // the process, and refused. Nothing ran.
     throw new ExecDeadlineRefusedError(read.remainingMs);
   }
@@ -1740,7 +1714,7 @@ async function runPreparedCommand(
 }
 
 /**
- * invariant: Write the attempt's marker on the container this entry provisioned. Only a
+ * why: Write the attempt's marker on the container this entry provisioned. Only a
  * returned `written`/`matched` continues: other bytes mean the container is not
  * this attempt's, and a REJECTED write is `unknown` — a lost reply leaves the
  * marker possibly written, so a concurrent replay can prove this container and
@@ -2063,7 +2037,7 @@ export async function runReviewAttempt(input: {
     progress,
     attemptId,
   } = input;
-  // invariant: The entry gate is a READ, not the fence: a replay that finds a durable
+  // note: The entry gate is a READ, not the fence: a replay that finds a durable
   // result hands it back without touching the container, and a row that already
   // sent (or already failed) its paid call is refused here. The one-way claim is
   // taken later, in the statement that is about to SEND the exec, so everything
@@ -2134,7 +2108,7 @@ export async function runReviewAttempt(input: {
     ...(customProviders !== undefined
       ? { customProviders: customProviders.map(toRunnerCustomProvider) }
       : {}),
-    // invariant: §7.8: the typed recheck input rides ONLY when open rows
+    // note: §7.8: the typed recheck input rides ONLY when open rows
     // exist — a first round with an empty lifecycle serializes
     // byte-identically to the pre-recheck payload.
     ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
@@ -2216,7 +2190,7 @@ export async function runReviewAttempt(input: {
   // exact-redacted from any model-echoed output below.
   const runnerEnv = buildRunnerEnv(appCfg);
   const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
-  // safety: SEC-01 exact-value defense: the session's ACTUAL secret values (the
+  // note: SEC-01 exact-value defense: the session's ACTUAL secret values (the
   // transported provider keys + the minted installation token) — needed by
   // the failure message below and shared by the degrade and success paths.
   progress.secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
@@ -2246,7 +2220,7 @@ export async function runReviewAttempt(input: {
       "runner",
     );
   }
-  // invariant: THE paid-step fence, taken in the statement that is ABOUT TO SEND: a lost
+  // why: THE paid-step fence, taken in the statement that is ABOUT TO SEND: a lost
   // reply, a retried entry or a restart finds `launched` and is refused, while
   // everything above this line leaves the row `provisioned` (releasable). The
   // refusal is `unknown`: a failure the caller could retry would pay twice.
@@ -2293,7 +2267,7 @@ export async function runReviewAttempt(input: {
       },
       reason,
     );
-  // invariant: THE exec bound is taken at the LAST possible instant the WORKER can see:
+  // note: THE exec bound is taken at the LAST possible instant the WORKER can see:
   // the claim above is a D1 write, and its round trip is part of the attempt's
   // clock. The container repeats this check after its own queue, marker proof
   // and RPC (the absolute instant rides the request below), so this refusal is
@@ -2388,7 +2362,7 @@ export async function runReviewAttempt(input: {
     `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
   );
 
-  // why: The ONE typed terminal outcome outside the verdict envelope (spec §
+  // invariant: The ONE typed terminal outcome outside the verdict envelope (spec §
   // Exhaustion): the runner declared the round's wall clock spent and
   // stopped review work BEFORE its own deadline fired — the signal is the
   // outcome, not model content, so a malformed one is still a parse
@@ -2428,7 +2402,7 @@ export async function runReviewAttempt(input: {
   const marker = attemptMarker(attemptId);
   const recheck = recheckInput !== undefined ? await readRecheckDoc(sandbox, marker, recheckInput) : null;
 
-  // invariant: The report document (mstar.report/v1) rides the SAME audited bounded read
+  // note: The report document (mstar.report/v1) rides the SAME audited bounded read
   // and the SAME fail-closed rule: the Worker validates it against its own
   // gate and falls back to `none` headings, or null when the seat wrote
   // nothing. Read only when the runner was actually given `--report-out`.
@@ -2444,7 +2418,7 @@ export async function runReviewAttempt(input: {
   // had run.
   const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
 
-  // invariant: Result and completion are ONE statement: the row reaches `persisted` only
+  // safety: Result and completion are ONE statement: the row reaches `persisted` only
   // in the write that stores the result, so completion is never recorded before
   // the result is durable. Anything else — a row that moved, a result too large
   // for the row, a storage fault, a lost reply — leaves the attempt `launched`
@@ -2453,18 +2427,23 @@ export async function runReviewAttempt(input: {
   // rejected write is explicitly unknown: it may have landed.
   //
   // NO runner output crosses the persistence boundary unredacted. The exact
-  // values this session's own exec received are removed HERE, on the host that
-  // holds them; the stored and the returned value are this one sanitized
-  // object, so nothing downstream can publish the raw stream either.
-  const execution = redactExecution(
-    {
-      run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
-      recheck,
-      report,
-      appliedProvider,
-    },
-    progress.secretValues,
-  );
+  // values this session's own exec received, and every bounded transform of
+  // them, are removed HERE, on the host that holds them; the stored and the
+  // returned value are this one sanitized object, so nothing downstream can
+  // publish the raw stream either. Each retained document is redacted as its
+  // own root, with its host-written identity protected BY PATH — a forged
+  // `{"head_sha": …}` in model text is at no protected path and is redacted.
+  const secretValues = progress.secretValues;
+  const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");
+  const recheckRedaction = redactDocument(recheck, secretValues, "recheck");
+  const reportRedaction = redactDocument(report, secretValues, "report");
+  const providerRedaction = redactDocument(appliedProvider, secretValues, "text");
+  const execution = {
+    run: { stdout: stdoutRedaction.value, stderr: "", exitCode: run.exitCode },
+    recheck: recheckRedaction.value,
+    report: reportRedaction.value,
+    appliedProvider: providerRedaction.value,
+  };
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());

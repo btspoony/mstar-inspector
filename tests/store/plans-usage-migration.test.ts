@@ -1,5 +1,5 @@
 /**
- * Migration 0031: plan catalogue, workspace subscriptions, usage ledger.
+ * why: Migration 0031: plan catalogue, workspace subscriptions, usage ledger.
  *
  * The migration is the product here, so the assertions pin its contract rather
  * than the DDL text: free.monthly_price_cents is 0 (a configured free plan),
@@ -17,7 +17,7 @@ import { createMigratedTestD1 } from "./helpers";
 const MIGRATION = "0031_plans_usage.sql";
 
 describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () => {
-  // 0032 replaced the catalogue with a nullable-seat shape and added the
+  // note: 0032 replaced the catalogue with a nullable-seat shape and added the
   // `unlimited` tier, so the applied DB carries three rows: 0031's free/pro
   // seed plus 0032's every-quota-NULL tier (timestamps stay the fixed seeds).
   // 0061 then sets the shared-bot capability: `free` keeps the column default,
@@ -90,7 +90,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
     insert.run("review-1", 1, "token-1", "default", at);
     expect(() => insert.run("review-1", 1, "token-2", "default", at)).toThrow();
     insert.run("review-1", 2, "token-3", "default", at);
-    // One execution, one row: the same token can never be counted twice.
+    // invariant: One execution, one row: the same token can never be counted twice.
     expect(() => insert.run("review-1", 3, "token-3", "default", at)).toThrow();
     expect(() => insert.run("review-2", 1, "token-4", "missing", at)).toThrow();
     db.raw.close();
@@ -100,7 +100,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
     const db = createMigratedTestD1();
     const indexes = db.raw.query("PRAGMA index_list('usage_events')").all() as Array<{ name: string }>;
     expect(indexes.map((index) => index.name)).toContain("usage_events_workspace_occurred");
-    // The execution identity is unique, so a replayed write cannot double-count.
+    // invariant: The execution identity is unique, so a replayed write cannot double-count.
     expect(indexes.map((index) => index.name)).toContain("usage_events_execution_token");
     db.raw.close();
   });

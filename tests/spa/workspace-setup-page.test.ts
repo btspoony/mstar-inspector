@@ -1,5 +1,4 @@
-/**
- * Workspace creation page — the signed-in landing for a login
+/** note: Workspace creation page — the signed-in landing for a login
  * that belongs to no workspace yet. Source-scan contract (no DOM runner), the
  * members/settings page precedent: the surface must offer exactly one action
  * (the creation POST) and must not invent an auto-join path.
@@ -21,7 +20,7 @@ const source = readFileSync(
 describe("workspace creation page", () => {
   test("posts the creation route and mounts no background fetch", () => {
     expect(source).toContain('postForm("/dashboard/api/workspaces"');
-    // The page loads nothing on mount: creation and the invite accepts are
+    // invariant: The page loads nothing on mount: creation and the invite accepts are
     // the only membership producers, both user-triggered.
     expect(source).not.toContain("useEffect");
   });
@@ -36,14 +35,14 @@ describe("workspace creation page", () => {
   });
 
   test("composes the page header and the shared section flow", () => {
-    // The page-title step, the section face and the invite row have ONE
+    // note: The page-title step, the section face and the invite row have ONE
     // spelling each, and all of them live in the primitives — the same shell
     // a workspace owner meets on every other page.
     expect(source).toContain("<PageHeader");
     expect(source).toContain("<FlowSection");
     expect(source).toContain("<ListRow");
     expect(source).not.toContain("text-(length:--typo-heading-24-size)");
-    // The section-title face is FlowSection's, not a per-page chain.
+    // note: The section-title face is FlowSection's, not a per-page chain.
     expect(source).not.toContain("text-(length:--typo-heading-16-size)");
     expect(source).not.toContain("CardTitle className=");
     expect(source).not.toContain("bg-card");
@@ -68,18 +67,17 @@ describe("workspace creation page", () => {
   });
 
   test("success lands on the workspace the response names, never on the bare root", () => {
-    // The page cannot compute the target: it does not know the tenant mode.
+    // note: The page cannot compute the target: it does not know the tenant mode.
     expect(
       creationLanding(201, JSON.stringify({ id: "ws_x", homePath: "/dashboard/ws_x/repos" })),
     ).toBe("/dashboard/ws_x/repos");
-    // A refusal or an unparseable body is a failure notice, never a navigation.
+    // invariant: A refusal or an unparseable body is a failure notice, never a navigation.
     expect(creationLanding(400, "")).toBeNull();
     expect(creationLanding(201, "not json")).toBeNull();
     expect(creationLanding(201, JSON.stringify({ id: "ws_x" }))).toBeNull();
   });
 
-  /**
-   * `emptyInstance` is the ONLY gate on the empty-instance guidance (2026-10):
+  /** note: `emptyInstance` is the ONLY gate on the empty-instance guidance (2026-10):
    * the Worker decides it from `DEPLOYMENT_MODE` + an empty `users` table, and
    * the page renders the sentence from that flag alone. The flag's own matrix
    * lives in `tests/worker/deployment-mode.test.ts`; this pins that the flag —
@@ -96,8 +94,7 @@ describe("workspace creation page", () => {
   });
 });
 
-/**
- * MF-2 — the invitee's accept surface. The boot carries `pendingInvites`,
+/** note: MF-2 — the invitee's accept surface. The boot carries `pendingInvites`,
  * so the creation page (the `needsWorkspace` landing) must offer the Accept
  * action; a login with no invites still sees only the create form.
  */
@@ -115,12 +112,12 @@ describe("workspace creation page — pending invitations", () => {
 
   test("an invitee sees the invite list with workspace, role and Accept", () => {
     const markup = renderToStaticMarkup(createElement(WorkspaceSetupPage, { boot: inviteeBoot }));
-    // Each invite names its workspace and invited role, with an Accept
+    // note: Each invite names its workspace and invited role, with an Accept
     // action per row — and the create form stays below for the uninvited.
     expect(markup).toContain("acme");
     expect(markup).toContain("beta");
     expect(markup).toContain("admin");
-    // "Accept" also appears in the description copy — count the buttons.
+    // note: "Accept" also appears in the description copy — count the buttons.
     expect(markup.match(/>Accept</g)).toHaveLength(2);
     expect(markup).toContain(t("en", "workspace.invitesHeading"));
   });
@@ -137,14 +134,14 @@ describe("workspace creation page — pending invitations", () => {
   });
 
   test("accept posts under the invited workspace's ref and lands on its repository overview", () => {
-    // The invite row carries the ref — the `needsWorkspace` path names none,
+    // note: The invite row carries the ref — the `needsWorkspace` path names none,
     // so the POST must address the invite's workspace prefix.
     expect(inviteAcceptPath("acme", "inv_1")).toBe("/dashboard/acme/api/members/invites/inv_1/accept");
     expect(inviteLanding("acme")).toBe("/dashboard/acme/repos");
   });
 
   test("a failed accept maps the refusal body onto a dictionary notice", () => {
-    // 409 `invite.expired` and 410 "no longer pending" keep their distinct
+    // note: 409 `invite.expired` and 410 "no longer pending" keep their distinct
     // reasons; anything else is the generic failure face.
     expect(inviteAcceptNotice(409, "invite.expired")).toBe("workspace.inviteExpired");
     expect(inviteAcceptNotice(410, "invite is no longer pending")).toBe("workspace.inviteGone");

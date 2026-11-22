@@ -1,5 +1,5 @@
 /**
- * GitHub rate-limit classification (the pure half of the consumer tagging
+ * why: GitHub rate-limit classification (the pure half of the consumer tagging
  * point). The classifier answers ONE question — which GitHub limit rejected
  * this call — because the persisted `review_failures.error` prefix and the
  * store's 24 h count are derived from it; a second interpretation of the same
@@ -20,7 +20,7 @@ import {
 } from "../../src/contracts/failure-stages";
 
 describe("rate-limit error prefixes", () => {
-  // The two prefixes are the durable `review_failures.error` vocabulary the
+  // why: The two prefixes are the durable `review_failures.error` vocabulary the
   // store counts by; a rename is a data-compat break, so the literals are
   // pinned here (the dashboard and the 24 h counts read them, not the source).
   test("each prefix equals its documented literal", () => {
@@ -58,7 +58,7 @@ describe("classifyGithubRateLimit", () => {
   });
 
   test("403 with x-ratelimit-remaining: 0 is a PRIMARY limit", () => {
-    // GitHub answers 403 for primary exhaustion too; the exhausted budget is
+    // why: GitHub answers 403 for primary exhaustion too; the exhausted budget is
     // the primary signal, while retry-after / the message name the secondary.
     expect(
       classifyGithubRateLimit({
@@ -94,7 +94,7 @@ describe("classifyGithubRateLimit", () => {
   });
 
   test("a plain 403, a 5xx and a retry-after on a non-403 are unclassified", () => {
-    // A permission/not-found 403 keeps some remaining budget: not a limit.
+    // why: A permission/not-found 403 keeps some remaining budget: not a limit.
     expect(
       classifyGithubRateLimit({
         status: 403,
@@ -117,7 +117,7 @@ describe("classifyGithubRateLimit", () => {
       { status: "403" },
       [],
       () => undefined,
-      // Malformed envelopes: a transport that answered without response/headers.
+      // why: Malformed envelopes: a transport that answered without response/headers.
       { status: 403, message: "Forbidden", response: null },
       { status: 403, message: "Forbidden", response: { headers: "retry-after: 60" } },
     ];

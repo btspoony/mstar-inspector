@@ -1,5 +1,5 @@
 /**
- * `scripts/extract-changelog-section.ts` unit tests (D5 / D11).
+ * why: `scripts/extract-changelog-section.ts` unit tests (D5 / D11).
  *
  * Pins the release-notes feed contract:
  *
@@ -132,7 +132,7 @@ describe("clampSection (bounded bodies)", () => {
 
   test("over the cap cuts on an entry boundary and counts the omitted entries", () => {
     const bounded = clampSection(body, 40, "en");
-    // never splits a bullet: every retained line is a whole entry
+    // why: never splits a bullet: every retained line is a whole entry
     expect(bounded.split("\n").filter((l) => l.startsWith("- "))).toEqual(["- one bullet", "- two bullet"]);
     expect(bounded).toContain("2 more entries — the full list is in [CHANGELOG.md](CHANGELOG.md).");
   });

@@ -1,5 +1,4 @@
-/**
- * The bot page's share switch: the official workspace's manager marks its own
+/** note: The bot page's share switch: the official workspace's manager marks its own
  * bot shared, or revokes the share — and every other caller sees nothing about
  * sharing at all.
  *
@@ -21,8 +20,7 @@ import { installDom } from "./dom";
 const locale = "en" as const;
 const WORKSPACE_REF = "acme";
 
-/**
- * The path the page must PATCH, DERIVED from the worker's own route table: a
+/** note: The path the page must PATCH, DERIVED from the worker's own route table: a
  * page that composes its own URL would otherwise keep passing its own test
  * while the request 404s against a route registered under another prefix.
  */

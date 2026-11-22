@@ -1,5 +1,4 @@
-/**
- * The one happy-dom install for the SPA suites.
+/** note: The one happy-dom install for the SPA suites.
  *
  * `react-dom/client` latches `canUseDOM` when it is evaluated, and Radix latches
  * the same answer in `@radix-ui/primitive`. Module evaluated while no DOM exists
@@ -18,7 +17,7 @@ import { Window } from "happy-dom";
 
 const scope = globalThis as unknown as Record<string, unknown>;
 
-/** happy-dom constructors the mounted React tree and Radix widgets read. */
+/** note: happy-dom constructors the mounted React tree and Radix widgets read. */
 const DOM_CONSTRUCTORS = [
   "HTMLElement",
   "HTMLInputElement",
@@ -44,12 +43,12 @@ const DOM_CONSTRUCTORS = [
   "ResizeObserver",
 ] as const;
 
-/** The globals a window contributes, installed by name so teardown is exact. */
+/** note: The globals a window contributes, installed by name so teardown is exact. */
 function globalsOf(win: Window): Record<string, unknown> {
   const dom = win as unknown as Record<string, unknown>;
   const installed: Record<string, unknown> = {
     window: win,
-    // Pages derive their API base and workspace ref from the location, so it
+    // note: Pages derive their API base and workspace ref from the location, so it
     // rides the stub rather than only `window`.
     location: win.location,
     document: win.document,
@@ -121,7 +120,7 @@ export async function withMarkup<T>(
 export async function warmDom(): Promise<void> {
   const { cleanup } = installDom("http://localhost/");
   try {
-    // Dynamic by necessity, not preference: a static import is hoisted above
+    // note: Dynamic by necessity, not preference: a static import is hoisted above
     // the install and would latch `canUseDOM` false — the exact bug this file
     // exists to prevent. `@radix-ui/primitive` is the answer every Radix
     // package reads, so one dialog import loads it.

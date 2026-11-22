@@ -1,5 +1,5 @@
 /**
- * Prerequisite guard for the hand-listed fixture shapes: replay every shape
+ * why: Prerequisite guard for the hand-listed fixture shapes: replay every shape
  * registered in `migration-shapes.ts` in order and assert each table a
  * migration indexes or alters already exists when that migration runs — the
  * failure a below-anchor reference otherwise reports as a bare
@@ -19,7 +19,7 @@ import {
 import { FIXTURE_SHAPES, applyMigrations, migrationSql } from "./migration-shapes";
 
 /**
- * Every table a migration indexes or alters but does NOT create in the same
+ * why: Every table a migration indexes or alters but does NOT create in the same
  * file, read from the file itself so a new tail migration extends the check
  * with no edit here.
  */
@@ -28,7 +28,7 @@ function touchedTables(sql: string): string[] {
   const created = new Set(
     [...ddl.matchAll(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"?(\w+)/gi)].map((match) => match[1]!),
   );
-  // A rename CREATES its target name in the same statement — `ALTER TABLE a
+  // why: A rename CREATES its target name in the same statement — `ALTER TABLE a
   // RENAME TO b` needs `b` absent and `a` present, so the target is no
   // below-anchor reference to chase.
   for (const match of ddl.matchAll(/ALTER\s+TABLE\s+"?(\w+)"?\s+RENAME\s+TO\s+"?(\w+)/gi)) created.add(match[2]!);
@@ -43,7 +43,7 @@ function touchedTables(sql: string): string[] {
 }
 
 describe("fixture shapes (TAIL_PREREQUISITES)", () => {
-  // An empty registry would report zero failures, i.e. the same vacuous green
+  // why: An empty registry would report zero failures, i.e. the same vacuous green
   // this guard exists to prevent.
   test("the shape registry is populated", () => {
     expect(Object.keys(FIXTURE_SHAPES).length).toBeGreaterThan(0);
@@ -54,7 +54,7 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
       const db = createTestD1();
       for (const name of migrations) {
         for (const table of touchedTables(migrationSql(name))) {
-          // `get()` is undefined-capable (the D1 double's `first()` reads it
+          // why: `get()` is undefined-capable (the D1 double's `first()` reads it
           // that way), so assert the ROW, not merely a non-null: a missing
           // table must never read as present.
           const row = db.raw
@@ -72,7 +72,7 @@ describe("fixture shapes (TAIL_PREREQUISITES)", () => {
 });
 
 /**
- * The App family is a review bot, and the derived tail renames it and then
+ * why: The App family is a review bot, and the derived tail renames it and then
  * splits the review configuration onto a target. A shape either carries that
  * tail — and must end on the bot vocabulary with a target table and no review
  * configuration on the bot row — or it stops below it, which only the pre-0015
@@ -99,7 +99,7 @@ describe("fixture shapes (review bot vocabulary)", () => {
         db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>
       ).map((column) => column.name);
       expect(reviews, `${shape}: review attribution column`).toContain(renamed ? "bot_id" : "app_id");
-      // The split is the rename's tail: the target table exists exactly where
+      // why: The split is the rename's tail: the target table exists exactly where
       // the bot vocabulary does, and the bot row no longer carries the review
       // configuration there, so no shape is left half-split.
       expect(tables.has("review_targets"), `${shape}: target table`).toBe(renamed);
@@ -116,14 +116,14 @@ describe("fixture shapes (review bot vocabulary)", () => {
 });
 
 /**
- * Every fixture migration must run through the fail-fast executor: a script
+ * why: Every fixture migration must run through the fail-fast executor: a script
  * whose second statement fails has to abort, not leave the earlier statements
  * applied and the rest of the file skipped. A whole-file `exec` cannot promise
  * that — on the pinned bun a failing statement inside a multi-statement string
  * is skipped while the rest still runs.
  */
 describe("fixture migrations (fail-fast)", () => {
-  /** Two good statements around a failing one: `after` marks a skipped abort. */
+  /** note: Two good statements around a failing one: `after` marks a skipped abort. */
   const SCRIPT = [
     "CREATE TABLE fail_fast_probe (v TEXT);",
     "INSERT INTO fail_fast_probe (v) VALUES ('first');",
@@ -142,10 +142,10 @@ describe("fixture migrations (fail-fast)", () => {
   });
 
   test("applyMigrations hands each statement over on its own — fail-fast", () => {
-    // A bare connection: the test is about what `applyMigrations` hands over.
+    // why: A bare connection: the test is about what `applyMigrations` hands over.
     const db = new Database(":memory:");
     const handed: string[] = [];
-    // `applyMigrations` touches nothing but the connection's `exec`, so
+    // why: `applyMigrations` touches nothing but the connection's `exec`, so
     // recording there is enough to see whether a script arrived whole.
     const recording = {
       raw: {
@@ -157,11 +157,11 @@ describe("fixture migrations (fail-fast)", () => {
     } as unknown as TestD1;
     try {
       applyMigrations(recording, ["0059_install_claims.sql"]);
-      // The expectation is HAND-WRITTEN. Deriving it from `splitSqlStatements`
+      // why: The expectation is HAND-WRITTEN. Deriving it from `splitSqlStatements`
       // would be satisfied by any splitter output, including a splitter that
       // stopped splitting (one handed-over blob) or split inside a literal.
       expect(handed).toHaveLength(3);
-      // The statement's head, with the leading `--` comment lines the splitter
+      // why: The statement's head, with the leading `--` comment lines the splitter
       // keeps attached skipped: three words identify each statement.
       expect(
         handed.map((statement) =>
@@ -179,7 +179,7 @@ describe("fixture migrations (fail-fast)", () => {
         "CREATE INDEX install_claims_user_open",
         "CREATE UNIQUE INDEX",
       ]);
-      // ...and each one reached the connection whole: the schema is what the
+      // why: ...and each one reached the connection whole: the schema is what the
       // three statements describe, nothing more and nothing less.
       expect(
         db

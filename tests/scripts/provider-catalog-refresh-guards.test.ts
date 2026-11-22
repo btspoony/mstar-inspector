@@ -1,5 +1,5 @@
 /**
- * `.github/workflows/refresh-catalog.yml` guards.
+ * invariant: `.github/workflows/refresh-catalog.yml` guards.
  *
  * The workflow runs unattended against a live registry, writes to a branch and
  * opens a pull request. Three things must hold every night, and none of them is
@@ -53,7 +53,7 @@ describe("refresh-catalog.yml trigger and permissions", () => {
   test("runs daily off-peak plus a manual dispatch", () => {
     const on = wf["true"] as { schedule: { cron: string }[]; workflow_dispatch: unknown };
     expect(on.schedule).toHaveLength(1);
-    // Off-peak UTC, and not on the hour (avoids the cron stampede at :00).
+    // why: Off-peak UTC, and not on the hour (avoids the cron stampede at :00).
     expect(on.schedule[0]!.cron).toMatch(/^\d+ \d+ \* \* \*$/);
     expect(Number(on.schedule[0]!.cron.split(" ")[0])).toBeGreaterThan(0);
     expect(Object.hasOwn(on, "workflow_dispatch")).toBe(true);
@@ -66,7 +66,7 @@ describe("refresh-catalog.yml trigger and permissions", () => {
 
 describe("refresh-catalog.yml step chain", () => {
   test("the required steps appear in dependency order", () => {
-    // Position in the chain matters: fetch before regenerate, regenerate before
+    // why: Position in the chain matters: fetch before regenerate, regenerate before
     // the fingerprint repair, the diff gate before verification.
     const order = [
       "Fetch the models.dev snapshot",
@@ -109,7 +109,7 @@ describe("refresh-catalog.yml guards", () => {
     expect(wf.jobs.refresh.env.BRANCH).toBe("chore/catalog-refresh");
     expect(runs).not.toMatch(/git push[^\n]*\bmain\b/);
     expect(runs).not.toMatch(/git push[^\n]*\bHEAD:main\b/);
-    // The push names the branch variable, and the step refuses the literal main.
+    // why: The push names the branch variable, and the step refuses the literal main.
     expect(runs).toContain('git push --force origin "$BRANCH"');
     expect(runs).toContain('[ "$BRANCH" = "main" ]');
   });
@@ -119,7 +119,7 @@ describe("refresh-catalog.yml guards", () => {
     const script = prStep.run!;
     expect(script).toContain("gh pr list --head \"$BRANCH\" --state open --json number");
     expect(script).toContain("gh pr edit");
-    // Not "the word else appears somewhere": `gh pr create` must sit INSIDE the
+    // why: Not "the word else appears somewhere": `gh pr create` must sit INSIDE the
     // branch taken when the lookup found nothing. The script is run here (with
     // `gh` stubbed) under both cases, so removing the guard makes this fail
     // instead of passing on the title branch's `else`.
@@ -131,7 +131,7 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("the create/update choice is exercised, not just read", () => {
-    // A stub `gh` that records its argv; the step's own script drives it.
+    // why: A stub `gh` that records its argv; the step's own script drives it.
     const prStep = steps.find((step) => step.name === "Open or update the refresh PR")!;
     for (const [open, expected] of [
       ["", "create"],
@@ -148,7 +148,7 @@ describe("refresh-catalog.yml guards", () => {
             `case "$1 $2" in\n  "pr list") echo ${JSON.stringify(open)} ;;\nesac\n`,
         );
         chmodSync(join(bin, "gh"), 0o755);
-        // The step's script with its env; only `gh` is stubbed.
+        // note: The step's script with its env; only `gh` is stubbed.
         const script = `BRANCH=chore/catalog-refresh\nRUNNER_TEMP=${JSON.stringify(dir)}\n` +
           `printf 'body\\n' > "$RUNNER_TEMP/pr-body.md"\n${prStep.run}`;
         const proc = Bun.spawnSync(["bash", "-e", "-c", script], {
@@ -174,7 +174,7 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("nothing is published unless the tree is green", () => {
-    // Verification STOPS the run: no `continue-on-error` (a swallowed failure
+    // why: Verification STOPS the run: no `continue-on-error` (a swallowed failure
     // would let the publishing steps proceed), and the gate step is a hard
     // `run:` that exits non-zero on any red signal.
     for (const id of ["typecheck", "test"]) {
@@ -187,24 +187,24 @@ describe("refresh-catalog.yml guards", () => {
     expect(gate.run).toContain("scripts/provider-catalog/pr-verdict.ts");
     expect(gate.run).toContain("$TYPECHECK_OUTCOME");
     expect(gate.run).toContain("$TEST_OUTCOME");
-    // The gate precedes every publishing step.
+    // why: The gate precedes every publishing step.
     const gateAt = steps.indexOf(gate);
     for (const name of ["Build the PR body", "Commit and force-update the refresh branch", "Open or update the refresh PR"]) {
       expect(steps.indexOf(steps.find((step) => step.name === name)!), name).toBeGreaterThan(gateAt);
     }
-    // And no artefact of the retired "ship it red" design survives.
+    // why: And no artefact of the retired "ship it red" design survives.
     expect(runs).not.toContain("⚠ tests red");
     expect(runs).not.toContain("checks red");
     const body = steps.find((step) => step.name === "Build the PR body")!;
     expect(body.run).not.toContain("❌");
     expect(body.run).not.toContain("✅");
-    // No auto-merge, ever: the PR is a review surface, not a merge trigger.
+    // why: No auto-merge, ever: the PR is a review surface, not a merge trigger.
     expect(runs).not.toContain("--auto");
     expect(runs).not.toContain("gh pr merge");
   });
 
   test("a red run publishes nothing: the verdict gate exits non-zero before any push", () => {
-    // The decision function, as the gate uses it.
+    // note: The decision function, as the gate uses it.
     expect(verdict("success", "failure", "").green).toBe(false);
     expect(verdict("failure", "success", "").green).toBe(false);
     expect(verdict("success", "success", " 10 pass\n 3 fail\n").green).toBe(false);
@@ -212,13 +212,13 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("the test step's exit status is the test's, not `tee`'s", () => {
-    // The workflow declares no `shell:`, so GitHub runs `bash -e {0}` — and a
+    // why: The workflow declares no `shell:`, so GitHub runs `bash -e {0}` — and a
     // bare `bun test | tee` reports 0 through tee even when the suite fails. Any
     // pipeline into `tee` must be preceded by `pipefail`.
     const test = byId.get("test")!;
     if (/\|\s*tee\b/.test(test.run!)) expect(test.run).toMatch(/set -o pipefail/);
     expect(test.run).toContain('"${RUNNER_TEMP}/test.log"');
-    // Belt and braces, asserted as the DECISION the gate makes: even if that
+    // why: Belt and braces, asserted as the DECISION the gate makes: even if that
     // construct were lost (step reports success) a log that records failures
     // must refuse publication — that is the round-1 bug, and this is the proof
     // it cannot come back silently.
@@ -228,7 +228,7 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("a red run performs no git push and no gh pr create (stubbed tools)", () => {
-    // The REAL gate, the REAL push step and the REAL PR step, in a scratch
+    // why: The REAL gate, the REAL push step and the REAL PR step, in a scratch
     // directory, with `git` and `gh` replaced by argv recorders. Each case runs
     // the whole chain under `bash -e` exactly as the job does: if the gate exits
     // non-zero, `bash -e` stops before the publishing steps — which is the
@@ -239,7 +239,7 @@ describe("refresh-catalog.yml guards", () => {
     const pr = steps.find((step) => step.name === "Open or update the refresh PR")!;
     const verdictScript = join(REPO_ROOT, "scripts/provider-catalog/pr-verdict.ts");
 
-    /** Run the chain; return the recorder's lines. */
+    /** note: Run the chain; return the recorder's lines. */
     const chain = (log: string, typecheck: string, test: string): { code: number; calls: string[] } => {
       const dir = mkdtempSync(join(tmpdir(), "publish-"));
       try {
@@ -250,7 +250,7 @@ describe("refresh-catalog.yml guards", () => {
           writeFileSync(
             join(bin, tool),
             `#!/bin/sh\nprintf '%s %s\\n' ${JSON.stringify(tool)} "$*" >> ${JSON.stringify(record)}\n` +
-              // `gh pr list` reports no open PR, so the create path is the one
+              // note: `gh pr list` reports no open PR, so the create path is the one
               // a broken gate would take.
               `case "$*" in\n  *"pr list"*) echo "" ;;\nesac\n`,
           );
@@ -258,7 +258,7 @@ describe("refresh-catalog.yml guards", () => {
         }
         writeFileSync(join(dir, "test.log"), log);
         writeFileSync(join(dir, "pr-body.md"), "body\n");
-        // The gate's script, with the repo-relative path made absolute: the
+        // note: The gate's script, with the repo-relative path made absolute: the
         // cwd is the scratch dir, and a broken path would make bun fail for the
         // wrong reason (round 4 caught exactly that).
         const gateRun = gate.run!.replace("scripts/provider-catalog/pr-verdict.ts", verdictScript);
@@ -287,7 +287,7 @@ describe("refresh-catalog.yml guards", () => {
       }
     };
 
-    // Red: failing typecheck. Red: a lost exit status with a failing log.
+    // note: Red: failing typecheck. Red: a lost exit status with a failing log.
     for (const red of [
       chain(" 1 pass\n 0 fail\n", "failure", "success"),
       chain(" 1 pass\n 79 fail\n", "success", "success"),
@@ -298,7 +298,7 @@ describe("refresh-catalog.yml guards", () => {
       expect(red.calls.filter((line) => line.includes("pr edit"))).toEqual([]);
     }
 
-    // Green reaches both steps — the control that makes the empty red recorders
+    // why: Green reaches both steps — the control that makes the empty red recorders
     // meaningful.
     const green = chain(" 5679 pass\n 0 fail\n", "success", "success");
     expect(green.code, JSON.stringify(green.calls)).toBe(0);
@@ -307,7 +307,7 @@ describe("refresh-catalog.yml guards", () => {
   });
 
   test("every trigger builds from the default branch, never from a dispatched feature branch", () => {
-    // `workflow_dispatch` may be run from any branch; without a pinned ref the
+    // why: `workflow_dispatch` may be run from any branch; without a pinned ref the
     // refresh branch (and its PR) would carry that branch's unmerged commits
     // while the removals diff still compares origin/main.
     const checkout = steps.find((step) => step.uses?.startsWith("actions/checkout"))!;
@@ -316,7 +316,7 @@ describe("refresh-catalog.yml guards", () => {
 
   test("the PR body reports catalog removals and the pin movement", () => {
     const body = steps.find((step) => step.name === "Build the PR body")!;
-    // The base revision's committed module is the comparison input.
+    // note: The base revision's committed module is the comparison input.
     expect(body.run).toContain("git show \"origin/main:src/contracts/provider-catalog.generated.ts\"");
     expect(body.run).toContain("scripts/provider-catalog/catalog-changes.ts");
     expect(body.run).toContain("## Catalog removals");
@@ -327,16 +327,16 @@ describe("refresh-catalog.yml guards", () => {
 
   test("an unpublished SDK version does not fail the run", () => {
     const latest = steps.find((step) => step.name === "Resolve the newest published SDK versions")!;
-    // `npm view` failures are tolerated; the pin step treats "unknown" as a skip.
+    // note: `npm view` failures are tolerated; the pin step treats "unknown" as a skip.
     expect(latest.run).toContain("set +e");
     expect(latest.run).toContain("unknown");
     expect(byId.get("pins")!.run).toContain('"$OMP_LATEST" != "unknown"');
     expect(byId.get("pins")!.run).toContain('"$ENGINE_LATEST" != "unknown"');
-    // An engine release whose CLI is not published yet cannot build the image
+    // why: An engine release whose CLI is not published yet cannot build the image
     // (the CLI pin is installed from a frozen lock at HARNESS_VERSION).
     expect(latest.run).toContain('npm view "@mstar-harness/cli@${ENGINE}" version');
     expect(byId.get("pins")!.run).toContain('"$CLI_STATE" != "available"');
-    // A version bump with no annotated tag must HOLD the pins: the version, the
+    // why: A version bump with no annotated tag must HOLD the pins: the version, the
     // CLI pin, harnessRef and the Dockerfile tag anchor describe one release, so
     // a version-only move is a half-moved tree (round 4's wedge). `ENGINE_ARG` is
     // set only inside the branch where the dereferenced tag exists.
@@ -345,14 +345,14 @@ describe("refresh-catalog.yml guards", () => {
     const setEngine = pins.indexOf('ENGINE_ARG="$ENGINE_LATEST"');
     expect(tagGuard).toBeGreaterThan(-1);
     expect(setEngine).toBeGreaterThan(tagGuard);
-    // …and the missing-tag branch must not set it.
+    // note: …and the missing-tag branch must not set it.
     const missing = pins.slice(pins.indexOf('if [ -z "$REF" ]'), setEngine);
     expect(missing).not.toContain('ENGINE_ARG=');
     expect(pins).toContain("holding the pins");
   });
 
   test("the pins step delegates to bump-pins, which owns every lock beside a manifest", () => {
-    // The workflow used to re-do the runner lock itself; a second implementation
+    // why: The workflow used to re-do the runner lock itself; a second implementation
     // drifted from the script's documented local path (the review caught the
     // local path leaving both locks stale). One owner, one behaviour.
     const pins = byId.get("pins")!.run!;
@@ -360,7 +360,7 @@ describe("refresh-catalog.yml guards", () => {
     expect(pins).not.toContain("bun install --lockfile-only");
     expect(pins).toContain("PINS=(");
     expect(pins).toContain("git checkout -- \"${PINS[@]}\"");
-    // The rollback must cover every lock the script may have rewritten.
+    // why: The rollback must cover every lock the script may have rewritten.
     for (const path of ["package.json", "bun.lock", "packages/runner/package.json", "packages/runner/bun.lock"]) {
       expect(pins, path).toContain(path);
     }

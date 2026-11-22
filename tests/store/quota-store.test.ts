@@ -1,5 +1,5 @@
 /**
- * Migration 0063 (versioned quota profiles) and its read module.
+ * why: Migration 0063 (versioned quota profiles) and its read module.
  *
  * The migration is the product for the schema half: interval overlap must be
  * unrepresentable (a second row at an existing `effective_from` is refused by
@@ -24,7 +24,7 @@ import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runti
 
 const V1_AT = "2026-10-24T00:00:00.000Z";
 
-/** One extra profile in a later month, so "which profile judges this" is observable. */
+/** note: One extra profile in a later month, so "which profile judges this" is observable. */
 function insertProfile(
   db: TestD1,
   row: { id: string; version: number; effectiveFrom: string; baseStandard?: number },
@@ -69,7 +69,7 @@ describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
         created_at: V1_AT,
       },
     ]);
-    // `unlimited` keeps its ROW with a NULL ceiling: an absent row would read as
+    // invariant: `unlimited` keeps its ROW with a NULL ceiling: an absent row would read as
     // "no ceiling" for a plan this profile never considered.
     expect(
       db.raw.query("SELECT plan_id, monthly_rp FROM quota_profile_plans ORDER BY plan_id").all(),
@@ -94,11 +94,11 @@ describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
         .run(id, version, effectiveFrom, V1_AT);
 
     expect(() => insertAt("quota-v2", 2, V1_AT)).toThrow(/UNIQUE constraint failed/);
-    // Same refusal through the version ordinal: two creates cannot mint one.
+    // invariant: Same refusal through the version ordinal: two creates cannot mint one.
     expect(() => insertAt("quota-v2", 1, "2026-11-15T00:00:00.000Z")).toThrow(
       /UNIQUE constraint failed/,
     );
-    // A genuinely new endpoint is accepted — overlap is what is unrepresentable,
+    // note: A genuinely new endpoint is accepted — overlap is what is unrepresentable,
     // not further profiles.
     expect(() => insertAt("quota-v2", 2, "2026-11-15T00:00:00.000Z")).not.toThrow();
     expect(
@@ -119,7 +119,7 @@ describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
         .prepare(`UPDATE quota_profile_plans SET monthly_rp = -1 WHERE plan_id = 'free'`)
         .run(),
     ).toThrow(/CHECK constraint failed/);
-    // A ceiling needs a real profile: the FK holds the profile's plan set closed.
+    // why: A ceiling needs a real profile: the FK holds the profile's plan set closed.
     expect(() =>
       db.raw
         .prepare(
@@ -155,7 +155,7 @@ describe("resolveQuotaProfile", () => {
 
     expect((await resolveQuotaProfile(db, V1_AT)).id).toBe("quota-v1");
     expect((await resolveQuotaProfile(db, "2026-11-14T23:59:59.999Z")).id).toBe("quota-v1");
-    // The instant itself belongs to the new profile: effective_from is inclusive.
+    // invariant: The instant itself belongs to the new profile: effective_from is inclusive.
     expect((await resolveQuotaProfile(db, "2026-11-15T00:00:00.000Z")).id).toBe("quota-v2");
     expect((await resolveQuotaProfile(db, "2030-01-01T00:00:00.000Z")).id).toBe("quota-v2");
     db.raw.close();
@@ -165,7 +165,7 @@ describe("resolveQuotaProfile", () => {
     const db = createMigratedTestD1();
     insertProfile(db, { id: "quota-v2", version: 2, effectiveFrom: "2026-11-15T00:00:00.000Z" });
 
-    // The cutover month: nothing was configured yet, so the earliest configured
+    // why: The cutover month: nothing was configured yet, so the earliest configured
     // state is what judged it. Never throws, never answers the latest.
     expect((await resolveQuotaProfile(db, "2020-01-01T00:00:00.000Z")).id).toBe("quota-v1");
     db.raw.close();
@@ -183,7 +183,7 @@ describe("resolveQuotaProfile", () => {
 describe("resolveMonthlyQuota — the month is judged by the profile covering its 1st", () => {
   test("a profile published mid-month does not judge that month", async () => {
     const db = createMigratedTestD1();
-    // Published 2026-11-15, so November (whose 1st is 2026-11-01) keeps v1;
+    // note: Published 2026-11-15, so November (whose 1st is 2026-11-01) keeps v1;
     // December is the first month v2 judges.
     insertProfile(db, { id: "quota-v2", version: 2, effectiveFrom: "2026-11-15T00:00:00.000Z" });
 
@@ -271,7 +271,7 @@ describe("quotaMonth", () => {
       startIso: "2026-11-01T00:00:00.000Z",
       endIso: "2026-12-01T00:00:00.000Z",
     });
-    // The year boundary, and an instant that is already next month in UTC.
+    // note: The year boundary, and an instant that is already next month in UTC.
     expect(quotaMonth(new Date("2026-12-31T23:59:59.999Z"))).toEqual({
       month: "2026-12",
       startIso: "2026-12-01T00:00:00.000Z",
@@ -303,7 +303,7 @@ describe("self-hosted resolves no quota without reading a table", () => {
 
 describe("quotaSpent", () => {
   test("a month already at its ceiling is spent, because the cheapest review costs 1 RP", () => {
-    // The default cost is the smallest cell `rpFor` can produce, so the faces
+    // why: The default cost is the smallest cell `rpFor` can produce, so the faces
     // answer "would even the cheapest review be refused?" — and the enqueue
     // refuses at `used + cost > limit`, which at `used == limit` is already true.
     expect(quotaSpent(2000, 2000)).toBe(true);
@@ -311,11 +311,11 @@ describe("quotaSpent", () => {
   });
 
   test("a known cost asks the enqueue's own question, so the two cannot disagree", () => {
-    // At 1999 of 2000 a Quick BYOK review (1 RP) fits and a Deep one (6 RP) does
+    // note: At 1999 of 2000 a Quick BYOK review (1 RP) fits and a Deep one (6 RP) does
     // not — the card said "not spent" for both when it ignored the cost.
     expect(quotaSpent(1999, 2000, 1)).toBe(false);
     expect(quotaSpent(1999, 2000, 6)).toBe(true);
-    // Exactly filling the headroom is admitted, one RP over is refused.
+    // invariant: Exactly filling the headroom is admitted, one RP over is refused.
     expect(quotaSpent(1994, 2000, 6)).toBe(false);
     expect(quotaSpent(1995, 2000, 6)).toBe(true);
   });

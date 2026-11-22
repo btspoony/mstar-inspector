@@ -1,5 +1,5 @@
 /**
- * note: Review comment assembly + posting.
+ * Review comment assembly + posting.
  *
  * Assembly (pure, unit-tested):
  *   - the ENGINE owns the review-body layout: `renderReviewMarkdown` renders
@@ -87,6 +87,7 @@ import {
   type ReviewOutput,
 } from "../review/schema";
 import { redactSecrets } from "./redact";
+import { isBudgetRefusal } from "../contracts/recovery-budget";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
@@ -159,7 +160,7 @@ export function truncateSummary(md: string, limit: number = SUMMARY_MD_LIMIT): s
 
 
 /**
- * invariant: Per-line bound for the rendered `cause:` / `unscanned:` lines. The engine
+ * why: Per-line bound for the rendered `cause:` / `unscanned:` lines. The engine
  * renders the pair from the envelope without bounding it, and the body clamp
  * cuts the END, so an unbounded reason would push the findings and the closure
  * off the comment. The stored envelope keeps the validated values unchanged —
@@ -182,18 +183,18 @@ function boundFactLine(text: string): string {
   return text.length <= FACT_LINE_BUDGET ? text : `${sliceWithoutSplittingPair(text, FACT_LINE_BUDGET - 1)}…`;
 }
 
-/** invariant: The envelope fact, bounded for rendering only. */
+/** note: The envelope fact, bounded for rendering only. */
 function boundIncomplete(fact: { reason: string; unscanned: readonly string[] }): {
   reason: string;
   unscanned: string[];
 } {
   const reason = boundFactLine(fact.reason);
-  // note: An empty scope stays empty: the engine renders `unscanned: none` itself, and
+  // safety: An empty scope stays empty: the engine renders `unscanned: none` itself, and
   // a synthetic "none" entry would leak back into the envelope's tally mirror.
   if (fact.unscanned.length === 0) return { reason, unscanned: [] };
   const full = fact.unscanned.join(", ");
   if (full.length <= FACT_LINE_BUDGET) return { reason, unscanned: [full] };
-  // invariant: Drop whole scopes rather than cutting mid-entry, and say how many went:
+  // note: Drop whole scopes rather than cutting mid-entry, and say how many went:
   // a silent cut reads as "these were the only unscanned files".
   const kept: string[] = [];
   for (const scope of fact.unscanned) {
@@ -321,7 +322,7 @@ export function buildReviewBody(
       rendered = { ...rendered, summary_md: stripFactEcho(rendered.summary_md, output.incomplete, bounded) };
     }
   }
-  // invariant: The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that
+  // why: The runner fits its coverage notes to SUMMARY_MD_LIMIT and documents that
   // this publisher keeps the head from there (runtime-omp.ts). Without the cap
   // a long narrative inflates the body toward REVIEW_BODY_LIMIT, and that clamp
   // keeps the head — so the findings and the closure would be what is lost.
@@ -340,7 +341,7 @@ export function buildReviewBody(
     rendered = { ...rendered, summary_md: truncateSummary(rendered.summary_md) };
   }
   let core = renderReviewMarkdown(rendered);
-  // note: Preserved parts: each states something a head-keeping cut would silently
+  // why: Preserved parts: each states something a head-keeping cut would silently
   // remove. The closure is where the round's prior-findings verdicts are
   // published, and the footer discloses the findings the merge-class cap
   // dropped — losing either hides the very fact it exists to state.
@@ -372,6 +373,7 @@ export function buildReviewBody(
 // rendering of the prior-findings recheck. Single upsert only — remote
 // resolution outcomes discovered after this publication appear in the NEXT
 // round's closure, never a second closure-only comment.
+// ---------------------------------------------------------------------------
 
 /**
  * §7.10: at most this many selected prior rows are shown; the rest is a count.
@@ -428,7 +430,7 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 }
 
 /**
- * invariant: The ONE prior-findings table (§7.10 columns: finding / disposition /
+ * note: The ONE prior-findings table (§7.10 columns: finding / disposition /
  * evidence / thread) plus its over-cap count, capped at `CLOSURE_MAX_ROWS`.
  * `buildRevalidatedSection`'s folded block is its only renderer.
  * Leading blank line included: the callers join blocks.
@@ -436,7 +438,7 @@ function closureCoverageLine(coverage: ClosureCoverage): string {
 function priorFindingLines(rows: ClosureRow[]): string[] {
   const shown = rows.slice(0, CLOSURE_MAX_ROWS);
   const overflow = rows.length - shown.length;
-  // note: Row text is model/lifecycle-echoed data: raw HTML can fold everything
+  // why: Row text is model/lifecycle-echoed data: raw HTML can fold everything
   // after it, and a newline would break the table row. So apply the same
   // `&`-then-`<` escape a report field gets, escape the pipes the table
   // grammar owns, and turn a line break into a space (a cell is one line).
@@ -469,6 +471,7 @@ function priorFindingLines(rows: ClosureRow[]): string[] {
 // report needs around the engine's layout. Inserted by ANCHOR, never by
 // rebuilding the layout — the renderer stays the single owner of the verdict,
 // tally, review narrative and finding blocks.
+// ---------------------------------------------------------------------------
 
 /** note: The engine's narrative heading — the overview's anchor. */
 const REVIEW_HEADING = "## 📋 Review";
@@ -499,7 +502,7 @@ export function buildRevalidatedSection(coverage: ClosureCoverage, rows: Closure
 /** invariant: The collapsible fix-plan block; markdown text must survive the outer fence. */
 function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY): string {
   if (planToFix === null || planToFix === "none") return "none";
-  // invariant: The outer fence must outrun every backtick run inside the plan, or a plan
+  // safety: The outer fence must outrun every backtick run inside the plan, or a plan
   // that documents a fence closes this one early and the rest leaks as markup.
   let longest = 2;
   for (const run of planToFix.matchAll(/`+/g)) longest = Math.max(longest, run[0].length);
@@ -507,10 +510,10 @@ function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY):
   const prefix = `<details><summary>Expand fix plan</summary>\n\n${fence}md\n`;
   const suffix = `\n${fence}\n\n</details>`;
   const room = budget - prefix.length - suffix.length;
-  // note: No room for a balanced block: a bare `none` keeps the heading honest and
+  // why: No room for a balanced block: a bare `none` keeps the heading honest and
   // leaves no fence or fold open.
   if (room < 1) return "none";
-  // invariant: Keep the head and mark the cut. The fence below it closes what is left of
+  // safety: Keep the head and mark the cut. The fence below it closes what is left of
   // the block, so the cut never leaks into the sections after it.
   const plan =
     planToFix.length <= room ? planToFix : `${sliceWithoutSplittingPair(planToFix, room - 1)}…`;
@@ -521,7 +524,7 @@ function planBlock(planToFix: string | null, budget = Number.POSITIVE_INFINITY):
 function insertAfterHeading(body: string, anchor: string, block: string): string {
   const lines = body.split("\n");
   const index = lines.indexOf(anchor);
-  // invariant: The engine's renderer emits this heading unconditionally, so a miss means
+  // why: The engine's renderer emits this heading unconditionally, so a miss means
   // the pinned layout changed: refuse to drop the report overview silently.
   if (index < 0) throw new Error(`report anchor missing: ${anchor}`);
   lines.splice(index + 1, 0, "", block);
@@ -602,7 +605,7 @@ function neutralizeReportText(text: string): string {
       const match = REPORT_STRUCTURE_LINE.exec(line);
       if (match === null) return line;
       const marker = match[2]!;
-      // invariant: An ordered marker's `.`/`)` is the escapable character — markdown only
+      // why: An ordered marker's `.`/`)` is the escapable character — markdown only
       // honours an escape on punctuation, so the digits take none.
       const at = match[1]!.length + (/^\d/.test(marker) ? marker.length - 1 : 0);
       return `${line.slice(0, at)}\\${line.slice(at)}`;
@@ -692,7 +695,7 @@ function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFIN
       .slice(0, count)
       .map((heading, index) => `${heading}\n\n${bodies[index]!}`)
       .join("\n\n");
-  // note: The caller joins the tail with one blank line and keeps one character for
+  // why: The caller joins the tail with one blank line and keeps one character for
   // the core's cut marker.
   const fits = (text: string): boolean => text.length + 3 <= limit;
 
@@ -718,6 +721,7 @@ function buildReportTail(report: ReportDoc | null, limit = Number.POSITIVE_INFIN
 // prepared upsert. The publication identity marker is appended to the round
 // marker; model text is stripped of Inspector marker syntax first so the
 // trusted markers are always ours (§7.5).
+// ---------------------------------------------------------------------------
 
 /**
  * The trusted publication identity marker appended to every prepared
@@ -743,21 +747,21 @@ export function buildPreparedReviewBody(input: {
   headSha: string;
   publicationMarker: string;
   /**
-   * invariant: Previous reviewed head this round was diffed against (increment rounds
+   * why: Previous reviewed head this round was diffed against (increment rounds
    * only). Rendered as ` · since <sha7>` on the header so a reader can tell
    * an incremental round from a full one at a glance; absent on full rounds,
    * where the body is byte-identical to the pre-increment shape.
    */
   sinceSha?: string;
   /**
-   * note: Report sections (mstar.report/v1 side document). `report: null` writes the
+   * why: Report sections (mstar.report/v1 side document). `report: null` writes the
    * headings with `none`; omitted entirely keeps the pre-report body
    * byte-identical.
    */
   reportParts?: { report: ReportDoc | null; revalidated: string };
 }): string {
   const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
-  // invariant: English, like every other string this body renders (verdict, tally, the
+  // why: English, like every other string this body renders (verdict, tally, the
   // findings sections). A Chinese header on an otherwise English comment is
   // unreadable to most readers and unlocalized for the rest: the body has no
   // locale input, so the only consistent choice is the one language the rest of
@@ -798,7 +802,8 @@ export function buildPreparedDegradedBody(input: {
   const budget = REVIEW_BODY_LIMIT - reserve;
   return `${roundMarker}\n${clampKeepingHead(core, budget)}\n${input.publicationMarker}`;
 }
-// note: --- Single-comment upsert ---
+// note: Single-comment upsert
+// ---------------------------------------------------------------------------
 
 /**
  * Parse the round number from a review comment body. Returns null when the
@@ -867,6 +872,7 @@ export function planUpsert(comments: ReviewComment[], excludeIds?: ReadonlySet<n
 // versa, so the two scans and their round counters stay independent (the
 // real chain is untouched). One degraded comment per PR, upserted with the
 // same create-on-miss / PATCH-on-hit mechanics.
+// ---------------------------------------------------------------------------
 
 /**
  * Parse the round number from a degraded comment body. Returns null when the
@@ -989,7 +995,8 @@ ${fence}
 </details>`;
 }
 
-// note: --- Auth + posting (self-contained; pipeline ↛ worker, no shared module). ---
+// safety: Auth + posting (self-contained; pipeline ↛ worker, no shared module).
+// ---------------------------------------------------------------------------
 
 /** note: DER tag for a SEQUENCE (0x30). */
 const DER_SEQUENCE = 0x30;
@@ -1126,7 +1133,7 @@ export type ReviewCommenterOptions = {
   /** note: Per-request transport seam (timeout/abort wrapper). */
   fetchImpl?: CommenterFetch;
   /**
-   * note: Test-only seam recording the SEAM-LEVEL construction this module performs:
+   * safety: Test-only seam recording the SEAM-LEVEL construction this module performs:
    * each `createAppAuth` build and each minted purpose/repository grant. It
    * exists so the single-credential invariant (spec §7.6) is provable by
    * BEHAVIOR — that Checks and comment writes share one review-write path while
@@ -1182,12 +1189,13 @@ export type AuthMint = {
 /** Records the credential construction/mint seam (test-only; see `authSeam`). */
 export type AuthSeam = { constructed: AuthConstruction[]; minted: AuthMint[] };
 
-// safety: Purpose-scoped token boundary (spec §7.6): every mint is
+// invariant: Purpose-scoped token boundary (spec §7.6): every mint is
 // tied to a purpose + the exact repository, and the SANDBOX grant is checked
 // against the RETURNED capabilities (RL-6) — the request is never presented
 // as proof of the response. The unrestricted `getInstallationToken(
 // installationId)` contract is deleted; every caller migrates to
 // `getInstallationToken({ scope, purpose })`.
+// ---------------------------------------------------------------------------
 
 export type TokenPurpose = "sandbox-read" | "review-write";
 
@@ -1350,7 +1358,7 @@ export type ReviewCommenter = {
    */
   getInstallationToken(input: TokenInput): Promise<InstallationTokenGrant>;
   /**
-   * invariant: Pre-staging plan read (§7.7: "Calculate round/target from the
+   * why: Pre-staging plan read (§7.7: "Calculate round/target from the
    * authenticated App's current single comment BEFORE staging"): the same
    * bot-marker scan the upsert used, surfaced so the consumer can compute
    * round/targetCommentId and stage the exact prepared body. Read-only.
@@ -1370,7 +1378,7 @@ export type ReviewCommenter = {
   /** note: postPreparedReview for the degraded chain; the id may be uncaptured (null). */
   postPreparedDegraded(input: PostPreparedDegradedInput): Promise<{ posted: boolean; commentId: number | null }>;
   /**
-   * invariant: Read-only readback of an ALREADY-DISPATCHED line batch (spec §7.9a
+   * safety: Read-only readback of an ALREADY-DISPATCHED line batch (spec §7.9a
    * condition 2): locate the review whose body carries this publication's
    * batch marker and capture its comment ids. Never creates anything — an
    * intent without a captured id is discovery, not permission to send again.
@@ -1400,7 +1408,7 @@ export type ReviewCommenter = {
    */
   listDiscussion(input: ListDiscussionInput): Promise<Discussion>;
   /**
-   * invariant: §7.5 thread identity surface — present only when the commenter is
+   * why: §7.5 thread identity surface — present only when the commenter is
    * constructed with the thread store (`createReviewCommenter(env, { db })`);
    * absent (undefined) otherwise. `discoverThread` proves ownership from the
    * prepared association BEFORE any adoption; `resolveFindingThread` applies
@@ -1487,7 +1495,7 @@ export type PostOctokit = {
     pulls?: {
       createReview?: (parameters: Record<string, unknown>) => Promise<unknown>;
       /**
-       * invariant: The PR's reviews (spec §7.9a discovery): a dispatched line batch is
+       * note: The PR's reviews (spec §7.9a discovery): a dispatched line batch is
        * found by its publication marker, then its comments are captured — the
        * read-only path an uncertain send leaves behind.
        */
@@ -1603,7 +1611,7 @@ function guardMutations<T extends { createComment: unknown; updateComment: unkno
 ): T {
   if (notAfterMs === undefined && fence === undefined) return issues;
   const atDispatch = async (verb: string): Promise<void> => {
-    // invariant: The publication lease is proved FIRST, and the frozen instant is read
+    // why: The publication lease is proved FIRST, and the frozen instant is read
     // only after that await resolves: a clock read before the verification
     // would let a slow lease read carry the mutation past `notAfterMs`.
     if (fence !== undefined && !(await fence.verify())) {
@@ -1725,7 +1733,7 @@ function journalClaimFence(
 }
 
 /**
- * invariant: Run ONE comment mutation under the authority of its sender: acquire the
+ * note: Run ONE comment mutation under the authority of its sender: acquire the
  * action's publication lease before the scan, hand the fence to the send (which
  * re-proves it at the mutation), and release on settlement or handoff — or, for
  * the journal lane, hand over the caller's claim as a verify-only fence. A live
@@ -1738,7 +1746,7 @@ async function underPublicationFence<T>(
   actionKey: string,
   run: (fence: PublicationFence | undefined) => Promise<T>,
 ): Promise<T> {
-  // invariant: Only the raw `*WithOctokit` seam can arrive without a guard (unit tests):
+  // note: Only the raw `*WithOctokit` seam can arrive without a guard (unit tests):
   // every production entry is `createReviewCommenter`, which refuses first.
   if (guard === undefined) return run(undefined);
   if (guard.kind === "journal") return run(journalClaimFence(guard, actionKey));
@@ -1842,7 +1850,7 @@ async function publishPreparedReview(
     }
   }
 
-  // note: Create plan: adopt an exact-body replay; any other bot review marker
+  // why: Create plan: adopt an exact-body replay; any other bot review marker
   // that appeared since the plan is a definitive rejection.
   const markerComments = comments.filter((c) => c.user?.type === "Bot" && parsedRound(c.body) !== null);
   for (const marker of markerComments) {
@@ -2005,7 +2013,7 @@ export type DegradedCleanupGuard = {
  *  request — so a crash leaves it durable. */
 export type DegradedTargetLock = {
   /**
-   * why: `keep: true` = the outcome is still unknown, so the unresolved marker
+   * invariant: `keep: true` = the outcome is still unknown, so the unresolved marker
    * stays (the lease may lapse; the marker does not); `false` = the response
    * proved the outcome and the target is free for writers again.
    */
@@ -2030,7 +2038,7 @@ export type DegradedDeleteOutcome = {
 };
 
 /**
- * invariant: The delete seam: a marker is removed only while it still carries the EXACT
+ * why: The delete seam: a marker is removed only while it still carries the EXACT
  * body that was scanned, and the proof runs INSIDE the delete verb — on the
  * last line before the request — so no path to `issues.deleteComment` can skip
  * it. A newer degraded publication can rewrite the same comment (round+1)
@@ -2121,7 +2129,7 @@ export async function deleteDegradedCommentWithOctokit(
     }
     let keepLock = false;
     try {
-      // note: The identity proof for THIS delete: re-read the list and require the
+      // why: The identity proof for THIS delete: re-read the list and require the
       // same id to still carry the same body. It runs inside the verb wrapper
       // below, so it is the last thing before the request.
       const deleting = guardDeletes(
@@ -2154,14 +2162,14 @@ export async function deleteDegradedCommentWithOctokit(
         outcome.rateLimited[limited] += 1;
         continue;
       }
-      // invariant: A RequestError from octokit carries `.status` (duck-typed so the
+      // why: A RequestError from octokit carries `.status` (duck-typed so the
       // mock-octokit tests can reject with a plain { status: N }).
       const status = typeof err === "object" && err !== null ? (err as { status?: unknown }).status : undefined;
       if (status === 403 || status === 404) {
         outcome.skipped += 1;
         continue;
       }
-      // note: An unresolved DELETE may still land: the exclusion stays held until it
+      // invariant: An unresolved DELETE may still land: the exclusion stays held until it
       // lapses, so no writer reuses the target while the outcome is unknown.
       keepLock = true;
       outcome.skipped += 1;
@@ -2179,6 +2187,7 @@ export async function deleteDegradedCommentWithOctokit(
 // orchestrates prefetch → filter → attempt; THIS module never decides
 // fallback policy — it throws and the consumer's never-throw guard logs
 // `line_comments_fallback=true` and proceeds.
+// ---------------------------------------------------------------------------
 
 /** note: Hunk header: `@@ -<oldStart>[,<oldCount>] +<newStart>[,<newCount>] @@`. */
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -2318,7 +2327,7 @@ export function filterLineCommentFindings(
     const line = finding.line_end ?? 0;
     const hunk = ranges.find(([start, end]) => line >= start && line <= end);
     if (hunk === undefined) continue;
-    // invariant: The range start is published ONLY when both endpoints sit in that SAME
+    // note: The range start is published ONLY when both endpoints sit in that SAME
     // right-side hunk; a range crossing a hunk boundary (or one that is not
     // strictly ascending) falls back to the single-line anchor at `line`.
     const start = finding.line_start;
@@ -2351,6 +2360,26 @@ export function renderLineCommentText(finding: ReviewFinding): string {
 }
 
 /**
+ * Why a read-only discovery readback captured nothing (§7.9a condition 2):
+ * `marker-missing` — no review carries this publication's batch marker;
+ * `ambiguous` — more than one does; `comment-gone` — the batch review is ours
+ * but an intent's comment is not in it; `readback-scope` — a read, or the
+ * authenticated identity a read needs, was unavailable, so nothing could be
+ * observed; `capture-failed` — the ids were observed but could not be
+ * persisted; `budget-refused` — the run's request allowance refused the read
+ * before dispatch, so nothing was observed and no attempt is spent. It is the
+ * last observation the recovery lane can record as the batch's stop reason,
+ * never a guess about what happened on GitHub.
+ */
+export type LineDiscoveryFailure =
+  | "marker-missing"
+  | "ambiguous"
+  | "comment-gone"
+  | "readback-scope"
+  | "capture-failed"
+  | "budget-refused";
+
+/**
  * §7.7 line-comment capture result: the returned review
  * comments mapped back to the posted intents. `posted[].associationId` is
  * the intent's association id (every posted comment carries a trusted
@@ -2365,6 +2394,8 @@ export type PostedLineComments = {
   ambiguous: string[];
   captured: boolean;
   reviewId: number | null;
+  /** note: Discovery-only: which observation failed (absent when it captured). */
+  failure?: LineDiscoveryFailure;
 };
 
 export type PostPreparedLineCommentsInput = {
@@ -2463,7 +2494,7 @@ async function publishLineComments(
         path: intent.path,
         side: "RIGHT",
         line: intent.line,
-        // invariant: A range rides only when it is a real one (strictly ascending, both
+        // why: A range rides only when it is a real one (strictly ascending, both
         // endpoints inside one hunk — the filter already demoted the rest);
         // otherwise this object keeps the single-line shape byte for byte.
         ...(start === null ? {} : { start_line: start, start_side: "RIGHT" }),
@@ -2490,7 +2521,7 @@ async function publishLineComments(
   const echoed = Array.isArray(response?.data?.comments) ? response!.data!.comments! : null;
   const reviewIdRaw = response?.data?.id;
   const reviewId = typeof reviewIdRaw === "number" ? reviewIdRaw : null;
-  // why: GitHub's create-review response carries no comments array, so the created
+  // invariant: GitHub's create-review response carries no comments array, so the created
   // ids are read back from the review's comments connection — one bounded
   // page. A missing surface, a throw or a malformed answer is NOT a failed
   // post: the comments may well have landed, so capture stays false and the
@@ -2537,8 +2568,8 @@ function captureLineCommentsOf(
     user?: { login?: unknown } | null;
   }>,
   reviewId: number | null,
-  /** invariant: Set on the recovery readback: only comments carrying THIS publication's
-   *  trusted marker, authored by THIS App, may be captured — a row anchor
+  /** Set on the recovery readback: only comments carrying THIS publication's
+   * note:  trusted marker, authored by THIS App, may be captured — a row anchor
    *  cannot prove either. */
   verify?: { publicationId: string; login: string },
 ): PostedLineComments {
@@ -2635,14 +2666,20 @@ export async function recoverLineCommentsWithOctokit(
   input: PostPreparedLineCommentsInput,
   expectedLogin: string | null,
 ): Promise<PostedLineComments> {
-  // note: Unverified: no identity to prove authorship, or a read failed. Nothing is
-  // captured, so nothing is persisted.
-  const nothing: PostedLineComments = { posted: [], ambiguous: [], captured: false, reviewId: null };
+  // why: Unverified: nothing could be observed, so nothing is persisted. The
+  // reason is the caller's durable stop evidence, so each exit names its own.
+  const unread = (failure: LineDiscoveryFailure): PostedLineComments => ({
+    posted: [],
+    ambiguous: [],
+    captured: false,
+    reviewId: null,
+    failure,
+  });
   if (input.intents.length === 0) return { posted: [], ambiguous: [], captured: true, reviewId: null };
-  if (expectedLogin === null) return nothing;
+  if (expectedLogin === null) return unread("readback-scope");
   const pulls = octokit.rest?.pulls;
   if (pulls?.listReviews === undefined || pulls.listCommentsForReview === undefined || typeof octokit.paginate !== "function") {
-    return nothing;
+    return unread("readback-scope");
   }
   let reviews: unknown;
   try {
@@ -2654,17 +2691,20 @@ export async function recoverLineCommentsWithOctokit(
       pull_number: input.prNumber,
       per_page: 100,
     });
-  } catch {
-    return nothing;
+  } catch (error) {
+    // invariant: A refusal before dispatch observed nothing AND spent no attempt (spec
+    // §7.11.1); the caller must leave the batch exactly where it was.
+    return unread(isBudgetRefusal(error) ? "budget-refused" : "readback-scope");
   }
   // invariant: EXACTLY ONE review may claim this publication (and its admitted head): two
   // candidates are ambiguous, and an ambiguous readback captures nothing.
   const candidates = (Array.isArray(reviews) ? reviews : []).filter((candidate: unknown) =>
     isBatchReviewOf(candidate, { publicationId: input.publicationId, headSha: input.headSha, login: expectedLogin }),
   );
-  if (candidates.length !== 1) return nothing;
+  if (candidates.length !== 1) return unread(candidates.length === 0 ? "marker-missing" : "ambiguous");
   const review = candidates[0]!;
   let returned: ReturnType<typeof asComments> | null;
+  let refused = false;
   try {
     // note: ALL pages of the review's comments, through the paginating route.
     const listed = await octokit.paginate(pulls.listCommentsForReview, {
@@ -2675,14 +2715,18 @@ export async function recoverLineCommentsWithOctokit(
       per_page: 100,
     });
     returned = Array.isArray(listed) ? asComments(listed) : null;
-  } catch {
+  } catch (error) {
+    refused = isBudgetRefusal(error);
     returned = null;
   }
-  if (returned === null) return nothing;
-  return captureLineCommentsOf(input.intents, returned, review.id, {
+  if (returned === null) return unread(refused ? "budget-refused" : "readback-scope");
+  const captured = captureLineCommentsOf(input.intents, returned, review.id, {
     publicationId: input.publicationId,
     login: expectedLogin,
   });
+  // note: The batch review is ours; an intent's comment is not in it (deleted,
+  // still invisible, or replaced) — that is the durable stop observation.
+  return captured.captured ? captured : { ...captured, failure: "comment-gone" };
 }
 
 /**
@@ -2721,13 +2765,13 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
 
   let appAuth: AppAuthStrategy | null = null;
   async function getAppAuth(): Promise<AppAuthStrategy> {
-    // invariant: Local capture: the closure variable's null state cannot be narrowed
+    // safety: Local capture: the closure variable's null state cannot be narrowed
     // across awaits by TS. The cast is the documented AppAuthStrategy seam —
     // auth-app's AuthInterface overloads are not structurally writable to the
     // named surface, but the runtime strategy satisfies it.
     let auth = appAuth;
     if (auth === null) {
-      // invariant: The mint must be bounded too: auth-app defaults to its own unbounded
+      // safety: The mint must be bounded too: auth-app defaults to its own unbounded
       // request, so a bounded seam is handed over as the strategy's request
       // (built here, at the single createAppAuth construction point).
       const authRequest = boundedFetch === undefined ? null : new Octokit(requestOptions).request;
@@ -2750,7 +2794,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
   async function mintGrant(input: { installationId: number; repo: string; purpose: TokenPurpose }): Promise<InstallationTokenGrant> {
     const auth = await getAppAuth();
     const permissions = permissionsFor(input.purpose);
-    // invariant: Seam record: every grant this instance can mint, with its exact purpose
+    // safety: Seam record: every grant this instance can mint, with its exact purpose
     // and requested permission set — the evidence that Checks and comment
     // writes ride the review-write mint and that Sandbox stays read-only.
     options?.authSeam?.minted.push({
@@ -2793,7 +2837,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
   }
 
   /**
-   * safety: Token-authenticated octokit for the exact purpose/repository. The real
+   * note: Token-authenticated octokit for the exact purpose/repository. The real
    * Octokit satisfies PostOctokit at runtime (paginate is bundled with
    * @octokit/rest); the cast bridges the overloaded plugin-paginate-rest
    * types to the minimal surface above.
@@ -2816,7 +2860,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
     try {
       const auth = await getAppAuth();
       const { token } = await auth({ type: "app" });
-      // invariant: `GET /app` is exposed by the installed plugin as
+      // safety: `GET /app` is exposed by the installed plugin as
       // `rest.apps.getAuthenticated` — there is NO `apps.get` (verified
       // against the plugin's endpoint map), so the probe MUST use this name:
       // the wrong name throws TypeError and would collapse every App into the
@@ -2829,18 +2873,18 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
           ? { githubAppId: data.id, slug: data.slug }
           : null;
     } catch {
-      cachedIdentity = null; // safety: identity unavailable fails closed downstream
+      cachedIdentity = null; // note: identity unavailable fails closed downstream
     }
     return cachedIdentity;
   }
 
-  /** note: Purpose-scoped review-write client exposing the existing graphql(). */
+  /** safety: Purpose-scoped review-write client exposing the existing graphql(). */
   async function getGraphqlOctokit(input: { installationId: number; repo: string }): Promise<GraphqlOctokit> {
     return (await getOctokit(input)) as unknown as GraphqlOctokit;
   }
 
   /**
-   * invariant: The SAME review-write client, narrowed to `rest.checks` (spec §7.9/§7.6).
+   * safety: The SAME review-write client, narrowed to `rest.checks` (spec §7.9/§7.6).
    * Structural only: no second mint, no second `Octokit`, no second auth
    * object — the checks methods exist on every @octokit/rest instance, and
    * `checks: "write"` is part of the one `review-write` permission set. A mint
@@ -2865,7 +2909,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
-  // invariant: §7.5 adapter: wired only when the caller binds the
+  // why: §7.5 adapter: wired only when the caller binds the
   // thread store — the two optional methods stay undefined otherwise.
   const threadSurface = options?.db
     ? createReviewThreads({
@@ -2876,7 +2920,7 @@ export function createReviewCommenter(env: CommenterEnv, options?: ReviewComment
       })
     : null;
 
-  // invariant: §7.9/§7.7 publication authority for comment sends. EVERY prepared send
+  // note: §7.9/§7.7 publication authority for comment sends. EVERY prepared send
   // through this factory presents one of the two authorities the module can
   // prove at dispatch — the Check attempt's per-action lease, or the caller's
   // journal claim — and a send that presents neither is refused here rather

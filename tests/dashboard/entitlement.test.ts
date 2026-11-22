@@ -1,5 +1,5 @@
 /**
- * `checkEntitlement` — the ONE plan decision, pinned as a table over
+ * why: `checkEntitlement` — the ONE plan decision, pinned as a table over
  * kind × plan × mode. Every row asserts the verdict a caller maps onto its own
  * surface, so a rule change has to change a row here first.
  *
@@ -23,10 +23,10 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const WS = "default";
 const TS = "2026-10-24T00:00:00.000Z";
-/** The month `quota-v1` judges: any instant on or after its `effective_from`. */
+/** note: The month `quota-v1` judges: any instant on or after its `effective_from`. */
 const MONTH_START = "2026-11-01T00:00:00.000Z";
 
-/** The workspace's active subscription; no row resolves the seeded `free`. */
+/** note: The workspace's active subscription; no row resolves the seeded `free`. */
 function seedSubscription(db: TestD1, planId: string): void {
   db.raw
     .prepare(
@@ -36,7 +36,7 @@ function seedSubscription(db: TestD1, planId: string): void {
     .run(WS, planId, TS, TS);
 }
 
-/** The four shapes a workspace resolves to: absent row → `free`, else the catalogue. */
+/** note: The four shapes a workspace resolves to: absent row → `free`, else the catalogue. */
 const SHAPES = [
   { plan: null, planId: "free", includedMembers: 5, sharedBotAllowed: false, appsPerWorkspace: 1 },
   { plan: "free", planId: "free", includedMembers: 5, sharedBotAllowed: false, appsPerWorkspace: 1 },
@@ -50,7 +50,7 @@ const SHAPES = [
   },
 ] as const;
 
-/** Migration 0063's ceiling per plan, in RP. */
+/** note: Migration 0063's ceiling per plan, in RP. */
 const CEILING = { free: 2000, pro: 20000, unlimited: null } as const;
 
 function migrated(shape: (typeof SHAPES)[number] | null): TestD1 {
@@ -59,7 +59,7 @@ function migrated(shape: (typeof SHAPES)[number] | null): TestD1 {
   return db;
 }
 
-/** `self-hosted` resolves the unlimited constant whatever the stored row says. */
+/** note: `self-hosted` resolves the unlimited constant whatever the stored row says. */
 const SELF_HOSTED = { planId: "unlimited", includedMembers: null, sharedBotAllowed: true, appsPerWorkspace: null };
 
 describe("checkEntitlement — shared-bot, the decision table", () => {
@@ -113,10 +113,10 @@ describe("checkEntitlement — member-slot", () => {
 
   test("`seats: null` never refuses: the caller's guarded SQL is the authority", async () => {
     const db = migrated(SHAPES[0]!);
-    // The count that WOULD refuse the route's fast-fail, deliberately absent.
+    // why: The count that WOULD refuse the route's fast-fail, deliberately absent.
     const verdict = await checkEntitlement({ db, mode: "saas", workspaceId: WS, kind: "member-slot", seats: null });
     expect(verdict.ok).toBe(true);
-    // ...and the limit the guarded insert binds comes off the same verdict.
+    // note: ...and the limit the guarded insert binds comes off the same verdict.
     expect(verdict.plan.includedMembers).toBe(5);
     db.raw.close();
   });
@@ -149,7 +149,7 @@ describe("checkEntitlement — free-workspace-slot", () => {
   });
 
   test("a question naming no workspace reads no plan: the rule is per LOGIN", async () => {
-    // The creation route and the SPA boot both ask this way, and both would pay
+    // why: The creation route and the SPA boot both ask this way, and both would pay
     // a plan resolution on every call if the branch resolved one anyway.
     const noPlanRead: WorkspaceStoreD1 = {
       prepare() {
@@ -157,7 +157,7 @@ describe("checkEntitlement — free-workspace-slot", () => {
       },
     };
     expect((await freeSlot(noPlanRead as never, null, 1)).ok).toBe(false);
-    // A paid target is never gated, and the counter is never read for it.
+    // why: A paid target is never gated, and the counter is never read for it.
     expect((await freeSlot(migrated(SHAPES[3]!), WS, 9)).ok).toBe(true);
   });
 
@@ -166,10 +166,10 @@ describe("checkEntitlement — free-workspace-slot", () => {
     expect((await freeSlot(free, WS, 0)).ok).toBe(true);
     const refused = await freeSlot(free, WS, 1);
     expect(refused.ok).toBe(false);
-    // The refusal carries the named workspace's plan, so its copy can name it.
+    // why: The refusal carries the named workspace's plan, so its copy can name it.
     if (!refused.ok) expect(refused.plan?.id).toBe("free");
 
-    // A paid workspace with the same spent slot: allowed, and — proved by the
+    // why: A paid workspace with the same spent slot: allowed, and — proved by the
     // throwing counter — without reading the count at all.
     let counted = 0;
     const paid = migrated(SHAPES[3]!);
@@ -284,7 +284,7 @@ describe("checkEntitlement — review-quota", () => {
 });
 
 describe("checkEntitlement — self-hosted answers before any read", () => {
-  // A double that throws on ANY read: the mode must answer without touching it.
+  // why: A double that throws on ANY read: the mode must answer without touching it.
   const neverRead: WorkspaceStoreD1 = {
     prepare() {
       throw new Error("self-hosted must not read the catalogue");
@@ -304,7 +304,7 @@ describe("checkEntitlement — self-hosted answers before any read", () => {
   }
 
   test("free-workspace-slot is a per-login rule, so the mode does not change it", async () => {
-    // Every caller gates it on `saas` itself; the branch consults neither the
+    // why: Every caller gates it on `saas` itself; the branch consults neither the
     // mode nor a plan when the question names no workspace, so a self-hosted
     // call pays no read and still refuses the second free membership.
     const verdict = await checkEntitlement({
@@ -326,11 +326,11 @@ describe("checkEntitlement — the plan is read per call", () => {
 
     expect((await sharedBot()).ok).toBe(false);
 
-    // The operator's move, through the same row Operator Admin writes.
+    // why: The operator's move, through the same row Operator Admin writes.
     seedSubscription(db, "pro");
     expect((await sharedBot()).ok).toBe(true);
 
-    // ...and back: the refusal returns without anything being restarted.
+    // note: ...and back: the refusal returns without anything being restarted.
     db.raw.prepare("UPDATE workspace_subscriptions SET status = 'canceled' WHERE workspace_id = ?").run(WS);
     expect((await sharedBot()).ok).toBe(false);
     db.raw.close();

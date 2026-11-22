@@ -158,7 +158,7 @@ export const REVIEW_LEVEL_KEY = "review.level.default";
 /** Absent row: the tier every App without its own depth inherits. */
 export const REVIEW_LEVEL_DEFAULT: ReviewLevel = "default";
 
-/** why: Integer in min..max — the one predicate every write and every read re-parses with. */
+/** note: Integer in min..max — the one predicate every write and every read re-parses with. */
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
@@ -169,7 +169,7 @@ export function isConcurrencyValue(value: unknown, max: number): value is number
 }
 
 /**
- * note: Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
+ * safety: Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
  * so the caller's default applies; `NaN` = the value is present but not a
  * trusted in-range integer, which no reader may treat as a default. Only a
  * number or a string counts: D1's declared column types do not constrain what
@@ -184,7 +184,7 @@ function parseInRange(value: unknown, min: number, max: number): number | undefi
 }
 
 /**
- * note: The workspace column's parse. A value ABOVE the per-workspace maximum is
+ * safety: The workspace column's parse. A value ABOVE the per-workspace maximum is
  * clamped to it rather than treated as untrusted: migration 0043 lowers the
  * rows that exist when it applies, but the window between "migrations applied"
  * and "new Worker live" lets the previously deployed API store one more
@@ -216,7 +216,7 @@ export type ConcurrencyRead = {
 };
 
 /**
- * invariant: One cap from one result row. Only `row === null` is an absent setting, so the
+ * safety: One cap from one result row. Only `row === null` is an absent setting, so the
  * caller's default applies; a present row whose selected field is missing is a
  * malformed result — untrusted, never absent.
  */
@@ -263,7 +263,7 @@ export type EffectiveConcurrency = {
   reason?: DegradedReason;
 };
 
-/** why: One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
+/** note: One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
 type RuntimeSettingRow = { value?: unknown };
 
 /**
@@ -342,7 +342,7 @@ export async function getEffectiveConcurrency(
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value?: unknown; workspace_value?: unknown }>();
-    // invariant: This query always yields exactly one row; no row means the answer itself
+    // safety: This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, not that both settings are absent. A present row whose
     // selected fields are missing is untrusted for the same reason — only a NULL
     // column means the setting is absent.
@@ -391,7 +391,7 @@ const storedBudgetSql = (keyParam: string, untrusted: string, min: number, max: 
   `(SELECT ${trustedIntSql("value", untrusted, min, max)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
- * note: Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
+ * why: Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
  * `before` carries the stored value only under the readers' trust rule, so a
  * corrupt row is recorded as `null` — a bare `CAST` would report `0` for
  * `'abc'` and a number no reader or write predicate ever used for `' 8'`.
@@ -413,7 +413,7 @@ const SYSTEM_UPSERT_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
- * note: The workspace cap as the ledger sees a stored value: the same clamp the
+ * invariant: The workspace cap as the ledger sees a stored value: the same clamp the
  * reader applies (canonical digits above the maximum record the maximum),
  * so `before` cannot disagree with the cap the workspace was running.
  */
@@ -425,7 +425,7 @@ const workspaceAuditCapSql = (value: string) => `CASE
       ELSE NULL END`;
 
 /**
- * why: The ledger row carries the UPDATE's own guard — the target exists — so a
+ * invariant: The ledger row carries the UPDATE's own guard — the target exists — so a
  * refused write appends nothing. It computes `before` with a subquery against
  * the not-yet-updated row: a bind cannot read the old value after the write.
  * That subquery uses the workspace clamp above, so a corrupt stored value is
@@ -442,7 +442,7 @@ const WORKSPACE_AUDIT_SQL = `
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
 
 /**
- * invariant: The workspace value is bounded by its own maximum only. The system quota is
+ * safety: The workspace value is bounded by its own maximum only. The system quota is
  * NOT part of this predicate: refusing on it would let a tenant binary-search
  * the platform number, and the quota already applies at admission as
  * `min(system, workspace)`.
@@ -633,7 +633,7 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
 }
 
 /**
- * note: One operator save, one audit row: `before` carries each stored value under
+ * why: One operator save, one audit row: `before` carries each stored value under
  * the readers' trust rule (a corrupt row is `null`), `after` the accepted pair.
  * The two upserts share this batch, so a refused write appends nothing.
  */
@@ -795,7 +795,7 @@ export type ReviewRouteWorkflowGate = {
   mode: "on" | "off";
   /** note: A stored row produced the answer (`false` for the absent-row default). */
   saved: boolean;
-  /** invariant: The refusal rests on unreadable evidence, not a stored `off`. */
+  /** note: The refusal rests on unreadable evidence, not a stored `off`. */
   degraded: boolean;
   reason?: "malformed" | "untrusted" | "read-failed";
   /**
@@ -843,6 +843,51 @@ export async function getReviewRouteWorkflowGate(
   } catch {
     return { mode: "off", saved: false, degraded: true, reason: "read-failed" };
   }
+}
+
+/**
+ * note: One operator save of the route switch, one audit row: `before` is whatever
+ * D1 actually held — a hand-edited `ON` is evidence of the row this save
+ * repaired, not absence — and `null` is reserved for "there was no row".
+ * `after` is the accepted value.
+ */
+const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.route_workflow.set', 'runtime', '${REVIEW_ROUTE_WORKFLOW_KEY}',
+          json_object('before', (SELECT value FROM review_runtime_settings WHERE key = ?5),
+                      'after', ?3),
+          ?4)`;
+
+/** What one accepted save holds and what the gate answers afterwards. */
+export type ReviewRouteWorkflowWrite = {
+  stored: ReviewRouteWorkflowGate["mode"];
+  effective: ReviewRouteWorkflowGate;
+};
+
+/**
+ * Set the route switch. The write is exactly as strict as the read: anything
+ * but `on` / `off` refuses (`invalid_value`, nothing written, no audit row), so
+ * a value the gate would not trust can never be stored through the product.
+ * `effective` is the gate's answer after the write, never this function's
+ * assumption.
+ */
+export async function setReviewRouteWorkflow(
+  db: DashboardD1,
+  value: string,
+  operator: string,
+): Promise<ReviewRouteWorkflowWrite> {
+  if (value !== "on" && value !== "off") {
+    throw new RuntimeConfigError("invalid_value", "the review route workflow must be exactly on | off");
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(REVIEW_ROUTE_WORKFLOW_AUDIT_SQL)
+      .bind(crypto.randomUUID(), operator, value, now, REVIEW_ROUTE_WORKFLOW_KEY),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ROUTE_WORKFLOW_KEY, value, now, operator),
+  ]);
+  return { stored: value, effective: await getReviewRouteWorkflowGate(db) };
 }
 
 /** note: The audit ledger's target id for the cap (one operator save, one row). */
@@ -1003,7 +1048,7 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
 }
 
 /**
- * note: One operator save, one audit row: `before` carries each stored value under
+ * why: One operator save, one audit row: `before` carries each stored value under
  * the readers' trust rule (a corrupt row is `null`), `after` the accepted trio.
  * The three upserts share this batch, so a refused write appends nothing.
  */
@@ -1132,7 +1177,7 @@ export async function readDefaultReviewLevel(db: DashboardD1): Promise<DefaultRe
 }
 
 /**
- * invariant: One operator save, one audit row: `before` carries the stored level only when
+ * note: One operator save, one audit row: `before` carries the stored level only when
  * it is on the vocabulary (a corrupt row is `null`), `after` the accepted one.
  */
 const REVIEW_LEVEL_AUDIT_SQL = `
@@ -1172,7 +1217,7 @@ export async function setDefaultReviewLevel(
   return value;
 }
 
-/** why: Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
+/** note: Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
 const SWEEP_RULES = {
   failureThreshold: { key: "platform.sweep.failure_threshold", fallback: QUEUE_MAX_ATTEMPTS + 1, min: 1, max: 10_000 },
   windowHours: { key: "platform.sweep.window_hours", fallback: 24, min: 1, max: 168 },
@@ -1300,7 +1345,7 @@ export function isRuntimeSettingKey(key: unknown): key is string {
 const OFFICIAL_WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * note: The official workspace, resolved against live tenants: a stored id naming a
+ * safety: The official workspace, resolved against live tenants: a stored id naming a
  * live workspace is that id, and an absent row, an unknown id, a soft-deleted
  * workspace or an unusable value all read `null`. Degrading rather than
  * refusing is deliberate — only the write path refuses, so a tenant retired
@@ -1321,7 +1366,7 @@ export async function readOfficialWorkspaceId(db: DashboardD1): Promise<string |
 }
 
 /**
- * note: One operator save, one audit row, in ONE batch. The `before` value is read by
+ * why: One operator save, one audit row, in ONE batch. The `before` value is read by
  * a subquery against the not-yet-written row, and both statements carry the
  * write's own guard — the target names a live workspace — so a refused write
  * appends neither row.
@@ -1384,7 +1429,7 @@ export async function setOfficialWorkspace(
     return null;
   }
 
-  // why: An id is matched trimmed, so a console field's stray whitespace is not a
+  // invariant: An id is matched trimmed, so a console field's stray whitespace is not a
   // different workspace; a malformed one cannot name a workspace and is refused
   // without a round trip. The batch's own guard covers a workspace retired in
   // between.
@@ -1467,7 +1512,7 @@ export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMo
 }
 
 /**
- * note: One operator save, one audit row, in ONE batch. `before` reads the three
+ * why: One operator save, one audit row, in ONE batch. `before` reads the three
  * rows as the getter would state them, `after` is the accepted window.
  */
 const MAINTENANCE_AUDIT_SQL = `
@@ -1501,7 +1546,7 @@ export async function setMaintenanceMode(
 ): Promise<void> {
   const { enabled, actor } = input;
   const reason = enabled ? (input.reason?.trim() || null) : null;
-  /** why: Upsert a value, or DELETE the row when there is none to state. */
+  /** note: Upsert a value, or DELETE the row when there is none to state. */
   const put = (key: string, value: string | null) =>
     value === null
       ? db.prepare(MAINTENANCE_CLEAR_SQL).bind(key)

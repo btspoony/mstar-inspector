@@ -1,5 +1,5 @@
 /**
- * PR head watermark (migration 0044):
+ * why: PR head watermark (migration 0044):
  *   - `upsertPullRequest` keeps `head_at` as the DELIVERY watermark (the most
  *     recent stamped delivery's `pull_request.updated_at`, not the sha's
  *     arrival time) while `head_sha` never rewinds — a stamped delivery is
@@ -108,7 +108,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
   });
 
   test("a stamped delivery fills a pre-0044 row's unknown watermark", async () => {
-    // The upgrade path: a row written before 0044 has a sha but no stamp, and
+    // why: The upgrade path: a row written before 0044 has a sha but no stamp, and
     // only the `head_at IS NULL` disjunct of the write CASE can ever fill it.
     const db = createMigratedTestD1();
     seedApp(db);
@@ -138,7 +138,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T10:00:00.000Z" }));
-    // A later delivery that carries only a state change (no head sha).
+    // why: A later delivery that carries only a state change (no head sha).
     await createReviewBotsStore(db).upsertPullRequest(
       delivery({ headSha: undefined, updatedAt: "2026-03-01T11:00:00.000Z" }),
     );
@@ -149,7 +149,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
   });
 
   test("a stamp-less delivery cannot rewind a known sha", async () => {
-    // A pre-deploy or replayed message carries no stamp, so it cannot be
+    // why: A pre-deploy or replayed message carries no stamp, so it cannot be
     // ordered: it may only fill an unknown sha. The 0039 rule (the arriving
     // sha wins) would rewrite the row back to an older commit here.
     const db = createMigratedTestD1();
@@ -184,7 +184,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
       headSha: "sha-1",
       headAt: "2026-03-01T10:00:00.000Z",
     });
-    // A target with no ledger row is "unknown" — never another target's
+    // why: A target with no ledger row is "unknown" — never another target's
     // watermark.
     expect(await store.selectPrHead({ ...ADDRESS, targetId: "target-with-no-rows" })).toBeNull();
   });
@@ -192,7 +192,7 @@ describe("upsertPullRequest head watermark (0044)", () => {
   test("a numeric-offset stamp is rewritten to UTC inside the write, not trusted from the caller", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
-    // The column is ordered lexically, so a `+02:00` spelling stored verbatim
+    // why: The column is ordered lexically, so a `+02:00` spelling stored verbatim
     // would sort below a `Z` value five minutes older. The store normalizes,
     // so no caller can put an unorderable stamp in the watermark.
     await createReviewBotsStore(db).upsertPullRequest(delivery({ updatedAt: "2026-03-01T12:00:00+02:00" }));

@@ -1,5 +1,4 @@
-/**
- * login surface visual-discipline pins (A3, exact-copy locked
+/** note: login surface visual-discipline pins (A3, exact-copy locked
  * centered-card reinforced form).
  *
  * 1. SPA face (src/spa/pages/LoginPage.tsx): behavior face (POST + signed-in
@@ -33,18 +32,18 @@ describe("login SPA face (A3)", () => {
   });
 
   test("centered-card reinforced form: wordmark echo + concise heading card", () => {
-    // Wordmark echo of the T1 sidebar wordmark — imports the same Logo
+    // note: Wordmark echo of the T1 sidebar wordmark — imports the same Logo
     // silhouette and renders nav.brand (the concise heading no longer
     // carries the brand name).
     expect(loginPage).toContain('import { Logo } from "../components/AppSidebar"');
     expect(loginPage).toContain('{t(locale, "nav.brand")}');
-    // Centered on the themed canvas; the card is the form surface.
+    // note: Centered on the themed canvas; the card is the form surface.
     expect(loginPage).toContain("min-h-svh flex-col items-center justify-center");
     expect(loginPage).toContain("max-w-sm");
   });
 
   test("the card title is the page's one hero heading, off the off-shelf scale", () => {
-    // The title face is the DESIGN.md hero step, carried by the card's one
+    // note: The title face is the DESIGN.md hero step, carried by the card's one
     // title slot (the token itself is the component's face, not a test
     // oracle); the retired off-shelf utility must not come back.
     expect(loginPage.match(/<CardTitle/g)).toHaveLength(1);
@@ -75,7 +74,7 @@ describe("login SSR face sync (A3 dual-track)", () => {
   const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
   const tokens = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
 
-  /** The stylesheet the auth faces actually ship. */
+  /** note: The stylesheet the auth faces actually ship. */
   async function ssrStyle(): Promise<string> {
     const { errorPage } = await import("../../src/dashboard/views");
     const html = errorPage("boom");
@@ -134,7 +133,7 @@ describe("login SSR face sync (A3 dual-track)", () => {
       expect(html, name).toContain(">Morning Star Inspector</span>");
       expect(html, name).toContain('<div class="banner" role="alert">');
     }
-    // The manifest flow keeps its own face (channel boundary, not login family).
+    // note: The manifest flow keeps its own face (channel boundary, not login family).
     expect(views).toContain("export function manifestErrorPage");
   });
 
@@ -145,13 +144,13 @@ describe("login SSR face sync (A3 dual-track)", () => {
     expect(authCss).toContain("var(--card-border)");
     expect(authCss).toContain("var(--card-radius)");
     expect(authCss).toContain("var(--shadow-card)");
-    // The brand mark rides the accent tone, not the palette step behind it.
+    // note: The brand mark rides the accent tone, not the palette step behind it.
     expect(authCss).toContain("var(--tone-accent-fg)");
     expect(authCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
   test("the brand mark silhouette stays single-source with the sidebar Logo", () => {
-    // LoginPage imports the exported AppSidebar Logo instead of copying the
+    // note: LoginPage imports the exported AppSidebar Logo instead of copying the
     // star-in-circle silhouette (the GitHub mark is a different shape).
     expect(sidebar).toContain("export function Logo()");
     expect(loginPage).not.toContain('circle cx="12"');

@@ -1,5 +1,5 @@
 /**
- * invariant: The console's data layer: one base path, the reads and writes the four
+ * note: The console's data layer: one base path, the reads and writes the four
  * screens use, and the loading/error state machine they share.
  *
  * Reads PARSE into typed rows instead of asserting the API's shape (the
@@ -164,6 +164,23 @@ export type AttemptCapConfig = {
 };
 
 /**
+ * The review route's operating switch as the operator API reports it: the
+ * gate's own answer (`mode`) plus what the stored row holds behind it. A
+ * hand-edited row the read path refuses answers `off` with `degraded: true`,
+ * `reason: "untrusted"` and the raw value in `rejected`.
+ */
+export type RouteWorkflowConfig = {
+  mode: "on" | "off";
+  /** note: A stored row produced `mode` (`false` for the absent-row default). */
+  saved: boolean;
+  /** note: The answer rests on unreadable evidence, not a stored `off`. */
+  degraded: boolean;
+  reason: string | null;
+  /** safety: The rejected raw value, quoted; `null` unless the row is untrusted. */
+  rejected: string | null;
+};
+
+/**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
  * is open — the store deletes both on disable, so a closed platform never
@@ -224,6 +241,12 @@ export type RuntimeConfig = {
    * Its `saved` flag is what separates a stored value from the default.
    */
   attemptCap: AttemptCapConfig | null;
+  /**
+   * why: The review route's operating switch; `null` under the same older-Worker
+   * rule. Its `saved` / `rejected` fields are what let the card name the stored
+   * row behind the gate's answer.
+   */
+  routeWorkflow: RouteWorkflowConfig | null;
   /** note: The maintenance window; `null` under the same older-Worker rule. */
   maintenance: MaintenanceConfig | null;
   /** note: The 24h admission-drop counts; `null` under the same older-Worker rule. */
@@ -236,7 +259,7 @@ export type RuntimeConfig = {
   /** note: The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
   /**
-   * invariant: The platform's designated official workspace — the one tenant whose bots
+   * safety: The platform's designated official workspace — the one tenant whose bots
    * may be offered platform-wide. `null` is "not designated", never unknown.
    */
   officialWorkspaceId: string | null;
@@ -315,6 +338,41 @@ function parseAttemptCap(row: Json): AttemptCapConfig | null {
   };
 }
 
+/**
+ * note: One gate answer as the store writes it: the read group and the save echo.
+ * `null` for a foreign shape — the caller decides whether that is a broken
+ * read or an unconfirmed write.
+ */
+function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const gate = raw as Json;
+  if (
+    (gate.mode !== "on" && gate.mode !== "off") ||
+    typeof gate.saved !== "boolean" ||
+    typeof gate.degraded !== "boolean"
+  ) {
+    return null;
+  }
+  return {
+    mode: gate.mode,
+    saved: gate.saved,
+    degraded: gate.degraded,
+    // note: Additive: an absent reason / rejected belongs to a trustworthy answer.
+    reason: typeof gate.reason === "string" ? gate.reason : null,
+    rejected: typeof gate.rejected === "string" ? gate.rejected : null,
+  };
+}
+
+/** note: The route switch's gate answer; absent (older Worker) answers `null`. */
+function parseRouteWorkflow(row: Json): RouteWorkflowConfig | null {
+  const raw = row.routeWorkflow;
+  if (raw === undefined) return null;
+  const gate = routeWorkflowGate(raw);
+  // note: A present but foreign group is a broken read, not absence.
+  if (gate === null) throw new Error("admin API: routeWorkflow is not a gate answer");
+  return gate;
+}
+
 /** note: The maintenance window; absent (older Worker) answers `null`. */
 function parseMaintenance(row: Json): MaintenanceConfig | null {
   const raw = row.maintenance;
@@ -377,6 +435,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     sweep: parseSweep(body),
     recheckAssignment: parseRecheckAssignment(body),
     attemptCap: parseAttemptCap(body),
+    routeWorkflow: parseRouteWorkflow(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
@@ -621,6 +680,25 @@ export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Pr
 }
 
 /**
+ * Save the route switch, answering the gate read-back the server returned —
+ * the mode the queue handler will act on, not this page's assumption. `null`
+ * means the write landed but its echo carried no readable gate answer: the
+ * request value is NOT substituted for it, because a page that shows `on`
+ * while the gate reads `off` is the failure this control exists to prevent.
+ * The caller re-reads the store and renders that answer.
+ */
+export async function setRouteWorkflow(
+  value: "on" | "off",
+): Promise<RouteWorkflowConfig | null> {
+  const answer = await write("PATCH", "/runtime", { routeWorkflow: { value } });
+  const saved =
+    typeof answer === "object" && answer !== null ? (answer as Json).routeWorkflow : undefined;
+  return typeof saved === "object" && saved !== null
+    ? routeWorkflowGate((saved as Json).effective)
+    : null;
+}
+
+/**
  * Open or close the maintenance window, answering the state the server stored.
  * The server owns `since`, so an unreadable echo answers the REQUEST's flag —
  * the write already landed — but keeps the loaded window's stamps: claiming a
@@ -806,7 +884,7 @@ function refusal(raw: string): string {
 }
 
 /**
- * note: One write, answering the server's JSON body (or `undefined` when there is
+ * why: One write, answering the server's JSON body (or `undefined` when there is
  * none). `redirect: "manual"` keeps a login redirect from reading as
  * success: the console renders a failure instead of confirming a write that
  * went to an HTML login page.
@@ -881,11 +959,11 @@ export type QuotaVersionRow = {
 
 export type QuotaVersionsData = {
   judgingVersion: number;
-  /** invariant: The ordinal a create would mint — the form's read-only version field. */
+  /** why: The ordinal a create would mint — the form's read-only version field. */
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
-  /** invariant: Plans the judging version sets no ceiling for: refused until republished. */
+  /** note: Plans the judging version sets no ceiling for: refused until republished. */
   uncoveredPlanIds: string[];
 };
 
@@ -999,7 +1077,7 @@ export type DataUpgradeRow = {
   title: string;
   /** invariant: The item's own statement of which rows it changes and never touches. */
   impact: string;
-  /** invariant: The item refuses a second batch while the maintenance window is off. */
+  /** note: The item refuses a second batch while the maintenance window is off. */
   requiresDowntime: boolean;
   state: DataUpgradeState;
   preflight: DataUpgradeCounts;
@@ -1112,7 +1190,7 @@ export function useLoaded<T>(read: () => Promise<T>) {
 
   useEffect(() => {
     let live = true;
-    // note: Keep a loaded table on screen while re-reading; a first read has nothing to keep.
+    // why: Keep a loaded table on screen while re-reading; a first read has nothing to keep.
     setState((previous) => (previous.status === "ready" ? previous : { status: "loading" }));
     read().then(
       (data) => {

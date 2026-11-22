@@ -1,5 +1,5 @@
 /**
- * Review-thread identity, discovery and resolution tests
+ * why: Review-thread identity, discovery and resolution tests
  * (spec review-lifecycle §7.5) — `src/pipeline/review-threads.ts` against the
  * bun:sqlite double running the real migration SQL (createMigratedTestD1:
  * 0001 → 0020, so review_publications/review_findings/review_threads/
@@ -59,7 +59,7 @@ import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
 const SLUG = "test-inspector";
-// GraphQL `author.login` returns the bare slug for this App; REST
+// note: GraphQL `author.login` returns the bare slug for this App; REST
 // `user.login` carries the `[bot]` suffix — both are the same identity.
 const BOT_LOGIN = SLUG;
 const REST_BOT_LOGIN = `${SLUG}[bot]`;
@@ -76,10 +76,10 @@ const PATH = "src/auth.ts";
 const LINE = 21;
 const uuid = (n: number): string => `${String(n).padStart(8, "0")}-aaaa-bbbb-cccc-${String(n).padStart(12, "0")}`;
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Fixture: seeded D1 (app + installation + confirmed publication + addressed
 // finding + pending association) and the §7.5 intent/body built from them.
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
@@ -111,7 +111,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
     line: LINE,
     body,
   });
-  // Confirmed original primary publication carrying the intent (T1 journal).
+  // note: Confirmed original primary publication carrying the intent (T1 journal).
   const payload: PublicationPayload = {
     version: 1,
     scope: SCOPE,
@@ -139,7 +139,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
     confirmedMs: 3000,
   });
   if (!proven) throw new Error("fixture: publication proof failed");
-  // Addressed finding row owned by THIS publication.
+  // note: Addressed finding row owned by THIS publication.
   db.raw
     .prepare(
       `INSERT INTO review_findings
@@ -149,7 +149,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 1, 1, 'addressed', 1000, 1000)`,
     )
     .run(FINDING_ROW_ID, APP_ID, INSTALLATION_ID, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, "fp-1", PUB_ID, PUB_ID, SHA, SHA);
-  // Pending association row with the stored intent AND the discovered remote
+  // note: Pending association row with the stored intent AND the discovered remote
   // ids (resolve consumes the persisted §7.5 mapping — discovery ran when the
   // publication response was captured).
   db.raw
@@ -163,7 +163,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
   return intent;
 }
 
-// --- GraphQL transport double -------------------------------------------------
+// note: --- GraphQL transport double -------------------------------------------------
 
 type ThreadCommentSpec = {
   id: string;
@@ -173,20 +173,20 @@ type ThreadCommentSpec = {
   authorLogin?: string | null;
   createdAt: string;
   updatedAt: string;
-  /** Authenticated provenance the fake transport reports for issue comments. */
+  /** note: Authenticated provenance the fake transport reports for issue comments. */
   viewerDidAuthor?: boolean;
 };
 
 type GraphqlCall = { kind: string; variables: Record<string, unknown> };
 
 type GraphqlRoutes = {
-  /** Thread node pages, in call order (before=undefined first). `line: null`
+  /** note: Thread node pages, in call order (before=undefined first). `line: null`
    *  with `originalLine` set is the REAL outdated shape (§7.5 node query). */
   threadPages?: Array<{ comments: ThreadCommentSpec[]; hasPreviousPage?: boolean; isResolved?: boolean; isOutdated?: boolean; line?: number | null; originalLine?: number | null; headRefOid?: string }>;
   issueComments?: { comments: ThreadCommentSpec[]; totalCount?: number; hasPreviousPage?: boolean; headRefOid?: string };
   reviewThreadsPages?: Array<{ threads: Array<Record<string, unknown>>; hasNextPage?: boolean }>;
   reviews?: unknown[];
-  /** Thrown instead of returned for the given kind. */
+  /** note: Thrown instead of returned for the given kind. */
   throwOn?: string;
 };
 
@@ -269,14 +269,14 @@ function fakeOctokit(routes: GraphqlRoutes): { octokit: GraphqlOctokit; calls: G
         if (page === undefined) return { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: 0, pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } as T;
         return { repository: { pullRequest: { headRefOid: SHA, reviewThreads: { totalCount: page.threads.length, pageInfo: { hasNextPage: page.hasNextPage ?? false, endCursor: "next" }, nodes: page.threads } } } } as T;
       }
-      // reviews
+      // note: reviews
       return { repository: { pullRequest: { reviews: { nodes: routes.reviews ?? [] } } } } as T;
     },
   };
   return { octokit, calls };
 }
 
-/** A batch review stub carrying OUR line-batch marker, bot-authored, at SHA. */
+/** note: A batch review stub carrying OUR line-batch marker, bot-authored, at SHA. */
 function batchReview(publicationId: string, overrides: Partial<{ fullDatabaseId: string; body: string; authorLogin: string | null; authorType: string | null; commitOid: string | null }> = {}) {
   return {
     id: "PRR_node_1",
@@ -288,7 +288,7 @@ function batchReview(publicationId: string, overrides: Partial<{ fullDatabaseId:
 }
 
 /**
- * A discovery thread stub: root carries OUR thread marker + digest-matched
+ * why: A discovery thread stub: root carries OUR thread marker + digest-matched
  * body. `line: null` + `originalLine` + `isOutdated` is the real outdated
  * shape an owned thread presents after its commented line leaves the diff.
  */
@@ -343,7 +343,7 @@ function makeDeps(db: TestD1, octokit: unknown, overrides: Partial<Deps> = {}): 
 
 function makeVerified(intent: LineIntent, comments: ThreadCommentSpec[], issue: ThreadCommentSpec[], headSha = SHA): Promise<VerifiedResolution> {
   return (async () => {
-    // Digest inputs mirror EXACTLY what the fake GraphQL transport serves:
+    // note: Digest inputs mirror EXACTLY what the fake GraphQL transport serves:
     // entry id = the GraphQL node id, fullDatabaseId = the REST id string.
     const entries = (specs: ThreadCommentSpec[], authorType: string, authorLogin: string) =>
       specs.map((c) => ({
@@ -381,9 +381,9 @@ function makeVerified(intent: LineIntent, comments: ThreadCommentSpec[], issue: 
   })();
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Opaque marker wire (spec §7.5)
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 describe("opaque marker wire (§7.5)", () => {
   test("lineMarker round-trips through parseLineMarker with exact syntax", () => {
@@ -393,18 +393,18 @@ describe("opaque marker wire (§7.5)", () => {
   });
 
   test("forged markers are rejected: non-canonical UUIDs, altered fields, uppercase ids", () => {
-    // A letter-bearing pair so toUpperCase() actually changes the value.
+    // note: A letter-bearing pair so toUpperCase() actually changes the value.
     const pubUpper = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".toUpperCase();
     expect(parseLineMarker("no marker at all")).toBeNull();
-    // Uppercase (non-canonical) UUIDs — never parse.
+    // note: Uppercase (non-canonical) UUIDs — never parse.
     expect(parseLineMarker(`<!-- mstar-inspector:thread:v1 publication=${pubUpper} association=${ASSOC_ID.toUpperCase()} -->`)).toBeNull();
-    // Shortened (non-UUID) ids.
+    // note: Shortened (non-UUID) ids.
     expect(parseLineMarker("<!-- mstar-inspector:thread:v1 publication=abc association=def -->")).toBeNull();
-    // Swapped/renamed fields — the exact syntax is required.
+    // note: Swapped/renamed fields — the exact syntax is required.
     expect(parseLineMarker(`<!-- mstar-inspector:thread:v1 association=${ASSOC_ID} publication=${PUB_ID} -->`)).toBeNull();
-    // Line-batch markers are NOT thread markers.
+    // invariant: Line-batch markers are NOT thread markers.
     expect(parseLineMarker(buildLineBatchMarker(PUB_ID))).toBeNull();
-    // Multiple markers: the LAST exact marker wins (trusted markers are
+    // invariant: Multiple markers: the LAST exact marker wins (trusted markers are
     // appended after untrusted text is stripped).
     const forged = `<!-- mstar-inspector:thread:v1 publication=${uuid(9)} association=${ASSOC_ID} -->`;
     expect(parseLineMarker(`${forged}\n\n${lineMarker({ publicationId: PUB_ID, associationId: ASSOC_ID })}`)).toEqual({
@@ -421,7 +421,7 @@ describe("opaque marker wire (§7.5)", () => {
         publicationId: PUB_ID,
         associationId: ASSOC_ID,
       } as LineIntent);
-      // No hint-derived content outside the (stripped) body; the marker line
+      // invariant: No hint-derived content outside the (stripped) body; the marker line
       // itself carries ONLY the two opaque UUIDs.
       const markerLine = built.split("\n").at(-1)!;
       expect(markerLine).toBe(lineMarker({ publicationId: PUB_ID, associationId: ASSOC_ID }));
@@ -433,7 +433,7 @@ describe("opaque marker wire (§7.5)", () => {
     const forged =
       "see <!-- mstar-inspector:review:v1 round=999 --> and <!-- mstar-inspector:thread:v1 publication=00000000-0000-0000-0000-000000000000 association=00000000-0000-0000-0000-000000000000 -->";
     const built = buildLineCommentBody({ body: forged, publicationId: PUB_ID, associationId: ASSOC_ID } as LineIntent);
-    // Exactly ONE marker remains — ours, at the end.
+    // invariant: Exactly ONE marker remains — ours, at the end.
     expect(built.match(/mstar-inspector:thread:v1/g)).toHaveLength(1);
     expect(built.endsWith(lineMarker({ publicationId: PUB_ID, associationId: ASSOC_ID }))).toBe(true);
     expect(built).not.toContain("mstar-inspector:review:v1");
@@ -467,7 +467,7 @@ describe("opaque marker wire (§7.5)", () => {
     });
     expect(intent.bodySha256).toBe(await sha256Hex(buildLineCommentBody(intent)));
     expect(intent.scope).toEqual(SCOPE);
-    // Multi-line anchor threading: absent -> null, present -> carried verbatim.
+    // note: Multi-line anchor threading: absent -> null, present -> carried verbatim.
     expect(intent.lineStart).toBeNull();
     const ranged = await buildLineIntent({
       findingRowId: FINDING_ROW_ID,
@@ -482,7 +482,7 @@ describe("opaque marker wire (§7.5)", () => {
       body: "body",
     });
     expect(ranged.lineStart).toBe(LINE - 2);
-    // A non-opaque (hint-like) association id can never become a marker.
+    // invariant: A non-opaque (hint-like) association id can never become a marker.
     await expect(
       buildLineIntent({
         findingRowId: FINDING_ROW_ID,
@@ -519,9 +519,9 @@ describe("opaque marker wire (§7.5)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // App-bot login shapes
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 describe("sameAppBotLogin — one predicate for both GitHub login shapes", () => {
   const CANONICAL = `${SLUG}[bot]`;
@@ -536,16 +536,16 @@ describe("sameAppBotLogin — one predicate for both GitHub login shapes", () =>
     expect(sameAppBotLogin("", CANONICAL)).toBe(false);
     expect(sameAppBotLogin("other-app", CANONICAL)).toBe(false);
     expect(sameAppBotLogin("other-app[bot]", CANONICAL)).toBe(false);
-    // A botLogin that is not the canonical `<slug>[bot]` never matches a bare
+    // invariant: A botLogin that is not the canonical `<slug>[bot]` never matches a bare
     // login: a human account named after the slug is not an App identity.
     expect(sameAppBotLogin(SLUG, SLUG)).toBe(false);
     expect(sameAppBotLogin(CANONICAL, SLUG)).toBe(false);
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Discovery (§7.5 "Discovery/adoption")
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 describe("discoverThread — ownership proof precedes adoption", () => {
   test("happy path (reviewId known): unique complete match → found + ids persisted on the row", async () => {
@@ -559,12 +559,12 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     const ops = createReviewThreads(makeDeps(db, octokit));
     const result = await ops.discoverThread({ scope: SCOPE, intent, reviewId: 555 });
     expect(result).toEqual({ kind: "found", reviewId: 555, commentId: ROOT_COMMENT_ID, threadId: THREAD_GQL_ID });
-    // Ids persisted under the association lease before resolving.
+    // note: Ids persisted under the association lease before resolving.
     const row = db.raw.query(`SELECT review_id, comment_id, thread_id, holder FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as {
       review_id: number; comment_id: number; thread_id: string; holder: string | null;
     };
     expect(row).toEqual({ review_id: 555, comment_id: ROOT_COMMENT_ID, thread_id: THREAD_GQL_ID, holder: null });
-    // The digest gate actually compared the remote root body.
+    // invariant: The digest gate actually compared the remote root body.
     expect(await sha256Hex(rootBody)).toBe(intent.bodySha256);
     expect(calls.some((c) => c.kind === "reviews")).toBe(true);
     expect(calls.some((c) => c.kind === "reviewThreads")).toBe(true);
@@ -590,14 +590,14 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     });
     const ops = createReviewThreads(makeDeps(db, octokit));
     expect(await ops.discoverThread({ scope: SCOPE, intent, reviewId: 555 })).toEqual({ kind: "foreign" });
-    // Rejected before the thread scan — the batch gate precedes adoption.
+    // invariant: Rejected before the thread scan — the batch gate precedes adoption.
     expect(calls.some((c) => c.kind === "reviewThreads")).toBe(false);
   });
 
   test("the REST-shaped `<slug>[bot]` author also matches (GraphQL drops the suffix)", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // Root comment from GraphQL (bare) while the batch review stub carries the
+    // note: Root comment from GraphQL (bare) while the batch review stub carries the
     // REST shape — one predicate, both call sites.
     const { octokit } = fakeOctokit({
       reviews: [batchReview(PUB_ID, { authorLogin: REST_BOT_LOGIN })],
@@ -619,7 +619,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   test("a copied marker on a human account / with a different body is foreign, never authority", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // Human-planted marker with the exact marker text.
+    // safety: Human-planted marker with the exact marker text.
     const human = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
       reviewThreadsPages: [{ threads: [discoveryThread(intent, { authorType: "User", authorLogin: "impostor" })], hasNextPage: false }],
@@ -628,7 +628,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
       await createReviewThreads(makeDeps(db, human.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
     ).toEqual({ kind: "foreign" });
 
-    // Right marker, wrong body (another round's text) — digest gate.
+    // invariant: Right marker, wrong body (another round's text) — digest gate.
     const altered = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
       reviewThreadsPages: [{ threads: [discoveryThread(intent, { rootBody: buildLineCommentBody(intent) + "\nedited" })], hasNextPage: false }],
@@ -637,7 +637,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
       await createReviewThreads(makeDeps(db, altered.octokit)).discoverThread({ scope: SCOPE, intent, reviewId: null }),
     ).toEqual({ kind: "foreign" });
 
-    // Generic Bot authorship with the WRONG login — identity gate.
+    // invariant: Generic Bot authorship with the WRONG login — identity gate.
     const otherBot = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
       reviewThreadsPages: [{ threads: [discoveryThread(intent, { authorLogin: "other-app[bot]" })], hasNextPage: false }],
@@ -667,7 +667,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   test("P67-QC-002: an OWNED OUTDATED thread (line null, originalLine matches) stays discoverable", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // The real response shape once the commented line leaves the diff: `line`
+    // note: The real response shape once the commented line leaves the diff: `line`
     // is null and the anchor survives only in `originalLine`.
     const { octokit } = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
@@ -682,7 +682,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   test("a NOT-outdated thread GitHub re-anchored to a shifted line stays discoverable via originalLine", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // Code above the comment shifted, so the live line drifted while the
+    // note: Code above the comment shifted, so the live line drifted while the
     // anchor GitHub recorded at publication time still names our intent.
     const { octokit } = fakeOctokit({
       reviews: [batchReview(PUB_ID)],
@@ -699,18 +699,18 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const cases: Array<[string, Partial<Parameters<typeof discoveryThread>[1]>]> = [
-      // Original anchor of a DIFFERENT line.
+      // note: Original anchor of a DIFFERENT line.
       ["wrong originalLine", { line: null, originalLine: LINE + 5, isOutdated: true }],
-      // Not outdated but no live anchor — nothing proves this is the intent.
+      // note: Not outdated but no live anchor — nothing proves this is the intent.
       ["null line without isOutdated", { line: null, originalLine: LINE, isOutdated: false }],
-      // Outdated with no surviving anchor at all.
+      // note: Outdated with no surviving anchor at all.
       ["null line and null originalLine", { line: null, originalLine: null, isOutdated: true }],
-      // A re-anchored live line only matches through `originalLine`.
+      // note: A re-anchored live line only matches through `originalLine`.
       ["re-anchored live line", { line: LINE + 1, originalLine: LINE + 2, isOutdated: false }],
       ["re-anchored live line, outdated", { line: LINE + 1, originalLine: LINE, isOutdated: true }],
-      // Not outdated, live line differs, but no original anchor recorded.
+      // note: Not outdated, live line differs, but no original anchor recorded.
       ["shifted live line without originalLine", { line: LINE + 12, originalLine: null, isOutdated: false }],
-      // Exact path fence is untouched by the anchor rule.
+      // note: Exact path fence is untouched by the anchor rule.
       ["other path", { path: "src/other.ts", line: null, originalLine: LINE, isOutdated: true }],
     ];
     for (const [name, overrides] of cases) {
@@ -718,7 +718,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
         reviews: [batchReview(PUB_ID)],
         reviewThreadsPages: [{ threads: [discoveryThread(intent, overrides)], hasNextPage: false }],
       });
-      // `name` in the assertion value: bun's toEqual takes no message arg.
+      // note: `name` in the assertion value: bun's toEqual takes no message arg.
       expect({ outcome: await createReviewThreads(makeDeps(db, octokit)).discoverThread({ scope: SCOPE, intent, reviewId: 555 }), rejectedAs: name }).toEqual({
         outcome: { kind: "unknown" },
         rejectedAs: name,
@@ -751,7 +751,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     const otherScope: Scope = { ...SCOPE, prNumber: 43 };
     expect(await ops.discoverThread({ scope: otherScope, intent, reviewId: null })).toEqual({ kind: "unknown" });
     expect(await ops.discoverThread({ scope: SCOPE, intent: { ...intent, associationId: uuid(77) }, reviewId: null })).toEqual({ kind: "unknown" });
-    expect(calls).toEqual([]); // zero GraphQL traffic
+    expect(calls).toEqual([]); // note: zero GraphQL traffic
   });
 
   test("identity-unavailable and slug-vs-live-App disagreement fail closed (unknown)", async () => {
@@ -762,7 +762,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
     expect(
       await createReviewThreads({ ...base, getAppIdentity: async () => null }).discoverThread({ scope: SCOPE, intent, reviewId: null }),
     ).toEqual({ kind: "unknown" });
-    // GET /app returns a DIFFERENT numeric App id than the routed row.
+    // invariant: GET /app returns a DIFFERENT numeric App id than the routed row.
     expect(
       await createReviewThreads({ ...base, getAppIdentity: async () => ({ githubAppId: 9999, slug: SLUG }) }).discoverThread({
         scope: SCOPE,
@@ -770,7 +770,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
         reviewId: null,
       }),
     ).toEqual({ kind: "unknown" });
-    expect(calls.every((c) => c.kind !== "reviews")).toBe(true); // no review scan past the identity gate
+    expect(calls.every((c) => c.kind !== "reviews")).toBe(true); // note: no review scan past the identity gate
   });
 
   test("discovery read-path transport failures are TYPED unknown (reviews scan, thread scan, mint)", async () => {
@@ -788,7 +788,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
       await createReviewThreads(makeDeps(db2, failingThreads.octokit)).discoverThread({ scope: SCOPE, intent: intent2, reviewId: null }),
     ).toEqual({ kind: "unknown" });
 
-    // A mint outage inside resolveAppContext fails closed to the typed
+    // invariant: A mint outage inside resolveAppContext fails closed to the typed
     // outcome instead of throwing out of the adapter.
     const db3 = await createSeededTestD1();
     const intent3 = await seedLifecycle(db3);
@@ -820,7 +820,7 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   test("unconfirmed publication → unknown, no API call", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // Force the publication back to `sending` (not confirmed).
+    // note: Force the publication back to `sending` (not confirmed).
     db.raw.prepare(`UPDATE review_publications SET phase = 'sending' WHERE id = ?`).run(PUB_ID);
     const { octokit, calls } = fakeOctokit({ reviews: [batchReview(PUB_ID)] });
     expect(
@@ -830,14 +830,14 @@ describe("discoverThread — ownership proof precedes adoption", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Resolution (§7.5 "Resolve order")
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 const ROOT: ThreadCommentSpec = {
   id: "c-root",
   fullDatabaseId: String(ROOT_COMMENT_ID),
-  body: "placeholder", // replaced per-test with the built body
+  body: "placeholder", // note: replaced per-test with the built body
   createdAt: "2026-09-01T10:00:00Z",
   updatedAt: "2026-09-01T10:00:00Z",
 };
@@ -869,7 +869,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   test("our own publication comment never changes the issue digest → the verified resolve is not blocked", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    // The verification was captured BEFORE the review posted: its issue
+    // note: The verification was captured BEFORE the review posted: its issue
     // digest covers ISSUE_A only. The live list now also carries our review
     // comment — the old domain hashed it and every resolve failed.
     const verified = await resolvedFixture(db, intent);
@@ -899,7 +899,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   test("a human issue comment arriving after the capture still yields needs-recheck (no bless)", async () => {
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
-    const verified = await resolvedFixture(db, intent); // issue digest over ISSUE_A only
+    const verified = await resolvedFixture(db, intent); // note: issue digest over ISSUE_A only
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
     const laterHuman: ThreadCommentSpec = {
       id: "i-human-later",
@@ -922,13 +922,13 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 
   test("a RE-SELECTED addressed row resolves even though a newer publication did not bump its finding", async () => {
-    // The publication fence is addressed-state + this row's verdict, not
+    // invariant: The publication fence is addressed-state + this row's verdict, not
     // `last_publication_id`: a re-selected addressed row is re-verified in a
     // real round, and the seen upsert never bumps the row's publication.
     const db = await createSeededTestD1();
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
-    // A NEWER publication (round 2) exists, but it did not re-report this
+    // note: A NEWER publication (round 2) exists, but it did not re-report this
     // fingerprint, so the finding still points at the ROUND-1 publication.
     const newerPubId = uuid(9);
     const newerBody = "newer overall body";
@@ -992,7 +992,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const intent = await seedLifecycle(db);
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
-    // The enqueue persists verified_json BEFORE discovery, so the crash window
+    // invariant: The enqueue persists verified_json BEFORE discovery, so the crash window
     // leaves exactly this shape: a verified snapshot with NO remote ids.
     db.raw
       .prepare(`UPDATE review_threads SET review_id = NULL, comment_id = NULL, thread_id = NULL WHERE id = ?`)
@@ -1010,7 +1010,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
       verified,
     });
 
-    // The unbound association completes instead of dying as
+    // note: The unbound association completes instead of dying as
     // `lookup-incomplete` — the crash window is genuinely recoverable.
     expect(outcome).toEqual({
       kind: "resolved",
@@ -1023,7 +1023,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
       .query(`SELECT resolution_state, review_id, comment_id, thread_id FROM review_threads WHERE id = ?`)
       .get(ASSOC_ID) as { resolution_state: string; review_id: number | null; comment_id: number | null; thread_id: string | null };
     expect(row.resolution_state).toBe("resolved");
-    // Discovery BOUND the ids (they were null before this call).
+    // note: Discovery BOUND the ids (they were null before this call).
     expect(row.review_id).toBe(555);
     expect(row.comment_id).toBe(ROOT_COMMENT_ID);
     expect(row.thread_id).toBe(THREAD_GQL_ID);
@@ -1037,12 +1037,12 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     db.raw
       .prepare(`UPDATE review_threads SET review_id = NULL, comment_id = NULL, thread_id = NULL WHERE id = ?`)
       .run(ASSOC_ID);
-    // The consumer enqueues the verified snapshot BEFORE discovery (the crash
+    // note: The consumer enqueues the verified snapshot BEFORE discovery (the crash
     // window §7.11.1 protects), so the row owns a snapshot while unbound.
     db.raw
       .prepare(`UPDATE review_threads SET verified_json = ? WHERE id = ?`)
       .run(JSON.stringify(verified), ASSOC_ID);
-    // No batch review at all → discovery cannot prove ownership.
+    // invariant: No batch review at all → discovery cannot prove ownership.
     const { octokit, calls } = fakeOctokit({
       reviews: [],
       reviewThreadsPages: [],
@@ -1060,7 +1060,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const row = db.raw
       .query(`SELECT resolution_state, holder, verified_json FROM review_threads WHERE id = ?`)
       .get(ASSOC_ID) as { resolution_state: string; holder: string | null; verified_json: string | null };
-    // Retryable, lease-free, snapshot retained — M8 keeps owning it.
+    // invariant: Retryable, lease-free, snapshot retained — M8 keeps owning it.
     expect(row.resolution_state).toBe("retry");
     expect(row.holder).toBeNull();
     expect(row.verified_json).not.toBeNull();
@@ -1085,7 +1085,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(attemptsOf()).toBe(0);
 
     await ops.discoverThread({ scope: SCOPE, intent, reviewId: null });
-    // Binding remote ids is bookkeeping: the resolve budget is untouched.
+    // invariant: Binding remote ids is bookkeeping: the resolve budget is untouched.
     expect(attemptsOf()).toBe(0);
 
     await ops.discoverThread({ scope: SCOPE, intent, reviewId: null });
@@ -1108,7 +1108,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     });
     expect(outcome).toEqual({ kind: "needs-recheck", reason: "head-changed" });
     expect(calls.some((c) => c.kind === "mutation")).toBe(false);
-    // The lease is released on the fence; the row stays pending (retryable).
+    // invariant: The lease is released on the fence; the row stays pending (retryable).
     const row = db.raw.query(`SELECT resolution_state, holder FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as { resolution_state: string; holder: string | null };
     expect(row.resolution_state).toBe("pending");
     expect(row.holder).toBeNull();
@@ -1141,7 +1141,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const { octokit, calls } = fakeOctokit({
       threadPages: [
         { comments: [root, REPLY], hasPreviousPage: true },
-        { comments: [root], hasPreviousPage: true }, // still an older page after 2 pages
+        { comments: [root], hasPreviousPage: true }, // note: still an older page after 2 pages
       ],
       issueComments: { comments: [ISSUE_A] },
     });
@@ -1169,7 +1169,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
       verified,
     });
     expect(outcome).toEqual({ kind: "needs-recheck", reason: "concern-unresolved" });
-    expect(calls).toEqual([]); // fails before any API call
+    expect(calls).toEqual([]); // note: fails before any API call
   });
 
   test("unverifiable verified assessment never authorizes a resolve", async () => {
@@ -1230,7 +1230,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
     const { octokit, calls } = fakeOctokit({
-      // §7.5 node query shape after the commented line left the diff.
+      // note: §7.5 node query shape after the commented line left the diff.
       threadPages: [{ comments: [root, REPLY], isOutdated: true, line: null, originalLine: LINE }],
       issueComments: { comments: [ISSUE_A] },
     });
@@ -1291,7 +1291,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const verified = await resolvedFixture(db, intent);
     const root = { ...ROOT, body: buildLineCommentBody(intent) };
 
-    // isResolved false in the mutation response.
+    // note: isResolved false in the mutation response.
     const unconfirmed = fakeOctokit({
       threadPages: [{ comments: [root, REPLY] }],
       issueComments: { comments: [ISSUE_A] },
@@ -1315,7 +1315,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(row1.resolution_state).toBe("retry");
     expect(row1.last_error).toContain("not confirmed");
 
-    // Mutation transport error.
+    // note: Mutation transport error.
     const db2 = await createSeededTestD1();
     await seedLifecycle(db2);
     const failing = fakeOctokit({
@@ -1398,7 +1398,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     expect(outcome).toEqual({ kind: "retry", reason: "api" });
     expect(calls).toEqual([]);
     const row = db.raw.query(`SELECT holder, lease_epoch FROM review_threads WHERE id = '${ASSOC_ID}'`).get() as { holder: string; lease_epoch: number };
-    expect(row.holder).toBe("other"); // untouched
+    expect(row.holder).toBe("other"); // note: untouched
     expect(row.lease_epoch).toBe(4);
   });
 
@@ -1421,7 +1421,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
       resolution_state: string; holder: string | null;
     };
     expect(row.resolution_state).toBe("retry");
-    expect(row.holder).toBeNull(); // released through persistOutcome, not held until expiry
+    expect(row.holder).toBeNull(); // note: released through persistOutcome, not held until expiry
     expect(calls.some((c) => c.kind === "mutation")).toBe(false);
   });
 
@@ -1464,7 +1464,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
       },
     });
     expect(outcome).toEqual({ kind: "resolved", threadId: THREAD_GQL_ID, adopted: true, outdated: false, lateChange: false });
-    expect(calls).toEqual([]); // settled row — no remote reads, no mutation, no retry loop
+    expect(calls).toEqual([]); // note: settled row — no remote reads, no mutation, no retry loop
   });
 
   test("re-entry on an already-ABANDONED row is a typed terminal no-op (supersession recoverable from the column)", async () => {
@@ -1473,13 +1473,13 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     const verified = await resolvedFixture(db, intent);
     const { octokit, calls } = fakeOctokit({});
 
-    // Non-superseded abandon (e.g. a provenance failure) → terminal foreign.
+    // note: Non-superseded abandon (e.g. a provenance failure) → terminal foreign.
     db.raw.prepare(`UPDATE review_threads SET resolution_state = 'abandoned' WHERE id = ?`).run(ASSOC_ID);
     expect(
       await createReviewThreads(makeDeps(db, octokit)).resolveFindingThread({ scope: SCOPE, associationId: ASSOC_ID, verified }),
     ).toEqual({ kind: "abandoned", reason: "foreign" });
 
-    // Superseded abandon → terminal superseded.
+    // note: Superseded abandon → terminal superseded.
     const db2 = await createSeededTestD1();
     await seedLifecycle(db2);
     db2.raw
@@ -1505,7 +1505,7 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
     octokit.graphql = (async (query: string, variables: Record<string, unknown> = {}) => {
       if (query.includes("node(id: $id)")) {
         reads += 1;
-        // The pre-mutation capture makes TWO node reads (newest page +
+        // invariant: The pre-mutation capture makes TWO node reads (newest page +
         // stability recheck) and both see SHA; the POST-mutation re-read
         // (reads 3+) sees SHA2.
         if (reads >= 3) {
@@ -1529,14 +1529,14 @@ describe("resolveFindingThread — fences, adoption, mutation confirmation", () 
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Post-pagination stability recheck (spec §7.5 "Re-read the final page/count
 // and PR HEAD after pagination; instability marks incomplete" / §7.8 "a
 // final newest-page/count recheck") — capture primitives.
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 describe("post-pagination stability recheck (§7.5/§7.8)", () => {
-  /** A thread-node response for one read: newest page, metadata included. */
+  /** note: A thread-node response for one read: newest page, metadata included. */
   const nodeResponse = (totalCount: number, comments: ThreadCommentSpec[], headRefOid = SHA) => ({
     node: {
       id: THREAD_GQL_ID,
@@ -1563,7 +1563,7 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
     },
   });
 
-  /** Responses served in read order; the last one repeats when exceeded. */
+  /** note: Responses served in read order; the last one repeats when exceeded. */
   function countingOctokit(responses: unknown[]): { octokit: GraphqlOctokit; calls: Array<Record<string, unknown>> } {
     const calls: Array<Record<string, unknown>> = [];
     let i = 0;
@@ -1586,7 +1586,7 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
     expect(capture.complete).toBe(true);
     expect(capture.totalCount).toBe(2);
     expect(capture.comments).toHaveLength(2);
-    // EXACTLY two node reads: newest page (metadata + comments together) and
+    // invariant: EXACTLY two node reads: newest page (metadata + comments together) and
     // the stability recheck. The old metadata-then-page-0 double fetch (which
     // discarded the first connection) is gone.
     expect(calls).toHaveLength(2);
@@ -1596,11 +1596,11 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
 
   test("totalCount drifted between the walk and the recheck → incomplete, never falsely complete", async () => {
     const root = { ...ROOT, body: "root body" };
-    // A reply landed after the walk: the recheck's count no longer matches.
+    // note: A reply landed after the walk: the recheck's count no longer matches.
     const { octokit } = countingOctokit([nodeResponse(2, [root, REPLY]), nodeResponse(3, [root, REPLY])]);
     const capture = await fetchThreadConversation(octokit, THREAD_GQL_ID);
     expect(capture.complete).toBe(false);
-    // The walked set is reported as captured; the recheck only validates.
+    // invariant: The walked set is reported as captured; the recheck only validates.
     expect(capture.totalCount).toBe(2);
     expect(capture.comments).toHaveLength(2);
   });
@@ -1636,7 +1636,7 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
     const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
     expect(capture.complete).toBe(false);
     expect(capture.totalCount).toBe(1);
-    expect(calls).toHaveLength(2); // walk + recheck
+    expect(calls).toHaveLength(2); // note: walk + recheck
   });
 
   test("stable issue-comment capture stays complete with the recheck in place", async () => {
@@ -1660,9 +1660,9 @@ describe("post-pagination stability recheck (§7.5/§7.8)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Per-call capture switch: App publications for the discovery lane
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 
 describe("fetchIssueComments — includeOwnPublications", () => {
   const ownPublication: ThreadCommentSpec = {
@@ -1687,7 +1687,7 @@ describe("fetchIssueComments — includeOwnPublications", () => {
     const { octokit } = fakeOctokit({ issueComments: { comments: [humanComment, ownPublication] } });
     const capture = await fetchIssueComments(octokit, { owner: SCOPE.owner, repo: SCOPE.repo, prNumber: SCOPE.prNumber });
     expect(capture.comments.map((c) => c.id)).toEqual(["i-human"]);
-    // The raw connection is unchanged by the filter.
+    // invariant: The raw connection is unchanged by the filter.
     expect(capture.totalCount).toBe(2);
   });
 
@@ -1700,7 +1700,7 @@ describe("fetchIssueComments — includeOwnPublications", () => {
     );
     expect(capture.comments.map((c) => c.id)).toEqual(["i-human", "i-own"]);
     expect(capture.comments[1]!.viewerDidAuthor).toBe(true);
-    // The switch moves the returned set only, never coverage.
+    // invariant: The switch moves the returned set only, never coverage.
     expect(capture.totalCount).toBe(2);
     expect(capture.complete).toBe(true);
   });

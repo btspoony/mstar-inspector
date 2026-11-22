@@ -1,5 +1,4 @@
-/**
- * Production Worker entry (deploy) tests (review Important 2 fix).
+/** note: Production Worker entry (deploy) tests (review Important 2 fix).
  *
  * The entry module (src/worker/entry.ts) is what wrangler.jsonc `main` points
  * at: it must export BOTH the fetch/queue handler (re-exported from ./index)
@@ -41,7 +40,7 @@ describe("worker entry (deploy)", () => {
   });
 
   test("exports BOTH DO classes the config declares — SandboxV1 plus the compatibility Sandbox (fresh-deploy migration replay)", () => {
-    // The retained legacy `v1` migration names `new_sqlite_classes: ["Sandbox"]`;
+    // note: The retained legacy `v1` migration names `new_sqlite_classes: ["Sandbox"]`;
     // a fresh worker replays every unapplied migration, so the compatibility
     // class MUST stay exported or the first deploy fails. Pinning the pair so a
     // rename cannot silently drop it again.
@@ -50,7 +49,7 @@ describe("worker entry (deploy)", () => {
   });
 
   test("the smoke entry re-exports the SAME DO class pair (its config carries the same v1 migration)", async () => {
-    // wrangler.smoke.jsonc's `main` is src/pipeline/smoke-entry.ts and it
+    // note: wrangler.smoke.jsonc's `main` is src/pipeline/smoke-entry.ts and it
     // carries the same `v1` `new_sqlite_classes: ["Sandbox"]` tag, so dropping
     // either re-export there re-arms the fresh-worker rejection on the smoke
     // worker. Identity-pinned: same module graph, same class objects.
@@ -62,7 +61,7 @@ describe("worker entry (deploy)", () => {
   test("re-exports the fetch handler (healthz)", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    // Field-set assertion: `ok:true` contract unchanged, `version`
+    // invariant: Field-set assertion: `ok:true` contract unchanged, `version`
     // additive from the generated single source with the `v` prefix.
     const body = (await res.json()) as { ok: boolean; version: string };
     expect(body.ok).toBe(true);
@@ -70,8 +69,7 @@ describe("worker entry (deploy)", () => {
   });
 });
 
-/**
- * Cron scheduled wiring (AL-6): the deploy entry must expose the
+/** note: Cron scheduled wiring (AL-6): the deploy entry must expose the
  * `scheduled` face (re-exported from ./index) that runs the trailing-24h
  * failure sweep over the bound D1 — read-only, and NEVER throwing out of the
  * handler (a throwing cron handler just retries into alert noise).
@@ -86,11 +84,11 @@ describe("worker entry scheduled wiring", () => {
 
   test("scheduled runs the sweep over the bound DB and POSTs the alert to ALERT_WEBHOOK_URL on breach", async () => {
     const db = createMigratedTestD1();
-    // The write contract names a target; the FK parent is this bot's target.
+    // note: The write contract names a target; the FK parent is this bot's target.
     seedBot(db, "bot-entry", 9401);
     seedTarget(db, "bot-entry", { id: "target-entry" });
     const store = createFailureStore(db);
-    // One row past the sweep's threshold: the breach is what this case pins.
+    // note: One row past the sweep's threshold: the breach is what this case pins.
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD + 1; i++) {
       await store.record({
         target_id: "target-entry",
@@ -134,7 +132,7 @@ describe("worker entry scheduled wiring", () => {
       fetchCalls++;
       return new Response("ok");
     }) as unknown as typeof fetch;
-    // TEST-01: capture the handler's warn events through the sweep log sink.
+    // note: TEST-01: capture the handler's warn events through the sweep log sink.
     const warnCalls: Array<{ fields: Record<string, unknown>; msg?: string }> = [];
     const originalWarn = defaultSweepLog.warn;
     defaultSweepLog.warn = (fields, msg) => void warnCalls.push({ fields: fields as Record<string, unknown>, msg });
@@ -145,7 +143,7 @@ describe("worker entry scheduled wiring", () => {
       defaultSweepLog.warn = originalWarn;
     }
     expect(fetchCalls).toBe(0);
-    // The DB-unbound case fires the `ops_sweep_db_unbound` event with the
+    // note: The DB-unbound case fires the `ops_sweep_db_unbound` event with the
     // binding-missing detail (TEST-01).
     expect(warnCalls).toHaveLength(1);
     expect(warnCalls[0]!.fields.event).toBe("ops_sweep_db_unbound");
@@ -153,7 +151,7 @@ describe("worker entry scheduled wiring", () => {
   });
 
   test("scheduled never throws when the sweep itself fails", async () => {
-    // The maintenance window read is answered OPEN so this expression reaches
+    // why: The maintenance window read is answered OPEN so this expression reaches
     // its lanes at all: every other statement breaks, which is the failure the
     // test pins. (An unreadable window now fails closed and skips the sweep.)
     const brokenDb = {
@@ -177,19 +175,19 @@ describe("worker entry scheduled wiring", () => {
     } finally {
       defaultSweepLog.warn = originalWarn;
     }
-    // The rule is "scheduled never throws and every degraded lane warns with
+    // invariant: The rule is "scheduled never throws and every degraded lane warns with
     // its OWN event", not a fixed composition list: each lane is asserted by
     // membership so a future independent best-effort step (or a reorder) does
     // not re-break this test.
     const events = warnCalls.map((call) => call.fields.event);
     for (const laneEvent of [
-      // Migration 0048's outbox re-send is its own independent step.
+      // note: Migration 0048's outbox re-send is its own independent step.
       "comment_claim_outbox_failed",
       "invite_lapse_swept_failed",
       "ops_sweep_failed",
       "pull_request_retention_swept_failed",
       "retention_swept_failed",
-      // The claim budgets are an operator setting: an unreadable settings row
+      // note: The claim budgets are an operator setting: an unreadable settings row
       // degrades to the documented defaults with its own line.
       "review_comment_claim_settings_degraded",
     ] as const) {

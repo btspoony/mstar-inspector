@@ -307,7 +307,7 @@ describe("parseReviewOutput", () => {
     const TALLY: PrTallyResult = {
       verdict: "needs fixes",
       scorePct: 45,
-      // Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
+      // note: Required since engine 4.0.0; scoreBand(45) === "fail" (< 60 floor).
       band: "fail",
       tally: { mustFix: 0, shouldFix: 2, mayFix: 0, nit: 1 },
       chatHeader: "**needs fixes** · 45%\n🔴 0 🟠 2 🔵 1",
@@ -317,7 +317,7 @@ describe("parseReviewOutput", () => {
       const r = parseReviewOutput(JSON.stringify({ ...VALID, tally: TALLY }));
       expect(r.ok).toBe(true);
       if (r.ok) {
-        // The local zod mirror (src/review/schema.ts) does not declare the
+        // note: The local zod mirror (src/review/schema.ts) does not declare the
         // engine's optional `band`, so it is stripped on parse; compare the
         // fields the mirror round-trips.
         const { band: _band, ...roundTripped } = TALLY;
@@ -326,7 +326,7 @@ describe("parseReviewOutput", () => {
     });
 
     test("accepts a tally with and without mayFix (the engine field is optional)", () => {
-      // Pre-4.2 envelopes omit mayFix; readers treat absent as 0, so both
+      // why: Pre-4.2 envelopes omit mayFix; readers treat absent as 0, so both
       // shapes parse and a present one round-trips.
       const { mayFix: _absent, ...withoutMayFix } = TALLY.tally;
       const absent = parseReviewOutput(JSON.stringify({ ...VALID, tally: { ...TALLY, tally: withoutMayFix } }));
@@ -367,7 +367,7 @@ describe("parseReviewOutput", () => {
   describe("incomplete verdict (four-token vocabulary)", () => {
     const FACT = { reason: "budget exhausted after 3 of 9 files", unscanned: ["src/b.ts", "src/c.ts"] };
     const INCOMPLETE: ReviewOutput = { ...VALID, verdict: "incomplete", incomplete: FACT };
-    /** Tally mirror of the incomplete envelope: the fact echoed verbatim. */
+    /** note: Tally mirror of the incomplete envelope: the fact echoed verbatim. */
     const TALLY = {
       verdict: "incomplete",
       scorePct: 45,
@@ -530,7 +530,7 @@ describe("capFindings (Phase 5 B4, merge-class priority)", () => {
   test("returns the input unchanged with omitted=0 when within the cap", () => {
     const output = { ...base, findings: [finding("nit", "a"), finding("should-fix", "b")] };
     const { output: out, omitted } = capFindings(output);
-    expect(out).toBe(output); // same reference, no copy
+    expect(out).toBe(output); // note: same reference, no copy
     expect(omitted).toBe(0);
   });
 
@@ -633,7 +633,7 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   test("a suggestion fence crossing the body budget is dropped whole, prose survives", () => {
     const prose = "P".repeat(1500);
     const fence = ["```suggestion", "C".repeat(800), "```"].join("\n");
-    const body = prose + "\n\n" + fence; // fence starts before FINDING_BODY_MAX and ends after it // 2502 chars, fence straddles FINDING_BODY_MAX
+    const body = prose + "\n\n" + fence; // note: fence starts before FINDING_BODY_MAX and ends after it // 2502 chars, fence straddles FINDING_BODY_MAX
     const clamped = clampFindingSizes({ ...base, findings: [finding("t", body)] });
     const clampedBody = clamped.findings[0]!.body;
     expect(clampedBody.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
@@ -643,7 +643,7 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   });
 
   test("a fence whose closing fence ends exactly at FINDING_BODY_MAX is dropped whole, prose kept", () => {
-    // Span end (just past the closing fence line) lands exactly on the budget, so
+    // why: Span end (just past the closing fence line) lands exactly on the budget, so
     // the final truncation would otherwise cut into that closing fence.
     const code = "const x = 1;";
     const pad = FINDING_BODY_MAX - 21 - code.length;
@@ -652,7 +652,7 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
     expect(clampedBody).toBe(`${"P".repeat(pad)}\n\n\ntail`);
     expect(clampedBody).not.toContain("```");
     expect(clampedBody).not.toContain("…");
-    // Clamping the already-clamped body is a no-op, so the boundary case stays idempotent.
+    // invariant: Clamping the already-clamped body is a no-op, so the boundary case stays idempotent.
     expect(clampFindingSizes({ ...base, findings: [finding("t", clampedBody)] }).findings[0]!.body).toBe(clampedBody);
   });
 
@@ -707,13 +707,13 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
   });
 
   test("a suggestion-only body clamps to the non-empty fallback and still parses (persistable)", () => {
-    // Long enough that the closed fence crosses FINDING_BODY_MAX and must be dropped.
+    // note: Long enough that the closed fence crosses FINDING_BODY_MAX and must be dropped.
     const body = "```suggestion\n" + "C".repeat(2000) + "\n```";
     const raw = { ...base, findings: [finding("t", body)] };
     expect(parseReviewOutput(JSON.stringify(raw)).ok).toBe(true);
     const clamped = clampFindingSizes(raw);
     expect(clamped.findings[0]!.body).toBe("(suggestion omitted)");
-    // The clamped envelope re-parses: persistence and line comments still happen.
+    // why: The clamped envelope re-parses: persistence and line comments still happen.
     expect(parseReviewOutput(JSON.stringify(clamped)).ok).toBe(true);
   });
 

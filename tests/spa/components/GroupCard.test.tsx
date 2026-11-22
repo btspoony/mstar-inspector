@@ -1,5 +1,4 @@
-/**
- * GroupCard — DESIGN.md `group-card`: the ui/card surface with Card's
+/** note: GroupCard — DESIGN.md `group-card`: the ui/card surface with Card's
  * symmetric padding split into a header band and a body, title + badge,
  * summary and action slots.
  *
@@ -33,7 +32,7 @@ const html = renderToStaticMarkup(
   ),
 );
 
-/** Markup between two slots, so a slot's children are checked in place. */
+/** note: Markup between two slots, so a slot's children are checked in place. */
 const between = (from: string, to: string) => {
   const start = html.indexOf(from);
   const end = to ? html.indexOf(to) : html.length;

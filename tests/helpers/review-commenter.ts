@@ -1,5 +1,5 @@
 /**
- * Shared ReviewCommenter test double — one factory for the
+ * why: Shared ReviewCommenter test double — one factory for the
  * consumer-flow test files. The double records every op into a caller-owned
  * array and reads its BEHAVIOR from a caller-owned mutable state object, so
  * tests reset state between cases exactly like the module-level `let` vars
@@ -22,27 +22,27 @@ import { PreparedSendRejected } from "../../src/pipeline/comment";
 
 export type CommenterCall = { op: string; args: unknown };
 
-/** Mutable per-test behavior switches (tests mutate this between cases). */
+/** note: Mutable per-test behavior switches (tests mutate this between cases). */
 export type FakeCommenterState = {
   token: string;
   tokenError?: Error;
-  /** Review-chain pre-staging plan (default: create round 1). */
+  /** note: Review-chain pre-staging plan (default: create round 1). */
   plan: UpsertPlan;
-  /** Degraded-chain pre-staging plan (default: create round 1). */
+  /** note: Degraded-chain pre-staging plan (default: create round 1). */
   degradedPlan: UpsertPlan;
-  /** postPreparedReview throw (send failure). */
+  /** note: postPreparedReview throw (send failure). */
   preparedReviewError?: Error;
-  /** commentId the prepared review send reports (default 101). */
+  /** note: commentId the prepared review send reports (default 101). */
   preparedReviewCommentId: number;
-  /** Target version rejection on the prepared review send. */
+  /** note: Target version rejection on the prepared review send. */
   preparedReviewReject?: boolean;
-  /** postPreparedDegraded throw (definitive degraded rejection). */
+  /** note: postPreparedDegraded throw (definitive degraded rejection). */
   preparedDegradedError?: Error;
   preparedDegradedResult: { posted: boolean; commentId: number | null };
   deleteDegradedOutcome: DegradedDeleteOutcome;
   deleteDegradedError?: Error;
   lineCommentsError?: Error;
-  /** postLineComments result — default: every intent captured, reviewId 55. */
+  /** note: postLineComments result — default: every intent captured, reviewId 55. */
   lineCommentsResult: {
     posted: { associationId: string; commentId: number; path: string; line: number }[];
     ambiguous: string[];
@@ -51,9 +51,9 @@ export type FakeCommenterState = {
   };
   discussion: Discussion;
   discussionError?: Error;
-  /** §7.5 discovery result for the resolution step. */
+  /** note: §7.5 discovery result for the resolution step. */
   discoverResult: DiscoveryResult;
-  /** §7.5 resolve result for the resolution step. */
+  /** note: §7.5 resolve result for the resolution step. */
   resolveResult: ResolveOutcome;
   resolveError?: Error;
 };
@@ -61,7 +61,7 @@ export type FakeCommenterState = {
 export function initialFakeCommenterState(): FakeCommenterState {
   return {
     token: "ghs_installation_token",
-    // Optional switches are listed EXPLICITLY as undefined so
+    // why: Optional switches are listed EXPLICITLY as undefined so
     // `Object.assign(state, initialFakeCommenterState())` in a test reset()
     // clears previously-set behaviors (absent keys are never assigned).
     tokenError: undefined,
@@ -141,7 +141,7 @@ export function createFakeCommenter(state: FakeCommenterState, calls: CommenterC
       calls.push({ op: "line-comments", args: input });
       if (state.lineCommentsError) throw state.lineCommentsError;
       if (state.lineCommentsResult.posted.length === 0 && input.intents.length > 0) {
-        // Default capture: map every intent to a fresh comment id.
+        // note: Default capture: map every intent to a fresh comment id.
         return {
           posted: input.intents.map((intent, index) => ({
             associationId: intent.associationId,

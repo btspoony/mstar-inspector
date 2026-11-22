@@ -1,5 +1,4 @@
-/**
- * The workspace-name card.
+/** note: The workspace-name card.
  *
  * Mounted, because the contract lives across two surfaces: the card submits
  * `PUT /dashboard/<id>/api/settings/name` and the top-bar switcher — rendered by
@@ -51,7 +50,7 @@ describe("workspace name card", () => {
           headers: { "Content-Type": "application/json" },
         });
       }
-      // The shell's support-grant read — no active grant here.
+      // note: The shell's support-grant read — no active grant here.
       if (call.url.endsWith("/api/settings/review-usage")) {
         return new Response(
           JSON.stringify({ month: "2026-11", sharedReviews: 2, ownReviews: 0, sharedBot: "available" }),
@@ -63,7 +62,7 @@ describe("workspace name card", () => {
         headers: { "Content-Type": "application/json" },
       });
     }) as unknown as typeof fetch;
-    // No navigation may happen: the new name is a label, not a URL.
+    // note: No navigation may happen: the new name is a label, not a URL.
     (win.history as unknown as Record<string, unknown>).replaceState = (...args: unknown[]) => {
       replaces.push(args);
     };
@@ -95,7 +94,7 @@ describe("workspace name card", () => {
         input.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
       });
 
-      // The card's own form — the shell's locale toggle is a form too.
+      // note: The card's own form — the shell's locale toggle is a form too.
       const form = input.closest("form");
       await act(async () => {
         form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
@@ -104,10 +103,10 @@ describe("workspace name card", () => {
       expect(calls.filter((call) => call.method === "PUT")).toEqual([
         { url: "/dashboard/ws_acme/api/settings/name", method: "PUT", body: JSON.stringify({ name: "Acme Labs" }) },
       ]);
-      // The live membership list was patched, so the top-bar label followed.
+      // why: The live membership list was patched, so the top-bar label followed.
       expect(container.querySelector('[data-slot="dropdown-menu-trigger"]')?.textContent).toContain("Acme Labs");
       expect(container.textContent).toContain(t("en", "workspace.nameSaved"));
-      // The URL is the id: no history entry, no path rewrite.
+      // note: The URL is the id: no history entry, no path rewrite.
       expect(win.location.pathname).toBe(PATH);
       expect(replaces).toEqual([]);
       expect(pushes).toEqual([]);
@@ -168,7 +167,7 @@ describe("workspace name card", () => {
         form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
       });
 
-      // Nothing landed: the switcher keeps the stored name and no history moves.
+      // invariant: Nothing landed: the switcher keeps the stored name and no history moves.
       expect(container.querySelector('[data-slot="dropdown-menu-trigger"]')?.textContent).toContain("Acme");
       expect(container.textContent).not.toContain("Taken Name");
       expect(container.textContent).toContain("name taken");
@@ -233,7 +232,7 @@ describe("workspace name card", () => {
           }),
         ),
       );
-      // The read lands the stored value, not the documented default.
+      // note: The read lands the stored value, not the documented default.
       const input = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(input.value).toBe("8");
       expect(container.textContent).toContain(t("en", "workspace.concurrencyRange", { min: 1, max: 32 }));
@@ -266,7 +265,7 @@ describe("workspace name card", () => {
   });
 
   test("an untouched Save submits the stored value, not the system cap", async () => {
-    // The card seeds the field from the STORED value: a save that changed
+    // note: The card seeds the field from the STORED value: a save that changed
     // nothing must store the same number again.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
     const calls: Call[] = [];
@@ -322,7 +321,7 @@ describe("workspace name card", () => {
   });
 
   test("a non-JSON 2xx is a successful save with a cleared draft", async () => {
-    // The write landed; only its body is unreadable. Reporting it as a failure
+    // invariant: The write landed; only its body is unreadable. Reporting it as a failure
     // would leave the stale draft in the form after a save that stored a value.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
     const calls: Call[] = [];
@@ -363,7 +362,7 @@ describe("workspace name card", () => {
       expect(calls.filter((call) => call.method === "PUT")).toHaveLength(1);
       expect(container.textContent).toContain(t("en", "workspace.concurrencySaved"));
       expect(container.textContent).not.toContain(t("en", "workspace.concurrencyFailed"));
-      // The draft is cleared: the input shows the submitted value, not a
+      // note: The draft is cleared: the input shows the submitted value, not a
       // lingering unsubmitted edit.
       expect(input.value).toBe("5");
 
@@ -375,7 +374,7 @@ describe("workspace name card", () => {
   });
 
   test("switching the workspace reloads the card, and the save lands on the new workspace's URL", async () => {
-    // The switcher only rewrites the path segment, so the card stays the same
+    // why: The switcher only rewrites the path segment, so the card stays the same
     // mount: its loaded cap, ceiling and draft must follow the URL instead.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
     const calls: Call[] = [];
@@ -428,7 +427,7 @@ describe("workspace name card", () => {
         win.dispatchEvent(new win.Event("popstate"));
       });
 
-      // B's read replaced A's stored value, never A's draft.
+      // invariant: B's read replaced A's stored value, never A's draft.
       const reloaded = win.document.querySelector("#workspace-concurrency") as unknown as HTMLInputElement;
       expect(reloaded.value).toBe("5");
       expect(calls.map((call) => call.url)).toContain("/dashboard/ws_beta/api/settings/concurrency");
@@ -454,7 +453,7 @@ describe("workspace name card", () => {
   });
 
   test("a degraded read starts empty, and a typed value repairs it", async () => {
-    // The store answered the conservative 1 for both levels because a stored
+    // why: The store answered the conservative 1 for both levels because a stored
     // value could not be read. The field must never present that fallback as
     // this workspace's setting, and a typed value is the repair path.
     const { win, cleanup } = installDom(`http://localhost${PATH}`);
@@ -469,7 +468,7 @@ describe("workspace name card", () => {
       if (method === "PUT") {
         const body = JSON.parse(String(init?.body ?? "{}")) as { concurrency?: number };
         storedValue = body.concurrency ?? storedValue;
-        // The write replaces the unreadable column, so the re-read is clean.
+        // why: The write replaces the unreadable column, so the re-read is clean.
         degraded = false;
         return new Response(JSON.stringify({ concurrency: storedValue }), {
           status: 200,
@@ -501,7 +500,7 @@ describe("workspace name card", () => {
         (button) => button.textContent === t("en", "workspace.concurrencySave"),
       ) as unknown as HTMLButtonElement;
       expect(save.disabled).toBe(false);
-      // Retry is offered beside the repair write.
+      // note: Retry is offered beside the repair write.
       expect(
         [...container.querySelectorAll("button")].some(
           (button) => button.textContent === t("en", "common.retry"),
@@ -526,7 +525,7 @@ describe("workspace name card", () => {
           body: JSON.stringify({ concurrency: 6 }),
         },
       ]);
-      // The accepted write triggers a re-read, so the repaired state converges:
+      // why: The accepted write triggers a re-read, so the repaired state converges:
       // warning gone, the stored number back in the field.
       expect(container.textContent).not.toContain(t("en", "workspace.concurrencyUnreadable", { min: 1, max: 32 }));
       expect(
@@ -541,7 +540,7 @@ describe("workspace name card", () => {
   });
 
   test("an admin gets the concurrency card but no name form; a plain member gets the refusal copy", () => {
-    // The name is owner-only; the review concurrency is owner-or-admin — the
+    // invariant: The name is owner-only; the review concurrency is owner-or-admin — the
     // page mirrors the two routes rather than the stricter gate alone.
     const asAdmin = withLocation(PATH, () =>
       renderToStaticMarkup(

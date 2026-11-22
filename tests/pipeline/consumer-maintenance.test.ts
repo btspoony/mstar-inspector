@@ -1,5 +1,5 @@
 /**
- * The queue face of the maintenance window (D20). A closed platform DEFERS the
+ * why: The queue face of the maintenance window (D20). A closed platform DEFERS the
  * batch — every delivery is retried while the queue still allows it; a delivery
  * with no redelivery left (a runtime without `retry`, or the last platform
  * attempt) is dropped through `review_failures` (stage `maintenance_deferred`)
@@ -24,7 +24,7 @@ import {
 } from "../helpers/consumer-harness";
 import { createSeededTestD1 } from "../helpers/consumer-fixtures";
 
-/** A log double that keeps only the `maintenance_defer` lines. */
+/** note: A log double that keeps only the `maintenance_defer` lines. */
 function deferLog(lines: ConsumerLogFields[]): ConsumerLog {
   const record = (fields: ConsumerLogFields) => {
     if (fields.event === "maintenance_defer") lines.push(fields);
@@ -33,7 +33,7 @@ function deferLog(lines: ConsumerLogFields[]): ConsumerLog {
 }
 
 /**
- * A closed window over the seeded shape: the drop carrier binds the payload's
+ * why: A closed window over the seeded shape: the drop carrier binds the payload's
  * `target_id`, whose `review_targets` row (FK) is what the seeded App owns.
  */
 async function closedWindowDB() {
@@ -59,14 +59,14 @@ describe("the queue maintenance gate", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Zero processing: no sandbox, no commenter, no KV, no failure row.
+    // invariant: Zero processing: no sandbox, no commenter, no KV, no failure row.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls).toHaveLength(0);
     expect(h.kvPuts).toHaveLength(0);
-    // Deferred, not dropped: every message is retried 300s out, none acked.
+    // invariant: Deferred, not dropped: every message is retried 300s out, none acked.
     expect(h.messageAckCalls).toHaveLength(0);
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 300 }]);
-    // One line, naming the queue and the batch it deferred.
+    // note: One line, naming the queue and the batch it deferred.
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ event: "maintenance_defer", queue: "review-queue", batch_size: 1 });
   });
@@ -86,7 +86,7 @@ describe("the queue maintenance gate", () => {
       messages: [{ ...batch.messages[0], retry: undefined, ack: () => acks.push(1) }],
     } as unknown as MessageBatch<ReviewJobPayload>;
 
-    // No redelivery is available, so the delivery is dropped — but not silently:
+    // invariant: No redelivery is available, so the delivery is dropped — but not silently:
     // one failure row carries the identity the sweep alerts on.
     await consumer(deferred);
 
@@ -114,7 +114,7 @@ describe("the queue maintenance gate", () => {
     const { createReviewConsumer } = await loadConsumer();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), deferLog(lines), h.overrides);
 
-    // QUEUE_MAX_ATTEMPTS is the last delivery a retry() would still fit in.
+    // note: QUEUE_MAX_ATTEMPTS is the last delivery a retry() would still fit in.
     h.queueState.attempts = QUEUE_MAX_ATTEMPTS;
     const payload = makePayload();
     await consumer(h.makeBatch(payload));
@@ -158,7 +158,7 @@ describe("the queue maintenance gate", () => {
     const h = createConsumerHarness();
     const lines: ConsumerLogFields[] = [];
     const db = await closedWindowDB();
-    // Every maintenance read throws: the reader answers `unreadable`, and the
+    // why: Every maintenance read throws: the reader answers `unreadable`, and the
     // queue takes the same deferral as a stated window rather than running a
     // pipeline write on a ledger the backfill may be repointing.
     const broken = {
@@ -188,7 +188,7 @@ describe("the queue maintenance gate", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The seeded App resolves, so the round reaches the sandbox and the window
+    // note: The seeded App resolves, so the round reaches the sandbox and the window
     // never writes a line.
     expect(h.sandbox.calls.length).toBeGreaterThan(0);
     expect(h.messageRetryCalls).toHaveLength(0);

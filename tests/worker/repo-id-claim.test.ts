@@ -1,5 +1,4 @@
-/**
- * The repository id claim item.
+/** note: The repository id claim item.
  *
  * A target can name a repository and still have no `repo_id`: the shape
  * `repo-backfill` leaves when it merges the 0067 leftover target, and the one
@@ -47,8 +46,7 @@ function seedInstallation(
 const lookupFound = (repoId: number): RepoLookup => async () => ({ kind: "found", repoId });
 const lookupAbsent: RepoLookup = async () => ({ kind: "absent" });
 
-/**
- * A target in the shape this item exists for: it names a repository and carries
+/** note: A target in the shape this item exists for: it names a repository and carries
  * no `repo_id`. `seedTarget` always writes a hashed id, so this fixture writes
  * the NULL itself rather than widening that helper for one item.
  */

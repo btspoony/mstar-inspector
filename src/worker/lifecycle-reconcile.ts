@@ -66,6 +66,7 @@
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
+import { RecoveryBudgetRefused, isBudgetRefusal } from "../contracts/recovery-budget";
 import {
   applyPublishedLifecycle,
   captureLineComments,
@@ -87,7 +88,9 @@ import {
   markResolutionLocalError,
   PREPARED_SEND_MIN_AGE_MS,
   readLineBatchState,
+  recordLineDiscoveryFailure,
   recordNeedsRecheck,
+  resetLineDiscoveryFailures,
   recordPublicationProof,
   recordLineDispatchIntent,
   reenableLifecycleForApps,
@@ -101,11 +104,12 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type PostPreparedLineCommentsInput, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type LineDiscoveryFailure, type PostPreparedLineCommentsInput, type PostedLineComments, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
-// note: --- Summary + budget constants (spec §7.11.1 verbatim values) ---
+// note: Summary + budget constants (spec §7.11.1 verbatim values)
+// ---------------------------------------------------------------------------
 
 export type LifecycleReconcileSummary = {
   examined: number;
@@ -157,7 +161,8 @@ const IDENTITY_REQUESTS = 1;
 /** note: Lease holder label for M8 recovery claims. */
 const HOLDER = "lifecycle-reconcile";
 
-// note: --- Reviewer surface — the §7.6 credential-routing seam ---
+// safety: Reviewer surface — the §7.6 credential-routing seam
+// ---------------------------------------------------------------------------
 
 /**
  * The GitHub surface M8 needs. `resolveFindingThread` is the §7.5 adapter
@@ -208,7 +213,7 @@ export type ReviewerResolution =
 export type ReconcileTransport = {
   /** invariant: Abort a single request after at most this many ms (≥1). */
   boundMs: () => number;
-  /** invariant: Wrapped fetch — the ONLY transport the built reviewer may use. */
+  /** note: Wrapped fetch — the ONLY transport the built reviewer may use. */
   fetchImpl: CommenterFetch;
 };
 
@@ -245,7 +250,7 @@ type RoutingRow = {
   private_key_enc: string;
 };
 
-/** invariant: The exact-pair routing query (also the re-enable probe — D1 only). */
+/** note: The exact-pair routing query (also the re-enable probe — D1 only). */
 async function routingRow(db: D1Like, appId: string, installationId: number): Promise<RoutingRow | null> {
   return db
     // shortcut: tenant-bypass — reconciler credential routing by exact (bot_id,
@@ -325,12 +330,13 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
       },
     };
   } catch {
-    // safety: missing key / tampered envelope — fail closed
+    // note: missing key / tampered envelope — fail closed
     return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
   }
 };
 
-// note: --- Log + deps ---
+// note: Log + deps
+// ---------------------------------------------------------------------------
 
 /** Structured JSON-lines log (warn for failures, one info summary line). */
 export type ReconcileLog = {
@@ -352,10 +358,11 @@ export type LifecycleReconcileDeps = {
   log?: ReconcileLog;
 };
 
-// note: --- Run budget ---
+// note: Run budget
+// ---------------------------------------------------------------------------
 
 type RunBudget = {
-  /** invariant: ACTUAL requests issued this run (mutated only at the transport). */
+  /** note: ACTUAL requests issued this run (mutated only at the transport). */
   spent: number;
   deadline: number;
   /**
@@ -384,54 +391,9 @@ function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: bo
   return true;
 }
 
-/** invariant: Charge one ACTUAL request (called only from the transport choke point). */
+/** note: Charge one ACTUAL request (called only from the transport choke point). */
 function reserve(budget: RunBudget, cost: number): void {
   budget.spent += cost;
-}
-
-/**
- * invariant: The run's request allowance refused a request BEFORE it was dispatched
- * (spec §7.11.1: "budget exhaustion is not a failed attempt"). It is a
- * distinct type because the refusal must be told apart from a send that
- * MIGHT have reached GitHub: the caller restores the claimed publication to
- * its due `prepared` state instead of recording post-attempt `unknown`, so a
- * publication that was never sent is never stranded behind read-only
- * discovery. Nothing dispatches, so no attempt is spent either.
- *
- * Thrown by the transport only; classified by chain in the lanes below.
- */
-class RecoveryBudgetRefused extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RecoveryBudgetRefused";
-  }
-}
-
-/**
- * invariant: Does this error CHAIN carry a pre-dispatch budget refusal? Octokit does not
- * let a custom transport error reach the caller intact: `fetchWrapper`
- * re-wraps every non-abort rejection in `RequestError(message, 500, ...)`
- * with the original parked on `cause` (`@octokit/request`), and the
- * paginate/plugin layers re-wrap again. The refusal therefore has to be
- * recognized by walking `cause` rather than by an `instanceof` at the throw
- * site. The chain is walked by IDENTITY, never by message text — a message
- * match would classify any error that merely mentions the budget as
- * un-dispatched, which is exactly the false "never sent" claim this
- * distinction exists to prevent. Each link is read defensively: `cause` is
- * not typed on `Error`, and a hostile/cyclic cause chain must not hang the
- * recovery lane, so the walk is bounded and deduplicated by identity.
- */
-function isBudgetRefusal(error: unknown): boolean {
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (current instanceof RecoveryBudgetRefused) return true;
-    if (typeof current !== "object" || current === null || seen.has(current)) return false;
-    seen.add(current);
-    if (!("cause" in current)) return false;
-    current = current.cause;
-  }
-  return false;
 }
 
 /**
@@ -481,12 +443,13 @@ function backoffFor(attemptsAfter: number): number {
   return LIFECYCLE_BACKOFF_MS[index]!;
 }
 
-/** safety: Structured give-up line — App/scope/work ID + reason, no payload/secret. */
+/** note: Structured give-up line — App/scope/work ID + reason, no payload/secret. */
 function giveUpLine(scope: Scope, workId: string, attempts: number, reason: string): string {
   return `gave up after ${attempts} attempts (app=${scope.appId}, installation=${scope.installationId}, owner=${scope.owner}, repo=${scope.repo}, pr=${scope.prNumber}, work=${workId}): ${reason}`;
 }
 
-// note: --- The reconciler ---
+// note: The reconciler
+// ---------------------------------------------------------------------------
 
 /**
  * One bounded M8 recovery pass. Never throws (the §7.11 composition
@@ -616,14 +579,14 @@ export async function reconcileReviewLifecycle(
 }
 
 /**
- * note: The per-run reviewer cache key. Probes are cached per (app, installation)
+ * why: The per-run reviewer cache key. Probes are cached per (app, installation)
  * pair, so every budget gate that needs to know whether a pair's identity
  * probe is already accounted builds this key the same way (lockstep).
  */
 const pairKeyOf = (scope: Scope): string => `${scope.appId}:${scope.installationId}`;
 
 /**
- * invariant: Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
+ * why: Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
  * pair's pending rows durably (once per pair per run — attempts untouched,
  * no cross-App substitution).
  *
@@ -652,7 +615,7 @@ async function reviewerForPair(
   if (cached !== undefined) return cached;
   const resolution = (async () => {
     try {
-      // note: The factory proves the live App identity before returning; that probe
+      // why: The factory proves the live App identity before returning; that probe
       // (and every other real request the pair issues) is metered at the
       // transport choke point, so no per-operation reservation is charged
       // here — reserving an estimate AND metering the real requests would
@@ -733,7 +696,7 @@ async function reconcilePublications(
     // transport; this gate only decides whether even ONE request could still
     // fit the run, so an exhausted run stops the lane before any claim.
     const scope = row.payload.scope;
-    if (!canSpend(budget, now(), 1, true)) continue; // note: stays due, no claim
+    if (!canSpend(budget, now(), 1, true)) continue; // invariant: stays due, no claim
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // note: pair suspended durably
     if (row.phase === "prepared") {
@@ -806,6 +769,13 @@ async function applyConfirmedPublication(
  *     transition the foreground uses (exactly one lane wins), or
  *   - finds an intent already recorded and performs read-only discovery —
  *     never a second send.
+ *
+ * The selection is bounded, so one query cannot guarantee a resolvable batch
+ * behind unresolvable ones is reached. Whenever a pass retires a batch (its
+ * discovery bound is spent), the lane re-queries: the retired rows are gone
+ * from the next result, so the pass keeps moving through the backlog and a
+ * fresh batch is reached in THIS pass. `handled` remembers what this pass
+ * already touched, so a row that stays eligible is not processed twice.
  */
 async function reconcileLineBatches(
   db: D1Like,
@@ -818,77 +788,148 @@ async function reconcileLineBatches(
   log: ReconcileLog,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
-  for (const row of rows) {
-    const scope = row.payload.scope;
-    if (!canSpend(budget, now(), 1, true)) continue; // invariant: stays due, no claim
-    // invariant: ONE conditional transition decides who sends: the durable dispatch
-    // intent. `null` means the batch was already dispatched (or another lane
-    // holds it) — then the only work left is read-only discovery.
-    const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
-    if (lease === null) {
-      const state = await readLineBatchState(db, row.id);
-      if (!state.pending) continue;
-      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-      if (resolved.kind === "unavailable") continue;
-      try {
-        const recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
-        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+  const handled = new Set<string>();
+  for (;;) {
+    const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+    let retired = 0;
+    for (const row of rows) {
+      if (handled.has(row.id)) continue;
+      handled.add(row.id);
+      const scope = row.payload.scope;
+      if (!canSpend(budget, now(), 1, true)) continue; // invariant: stays due, no claim
+      // note: ONE conditional transition decides who sends: the durable dispatch
+      // intent. `null` means the batch was already dispatched (or another lane
+      // holds it) — then the only work left is read-only discovery.
+      const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
+      if (lease === null) {
+        const state = await readLineBatchState(db, row.id);
+        if (!state.pending) continue;
+        const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+        if (resolved.kind === "unavailable") continue;
+        let recovered: PostedLineComments;
+        try {
+          recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
+        } catch (error) {
+          // invariant: A budget refusal never dispatched, so it observed nothing and spends
+          // no attempt: the row stays exactly where it was (spec §7.11.1).
+          if (isBudgetRefusal(error)) {
+            log.info(
+              { event: "ops_lifecycle_line_discovery_deferred", detail: `publication=${row.id}: request budget exhausted` },
+              "line-comment discovery deferred — nothing was read and no attempt is spent",
+            );
+            continue;
+          }
+          // invariant: Any other thrown read observed nothing: one failed pass under the
+          // read-scope reason, never a capture.
+          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
+          log.warn(
+            { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
+          );
+          continue;
+        }
+        let newlyCaptured = 0;
+        try {
+          newlyCaptured = await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+        } catch (error) {
+          log.warn(
+            { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment id capture failed — the intent stays, discovery owns the rest",
+          );
+        }
+        if (newlyCaptured > 0) {
+          // note: A NEW id is progress — the count means consecutive attempts that
+          // saved nothing, not consecutive incomplete ones.
+          await resetLineDiscoveryFailures(db, row.id);
+        } else if (recovered.failure !== "budget-refused") {
+          // note: A budget refusal observed nothing and spends no attempt. A write that
+          // persisted nothing — a throw included — IS a failed attempt.
+          const reason: LineDiscoveryFailure =
+            recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
+          if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;
+        }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
           "line-comment batch discovered without a second send",
         );
-      } catch (error) {
-        log.warn(
-          { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-          "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
-        );
+        continue;
       }
-      continue;
-    }
-    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
-    if (resolved.kind === "unavailable") {
-      await releaseLineDispatch(db, row.id, lease, now(), false);
-      continue;
-    }
-    const input = lineInputOf(row);
-    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
-    if (admitted.kind === "unresolved") {
-      await releaseLineDispatch(db, row.id, lease, now(), false);
-      log.warn(
-        { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
-        "line-comment batch not sent — its admitted attempt cannot be resolved",
-      );
-      continue;
-    }
-    let outcome: "sent" | "refused" | "unknown" = "unknown";
-    try {
-      const posted = await resolved.reviewer.postLineComments({
-        ...input,
-        journalClaim: lease,
-        ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
-      });
+      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+      if (resolved.kind === "unavailable") {
+        await releaseLineDispatch(db, row.id, lease, now(), false);
+        continue;
+      }
+      const input = lineInputOf(row);
+      const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+      if (admitted.kind === "unresolved") {
+        await releaseLineDispatch(db, row.id, lease, now(), false);
+        log.warn(
+          { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
+          "line-comment batch not sent — its admitted attempt cannot be resolved",
+        );
+        continue;
+      }
+      let outcome: "sent" | "refused" | "unknown" = "unknown";
       try {
-        await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+        const posted = await resolved.reviewer.postLineComments({
+          ...input,
+          journalClaim: lease,
+          ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
+        });
+        try {
+          await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+        } catch (error) {
+          log.warn(
+            { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+            "line-comment id capture failed — the intent stays, discovery owns the rest",
+          );
+        }
+        outcome = "sent";
       } catch (error) {
+        // why: A definitive pre-send refusal proves nothing was sent; anything else
+        // may have landed, so the intent is kept and only discovery may follow.
+        if (error instanceof PreparedSendRejected) outcome = "refused";
         log.warn(
-          { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-          "line-comment id capture failed — the intent stays, discovery owns the rest",
+          { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment batch send failed — an unresolved send stays discovery-only",
         );
+      } finally {
+        if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
       }
-      outcome = "sent";
-    } catch (error) {
-      // invariant: A definitive pre-send refusal proves nothing was sent; anything else
-      // may have landed, so the intent is kept and only discovery may follow.
-      if (error instanceof PreparedSendRejected) outcome = "refused";
-      log.warn(
-        { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
-        "line-comment batch send failed — an unresolved send stays discovery-only",
-      );
-    } finally {
-      if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
     }
+    if (retired === 0) return;
   }
+}
+
+/**
+ * invariant: ONE discovery pass that captured nothing: the durable count moves toward the
+ * bound and, at it, the batch leaves the eligible set with the reason this
+ * pass observed. Reported ONCE — that transition is the report; the selector
+ * never returns the row again — and the row, its count and its reason stay
+ * readable, so an operator can see why recovery stopped. Returns true only
+ * when this call retired the batch (the caller re-queries the selection then).
+ *
+ * `observedCaptures` is the capture state this pass was taken against; a
+ * capture that landed since (full or partial) makes the write a no-op.
+ */
+async function noteLineDiscoveryFailure(
+  db: D1Like,
+  row: PublicationRow,
+  reason: LineDiscoveryFailure,
+  observedCaptures: number,
+  nowMs: number,
+  log: ReconcileLog,
+): Promise<boolean> {
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs);
+  if (settled === null || !settled.unresolvable) return false;
+  log.warn(
+    {
+      event: "ops_lifecycle_line_unresolvable",
+      detail: `publication=${row.id} reason=${reason} attempts=${settled.attempts}`,
+    },
+    "line-comment batch left the recovery set — its remote batch cannot be read back",
+  );
+  return true;
 }
 
 /** note: The exact frozen batch of one applied publication. */
@@ -906,8 +947,8 @@ function lineInputOf(row: PublicationRow): PostPreparedLineCommentsInput {
   };
 }
 
-/** invariant: The identity a publication was admitted under, resolved from its FROZEN
- *  evidence — the staged payload's launch-attempt id plus that row's
+/** The identity a publication was admitted under, resolved from its FROZEN
+ * note:  evidence — the staged payload's launch-attempt id plus that row's
  *  `(attempt_key, generation)` pair. Never a recency lookup. */
 type AdmittedAttempt =
   | { kind: "check"; attemptId: string }
@@ -939,7 +980,7 @@ async function admittedAttemptOf(db: D1Like, admittedAttemptId: string | undefin
 }
 
 /**
- * invariant: Send a prepared publication once, with the same identity (§7.7 failure
+ * note: Send a prepared publication once, with the same identity (§7.7 failure
  * matrix: "Staged, before send → M8 sends once with same identity when
  * enabled/current"). Order: pause gate → age gate → budget → read-only
  * staleness pre-check (supersede instead of a stale send over a newer
@@ -955,16 +996,16 @@ async function sendPreparedPublication(
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const scope = row.payload.scope;
-  // note: Frozen pause policy: no NEW primary publication while paused — the row
+  // invariant: Frozen pause policy: no NEW primary publication while paused — the row
   // stays due (no attempt spent) for the re-enabled future.
   if (resolved.paused) return;
-  // invariant: Age gate: only a settled prepared row (≥60s old) is recovery-sent; the
+  // note: Age gate: only a settled prepared row (≥60s old) is recovery-sent; the
   // consumer owns younger ones.
   const createdMs = await getPublicationCreatedMs(db, row.id);
   if (createdMs === null || now() - createdMs < PREPARED_SEND_MIN_AGE_MS) return;
   // Preflight admission only — the plan/send requests are metered as they are
   // actually issued at the transport, so nothing is charged twice.
-  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // invariant: remains due, no attempt
+  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // note: remains due, no attempt
   // invariant: Read-only staleness pre-check: never send a stale publication over a
   // newer round. A pre-check failure is typed "stay due" — no claim, no
   // attempt.
@@ -994,7 +1035,7 @@ async function sendPreparedPublication(
     }
     return;
   }
-  // invariant: §7.9a condition 3: a degraded UPDATE reuses the comment a cleanup may be
+  // note: §7.9a condition 3: a degraded UPDATE reuses the comment a cleanup may be
   // deleting. The same target exclusion the staging path holds covers this
   // recovery send (and a target whose delete is unresolved refuses it).
   const degradedTarget =
@@ -1132,7 +1173,7 @@ async function sendPreparedPublication(
       // a run's exhaustion against the publication.
       const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
       if (!restored) {
-        // note: The claim was no longer ours (another invocation moved or released
+        // why: The claim was no longer ours (another invocation moved or released
         // the row first). Report rather than assume the restore applied; the
         // row keeps whatever truthful state its new owner gave it.
         summary.errors += 1;
@@ -1159,7 +1200,7 @@ async function sendPreparedPublication(
 }
 
 /**
- * safety: Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
+ * invariant: Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
  * scan the PR's bounded newest issue comments for the EXACT prepared body
  * (marker + digest — body equality implies both). Ownership is proven from the
  * AUTHENTICATED provenance the capture carries for this installation token
@@ -1180,7 +1221,7 @@ async function discoverUncertainPublication(
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
   const scope = row.payload.scope;
-  if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // note: stays unknown/due, no attempt
+  if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // invariant: stays unknown/due, no attempt
   const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) return; // note: another invocation owns discovery
   try {
@@ -1189,7 +1230,7 @@ async function discoverUncertainPublication(
       owner: scope.owner,
       repo: scope.repo,
       prNumber: scope.prNumber,
-      threads: [], // invariant: issue comments only — the publication lives on the PR conversation
+      threads: [], // note: issue comments only — the publication lives on the PR conversation
       // invariant: The comment this lane is looking for IS one of our own publications,
       // so the capture must not hide it from the walk.
       includeOwnPublications: true,
@@ -1291,7 +1332,7 @@ async function reconcileResolutions(
     // precedes.
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // note: pair suspended durably
-    // note: A paused App keeps "previously-authorized resolution retry" running
+    // why: A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.
     const work = await getResolutionRecoveryRow(db, associationId);
     if (work === null) continue; // note: row vanished (operator action) — nothing to drive

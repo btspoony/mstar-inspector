@@ -1,5 +1,4 @@
-/**
- * state-pattern trio (AD-582) — PageSkeleton / EmptyState /
+/** note: state-pattern trio (AD-582) — PageSkeleton / EmptyState /
  * ErrorState under `src/spa/components/state/`. Components are pinned
  * behaviorally through react-dom/server SSR (the settings-layout
  * idiom, no DOM runner in this stack): role faces, per-kind skeleton
@@ -103,14 +102,14 @@ describe("PageSkeleton (AD-582)", () => {
     const out = renderSkeleton("table");
     expect(count(out, 'data-slot="skeleton-table-header"')).toBe(1);
     expect(count(out, 'data-slot="skeleton-table-row"')).toBe(5);
-    // 4 header cells + 5 rows × 4 cells — all Skeleton primitives.
+    // note: 4 header cells + 5 rows × 4 cells — all Skeleton primitives.
     expect(count(out, 'data-slot="skeleton"')).toBe(24);
   });
 
   test("cards idiom: 3 card shells by default; forms idiom: 4 labeled input blocks", () => {
     expect(count(renderSkeleton("cards"), 'data-slot="skeleton-card"')).toBe(3);
     expect(count(renderSkeleton("forms"), 'data-slot="skeleton-form-field"')).toBe(4);
-    // Input bars match the restyled control shape (h-9, control-tier radius).
+    // note: Input bars match the restyled control shape (h-9, control-tier radius).
     expect(renderSkeleton("forms")).toContain("h-9 w-full rounded-sm");
   });
 
@@ -121,7 +120,7 @@ describe("PageSkeleton (AD-582)", () => {
   });
 
   test("rows clamps negative values to 0; 0 stays a legal empty body (QC round 1 F-007)", () => {
-    // Negative input collapses the body rows instead of producing a broken
+    // note: Negative input collapses the body rows instead of producing a broken
     // or silently-wrong shape; the page frame still renders.
     expect(count(renderSkeleton("table", { rows: -3 }), 'data-slot="skeleton-table-row"')).toBe(0);
     expect(count(renderSkeleton("table", { rows: -3 }), 'data-slot="skeleton-heading"')).toBe(1);
@@ -134,12 +133,12 @@ describe("PageSkeleton (AD-582)", () => {
 describe("EmptyState (AD-582)", () => {
   test("composed guidance view on the Card surface — icon chip, title, description, action slot", () => {
     const out = emptyState({ icon: true, description: "Connect your first App.", action: true });
-    expect(out).toContain('data-slot="empty-state"'); // the shared Card primitive surface
-    // r3 (2026-10-31): a card is a hairline plus the surface step; the
+    expect(out).toContain('data-slot="empty-state"'); // note: the shared Card primitive surface
+    // note: r3 (2026-10-31): a card is a hairline plus the surface step; the
     // elevation tokens stay on overlays, never on content sitting on the page.
     expect(out).not.toMatch(/shadow-/);
     expect(out).toContain('data-slot="empty-state-icon"');
-    expect(out).toContain('data-testid="chosen-icon"'); // consumer-chosen node renders inside the chip
+    expect(out).toContain('data-testid="chosen-icon"'); // note: consumer-chosen node renders inside the chip
     expect(out).toContain('data-slot="empty-state-title"');
     expect(out).toContain("No Apps yet");
     expect(out).toContain('data-slot="empty-state-description"');
@@ -179,7 +178,7 @@ describe("ErrorState (AD-582)", () => {
     expect(withRetry).toContain(">Retry</button>");
     const withoutRetry = errorState();
     expect(withoutRetry).not.toContain("<button");
-    // Static markup cannot carry handlers — pin the wiring at the source.
+    // note: Static markup cannot carry handlers — pin the wiring at the source.
     const source = readFileSync(join(spaRoot, "components/state/ErrorState.tsx"), "utf8");
     expect(source).toContain("onClick={onRetry}");
   });
