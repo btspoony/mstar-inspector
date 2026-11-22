@@ -1034,6 +1034,22 @@ describe("workspace check_min_score default", () => {
 });
 
 describe("reconciler settings snapshot", () => {
+  test("publication allowance leaves thread admission headroom on writes and reads", async () => {
+    const db = createMigratedTestD1();
+    const invalid = { ...RECONCILE_DEFAULTS, lifecycleMaxRequests: 80, lifecyclePublicationLaneMaxRequests: 70, lifecycleThreadOperationRequests: 15 };
+    await expect(setReconcileSettings(db, invalid, "operator")).rejects.toMatchObject({ reason: "invalid_value" });
+    expect(await getReconcileSettings(db)).toEqual({ values: RECONCILE_DEFAULTS, issue: null });
+    const valid = { ...invalid, lifecyclePublicationLaneMaxRequests: 65 };
+    await setReconcileSettings(db, valid, "operator");
+    expect(await getReconcileSettings(db)).toEqual({ values: valid, issue: null });
+    db.raw.prepare("UPDATE review_runtime_settings SET value='70' WHERE key='platform.reconcile.lifecycle.publication_lane_max_requests'").run();
+    expect(await getReconcileSettings(db)).toEqual({
+      values: RECONCILE_DEFAULTS,
+      issue: { kind: "invalid_rows", keys: ["platform.reconcile.lifecycle.publication_lane_max_requests", "platform.reconcile.lifecycle.thread_operation_requests"] },
+    });
+    db.raw.close();
+  });
+
   test("previously accepted one-request budgets now fall back with key-only diagnostics", async () => {
     const db = createMigratedTestD1();
     for (const key of [

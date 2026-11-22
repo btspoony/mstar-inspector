@@ -1333,6 +1333,7 @@ describe("PATCH /_internal_admin/api/runtime reconcile", () => {
       { lifecycleRunBudgetMs: 1 }, { checkRunBudgetMs: 1 },
       { lifecycleMaxRequests: 1 }, { checkMaxRequests: 1 },
       { lifecyclePublicationLaneMaxRequests: 81 }, { lifecycleThreadOperationRequests: 81 },
+      { lifecycleMaxRequests: 80, lifecyclePublicationLaneMaxRequests: 70, lifecycleThreadOperationRequests: 15 },
     ]) expect((await save({ ...RECONCILE_DEFAULTS, ...fields })).status).toBe(400);
     expect((await save({})).status).toBe(400);
     expect(storedBudgets(db)).toEqual({});

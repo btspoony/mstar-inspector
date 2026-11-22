@@ -1514,7 +1514,7 @@ export const en = {
       claimUnreadable:
         "The stored comment-trigger recovery settings could not be read, so the documented defaults are in use. Entering values in range saves new ones, and retrying the read re-checks the rows.",
       reconcileTitle: "Recovery reconcilers",
-      reconcileDescription: "Applies on the next recovery run, with one settings snapshot per run. Request timeouts must fit the run budget; publication, thread-operation and row requests must fit total requests.",
+      reconcileDescription: "Applies on the next recovery run, with one settings snapshot per run. Request timeouts must fit the run budget; publication-lane plus thread-operation requests must fit the lifecycle total, and row requests must fit the Check total.",
       reconcileFields: {
         lifecycleMaxRequests: "Lifecycle requests per run",
         lifecycleRunBudgetMs: "Lifecycle run budget (ms)",

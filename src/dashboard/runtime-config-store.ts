@@ -1269,7 +1269,7 @@ export async function setReconcileSettings(db: DashboardD1, input: unknown, acto
   }
   const invalid = invalidReconcileRelations(values);
   if (invalid.length > 0) {
-    throw new RuntimeConfigError("invalid_value", `reconcile budgets must satisfy per-request <= run budget, publication lane/thread operation/row <= total requests; correct ${invalid.join(", ")} in Admin > Runtime and save again`);
+    throw new RuntimeConfigError("invalid_value", `reconcile budgets must satisfy per-request <= run budget, publication lane + thread operation <= lifecycle total requests, row <= Check total requests; correct ${invalid.join(", ")} in Admin > Runtime and save again`);
   }
   const now = new Date().toISOString();
   await db.batch([

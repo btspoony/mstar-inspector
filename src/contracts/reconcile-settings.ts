@@ -50,8 +50,8 @@ const CHECK_ROW_MIN_REQUESTS = credentials + discovery + send;
 const PUBLICATION_MIN_REQUESTS = credentials + plan + send;
 /** Stable thread/issue captures, one mutation, and a post-mutation capture. */
 const THREAD_MIN_REQUESTS = discovery + discovery + plan + discovery;
-/** Either remote lane must be able to finish a cold, single-page operation. */
-const LIFECYCLE_MIN_REQUESTS = Math.max(PUBLICATION_MIN_REQUESTS, credentials + THREAD_MIN_REQUESTS);
+/** Publication admission must leave room for a thread operation in the same run. */
+const LIFECYCLE_MIN_REQUESTS = PUBLICATION_MIN_REQUESTS + THREAD_MIN_REQUESTS;
 
 export const RECONCILE_RULES = {
   lifecycleMaxRequests: { key: "platform.reconcile.lifecycle.max_requests", fallback: 80, min: LIFECYCLE_MIN_REQUESTS, max: RECONCILE_REQUEST_HARD_MAX },
@@ -82,6 +82,7 @@ export function invalidReconcileRelations(values: ReconcileValues): ReconcileFie
   if (values.checkPerRequestMs > values.checkRunBudgetMs) invalid.push("checkPerRequestMs", "checkRunBudgetMs");
   if (values.lifecyclePublicationLaneMaxRequests > values.lifecycleMaxRequests) invalid.push("lifecyclePublicationLaneMaxRequests", "lifecycleMaxRequests");
   if (values.lifecycleThreadOperationRequests > values.lifecycleMaxRequests) invalid.push("lifecycleThreadOperationRequests", "lifecycleMaxRequests");
+  if (values.lifecyclePublicationLaneMaxRequests + values.lifecycleThreadOperationRequests > values.lifecycleMaxRequests) invalid.push("lifecyclePublicationLaneMaxRequests", "lifecycleThreadOperationRequests");
   if (values.checkRowMaxRequests > values.checkMaxRequests) invalid.push("checkRowMaxRequests", "checkMaxRequests");
   return [...new Set(invalid)];
 }

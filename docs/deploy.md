@@ -2788,7 +2788,7 @@ behave.
 
   | API field | Absent-row default | Accepted range |
   |---|---:|---:|
-  | `lifecycleMaxRequests` | 80 | 9–100 |
+  | `lifecycleMaxRequests` | 80 | 12–100 |
   | `lifecycleRunBudgetMs` | 45,000 | 1–60,000 |
   | `lifecyclePerRequestMs` | 5,000 | 1–15,000 |
   | `lifecycleThreadOperationRequests` | 15 | 7–100 |
@@ -2806,8 +2806,9 @@ behave.
   operation: Check adoption/create/fetch/update, publication plan/send, or
   thread/issue captures and resolution. Pagination can require a larger budget.
   Per-request timeouts must not exceed their run budget. Publication-lane
-  and thread-operation request allowances must not exceed lifecycle total
-  requests; row requests must not exceed Check total requests. A read failure,
+  plus thread-operation request allowances must not exceed lifecycle total
+  requests, leaving room to admit a thread after the publication lane;
+  row requests must not exceed Check total requests. A read failure,
   invalid row or invalid relation uses all documented defaults and continues
   recovery. The `ops_lifecycle_reconcile_settings_degraded` /
   `ops_check_reconcile_settings_degraded` warnings distinguish `read_failed`

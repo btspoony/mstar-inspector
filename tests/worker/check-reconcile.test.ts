@@ -5339,13 +5339,12 @@ describe("runtime reconciler snapshot", () => {
     }
   });
 
-  test("selection limit and attempt cap apply with exactly one settings read per run", async () => {
+  test("an attempt at the configured cap is excluded with exactly one settings read", async () => {
     const db = seededDb();
     const first = await claim(db);
-    await claim(db, { headSha: "b".repeat(40) });
-    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.select_limit", "1", "now");
     db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.max_attempts", "2", "now");
     db.raw.prepare("UPDATE review_checks SET attempts = 2 WHERE id = ?").run(first.attempt.identity.attemptId);
+    const before = await rawRow(db, first.attempt.identity.attemptId);
     let reads = 0;
     const original = db.prepare.bind(db);
     db.prepare = (sql: string) => {
@@ -5360,9 +5359,22 @@ describe("runtime reconciler snapshot", () => {
       return statement;
     };
     const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
-    expect(summary.examined).toBe(1);
+    expect(summary.examined).toBe(0);
     expect(reads).toBe(1);
-    expect((await rawRow(db, first.attempt.identity.attemptId)).attempts).toBe(2);
+    const after = await rawRow(db, first.attempt.identity.attemptId);
+    expect(after.attempts).toBe(before.attempts);
+    expect(after.holder).toBe(before.holder);
+    expect(after.lease_until_ms).toBe(before.lease_until_ms);
+    expect(after.lease_epoch).toBe(before.lease_epoch);
+  });
+
+  test("selection limit one examines only one of two eligible rows", async () => {
+    const db = seededDb();
+    await claim(db);
+    await claim(db, { headSha: "b".repeat(40) });
+    db.raw.prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)").run("platform.reconcile.check.select_limit", "1", "now");
+    const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
+    expect(summary.examined).toBe(1);
   });
 });
 
