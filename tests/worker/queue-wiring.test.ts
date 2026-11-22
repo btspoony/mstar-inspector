@@ -22,6 +22,15 @@ const consumerRuns: Array<{
 /** The promise the fake consumer hands to the invocation context. */
 const handedByConsumer = Promise.withResolvers<void>();
 
+/**
+ * The REAL consumer namespace, captured BEFORE the stub below. `mock.module` is
+ * process-wide, and `mock.restore()` does not reliably undo a module stub
+ * across Bun versions, so the file puts the real module back itself in
+ * `afterAll` — a stub that outlives this file breaks every later dynamic
+ * import of the consumer (`ensureRunnerConfig` and friends vanish).
+ */
+const realConsumer = await import("../../src/pipeline/consumer");
+
 mock.module("../../src/pipeline/consumer", () => ({
   createReviewConsumer: (
     _env: unknown,
@@ -58,6 +67,9 @@ mock.module("../../src/pipeline/consumer", () => ({
 const { default: worker } = await import("../../src/worker/entry");
 
 afterAll(() => {
+  // The module stub is process-wide: put the REAL namespace back before the
+  // generic restore, so this file's scoping ends with the file.
+  mock.module("../../src/pipeline/consumer", () => realConsumer);
   mock.restore();
 });
 
