@@ -2544,6 +2544,51 @@ describe("the SEC-01 publish gate", () => {
     expect(failure.some((row) => row.error.includes("publish gate refused"))).toBe(true);
   });
 
+  test("a gate-refused review still accounts its recheck round", async () => {
+    // note: The round SENT rows and lost its document, so it owes an attribution line
+    // and a shipped-failure row — and it owes them even when the gate refuses the
+    // body. The refusal settlement is a real failure; the accounting rides with it.
+    const echo = ECHOES.base64;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+    });
+    await sealStoredGateSecrets(db, [KEY]);
+    stubStoredEcho(db, echo);
+    expect(prepared.targets.length).toBeGreaterThan(0);
+    expect(prepared.recheckInput).toBeDefined();
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    // The gate refused, and nothing was staged or posted.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+    // The round's own attribution line is in the ledger all the same (its message
+    // depends on the round's outcome; the field is the stable marker).
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    const rows = db.raw.prepare("SELECT stage FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+    }[];
+    expect(rows.filter((row) => row.stage === "recheck")).toHaveLength(1);
+  });
+
+  test("a clean collect accounts its recheck round exactly once", async () => {
+    // note: Moving the accounting ahead of the gate must not double-fire it.
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+    });
+    expect(prepared.recheckInput).toBeDefined();
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("collected");
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    const rows = db.raw.prepare("SELECT stage FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+    }[];
+    expect(rows.filter((row) => row.stage === "recheck")).toHaveLength(1);
+  });
+
   test("a short key equal to trusted marker text is not refused", async () => {
     // The body always carries `mstar-inspector` markers; the raw spelling of a
     // short key is exact-leaf redaction's job, never the publish gate's.

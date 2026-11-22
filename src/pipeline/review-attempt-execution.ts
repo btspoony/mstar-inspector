@@ -5207,24 +5207,6 @@ async function collectPhase(
   };
   const capped = capFindings(clampFindingSizes(suggestionsDropped));
   const output = capped.output;
-  // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
-  // template (markers, commit SHA, schema tags) is not model output, so a key
-  // whose encoding collides with it can never refuse a clean review.
-  const publishGate = await refusesCredentialEcho(
-    deps,
-    ref,
-    prepared,
-    progress,
-    gateSecrets,
-    modelTexts(
-      output,
-      report,
-      targets.map((target) => target.original.title),
-    ),
-  );
-  if (publishGate !== "clear") {
-    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
-  }
   // 11. §7.7 step 6 — validation + conservative reconciliation + closure
   // assembly + final body. The recheck document is reconciled against the
   // SAME round's final capped findings (§7.4 conservative precedence:
@@ -5338,6 +5320,27 @@ async function collectPhase(
         deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
       }
     }
+  }
+  // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
+  // template (markers, commit SHA, schema tags) is not model output, so a key
+  // whose encoding collides with it can never refuse a clean review. It runs
+  // AFTER the round's accounting above: a review this gate refuses is settled as
+  // a real failure, and that settlement must not take the round's attribution
+  // line and shipped-failure row with it (I-000686).
+  const publishGate = await refusesCredentialEcho(
+    deps,
+    ref,
+    prepared,
+    progress,
+    gateSecrets,
+    modelTexts(
+      output,
+      report,
+      targets.map((target) => target.original.title),
+    ),
+  );
+  if (publishGate !== "clear") {
+    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
   }
   // The ROUND's coverage reads the whole capture, never the narrowed wire
   // view: an unsent row's truncated thread still leaves this round's context
