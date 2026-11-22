@@ -17,6 +17,7 @@ import {
   releaseUnspentPublicationClaim,
   retryLifecycleWork,
   selectAssessmentTargets,
+  readLineBatchState,
   stagePublication,
   suspendPublicationRecovery,
   suspendResolutionRecovery,
@@ -1859,5 +1860,42 @@ describe("public findings attach to the review that exists", () => {
     expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
       { review_id: derived },
     ]);
+  });
+});
+
+describe("review_threads lookups (EXPLAIN QUERY PLAN)", () => {
+  function capturing(db: TestD1, captured: string[]): TestD1 {
+    return { ...db, prepare: (sql) => (captured.push(sql), db.prepare(sql)) };
+  }
+  function plan(db: TestD1, sql: string): string {
+    const params = Array.from({ length: (sql.match(/\?/g) ?? []).length }, () => "x");
+    return (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as Array<{ detail: string }>)
+      .map(({ detail }) => detail)
+      .join("\n");
+  }
+
+  test("finding and publication reads seek their indexes instead of scanning", async () => {
+    const db = createSeededTestD1();
+    await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
+    db.raw
+      .prepare(
+        `INSERT INTO review_findings
+           (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+            first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
+            first_seen_round, last_seen_round, state, created_ms, updated_ms)
+         VALUES ('row-1', ?, 123, 'acme', 'widgets', 42, 'f-1', ?, 'pub-1', 'pub-1', ?, ?, 1, 1, 'open', 10, 10)`,
+      )
+      .run(APP_ID, JSON.stringify(originalFinding()), SHA, SHA);
+    const captured: string[] = [];
+    const traced = capturing(db, captured);
+    expect(await selectAssessmentTargets(traced, SCOPE, 25)).toHaveLength(1);
+    await readLineBatchState(traced, "pub-1");
+
+    const byFinding = captured.find((sql) => sql.includes("FROM review_threads") && sql.includes("finding_row_id IN"));
+    const byPublication = captured.find((sql) => sql.includes("FROM review_threads WHERE publication_id"));
+    expect(byFinding).toBeDefined();
+    expect(byPublication).toBeDefined();
+    expect(plan(db, byFinding!)).toMatch(/SEARCH review_threads USING INDEX idx_thread_live_finding/);
+    expect(plan(db, byPublication!)).toMatch(/SEARCH review_threads USING (COVERING )?INDEX idx_thread_publication/);
   });
 });
