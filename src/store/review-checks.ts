@@ -313,6 +313,21 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const NONTERMINAL_WHERE = "terminal_ms IS NULL";
 
 /**
+ * The launch whose PAID result is durable (`persisted`) for the Check's own
+ * key + generation: the paid step is over, so the Check no longer has to wait
+ * out its execution deadline once no live lease holds it (I-000684 — a host that
+ * died after persisting the result leaves that Check queued with nothing
+ * selecting it). The state is the attempt's own frozen identity, never a head
+ * match, and it grants no authority over a live holder.
+ */
+const LAUNCH_PERSISTED_SQL = `EXISTS (
+    SELECT 1 FROM review_launches l
+     WHERE l.attempt_key = review_checks.attempt_key
+       AND l.attempt_generation = review_checks.generation
+       AND l.state = 'persisted'
+  )`;
+
+/**
  * The §7.11.2 due predicate, SHARED by the selector and the recovery claim so
  * the two can never drift (`claimCheckRecovery` repeats the selector's full
  * eligibility by contract). Bound values, in order: `maxAttempts`, `nowMs`,
@@ -323,6 +338,18 @@ const NONTERMINAL_WHERE = "terminal_ms IS NULL";
  * and that attempt is due as soon as no live lease holds it — the publication
  * proof it concludes from is already durable, so it must not wait out the
  * execution deadline.
+ *
+ * The PERSISTED launch (`LAUNCH_PERSISTED_SQL`) joins the FIRST shape for the
+ * same reason: once the attempt's paid result is durable, its Check does not
+ * have to wait out `execution_deadline_ms` — it is due as soon as NO LIVE LEASE
+ * holds it (the ordinary lease clause, unchanged). A live execution holder keeps
+ * full authority whatever its silence: it may still be collecting, and taking
+ * its lease would fence the conclusion it already knows (a staging conflict's
+ * `pre-publication-failure`, say) out of the row. The lease is the fence; the
+ * launch state only decides whether the row waits for the deadline after the
+ * holder is gone. `recovery_state`, the due time, the attempt cap and
+ * `terminal_ms IS NULL` still gate it, so a concluded Check is never selected
+ * and nothing is re-run or re-published.
  */
 const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
           AND attempts < ?
@@ -332,7 +359,8 @@ const CHECK_DUE_PREDICATE = `recovery_state IN ('pending','remote-unconfirmed')
               AND (lease_until_ms IS NULL OR lease_until_ms <= ?
                    OR (desired <> 'in_progress' AND holder IS NOT NULL AND updated_ms <= ?))
               AND (desired <> 'in_progress' OR execution_deadline_ms <= ?
-                   OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?))
+                   OR (recovery_state IN ('pending','remote-unconfirmed') AND next_attempt_ms <= ?)
+                   OR ${LAUNCH_PERSISTED_SQL})
             )
             OR (
               -- An OWED settlement, associated by the Check's OWN attempt key
@@ -919,8 +947,11 @@ function isUniqueViolation(error: unknown): boolean {
  * recovery (an abandoned hook, a failed send) may still owe a conclusion from
  * a proof that has not arrived yet, and its release recorded that due time, so
  * it is eligible on `next_attempt_ms` — before the execution deadline. A row
- * with NO due time has not been released to recovery and stays withheld until
- * the deadline.
+ * with NO due time is withheld until the deadline, UNLESS its attempt's paid
+ * result is already durable: a released persisted launch is due as soon as no
+ * live lease holds it, because the wait it was released for can never produce
+ * the proof (see the predicate's note). The lease stays the one authority in
+ * both shapes — this claim never takes a live one.
  *
  * Deliberately spends NO attempt: a budget deferral must not burn a retry
  * (§7.11.2 step 5) — the caller releases the claim instead.
@@ -2365,7 +2396,9 @@ export async function listReenableableCheckPairs(
  * whose `updated_ms` is at least `CHECK_STALE_HOLDER_MS` old is taken over.
  * Taking over is safe because the taker bumps `lease_epoch`, which fences the
  * old holder's late writes. A row that still wants `in_progress` never matches
- * this disjunct and keeps waiting out its deadline.
+ * this disjunct: it keeps waiting out its deadline, or — when its attempt's
+ * paid result is already durable — is due as soon as no live lease holds it
+ * (never taken while one does).
  */
 export async function listCheckReconcileBatch(
   db: D1Like,

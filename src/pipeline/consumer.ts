@@ -1530,9 +1530,11 @@ export function createReviewConsumer(
       return;
     }
     for (const message of batch.messages) {
-      // The Queue send stamp is the attempt deadline's origin. It is a `Date`
-      // on the platform and may be absent in a hand-built test batch; the
-      // boundary normalization keeps an absent stamp absent.
+      // The Queue send stamp is the attempt's queue-wait origin (the duration
+      // report's `enqueued_ms`), never its cap anchor — the cap starts at this
+      // delivery's claim (I-000683). It is a `Date` on the platform and may be
+      // absent in a hand-built test batch; the boundary normalization keeps an
+      // absent stamp absent.
       const sentAtMs = queueStampOf(message.timestamp);
       const outcome = await processMessage(message.body, deps, message.attempts, starter, sentAtMs);
       // BB-3: guard-held is a typed outcome — schedule the per-message
@@ -1645,10 +1647,11 @@ export async function ensureRunnerConfig(
  *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
  *   or-pending proof.
  * @param queueSentAtMs the original Queue send stamp, already normalized at the
- *   boundary: `null` means the platform supplied none. An absent value is NOT
- *   replaced: the cap falls back to admission, while the report's origin stays
- *   missing. A redelivery of an already-frozen attempt ignores it in favour of
- *   the recorded deadline.
+ *   boundary: `null` means the platform supplied none. It is recorded as the
+ *   attempt's queue-wait origin (`enqueued_ms`) and never anchors the cap — an
+ *   absent stamp stays absent rather than be invented for the report. A
+ *   redelivery of an already-frozen attempt ignores it in favour of the
+ *   recorded deadline.
  */
 async function processMessage(
   payload: ReviewJobPayload,
@@ -1657,17 +1660,11 @@ async function processMessage(
   startAttempt?: AttemptStarter,
   queueSentAtMs: number | null = null,
 ): Promise<ProcessOutcome> {
-  // This invocation's entry instant. Every best-effort step that can spend a
-  // sandbox window is measured against it, and it is the fallback origin for
-  // an attempt whose Queue send stamp is unavailable.
+  // This invocation's entry instant — the delivery's claim. Every best-effort
+  // step that can spend a sandbox window is measured against it, and it is the
+  // origin of an attempt's cap (I-000683): a message delayed behind the guard's
+  // backoff is claimed long after it was enqueued.
   const roundStartedAt = Date.now();
-  // The attempt's clock starts at the ORIGINAL Queue send, not here: the queue
-  // wait is charged against the cap. The REPORT's origin stays absent when the
-  // platform supplied no stamp — an invented origin would make the measured
-  // queue wait a lie. The CAP still needs an instant, so its origin is the send
-  // stamp clamped to this instant (a future stamp is clock skew), or admission
-  // when there is none — the timing contract's documented fallback.
-  const capOriginMs = queueSentAtMs === null ? roundStartedAt : Math.min(queueSentAtMs, roundStartedAt);
   // The delivery key and the recorded attempt id are learned inside the try, so
   // a DB fault or a legacy payload still flows through the structured failure
   // channel. A redelivery of this message finds the row its predecessor wrote
@@ -2057,12 +2054,15 @@ async function processMessage(
     };
     // THE ATTEMPT'S ONE HARD STOP is frozen HERE, before the admission row is
     // taken: that row's TTL must hold the whole attempt, so the instant cannot
-    // be discovered afterwards. A row written before the deadline column
-    // existed is anchored ONCE from its OWN admission stamp — the only instant
-    // that attempt had — never from this delivery's clock, so a redelivery or
-    // a recovery re-enqueue cannot move it. The first writer wins the write
-    // itself (store), and a degraded cap read throws so admission retries
-    // instead of inventing a cap.
+    // be discovered afterwards. The cap runs from THIS delivery's claim, never
+    // from the Queue send stamp: a message held behind the guard's cumulative
+    // delayed retries is delivered long after it was enqueued, and an origin on
+    // that stamp left every such delivery a spent deadline (I-000683). A row
+    // written before the deadline column existed is anchored ONCE from its OWN
+    // admission stamp — the only instant that attempt had — never from this
+    // delivery's clock, so a redelivery or a recovery re-enqueue cannot move it.
+    // The first writer wins the write itself (store), and a degraded cap read
+    // throws so admission retries instead of inventing a cap.
     let deadlineMs: number;
     if (previousHandoff?.deadlineMs !== null && previousHandoff?.deadlineMs !== undefined) {
       deadlineMs = previousHandoff.deadlineMs;
@@ -2073,7 +2073,7 @@ async function processMessage(
           warn: (readerFields, msg) =>
             deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
         }));
-      deadlineMs = (previousHandoff?.createdMs ?? capOriginMs) + capMs;
+      deadlineMs = (previousHandoff?.createdMs ?? roundStartedAt) + capMs;
     }
     // The guard row must outlive the attempt's own hard stop: an operator cap
     // can exceed the level's ceiling-derived TTL, and a guard that expired
