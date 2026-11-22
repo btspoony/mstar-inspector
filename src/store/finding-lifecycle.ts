@@ -1394,7 +1394,7 @@ export async function releaseUnspentPublicationClaim(
 
 /** One applied publication's post-apply line batch: is work still pending, has
  *  a dispatch intent already been recorded (the batch may have been sent), and
- *  how many capture writes have persisted against it. */
+ *  how many of its associations carry a captured comment id. */
 export type LineBatchState = { pending: boolean; dispatched: boolean; captures: number };
 
 /**
@@ -1404,22 +1404,28 @@ export type LineBatchState = { pending: boolean; dispatched: boolean; captures: 
  * predates the column carries `LINE_DISPATCH_UNKNOWN` and is treated the same
  * way: its intent is unknown, not absent. `captures` is the optimistic token a
  * failure observation carries: it must still match when the failure is
- * recorded, or a concurrent capture (full or partial) invalidates it.
+ * recorded, or a concurrent capture (full or partial) invalidates it. It is
+ * DERIVED from the thread rows, so re-writing an already-captured id moves it
+ * not at all — only a NEW id does.
  */
 export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
   const row = await db
-    .prepare(`SELECT line_dispatch_ms, line_capture_count FROM review_publications WHERE id = ?`)
+    .prepare(`SELECT line_dispatch_ms FROM review_publications WHERE id = ?`)
     .bind(id)
-    .first<{ line_dispatch_ms: number | null; line_capture_count: number }>();
+    .first<{ line_dispatch_ms: number | null }>();
   if (row === null) return { pending: false, dispatched: false, captures: 0 };
-  const pending = await db
-    .prepare(`SELECT 1 AS hit FROM review_threads WHERE publication_id = ? AND review_id IS NULL LIMIT 1`)
+  const counts = await db
+    .prepare(
+      `SELECT SUM(CASE WHEN review_id IS NULL THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN review_id IS NOT NULL THEN 1 ELSE 0 END) AS captures
+         FROM review_threads WHERE publication_id = ?`,
+    )
     .bind(id)
-    .first<{ hit: number }>();
+    .first<{ pending: number | null; captures: number | null }>();
   return {
-    pending: pending !== null,
+    pending: (counts?.pending ?? 0) > 0,
     dispatched: row.line_dispatch_ms !== null,
-    captures: row.line_capture_count,
+    captures: counts?.captures ?? 0,
   };
 }
 
@@ -1505,10 +1511,15 @@ export type LineDiscoveryOutcome = { attempts: number; unresolvable: boolean };
  * unresolvable returns `null` — the caller has nothing new to report.
  *
  * The write is OPTIMISTIC on the capture state this attempt observed
- * (`readLineBatchState().captures`): a concurrent pass that saved comment ids
- * bumps `line_capture_count`, so this stale observation changes nothing — not
- * the count, not the marker — instead of retiring a batch that is still making
- * progress. The same predicate keeps a completed batch unmarkable.
+ * (`readLineBatchState().captures`, derived from the thread rows): a concurrent
+ * pass that saved a NEW comment id moves it, so this stale observation changes
+ * nothing — not the count, not the marker — instead of retiring a batch that is
+ * still making progress. The same predicate keeps a completed batch unmarkable.
+ *
+ * It deliberately does NOT stamp `updated_ms`. Attribution of a reused
+ * same-head journal row is that column's LAST WRITE (the Check wait's probe),
+ * and a bookkeeping count is not a write by any attempt: stamping it would let
+ * a recovery pass hand an old publication's proof to a newer generation.
  */
 export async function recordLineDiscoveryFailure(
   db: D1Like,
@@ -1525,14 +1536,13 @@ export async function recordLineDiscoveryFailure(
               line_unresolvable_ms =
                 CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_ms END,
               line_unresolvable_reason =
-                CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_reason END,
-              updated_ms = ?
+                CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_reason END
         WHERE id = ? AND phase = 'applied' AND line_unresolvable_ms IS NULL
-          AND line_capture_count = ?
+          AND (SELECT COUNT(*) FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NOT NULL) = ?
           AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
         RETURNING line_discovery_attempts, line_unresolvable_ms`,
     )
-    .bind(bound, nowMs, bound, reason, nowMs, id, observedCaptures, id)
+    .bind(bound, nowMs, bound, reason, id, id, observedCaptures, id)
     .run<{ line_discovery_attempts: number; line_unresolvable_ms: number | null }>();
   const written = result.results[0];
   if (written === undefined) return null;
@@ -1543,20 +1553,21 @@ export async function recordLineDiscoveryFailure(
 }
 
 /**
- * A discovery pass that PERSISTED at least one comment id clears the count —
- * a partial capture is progress, even while other comments stay missing, so
- * the batch must not carry earlier misses toward a cap it no longer deserves.
- * Only the counter moves; an unresolvable batch is never selected, so its
- * marker columns cannot be cleared from here.
+ * A discovery pass that PERSISTED at least one NEW comment id clears the count —
+ * a partial capture is progress, even while other comments stay missing, so the
+ * batch must not carry earlier misses toward a cap it no longer deserves. Only
+ * the counter moves (no `updated_ms` stamp — see `recordLineDiscoveryFailure`);
+ * an unresolvable batch is never selected, so its marker columns cannot be
+ * cleared from here.
  */
-export async function resetLineDiscoveryFailures(db: D1Like, id: string, nowMs: number): Promise<void> {
+export async function resetLineDiscoveryFailures(db: D1Like, id: string): Promise<void> {
   await db
     .prepare(
       `UPDATE review_publications
-          SET line_discovery_attempts = 0, updated_ms = ?
+          SET line_discovery_attempts = 0
         WHERE id = ? AND line_discovery_attempts > 0 AND line_unresolvable_ms IS NULL`,
     )
-    .bind(nowMs, id)
+    .bind(id)
     .run();
 }
 
@@ -1565,11 +1576,12 @@ export async function resetLineDiscoveryFailures(db: D1Like, id: string, nowMs: 
  * step 10 capture). Replay-safe and scoped to the publication, so a discovery
  * pass in another lane can complete what a send could not read back.
  *
- * The SAME batch bumps the publication's capture counter — even when only some
- * associations were captured. That is the durable assertion that a capture
- * persisted, and the optimistic token every in-flight failure observation is
- * checked against, so a stale "readback observed nothing" cannot retire a batch
- * that is making progress.
+ * Only an UNC captured association is written: a re-listed id is not progress,
+ * and rewriting it must not look like any. Returns how many associations this
+ * call NEWLY captured — the caller's only "progress" signal, and the value the
+ * derived capture count (the optimistic token) moves by. The publication row is
+ * deliberately not touched: this is not a write any attempt should be
+ * attributed by (see `recordLineDiscoveryFailure`).
  */
 export async function captureLineComments(
   db: D1Like,
@@ -1577,18 +1589,20 @@ export async function captureLineComments(
   reviewId: number | null,
   posted: readonly { associationId: string; commentId: number }[],
   nowMs: number,
-): Promise<void> {
-  if (posted.length === 0) return;
-  await db.batch([
-    ...posted.map((p) =>
+): Promise<number> {
+  if (posted.length === 0) return 0;
+  const results = await db.batch(
+    posted.map((p) =>
       db
-        .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ? AND publication_id = ?`)
+        .prepare(
+          `UPDATE review_threads
+              SET review_id = ?, comment_id = ?, updated_ms = ?
+            WHERE id = ? AND publication_id = ? AND review_id IS NULL`,
+        )
         .bind(reviewId, p.commentId, nowMs, p.associationId, publicationId),
     ),
-    db
-      .prepare(`UPDATE review_publications SET line_capture_count = line_capture_count + 1 WHERE id = ?`)
-      .bind(publicationId),
-  ]);
+  );
+  return results.reduce((captured, result) => captured + result.meta.changes, 0);
 }
 
 /**

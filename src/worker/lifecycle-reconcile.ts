@@ -66,6 +66,7 @@
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like, D1StatementLike } from "../store/types";
+import { RecoveryBudgetRefused, isBudgetRefusal } from "../contracts/recovery-budget";
 import {
   applyPublishedLifecycle,
   captureLineComments,
@@ -397,51 +398,6 @@ function canSpend(budget: RunBudget, nowMs: number, cost: number, laneScoped: bo
 /** Charge one ACTUAL request (called only from the transport choke point). */
 function reserve(budget: RunBudget, cost: number): void {
   budget.spent += cost;
-}
-
-/**
- * The run's request allowance refused a request BEFORE it was dispatched
- * (spec §7.11.1: "budget exhaustion is not a failed attempt"). It is a
- * distinct type because the refusal must be told apart from a send that
- * MIGHT have reached GitHub: the caller restores the claimed publication to
- * its due `prepared` state instead of recording post-attempt `unknown`, so a
- * publication that was never sent is never stranded behind read-only
- * discovery. Nothing dispatches, so no attempt is spent either.
- *
- * Thrown by the transport only; classified by chain in the lanes below.
- */
-class RecoveryBudgetRefused extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RecoveryBudgetRefused";
-  }
-}
-
-/**
- * Does this error CHAIN carry a pre-dispatch budget refusal? Octokit does not
- * let a custom transport error reach the caller intact: `fetchWrapper`
- * re-wraps every non-abort rejection in `RequestError(message, 500, ...)`
- * with the original parked on `cause` (`@octokit/request`), and the
- * paginate/plugin layers re-wrap again. The refusal therefore has to be
- * recognized by walking `cause` rather than by an `instanceof` at the throw
- * site. The chain is walked by IDENTITY, never by message text — a message
- * match would classify any error that merely mentions the budget as
- * un-dispatched, which is exactly the false "never sent" claim this
- * distinction exists to prevent. Each link is read defensively: `cause` is
- * not typed on `Error`, and a hostile/cyclic cause chain must not hang the
- * recovery lane, so the walk is bounded and deduplicated by identity.
- */
-function isBudgetRefusal(error: unknown): boolean {
-  const seen = new Set<unknown>();
-  let current: unknown = error;
-  for (let depth = 0; depth < 8; depth += 1) {
-    if (current instanceof RecoveryBudgetRefused) return true;
-    if (typeof current !== "object" || current === null || seen.has(current)) return false;
-    seen.add(current);
-    if (!("cause" in current)) return false;
-    current = current.cause;
-  }
-  return false;
 }
 
 /**
@@ -859,8 +815,17 @@ async function reconcileLineBatches(
         try {
           recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
         } catch (error) {
-          // A thrown read observed nothing: one failed pass under the read-scope
-          // reason, never a capture.
+          // A budget refusal never dispatched, so it observed nothing and spends
+          // no attempt: the row stays exactly where it was (spec §7.11.1).
+          if (isBudgetRefusal(error)) {
+            log.info(
+              { event: "ops_lifecycle_line_discovery_deferred", detail: `publication=${row.id}: request budget exhausted` },
+              "line-comment discovery deferred — nothing was read and no attempt is spent",
+            );
+            continue;
+          }
+          // Any other thrown read observed nothing: one failed pass under the
+          // read-scope reason, never a capture.
           if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
           log.warn(
             { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
@@ -868,24 +833,22 @@ async function reconcileLineBatches(
           );
           continue;
         }
-        let capturePersisted = false;
+        let newlyCaptured = 0;
         try {
-          await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
-          capturePersisted = true;
+          newlyCaptured = await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
         } catch (error) {
           log.warn(
             { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
             "line-comment id capture failed — the intent stays, discovery owns the rest",
           );
         }
-        const persistedProgress = capturePersisted && recovered.posted.length > 0;
-        if (persistedProgress) {
-          // ANY persisted capture is progress — the count means consecutive
-          // attempts that saved nothing, not consecutive incomplete ones.
-          await resetLineDiscoveryFailures(db, row.id, now());
-        } else {
-          // A capture that persisted nothing — a write that threw included —
-          // IS a failed attempt under that definition.
+        if (newlyCaptured > 0) {
+          // A NEW id is progress — the count means consecutive attempts that
+          // saved nothing, not consecutive incomplete ones.
+          await resetLineDiscoveryFailures(db, row.id);
+        } else if (recovered.failure !== "budget-refused") {
+          // A budget refusal observed nothing and spends no attempt. A write that
+          // persisted nothing — a throw included — IS a failed attempt.
           const reason: LineDiscoveryFailure =
             recovered.captured || recovered.failure === undefined ? "capture-failed" : recovered.failure;
           if (await noteLineDiscoveryFailure(db, row, reason, state.captures, now(), log)) retired += 1;

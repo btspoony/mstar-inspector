@@ -16,11 +16,3 @@
 ALTER TABLE review_publications ADD COLUMN line_discovery_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE review_publications ADD COLUMN line_unresolvable_ms INTEGER;
 ALTER TABLE review_publications ADD COLUMN line_unresolvable_reason TEXT;
-
--- The batch's CAPTURE counter. A failure observation is only trusted while the
--- capture state it was taken against is unchanged: a concurrent pass that saved
--- some or all comment ids bumps this counter, so a failure write started before
--- that capture becomes a no-op instead of retiring a batch that is making
--- progress. It is also the evidence that a capture actually persisted.
-ALTER TABLE review_publications ADD COLUMN line_capture_count INTEGER NOT NULL DEFAULT 0;
-
