@@ -18,17 +18,23 @@ const pending = 10;
 const now = 1_800_000_000_000;
 const payload = JSON.stringify({ pad: "x".repeat(1_500) });
 const limit = RECONCILE_DEFAULTS.lifecycleSelectLimit;
-const BEFORE = `SELECT * FROM review_publications p
-  WHERE p.phase = 'applied'
-    AND p.line_unresolvable_ms IS NULL
-    AND (p.lease_until_ms IS NULL OR p.lease_until_ms <= ?)
-    AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
-  ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id
-  LIMIT ?`;
-const AFTER = BEFORE.replace(
-  "AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)",
-  "AND p.id IN (SELECT t.publication_id FROM review_threads t WHERE t.review_id IS NULL)",
-);
+const IN_THREADS = "p.id IN (SELECT t.publication_id FROM review_threads t WHERE t.review_id IS NULL)";
+const EXISTS_THREADS = "EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)";
+
+// The after arm times the exact statement listLineBatchRecovery prepares; the
+// before arm is that statement with the thread predicate put back in its
+// previous EXISTS form, so neither arm is a hand-kept copy of production SQL.
+async function statements(): Promise<{ before: string; after: string }> {
+  const handle = createMigratedTestD1();
+  let after = "";
+  await listLineBatchRecovery(
+    { ...handle, prepare: (sql: string) => ((after = sql), handle.prepare(sql)) },
+    now,
+    limit,
+  );
+  if (!after.includes(IN_THREADS)) throw new Error("listLineBatchRecovery no longer selects through the uncaptured-thread IN");
+  return { before: after.replace(IN_THREADS, EXISTS_THREADS), after };
+}
 
 function median(values: number[]): number {
   return values.sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
@@ -46,6 +52,7 @@ async function time(fn: () => Promise<string[]>): Promise<{ ms: number; ids: str
   return { ms: median(times), ids };
 }
 
+const { before: BEFORE, after: AFTER } = await statements();
 console.log(`bun:sqlite; 3 threads per applied publication, ${pending} with an uncaptured thread, ~1.5 KB payloads; median of ${runs} runs; times in ms`);
 console.log("publications\tbefore ms\tafter ms\tspeedup\trows");
 for (const withPublicationIndex of [false, true]) {
