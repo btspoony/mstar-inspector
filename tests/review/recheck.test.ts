@@ -1,5 +1,5 @@
 /**
- * Unit tests for the bounded recheck seat module (spec
+ * why: Unit tests for the bounded recheck seat module (spec
  * review-lifecycle §7.8). Pure functions only — the seat's SDK interaction
  * is covered through the mocked omp runtime in runtime-omp.test.ts (bun's
  * mock.module registry is process-global, so this file deliberately does
@@ -36,7 +36,7 @@ import { MODEL_ITEM_MAX_CHARS, MODEL_MAX_ITEMS, MODEL_TOTAL_MAX_CHARS, RECHECK_M
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** Minimal trusted-catalog input (shape mirrors tests/contracts fixtures). */
+/** note: Minimal trusted-catalog input (shape mirrors tests/contracts fixtures). */
 function recheckInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
   return {
     schema: "mstar.recheck-input/v1",
@@ -176,7 +176,7 @@ describe("recheckAssignment", () => {
     const input = recheckInput();
     const assignment = recheckAssignment(input);
 
-    // The complete input rides as JSON — targets with the ORIGINAL body and
+    // why: The complete input rides as JSON — targets with the ORIGINAL body and
     // the trusted evidence catalog, not a reduced title.
     expect(assignment).toContain(JSON.stringify(input));
     expect(assignment).toContain("The reaper recurses without a depth bound.");
@@ -198,7 +198,7 @@ describe("recheckAssignment", () => {
   test("states how the discussion arrived: §7.8 caps applied and untrusted text neutralized", () => {
     const assignment = recheckAssignment(recheckInput());
 
-    // The figures are read off the shared constants, so a moved cap can never
+    // why: The figures are read off the shared constants, so a moved cap can never
     // leave this assertion pinning a stale number.
     expect(assignment).toContain(
       `${MODEL_MAX_ITEMS} items / ${MODEL_ITEM_MAX_CHARS} chars per item / ${MODEL_TOTAL_MAX_CHARS} total`,
@@ -222,9 +222,9 @@ describe("recheckAssignment", () => {
     expect(assignment).toContain("verified-fix");
     expect(assignment).toContain("non-fix-dismissal");
     expect(assignment).toContain("unverifiable");
-    // The seat must copy the cited catalog lines, not retype them.
+    // why: The seat must copy the cited catalog lines, not retype them.
     expect(assignment).toContain("Copy `quote` verbatim");
-    // The seat never sees the current findings — it must not invent indexes.
+    // why: The seat never sees the current findings — it must not invent indexes.
     expect(assignment).toContain("emit []");
   });
 
@@ -252,13 +252,13 @@ describe("recheckBudget (spec §7.8: min(cap, deadline-now-5000); 0 = skip)", ()
   });
 
   test("the skip floor IS the contract's RECHECK_MIN_REMAINING_MS (P67-QC-014)", () => {
-    // Boundary derived from the exported norm, not a second literal: a seat
+    // why: Boundary derived from the exported norm, not a second literal: a seat
     // that re-types the floor drifts the moment the contract value moves.
     const floor = RECHECK_MIN_REMAINING_MS;
-    const margin = 5_000; // §7.8 start margin
-    expect(recheckBudget(600_000 + floor + margin, 600_000)).toBe(floor); // exactly the floor runs
-    expect(recheckBudget(600_000 + floor + margin - 1, 600_000)).toBe(0); // 1ms below → skip
-    // The same floor holds when it, not the 180s cap, is what decides.
+    const margin = 5_000; // note: §7.8 start margin
+    expect(recheckBudget(600_000 + floor + margin, 600_000)).toBe(floor); // note: exactly the floor runs
+    expect(recheckBudget(600_000 + floor + margin - 1, 600_000)).toBe(0); // note: 1ms below → skip
+    // why: The same floor holds when it, not the 180s cap, is what decides.
     expect(recheckBudget(600_000 + RECHECK_MAX_RUNTIME_MS + margin + 1, 600_000)).toBe(RECHECK_MAX_RUNTIME_MS);
   });
 
@@ -271,16 +271,16 @@ describe("recheckBudget (spec §7.8: min(cap, deadline-now-5000); 0 = skip)", ()
   });
 
   test("a caller-supplied cap replaces the default — and the floor still decides", () => {
-    // The tier's clock (540,000ms for default) is wider than the old 180s cap
+    // why: The tier's clock (540,000ms for default) is wider than the old 180s cap
     // and narrower than the deadline: the caller's figure is the cap.
     expect(recheckBudget(600_000 + 600_000, 600_000, 540_000)).toBe(540_000);
-    // A cap below the contract's minimum is a skip, never a short seat.
+    // why: A cap below the contract's minimum is a skip, never a short seat.
     expect(recheckBudget(600_000 + 600_000, 600_000, RECHECK_MIN_REMAINING_MS - 1)).toBe(0);
   });
 });
 
 /**
- * The cap each tier actually gets, as a literal table — NOT a copy of the
+ * why: The cap each tier actually gets, as a literal table — NOT a copy of the
  * implementation's `min` formula, so the expectation cannot move with the
  * implementation. Quick's 5-minute clock fits inside its 8-minute outer
  * window (480,000); default's 10-minute clock is bounded by the outer guard's
@@ -294,7 +294,7 @@ const TIER_CAP_MS: Record<keyof typeof OUTER_RUNNER_CAP_MS, number> = {
 };
 
 describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", () => {
-  // bun's module registry is process-global, so the anchor is shared across
+  // why: bun's module registry is process-global, so the anchor is shared across
   // test files. Every case starts from the UNSET state instead of depending on
   // another case's leftover anchor or on declaration order.
   beforeEach(() => {
@@ -303,7 +303,7 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", ()
 
   test("no anchor yields the default tier's cap from now — never a fixed 180s", () => {
     expect(currentRecheckBudget(Date.now())).toBe(TIER_CAP_MS.default);
-    // I-000431: the round reads up to 25 published findings, so the tier's
+    // why: I-000431: the round reads up to 25 published findings, so the tier's
     // clock is the budget; 180s survives only as the pure function's default.
     expect(TIER_CAP_MS.default).toBeGreaterThan(RECHECK_MAX_RUNTIME_MS);
   });
@@ -312,16 +312,16 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", ()
     const start = Date.now();
     const cap = OUTER_RUNNER_CAP_MS.quick;
     anchorRecheckDeadline(start, "quick");
-    // Immediately after start the tier's clock dominates.
+    // note: Immediately after start the tier's clock dominates.
     expect(currentRecheckBudget(start)).toBe(TIER_CAP_MS.quick);
-    // Near the outer deadline: whatever remains less the publication tail, down
+    // why: Near the outer deadline: whatever remains less the publication tail, down
     // to the contract's floor.
     expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS)).toBe(
       RECHECK_MIN_REMAINING_MS,
     );
-    // 1ms less: below the floor → skip.
+    // note: 1ms less: below the floor → skip.
     expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS + 1)).toBe(0);
-    // At/past the outer deadline there is nothing left — never a fresh cap.
+    // why: At/past the outer deadline there is nothing left — never a fresh cap.
     expect(currentRecheckBudget(start + cap)).toBe(0);
     expect(currentRecheckBudget(start + cap + 100_000)).toBe(0);
   });
@@ -330,13 +330,13 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", ()
     const start = Date.now();
     const cap = OUTER_RUNNER_CAP_MS.deep;
     anchorRecheckDeadline(start, "deep");
-    // Deep's 15-minute tier clock is wider than its 14-minute outer guard, so
+    // why: Deep's 15-minute tier clock is wider than its 14-minute outer guard, so
     // the guard minus the publication tail is what decides.
     expect(currentRecheckBudget(start)).toBe(TIER_CAP_MS.deep);
     expect(currentRecheckBudget(start + cap - RECHECK_MIN_REMAINING_MS - PUBLICATION_TAIL_MS)).toBe(
       RECHECK_MIN_REMAINING_MS,
     );
-    // Late but inside deep's cap the tail-bounded budget still runs; the SAME
+    // why: Late but inside deep's cap the tail-bounded budget still runs; the SAME
     // instant under quick's shorter cap has nothing left.
     const late = start + OUTER_RUNNER_CAP_MS.quick + 1_000;
     expect(currentRecheckBudget(late)).toBe(cap - (late - start) - PUBLICATION_TAIL_MS);
@@ -348,7 +348,7 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", ()
     anchorRecheckDeadline(Date.now(), "quick");
     const start = Date.now();
     anchorRecheckDeadline(start, "default");
-    // Under the OLD quick deadline (start_of_test + cap) this instant would
+    // why: Under the OLD quick deadline (start_of_test + cap) this instant would
     // already be past — only the override makes a budget available: 100,000ms
     // of outer guard left less the 60s publication tail.
     expect(currentRecheckBudget(start + 500_000)).toBe(40_000);
@@ -365,7 +365,7 @@ describe("anchorRecheckDeadline / currentRecheckBudget (§7.8 tier budgets)", ()
 
 describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
   /**
-   * The tier's soft cap in minutes IS the engine's figure — reading it here
+   * why: The tier's soft cap in minutes IS the engine's figure — reading it here
    * means the assertions below can never silently drift into a re-typed
    * literal.
    */
@@ -381,7 +381,7 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     anchorRecheckDeadline(start, "quick");
 
     expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
-    // Sub-minute elapsed is NOT quantized away — the value stays a correct
+    // why: Sub-minute elapsed is NOT quantized away — the value stays a correct
     // elapsed source for the supervision that consumes it.
     expect(remainingSoftMinutes(start + 30_000)).toBe(QUICK_CAP - 0.5);
     expect(remainingSoftMinutes(start + 150_000)).toBe(QUICK_CAP - 2.5);
@@ -404,7 +404,7 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     const atCap = start + DEEP_CAP * 60_000;
 
     expect(remainingSoftMinutes(atCap)).toBe(0);
-    // ONE SECOND past the cap is already an overrun — no minute bucket hides it.
+    // why: ONE SECOND past the cap is already an overrun — no minute bucket hides it.
     expect(remainingSoftMinutes(atCap + 1_000)).toBeLessThan(0);
     expect(remainingSoftMinutes(atCap + 1_000)).toBeCloseTo(-1 / 60, 10);
     expect(remainingSoftMinutes(atCap + 120_000)).toBe(-2);
@@ -413,14 +413,14 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
   test("the soft clock and the outer recheck budget stay independent (one anchor, no shared clamp)", () => {
     const start = 4_000_000;
     anchorRecheckDeadline(start, "deep");
-    // An instant past BOTH deadlines: the tier's soft cap AND the outer exec
+    // why: An instant past BOTH deadlines: the tier's soft cap AND the outer exec
     // guard (646,000 ms deep). Derived from the engine cap with margin rather
     // than re-pinning either constant.
     const pastBoth = start + Math.max(DEEP_CAP + 2, 20) * 60_000;
 
-    // The shared clock reports the OVERRUN...
+    // note: The shared clock reports the OVERRUN...
     expect(remainingSoftMinutes(pastBoth)).toBeLessThan(0);
-    // ...while the outer recheck budget keeps its own clamp (0 = skip) — the
+    // why: ...while the outer recheck budget keeps its own clamp (0 = skip) — the
     // two clocks are provably distinct, off one anchor.
     expect(currentRecheckBudget(pastBoth)).toBe(0);
   });
@@ -431,7 +431,7 @@ describe("remainingSoftMinutes (the shared soft clock at dispatch)", () => {
     expect(remainingSoftMinutes(start)).toBe(QUICK_CAP);
     expect(remainingSoftMinutes(start, "deep")).toBe(DEEP_CAP);
     expect(remainingSoftMinutes(start, "default")).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
-    // ONE captured `now` feeds both the anchor and the read — the derivation is
+    // why: ONE captured `now` feeds both the anchor and the read — the derivation is
     // exact, so two ambient reads could straddle a millisecond and fail a
     // correct clock.
     const now = Date.now();
@@ -446,7 +446,7 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
   });
 
   test("counts down to the anchored outer deadline — and is never the soft remainder", () => {
-    // quick's outer guard is the same frozen §7.8 table entry the recheck
+    // why: quick's outer guard is the same frozen §7.8 table entry the recheck
     // budget reads.
     const start = 5_000_000;
     const cap = OUTER_RUNNER_CAP_MS.quick;
@@ -454,16 +454,16 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
 
     expect(remainingOuterMs(start, "quick")).toBe(cap);
     expect(remainingOuterMs(start + 120_000, "quick")).toBe(cap - 120_000);
-    // Past the outer deadline the remainder goes negative — never a fresh cap.
+    // why: Past the outer deadline the remainder goes negative — never a fresh cap.
     expect(remainingOuterMs(start + cap + 100_000, "quick")).toBeLessThan(0);
-    // One anchor, two clocks: the soft figure is the tier's convergence target,
+    // why: One anchor, two clocks: the soft figure is the tier's convergence target,
     // this one the outer exec guard a hard cap derives from.
     expect(remainingSoftMinutes(start, "quick") * 60_000).not.toBe(remainingOuterMs(start, "quick"));
   });
 
   test("a supplied absolute deadline replaces the tier cap — the exec the runner really has", () => {
     const start = 6_000_000;
-    // deep's tier cap is 646,000, but this round's exec is killed at start+240,000.
+    // why: deep's tier cap is 646,000, but this round's exec is killed at start+240,000.
     // Everything derived from the anchor must plan against the exec the runner
     // actually runs under, not the table entry it would have got alone.
     const deadline = start + 240_000;
@@ -471,7 +471,7 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
 
     expect(remainingOuterMs(start)).toBe(240_000);
     expect(remainingOuterMs(start + 100_000)).toBe(140_000);
-    // The seat's hard cap (runtime-omp: `remainingOuterMs - PUBLICATION_TAIL_MS`)
+    // why: The seat's hard cap (runtime-omp: `remainingOuterMs - PUBLICATION_TAIL_MS`)
     // therefore leaves the tail before the EXEC deadline, not before the tier's
     // wider one. Proved through the recheck budget, which derives from the same
     // deadline: what it allows plus the tail is exactly what the exec leaves.
@@ -483,7 +483,7 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
     const start = 7_000_000;
     const delay = 30_000;
     const deadline = start + 240_000;
-    // The runner only calls the anchor after it read credentials and parsed the
+    // why: The runner only calls the anchor after it read credentials and parsed the
     // input: `now` is later, but the deadline it anchors is the caller's
     // absolute instant — the delay is spent out of it, never added onto it.
     anchorRecheckDeadline(start + delay, "deep", deadline);
@@ -497,12 +497,12 @@ describe("remainingOuterMs (the outer exec guard, as opposed to the soft clock)"
     const start = 8_000_000;
     anchorRecheckDeadline(start, "default", start - 5_000);
 
-    // Negative, never a fresh tier cap: the caller's exec is already gone.
+    // note: Negative, never a fresh tier cap: the caller's exec is already gone.
     expect(remainingOuterMs(start)).toBe(-5_000);
-    // The recheck seat's cap clamps to 0 (= skip); the 60s tail is still what
+    // why: The recheck seat's cap clamps to 0 (= skip); the 60s tail is still what
     // the derivation subtracts, so a seat can never start inside it.
     expect(currentRecheckBudget(start)).toBe(0);
-    // The soft clock keeps its own tier origin: the anchor's start, not the
+    // why: The soft clock keeps its own tier origin: the anchor's start, not the
     // deadline it was handed.
     expect(remainingSoftMinutes(start)).toBe(PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes);
   });
@@ -554,7 +554,7 @@ describe("recheckRoundStatus (a round that delivered nothing is failed, never cl
       { rowId: "row-1", disposition: "unverifiable", reason: "no-evidence", evidence: null, relatedCurrentFindingIndexes: [] },
     ];
     expect(recheckRoundStatus(gateOf(survived, []), 1, SHA)).toMatchObject({ outcome: "ok", reason: null });
-    // Nothing was sent, so there is no round to blame.
+    // why: Nothing was sent, so there is no round to blame.
     expect(recheckRoundStatus(gateOf([], []), 0, SHA)).toMatchObject({ outcome: "ok", reason: null });
   });
 });
