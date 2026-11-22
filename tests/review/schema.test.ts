@@ -26,11 +26,11 @@ import { describe, expect, test } from "bun:test";
 import {
   clampFindingSizes,
   dropAllSuggestionFences,
-  dropSuggestionFences,
+  dropRedactedSuggestions,
+  dropUnsafeFences,
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
   capFindings,
-  neutralizeRedactedSuggestions,
   parseReviewOutput,
   suggestionFenceSpans,
   type ReviewOutput,
@@ -720,9 +720,9 @@ describe("clampFindingSizes (qc2 F-003, per-finding byte budgets)", () => {
 
   test("a closed fence ending exactly at the budget with no truncation is kept verbatim", () => {
     const fence = "```suggestion\nconst x = 1;\n```";
-    const text = "P".repeat(FINDING_BODY_MAX - fence.length) + fence;
+    const text = "P".repeat(FINDING_BODY_MAX - fence.length - 1) + "\n" + fence;
     expect(text.length).toBe(FINDING_BODY_MAX);
-    expect(dropSuggestionFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
+    expect(dropUnsafeFences(text, FINDING_BODY_MAX)).toEqual({ text, dropped: false });
   });
 });
 
@@ -799,18 +799,42 @@ describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
   });
 });
 
-describe("neutralizeRedactedSuggestions", () => {
-  test("a suggestion whose patch carries the marker becomes a plain fence", () => {
+describe("dropRedactedSuggestions", () => {
+  test("a suggestion whose patch carries the marker is removed with its prose kept", () => {
     const text = "before\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
-    expect(neutralizeRedactedSuggestions(text)).toBe(
-      "before\n```\nconst x = \"[REDACTED]\";\n```\nafter",
-    );
+    expect(dropRedactedSuggestions(text)).toBe("before\nafter");
   });
 
-  test("a clean suggestion is untouched; only a marker-bearing one is downgraded", () => {
+  test("a clean suggestion is untouched", () => {
     const clean = "```suggestion\nconst x = 1;\n```";
-    expect(neutralizeRedactedSuggestions(clean)).toBe(clean);
-    const withInfo = "```suggestion js\nconst x = \"[REDACTED]\";\n```";
-    expect(neutralizeRedactedSuggestions(withInfo)).toBe("```\nconst x = \"[REDACTED]\";\n```");
+    expect(dropRedactedSuggestions(clean)).toBe(clean);
+  });
+
+  test("a CRLF suggestion carrying the marker is removed too", () => {
+    const text = "before\r\n```suggestion\r\nconst x = \"[REDACTED]\";\r\n```\r\nafter";
+    expect(dropRedactedSuggestions(text)).toBe("before\r\nafter");
+  });
+
+  test("a body that was only the redacted suggestion keeps a safe omission notice", () => {
+    const text = "```suggestion\nconst x = \"[REDACTED]\";\n```";
+    expect(dropRedactedSuggestions(text)).toBe("(suggestion omitted)");
+  });
+});
+
+describe("dropUnsafeFences (any fence, not only suggestions)", () => {
+  test("a plain fence crossing the budget is dropped whole; the prose after it survives", () => {
+    const pad = "P".repeat(20) + "\n";
+    const fence = "```\nconst x = 1;\n```";
+    const tail = "\nkeep";
+    const body = `${pad}${fence}${tail}`;
+    const max = pad.length + 5; // lands inside the plain fence
+
+    const { text, dropped } = dropUnsafeFences(body, max);
+    expect(dropped).toBe(true);
+    expect(text).toBe(`${pad}keep`);
+    // The explanation below the block is preserved, and no truncated fence rides out.
+    expect(text).toContain("keep");
+    expect(text).not.toContain("```");
+    expect(text.length).toBeLessThanOrEqual(max);
   });
 });

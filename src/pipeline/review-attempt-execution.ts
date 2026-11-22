@@ -35,7 +35,7 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { dropAllSuggestionFences, neutralizeRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
@@ -4894,8 +4894,13 @@ export async function collectAttempt(
  * redaction covers. The rendered body also carries host template (markers,
  * commit SHA, schema tags), which must never enter the gate.
  */
-function modelTexts(output: ReviewOutput, report: ReviewAttemptExecution["report"]): string[] {
+function modelTexts(
+  output: ReviewOutput,
+  report: ReviewAttemptExecution["report"],
+  priorTitles: readonly string[],
+): string[] {
   const texts: string[] = [];
+  texts.push(...priorTitles);
   if (output.summary_md !== undefined) texts.push(output.summary_md);
   if (output.incomplete !== undefined) texts.push(output.incomplete.reason, ...output.incomplete.unscanned);
   if (output.tally !== undefined) {
@@ -5170,7 +5175,7 @@ async function collectPhase(
     ...capped.output,
     findings: capped.output.findings.map((finding) => ({
       ...finding,
-      body: neutralizeRedactedSuggestions(finding.body),
+      body: dropRedactedSuggestions(finding.body),
     })),
   };
   // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
@@ -5181,7 +5186,11 @@ async function collectPhase(
     ref,
     prepared,
     progress,
-    modelTexts(output, report),
+    modelTexts(
+      output,
+      report,
+      targets.map((target) => target.original.title),
+    ),
     fields,
   );
   if (publishGate !== "clear") {

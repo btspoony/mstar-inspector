@@ -295,25 +295,31 @@ const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
 export const SUGGESTION_OMITTED = "(suggestion omitted)";
 
+type FenceSpan = { start: number; end: number; closed: boolean; suggestion: boolean };
+
 /**
- * Fenced `suggestion` blocks as [start, end) offsets, plus whether the closing
- * fence arrived. ALL fenced blocks are tracked (backtick and tilde, CommonMark
- * open/close rules), so a literal ```suggestion line inside an ordinary
- * ```js / ```markdown / ~~~ fence is CONTENT, not a suggestion. A block
- * counts as a suggestion only at the top level with an info string whose first
- * token is exactly `suggestion` — `suggestions` / `suggestion-example` do not
- * open — and only a same-char run at least as long as the opening one with NO
- * info string closes it (an inner ```js line does not). An unclosed block
- * runs to the end of the text.
+ * Top-level fenced blocks as [start, end) offsets, plus whether the closing
+ * fence arrived and whether the block is a `suggestion`. ALL fences are tracked
+ * (backtick and tilde, CommonMark open/close rules), so a literal
+ * ```suggestion line inside an ordinary ```js / ```markdown / ~~~ fence is
+ * CONTENT, not a suggestion. A block counts as a suggestion only at the top
+ * level with an info string whose first token is exactly `suggestion` —
+ * `suggestions` / `suggestion-example` do not open — and only a same-char run
+ * at least as long as the opening one with NO info string closes it (an inner
+ * ```js line does not). An unclosed block runs to the end of the text. A CRLF
+ * line has its carriage return stripped before matching, so it is still a
+ * fence.
  */
-export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
-  const spans: { start: number; end: number; closed: boolean }[] = [];
+function fencedBlockSpans(text: string): FenceSpan[] {
+  const spans: FenceSpan[] = [];
   let open: { start: number; ticks: number; char: string; suggestion: boolean } | null = null;
   let offset = 0;
   for (;;) {
     const newline = text.indexOf("\n", offset);
     const lineEnd = newline === -1 ? text.length : newline;
-    const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
+    const rawLine = text.slice(offset, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const fence = FENCE_LINE.exec(line);
     // CommonMark: a backtick fence's info string may not contain a backtick, so
     // a line like ```oldCall()``` is inline code - it neither opens nor closes.
     const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
@@ -325,28 +331,38 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
         // Any fence opens a block; only a top-level suggestion opener counts.
         open = { start: offset, ticks, char, suggestion: info.split(/\s+/)[0] === "suggestion" };
       } else if (char === open.char && info === "" && ticks >= open.ticks) {
-        if (open.suggestion) {
-          spans.push({ start: open.start, end: newline === -1 ? text.length : lineEnd + 1, closed: true });
-        }
+        spans.push({
+          start: open.start,
+          end: newline === -1 ? text.length : lineEnd + 1,
+          closed: true,
+          suggestion: open.suggestion,
+        });
         open = null;
       }
     }
     if (newline === -1) break;
     offset = lineEnd + 1;
   }
-  if (open !== null && open.suggestion) spans.push({ start: open.start, end: text.length, closed: false });
+  if (open !== null) spans.push({ start: open.start, end: text.length, closed: false, suggestion: open.suggestion });
   return spans;
 }
 
+/** Fenced `suggestion` blocks only (the drop/neutralize callers). */
+export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
+  return fencedBlockSpans(text)
+    .filter((span) => span.suggestion)
+    .map(({ start, end, closed }) => ({ start, end, closed }));
+}
+
 /**
- * Drop whole fenced `suggestion` blocks that cannot be published safely: one
- * the `max` boundary would cut in half (so no partial fence survives a later
- * truncation), and one whose closing fence never arrives at ANY length (it
- * would swallow the trusted marker appended after the body). The surrounding
- * prose is kept. Shared by the schema clamp and the line-comment renderer so
- * the two cannot drift.
+ * Drop whole fenced blocks (suggestion OR an ordinary/neutralized one) that
+ * cannot be published safely: one the `max` boundary would cut in half (so no
+ * partial fence survives a later truncation), and one whose closing fence never
+ * arrives at ANY length (it would swallow the trusted marker appended after the
+ * body). The surrounding prose is kept. Shared by the schema clamp and the
+ * line-comment renderer so the two cannot drift.
  */
-export function dropSuggestionFences(text: string, max: number): {
+export function dropUnsafeFences(text: string, max: number): {
   text: string;
   dropped: boolean;
 } {
@@ -357,7 +373,7 @@ export function dropSuggestionFences(text: string, max: number): {
     // cuts that fence once the trailing ellipsis is appended, so it crosses too —
     // but ONLY when truncation actually happens (out.length > max); a fence
     // ending exactly at max with no truncation is published verbatim.
-    const fence = suggestionFenceSpans(out).find(
+    const fence = fencedBlockSpans(out).find(
       ({ start, end, closed }) => !closed || (out.length > max && start < max && max <= end),
     );
     if (fence === undefined) return { text: out, dropped };
@@ -381,33 +397,30 @@ export function dropAllSuggestionFences(text: string): string {
 }
 
 /**
- * Downgrade every fenced `suggestion` block whose body carries the redaction
- * marker to a plain fenced block: GitHub must render the altered patch as
- * text, never offer a one-click apply of `[REDACTED]`.
+ * Drop every fenced `suggestion` block whose body carries the redaction marker:
+ * GitHub must never offer a one-click apply of `[REDACTED]`. The surrounding
+ * prose is kept, or the safe omission notice when nothing survives.
  */
-export function neutralizeRedactedSuggestions(text: string): string {
+export function dropRedactedSuggestions(text: string): string {
   const spans = suggestionFenceSpans(text);
   if (spans.length === 0) return text;
   let out = "";
   let cursor = 0;
+  let dropped = false;
   for (const { start, end } of spans) {
     if (!text.slice(start, end).includes(REDACTED)) continue;
-    const lineEnd = text.indexOf("\n", start);
-    const openerEnd = lineEnd === -1 || lineEnd >= end ? end : lineEnd;
-    const opener = text.slice(start, openerEnd);
-    const plain = opener.replace(
-      /^(\s*)(`{3,}|~{3,})(.*)$/,
-      (_match, lead: string, fence: string) => `${lead}${fence}`,
-    );
-    out += text.slice(cursor, start) + plain + text.slice(openerEnd, end);
+    out += text.slice(cursor, start);
     cursor = end;
+    dropped = true;
   }
-  return cursor === 0 ? text : out + text.slice(cursor);
+  if (!dropped) return text;
+  out += text.slice(cursor);
+  return out.trim() === "" ? SUGGESTION_OMITTED : out;
 }
 
 /** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
 function clampFindingBody(body: string): string {
-  let { text } = dropSuggestionFences(body, FINDING_BODY_MAX);
+  let { text } = dropUnsafeFences(body, FINDING_BODY_MAX);
   // A body that was ONLY suggestion fences would fail the non-blank schema and
   // lose persistence + line comments; keep a non-empty safe fallback instead.
   if (text.trim() === "") text = SUGGESTION_OMITTED;

@@ -22,9 +22,12 @@ import {
   TEST_OWNER,
   TEST_PR_NUMBER,
   TEST_REPO,
+  VALID_DIFF,
   VALID_OUTPUT,
   createSeededTestD1,
   registerGitOpsCommands,
+  seedOpenTarget,
+  seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -2095,9 +2098,10 @@ describe("the SEC-01 publish gate", () => {
   async function reviewedEcho(
     echo: string,
     writeTimeKey: boolean,
+    beforePrepare?: (db: TestD1) => Promise<void>,
   ): Promise<{
     deps: ProcessDeps;
-    db: Awaited<ReturnType<typeof createSeededTestD1>>;
+    db: TestD1;
     ref: AttemptRef;
     prepared: PreparedAttempt;
   }> {
@@ -2110,6 +2114,7 @@ describe("the SEC-01 publish gate", () => {
         customProviders: undefined,
       });
     }
+    if (beforePrepare !== undefined) await beforePrepare(db);
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
@@ -2239,7 +2244,24 @@ describe("the SEC-01 publish gate", () => {
     expect(body).toContain(`sha=${SHA}`);
   });
 
-  test("a redacted suggestion is downgraded to a plain block before publish", async () => {
+  test("a prior finding's title carrying an encoded echo is caught by the gate", async () => {
+    const echo = ECHOES.base64;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb, { original: { title: `prior echo ${echo}` } });
+    });
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+
+    expect(prepared.targets.some((target) => target.original.title.includes(echo))).toBe(true);
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+  });
+
+  test("a redacted suggestion is removed before publish", async () => {
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
     const launch = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
@@ -2261,9 +2283,37 @@ describe("the SEC-01 publish gate", () => {
       artifact: { payload: { findings: Array<{ body: string }> } };
     };
     const body = payload.artifact.payload.findings[0]!.body;
-    expect(body).toContain("[REDACTED]");
     expect(body).not.toContain("```suggestion");
-    expect(body).toContain('```\nconst key = "[REDACTED]";');
+    expect(body).toContain("before");
+    expect(body).toContain("after");
+  });
+
+  test("an inline line comment carries no suggestion fence after a redaction", async () => {
+    h.sandbox.diffStdout = VALID_DIFF;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = 'before\n```suggestion\nconst key = "sk-test";\n```\nafter';
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      lineIntents: Array<{ body: string }>;
+    };
+    const inline = payload.lineIntents.map((intent) => intent.body).join("\n");
+    expect(payload.lineIntents.length).toBeGreaterThan(0);
+    expect(inline).not.toContain("```suggestion");
+    expect(inline).toContain("after");
   });
 
   /** The paid result rewritten to a schema-invalid body carrying `echo`. */
