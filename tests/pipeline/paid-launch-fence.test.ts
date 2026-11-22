@@ -475,25 +475,15 @@ describe("no runner output reaches durable storage before redaction", () => {
   test("every transformed echo of the key is gone from the stored payload", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
-    // A slash makes the JSON-escaped form distinct from the raw one.
     const secret = "sk-live/9f2a44c1d3";
     const forms = secretTransforms(secret);
-    const echoes = [
-      forms.raw,
-      forms.slashEscaped,
-      forms.urlEncoded,
-      forms.base64,
-      forms.base64url,
-      forms.hex,
-    ];
-    const stdout = JSON.stringify({
-      schema: "mstar.review/v1",
-      head_sha: SHA,
-      attempt_id: ATTEMPT,
-      score: 0.5,
-      blocked: false,
-      echoes,
-    });
+    const echoes = [forms.raw, forms.urlEncoded, forms.base64, forms.base64url, forms.hex];
+    // The escaped echo is a JSON escape in the serialized envelope, so only
+    // decoding (not a substring form) can recover the raw character.
+    const stdout =
+      `{"schema":"mstar.review/v1","head_sha":"${SHA}","attempt_id":"${ATTEMPT}",` +
+      `"score":0.5,"blocked":false,"echoes":${JSON.stringify(echoes)},` +
+      `"escaped":"sk-live\\u002f9f2a44c1d3"}`;
 
     const execution = await runReviewAttempt({
       ...executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db),
@@ -503,6 +493,7 @@ describe("no runner output reaches durable storage before redaction", () => {
     const stored = db.raw
       .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT) as { result_json: string };
+    // Stored shape is the module's own `encodeExecution` contract.
     const row = JSON.parse(stored.result_json) as { run: { stdout: string; exitCode: number } };
     const envelope = JSON.parse(row.run.stdout) as {
       head_sha: string;
@@ -510,8 +501,10 @@ describe("no runner output reaches durable storage before redaction", () => {
       score: number;
       blocked: boolean;
       echoes: string[];
+      escaped: string;
     };
-    expect(envelope.echoes).toEqual(Array(6).fill("[redacted]"));
+    expect(envelope.echoes).toEqual(Array(5).fill("[redacted]"));
+    expect(envelope.escaped).toBe("[redacted]");
     // Identity and non-string leaves are the unredacted bytes.
     expect(envelope.head_sha).toBe(SHA);
     expect(envelope.attempt_id).toBe(ATTEMPT);
@@ -519,6 +512,9 @@ describe("no runner output reaches durable storage before redaction", () => {
     expect(envelope.blocked).toBe(false);
     expect(row.run.exitCode).toBe(0);
     expect(execution.run.stdout).toBe(row.run.stdout);
+    // The stored bytes did change — that is the point — but they are still a
+    // serialized envelope this build can parse.
+    expect(row.run.stdout).not.toBe(stdout);
   });
 
   test("a payload carrying no secret serializes byte-identically", async () => {
@@ -531,6 +527,9 @@ describe("no runner output reaches durable storage before redaction", () => {
       score: 1,
       blocked: false,
     });
+
+    // The only evidence the envelope is not reshaped: its own bytes round-trip.
+    expect(JSON.stringify(JSON.parse(stdout))).toBe(stdout);
 
     await runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db));
 

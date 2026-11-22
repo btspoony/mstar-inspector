@@ -108,61 +108,105 @@ describe("redactExactSecrets", () => {
 });
 
 describe("redactTransformed", () => {
-  // A credential with a slash so the JSON-escaped form differs from the raw one.
   const SECRET = "sk-live/paid-session-secret-01";
   const forms = secretTransforms(SECRET);
 
-  test("secretTransforms names the bounded set", () => {
+  test("secretTransforms is the bounded set and carries no escape form", () => {
     const one = secretTransforms("p/a b");
     expect(one.raw).toBe("p/a b");
-    expect(one.jsonEscaped).toBe("p/a b");
-    expect(one.slashEscaped).toBe("p\\/a b");
-    expect(one.unicodeEscaped).toBe("\\u0070\\u002f\\u0061\\u0020\\u0062");
     expect(one.urlEncoded).toBe("p%2Fa%20b");
     expect(one.base64).toBe("cC9hIGI=");
     expect(one.base64url).toBe("cC9hIGI");
     expect(one.hex).toBe("702f612062");
+    // JSON escaping is the PARSER's job: no `\uXXXX`/`\/` form exists here.
+    expect(Object.keys(one).sort()).toEqual(["base64", "base64url", "hex", "raw", "urlEncoded"]);
   });
 
-  test("removes all six injected forms from nested leaves, leaving non-strings untouched", () => {
-    const injected = [
-      forms.raw,
-      forms.slashEscaped,
-      forms.urlEncoded,
-      forms.base64,
-      forms.base64url,
-      forms.hex,
-    ];
+  test("removes every transform from nested decoded leaves, leaving non-strings untouched", () => {
+    const injected = [forms.raw, forms.urlEncoded, forms.base64, forms.base64url, forms.hex];
     const payload = {
-      run: { stdout: `echo ${injected.join(" ")}`, exitCode: 0 },
-      recheck: { rejected: new Set(injected.map((form, index) => `row${index}:${form}`)), rows: injected },
+      run: { stdout: JSON.stringify({ echoes: injected }), exitCode: 0 },
+      recheck: { rejected: new Set(injected.map((form, index) => `row${index}:${form}`)) },
       report: null,
       passed: true,
       score: 0.5,
     };
 
-    const redacted = redactTransformed(payload, [SECRET]);
+    const outcome = redactTransformed(payload, [SECRET]);
 
-    expect(redacted.run.stdout).toBe("echo " + Array(6).fill("[redacted]").join(" "));
-    expect([...redacted.recheck.rejected]).toEqual(injected.map((_, index) => `row${index}:[redacted]`));
-    expect(redacted.recheck.rows).toEqual(Array(6).fill("[redacted]"));
-    expect(redacted.run.exitCode).toBe(0);
-    expect(redacted.passed).toBe(true);
-    expect(redacted.score).toBe(0.5);
-    expect(redacted.report).toBeNull();
+    // Fixture shape is ours: the envelope we just serialized.
+    const redactedEnvelope = JSON.parse(outcome.value.run.stdout) as { echoes: string[] };
+    expect(redactedEnvelope.echoes).toEqual(Array(5).fill("[redacted]"));
+    expect([...outcome.value.recheck.rejected]).toEqual(
+      injected.map((_, index) => `row${index}:[redacted]`),
+    );
+    expect(outcome.value.run.exitCode).toBe(0);
+    expect(outcome.value.passed).toBe(true);
+    expect(outcome.value.score).toBe(0.5);
+    expect(outcome.value.report).toBeNull();
+    expect(outcome.replaced).toBe(10);
+    expect(outcome.skipped).toBe(0);
   });
 
-  test("is idempotent", () => {
-    const payload = { text: `raw ${forms.raw} and hex ${forms.hex}`, n: 1 };
-    const once = redactTransformed(payload, [SECRET]);
-    const twice = redactTransformed(once, [SECRET]);
-    expect(twice).toEqual(once);
+  test("a mixed escape echo decodes before matching (`\\u002f`, `\\/`)", () => {
+    const unicodeEcho = '{"summary_md":"abc\\u002fdefg"}';
+    const slashEcho = '{"summary_md":"abc\\/defg"}';
+    // Fixture shape is ours: the two envelopes above.
+    const decodedUnicode = JSON.parse(unicodeEcho) as { summary_md: string };
+    const decodedSlash = JSON.parse(slashEcho) as { summary_md: string };
+    expect(decodedUnicode.summary_md).toBe("abc/defg");
+    expect(decodedSlash.summary_md).toBe("abc/defg");
+
+    expect(redactTransformed(unicodeEcho, ["abc/defg"]).value).toBe('{"summary_md":"[redacted]"}');
+    expect(redactTransformed(slashEcho, ["abc/defg"]).value).toBe('{"summary_md":"[redacted]"}');
   });
 
-  test("no secret values → the value itself, unchanged", () => {
-    const payload = { text: `raw ${forms.raw}`, n: 1, ok: true };
-    expect(redactTransformed(payload, [])).toBe(payload);
-    expect(redactTransformed(payload, [""])).toBe(payload);
+  test("a short credential is skipped, leaving head_sha byte-identical", () => {
+    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
+    const envelope = JSON.stringify({ head_sha: headSha, attempt_id: "abc-id", note: "abc" });
+
+    const outcome = redactTransformed(envelope, ["abc"]);
+
+    expect(outcome.value).toBe(envelope);
+    expect(outcome.replaced).toBe(0);
+    expect(outcome.skipped).toBe(1);
+  });
+
+  test("an identity field is never rewritten, even when an 8+ char value occurs in it", () => {
+    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
+    const key = "cabcabca";
+    const envelope = JSON.stringify({ head_sha: headSha, attempt_id: "abc-id", note: key });
+
+    const outcome = redactTransformed(envelope, [key]);
+    // Envelope shape is ours: the object serialized above.
+    const redacted = JSON.parse(outcome.value) as { head_sha: string; note: string };
+
+    expect(redacted.head_sha).toBe(headSha);
+    expect(redacted.note).toBe("[redacted]");
+  });
+
+  test("is idempotent, including a credential equal to the marker's text", () => {
+    const once = redactTransformed({ text: `key ${SECRET}` }, [SECRET]);
+    const twice = redactTransformed(once.value, [SECRET]);
+    expect(twice.value).toEqual(once.value);
+    expect(twice.replaced).toBe(0);
+
+    const ambiguous = redactTransformed({ text: "[redacted]" }, ["redacted"]);
+    expect(ambiguous.value).toEqual({ text: "[redacted]" });
+    expect(ambiguous.replaced).toBe(0);
+    expect(ambiguous.skipped).toBe(1);
+  });
+
+  test("a payload with no secret present keeps its exact bytes", () => {
+    const envelope = JSON.stringify({ head_sha: "a".repeat(40), attempt_id: "id", score: 0.5, ok: true });
+
+    // The runner's envelope round-trips byte-for-byte, so an untouched leaf is
+    // never reshaped by this pass.
+    expect(JSON.stringify(JSON.parse(envelope))).toBe(envelope);
+    expect(redactTransformed(envelope, []).value).toBe(envelope);
+    const unrelated = redactTransformed(envelope, ["sk-unrelated-credential-0001"]);
+    expect(unrelated.value).toBe(envelope);
+    expect(unrelated.replaced).toBe(0);
   });
 });
 

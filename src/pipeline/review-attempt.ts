@@ -2430,9 +2430,10 @@ export async function runReviewAttempt(input: {
   // values this session's own exec received, and every bounded transform of
   // them, are removed HERE, on the host that holds them; the stored and the
   // returned value are this one sanitized object, so nothing downstream can
-  // publish the raw stream either. String leaves only: the envelope's
-  // `head_sha` and every numeric leaf stay byte-identical.
-  const execution = redactTransformed(
+  // publish the raw stream either. Matching happens in DECODED string leaves
+  // (an embedded JSON envelope is parsed, not substring-matched), and the
+  // envelope's identity keys and every numeric leaf stay byte-identical.
+  const redaction = redactTransformed(
     {
       run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
       recheck,
@@ -2441,6 +2442,15 @@ export async function runReviewAttempt(input: {
     },
     progress.secretValues,
   );
+  if (redaction.skipped > 0) {
+    // Visible, never silent: these credentials were NOT applied (too short, or
+    // ambiguous with the marker), so a text echo of one would survive.
+    deps.log.warn(
+      { ...fields, skipped_credentials: redaction.skipped },
+      "credential redaction skipped a value that is too short or ambiguous with the marker",
+    );
+  }
+  const execution = redaction.value;
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());
