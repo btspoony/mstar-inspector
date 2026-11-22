@@ -728,6 +728,87 @@ describe("the held-check relabel takes the output action's publication lease", (
     // The re-read is what saw the settled row: the fence's proof, then this.
     expect(reads).toBe(2);
   });
+
+  test("a lease that lapses between the eligibility read and the dispatch sends nothing", async () => {
+    const db = await seededDb();
+    const claim = await claimAttempt(db, {
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
+      holder: "delivery:delivery-relabel",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (claim.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claim.kind}`);
+    const attemptId = claim.attempt.identity.attemptId;
+    expect(await setCheckCreateState(db, attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
+    expect(await attachCheckRunId(db, attemptId, claim.lease, RUN_ID, T0)).toBe(true);
+
+    // The row is still eligible, but the acquisition's window closes while the
+    // eligibility is being read — the second `getCheckAttempt` (the read under
+    // the lease) is where the clock passes the expiry.
+    let reads = 0;
+    const lapsing = new Proxy(db as object, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== "prepare" || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          const stmt = value.call(target, sql) as object;
+          if (sql !== "SELECT * FROM review_checks WHERE id = ?") return stmt;
+          return new Proxy(stmt, {
+            get(s, sp) {
+              const member = Reflect.get(s, sp);
+              if (sp !== "bind" || typeof member !== "function") {
+                return typeof member === "function" ? member.bind(s) : member;
+              }
+              return (...bound: unknown[]) => {
+                const b = member.apply(s, bound) as object;
+                return new Proxy(b, {
+                  get(bb, bp) {
+                    const fn = Reflect.get(bb, bp);
+                    if (bp !== "first" || typeof fn !== "function") {
+                      return typeof fn === "function" ? fn.bind(bb) : fn;
+                    }
+                    return (...args: unknown[]) => {
+                      reads += 1;
+                      if (reads === 2) CLOCK = T0 + PUBLICATION_LEASE_MS;
+                      return fn.apply(bb, args);
+                    };
+                  },
+                });
+              };
+            },
+          });
+        };
+      },
+    }) as TestD1;
+
+    const fake = fakeChecks(claim.attempt.identity);
+    const adapter = createChecksAdapter({ db: lapsing, nowMs: () => CLOCK, getOctokit: async () => fake.octokit });
+    const sent = await adapter.markQueuedBehindInflight!({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
+      checkRunId: RUN_ID,
+      summary: "Queued behind the live review for this pull request.",
+      updateBudgetMs: 1_000,
+      warn: () => {},
+    });
+
+    expect(sent).toBe(false);
+    expect(fake.updates).toHaveLength(0);
+    // Nothing was retained: the refused attempt handed its action back.
+    const lease = await publicationRow(db, attemptId, PUBLICATION_ACTION_CHECK_COMPLETE);
+    expect(lease?.holder).toBeNull();
+    CLOCK = T0;
+  });
 });
 
 describe("the degraded cleanup deletes only the marker it scanned", () => {

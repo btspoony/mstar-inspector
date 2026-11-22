@@ -1022,6 +1022,10 @@ async function markQueuedBehindInflightWith(
       ) {
         return false;
       }
+      // The lease can lapse between that read and the request, and a lapsed
+      // lease is no authority: prove it once more ON the line that dispatches,
+      // the same shape the comment send uses for its last-line proof.
+      if (!(await fence.verify())) return false;
       await client.rest.checks.update({
         owner: input.scope.owner,
         repo: input.scope.repo,
