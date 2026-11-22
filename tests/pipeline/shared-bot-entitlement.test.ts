@@ -1,5 +1,5 @@
 /**
- * The shared-bot enqueue refusal: the webhook face's admission gate on a
+ * why: The shared-bot enqueue refusal: the webhook face's admission gate on a
  * delivery whose target's plan lost the capability.
  *
  * Pinned here, in the order the product fixes:
@@ -38,13 +38,13 @@ const TARGET_ID = "66666666-7777-8888-9999-aaaaaaaaaaaa";
 const INSTALLATION_ID = 12345;
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** The verdict the route computes and hands to the handler. */
+/** note: The verdict the route computes and hands to the handler. */
 const REFUSAL: SharedBotRefusal = { kind: "shared-bot-not-included", planId: "free" };
 
-/** The quota verdict the route computes in the branch the capability admitted. */
+/** note: The quota verdict the route computes in the branch the capability admitted. */
 const QUOTA_REFUSAL: DeliveryRefusal = { kind: "quota-exhausted", limit: 2000, used: 1999, cost: 60 };
 
-/** The one failure read both cases make. */
+/** note: The one failure read both cases make. */
 const FAILURE_SQL = "SELECT * FROM review_failures ORDER BY rowid";
 
 type FailureRow = {
@@ -73,7 +73,7 @@ function payload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayload {
   };
 }
 
-/** One bot and its target in the default workspace (the failure row's FK). */
+/** note: One bot and its target in the default workspace (the failure row's FK). */
 function seedReviewConfig(db: TestD1): void {
   db.raw
     .prepare(
@@ -110,7 +110,7 @@ function countRows(db: TestD1, table: string): number {
   return (db.raw.query(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 }
 
-/** The deps the route assembles for a refused delivery: the attach hook. */
+/** note: The deps the route assembles for a refused delivery: the attach hook. */
 function handlerDeps(
   db: TestD1,
   kv: KVNamespace,
@@ -135,22 +135,22 @@ describe("handleReviewJob — a shared-bot refusal", () => {
     const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), REFUSAL);
 
     expect(outcome).toEqual({ kind: "skipped", reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON });
-    // No runner can start and nothing is metered.
+    // invariant: No runner can start and nothing is metered.
     expect(send).toHaveBeenCalledTimes(0);
     expect(countRows(db, "usage_events")).toBe(0);
-    // No idempotency claim and no comment outbox row for the sweep to re-send.
+    // invariant: No idempotency claim and no comment outbox row for the sweep to re-send.
     expect(get).toHaveBeenCalledTimes(0);
     expect(put).toHaveBeenCalledTimes(0);
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
 
-    // The Check is still attached exactly as an admitted delivery's would be;
+    // invariant: The Check is still attached exactly as an admitted delivery's would be;
     // its neutral settlement belongs to the route, which chains it onto that
     // attach (the attach may outlive this handler's call), so the handler
     // itself touches no registry row.
     expect(attach).toHaveBeenCalledTimes(1);
     expect(countRows(db, "review_checks")).toBe(0);
 
-    // ONE terminal failure row, carrying the sentence the Check carries.
+    // note: ONE terminal failure row, carrying the sentence the Check carries.
     const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
@@ -184,10 +184,10 @@ describe("handleReviewJob — a shared-bot refusal", () => {
 
     expect(outcome.kind).toBe("skipped");
     expect(send).toHaveBeenCalledTimes(0);
-    // The hook is the route's, and a mention delivery attaches nothing — the
+    // why: The hook is the route's, and a mention delivery attaches nothing — the
     // route decides that on the absent SHA, not this handler.
     expect(attach).toHaveBeenCalledTimes(1);
-    // The claim BEFORE the send would be this delivery's outbox record; a
+    // why: The claim BEFORE the send would be this delivery's outbox record; a
     // refusal writes none, so the sweep re-sends nothing.
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
     const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
@@ -209,13 +209,13 @@ describe("handleReviewJob — a quota refusal", () => {
     const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), QUOTA_REFUSAL);
 
     expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_SKIP_REASON });
-    // The refusal spends nothing: no runner, no ledger row, no claim, no KV key.
+    // invariant: The refusal spends nothing: no runner, no ledger row, no claim, no KV key.
     expect(send).toHaveBeenCalledTimes(0);
     expect(countRows(db, "usage_events")).toBe(0);
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
     expect(get).toHaveBeenCalledTimes(0);
     expect(put).toHaveBeenCalledTimes(0);
-    // The Check is still attached; its neutral settlement is the route's.
+    // invariant: The Check is still attached; its neutral settlement is the route's.
     expect(attach).toHaveBeenCalledTimes(1);
     expect(countRows(db, "review_checks")).toBe(0);
 
@@ -223,7 +223,7 @@ describe("handleReviewJob — a quota refusal", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: QUOTA_STAGE, target_id: TARGET_ID, head_sha: SHA });
     expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
-    // The author-facing sentence names no plan, no ceiling and no workspace.
+    // invariant: The author-facing sentence names no plan, no ceiling and no workspace.
     expect(rows[0]!.error).not.toContain("2000");
     db.raw.close();
   });
