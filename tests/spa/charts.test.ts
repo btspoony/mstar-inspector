@@ -465,10 +465,12 @@ describe("the closed chart vocabulary has two faces per slot (D14)", () => {
 
   test("a series value outside the six slots does not typecheck", () => {
     const inRange: StackedSeries = { key: "k", label: "k", slot: 6 };
-    // note: @ts-expect-error — 7 is outside chart-1..6: a chart cannot name a face
-    // the stylesheet does not answer.
+    // note: 7 is outside chart-1..6: a chart cannot name a face
+    // @ts-expect-error
+    // note: the stylesheet does not answer.
     const outOfRange: StackedSeries = { key: "k", label: "k", slot: 7 };
-    // note: @ts-expect-error — the slot union has no zero.
+    // @ts-expect-error
+    // note: the slot union has no zero.
     const zero: ChartSlot = 0;
     // note: The teeth are the two `@ts-expect-error` lines above (a value outside
     // the union is a compile error); the runtime asserts the same facts as

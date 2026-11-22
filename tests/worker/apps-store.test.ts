@@ -805,13 +805,15 @@ describe("apps-store workspace dual write (migration 0026)", () => {
 
   test("CreateAppInput.workspaceId is required (compile-time, strict-only)", async () => {
     const { workspaceId: _omitted, ...input } = APP_INPUT;
-    // invariant: @ts-expect-error — workspaceId is required; omitting it must not compile (the sole-workspace fallback is deleted)
+    // @ts-expect-error
+    // note: workspaceId is required; omitting it must not compile (the sole-workspace fallback is deleted)
     await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow();
   });
 
   test("CreateAppInput.maxApps is required: an omitted cap cannot mean unlimited", async () => {
     const { maxApps: _omitted, ...input } = APP_INPUT;
-    // why: @ts-expect-error — maxApps is required; an omitted cap would be a silent bypass
+    // @ts-expect-error
+    // note: maxApps is required; an omitted cap would be a silent bypass
     await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow(/AppCountExceededError|already owns/);
   });
 
