@@ -1,5 +1,5 @@
 /**
- * The `scripts/provider-catalog/` directory contract, checked against git.
+ * why: The `scripts/provider-catalog/` directory contract, checked against git.
  *
  * The README is the standard: a directory says who owns a file (`inputs/` = a
  * human or an external service writes it, `generated/` = a step rebuilds it,
@@ -23,7 +23,7 @@ const CATALOG_REL = "scripts/provider-catalog";
 const CATALOG = join(REPO_ROOT, CATALOG_REL);
 const README = readFileSync(join(CATALOG, "README.md"), "utf8");
 
-/** Every tracked path under the directory, relative to the catalog root. */
+/** note: Every tracked path under the directory, relative to the catalog root. */
 function trackedFiles(): string[] {
   const proc = Bun.spawnSync(["git", "ls-files", CATALOG_REL], {
     cwd: REPO_ROOT,
@@ -47,13 +47,13 @@ function isIgnored(path: string): boolean {
   return proc.exitCode === 0;
 }
 
-/** The first column of every data row — the file each row documents. */
+/** note: The first column of every data row — the file each row documents. */
 function tablePaths(): string[] {
   return [...README.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1]!);
 }
 
 /**
- * The table names a FAMILY for the dated snapshot (`inputs/models.dev-<date>.json`),
+ * why: The table names a FAMILY for the dated snapshot (`inputs/models.dev-<date>.json`),
  * because a refresh that moves data also moves that file name. A `<date>` row is
  * a WILDCARD over ISO dates, matched against the tracked listing — not a
  * normalisation applied to both sides of the comparison, which would make every
@@ -67,7 +67,7 @@ function asPattern(row: string): RegExp {
   return new RegExp(`^${literal.replaceAll("<date>", "\\d{4}-\\d{2}-\\d{2}")}$`);
 }
 
-/** Does `listing` satisfy `readme`'s table? Every row must name exactly one
+/** note: Does `listing` satisfy `readme`'s table? Every row must name exactly one
  *  tracked file, and every tracked file must be named by exactly one row. */
 function tableMatches(readme: string, listing: readonly string[]): boolean {
   const rows = [...readme.matchAll(/^\| `([^`]+)` \|/gm)].map((match) => match[1]!);
@@ -90,14 +90,14 @@ describe("provider-catalog directory contract", () => {
   });
 
   test("the README's table is exactly `git ls-files` — no stale row, no undocumented file", () => {
-    // Set equality, not one-way containment: this is what makes the table the
+    // why: Set equality, not one-way containment: this is what makes the table the
     // contract. A new file must gain a row, and a rename must move its row, in
     // the same commit that changes the layout.
     expect(tableMatches(README, files)).toBe(true);
   });
 
   test("a tree whose snapshot date differs still satisfies the contract", () => {
-    // The refresh commits the new dated file BEFORE this suite runs, so the
+    // why: The refresh commits the new dated file BEFORE this suite runs, so the
     // property that matters is: the committed README satisfies a listing from a
     // DIFFERENT day. Rather than normalising both sides (a tautology), build
     // that listing and run the same matcher.
@@ -107,18 +107,18 @@ describe("provider-catalog directory contract", () => {
     for (const date of ["2026-11-18", "2999-12-31"]) {
       const listing = movedFiles(date);
       expect(listing, date).not.toEqual(files);
-      // The COMMITTED README, unchanged, must accept tomorrow's tree.
+      // why: The COMMITTED README, unchanged, must accept tomorrow's tree.
       expect(tableMatches(README, listing), date).toBe(true);
     }
 
-    // The regression this replaces: a README whose row is a literal date does
+    // why: The regression this replaces: a README whose row is a literal date does
     // NOT accept a tree from another day. (With the family row it does.)
     const pinned = README.replace(/models\.dev-<date>\.json/g, "models.dev-2026-11-13.json");
     expect(pinned).not.toBe(README);
     expect(tableMatches(pinned, movedFiles("2026-11-18"))).toBe(false);
     expect(tableMatches(pinned, files)).toBe(true);
 
-    // And the committed row really is the family, not a literal.
+    // note: And the committed row really is the family, not a literal.
     expect(tablePaths()).toContain("inputs/models.dev-<date>.json");
     expect(tablePaths().some((path) => /models\.dev-\d{4}-\d{2}-\d{2}\.json/.test(path))).toBe(false);
   });
@@ -146,7 +146,7 @@ describe("provider-catalog directory contract", () => {
     const inputs = readdirSync(join(CATALOG, "inputs")).sort();
     expect(inputs.filter((name) => /^models\.dev-\d{4}-\d{2}-\d{2}\.json$/.test(name))).toHaveLength(1);
     expect(inputs).toContain("overrides.json");
-    // lib/ is pure: no JSON, no data of its own.
+    // why: lib/ is pure: no JSON, no data of its own.
     expect(readdirSync(join(CATALOG, "lib")).every((name) => name.endsWith(".ts"))).toBe(true);
   });
 
@@ -155,7 +155,7 @@ describe("provider-catalog directory contract", () => {
   });
 
   test("the guard patterns catch a raw response and a scratch copy, and spare the tracked inputs", () => {
-    // A raw `models.dev` body is ~6.7 MB and belongs in $RUNNER_TEMP.
+    // why: A raw `models.dev` body is ~6.7 MB and belongs in $RUNNER_TEMP.
     for (const raw of [`${CATALOG_REL}/inputs/raw-api.json`, `${CATALOG_REL}/inputs/api.json`]) {
       expect(isIgnored(raw), `${raw} would be committed`).toBe(true);
     }
@@ -166,7 +166,7 @@ describe("provider-catalog directory contract", () => {
   });
 
   test("the stored snapshot is the trimmed payload, never the upstream body", () => {
-    // Upstream providers carry `models` (id-keyed, ~6.7 MB), `npm`, `cost`,
+    // why: Upstream providers carry `models` (id-keyed, ~6.7 MB), `npm`, `cost`,
     // `modalities` … The trimmed snapshot carries exactly the generator's fields;
     // a raw body copied in would blow past this bound and carry `models`.
     for (const name of readdirSync(join(CATALOG, "inputs")).filter((entry) => entry.startsWith("models.dev-"))) {
@@ -192,7 +192,7 @@ describe("provider-catalog directory contract", () => {
 
 describe("generated/ is disposable", () => {
   test("the extractor creates generated/ when it is missing", () => {
-    // The README says `generated/` can be deleted and rebuilt. That claim broke
+    // why: The README says `generated/` can be deleted and rebuilt. That claim broke
     // the moment the extractor started reading its own previous output to keep
     // the extraction date: with no directory it died on ENOENT. Asserted from
     // the source (the script reads the installed SDK, so it cannot run in a
@@ -200,7 +200,7 @@ describe("generated/ is disposable", () => {
     const source = readFileSync(join(CATALOG, "extract-omp-snapshot.ts"), "utf8");
     expect(source).toContain("mkdir(GENERATED_DIR, { recursive: true })");
     expect(source.indexOf("mkdir(GENERATED_DIR")).toBeLessThan(source.indexOf("writeFile("));
-    // And nothing in lib/ writes: a pure module that wrote would make `lib/`
+    // why: And nothing in lib/ writes: a pure module that wrote would make `lib/`
     // just another output directory.
     for (const name of readdirSync(join(CATALOG, "lib"))) {
       const text = readFileSync(join(CATALOG, "lib", name), "utf8");
