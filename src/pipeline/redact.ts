@@ -45,9 +45,6 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
-/** Marker replacing every transformed occurrence of a secret. */
-const TRANSFORMED_REDACTED = "[redacted]";
-
 /** Regex metacharacters, escaped so a credential form matches literally. */
 const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
@@ -243,7 +240,7 @@ function redactTree(
 /**
  * One scan per leaf. Existing markers are BOUNDARIES, not scanned text: the leaf
  * is split on the literal marker, each segment is scanned once, and the markers
- * are rejoined verbatim. So a credential that is a substring of `[redacted]`
+ * are rejoined verbatim. So a credential that is a substring of `[REDACTED]`
  * (or spans its edge) can never rewrite it, a model-printed marker shields
  * nothing but itself, and text the scan emitted is never re-examined — a second
  * pass is a no-op with no placeholder involved.
@@ -251,14 +248,14 @@ function redactTree(
 function redactText(text: string, pattern: RegExp, state: RedactionState): string {
   let count = 0;
   const out = text
-    .split(TRANSFORMED_REDACTED)
+    .split(REDACTED)
     .map((segment) =>
       segment.replace(pattern, () => {
         count += 1;
-        return TRANSFORMED_REDACTED;
+        return REDACTED;
       }),
     )
-    .join(TRANSFORMED_REDACTED);
+    .join(REDACTED);
   state.replaced += count;
   return count === 0 ? text : out;
 }

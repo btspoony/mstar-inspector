@@ -455,7 +455,7 @@ describe("no runner output reaches durable storage before redaction", () => {
     });
 
     expect(execution.run.stdout).not.toContain(secret);
-    expect(execution.run.stdout).toContain("[redacted]");
+    expect(execution.run.stdout).toContain("[REDACTED]");
     expect(execution.report?.overview).not.toContain(secret);
     expect(execution.report?.overview).toContain("[REDACTED]");
     // The durable copy — what a later collect and a later host can read — is
@@ -503,8 +503,8 @@ describe("no runner output reaches durable storage before redaction", () => {
       echoes: string[];
       escaped: string;
     };
-    expect(envelope.echoes).toEqual(Array(5).fill("[redacted]"));
-    expect(envelope.escaped).toBe("[redacted]");
+    expect(envelope.echoes).toEqual(Array(5).fill("[REDACTED]"));
+    expect(envelope.escaped).toBe("[REDACTED]");
     // Host-written identity and non-string leaves are the unredacted bytes.
     expect(envelope.target.head_sha).toBe(SHA);
     expect(envelope.attempt_id).toBe(ATTEMPT);
