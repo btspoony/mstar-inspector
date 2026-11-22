@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * validate-release-version.ts — release gate.
+ * note: validate-release-version.ts — release gate.
  *
  * Usage:
  *   bun run release:validate -- v1.0.0
@@ -31,7 +31,7 @@ import {
 
 export type ValidateResult = {
   ok: boolean;
-  /** Every diagnostic line in check order — OK/MISSING/MISMATCH prefixes. */
+  /** note: Every diagnostic line in check order — OK/MISSING/MISMATCH prefixes. */
   lines: string[];
 };
 
@@ -101,7 +101,7 @@ export async function validateReleaseVersion(tag: string, root: string): Promise
     }
   }
 
-  // Tag-exists gate with self-heal (QC A1): a rerun AFTER the tag was pushed
+  // why: Tag-exists gate with self-heal (QC A1): a rerun AFTER the tag was pushed
   // (tag sits on current HEAD) must pass so the Release workflow converges —
   // validate passes -> tag step skips idempotently -> Release creation
   // proceeds. A tag pointing at any other commit is a double-use attempt and
@@ -129,7 +129,7 @@ function printUsage(): void {
   GITHUB_REF_NAME=v1.0.0 bun run release:validate`);
 }
 
-// Run only when executed directly — importing the module (unit tests) must
+// why: Run only when executed directly — importing the module (unit tests) must
 // not run the gate against the real checkout.
 if (import.meta.main) {
   const rest = process.argv.slice(2).filter((a) => a !== "--");

@@ -52,6 +52,7 @@ import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generate
 import { PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
 import { sk, fakePem } from "../helpers/fake-secrets";
 import { withFrozenClock } from "../helpers/clock";
+import { inlineWorkflowStarter } from "../helpers/workflow-route";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 import { runnerTimeoutMs } from "../../src/review-budget";
@@ -207,6 +208,15 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
+  claimMarker: mock(async () => "written" as const),
+  runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
+    kind: "ran" as const,
+    ...(await fakeSandbox.runCommand(cmd, opts)),
+  })),
+  destroyMarked: mock(async () => {
+    await fakeSandbox.destroy();
+    return "destroyed" as const;
+  }),
   destroy: mock(async () => {}),
 };
 
@@ -259,6 +269,9 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
   }),
+  recoverLineComments: mock(async () => {
+    throw new Error("unexpected: no dispatched line batch → no discovery");
+  }),
   // §7.8 discussion capture + §7.5 resolution: no open lifecycle
   // rows in these fixtures → never triggered.
   listDiscussion: mock(async () => {
@@ -275,6 +288,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
 const testOverrides = {
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
+  startAttempt: inlineWorkflowStarter([]),
 };
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
@@ -354,19 +368,20 @@ function reset(): void {
 }
 
 /**
- * The runner input's declared instant is a RUN FACT, not configuration: the
- * instant the exec is killed at = its own start + the timeout it runs under.
- * The start is read off the SAME call record, never a last-written scalar, so
- * round N's input can never borrow another round's start.
+ * The runner input's declared instant is a RUN FACT, not configuration, and it
+ * is the exec's OWN bound: the paid request carries that absolute instant (the
+ * container reads it and reserves its kill grace out of it), so the input and
+ * the request cannot disagree. The instant is read off the SAME call record,
+ * never a last-written scalar, so round N's input can never borrow round N-1's.
  */
 function expectOuterDeadline(input: Record<string, unknown>): void {
   const runner = sandboxCalls.find((c) => c.cmd.includes("--input"));
   if (runner === undefined) throw new Error("no runner exec was issued");
   const opts = runner.opts;
-  const execTimeout =
-    opts !== null && typeof opts === "object" && "timeout" in opts ? opts.timeout : undefined;
-  if (typeof execTimeout !== "number") throw new Error("runner exec carried no numeric timeout");
-  expect(input.outerDeadlineEpochMs).toBe(runner.startedAt + execTimeout);
+  const execDeadline =
+    opts !== null && typeof opts === "object" && "deadlineEpochMs" in opts ? opts.deadlineEpochMs : undefined;
+  if (typeof execDeadline !== "number") throw new Error("runner exec carried no numeric deadlineEpochMs");
+  expect(input.outerDeadlineEpochMs).toBe(execDeadline);
 }
 
 /** The fields every runner input declares, whatever the run adds. */

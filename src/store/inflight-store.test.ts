@@ -84,6 +84,8 @@ describe("inflight-store", () => {
       ok: false,
       reason: "pr-held",
       heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: false,
     });
   });
 
@@ -104,7 +106,7 @@ describe("inflight-store", () => {
     expect(commentRow.head_sha).toBe("");
     expect(
       await acquireInflight(db, otherPr(9), { ...OPTS, attemptId: "attempt-2", headSha: "a".repeat(40) }),
-    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: "" });
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: "", heldAttemptId: "attempt-1", heldExpired: false });
   });
 
   test("refuses when the system cap is reached", async () => {
@@ -146,24 +148,34 @@ describe("inflight-store", () => {
     ).toEqual({ ok: false, reason: "workspace-cap" });
   });
 
-  test("an expired row is reclaimed by the next acquire", async () => {
+  test("expiry alone never reassigns the PR — only its own attempt may re-acquire it", async () => {
     const db = freshDb();
     expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
-    const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
+    // §7.9: the lapsed lease is a fence, not evidence that attempt-1 stopped.
     expect(
       await acquireInflight(db, KEY, {
         ...OPTS,
         attemptId: "attempt-2",
-        headSha: newerSha,
         now: "2026-11-03T00:02:00Z",
       }),
-    ).toEqual({ ok: true });
-    // The reclaim replaced the row in place — one row, the newer attempt's,
-    // carrying the newer commit (a stale sha would misjudge the next push).
-    const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    ).toEqual({
+      ok: false,
+      reason: "pr-held",
+      heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: true,
+    });
+    let rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.attempt_id).toBe("attempt-2");
-    expect(rows[0]!.head_sha).toBe(newerSha);
+    expect(rows[0]!.attempt_id).toBe("attempt-1");
+    // A replay of the SAME attempt is not a successor: it always may re-acquire
+    // the row it already wrote.
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60, now: "2026-11-03T00:02:00Z" })).toEqual({
+      ok: true,
+    });
+    rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.attempt_id).toBe("attempt-1");
   });
 
   test("an expired row does not count toward the caps", async () => {
@@ -187,6 +199,8 @@ describe("inflight-store", () => {
       ok: false,
       reason: "pr-held",
       heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: false,
     });
   });
 
@@ -267,7 +281,7 @@ describe("inflight-store", () => {
     });
     expect(
       await acquireInflight(db, { ...KEY, owner: "acme", repo: "widgets" }, { ...OPTS, attemptId: "attempt-2" }),
-    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: SHA });
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: SHA, heldAttemptId: "attempt-1", heldExpired: false });
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.owner).toBe("acme");

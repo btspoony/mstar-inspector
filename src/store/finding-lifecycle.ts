@@ -99,7 +99,28 @@ export type PublicationPayload = {
   round: number; targetCommentId: number | null; body: string; bodySha256: string;
   artifact: ReviewArtifactDoc | null; lifecycle: LifecycleRound | null;
   lineIntents: LineIntent[];
+  /**
+   * The attempt that staged this publication (migration 0087's report uses it
+   * to end that attempt's interval when a recovery lane completes the apply).
+   * Optional: rows staged before this field existed carry none, and a recovery
+   * completing one has no attempt to settle.
+   */
+  attemptId?: string;
+  /**
+   * §7.9a binding: the attempt this publication was ADMITTED under (the launch
+   * row id), frozen into the staged payload. Later lanes resolve the launch
+   * row's frozen `(attempt_key, generation)` from it — never "the newest Check
+   * linked to the publication" — so send and recovery name the same identity.
+   * Absent only on rows staged before this field existed; recovery refuses
+   * those rather than falling back to a second identity.
+   */
+  admittedAttemptId?: string;
 };
+
+/** The phases a claimer may resume for: terminal rows are never claimable. */
+export type PublicationClaimPhase = 'prepared' | 'sending' | 'unknown' | 'confirmed';
+
+export type PublicationPhase = PublicationClaimPhase | 'applied' | 'failed' | 'superseded';
 
 export type PublicationRow = {
   id: string; payload: PublicationPayload; proof: PublicationProof | null;
@@ -114,6 +135,10 @@ export type PublicationRow = {
 
 /** Publication lease duration (spec §7.7 step 8: "120s, epoch-fenced"). */
 export const PUBLICATION_LEASE_MS = 120_000;
+
+/** `line_dispatch_ms` value for a row that predates the column: its intent is
+ *  UNKNOWN (the batch may have been sent), so it is discovery-only forever. */
+export const LINE_DISPATCH_UNKNOWN = -1;
 /** Recovery attempt cap — rows at/after this count leave the selectors. */
 export const LIFECYCLE_MAX_ATTEMPTS = 5;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
@@ -340,6 +365,17 @@ export async function stagePublication(
 }
 
 /**
+ * The STAGED journal row by id — the authority `publish` reads rather than any
+ * in-memory copy of the payload: a restart after staging must publish exactly
+ * what was staged, including the body, the target comment, the line intents and
+ * the lifecycle it carries. `null` means the id has no row (nothing to send).
+ */
+export async function readPublication(db: D1Like, id: string): Promise<PublicationRow | null> {
+  const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
+  return row === null ? null : publicationRowOf(row);
+}
+
+/**
  * Conditional epoch-fenced claim (spec §7.0 claims / §7.7 step 8): only a
  * non-terminal publication (`prepared`/`sending`/`unknown`/`confirmed` —
  * `applied`/`failed`/`superseded` are terminal) with a free or expired
@@ -348,22 +384,132 @@ export async function stagePublication(
  * Returns null when the row is gone, terminal, or another holder owns a
  * live lease.
  */
-export async function claimPublication(db: D1Like, id: string, holder: string, nowMs: number): Promise<Lease | null> {
+export async function claimPublication(
+  db: D1Like,
+  id: string,
+  holder: string,
+  nowMs: number,
+  /**
+   * The phase this caller RESUMED for. The READ and the claim are separated by
+   * an unbounded wait, so a row that moved on in between (another lane took the
+   * expired claim, or the work completed) must not be taken by this caller: the
+   * conditional write re-checks the phase in the same statement that dispatches.
+   */
+  expectPhase: PublicationPhase,
+): Promise<Lease | null> {
   const claim = await db
     .prepare(
       `UPDATE review_publications
        SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?, updated_ms = ?,
            attempts = attempts + 1,
            phase = CASE WHEN phase = 'prepared' THEN 'sending' ELSE phase END
-       WHERE id = ? AND phase IN ('prepared','sending','unknown','confirmed')
-         AND (lease_until_ms IS NULL OR lease_until_ms <= ?)`,
+       WHERE id = ? AND phase = ?
+         AND phase IN ('prepared','sending','unknown','confirmed')
+         AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+       RETURNING holder, lease_epoch, lease_until_ms`,
     )
-    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, nowMs)
+    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, id, expectPhase, nowMs)
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote: no later lookup can hand this
+  // claimant a row a same-holder acquisition took after it.
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== holder ||
+    written.lease_until_ms !== nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+// ---------------------------------------------------------------------------
+// §7.9 publication lease — authority over ONE action, not over the attempt
+// ---------------------------------------------------------------------------
+
+/** What a publication acquisition is for. Not part of the key: a `recover`
+ *  contends with a live `send` of the same action instead of bypassing it. */
+export type PublicationLeaseMode = "send" | "recover";
+
+/** The durable identity of one publishable action on one attempt. `actionKey`
+ *  is the mutation (`check:complete`, `comment:<publicationId>`), never a
+ *  caller or a delivery. */
+export type PublicationAction = { attemptId: string; actionKey: string };
+
+/**
+ * Claim the publication lease of ONE action (spec §7.9): its own row, its own
+ * epoch, a fresh `PUBLICATION_LEASE_MS` window — independent of the attempt's
+ * execution lease, which may be live, renewed or expired throughout. One
+ * conditional write takes a free or expired row and increments the epoch;
+ * `null` means another holder owns a live one. Acquiring does not imply (and
+ * does not touch) execution; it says only "this holder may perform THIS
+ * mutation now".
+ */
+export async function claimPublicationLease(
+  db: D1Like,
+  input: PublicationAction & { holder: string; mode: PublicationLeaseMode; nowMs: number },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) {
+    throw new Error("finding-lifecycle: publication lease requires a nonblank holder identity");
+  }
+  const claim = await db
+    .prepare(
+      `INSERT INTO publication_leases
+         (attempt_id, action_key, holder, lease_epoch, lease_until_ms, mode, updated_ms)
+       VALUES (?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT (attempt_id, action_key) DO UPDATE
+         SET holder = excluded.holder,
+             lease_epoch = publication_leases.lease_epoch + 1,
+             lease_until_ms = excluded.lease_until_ms,
+             mode = excluded.mode,
+             updated_ms = excluded.updated_ms
+       WHERE publication_leases.lease_until_ms IS NULL OR publication_leases.lease_until_ms <= ?
+       RETURNING holder, lease_epoch, lease_until_ms`,
+    )
+    .bind(
+      input.attemptId, input.actionKey, input.holder,
+      input.nowMs + PUBLICATION_LEASE_MS, input.mode, input.nowMs,
+      input.nowMs,
+    )
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote, so the claim carries the identity it
+  // established instead of re-reading a row a delayed caller could no longer
+  // own. Zero rows = the guard refused (a live holder). A row that is not the
+  // fence this call wrote — another holder, or an expiry other than the one
+  // bound here — is a refusal, never a live lease.
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== input.holder ||
+    written.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+/**
+ * Release the publication lease of ONE action under the epoch it was granted
+ * with: holder and expiry clear, the epoch stays (a late release of an older
+ * acquisition can never clear a newer one). Deliberately not gated on
+ * `lease_until_ms > now` — a holder whose window lapsed still owns its own row
+ * by epoch, and a lapsed publication right is not evidence about the remote
+ * effect. Releases nothing else: execution, the Check row and the journal are
+ * untouched.
+ */
+export async function releasePublicationLease(
+  db: D1Like,
+  input: PublicationAction & { lease: Lease; nowMs: number },
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE publication_leases
+          SET holder = NULL, lease_until_ms = NULL, updated_ms = ?
+        WHERE attempt_id = ? AND action_key = ? AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(input.nowMs, input.attemptId, input.actionKey, input.lease.holder, input.lease.epoch)
     .run();
-  if (claim.meta.changes === 0) return null;
-  const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
-  if (row === null || row.holder !== holder || row.lease_until_ms === null) return null;
-  return { holder, epoch: row.lease_epoch, untilMs: row.lease_until_ms };
+  return released.meta.changes === 1;
 }
 
 /**
@@ -579,23 +725,42 @@ export async function applyPublishedLifecycle(
    * observed between chunks instead of being assumed live.
    */
   clock?: () => number,
+  /**
+   * Statements appended to the SAME atomic apply as the applied mark, after it:
+   * a caller that must record a completion fact (the attempt's settlement) can
+   * never observe an applied publication with that fact missing. The mark runs
+   * first, so a tail predicate can require `phase = 'applied'`. An idempotent
+   * replay (row already applied) runs the tail alone — it is the only work left.
+   */
+  tail?: (payload: PublicationPayload) => D1StatementLike[],
 ): Promise<boolean> {
   const nowAt = clock ?? (() => nowMs);
   const row = await db.prepare(`SELECT * FROM review_publications WHERE id = ?`).bind(id).first<ReviewPublicationRow>();
   if (row === null) return false;
-  if (row.phase === "applied") return true; // idempotent replay — nothing left to apply
+  if (row.phase === "applied") {
+    // Idempotent replay: nothing left to apply, but a caller's completion fact
+    // may still be owed.
+    const tailStatements = tail?.(JSON.parse(row.payload_json) as PublicationPayload) ?? [];
+    if (tailStatements.length > 0) await db.batch(tailStatements);
+    return true;
+  }
   // Live lease fence (holder + epoch + unexpired) and positive persisted proof.
   if (row.holder !== lease.holder || row.lease_epoch !== lease.epoch) return false;
   if (row.lease_until_ms === null || row.lease_until_ms <= nowAt()) return false;
   if (row.phase !== "confirmed" || row.proof_json === null) return false;
 
   const payload = JSON.parse(row.payload_json) as PublicationPayload;
+  const tailStatements = tail?.(payload) ?? [];
 
   if (payload.kind === "degraded") {
     // Degraded payload: artifact/lifecycle null, empty line intents — no
     // normal review or lifecycle rows are created from it (spec §7.7).
-    const applied = await markPublicationApplied(db, row.id, lease, nowMs).run();
-    return applied.meta.changes > 0;
+    if (tailStatements.length === 0) {
+      const applied = await markPublicationApplied(db, row.id, lease, nowMs).run();
+      return applied.meta.changes > 0;
+    }
+    const [applied] = await db.batch([markPublicationApplied(db, row.id, lease, nowMs), ...tailStatements]);
+    return (applied?.meta.changes ?? 0) > 0;
   }
   if (payload.kind !== "review" || payload.artifact === null || payload.lifecycle === null) {
     // A review-kind payload without its complete artifact/lifecycle is
@@ -652,19 +817,22 @@ export async function applyPublishedLifecycle(
       LIFECYCLE_APPLY_BATCH_STATEMENTS,
     ),
   ];
+  // The caller's completion facts ride the FINAL chunk, after the applied mark:
+  // same transaction, so neither fact can land without the other.
+  if (tailStatements.length > 0) chunks[chunks.length - 1]!.push(...tailStatements);
   const results: D1BatchResult[] = [];
   for (const chunk of chunks) {
     // Per-chunk fence (§7.11.1): the apply may span a real time window, and
     // once the 120s lease expires another invocation can claim a NEWER epoch.
     // Re-prove the SAME live holder/epoch before this chunk writes, so a
     // stale invocation stops instead of mutating findings/rounds/associations
-    // under an ownership it no longer holds. The final chunk still carries
-    // the applied mark as its last statement — its SQL re-checks the same
-    // predicate, so a replacement mid-chunk can never mark complete.
+    // under an ownership it no longer holds. The final chunk's applied mark
+    // still re-checks the same predicate in its own SQL, so a replacement
+    // mid-chunk can never mark complete (nor satisfy a tail's `applied` guard).
     if (!(await publicationLeaseIsLive(db, id, lease, nowAt()))) return false;
     results.push(...(await db.batch(chunk)));
   }
-  const applied = results[results.length - 1]!;
+  const applied = results[results.length - 1 - tailStatements.length]!;
   return applied.meta.changes > 0;
 }
 
@@ -1220,6 +1388,241 @@ export async function releaseUnspentPublicationClaim(
     .bind(nowMs, id, lease.holder, lease.epoch)
     .run();
   return result.meta.changes > 0;
+}
+
+/** One applied publication's post-apply line batch: is work still pending, and
+ *  has a dispatch intent already been recorded (the batch may have been sent)? */
+export type LineBatchState = { pending: boolean; dispatched: boolean };
+
+/**
+ * Read the batch's durable state. `dispatched` is the §7.9a evidence question:
+ * an intent means some lane took the send right for this exact batch, so the
+ * only remaining work is read-only discovery — never a second send. A row that
+ * predates the column carries `LINE_DISPATCH_UNKNOWN` and is treated the same
+ * way: its intent is unknown, not absent.
+ */
+export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
+  const row = await db
+    .prepare(`SELECT line_dispatch_ms FROM review_publications WHERE id = ?`)
+    .bind(id)
+    .first<{ line_dispatch_ms: number | null }>();
+  if (row === null) return { pending: false, dispatched: false };
+  const pending = await db
+    .prepare(`SELECT 1 AS hit FROM review_threads WHERE publication_id = ? AND review_id IS NULL LIMIT 1`)
+    .bind(id)
+    .first<{ hit: number }>();
+  return { pending: pending !== null, dispatched: row.line_dispatch_ms !== null };
+}
+
+/**
+ * §7.9a condition 2: the applied mark cleared the journal claim, so the no-Check
+ * lane's line batch takes a FRESH claim of its own — and records the DISPATCH
+ * INTENT in that same conditional transition. One statement decides who may
+ * send this exact batch: the row must be `applied`, carry no prior intent, hold
+ * a free/expired lease, and still have an uncaptured line intent. `null` means
+ * the batch was already dispatched (discovery only), another lane owns it, or
+ * nothing is pending.
+ */
+export async function recordLineDispatchIntent(
+  db: D1Like,
+  id: string,
+  holder: string,
+  nowMs: number,
+): Promise<Lease | null> {
+  if (holder.length === 0) throw new Error("finding-lifecycle: line-batch claim requires a nonblank holder identity");
+  const claim = await db
+    .prepare(
+      `UPDATE review_publications
+          SET holder = ?, lease_epoch = lease_epoch + 1, lease_until_ms = ?,
+              line_dispatch_ms = ?, updated_ms = ?
+        WHERE id = ? AND phase = 'applied' AND line_dispatch_ms IS NULL
+          AND (lease_until_ms IS NULL OR lease_until_ms <= ?)
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
+        RETURNING holder, lease_epoch, lease_until_ms`,
+    )
+    .bind(holder, nowMs + PUBLICATION_LEASE_MS, nowMs, nowMs, id, nowMs, id)
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== holder ||
+    written.lease_until_ms !== nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+/**
+ * Hand the line-batch send right back under the exact epoch it was granted with.
+ * `sent: true` (the batch landed, or may have) KEEPS the durable intent — from
+ * then on the work is discovery. `sent: false` is a definitive pre-send refusal:
+ * nothing left the Worker, so the intent is cleared and a later lane may record
+ * a new one. `phase` stays `applied` in both cases.
+ */
+export async function releaseLineDispatch(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: number,
+  sent: boolean,
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE review_publications
+          SET holder = NULL, lease_until_ms = NULL,
+              line_dispatch_ms = CASE WHEN ? THEN line_dispatch_ms ELSE NULL END,
+              updated_ms = ?
+        WHERE id = ? AND holder = ? AND lease_epoch = ? AND phase = 'applied'`,
+    )
+    .bind(sent ? 1 : 0, nowMs, id, lease.holder, lease.epoch)
+    .run();
+  return released.meta.changes > 0;
+}
+
+/**
+ * Persist the captured line-comment ids against their associations (the §7.7
+ * step 10 capture). Replay-safe and scoped to the publication, so a discovery
+ * pass in another lane can complete what a send could not read back.
+ */
+export async function captureLineComments(
+  db: D1Like,
+  publicationId: string,
+  reviewId: number | null,
+  posted: readonly { associationId: string; commentId: number }[],
+  nowMs: number,
+): Promise<void> {
+  if (posted.length === 0) return;
+  await db.batch(
+    posted.map((p) =>
+      db
+        .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ? AND publication_id = ?`)
+        .bind(reviewId, p.commentId, nowMs, p.associationId, publicationId),
+    ),
+  );
+}
+
+/**
+ * The post-apply line lane's selection: applied rows that still carry an
+ * uncaptured line intent and no live holder. `line_dispatch_ms` is deliberately
+ * not filtered — a dispatched row is returned so the recovery lane can run the
+ * read-only discovery the intent allows.
+ */
+export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
+  const rows = await db
+    .prepare(
+      `SELECT * FROM review_publications p
+        WHERE p.phase = 'applied'
+          AND (p.lease_until_ms IS NULL OR p.lease_until_ms <= ?)
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
+        ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id
+        LIMIT ?`,
+    )
+    .bind(nowMs, limit)
+    .all<ReviewPublicationRow>();
+  return rows.results.map(publicationRowOf);
+}
+
+// ---------------------------------------------------------------------------
+// §7.9a condition 3 — one authority over ONE degraded target comment
+// ---------------------------------------------------------------------------
+
+/** The exact degraded comment a cleanup and its publishers contend on. */
+export type DegradedTargetRef = { scope: Scope; commentId: number };
+
+const DEGRADED_TARGET_COLUMNS = "bot_id = ? AND installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?";
+
+function degradedTargetBinds({ scope, commentId }: DegradedTargetRef): [string, number, string, string, number, number] {
+  return [scope.appId, scope.installationId, scope.owner, scope.repo, scope.prNumber, commentId];
+}
+
+/**
+ * Claim writer exclusion for ONE degraded target comment (spec §7.9a condition
+ * 3). The cleanup takes it before DELETE; a degraded publisher (its staging AND
+ * its recovery send) takes it before an UPDATE of that comment. One conditional
+ * row, one epoch: a live holder refuses the other side, and a target whose last
+ * DELETE is UNRESOLVED (`unresolved_ms` set) refuses every writer until a fresh
+ * complete observation proves the outcome — there is no time bound that quietly
+ * re-opens it.
+ */
+export async function claimDegradedTarget(
+  db: D1Like,
+  input: DegradedTargetRef & { holder: string; nowMs: number; deleting?: boolean },
+): Promise<Lease | null> {
+  if (input.holder.length === 0) throw new Error("finding-lifecycle: degraded target claim requires a nonblank holder identity");
+  // A DELETE records its unresolved intent IN the acquiring statement: from the
+  // moment the target is held, every writer is refused — and a crash before the
+  // DELETE even starts leaves the intent durable once the lease lapses.
+  const unresolvedMs = input.deleting === true ? input.nowMs : null;
+  const claim = await db
+    .prepare(
+      `INSERT INTO degraded_target_leases
+         (bot_id, installation_id, owner, repo, pr_number, comment_id,
+          holder, lease_epoch, lease_until_ms, unresolved_ms, updated_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+       ON CONFLICT (bot_id, installation_id, owner, repo, pr_number, comment_id) DO UPDATE
+         SET holder = excluded.holder,
+             lease_epoch = degraded_target_leases.lease_epoch + 1,
+             lease_until_ms = excluded.lease_until_ms,
+             unresolved_ms = excluded.unresolved_ms,
+             updated_ms = excluded.updated_ms
+         WHERE (degraded_target_leases.lease_until_ms IS NULL
+                OR degraded_target_leases.lease_until_ms <= ?)
+           AND degraded_target_leases.unresolved_ms IS NULL
+       RETURNING holder, lease_epoch, lease_until_ms`,
+    )
+    .bind(
+      ...degradedTargetBinds(input),
+      input.holder,
+      input.nowMs + PUBLICATION_LEASE_MS,
+      unresolvedMs,
+      input.nowMs,
+      input.nowMs,
+    )
+    .run<{ holder: string; lease_epoch: number; lease_until_ms: number | null }>();
+  // The statement RETURNS the row it wrote: a same-holder acquisition that took
+  // a later epoch can never be mistaken for this one (no read-back).
+  const written = claim.results[0];
+  if (
+    written === undefined ||
+    written.holder !== input.holder ||
+    written.lease_until_ms !== input.nowMs + PUBLICATION_LEASE_MS
+  ) {
+    return null;
+  }
+  return { holder: written.holder, epoch: written.lease_epoch, untilMs: written.lease_until_ms };
+}
+
+/**
+ * Hand the target exclusion back under the exact epoch it was granted with.
+ * `keep: true` leaves the UNRESOLVED marker set (a DELETE that may have landed):
+ * no writer and no new delete may use the target again — there is no observation
+ * that can prove a late DELETE will not land, so this is a permanent exclusion
+ * (the plan's boundary note). `keep: false` is a known response, which is proof,
+ * and frees the target.
+ */
+export async function releaseDegradedTarget(
+  db: D1Like,
+  input: DegradedTargetRef & { lease: Lease; nowMs: number; keep: boolean },
+): Promise<boolean> {
+  const released = await db
+    .prepare(
+      `UPDATE degraded_target_leases
+          SET holder = NULL, lease_until_ms = NULL,
+              unresolved_ms = CASE WHEN ? THEN ? ELSE NULL END,
+              updated_ms = ?
+        WHERE ${DEGRADED_TARGET_COLUMNS} AND holder = ? AND lease_epoch = ?`,
+    )
+    .bind(
+      input.keep ? 1 : 0,
+      input.nowMs,
+      input.nowMs,
+      ...degradedTargetBinds(input),
+      input.lease.holder,
+      input.lease.epoch,
+    )
+    .run();
+  return released.meta.changes === 1;
 }
 
 /**

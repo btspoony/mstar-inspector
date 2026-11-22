@@ -121,7 +121,7 @@ describe("deploy-status.sh", () => {
     expect(status(...args).out).toBe(`deploy_status=not-deployed\nrequested_sha=${SHA_A}\n`);
 
     const src = readFileSync(join(SCRIPTS, "deploy-status.sh"), "utf8");
-    const guardStart = src.indexOf("# Two version-creating steps:");
+    const guardStart = src.indexOf('if [ "$outcome" = "success" ] && [ "$#" -ge 4 ]');
     const guardEnd = src.indexOf('if [ "$outcome" = "success" ]; then');
     expect(guardStart, "the serving guard is missing from deploy-status.sh").toBeGreaterThan(-1);
     expect(guardEnd).toBeGreaterThan(guardStart);

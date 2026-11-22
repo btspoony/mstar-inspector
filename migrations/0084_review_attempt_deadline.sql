@@ -1,0 +1,12 @@
+-- The attempt's absolute hard stop, frozen when its delivery is first admitted
+-- as the original Queue send stamp plus the operator's end-to-end cap
+-- (`review_runtime_settings`), and replayed unchanged by a redelivery or a
+-- recovery re-enqueue of the same message.
+--
+-- It lives on the delivery's handoff row because that row is the one record
+-- written BEFORE the Workflow instance exists: an interrupted create, an
+-- ambiguous one and a re-enqueue all replay the same attempt id, so they must
+-- replay the same instant instead of re-reading a cap the operator may have
+-- changed in between. NULL on rows written before this column existed; the
+-- next admission freezes it once and never moves it again.
+ALTER TABLE review_attempt_handoffs ADD COLUMN deadline_ms INTEGER;

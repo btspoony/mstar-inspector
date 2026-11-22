@@ -1,5 +1,5 @@
 /**
- * Per-review omp models.yml synthesis (AL-23-1; the
+ * why: Per-review omp models.yml synthesis (AL-23-1; the
  * capability-host base, always synthesize).
  *
  * omp 18.13.3 has NO include semantics: the SDK's ModelRegistry reads exactly
@@ -36,16 +36,16 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type CapabilityHost, type CustomProviderDeclaration } from "../../shared/src/runtime";
 
-/** File name the SDK loads from the agentDir (model-registry single-file). */
+/** note: File name the SDK loads from the agentDir (model-registry single-file). */
 const MODELS_YAML_NAME = "models.yml";
 
-/** Top-level YAML mapping-key line (`name:` at column 0, optional trailing comment). */
+/** note: Top-level YAML mapping-key line (`name:` at column 0, optional trailing comment). */
 const TOP_LEVEL_KEY_RE = /^[A-Za-z0-9_-]+:\s*(?:#.*)?$/;
 
-/** Provider-entry line under `providers:` (2-space indent). */
+/** note: Provider-entry line under `providers:` (2-space indent). */
 const PROVIDER_KEY_RE = /^  ([A-Za-z0-9_-]+):\s*(?:#.*)?$/;
 
-/** Double-quoted YAML scalar with the standard escapes (safe for any value). */
+/** note: Double-quoted YAML scalar with the standard escapes (safe for any value). */
 function yamlQuote(value: string): string {
   const escaped = value
     .replace(/\\/g, "\\\\")
@@ -57,7 +57,7 @@ function yamlQuote(value: string): string {
 }
 
 /**
- * One capability-host block, 2-space-indented under `providers:` — byte-shape
+ * why: One capability-host block, 2-space-indented under `providers:` — byte-shape
  * identical to the baked in-image models.yml body this generator replaced,
  * MINUS the scalar `apiKey` and with `auth: oauth`. A models.yml `apiKey` is
  * registered as a tier-2 config override and would suppress the stored
@@ -94,24 +94,24 @@ export function capabilityHostsYaml(hosts: readonly CapabilityHost[]): string {
   return ["providers:", ...blocks].join("\n") + "\n";
 }
 
-/** One custom provider block, 2-space-indented under `providers:`. */
+/** note: One custom provider block, 2-space-indented under `providers:`. */
 function providerBlock(decl: CustomProviderDeclaration): string {
-  // The provider KEY is double-quoted too: YAML 1.1 parses bare `on:`/`yes:`/
+  // why: The provider KEY is double-quoted too: YAML 1.1 parses bare `on:`/`yes:`/
   // `true:` keys as booleans, which a strict parser then rejects inside the
   // providers map (values are already quoted via yamlQuote).
   const lines = [`  ${yamlQuote(decl.provider_id)}:`];
   lines.push(`    baseUrl: ${yamlQuote(decl.base_url)}`);
-  // The api enum value is quoted like every other user-derived scalar (QC
+  // safety: The api enum value is quoted like every other user-derived scalar (QC
   // wave-1 S-003): the runner input is the in-image trust edge, and a hostile
   // `api` carrying a newline would otherwise break the YAML shape.
   lines.push(`    api: ${yamlQuote(decl.api)}`);
-  // Same poolized shape as the capability blocks: no apiKey pin (it would be a
+  // why: Same poolized shape as the capability blocks: no apiKey pin (it would be a
   // tier-2 config override suppressing the stored pool), auth oauth.
   lines.push("    auth: oauth");
   lines.push("    models:");
   for (const id of decl.model_ids) {
     lines.push(`      - id: ${yamlQuote(id)}`);
-    // Only what the owner STATED: the capability-host key order and
+    // why: Only what the owner STATED: the capability-host key order and
     // indentation, no default and no guessed number. An id-only model keeps
     // the bare `- id:` entry it has always had.
     const meta = decl.models_meta?.[id];
@@ -152,7 +152,7 @@ export function synthesizeModelsYaml(
     );
   }
 
-  // Existing base provider ids under `providers:` — base wins on collision.
+  // note: Existing base provider ids under `providers:` — base wins on collision.
   const baseProviderIds = new Set<string>();
   for (let index = providersIndex + 1; index < lines.length; index++) {
     const line = lines[index] ?? "";
@@ -160,11 +160,11 @@ export function synthesizeModelsYaml(
     if (providerId !== undefined) {
       baseProviderIds.add(providerId);
     } else if (TOP_LEVEL_KEY_RE.test(line)) {
-      break; // left the providers block
+      break; // note: left the providers block
     }
   }
 
-  // Insert point: the next top-level key after the providers block (or EOF).
+  // note: Insert point: the next top-level key after the providers block (or EOF).
   let insertAt = lines.length;
   for (let index = providersIndex + 1; index < lines.length; index++) {
     if (TOP_LEVEL_KEY_RE.test(lines[index] ?? "")) {
@@ -176,7 +176,7 @@ export function synthesizeModelsYaml(
   const blocks: string[] = [];
   for (const decl of customProviders) {
     if (baseProviderIds.has(decl.provider_id)) {
-      onCollision?.(decl.provider_id); // base wins (AL-23-1) — never silent
+      onCollision?.(decl.provider_id); // why: base wins (AL-23-1) — never silent
       continue;
     }
     blocks.push(providerBlock(decl));
@@ -217,7 +217,7 @@ export async function writePerReviewModelsYaml(
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, MODELS_YAML_NAME), synthesizeModelsYaml(baseYaml, customProviders, onCollision));
   } catch (err) {
-    // A throw between mkdir and writeFile must not leak the fresh
+    // why: A throw between mkdir and writeFile must not leak the fresh
     // /tmp/omp-agent-<uuid> dir: remove it before rethrowing so every caller
     // (runner, verify-synthesis.sh) keeps fail-loud semantics with no residue.
     await rm(dir, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 /**
- * Budget-exhaustion vocabulary — the runner's structured stop signal and the
+ * why: Budget-exhaustion vocabulary — the runner's structured stop signal and the
  * typed terminal outcome the Worker normalizes it into. Zero I/O, zero SDK
  * imports, safe to import from BOTH runtime faces (container Bun and
  * workerd), same rule as every `*-wire.ts` module here.
@@ -82,7 +82,7 @@ export type BudgetExhaustedOutcome = {
   changedLines: number | null;
 };
 
-/** The signal document's exact key set — nothing else may ride it. */
+/** invariant: The signal document's exact key set — nothing else may ride it. */
 const SIGNAL_KEYS: Record<string, true> = { schema: true, seatsDispatched: true, seatsStopped: true };
 
 /**
@@ -94,12 +94,12 @@ const SIGNAL_KEYS: Record<string, true> = { schema: true, seatsDispatched: true,
 export function isReviewBudgetExhaustedSignal(value: unknown): value is ReviewBudgetExhaustedSignal {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const doc = value as Record<string, unknown>;
-  // The schema literal is the whole discriminator: without it the document
+  // why: The schema literal is the whole discriminator: without it the document
   // is unrelated stdout, whatever counts it carries. Keys must be exact OWN
   // names — `in` would admit inherited names like `constructor` as document
   // keys, so the key table is probed with `Object.hasOwn`.
   if (doc.schema !== REVIEW_BUDGET_EXHAUSTED_SCHEMA) return false;
-  // Reads traverse the prototype, so the required keys must be own properties
+  // why: Reads traverse the prototype, so the required keys must be own properties
   // too — `Object.keys` alone cannot see an inherited `seatsStopped`.
   for (const key of Object.keys(SIGNAL_KEYS)) {
     if (!Object.hasOwn(doc, key)) return false;
@@ -128,13 +128,13 @@ export function isReviewBudgetExhaustedSignal(value: unknown): value is ReviewBu
 export class RunnerBudgetExhausted extends Error {
   readonly seatsDispatched: number;
   readonly seatsStopped: number;
-  /** The recheck round's settled document, or null; attached by the runtime before the throw propagates. */
+  /** note: The recheck round's settled document, or null; attached by the runtime before the throw propagates. */
   recheck: RecheckDoc | null = null;
-  /** The recheck round's status, when a recheck round ran. */
+  /** note: The recheck round's status, when a recheck round ran. */
   recheckStatus?: RecheckStatus;
-  /** The provider/model the run's sessions actually served, when one did. */
+  /** note: The provider/model the run's sessions actually served, when one did. */
   appliedModel?: string;
-  /** Always null — a report seat needs a settled envelope and never runs on this path. */
+  /** why: Always null — a report seat needs a settled envelope and never runs on this path. */
   readonly report: ReportDoc | null = null;
 
   constructor(seatsDispatched: number, seatsStopped: number) {
@@ -146,7 +146,7 @@ export class RunnerBudgetExhausted extends Error {
     this.seatsStopped = seatsStopped;
   }
 
-  /** The stdout document this stop publishes — validated by {@link isReviewBudgetExhaustedSignal} at the boundary. */
+  /** note: The stdout document this stop publishes — validated by {@link isReviewBudgetExhaustedSignal} at the boundary. */
   signal(): ReviewBudgetExhaustedSignal {
     return {
       schema: REVIEW_BUDGET_EXHAUSTED_SCHEMA,

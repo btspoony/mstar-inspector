@@ -1,5 +1,5 @@
 /**
- * Where the catalog's data lives, and which snapshot is current.
+ * note: Where the catalog's data lives, and which snapshot is current.
  *
  * A directory says who owns the file: `inputs/` is the only place a human or an
  * external service writes, `generated/` is rebuilt by a step. This module names

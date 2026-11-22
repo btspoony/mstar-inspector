@@ -1,5 +1,5 @@
 /**
- * Author-time extractor for the two vendored omp snapshots:
+ * note: Author-time extractor for the two vendored omp snapshots:
  *   `scripts/provider-catalog/generated/omp-api-key-providers.json`
  *   `scripts/provider-catalog/generated/omp-provider-verify.json`
  *
@@ -52,12 +52,12 @@ const PI_CATALOG_DIR = path.dirname(
   createRequire(import.meta.url).resolve("@oh-my-pi/pi-catalog/package.json"),
 );
 const RULES_PATH = path.join(PI_CATALOG_DIR, "src/compat/rules.json");
-/** The newest committed models.dev snapshot (the generator reads the same one). */
+/** note: The newest committed models.dev snapshot (the generator reads the same one). */
 const MODELS_DEV_PATH = path.join(INPUTS_DIR, pickNewestSnapshot(await readdir(INPUTS_DIR)).file);
 const OUT_PROVIDERS_PATH = path.join(GENERATED_DIR, "omp-api-key-providers.json");
 const OUT_VERIFY_PATH = path.join(GENERATED_DIR, "omp-provider-verify.json");
 /**
- * Hand-measured, vendor-authoritative vocabularies. Read-only input: this
+ * why: Hand-measured, vendor-authoritative vocabularies. Read-only input: this
  * script never writes it, so the file survives every regeneration.
  */
 const OVERRIDES_PATH = path.join(INPUTS_DIR, "overrides.json");
@@ -93,7 +93,7 @@ type OmpRecord = {
 };
 type VerifyRecord = { id: string; url: string; headersHook?: string };
 
-/** The naming aliases the catalog already resolves through (kept verbatim —
+/** note: The naming aliases the catalog already resolves through (kept verbatim —
  *  the generator validates each target is a catalog row). */
 const ALIAS: Record<string, string> = {
   abliteration: "abliteration-ai",
@@ -114,7 +114,7 @@ const ALIAS: Record<string, string> = {
   "opencode-zen": "opencode",
 };
 
-/** The builtin tier's models.dev source keys (generator BUILTIN_ORDER).
+/** note: The builtin tier's models.dev source keys (generator BUILTIN_ORDER).
  *  A builtin row owns its protocol, so the union never restates these. */
 const BUILTIN_IDS: Record<string, true> = Object.fromEntries(
   [
@@ -140,7 +140,7 @@ const BUILTIN_IDS: Record<string, true> = Object.fromEntries(
   ].map((id) => [id, true]),
 );
 
-/** The builtin tier's models.dev source keys (generator BUILTIN_ORDER).
+/** note: The builtin tier's models.dev source keys (generator BUILTIN_ORDER).
  *  A builtin row owns its protocol, so the union never restates these. */
 const BUILTIN_SOURCE_KEYS: Record<string, true> = Object.fromEntries(
   [
@@ -165,7 +165,7 @@ const BUILTIN_SOURCE_KEYS: Record<string, true> = Object.fromEntries(
   ].map((key) => [key, true]),
 );
 
-/** The materializable protocol vocabulary (generator MATERIALIZABLE_APIS) and
+/** note: The materializable protocol vocabulary (generator MATERIALIZABLE_APIS) and
  *  the custom-provider id grammar / URL-placeholder allowlist. A record that
  *  fails any of these is recorded as an exclusion instead of a row. */
 const MATERIALIZABLE_APIS: Record<string, true> = {
@@ -177,14 +177,14 @@ const MATERIALIZABLE_APIS: Record<string, true> = {
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
 
-/** The curated workers-ai template consumes this snapshot key (generator
+/** note: The curated workers-ai template consumes this snapshot key (generator
  *  TEMPLATE_DEDUPE_SNAPSHOT_KEYS). */
 const TEMPLATE_DEDUPE_SNAPSHOT_KEYS: Record<string, true> = { "cloudflare-workers-ai": true };
 
 const pkg = JSON.parse(await readFile(path.join(PI_CATALOG_DIR, "package.json"), "utf8")) as { version: string };
 const rules = JSON.parse(await readFile(RULES_PATH, "utf8")) as Rules;
 const modelsDev = JSON.parse(await readFile(MODELS_DEV_PATH, "utf8")) as Record<string, unknown>;
-/** Absent file = no overrides; a malformed one stops the run instead of being ignored. */
+/** why: Absent file = no overrides; a malformed one stops the run instead of being ignored. */
 const overrides = await readFile(OVERRIDES_PATH, "utf8")
   .then((text) => JSON.parse(text) as Record<string, Override>)
   .catch((error: unknown) => {
@@ -199,7 +199,7 @@ const ompProviderIds: string[] = [];
 const nonModel: string[] = [];
 const oauthOrDeviceCode: string[] = [];
 const notMaterializable: Record<string, string> = {};
-/** models.dev snapshot keys this snapshot takes over (mixed-protocol rows). */
+/** note: models.dev snapshot keys this snapshot takes over (mixed-protocol rows). */
 const ownsSnapshotKeys: string[] = [];
 
 const modelsDevKeys = new Set(Object.keys(modelsDev));
@@ -247,7 +247,7 @@ for (const auth of rules.auth.providers) {
   const env = envFor(id, auth);
   const label = rule?.discovery?.label ?? auth.name ?? id;
 
-  // Rule (a): the catalog already carries this provider. EXCEPTION — a
+  // note: Rule (a): the catalog already carries this provider. EXCEPTION — a
   // mixed-protocol provider needs one declaration per protocol, which a
   // single models.dev row cannot express, so omp owns that snapshot key.
   if (
@@ -260,10 +260,10 @@ for (const auth of rules.auth.providers) {
   }
   const inModelsDev = modelsDevKeys.has(id);
   const protocols = new Set(rows.map((row) => row.api));
-  // A single-protocol provider the models.dev snapshot carries already has
+  // why: A single-protocol provider the models.dev snapshot carries already has
   // its breadth row — nothing to add here.
   if (inModelsDev && protocols.size <= 1) continue;
-  // Rule (c): no env key → not an API-key model provider (search, local,
+  // note: Rule (c): no env key → not an API-key model provider (search, local,
   // on-device). OAuth/device-code logins are recorded under their own rule.
   // A provider the models.dev snapshot carries keeps its breadth row either
   // way: it is named under rule (a) by the generator, never taken over here
@@ -285,13 +285,13 @@ for (const auth of rules.auth.providers) {
   }
   const primary = mostCommon(rows.map((r) => r.api)) ?? "openai-completions";
   const apis = [...byApi.keys()].sort((a, b) => (a === primary ? -1 : b === primary ? 1 : a.localeCompare(b)));
-  // Build first, then decide ownership: a models.dev key may only be taken
+  // why: Build first, then decide ownership: a models.dev key may only be taken
   // over when at least ONE materializable record replaces it.
   const built: OmpRecord[] = [];
   for (const api of apis) {
     const group = byApi.get(api)!;
     const recordId = api === primary ? id : `${id}-${PROTOCOL_SUFFIX[api] ?? api}`;
-    // `seed.api` is the protocol dialect (see `modelRows`), NOT a URL: using it
+    // safety: `seed.api` is the protocol dialect (see `modelRows`), NOT a URL: using it
     // as a base-URL fallback would prefill a template row with
     // "openai-completions". Only real URLs enter the chain, each tried in turn
     // against the declaration store's https rule.
@@ -324,7 +324,7 @@ for (const auth of rules.auth.providers) {
     built.push(record);
   }
   if (built.length === 0) {
-    // Nothing can replace the breadth row: leave it alone.
+    // note: Nothing can replace the breadth row: leave it alone.
     if (inModelsDev) continue;
     nonModel.push(id);
     continue;
@@ -333,7 +333,7 @@ for (const auth of rules.auth.providers) {
   records.push(...built);
 }
 
-// The hand-measured layer wins over the package, and says so on every run.
+// note: The hand-measured layer wins over the package, and says so on every run.
 const overridden = applyOverrides(records, overrides);
 if (overridden.applied.length > 0) {
   for (const entry of overridden.applied) {
@@ -346,7 +346,7 @@ for (const missing of overridden.unmatched) {
   console.warn(`override ${missing}: no extracted record for that protocol — left unapplied`);
 }
 
-// Verify snapshot: only api-key logins that validate against a GET endpoint.
+// note: Verify snapshot: only api-key logins that validate against a GET endpoint.
 const endpoints: VerifyRecord[] = [];
 for (const auth of rules.auth.providers) {
   const login = auth.login;
@@ -418,7 +418,7 @@ const verifyOut = {
   endpoints,
 };
 
-/** Keep the committed extraction date when the extraction itself is unchanged:
+/** why: Keep the committed extraction date when the extraction itself is unchanged:
  *  the refresh workflow runs this daily, and a date-only diff would open a PR
  *  for data that did not move. */
 async function stableExtracted<T extends { source: { extracted: string } }>(
@@ -436,7 +436,7 @@ async function stableExtracted<T extends { source: { extracted: string } }>(
   return next;
 }
 
-// `generated/` is disposable by contract: deleting it and re-running must
+// why: `generated/` is disposable by contract: deleting it and re-running must
 // reproduce every byte, so the directory is created rather than assumed.
 await mkdir(GENERATED_DIR, { recursive: true });
 await writeFile(
