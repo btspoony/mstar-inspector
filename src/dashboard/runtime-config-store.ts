@@ -846,16 +846,16 @@ export async function getReviewRouteWorkflowGate(
 }
 
 /**
- * One operator save of the route switch, one audit row: `before` carries the
- * stored value only when the read path would trust it (a hand-edited value is
- * `null`, the same way it reads), `after` the accepted one.
+ * One operator save of the route switch, one audit row: `before` is whatever
+ * D1 actually held — a hand-edited `ON` is evidence of the row this save
+ * repaired, not absence — and `null` is reserved for "there was no row".
+ * `after` is the accepted value.
  */
 const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
   INSERT INTO platform_audit_events
     (id, actor_login, action, target_type, target_id, detail_json, created_at)
   VALUES (?1, ?2, 'runtime.route_workflow.set', 'runtime', '${REVIEW_ROUTE_WORKFLOW_KEY}',
-          json_object('before', (SELECT CASE WHEN value IN ('on', 'off') THEN value ELSE NULL END
-                                FROM review_runtime_settings WHERE key = ?5),
+          json_object('before', (SELECT value FROM review_runtime_settings WHERE key = ?5),
                       'after', ?3),
           ?4)`;
 

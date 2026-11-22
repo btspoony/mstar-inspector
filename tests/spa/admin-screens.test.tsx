@@ -1183,6 +1183,67 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an unreadable save echo is confirmed by a re-read, never echoed back", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      return json({
+        ...RUNTIME,
+        // Page load: an untrusted row. The post-save re-read: the store's word.
+        routeWorkflow:
+          runtimeReads === 1
+            ? { mode: "off", saved: false, degraded: true, reason: "untrusted", rejected: '"ON"' }
+            : { mode: "on", saved: true, degraded: false },
+      });
+    });
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The echo carried no gate answer, so the page asked the read path…
+    expect(
+      surface.sent.filter(
+        (request) => request.method === "GET" && request.url === "/_internal_admin/api/runtime",
+      ),
+    ).toHaveLength(2);
+    // …and rendered THAT: the save asked for `off`, the store answered `on`.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "on — saved",
+    );
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "on — deliveries create a Workflow instance",
+    );
+    await surface.close();
+  });
+
+  test("an unreadable echo with a failed re-read says the state is unconfirmed", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      if (runtimeReads > 1) return new Response("unavailable", { status: 503 });
+      return json({
+        ...RUNTIME,
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      });
+    });
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("The save could not be confirmed");
+    // The requested mode is not presented as the stored one.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      'off — untrusted (stored value "ON")',
+    );
+    await surface.close();
+  });
+
   test("an older server without a routeWorkflow field hides only that card", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME));
     expect(surface.container.querySelector('[data-route-workflow="form"]')).toBeNull();

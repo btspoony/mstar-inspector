@@ -1044,8 +1044,8 @@ describe("PATCH /_internal_admin/api/runtime routeWorkflow", () => {
         })
       ).status,
     ).toBe(200);
-    // A value the read path refuses is not a trusted "before".
-    expect(auditDetails(db)).toEqual([{ before: null, after: "on" }]);
+    // The audit records what D1 held: the rejected `ON`, not "no row".
+    expect(auditDetails(db)).toEqual([{ before: "ON", after: "on" }]);
     expect(await getReviewRouteWorkflowGate(db)).toEqual({
       mode: "on",
       saved: true,

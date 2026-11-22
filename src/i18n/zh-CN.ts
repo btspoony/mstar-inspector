@@ -1327,6 +1327,9 @@ export const zhCN: Dictionary = {
       routeWorkflowSaved: "已保存。",
       /** 写入失败且错误无法识别时的兜底文案。 */
       routeWorkflowFailed: "修改审查路由失败。",
+      /** 保存已落库，但响应回显与重读都未能确认模式。 */
+      routeWorkflowUnconfirmed:
+        "无法确认保存结果：响应中没有可读的闸门回答，且重新读取失败，因此存储的模式未知。请重新加载页面读取。",
       /** 流水线在最近 24 小时记录的准入拒绝。 */
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:

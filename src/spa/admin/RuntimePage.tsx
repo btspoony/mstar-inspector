@@ -694,21 +694,31 @@ export function RuntimePage({ locale }: { locale: Locale }) {
 
   /**
    * Set the route switch. `value` is what the control shows (the gate's own
-   * answer until the operator changes it); the store refuses anything but the
-   * two exact strings and answers its gate read-back, so the card renders after
-   * a save what the queue handler will actually act on.
+   * answer until the operator changes it). The store refuses anything but the
+   * two exact strings; an accepted save whose echo carries no readable gate
+   * answer is confirmed by re-reading the runtime face, and an unreadable
+   * re-read says the outcome is unconfirmed — the request value never stands in
+   * for a mode the gate may not be applying.
    */
-  async function onSaveRouteWorkflow(
-    stored: RouteWorkflowConfig,
-    value: "on" | "off",
-  ): Promise<void> {
+  async function onSaveRouteWorkflow(value: "on" | "off"): Promise<void> {
     if (busy) return; // in-flight guard — no double submit
     setBusy(true);
     setNotice(null);
     routeWorkflowSignal.start();
     try {
-      const saved = await setRouteWorkflow(value, stored);
-      update((data) => ({ ...data, routeWorkflow: saved }));
+      const saved = await setRouteWorkflow(value);
+      // The write landed (2xx); only a readable gate answer may be rendered.
+      const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
+      if (answer === null) {
+        setNotice({
+          kind: "error",
+          message: t(locale, "admin.runtime.routeWorkflowUnconfirmed"),
+          source: "routeWorkflow",
+        });
+        routeWorkflowSignal.fail();
+        return;
+      }
+      update((data) => ({ ...data, routeWorkflow: answer }));
       setRouteWorkflowTarget(null);
       setNotice({
         kind: "success",
@@ -1137,7 +1147,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   data-route-workflow="form"
                   onSubmit={(event) => {
                     event.preventDefault();
-                    void onSaveRouteWorkflow(routeWorkflow, routeWorkflowOn ? "on" : "off");
+                    void onSaveRouteWorkflow(routeWorkflowOn ? "on" : "off");
                   }}
                 >
                   <Toggle

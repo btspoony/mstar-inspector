@@ -1595,6 +1595,9 @@ export const en = {
       routeWorkflowSaved: "Saved.",
       /** Fallback when the write fails with an unrecognised error. */
       routeWorkflowFailed: "Could not change the review route.",
+      /** A save landed but neither its echo nor a re-read confirmed the mode. */
+      routeWorkflowUnconfirmed:
+        "The save could not be confirmed: its response carried no readable gate answer and the re-read failed, so the stored mode is unknown. Reload to read it back.",
       /** Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:

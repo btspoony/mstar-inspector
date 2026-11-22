@@ -338,16 +338,25 @@ function parseAttemptCap(row: Json): AttemptCapConfig | null {
   };
 }
 
-/** One gate answer as the store writes it: the read group and the save echo. */
-function parseRouteWorkflowGate(raw: unknown): RouteWorkflowConfig {
-  const gate = map(raw, "runtime routeWorkflow");
-  if (gate.mode !== "on" && gate.mode !== "off") {
-    throw new Error("admin API: routeWorkflow.mode is not on | off");
+/**
+ * One gate answer as the store writes it: the read group and the save echo.
+ * `null` for a foreign shape — the caller decides whether that is a broken
+ * read or an unconfirmed write.
+ */
+function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const gate = raw as Json;
+  if (
+    (gate.mode !== "on" && gate.mode !== "off") ||
+    typeof gate.saved !== "boolean" ||
+    typeof gate.degraded !== "boolean"
+  ) {
+    return null;
   }
   return {
     mode: gate.mode,
-    saved: bool(gate, "saved"),
-    degraded: bool(gate, "degraded"),
+    saved: gate.saved,
+    degraded: gate.degraded,
     // Additive: an absent reason / rejected belongs to a trustworthy answer.
     reason: typeof gate.reason === "string" ? gate.reason : null,
     rejected: typeof gate.rejected === "string" ? gate.rejected : null,
@@ -357,7 +366,11 @@ function parseRouteWorkflowGate(raw: unknown): RouteWorkflowConfig {
 /** The route switch's gate answer; absent (older Worker) answers `null`. */
 function parseRouteWorkflow(row: Json): RouteWorkflowConfig | null {
   const raw = row.routeWorkflow;
-  return raw === undefined ? null : parseRouteWorkflowGate(raw);
+  if (raw === undefined) return null;
+  const gate = routeWorkflowGate(raw);
+  // A present but foreign group is a broken read, not absence.
+  if (gate === null) throw new Error("admin API: routeWorkflow is not a gate answer");
+  return gate;
 }
 
 /** The maintenance window; absent (older Worker) answers `null`. */
@@ -668,28 +681,21 @@ export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Pr
 
 /**
  * Save the route switch, answering the gate read-back the server returned —
- * the mode the queue handler will act on, not this page's assumption. A 2xx
- * whose echo is foreign still landed the write, so the request value then
- * stands in, the same rule as `setSystemConcurrency`.
+ * the mode the queue handler will act on, not this page's assumption. `null`
+ * means the write landed but its echo carried no readable gate answer: the
+ * request value is NOT substituted for it, because a page that shows `on`
+ * while the gate reads `off` is the failure this control exists to prevent.
+ * The caller re-reads the store and renders that answer.
  */
 export async function setRouteWorkflow(
   value: "on" | "off",
-  stored: RouteWorkflowConfig,
-): Promise<RouteWorkflowConfig> {
+): Promise<RouteWorkflowConfig | null> {
   const answer = await write("PATCH", "/runtime", { routeWorkflow: { value } });
   const saved =
     typeof answer === "object" && answer !== null ? (answer as Json).routeWorkflow : undefined;
-  const effective =
-    typeof saved === "object" && saved !== null ? (saved as Json).effective : undefined;
-  if (
-    typeof effective === "object" &&
-    effective !== null &&
-    "mode" in effective &&
-    (effective.mode === "on" || effective.mode === "off")
-  ) {
-    return parseRouteWorkflowGate(effective);
-  }
-  return { ...stored, mode: value, saved: true, degraded: false, reason: null, rejected: null };
+  return typeof saved === "object" && saved !== null
+    ? routeWorkflowGate((saved as Json).effective)
+    : null;
 }
 
 /**
