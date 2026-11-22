@@ -692,6 +692,26 @@ Final manifest permissions: contents write, metadata read, pull_requests write, 
 - `src/worker/lifecycle-reconcile.ts`, `src/worker/check-reconcile.ts`, `src/worker/index.ts`: independent recovery and scheduled composition; `src/worker/sweep.ts` stays read-only.
 - `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, `scripts/sandbox-smoke.ts`, `src/pipeline/smoke-entry.ts`: fresh-App and purpose-scoped smoke contracts.
 
+## Deployment gate
+
+Merging this code does not enable the review route, and no deploy flips it. The queue handler
+(`src/worker/index.ts`) consults the system setting **`review.route.workflow`** on every batch:
+
+- **Absent row — `off`.** A fresh deploy ships closed; shipping the schema is not an admission
+  decision.
+- **`on`** — the only value that admits a delivery to a Workflow instance.
+- **`off`, any other stored value, or an unreadable row — `off`.** Every unreadable shape is a
+  refusal, never permission; `getReviewRouteWorkflowGate` reports it as `degraded` with its
+  reason (`malformed`, `untrusted`, `read-failed`).
+- When off, the batch is acknowledged without creating any Workflow instance and ONE structured
+  line (`event: "review_route_gate_closed"`) names the gate, its source and the batch size. A
+  refused delivery is never silently re-routed to a path that no longer exists.
+
+The setting is an operating switch, not a product surface: it has no dashboard control. The
+operator flips it — one `review_runtime_settings` row — **after** the nine claims hold and
+`I-000666` closes, which makes enabling a deliberate, auditable act rather than a merge side
+effect.
+
 ## Change obligations
 
 Update wire shapes, schema, markers, publication order, both recovery selectors and all direct permission surfaces together. Scoped behavioral evidence must cover identity/domain boundaries, recurrence, evidence range/content validation, truncation, crash boundaries, private-result invisibility, lease races, proof/observation separation and independent reconcilers; source-text/exact-call-count tests do not substitute for behavior. Live installation grants, remote thread resolution and other GitHub effects remain unverified without separately authorized live checks. The `contents:write` requirement for `resolveReviewThread` is based on [GitHub-maintained issue 35726](https://github.com/github/gh-aw/issues/35726) and its [maintainer explanation](https://github.com/github/gh-aw/issues/35726#issuecomment-4693962674), not an official per-mutation permission table; the Worker-only boundary does not claim live permission success.

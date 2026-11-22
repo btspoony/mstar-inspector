@@ -782,6 +782,53 @@ export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemp
   return reason === undefined ? { capMs, degraded } : { capMs, degraded, reason };
 }
 
+/** The review route's operating switch: `on` admits a queue delivery to a Workflow. */
+export const REVIEW_ROUTE_WORKFLOW_KEY = "review.route.workflow";
+
+/**
+ * The gate's answer. `off` is the answer for an ABSENT row, a stored `off`, an
+ * untrusted value and an unreadable row alike — the modes are deliberately not
+ * a boolean, because "the operator has not turned this on" and "the row cannot
+ * be trusted" are different operating facts with the same refusal.
+ */
+export type ReviewRouteWorkflowGate = {
+  mode: "on" | "off";
+  /** A stored row produced the answer (`false` for the absent-row default). */
+  saved: boolean;
+  /** The refusal rests on unreadable evidence, not a stored `off`. */
+  degraded: boolean;
+  reason?: "malformed" | "untrusted" | "read-failed";
+};
+
+/**
+ * May a queue delivery create a Workflow instance? The setting is the gate:
+ * absent is OFF (a fresh deploy must not route live reviews just because the
+ * migration shipped), a stored `on` is the only admission, and every
+ * unreadable shape is OFF — a refusal, never permission. The consumer's queue
+ * handler reads this per batch; nothing else in the pipeline consults it.
+ */
+export async function getReviewRouteWorkflowGate(
+  db: DashboardD1,
+): Promise<ReviewRouteWorkflowGate> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(REVIEW_ROUTE_WORKFLOW_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { mode: "off", saved: false, degraded: false };
+    // A result row without its (NOT NULL) value column is malformed, not absent.
+    if (row.value === undefined) {
+      return { mode: "off", saved: false, degraded: true, reason: "malformed" };
+    }
+    const value = typeof row.value === "string" ? row.value.trim() : row.value;
+    if (value === "on") return { mode: "on", saved: true, degraded: false };
+    if (value === "off") return { mode: "off", saved: true, degraded: false };
+    return { mode: "off", saved: false, degraded: true, reason: "untrusted" };
+  } catch {
+    return { mode: "off", saved: false, degraded: true, reason: "read-failed" };
+  }
+}
+
 /** The audit ledger's target id for the cap (one operator save, one row). */
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
 
