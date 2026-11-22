@@ -378,6 +378,9 @@ function fencedBlockSpans(text: string): FenceSpan[] {
           suggestion: open.suggestion,
         });
         open = null;
+        // The closing line is markup: a closer below the list's content column
+        // also ends that list item, so the stack must not outlive the block.
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
       }
     }
     if (newline === -1) break;

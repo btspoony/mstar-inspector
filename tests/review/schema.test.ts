@@ -840,6 +840,13 @@ describe("dropUnsafeFences (any fence, not only suggestions)", () => {
     expect(dropUnsafeFences(body, 10_000)).toEqual({ text: "before\n", dropped: true });
   });
 
+  test("a closing fence below the list content column also ends the list item", () => {
+    const body = "1. step\n   ```\n   code\n```\n    ```js\n    indented code\nkeep this";
+    // The 0-indent closer ends the list item: the following 4-space line is an
+    // indented code block, not a second fence, so nothing after it is dropped.
+    expect(dropUnsafeFences(body, 10_000)).toEqual({ text: body, dropped: false });
+  });
+
   test("a fence body's list text does not create a frame for a later suggestion", () => {
     const text = "```\n1. item\n```\n\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
     // The `1. item` line is CODE inside the first fence: no list frame exists
