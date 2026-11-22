@@ -87,6 +87,7 @@ import {
   type ReviewOutput,
 } from "../review/schema";
 import { redactSecrets } from "./redact";
+import { isBudgetRefusal } from "../contracts/recovery-budget";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
@@ -2373,15 +2374,18 @@ export function renderLineCommentText(finding: ReviewFinding): string {
  * but an intent's comment is not in it; `readback-scope` — a read, or the
  * authenticated identity a read needs, was unavailable, so nothing could be
  * observed; `capture-failed` — the ids were observed but could not be
- * persisted. It is the last observation the recovery lane can record as the
- * batch's stop reason, never a guess about what happened on GitHub.
+ * persisted; `budget-refused` — the run's request allowance refused the read
+ * before dispatch, so nothing was observed and no attempt is spent. It is the
+ * last observation the recovery lane can record as the batch's stop reason,
+ * never a guess about what happened on GitHub.
  */
 export type LineDiscoveryFailure =
   | "marker-missing"
   | "ambiguous"
   | "comment-gone"
   | "readback-scope"
-  | "capture-failed";
+  | "capture-failed"
+  | "budget-refused";
 
 /**
  * §7.7 line-comment capture result: the returned review
@@ -2695,8 +2699,10 @@ export async function recoverLineCommentsWithOctokit(
       pull_number: input.prNumber,
       per_page: 100,
     });
-  } catch {
-    return unread("readback-scope");
+  } catch (error) {
+    // A refusal before dispatch observed nothing AND spent no attempt (spec
+    // §7.11.1); the caller must leave the batch exactly where it was.
+    return unread(isBudgetRefusal(error) ? "budget-refused" : "readback-scope");
   }
   // EXACTLY ONE review may claim this publication (and its admitted head): two
   // candidates are ambiguous, and an ambiguous readback captures nothing.
@@ -2706,6 +2712,7 @@ export async function recoverLineCommentsWithOctokit(
   if (candidates.length !== 1) return unread(candidates.length === 0 ? "marker-missing" : "ambiguous");
   const review = candidates[0]!;
   let returned: ReturnType<typeof asComments> | null;
+  let refused = false;
   try {
     // ALL pages of the review's comments, through the paginating route.
     const listed = await octokit.paginate(pulls.listCommentsForReview, {
@@ -2716,10 +2723,11 @@ export async function recoverLineCommentsWithOctokit(
       per_page: 100,
     });
     returned = Array.isArray(listed) ? asComments(listed) : null;
-  } catch {
+  } catch (error) {
+    refused = isBudgetRefusal(error);
     returned = null;
   }
-  if (returned === null) return unread("readback-scope");
+  if (returned === null) return unread(refused ? "budget-refused" : "readback-scope");
   const captured = captureLineCommentsOf(input.intents, returned, review.id, {
     publicationId: input.publicationId,
     login: expectedLogin,

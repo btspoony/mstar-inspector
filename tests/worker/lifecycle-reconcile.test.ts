@@ -45,6 +45,9 @@ import {
   recordPublicationProof,
   readLineBatchState,
   recordLineDiscoveryFailure,
+  resetLineDiscoveryFailures,
+  findPublicationJournal,
+  PUBLICATION_PROOF_WAIT_PHASES,
   stagePublication,
   suspendPublicationRecovery,
   suspendResolutionRecovery,
@@ -87,6 +90,7 @@ import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers"
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
+import { RecoveryBudgetRefused } from "../../src/contracts/recovery-budget";
 
 const APP = "11111111-2222-3333-4444-555555555555";
 const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -1575,6 +1579,104 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       .prepare(`SELECT id FROM review_threads WHERE publication_id = ? AND review_id IS NULL`)
       .all("pub-progress") as Array<{ id: string }>;
     expect(pending).toEqual([{ id: "assoc-pub-progress-1" }]);
+  });
+
+  test("re-listing an already captured id is not progress", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-rewrite", appliedAgeMs: 100_000, dispatched: true, intentCount: 2 });
+
+    // Pass 1 captures the first comment: a NEW id, so the count stays at zero.
+    const reader = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-rewrite", commentId: 9401, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: false,
+          reviewId: 9400,
+          failure: "comment-gone",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: reader, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-rewrite").line_discovery_attempts).toBe(0);
+
+    // Pass 2 lists the SAME id again (a rewrite, not a capture) and still
+    // misses the second comment: that pass saved nothing and counts.
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 1_000, reviewer: reader, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-rewrite")).toMatchObject({
+      line_discovery_attempts: 1,
+      line_unresolvable_ms: null,
+    });
+  });
+
+  test("the count and the reset never stamp updated_ms, so a same-head row stays unattributed", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-old", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 1 });
+    const writtenAt = (
+      db.raw.prepare(`SELECT updated_ms FROM review_publications WHERE id = ?`).get("pub-old") as { updated_ms: number }
+    ).updated_ms;
+    // A newer generation admitted after that last write, same scope and head.
+    const admittedMs = T0;
+
+    expect((await recordLineDiscoveryFailure(db, "pub-old", "marker-missing", 0, T0))?.attempts).toBe(2);
+    await resetLineDiscoveryFailures(db, "pub-old");
+
+    const after = db.raw
+      .prepare(`SELECT updated_ms, line_discovery_attempts FROM review_publications WHERE id = ?`)
+      .get("pub-old") as { updated_ms: number; line_discovery_attempts: number };
+    expect(after).toEqual({ updated_ms: writtenAt, line_discovery_attempts: 0 });
+
+    // The Check wait's probe reports the newest row written at/after admission;
+    // bookkeeping must not hand this old row's proof to the new attempt.
+    expect(
+      await findPublicationJournal(db, {
+        scope: SCOPE,
+        headSha: SHA,
+        phases: PUBLICATION_PROOF_WAIT_PHASES,
+        order: "newest",
+        writtenAtOrAfterMs: admittedMs,
+      }),
+    ).toBeNull();
+  });
+
+  test("a budget refusal is not a discovery attempt", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-budget", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 3 });
+
+    // Returned refusal: the read never dispatched, so nothing was observed.
+    const refused = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [],
+          ambiguous: [],
+          captured: false,
+          reviewId: null,
+          failure: "budget-refused",
+        }),
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0, reviewer: refused, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-budget")).toMatchObject({
+      line_discovery_attempts: 3,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+
+    // Thrown refusal (Octokit re-wraps the transport error in `cause`).
+    const thrown = async () =>
+      okResolution({
+        recoverLineComments: async () => {
+          throw Object.assign(new Error("Request failed"), {
+            cause: new RecoveryBudgetRefused("recovery request budget exhausted"),
+          });
+        },
+      });
+    await reconcileReviewLifecycle(asEnv(db), { now: () => T0 + 2_000, reviewer: thrown, log: SILENT_LOG });
+    expect(batchColumns(db, "pub-budget").line_discovery_attempts).toBe(3);
+
+    // The work stays due: the row is still selected.
+    expect(await listLineBatchRecovery(db, T0 + 3_000, RECONCILE_SELECT_LIMIT)).toHaveLength(1);
   });
 });
 
