@@ -9,6 +9,7 @@
  * two copies would be free to drift.
  */
 import { DEFAULT_CHECK_MIN_SCORE } from "../../../src/contracts/review-gate";
+import { TERMINAL_FAILURE_TEXT } from "../../../src/pipeline/checks";
 import type { Scope } from "../../../packages/shared/src/recheck-wire";
 import {
   CHECK_NAME,
@@ -49,8 +50,8 @@ export const SILENT_LOG = { warn: () => {}, info: () => {} };
 /** The cron's queue binding (comment-claim outbox): these suites re-send nothing. */
 export const NOOP_QUEUE = { send: async () => {} } as unknown as ScheduledEnv["REVIEW_QUEUE"];
 
-/** `CHECK_SUMMARIES.unconfirmed` — the give-up fallback the consumer freezes. */
-export const UNCONFIRMED = "Review attempt could not be confirmed complete; publication status is unknown.";
+/** The approved wording for an unconfirmed send — the product constant, never a copy. */
+export const UNCONFIRMED = TERMINAL_FAILURE_TEXT["unknown-failure"];
 
 export function asEnv(db: TestD1): ScheduledEnv {
   return { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
@@ -149,7 +150,24 @@ export function remoteFor(identity: CheckIdentity, overrides: Partial<CheckRemot
     app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
     status: overrides.status ?? "completed",
     conclusion: overrides.conclusion === undefined ? "success" : overrides.conclusion,
+    // No text is the honest default: a run whose wording was never proven is
+    // NOT a delivered one, so a fixture that means "already delivered" passes
+    // the row's own frozen summary through this field.
+    summary: overrides.summary === undefined ? null : overrides.summary,
   };
+}
+
+/**
+ * The frozen summary this attempt's row carries right now — what a run whose
+ * terminal update LANDED (and whose reply was lost) reads back. The reconciler
+ * freezes the intent before it fetches, so the read is the same text the send
+ * would carry.
+ */
+export function frozenSummaryOf(db: TestD1, attemptId: string): string | null {
+  const row = db.raw.query("SELECT desired_summary FROM review_checks WHERE id = ?").get(attemptId) as
+    | { desired_summary: string | null }
+    | null;
+  return row?.desired_summary ?? null;
 }
 
 /** A self-consistent persisted publication proof for the attempt's scope/SHA. */
@@ -487,9 +505,13 @@ export function scriptedAdapter(db: TestD1, script: AdapterScript, transport: Ch
 
 /**
  * The ordinary healthy flow: nothing is observable yet, the create lands, and
- * the run then reads back terminal and in agreement with the frozen intent.
+ * the run then reads back terminal and in agreement with the frozen intent —
+ * including its TEXT, which is what makes the read a delivery rather than a
+ * conclusion-only match (spec §7.9). The reconciler freezes the intent before
+ * it fetches, so the row's frozen summary is the text that landed.
  */
 export function agreeingScript(
+  db: TestD1,
   conclusion: CheckConclusion["desired"] = "failure",
   checkRunId = 4242,
 ): AdapterScript {
@@ -499,7 +521,15 @@ export function agreeingScript(
       kind: "ready",
       remote: remoteFor(identity, { id: checkRunId, status: "in_progress", conclusion: null }),
     }),
-    fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion }) }),
+    fetch: async (identity) => ({
+      kind: "found",
+      remote: remoteFor(identity, {
+        id: checkRunId,
+        status: "completed",
+        conclusion,
+        summary: frozenSummaryOf(db, identity.attemptId),
+      }),
+    }),
   };
 }
 

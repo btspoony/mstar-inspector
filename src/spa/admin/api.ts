@@ -1,5 +1,5 @@
 /**
- * note: The console's data layer: one base path, the reads and writes the four
+ * invariant: The console's data layer: one base path, the reads and writes the four
  * screens use, and the loading/error state machine they share.
  *
  * Reads PARSE into typed rows instead of asserting the API's shape (the
@@ -150,6 +150,20 @@ export type RecheckAssignmentConfig = {
 };
 
 /**
+ * The one end-to-end attempt cap. `saved` is true only when a stored row
+ * produced `capMs`; an absent row answers the platform default with
+ * `saved: false`, and the card must not present that as a saved value.
+ */
+export type AttemptCapConfig = {
+  capMs: number;
+  saved: boolean;
+  min: number;
+  max: number;
+  /** invariant: No attempt is admitted while the stored row cannot be read. */
+  degraded: boolean;
+};
+
+/**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
  * is open — the store deletes both on disable, so a closed platform never
@@ -190,7 +204,7 @@ export type RuntimeConfig = {
   /** note: The stored cap could not be read: `concurrency` is the conservative fallback. */
   degraded: boolean;
   /**
-   * why: The Check-budget surface; `null` when the server does not report it (an
+   * invariant: The Check-budget surface; `null` when the server does not report it (an
    * older Worker behind a newer SPA bundle). The page then renders the
    * concurrency card exactly as before and hides the budget card — a missing
    * field is absence, not an unreadable setting.
@@ -201,23 +215,28 @@ export type RuntimeConfig = {
    * `checkBudgets` (an older Worker behind a newer bundle).
    */
   commentClaim: CommentClaimConfig | null;
-  /** why: Null when the Worker predates the sweep settings surface. */
+  /** note: Null when the Worker predates the sweep settings surface. */
   sweep: SweepConfig | null;
   /** note: The recheck ask-budget surface; `null` under the same older-Worker rule. */
   recheckAssignment: RecheckAssignmentConfig | null;
+  /**
+   * note: The one end-to-end attempt cap; `null` under the same older-Worker rule.
+   * Its `saved` flag is what separates a stored value from the default.
+   */
+  attemptCap: AttemptCapConfig | null;
   /** note: The maintenance window; `null` under the same older-Worker rule. */
   maintenance: MaintenanceConfig | null;
   /** note: The 24h admission-drop counts; `null` under the same older-Worker rule. */
   admissionDrops24h: AdmissionDropCounts | null;
   /**
-   * why: The live queue gauge; `null` when the server does not report it or the
+   * invariant: The live queue gauge; `null` when the server does not report it or the
    * gauge itself is unreadable. `null` is never an empty queue.
    */
   queue: QueueBacklog | null;
-  /** why: The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
+  /** note: The 24h GitHub secondary-rate-limit count; `0` when the server does not report it. */
   githubRateLimited24h: number;
   /**
-   * note: The platform's designated official workspace — the one tenant whose bots
+   * invariant: The platform's designated official workspace — the one tenant whose bots
    * may be offered platform-wide. `null` is "not designated", never unknown.
    */
   officialWorkspaceId: string | null;
@@ -283,6 +302,19 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
   };
 }
 
+function parseAttemptCap(row: Json): AttemptCapConfig | null {
+  const raw = row.attemptCap;
+  if (raw === undefined) return null;
+  const cap = map(raw, "runtime attemptCap");
+  return {
+    capMs: num(cap, "capMs"),
+    saved: bool(cap, "saved"),
+    min: num(cap, "min"),
+    max: num(cap, "max"),
+    degraded: bool(cap, "degraded"),
+  };
+}
+
 /** note: The maintenance window; absent (older Worker) answers `null`. */
 function parseMaintenance(row: Json): MaintenanceConfig | null {
   const raw = row.maintenance;
@@ -311,7 +343,7 @@ function parseAdmissionDrops(row: Json): AdmissionDropCounts | null {
 }
 
 /**
- * note: The live queue gauge. A foreign shape answers `null` like the server's own
+ * why: The live queue gauge. A foreign shape answers `null` like the server's own
  * `null` does — both mean "not readable", so the page degrades instead of
  * failing the whole read over one optional gauge.
  */
@@ -344,15 +376,105 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     commentClaim: parseCommentClaim(body),
     sweep: parseSweep(body),
     recheckAssignment: parseRecheckAssignment(body),
+    attemptCap: parseAttemptCap(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
     githubRateLimited24h: parseGithubRateLimited(body),
-    // note: Additive field: an older Worker omits it, and an absent designation is
+    // invariant: Additive field: an older Worker omits it, and an absent designation is
     // exactly what `null` says on the wire. A present non-string is still a
     // broken read, so `maybeText` answers it.
     officialWorkspaceId:
       body.officialWorkspaceId === undefined ? null : maybeText(body, "officialWorkspaceId"),
+  };
+}
+
+export type DurationPercentiles = { p50Ms: number; p90Ms: number; maxMs: number };
+
+/** One candidate cap's observed cutoff: what it would exclude, and where. */
+export type DurationReportCutoff = {
+  capMs: number;
+  over: number;
+  /** note: `null` when the sample is empty — a share of nothing is not `0%`. */
+  share: number | null;
+  crossed: { queueWait: number; execution: number; publication: number };
+};
+
+/**
+ * The duration analysis report. Every percentile group is `null` when nothing
+ * completed in the window: the surface must render "no sample", never a zero.
+ */
+export type DurationReport = {
+  window: { days: number; startMs: number; endMs: number };
+  sampleSize: number;
+  total: DurationPercentiles | null;
+  phases: {
+    queueWait: DurationPercentiles | null;
+    execution: DurationPercentiles | null;
+    publication: DurationPercentiles | null;
+  };
+  excluded: {
+    "check-open-at-settle": number;
+    "no-settlement-record": number;
+    "no-boundary": number;
+    unsettled: number;
+    "pre-prepare": number;
+  };
+  cutoff: DurationReportCutoff | null;
+};
+
+function percentilesOrNull(raw: unknown, what: string): DurationPercentiles | null {
+  if (raw === null || raw === undefined) return null;
+  const group = map(raw, what);
+  return { p50Ms: num(group, "p50Ms"), p90Ms: num(group, "p90Ms"), maxMs: num(group, "maxMs") };
+}
+
+function parseCutoff(raw: unknown): DurationReportCutoff {
+  const cutoff = map(raw, "duration cutoff");
+  const crossed = map(cutoff.crossed, "duration cutoff crossed");
+  return {
+    capMs: num(cutoff, "capMs"),
+    over: num(cutoff, "over"),
+    share: maybeNum(cutoff, "share"),
+    crossed: {
+      queueWait: num(crossed, "queueWait"),
+      execution: num(crossed, "execution"),
+      publication: num(crossed, "publication"),
+    },
+  };
+}
+
+/**
+ * Read the operator's duration report. `capMs` is the candidate the operator
+ * typed; `null` asks for the distribution alone.
+ */
+export async function readDurationReport(capMs: number | null): Promise<DurationReport> {
+  const query = capMs === null ? "" : `?capMs=${encodeURIComponent(String(capMs))}`;
+  const body = map(await fetchJson(`${BASE}/runtime/duration-report${query}`), "duration report response");
+  const window = map(body.window, "duration window");
+  const phases = map(body.phases, "duration phases");
+  const excluded = map(body.excluded, "duration exclusions");
+  return {
+    window: {
+      days: num(window, "days"),
+      startMs: num(window, "startMs"),
+      endMs: num(window, "endMs"),
+    },
+    sampleSize: num(body, "sampleSize"),
+    total: percentilesOrNull(body.total, "duration total"),
+    phases: {
+      queueWait: percentilesOrNull(phases.queueWait, "duration queueWait"),
+      execution: percentilesOrNull(phases.execution, "duration execution"),
+      publication: percentilesOrNull(phases.publication, "duration publication"),
+    },
+    excluded: {
+      "check-open-at-settle": num(excluded, "check-open-at-settle"),
+      "no-settlement-record": num(excluded, "no-settlement-record"),
+      "no-boundary": num(excluded, "no-boundary"),
+      unsettled: num(excluded, "unsettled"),
+      "pre-prepare": num(excluded, "pre-prepare"),
+    },
+    cutoff: body.cutoff === null || body.cutoff === undefined ? null : parseCutoff(body.cutoff),
   };
 }
 
@@ -376,7 +498,7 @@ export async function saveSweepSettings(values: SweepValues): Promise<void> {
   await write("PATCH", "/runtime", { sweep: values });
 }
 
-/** why: The server's `{ concurrency }` answer; `null` when the body is not that shape. */
+/** note: The server's `{ concurrency }` answer; `null` when the body is not that shape. */
 function storedConcurrency(answer: unknown): number | null {
   if (typeof answer !== "object" || answer === null || !("concurrency" in answer)) return null;
   return typeof answer.concurrency === "number" ? answer.concurrency : null;
@@ -477,6 +599,28 @@ export async function setRecheckAssignmentMaxBytes(
 }
 
 /**
+ * Save the end-to-end attempt cap, answering the value the server stored. The
+ * echo is the stored number only, so `saved: true` rides the landed write; a
+ * 2xx with an unreadable body still landed, so the request value stands in —
+ * the same rule as `setSystemConcurrency`.
+ */
+export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Promise<AttemptCapConfig> {
+  const answer = await write("PATCH", "/runtime", { attemptCap: { capMs } });
+  if (typeof answer === "object" && answer !== null && "attemptCap" in answer) {
+    const saved = answer.attemptCap;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "capMs" in saved &&
+      typeof saved.capMs === "number"
+    ) {
+      return { ...stored, capMs: saved.capMs, saved: true, degraded: false };
+    }
+  }
+  return { ...stored, capMs, saved: true, degraded: false };
+}
+
+/**
  * Open or close the maintenance window, answering the state the server stored.
  * The server owns `since`, so an unreadable echo answers the REQUEST's flag —
  * the write already landed — but keeps the loaded window's stamps: claiming a
@@ -537,7 +681,7 @@ export type BotRow = {
   /** note: The bot's workspace IS the platform's official workspace. */
   isOfficial: boolean;
   scope: BotScope;
-  /** why: When the share was granted; `null` while the bot is owned. */
+  /** note: When the share was granted; `null` while the bot is owned. */
   sharedAt: string | null;
   /** note: Live GitHub installations (`removed_at IS NULL`). */
   installationCount: number;
@@ -648,7 +792,7 @@ export class AdminWriteError extends Error {
   }
 }
 
-/** why: The server's `{ error }` body, else the raw body. */
+/** note: The server's `{ error }` body, else the raw body. */
 function refusal(raw: string): string {
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -662,7 +806,7 @@ function refusal(raw: string): string {
 }
 
 /**
- * why: One write, answering the server's JSON body (or `undefined` when there is
+ * note: One write, answering the server's JSON body (or `undefined` when there is
  * none). `redirect: "manual"` keeps a login redirect from reading as
  * success: the console renders a failure instead of confirming a write that
  * went to an HTML login page.
@@ -679,7 +823,7 @@ async function write(method: "POST" | "PATCH" | "DELETE", path: string, body?: u
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!res.ok) throw new AdminWriteError(res.status, refusal(await res.text()));
-  // note: The write already landed: an unreadable body answers `undefined` rather
+  // invariant: The write already landed: an unreadable body answers `undefined` rather
   // than reporting a failure the server never had.
   try {
     return await res.json();
@@ -741,7 +885,7 @@ export type QuotaVersionsData = {
   nextVersion: number;
   plans: QuotaPlan[];
   versions: QuotaVersionRow[];
-  /** note: Plans the judging version sets no ceiling for: refused until republished. */
+  /** invariant: Plans the judging version sets no ceiling for: refused until republished. */
   uncoveredPlanIds: string[];
 };
 
@@ -839,7 +983,7 @@ export type DataUpgradeStatus = "pending" | "running" | "verifying" | "completed
 
 export type DataUpgradeState = {
   status: DataUpgradeStatus;
-  /** why: Rows the batches moved so far; a reset returns it to 0. */
+  /** note: Rows the batches moved so far; a reset returns it to 0. */
   processed: number;
   startedAt: string | null;
   finishedAt: string | null;
@@ -855,7 +999,7 @@ export type DataUpgradeRow = {
   title: string;
   /** invariant: The item's own statement of which rows it changes and never touches. */
   impact: string;
-  /** note: The item refuses a second batch while the maintenance window is off. */
+  /** invariant: The item refuses a second batch while the maintenance window is off. */
   requiresDowntime: boolean;
   state: DataUpgradeState;
   preflight: DataUpgradeCounts;
@@ -968,7 +1112,7 @@ export function useLoaded<T>(read: () => Promise<T>) {
 
   useEffect(() => {
     let live = true;
-    // why: Keep a loaded table on screen while re-reading; a first read has nothing to keep.
+    // note: Keep a loaded table on screen while re-reading; a first read has nothing to keep.
     setState((previous) => (previous.status === "ready" ? previous : { status: "loading" }));
     read().then(
       (data) => {
@@ -985,7 +1129,7 @@ export function useLoaded<T>(read: () => Promise<T>) {
 
   return {
     state,
-    /** why: Re-read: the retry after a failed read, and the refresh after a server-generated row. */
+    /** note: Re-read: the retry after a failed read, and the refresh after a server-generated row. */
     reload: () => setAttempt((count) => count + 1),
     /** note: Apply an accepted write without a second read. */
     update: (change: (data: T) => T) =>

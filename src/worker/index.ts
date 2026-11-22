@@ -21,15 +21,18 @@
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
-import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import type { D1Database, ExecutionContext, MessageBatch, ScheduledController, Workflow } from "@cloudflare/workers-types";
 import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
+import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
+import type * as ConsumerModule from "../pipeline/consumer";
+import type { AttemptRef } from "../pipeline/review-attempt-execution";
 import {
   classifyWebhook,
   MENTION_MISS_REASON,
@@ -57,6 +60,7 @@ import {
 } from "../dashboard/targets-store";
 import {
   getMaintenanceMode,
+  getReviewRouteWorkflowGate,
   maintenanceClosed,
   readDefaultReviewLevel,
 } from "../dashboard/runtime-config-store";
@@ -74,7 +78,7 @@ import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
-// note: `/dashboard*` GET/HEAD redirects (trailing
+// invariant: `/dashboard*` GET/HEAD redirects (trailing
 // slash), then the tenant route-family gate, then SPA dispatch. The gate runs
 // HERE, ahead of SPA dispatch: a retired App path (`/dashboard/apps…`,
 // `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
@@ -131,7 +135,7 @@ export function deliveryOutcomeFromWebhook(
 }
 
 /**
- * note: Structured warn for the webhook face's rejection/bookkeeping paths (QC
+ * invariant: Structured warn for the webhook face's rejection/bookkeeping paths (QC
  * F-005; log hygiene): the caller passes the real stage label
  * (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
@@ -154,7 +158,7 @@ function webhookInfo(event: string, detail: string, msg: string): void {
 }
 
 /**
- * note: Best-effort install bookkeeping shared by the two delivery paths that learn
+ * invariant: Best-effort install bookkeeping shared by the two delivery paths that learn
  * an installing account (a review `job` and an `installation.*` event): upsert
  * the (appId, installationId) row's `account_login` / `seen_at`, and on any
  * store failure log the one structured warn and carry on. It never throws —
@@ -185,7 +189,7 @@ async function recordInstallation(
 }
 
 /**
- * note: Byte-authoritative streamed body read for the webhook cap (61-R1): reads
+ * safety: Byte-authoritative streamed body read for the webhook cap (61-R1): reads
  * the request stream up to `limit` bytes and UTF-8-decodes exactly those
  * bytes — TextDecoder's default (UTF-8, non-fatal) is the same decode
  * `request.text()` performed, so the returned string is decode-identical for
@@ -234,7 +238,7 @@ async function readBodyWithinLimit(request: Request, limit: number): Promise<str
 export const CHECK_ATTACH_INLINE_BUDGET_MS = 2_500;
 
 /**
- * why: Resolve when `promise` settles or the budget elapses — whichever is first.
+ * invariant: Resolve when `promise` settles or the budget elapses — whichever is first.
  * The promise is NOT cancelled: its owner (the invocation context) still holds
  * it, and a late attach is exactly what the consumer's takeover handles.
  */
@@ -249,7 +253,7 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
 }
 
 /**
- * note: Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
+ * invariant: Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
  *
  * Runs BEFORE the enqueue: the attempt is claimed and its `queued` run created
  * NOW, so the Check shows up within seconds of the webhook instead of when a
@@ -278,7 +282,7 @@ async function attachCheckOnAcceptance(input: {
 }): Promise<void> {
   const { db, env, row, payload, deliveryId } = input;
   const headSha = payload.head_sha;
-  // note: A bot-mention delivery carries no SHA: the consumer claims after its own
+  // invariant: A bot-mention delivery carries no SHA: the consumer claims after its own
   // `rev-parse`, exactly as before.
   if (headSha === null) return;
   try {
@@ -316,7 +320,7 @@ async function attachCheckOnAcceptance(input: {
         deliveryId,
       },
     );
-    // note: One warn for a real failure (a refusal, a failed run-id write, a failed
+    // invariant: One warn for a real failure (a refusal, a failed run-id write, a failed
     // release). A busy/terminal skip is a legitimate no-op and stays silent.
     if (result.kind === "failed") {
       webhookWarn(
@@ -381,7 +385,7 @@ export async function settleRefusedAfterAttach(input: {
   try {
     await input.attach;
   } catch {
-    // note: The attach logs its own fault and does not reject today; a rejected one
+    // invariant: The attach logs its own fault and does not reject today; a rejected one
     // still counts as finished, so the settlement below runs and finds nothing.
   }
   try {
@@ -392,7 +396,7 @@ export async function settleRefusedAfterAttach(input: {
 }
 
 /**
- * note: The monthly RP ceiling for one admitted delivery: `null` means "may run",
+ * invariant: The monthly RP ceiling for one admitted delivery: `null` means "may run",
  * a `quota-exhausted` verdict means the enqueue is refused.
  *
  * Step 2 of the admission order (see the route's gate). The cost comes from
@@ -448,11 +452,11 @@ async function quotaRefusal(
 // contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
 // reconcilable). Single source = generated src/version.ts.
 app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
-// note: 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
+// invariant: 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
 /**
- * note: Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
+ * safety: Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
  * entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
  * fail-closed — the dashboard-dependency convention) → workspace + app id
@@ -532,7 +536,7 @@ app.route("/dashboard", dashboardApp);
  * retries instead of the delivery slipping past an unapplied gate.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
-  // note: Body-size cap checked BEFORE buffering the body (B6). Two gates: the
+  // invariant: Body-size cap checked BEFORE buffering the body (B6). Two gates: the
   // truthful over-limit header short-circuits before any byte is read, and
   // the streamed read below is byte-authoritative (61-R1) — a missing,
   // chunked, or lying `content-length` header never bypasses the byte count.
@@ -557,7 +561,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  // note: DB-unbound guard (fold-in): unreachable on the deployed Worker
+  // why: DB-unbound guard (fold-in): unreachable on the deployed Worker
   // (wrangler.jsonc binds DB globally) — the branch exists because the
   // shared fetch-face Env keeps DB optional for the dashboard's unbound-D1
   // premises. Fail-closed 500, zero enqueue.
@@ -570,7 +574,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  // note: The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
+  // why: The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
   // store's one read face joins `bot_workspaces`, so an App with no workspace
   // mapping is unknown here too (404 with zero decrypt, zero delivery row and
   // zero enqueue).
@@ -601,7 +605,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("unknown webhook path", 404);
   }
 
-  // note: The maintenance window (D20) refuses the delivery HERE — after the bot
+  // safety: The maintenance window (D20) refuses the delivery HERE — after the bot
   // lookup, before the secret decrypt and signature verification — so an
   // unauthenticated caller learns nothing and a verified delivery is asked to
   // come back later instead of landing a pipeline write on a ledger the
@@ -617,7 +621,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("maintenance in progress", 503);
   }
 
-  // note: The review configuration a delivery reads lives on the bot's target, not
+  // safety: The review configuration a delivery reads lives on the bot's target, not
   // on the bot row: trigger mode and the business pause. A target IS a
   // repository now (migration 0067), so resolution needs the delivery's own
   // repository — which exists only in the body, so resolution runs inside the
@@ -650,7 +654,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  // note: Architect lock L1: the verifier memoizes under the row id as
+  // safety: Architect lock L1: the verifier memoizes under the row id as
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ review_bots rows) with no eviction policy.
@@ -663,7 +667,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // existing fail-safe. The target's `review_drafts` switch rides the same
   // context, so a draft delivery is classified against the row that owns it.
   const appSlug = row.github_slug ?? "";
-  // note: The classifier's ONE parse, kept for the delivery row's source repository
+  // invariant: The classifier's ONE parse, kept for the delivery row's source repository
   // and the PR ledger below — recording either must not re-parse up-to-1 MB of
   // body.
   let classified: unknown = null;
@@ -721,7 +725,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // why: No target → this delivery has no review configuration to act on. It is an
+  // invariant: No target → this delivery has no review configuration to act on. It is an
   // `ignore` (2xx, delivery row `ignored`, `last_webhook_at` touched), never a
   // pause or a refusal: zero enqueue, no PR ledger row, and the allowlist is
   // not consulted — nothing here can admit it. An `installation` delivery also
@@ -735,18 +739,18 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       "per-App webhook ignored with 200 — no review target resolves for this delivery (zero enqueue, no ledger row)",
     );
   }
-  // note: Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
+  // invariant: Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
   // Both suppress a review, and the settings switch users flip is the target's,
   // so this webhook must consult both — one derivation, read at the delivery
   // record and at the pause gate. A delivery with no target cannot be a job,
   // so it carries no pause state.
   const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
-  // note: Owner allowlist admission is GONE with migration 0067 (D18): an App
+  // invariant: Owner allowlist admission is GONE with migration 0067 (D18): an App
   // reviews every repository its targets name, and a repository owner outside
   // any list is admitted exactly like one inside it. Nothing here can refuse a
   // verified delivery before the delivery record.
 
-  // note: AL-20-1: best-effort delivery recording — the R2 diagnostics
+  // invariant: AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per ADMITTED verified delivery, written
   // immediately after classification (before the reject return) so every
   // classified outcome that reaches this line lands: reject → rejected
@@ -796,7 +800,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // note: The admission verdict, decided ONCE here, in the order the product fixes
+  // invariant: The admission verdict, decided ONCE here, in the order the product fixes
   // (capability first, then quota): a delivery may carry at most one refusal,
   // so the two gates can never both fire and the author is told the cause that
   // actually binds — a quota message for a workspace that may not use this bot
@@ -832,6 +836,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // not run, and the failure row says which read could not answer. Fail-closed
   // — a verdict the platform could not compute never admits a delivery — and
   // never silent: the row and one structured warn both name the cause.
+  if (outcome.kind === "job") {
+    // invariant: THE ROUTE GATE, AT ACCEPTANCE (spec § Deployment gate). A closed route
+    // must be honoured HERE — before the Check is attached and before anything
+    // is enqueued. Attaching first would leave an eligible head with an
+    // `in_progress` Check that nothing adopts, and the reconciler would later
+    // report an unconfirmed failure for work the gate declined. A closed gate
+    // is NOT a failure: no Check, no terminal outcome, no reconciler work.
+    const routeGate = await getReviewRouteWorkflowGate(db);
+    if (routeGate.mode !== "on") {
+      const line = JSON.stringify({
+        event: "review_route_gate_closed",
+        review_route_workflow: "off",
+        gate_saved: routeGate.saved,
+        gate_degraded: routeGate.degraded,
+        gate_reason: routeGate.reason ?? null,
+        gate_rejected: routeGate.rejected ?? null,
+        installation_id: outcome.payload.installation_id,
+        owner: outcome.payload.owner,
+        repo: outcome.payload.repo,
+        pr_number: outcome.payload.pr_number,
+        head_sha: outcome.payload.head_sha,
+        msg: "review route is off (review.route.workflow) — delivery refused at acceptance: no Check attached, nothing enqueued",
+      });
+      if (routeGate.degraded) console.warn(line);
+      else console.log(line);
+      return c.text("ignored", 200);
+    }
+  }
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
@@ -854,7 +886,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         refusal = await quotaRefusal(db, target, row.scope, mode);
       }
     } catch (err) {
-      // note: Three faults land here: a D1 error among the gate's own reads; an empty
+      // invariant: Three faults land here: a D1 error among the gate's own reads; an empty
       // `quota_profiles` table (migration 0063 not applied); and a plan with no
       // ceiling row in the judging profile — a CONFIGURATION defect that throws
       // by design and would otherwise 500 every webhook of that plan until a
@@ -878,7 +910,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       // off the classifier's own single parse of the body — null when the
       // payload carries no repository.
       repositoryFullName: webhookRepositoryFullName(classified),
-      // invariant: Why a refusal happened: the classifier's own sentence, and only for a
+      // why: Why a refusal happened: the classifier's own sentence, and only for a
       // reject — every other outcome has none.
       reason: outcome.kind === "reject" ? outcome.reason : null,
     });
@@ -891,7 +923,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text(outcome.reason, outcome.status);
   }
 
-  // note: PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
+  // invariant: PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
   // delivery lands in `pull_requests` — including an `ignore` (a
   // non-whitelisted action, a mode that does not auto-trigger, a paused App),
   // which is exactly the "the App received this PR but nothing ran" case the
@@ -904,7 +936,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   if (eventName === "pull_request" && target !== null) {
     const record = pullRequestRecord(classified);
     if (record === null) {
-      // note: Visible, not silent: this delivery ran (or was ignored) with no ledger
+      // invariant: Visible, not silent: this delivery ran (or was ignored) with no ledger
       // row, so the dashboard's "what did this App receive" answer is
       // incomplete for it. Same best-effort posture as every sibling path —
       // log, never change the response.
@@ -923,7 +955,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     }
   }
 
-  // note: Lock L5: the signature VERIFIED (classifyWebhook returned a
+  // safety: Lock L5: the signature VERIFIED (classifyWebhook returned a
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
@@ -942,7 +974,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // note: Install bookkeeping: every verified review-type delivery offers
+  // invariant: Install bookkeeping: every verified review-type delivery offers
   // `outcome.installationAccount` — the installing account's login, inferred
   // from the repository owner when the payload omits `installation.account` —
   // so installs that predate this column fill in on their next delivery instead
@@ -965,7 +997,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // note: Install event (installation.created / new_permissions_accepted): the one
+  // invariant: Install event (installation.created / new_permissions_accepted): the one
   // delivery that observes a brand-new install before any review traffic, so
   // it records `account_login` here — BEFORE the pause gate and the global
   // flag gate, because those two gate the ENQUEUE face and this outcome never
@@ -982,7 +1014,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // invariant: Uninstall (installation.deleted): stamp the local row, never delete it —
+  // safety: Uninstall (installation.deleted): stamp the local row, never delete it —
   // the credential-routing and failure-attribution joins keep resolving, and
   // the install-health read face stops listing it. No account_login is
   // written: the payload states a removal, not a login. Best-effort like every
@@ -1019,7 +1051,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // note: Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
+  // invariant: Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
   // for every App — same contract as the per-App pause above (2xx, zero
   // enqueue) and deliberately NOT a dequeue-side check: work already queued
   // keeps running. Absent flag row = enabled. `reviewGlobal` was read once
@@ -1032,7 +1064,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // note: Lock L3: both ids are attached at the route handler — after the target
+  // safety: Lock L3: both ids are attached at the route handler — after the target
   // resolved, before the queue send. The queue message carries the id
   // references only (lock L4: the PEM never leaves the consumer). Every
   // remaining outcome is a `job`, and a job is only produced once the resolver
@@ -1045,12 +1077,12 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // proof is judged against the App's REAL gate instead of being deferred.
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
   await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
-    // note: `db` is the route's already-narrowed binding (the unbound guard above
+    // invariant: `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a
     // possibly-unbound DB.
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
-    // why: The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
+    // invariant: The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
     // message finds a released row to adopt instead of racing the delivery
     // holder (spec §7.7 step 4 / §7.9). The webhook waits at most
     // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
@@ -1064,7 +1096,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       const attachDeliveryId = crypto.randomUUID();
       const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload, deliveryId: attachDeliveryId });
       const headSha = payload.head_sha;
-      // note: A refused commit delivery settles the row it just attached, CHAINED
+      // invariant: A refused commit delivery settles the row it just attached, CHAINED
       // onto that attach: the webhook may already have stopped waiting, and an
       // inline settlement would race the create it kept running. A bot-mention
       // delivery attached nothing (no head SHA) and settles nothing.
@@ -1098,7 +1130,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       try {
         c.executionCtx.waitUntil(work);
       } catch {
-        // note: No invocation context (tests, a non-Worker host): the attach (and,
+        // invariant: No invocation context (tests, a non-Worker host): the attach (and,
         // on a refusal, its chained settlement) is already running detached
         // and is best-effort either way.
         void work;
@@ -1111,7 +1143,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 });
 
 /**
- * note: The `saas` router: `app` plus the hidden operator console.
+ * invariant: The `saas` router: `app` plus the hidden operator console.
  *
  * Built here, after every `app` registration — `route()` copies the source
  * app's route table at call time, so a route added to `app` later would be
@@ -1152,6 +1184,82 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
   }
 }
 
+/**
+ * invariant: The queue face's env: the shared Worker env plus the review execution route's
+ * platform binding. Kept out of `Env` so the fetch path (and the SPA program
+ * that loads src/worker/env.ts) never pulls in the execution module's types.
+ */
+type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRef> };
+
+/** note: The consumer surface the queue face needs, loadable at call time. */
+type ReviewQueueConsumerModule = Pick<
+  typeof ConsumerModule,
+  "createReviewConsumer" | "createWorkflowInstance"
+>;
+
+/**
+ * ONE queue batch, end to end: the deployment gate, then the consumer through
+ * the Workflow starter.
+ *
+ * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
+ * test can drive this wiring with a fake module instead of stubbing
+ * `src/pipeline/consumer` process-wide — `mock.module` cannot be undone in Bun
+ * (measured: neither `mock.restore()` nor re-mocking restores the real one), so
+ * a stub here would leak into every later file that imports the consumer.
+ */
+export async function runReviewQueueBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  env: ReviewQueueEnv,
+  ctx: ExecutionContext,
+  loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
+): Promise<void> {
+  // invariant: THE DEPLOYMENT GATE (spec § Deployment gate). Merging this code does not
+  // enable the review route: the operator flips `review.route.workflow` only
+  // after the nine claims hold and I-000666 closes. Until then a delivery is
+  // REFUSED here — acknowledged, one structured line — never silently
+  // re-routed to a path that no longer exists. Absent and unreadable rows are
+  // OFF (see `getReviewRouteWorkflowGate`).
+  const gate = await getReviewRouteWorkflowGate(env.DB);
+  if (gate.mode !== "on") {
+    const line = JSON.stringify({
+      event: "review_route_gate_closed",
+      review_route_workflow: "off",
+      gate_saved: gate.saved,
+      gate_degraded: gate.degraded,
+      gate_reason: gate.reason ?? null,
+      gate_rejected: gate.rejected ?? null,
+      batch_messages: batch.messages.length,
+      msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
+    });
+    // invariant: A stored `off` is the operator's intended state; an unreadable row is a
+    // fault worth surfacing, and both refuse the same way.
+    if (gate.degraded) console.warn(line);
+    else console.log(line);
+    return;
+  }
+  // safety: ONE execution route: the consumer admits, dedupes and settles skips, and
+  // its hand-off calls THIS starter, which creates exactly one Workflow
+  // instance per admitted attempt — instance id = attempt id. The handler
+  // itself never touches a container, a sandbox credential or the model.
+  const workflow = env.REVIEW_WORKFLOW;
+  if (workflow === undefined) {
+    // invariant: A deploy without the binding could only drop every review it admits:
+    // fail loud into the queue's retry/DLQ path instead.
+    throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+  }
+  const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
+  // why: The invocation context owns the detached Check terminalization: the
+  // consumer hands it the promise, so an overrun still finishes after the
+  // handler returns instead of being reclaimed with the isolate.
+  await createReviewConsumer(
+    env,
+    undefined,
+    {},
+    { waitUntil: (promise) => ctx.waitUntil(promise) },
+    (_deps, ref) => createWorkflowInstance(workflow, ref),
+  )(batch);
+}
+
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
@@ -1161,14 +1269,10 @@ export default {
   // cannot resolve it, so a
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
-  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv, ctx: ExecutionContext): Promise<void> {
-    const { createReviewConsumer } = await import("../pipeline/consumer");
-    // note: The invocation context owns the detached Check terminalization: the
-    // consumer hands it the promise, so an overrun still finishes after the
-    // handler returns instead of being reclaimed with the isolate.
-    await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
+  async queue(batch: MessageBatch<ReviewJobPayload>, env: ReviewQueueEnv, ctx: ExecutionContext): Promise<void> {
+    await runReviewQueueBatch(batch, env, ctx);
   },
-  // note: Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
+  // safety: Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
   // `* * * * *` — the Check lane alone (spec §7.11.2) and its ONLY driver. A
   // Check attempt whose terminalize overran or threw releases its lease
@@ -1207,17 +1311,21 @@ export default {
       await runCheckReconcileStage(env);
       return;
     }
+    // note: The database is the composition's prerequisite: captured ONCE after the
+    // guard (a reconciler call may widen `env`, and every stage needs the same
+    // bound handle).
+    const db = env.DB;
+    if (db === undefined) {
+      defaultSweepLog.warn(
+        { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
+        "ops sweep skipped",
+      );
+      return;
+    }
     try {
-      if (!env.DB) {
-        defaultSweepLog.warn(
-          { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
-          "ops sweep skipped",
-        );
-        return;
-      }
-      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
+      await runSweep(db, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
-      // note: SEC-03: the sweep-failure detail is redacted before the warn line —
+      // safety: SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value
       // (defense-in-depth; clean strings pass through unchanged).
       defaultSweepLog.warn(
@@ -1228,7 +1336,7 @@ export default {
         "ops sweep failed",
       );
     }
-    // note: M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
+    // invariant: M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
     // reconcileReviewLifecycle is throw-proof by contract; the catch is the
     // composition's independent-failure guarantee (and matches the
     // upcoming stage shape).
@@ -1241,6 +1349,29 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "lifecycle reconcile failed",
+      );
+    }
+    // note: Durable route handoffs (migration 0083) — OWN try/catch, LAST stage: an
+    // unconfirmed Workflow create and a moved head's undelivered successor are
+    // re-sent to the queue here, so neither can vanish with an interrupted
+    // host.
+    try {
+      // note: The scheduled lane's env type narrows the bindings it reads; the
+      // route's recovery pass also writes the commit claim, which this worker
+      // has bound at runtime (the scheduled handler receives the full Env).
+      const routeKv = (env as Env).IDEMPOTENCY_KV;
+      await reconcileReviewRoute({
+        DB: db,
+        REVIEW_QUEUE: env.REVIEW_QUEUE,
+        IDEMPOTENCY_KV: routeKv,
+      });
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_route_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "route handoff reconcile failed",
       );
     }
   },

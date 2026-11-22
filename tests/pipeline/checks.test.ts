@@ -53,8 +53,10 @@ import {
   type PublicationProof,
   type Scope,
 } from "../../src/store/review-checks";
+import { readCheckIdentity } from "../../src/store/review-checks";
 import {
   CHECK_SUMMARIES,
+  TERMINAL_FAILURE_TEXT,
   CheckRequestNotDispatched,
   attachCheckAtAcceptance,
   budgetExhaustedSummary,
@@ -174,7 +176,11 @@ function fakeChecks(respond: Partial<{
         async update(params) {
           updates.push({ params, raw: { ...params } as unknown as Record<string, unknown> });
           if (respond.update === undefined) throw Object.assign(new Error("nope"), { status: 500 });
-          return { data: await respond.update(params) };
+          const payload = await respond.update(params);
+          // GitHub answers with the run it just stored, `output` included, so a
+          // responder that means "the reply carries no text" must say
+          // `output: null` explicitly (spec §7.9: delivery needs the text).
+          return { data: "output" in payload ? payload : { ...payload, output: params.output } };
         },
         async get(params) {
           if (respond.get === undefined) throw Object.assign(new Error("missing"), { status: 404 });
@@ -308,6 +314,8 @@ describe("beginCheck — the create contract", () => {
         app: { id: GITHUB_APP_ID },
         status: "in_progress",
         conclusion: null,
+        // A create carries no text yet: the promotion relabel writes it.
+        summary: null,
       },
     });
   });
@@ -1106,6 +1114,68 @@ describe("completeCheck — the terminal send", () => {
     expect(released.attempts).toBe(1);
     expect(released.next_attempt_ms).toBe(T0 + 60_000);
   });
+
+  test("a reply without the frozen text is unconfirmed, never a delivery", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    // Layer 1 — the adapter: the update landed with the right conclusion but no
+    // readable output, so the reply proves nothing about the text the user reads.
+    const first = await claimedAttempt(db);
+    await attachedRun(db, first.attempt, first.lease, 4242);
+    expect(await setCheckDesired(db, first.attempt.identity.attemptId, first.lease, SUCCESS, null, T0)).toBe(true);
+    const textless = fakeChecks({
+      update: () => runPayload(first.attempt.identity, { status: "completed", conclusion: "success", output: null }),
+    });
+    const unproven = await adapterFor(db, textless.octokit).completeCheck({
+      identity: first.attempt.identity,
+      lease: first.lease,
+      checkRunId: 4242,
+      conclusion: SUCCESS,
+    });
+    expect(unproven.kind).toBe("unavailable");
+    if (unproven.kind === "unavailable") {
+      expect(unproven.reason).toMatch(/frozen text/);
+      // It WAS a request: the run may already wear the conclusion.
+      expect(unproven.requests).toBe(1);
+    }
+
+    // Layer 2 — the lifecycle turns that into UNKNOWN, never delivery: the row
+    // keeps its frozen intent, nothing is observed, and recovery owns the run.
+    const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
+    const second = await claimedAttempt(db, { headSha: otherSha });
+    await attachedRun(db, second.attempt, second.lease, 4343);
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () =>
+        adapterFor(
+          db,
+          fakeChecks({
+            update: () =>
+              runPayload(second.attempt.identity, { status: "completed", conclusion: "failure", output: null }),
+          }).octokit,
+        ),
+      getCheckGate: async () => GATE,
+    });
+    await lifecycle.terminalize({
+      handle: {
+        attemptId: second.attempt.identity.attemptId,
+        scope: SCOPE,
+        githubAppId: GITHUB_APP_ID,
+        headSha: otherSha,
+        lease: second.lease,
+      },
+      publicationId: null,
+      outcome: "publication-unknown",
+    });
+    const released = await rowOf(db, second.attempt);
+    expect(released.observed).toBe("unknown");
+    expect(released.terminal_ms).toBeNull();
+    expect(released.desired).toBe("failure");
+    expect(released.recovery_state).toBe("remote-unconfirmed");
+    expect(released.holder).toBeNull();
+    expect(released.attempts).toBe(1);
+  });
 });
 
 describe("frozen terminal intent (spec §7.9)", () => {
@@ -1436,11 +1506,12 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     }
   });
 
-  test("a missing review row or a missing tally is an unreadable-gate failure, never a pass", () => {
+  test("a missing review row or a missing tally is an execution failure, never a pass", () => {
     for (const missing of [null, review("ship it", null)]) {
       const decided = decideConclusion({ proof: normal, outcome: "expired", gate, review: missing });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
@@ -1481,7 +1552,8 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
 
     const decided = decideConclusion({ proof: unreadable, outcome: "expired", gate, review: read });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadable(sha7, gate));
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("an EMPTY allowed-verdict set misses every review — a saved [] gates every Check to failure", () => {
@@ -1500,28 +1572,28 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     for (const outcome of outcomes) {
       const decided = decideConclusion({ proof: degraded, outcome, gate, review: review("ship it", 100) });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  test("no proof + pre-publication failure is failure with the reason in the summary", () => {
+  test("no proof + pre-publication failure carries the approved wording, never the reason", () => {
     const decided = decideConclusion({
       proof: null,
       outcome: "pre-publication-failure",
       gate,
       review: null,
-      reason: "sandbox clone rejected",
     });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(
-      "Review execution failed before publication: sandbox clone rejected. No review was published.",
-    );
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("no proof + degraded-not-posted is failure with the degraded-notice wording", () => {
+  test("no proof + degraded-not-posted carries the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe("Review output was invalid and the degraded notice was not published.");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("no proof + skipped (nothing to review and nothing to inherit) is neutral, never a failure", () => {
@@ -1582,85 +1654,50 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     for (const input of unreadable) {
       const decided = decideConclusion({ proof: null, outcome: "skipped", ...input, inherited });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toContain(`No new changes at ${sha7}`);
-      expect(decided.summary).toContain(base7);
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  test("an empty increment whose baseline result is unreadable fails closed and says why", () => {
+  test("an empty increment whose baseline result is unreadable fails closed with the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "skipped", gate, review: null, inherited });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedUnreadable(sha7, base7));
-    expect(decided.summary).toContain(base7);
-    expect(decided.summary).toContain("could not be read");
-    expect(decided.summary).toContain("failing closed");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("no proof + publication-unknown / expired is the unconfirmed failure", () => {
+  test("no proof + publication-unknown / expired is the unconfirmed execution failure", () => {
     for (const outcome of ["publication-unknown", "expired"] as const) {
       const decided = decideConclusion({ proof: null, outcome, gate, review: null });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(
-        "Review attempt could not be confirmed complete; publication status is unknown.",
-      );
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     }
   });
 
-  // The deadline ended the wait without a proof. Each named cause replaces the
-  // generic unknown, so the frozen Check says which evidence it could not read.
-  test("a deadline with no publication row staged names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unstaged",
-    });
+  test("the deadline concludes the same approved wording whatever evidence it could not read", () => {
+    // Which proof read was missing stays an internal attribution (the
+    // reconciler logs it); the user-facing text is the category's.
+    const decided = decideConclusion({ proof: null, outcome: "expired", gate, review: null });
     expect(decided.desired).toBe("failure");
     expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
-    expect(decided.summary).toContain("no publication row was staged");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("a deadline whose staged publication never landed its proof names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unproven",
-    });
-    expect(decided.desired).toBe("failure");
-    expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
-    expect(decided.summary).toContain("the proof never landed");
-  });
-
-  test("a deadline whose proof read failed names that cause", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review: null,
-      unconfirmedCause: "unreadable",
-    });
-    expect(decided.desired).toBe("failure");
-    expect(decided.title).toBe(CHECK_NAME);
-    expect(decided.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
-    expect(decided.summary).toContain("could not be read");
-  });
-
-  test("no proof + local-error is the exhausted finalization wording", () => {
+  test("no proof + local-error carries the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "local-error", gate, review: null });
     expect(decided.desired).toBe("failure");
-    expect(decided.summary).toBe("Finalization could not be confirmed. Manual inspection may be required.");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
   test("an unreadable App gate is failure — no floor, no allowed list, never a default", () => {
     for (const applied of [null, review("ship it", 100)]) {
       const decided = decideConclusion({ proof: normal, outcome: "expired", gate: null, review: applied });
       expect(decided.desired).toBe("failure");
-      expect(decided.summary).toBe(CHECK_SUMMARIES.gateUnreadableConfig(sha7));
+      expect(decided.failureStatus).toBe("unknown-failure");
+      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
       // A gate that could not be read must not be described as if it were.
       expect(decided.summary).not.toContain("floor");
       expect(decided.summary).not.toContain("allowed:");
@@ -1681,13 +1718,10 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       decideConclusion({ proof: normal, outcome: "expired", gate, review: null }),
       decideConclusion({ proof: normal, outcome: "expired", gate: null, review: review("ship it", 96) }),
       decideConclusion({ proof: degraded, outcome: "publication-unknown", gate, review: null }),
-      decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null, reason: "x".repeat(9_000) }),
+      decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null }),
       decideConclusion({ proof: null, outcome: "publication-unknown", gate, review: null }),
       decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null }),
       decideConclusion({ proof: null, outcome: "expired", gate, review: null }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unstaged" }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unproven" }),
-      decideConclusion({ proof: null, outcome: "expired", gate, review: null, unconfirmedCause: "unreadable" }),
       decideConclusion({ proof: null, outcome: "local-error", gate, review: null }),
     ]) {
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
@@ -1697,19 +1731,6 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.summary).not.toMatch(/approve|approved|request changes|merge gate required|blocking/i);
       expect(decided.summary).not.toMatch(/APPROVE|REQUEST_CHANGES/);
     }
-  });
-
-  test("an untrusted reason cannot smuggle a token or newlines into a public summary", () => {
-    const decided = decideConclusion({
-      proof: null,
-      outcome: "pre-publication-failure",
-      gate,
-      review: null,
-      reason: `ghp_SECRETVALUE123\nsecond line <script>`,
-    });
-    expect(decided.summary).not.toContain("ghp_SECRETVALUE123");
-    expect(decided.summary).not.toContain("\n");
-    expect(decided.summary).toContain("[REDACTED]");
   });
 });
 
@@ -1819,14 +1840,16 @@ describe("empty increment inheritance (spec §7.9)", () => {
         desired: testCase.desired,
         observed: testCase.desired,
       });
-      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
-      expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(BASE7);
-      if (testCase.baseline === null) {
-        // A baseline that cannot be read fails the check closed.
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("could not be read");
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain("failing closed");
-      } else if (testCase.gate !== null) {
-        expect((fake.updates[0]!.raw.output as { summary: string }).summary).toContain(`verdict "${testCase.baseline.verdict}"`);
+      // The wording follows the branch: a readable baseline keeps the precise
+      // inherited verdict, while an unreadable baseline or gate is an execution
+      // fault and carries the approved category text instead.
+      const sentSummary = (fake.updates[0]!.params as ChecksUpdateParams).output.summary;
+      if (testCase.baseline !== null && testCase.gate !== null) {
+        expect(sentSummary).toContain(`No new changes at ${SHA.slice(0, 7)}`);
+        expect(sentSummary).toContain(BASE7);
+        expect(sentSummary).toContain(`verdict "${testCase.baseline.verdict}"`);
+      } else {
+        expect(sentSummary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
       }
     }
   });
@@ -1894,7 +1917,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
     expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
+      TERMINAL_FAILURE_TEXT["unknown-failure"],
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
@@ -1974,8 +1997,8 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
 
     expect(fake.updates).toHaveLength(1);
     expect(fake.updates[0]!.raw.conclusion).toBe("failure");
-    expect((fake.updates[0]!.raw.output as { summary: string }).summary).toBe(
-      "Review attempt could not be confirmed complete; publication status is unknown.",
+    expect((fake.updates[0]!.params as ChecksUpdateParams).output.summary).toBe(
+      TERMINAL_FAILURE_TEXT["unknown-failure"],
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
@@ -2078,7 +2101,14 @@ describe("identity helpers", () => {
       app: { id: GITHUB_APP_ID },
       status: "in_progress",
       conclusion: null,
+      summary: null,
     });
+    // The run's own text is evidence: it is what tells "the approved wording
+    // landed" apart from "something set the same conclusion".
+    expect(toCheckRemote({ ...runPayload(identity), output: { title: "t", summary: "approved text" } })?.summary).toBe(
+      "approved text",
+    );
+    expect(toCheckRemote({ ...runPayload(identity), output: null })?.summary).toBeNull();
     expect(toCheckRemote(null)).toBeNull();
     expect(toCheckRemote(undefined)).toBeNull();
     expect(toCheckRemote({ ...runPayload(identity), id: "not-a-number" as unknown as number })).toBeNull();
@@ -3194,7 +3224,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.sameHeadInheritedUnreadable(SHA.slice(0, 7)));
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
   });
@@ -3248,12 +3278,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(
-      CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(
-        SHA.slice(0, 7),
-        "the inherited review carries no readable score",
-      ),
-    );
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
   });
 
@@ -3295,7 +3320,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const { row } = await skipHead(db, fake);
 
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
-    expect(fake.updates[0]!.params.output.summary).toBe(CHECK_SUMMARIES.degraded);
+    expect(fake.updates[0]!.params.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(row.desired).toBe("failure");
   });
 
@@ -3736,9 +3761,33 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
 });
 
 describe("markQueuedBehindInflight — the held-check relabel is bounded", () => {
+  const RELABEL_KEY = { headSha: SHA, triggeredBy: "octocat", action: "review", attachDeliveryId: "delivery-relabel" };
+
+  /**
+   * A released delivery row in exactly the shape the store predicate relabels:
+   * known run id, still `in_progress`, non-terminal, holder handed back.
+   */
+  async function relabelableRow(db: TestD1): Promise<void> {
+    const result = await claimAttempt(db, {
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: RELABEL_KEY.triggeredBy,
+      action: RELABEL_KEY.action,
+      attachDeliveryId: RELABEL_KEY.attachDeliveryId,
+      holder: `delivery:${RELABEL_KEY.attachDeliveryId}`,
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_ATTACH_WINDOW_MS,
+    });
+    if (result.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${result.kind}`);
+    await attachedRun(db, result.attempt, result.lease, 4242);
+    expect(await releaseCheckClaim(db, result.attempt.identity.attemptId, result.lease, T0)).toBe(true);
+  }
+
   const relabel = (adapter: ReturnType<typeof adapterFor>, warns: string[], updateBudgetMs = 1_000) =>
     adapter.markQueuedBehindInflight!({
       scope: SCOPE,
+      ...RELABEL_KEY,
       checkRunId: 4242,
       summary: "Queued behind the review in flight for this pull request.",
       updateBudgetMs,
@@ -3747,6 +3796,7 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
 
   test("a rejected send is ONE warn and false — it never reaches the caller as a throw", async () => {
     const db = await seededDb();
+    await relabelableRow(db);
     const fake = fakeChecks({
       update: () => {
         throw Object.assign(new Error("boom"), { status: 500 });
@@ -3763,6 +3813,7 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
 
   test("a send that never answers returns false inside the budget, so the retry is never held", async () => {
     const db = await seededDb();
+    await relabelableRow(db);
     // GitHub accepts the request and never answers it: only the budget ends it.
     const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
     const warns: string[] = [];
@@ -4148,4 +4199,94 @@ describe("budget-exhausted Check vocabulary", () => {
     ).toThrow(/requires the resolved budgetExhaustion record/);
   });
 
+});
+
+describe("a resumed settlement acts only on the frozen generation", () => {
+  /** The lifecycle seam a resumed phase reaches `begin` through. */
+  function lifecycleFor(db: TestD1, onRemoteCall: () => void) {
+    return createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      // Any adapter use means the fence let the call through to a send.
+      getAdapter: () =>
+        ({
+          beginCheck: async () => {
+            onRemoteCall();
+            return { kind: "unavailable", reason: "must not be reached", requests: 0 };
+          },
+        }) as never,
+      getCheckGate: async () => GATE,
+    });
+  }
+
+  test("a frozen generation that has ended is never re-minted by a resumed claim", async () => {
+    const db = await seededDb();
+    const first = await claimedAttempt(db);
+    const frozen = await readCheckIdentity(db, first.attempt.identity.attemptId);
+    if (frozen === null) throw new Error("fixture: the claim wrote no identity");
+    // The attempt's own generation ended WITHOUT a proven publication, so the
+    // unrestricted claim path would happily mint generation 2 for this key.
+    await db
+      .prepare("UPDATE review_checks SET terminal_ms = ?, holder = NULL, lease_until_ms = NULL WHERE id = ?")
+      .bind(T0, first.attempt.identity.attemptId)
+      .run();
+
+    let remoteCalls = 0;
+    const lifecycle = lifecycleFor(db, () => {
+      remoteCalls += 1;
+    });
+    const adopted = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+      expect: frozen,
+    });
+
+    // Refused BEFORE the claim, so no row exists for this call to leave behind.
+    expect(adopted).toBeNull();
+    expect(remoteCalls).toBe(0);
+    const rows = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_checks WHERE attempt_key = ?")
+      .get(frozen.key) as { n: number };
+    expect(rows.n).toBe(1);
+  });
+
+  test("a frozen pair whose row is still open is not refused by the identity check", async () => {
+    const db = await seededDb();
+    const attempt = await claimedAttempt(db);
+    const frozen = await readCheckIdentity(db, attempt.attempt.identity.attemptId);
+    if (frozen === null) throw new Error("fixture: the claim wrote no identity");
+
+    let began = 0;
+    const adapter = {
+      beginCheck: async () => {
+        began += 1;
+        return { kind: "unavailable", reason: "test surface", requests: 0 };
+      },
+    } as never;
+    const lifecycle = createCheckLifecycle({ db, nowMs: () => CLOCK, getAdapter: () => adapter, getCheckGate: async () => GATE });
+    const adopted = await lifecycle.begin({
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+      expect: frozen,
+    });
+
+    // The identity check passes and the claim path runs: the open row is busy
+    // (held by this very claim), so no adoption and no second row — but this
+    // call is NOT refused by the frozen-pair rule, which is what the previous
+    // case pins in the other direction.
+    expect(adopted).toBeNull();
+    expect(began).toBe(0);
+    const rows = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_checks WHERE attempt_key = ?")
+      .get(frozen.key) as { n: number };
+    expect(rows.n).toBe(1);
+  });
 });

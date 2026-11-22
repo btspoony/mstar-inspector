@@ -1,5 +1,5 @@
 /**
- * why: Unit tests: the in-flight review store (src/store/inflight-store.ts) over the
+ * invariant: Unit tests: the in-flight review store (src/store/inflight-store.ts) over the
  * REAL migration DDL.
  *
  * The fixture is the bun:sqlite double in tests/store/helpers.ts with every
@@ -38,7 +38,7 @@ const KEY: InflightKey = {
   workspace_id: "ws_1",
 };
 
-/** note: The commit a live row was acquired for — what a `pr-held` refusal reports. */
+/** invariant: The commit a live row was acquired for — what a `pr-held` refusal reports. */
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
 const OPTS: AcquireInflightOptions = {
@@ -84,11 +84,13 @@ describe("inflight-store", () => {
       ok: false,
       reason: "pr-held",
       heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: false,
     });
   });
 
   test("the row carries the reviewed sha; a null sha reads back as ''", async () => {
-    // note: Round-8 review: a held push can only be judged (duplicate vs a commit
+    // invariant: Round-8 review: a held push can only be judged (duplicate vs a commit
     // the live review never covers) against the sha the row was taken for.
     const db = freshDb();
     expect(await acquireInflight(db, KEY, OPTS)).toEqual({ ok: true });
@@ -104,7 +106,7 @@ describe("inflight-store", () => {
     expect(commentRow.head_sha).toBe("");
     expect(
       await acquireInflight(db, otherPr(9), { ...OPTS, attemptId: "attempt-2", headSha: "a".repeat(40) }),
-    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: "" });
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: "", heldAttemptId: "attempt-1", heldExpired: false });
   });
 
   test("refuses when the system cap is reached", async () => {
@@ -136,7 +138,7 @@ describe("inflight-store", () => {
       ok: false,
       reason: "system-cap",
     });
-    // note: A second PR of ws_2 is refused by the workspace cap, not the PR lock.
+    // invariant: A second PR of ws_2 is refused by the workspace cap, not the PR lock.
     expect(
       await acquireInflight(db, otherPr(4, "ws_2"), {
         ...OPTS,
@@ -146,24 +148,34 @@ describe("inflight-store", () => {
     ).toEqual({ ok: false, reason: "workspace-cap" });
   });
 
-  test("an expired row is reclaimed by the next acquire", async () => {
+  test("expiry alone never reassigns the PR — only its own attempt may re-acquire it", async () => {
     const db = freshDb();
     expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
-    const newerSha = "fedcba9876543210fedcba9876543210fedcba98";
+    // note: §7.9: the lapsed lease is a fence, not evidence that attempt-1 stopped.
     expect(
       await acquireInflight(db, KEY, {
         ...OPTS,
         attemptId: "attempt-2",
-        headSha: newerSha,
         now: "2026-11-03T00:02:00Z",
       }),
-    ).toEqual({ ok: true });
-    // note: The reclaim replaced the row in place — one row, the newer attempt's,
-    // carrying the newer commit (a stale sha would misjudge the next push).
-    const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    ).toEqual({
+      ok: false,
+      reason: "pr-held",
+      heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: true,
+    });
+    let rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.attempt_id).toBe("attempt-2");
-    expect(rows[0]!.head_sha).toBe(newerSha);
+    expect(rows[0]!.attempt_id).toBe("attempt-1");
+    // invariant: A replay of the SAME attempt is not a successor: it always may re-acquire
+    // the row it already wrote.
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60, now: "2026-11-03T00:02:00Z" })).toEqual({
+      ok: true,
+    });
+    rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.attempt_id).toBe("attempt-1");
   });
 
   test("an expired row does not count toward the caps", async () => {
@@ -187,6 +199,8 @@ describe("inflight-store", () => {
       ok: false,
       reason: "pr-held",
       heldHeadSha: SHA,
+      heldAttemptId: "attempt-1",
+      heldExpired: false,
     });
   });
 
@@ -202,7 +216,7 @@ describe("inflight-store", () => {
   });
 
   test("a raced zero-row acquire is distinguishable from a fault", async () => {
-    // note: The insert reports zero rows while the follow-up read still shows room:
+    // invariant: The insert reports zero rows while the follow-up read still shows room:
     // the capacity was released between the two statements. That is a benign
     // race, not a dead binding, and the result must say so.
     const db = freshDb();
@@ -239,12 +253,12 @@ describe("inflight-store", () => {
     expect(malformed).toMatchObject({ reason: "error", cause: { kind: "fault" } });
     const badTtl = await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: Number.NaN });
     expect(badTtl).toMatchObject({ reason: "error", cause: { kind: "fault" } });
-    // note: Neither refusal wrote a row — fail-closed never admits.
+    // invariant: Neither refusal wrote a row — fail-closed never admits.
     expect(db.raw.query("SELECT * FROM review_inflight").all()).toHaveLength(0);
   });
 
   test("a zero or negative TTL is refused, never an already-expired success", async () => {
-    // note: A non-positive TTL writes `expires_at <= now`: the row holds no PR and
+    // invariant: A non-positive TTL writes `expires_at <= now`: the row holds no PR and
     // reserves no slot, so reporting `ok` would admit a review the lock never
     // guarded. Both must answer the fault refusal and write nothing.
     const db = freshDb();
@@ -259,7 +273,7 @@ describe("inflight-store", () => {
   });
 
   test("owner/repo case does not split or evade the per-PR lock", async () => {
-    // note: GitHub owner/repo are case-insensitive; the row's PRIMARY KEY is not.
+    // invariant: GitHub owner/repo are case-insensitive; the row's PRIMARY KEY is not.
     // Insert, refusal read and release must all land on ONE normalized key.
     const db = freshDb();
     expect(await acquireInflight(db, { ...KEY, owner: "Acme", repo: "Widgets" }, OPTS)).toEqual({
@@ -267,7 +281,7 @@ describe("inflight-store", () => {
     });
     expect(
       await acquireInflight(db, { ...KEY, owner: "acme", repo: "widgets" }, { ...OPTS, attemptId: "attempt-2" }),
-    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: SHA });
+    ).toEqual({ ok: false, reason: "pr-held", heldHeadSha: SHA, heldAttemptId: "attempt-1", heldExpired: false });
     const rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.owner).toBe("acme");

@@ -1,5 +1,5 @@
 /**
- * note: The two runtime-configuration write surfaces, through the real worker mount:
+ * invariant: The two runtime-configuration write surfaces, through the real worker mount:
  *
  *   - `PUT /dashboard/<ref>/api/settings/concurrency` — the workspace cap.
  *     Membership is the gate and owner/admin is the role: an outsider, a plain
@@ -99,7 +99,7 @@ function fixture() {
   return { db };
 }
 
-/** why: The stored workspace column, read raw so a refused write is observable. */
+/** invariant: The stored workspace column, read raw so a refused write is observable. */
 function storedWorkspace(db: TestD1): number | null {
   const row = db.raw
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = 'ws-acme'")
@@ -148,7 +148,7 @@ const DEFAULT_CHECK_BUDGETS = {
   degraded: false,
 };
 
-/** why: The documented absent-row comment-claim settings as the operator API reports them. */
+/** note: The documented absent-row comment-claim settings as the operator API reports them. */
 const DEFAULT_COMMENT_CLAIM = {
   retryMs: 300_000,
   maxAttempts: 3,
@@ -207,7 +207,19 @@ const DEFAULT_RECHECK_ASSIGNMENT = {
   degraded: false,
 };
 
-/** why: The empty trailing-24h admission-drop read: every reason present at zero. */
+/**
+ * note: The documented absent-row attempt cap as the operator API reports it:
+ * `saved: false` is the whole reason the console can call it a default.
+ */
+const DEFAULT_ATTEMPT_CAP = {
+  capMs: 1_200_000,
+  saved: false,
+  min: 900_000,
+  max: 3_600_000,
+  degraded: false,
+};
+
+/** note: The empty trailing-24h admission-drop read: every reason present at zero. */
 const DEFAULT_ADMISSION_DROPS = {
   "pr-held": 0,
   "system-cap": 0,
@@ -221,7 +233,7 @@ const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp
 /** note: The documented absent-row maintenance window: the platform is open. */
 const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null, unreadable: false };
 
-/** why: The stored recheck ask-budget row, raw so a refused write is observable. */
+/** invariant: The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.recheck.assignment_max_bytes'")
@@ -229,7 +241,7 @@ function storedRecheckBudget(db: TestD1): string | null {
   return row?.value ?? null;
 }
 
-/** why: The stored default-level row, raw so a refused write is observable. */
+/** invariant: The stored default-level row, raw so a refused write is observable. */
 function storedLevel(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.level.default'")
@@ -358,7 +370,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
   });
 
   test("a value above the system quota is still accepted, with no system data exposed", async () => {
-    // note: Refusing on the quota would let a tenant binary-search the platform number
+    // invariant: Refusing on the quota would let a tenant binary-search the platform number
     // through accepted and refused writes. The quota applies at admission.
     const { db } = fixture();
     seedSystemCap(db, 8);
@@ -391,6 +403,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -490,6 +503,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -507,6 +521,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       sweep: DEFAULT_SWEEP,
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
+      attemptCap: DEFAULT_ATTEMPT_CAP,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -837,7 +852,7 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
   });
 
   test("the group the GET reports is a valid save body", async () => {
-    // note: The console saves what it displayed: the read group also carries `levels`
+    // invariant: The console saves what it displayed: the read group also carries `levels`
     // and `degraded`, and a save must not refuse it for saying so.
     const { db } = fixture();
     const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
@@ -1028,7 +1043,7 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
 });
 
 describe("workspace default review-gate floor", () => {
-  /** why: The workspace column, raw so a refused write is observable. */
+  /** invariant: The workspace column, raw so a refused write is observable. */
   const storedFloor = (db: TestD1): number | null =>
     (
       db.raw

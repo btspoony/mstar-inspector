@@ -699,6 +699,194 @@ export async function setCheckBudgets(
   return value;
 }
 
+/** PK of the end-to-end review attempt cap (the Workflow route's hard stop). */
+export const REVIEW_ATTEMPT_CAP_KEY = "review.attempt.duration_cap_ms";
+/**
+ * Absent row: 20 minutes. The 30-day successful-review sample (n = 1 361) had
+ * p50 304 584 ms, p90 508 800 ms and max 647 553 ms; 20 minutes leaves those
+ * tails room for queue wait, execution and publication while still bounding
+ * capacity. Absent must mean neither "no cap" nor "cap of zero".
+ */
+export const REVIEW_ATTEMPT_CAP_DEFAULT_MS = 1_200_000;
+/**
+ * Range of a stored cap. Below the retired 900 000 ms Queue wall clock a cap
+ * would cut reviews the platform was already completing; one hour is the most
+ * capacity one attempt may hold.
+ */
+export const REVIEW_ATTEMPT_CAP_MIN_MS = 900_000;
+export const REVIEW_ATTEMPT_CAP_MAX_MS = 3_600_000;
+
+/** One cap read: the effective value, plus whether the stored row could be trusted. */
+export type ReviewAttemptCap = {
+  capMs: number;
+  degraded: boolean;
+  /** note: The degradation's cause; absent from a trustworthy read. */
+  reason?: DegradedReason;
+};
+
+/**
+ * The cap plus WHERE its number came from. `saved` is true only when a stored
+ * row parsed in range, so the operator surface can show an absent row as the
+ * default instead of claiming a value the store does not hold.
+ */
+export type ReviewAttemptCapSetting = ReviewAttemptCap & { saved: boolean };
+
+/**
+ * The end-to-end attempt cap in ONE read, plus whether a stored row produced
+ * it. Only an absent row is the default; a present value the parse cannot
+ * trust or a read failure answers the default with `degraded: true` and never
+ * throws — admission REFUSES a degraded answer (retrying the delivery) and the
+ * operator surface reports it as unreadable instead of showing a number.
+ */
+export async function getReviewAttemptCapSetting(
+  db: DashboardD1,
+): Promise<ReviewAttemptCapSetting> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(REVIEW_ATTEMPT_CAP_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) {
+      return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false };
+    }
+    // note: A result row without its (NOT NULL) value column is malformed, not absent.
+    if (row.value === undefined) {
+      return {
+        capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+        saved: false,
+        degraded: true,
+        reason: "malformed",
+      };
+    }
+    const capMs = parseInRange(row.value, REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS);
+    if (Number.isNaN(capMs)) {
+      return {
+        capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+        saved: false,
+        degraded: true,
+        reason: "untrusted",
+      };
+    }
+    // note: A present row whose value is NULL is an absent setting, not a save.
+    return capMs === undefined
+      ? { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: false }
+      : { capMs, saved: true, degraded: false };
+  } catch {
+    return { capMs: REVIEW_ATTEMPT_CAP_DEFAULT_MS, saved: false, degraded: true, reason: "read-failed" };
+  }
+}
+
+/** The enforcement read: the effective cap of {@link getReviewAttemptCapSetting}. */
+export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemptCap> {
+  const { capMs, degraded, reason } = await getReviewAttemptCapSetting(db);
+  return reason === undefined ? { capMs, degraded } : { capMs, degraded, reason };
+}
+
+/** The review route's operating switch: `on` admits a queue delivery to a Workflow. */
+export const REVIEW_ROUTE_WORKFLOW_KEY = "review.route.workflow";
+
+/**
+ * The gate's answer. `off` is the answer for an ABSENT row, a stored `off`, an
+ * untrusted value and an unreadable row alike — the modes are deliberately not
+ * a boolean, because "the operator has not turned this on" and "the row cannot
+ * be trusted" are different operating facts with the same refusal.
+ */
+export type ReviewRouteWorkflowGate = {
+  mode: "on" | "off";
+  /** note: A stored row produced the answer (`false` for the absent-row default). */
+  saved: boolean;
+  /** invariant: The refusal rests on unreadable evidence, not a stored `off`. */
+  degraded: boolean;
+  reason?: "malformed" | "untrusted" | "read-failed";
+  /**
+   * safety: The rejected raw value, quoted, so the refusal line names what the row
+   * actually holds (`"on "` and `"on"` are visibly different). A setting is not
+   * a credential, so this is safe to log.
+   */
+  rejected?: string;
+};
+
+/**
+ * May a queue delivery create a Workflow instance? The setting is the gate:
+ * absent is OFF (a fresh deploy must not route live reviews just because the
+ * migration shipped), a stored `on` is the only admission, and every
+ * unreadable shape is OFF — a refusal, never permission. The consumer's queue
+ * handler reads this per batch; nothing else in the pipeline consults it.
+ */
+export async function getReviewRouteWorkflowGate(
+  db: DashboardD1,
+): Promise<ReviewRouteWorkflowGate> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(REVIEW_ROUTE_WORKFLOW_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { mode: "off", saved: false, degraded: false };
+    // note: A result row without its (NOT NULL) value column is malformed, not absent.
+    if (row.value === undefined) {
+      return { mode: "off", saved: false, degraded: true, reason: "malformed" };
+    }
+    // invariant: STRICT, deliberately: the value is NOT trimmed. A setting whose meaning
+    // flips on a stray space is exactly the class of bug this iteration
+    // removes, so `"on "`, `" on"`, `"ON"`, `"1"` and `"true"` are all refusals
+    // — and the refused raw value rides the answer so the log names it.
+    const raw = row.value;
+    if (raw === "on") return { mode: "on", saved: true, degraded: false };
+    if (raw === "off") return { mode: "off", saved: true, degraded: false };
+    return {
+      mode: "off",
+      saved: false,
+      degraded: true,
+      reason: "untrusted",
+      rejected: typeof raw === "string" ? JSON.stringify(raw) : String(raw),
+    };
+  } catch {
+    return { mode: "off", saved: false, degraded: true, reason: "read-failed" };
+  }
+}
+
+/** note: The audit ledger's target id for the cap (one operator save, one row). */
+const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
+
+/**
+ * note: One operator save, one audit row: `before` carries the stored value under
+ * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
+ */
+const REVIEW_ATTEMPT_CAP_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.attempt_cap.set', 'runtime', ?3,
+          json_object('before', ${storedBudgetSql("?5", "NULL", REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS)},
+                      'after', ?4),
+          ?6)`;
+
+/**
+ * Set the end-to-end attempt cap. A value outside its range refuses the write
+ * (`invalid_value`, the accepted range named in the message) with no row and
+ * no audit entry; an accepted value is audited with the actor in ONE batch and
+ * returned.
+ */
+export async function setReviewAttemptCap(
+  db: DashboardD1,
+  value: number,
+  actor: string,
+): Promise<number> {
+  if (!isIntegerIn(value, REVIEW_ATTEMPT_CAP_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `the attempt cap must be an integer in ${REVIEW_ATTEMPT_CAP_MIN_MS}..${REVIEW_ATTEMPT_CAP_MAX_MS} ms`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(REVIEW_ATTEMPT_CAP_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, REVIEW_ATTEMPT_CAP_TARGET, value, REVIEW_ATTEMPT_CAP_KEY, now),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ATTEMPT_CAP_KEY, String(value), now, actor),
+  ]);
+  return value;
+}
+
 /**
  * The comment-claim outbox settings (migration 0048) and whether the stored
  * rows could be trusted. Global like the check budgets — one outbox per

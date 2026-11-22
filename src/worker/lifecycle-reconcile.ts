@@ -65,14 +65,17 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
-import type { D1Like } from "../store/types";
+import type { D1Like, D1StatementLike } from "../store/types";
 import {
   applyPublishedLifecycle,
+  captureLineComments,
+  claimDegradedTarget,
   claimPublication,
   deferPublicationRecovery,
   deferResolutionRecovery,
   getPublicationCreatedMs,
   getResolutionRecoveryRow,
+  listLineBatchRecovery,
   listPublicationRecovery,
   listResolutionRecovery,
   listSuspendedLifecycleApps,
@@ -83,9 +86,13 @@ import {
   markPublicationUnknown,
   markResolutionLocalError,
   PREPARED_SEND_MIN_AGE_MS,
+  readLineBatchState,
   recordNeedsRecheck,
   recordPublicationProof,
+  recordLineDispatchIntent,
   reenableLifecycleForApps,
+  releaseDegradedTarget,
+  releaseLineDispatch,
   releaseUnspentPublicationClaim,
   supersedePublication,
   suspendPublicationRecovery,
@@ -94,12 +101,11 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, type CommenterFetch, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type PostPreparedLineCommentsInput, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
+import { settlementStatementIfDischarged } from "../store/review-route-store";
 
-// ---------------------------------------------------------------------------
-// note: Summary + budget constants (spec §7.11.1 verbatim values)
-// ---------------------------------------------------------------------------
+// note: --- Summary + budget constants (spec §7.11.1 verbatim values) ---
 
 export type LifecycleReconcileSummary = {
   examined: number;
@@ -123,7 +129,7 @@ export const RECONCILE_PUBLICATION_LANE_MAX_REQUESTS = 40;
 /** Bounded selection per lane (§7.11.1: LIMIT 10). */
 export const RECONCILE_SELECT_LIMIT = 10;
 /**
- * note: Conservative, non-mutating preflight admission estimates for the
+ * invariant: Conservative, non-mutating preflight admission estimates for the
  * publication lane's operations (plan, send, read-only discovery).
  * `canSpend` consults them only to decide whether an operation may start;
  * they are NOT reservations and are never charged — the transport meters
@@ -151,9 +157,7 @@ const IDENTITY_REQUESTS = 1;
 /** note: Lease holder label for M8 recovery claims. */
 const HOLDER = "lifecycle-reconcile";
 
-// ---------------------------------------------------------------------------
-// safety: Reviewer surface — the §7.6 credential-routing seam
-// ---------------------------------------------------------------------------
+// note: --- Reviewer surface — the §7.6 credential-routing seam ---
 
 /**
  * The GitHub surface M8 needs. `resolveFindingThread` is the §7.5 adapter
@@ -162,7 +166,7 @@ const HOLDER = "lifecycle-reconcile";
  */
 export type ReconcileReviewer = Pick<
   ReviewCommenter,
-  "planReviewUpsert" | "postPreparedReview" | "postPreparedDegraded" | "listDiscussion"
+  "planReviewUpsert" | "postPreparedReview" | "postPreparedDegraded" | "postLineComments" | "recoverLineComments" | "listDiscussion"
 > & {
   resolveFindingThread: NonNullable<ReviewCommenter["resolveFindingThread"]>;
 };
@@ -176,7 +180,7 @@ export type ReviewerResolution =
       reviewer: ReconcileReviewer;
       paused: boolean;
       /**
-       * note: This App's canonical `<slug>[bot]` — NOT ownership evidence: publication
+       * why: This App's canonical `<slug>[bot]` — NOT ownership evidence: publication
        * discovery proves authorship from the capture's authenticated
        * `viewerDidAuthor`, because login text and bodies are both copyable.
        */
@@ -225,6 +229,11 @@ export type ReviewerFactory = (input: {
   appId: string;
   installationId: number;
   transport?: ReconcileTransport;
+  /**
+   * why: The run's clock. The resolved reviewer's store faces use it too, so a
+   * journal claim taken with this clock is verified against the same one.
+   */
+  now?: () => number;
 }) => Promise<ReviewerResolution>;
 
 type RoutingRow = {
@@ -263,12 +272,12 @@ async function routingRow(db: D1Like, appId: string, installationId: number): Pr
  * malformed probe is `identity-mismatch` too — the lanes must not mutate
  * under an unproven identity.
  */
-export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId, transport }) => {
+export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appId, installationId, transport, now }) => {
   const row = await routingRow(db, appId, installationId);
   if (row === null) return { kind: "unavailable", reason: "missing" };
   if (row.deleted_at !== null) return { kind: "unavailable", reason: "deleted" };
   if (row.status !== "active") return { kind: "unavailable", reason: "disabled" };
-  // note: The suspension fingerprint binds a durable identity-mismatch suspension
+  // safety: The suspension fingerprint binds a durable identity-mismatch suspension
   // to the credentials it was proven against (§7.6 / P67-QC-007): digesting
   // the ENCRYPTED envelope means the value can be persisted and compared
   // without ever exposing or re-deriving the private key.
@@ -280,6 +289,9 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     );
     const commenter = createReviewCommenter({ APP_ID: String(row.github_app_id), PRIVATE_KEY: pem }, {
       db,
+      // note: ONE clock: the publication authority this lane proves at dispatch is
+      // the journal claim taken with the run's clock, not the wall clock.
+      ...(now === undefined ? {} : { nowMs: now }),
       ...(transport === undefined ? {} : { fetchImpl: transport.fetchImpl }),
     });
     const { resolveFindingThread, getAppIdentity } = commenter;
@@ -298,7 +310,7 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
     return {
       kind: "ok",
       paused: row.review_enabled === 0,
-      // note: The authenticated `<slug>[bot]` login is the EXACT App-ownership
+      // invariant: The authenticated `<slug>[bot]` login is the EXACT App-ownership
       // proof (spec §7.5); recovery must never fall back to a generic
       // `[bot]` suffix (P67-QC-011).
       botLogin: `${identity.slug}[bot]`,
@@ -306,19 +318,19 @@ export const productionReviewerFactory: ReviewerFactory = async ({ db, env, appI
         planReviewUpsert: (input) => commenter.planReviewUpsert(input),
         postPreparedReview: (input) => commenter.postPreparedReview(input),
         postPreparedDegraded: (input) => commenter.postPreparedDegraded(input),
+        postLineComments: (input) => commenter.postLineComments(input),
+        recoverLineComments: (input) => commenter.recoverLineComments(input),
         listDiscussion: (input) => commenter.listDiscussion(input),
         resolveFindingThread,
       },
     };
   } catch {
-    // note: missing key / tampered envelope — fail closed
+    // safety: missing key / tampered envelope — fail closed
     return { kind: "unavailable", reason: "decrypt-failed", credentialFingerprint };
   }
 };
 
-// ---------------------------------------------------------------------------
-// note: Log + deps
-// ---------------------------------------------------------------------------
+// note: --- Log + deps ---
 
 /** Structured JSON-lines log (warn for failures, one info summary line). */
 export type ReconcileLog = {
@@ -340,16 +352,14 @@ export type LifecycleReconcileDeps = {
   log?: ReconcileLog;
 };
 
-// ---------------------------------------------------------------------------
-// note: Run budget
-// ---------------------------------------------------------------------------
+// note: --- Run budget ---
 
 type RunBudget = {
   /** invariant: ACTUAL requests issued this run (mutated only at the transport). */
   spent: number;
   deadline: number;
   /**
-   * note: Admission ceiling for the lane currently running (§7.11.1: "Publication
+   * invariant: Admission ceiling for the lane currently running (§7.11.1: "Publication
    * lane gets at most half the run budget before the thread lane"). Applied
    * to actual requests at the transport so the lane share is a real bound,
    * not merely a scheduling hint.
@@ -358,7 +368,7 @@ type RunBudget = {
 };
 
 /**
- * note: Non-mutating preflight admission (§7.11.1). The per-operation envelopes
+ * invariant: Non-mutating preflight admission (§7.11.1). The per-operation envelopes
  * below are ESTIMATES used only to decide whether an operation may start —
  * they are never charged, because the transport meters every ACTUAL request
  * and charging both would double-count (an operation estimated at 3 that
@@ -380,7 +390,7 @@ function reserve(budget: RunBudget, cost: number): void {
 }
 
 /**
- * note: The run's request allowance refused a request BEFORE it was dispatched
+ * invariant: The run's request allowance refused a request BEFORE it was dispatched
  * (spec §7.11.1: "budget exhaustion is not a failed attempt"). It is a
  * distinct type because the refusal must be told apart from a send that
  * MIGHT have reached GitHub: the caller restores the claimed publication to
@@ -398,7 +408,7 @@ class RecoveryBudgetRefused extends Error {
 }
 
 /**
- * note: Does this error CHAIN carry a pre-dispatch budget refusal? Octokit does not
+ * invariant: Does this error CHAIN carry a pre-dispatch budget refusal? Octokit does not
  * let a custom transport error reach the caller intact: `fetchWrapper`
  * re-wraps every non-abort rejection in `RequestError(message, 500, ...)`
  * with the original parked on `cause` (`@octokit/request`), and the
@@ -425,7 +435,7 @@ function isBudgetRefusal(error: unknown): boolean {
 }
 
 /**
- * note: The enforced per-request transport bound AND the actual-request meter
+ * invariant: The enforced per-request transport bound AND the actual-request meter
  * (§7.11.1: "each request ≤5s and additionally capped by remaining run
  * deadline"; ≤80 requests/run). Every request gets its own abort signal at
  * `min(5s, time left in the run)` — computed at the request, so a request
@@ -449,7 +459,7 @@ function buildTransport(budget: RunBudget, now: () => number): ReconcileTranspor
   return {
     boundMs,
     fetchImpl: (input, init) => {
-      // invariant: Admission + accounting for THIS request, atomically before dispatch.
+      // note: Admission + accounting for THIS request, atomically before dispatch.
       if (!canSpend(budget, now(), 1, false)) {
         return Promise.reject(
           new RecoveryBudgetRefused(
@@ -476,9 +486,7 @@ function giveUpLine(scope: Scope, workId: string, attempts: number, reason: stri
   return `gave up after ${attempts} attempts (app=${scope.appId}, installation=${scope.installationId}, owner=${scope.owner}, repo=${scope.repo}, pr=${scope.prNumber}, work=${workId}): ${reason}`;
 }
 
-// ---------------------------------------------------------------------------
-// note: The reconciler
-// ---------------------------------------------------------------------------
+// note: --- The reconciler ---
 
 /**
  * One bounded M8 recovery pass. Never throws (the §7.11 composition
@@ -512,7 +520,7 @@ export async function reconcileReviewLifecycle(
     // suspension) per App pair per run.
     const reviewerCache = new Map<string, Promise<ReviewerResolution>>();
 
-    // invariant: 0. Exact-App re-enable policy (D1 only, no credentials):
+    // safety: 0. Exact-App re-enable policy (D1 only, no credentials):
     //    - a DISABLED App resumes by status alone once its row is active
     //      again (§7.6 "Re-enable allows due suspended rows to resume with
     //      the same IDs and fresh fencing");
@@ -532,11 +540,11 @@ export async function reconcileReviewLifecycle(
         if (pair.requiresIdentityProof) {
           const currentFingerprint = row === null ? null : await sha256Hex(row.private_key_enc);
           if (currentFingerprint === null || currentFingerprint === pair.credentialFingerprint) {
-            // note: Same credentials that already proved the mismatch (or no
+            // safety: Same credentials that already proved the mismatch (or no
             // evidence they changed): stay suspended, issue nothing.
             continue;
           }
-          // note: Credentials changed — the operator's correction is the one event
+          // safety: Credentials changed — the operator's correction is the one event
           // that reopens the identity question. The probe is a real request,
           // so it passes the same whole-run admission gate as any other
           // (§7.11.1): unaffordable → the pair simply stays suspended.
@@ -547,9 +555,10 @@ export async function reconcileReviewLifecycle(
             appId: pair.appId,
             installationId: pair.installationId,
             transport,
+            now,
           });
           if (proof.kind !== "ok") {
-            // note: Still mismatched / still unusable: re-stamp BOTH lanes with the
+            // why: Still mismatched / still unusable: re-stamp BOTH lanes with the
             // CURRENT fingerprint so the next pass can tell again.
             const suspension = {
               kind: proof.reason,
@@ -562,7 +571,7 @@ export async function reconcileReviewLifecycle(
             await suspendResolutionRecovery(db, pair, suspension, now());
             continue;
           }
-          // why: Identity proved against the corrected credentials: cache it so
+          // safety: Identity proved against the corrected credentials: cache it so
           // this run's lanes reuse the proof instead of probing again.
           reviewerCache.set(`${pair.appId}:${pair.installationId}`, Promise.resolve(proof));
         }
@@ -581,6 +590,10 @@ export async function reconcileReviewLifecycle(
     // share is a real bound for this lane rather than a scheduling hint.
     budget.laneCap = RECONCILE_PUBLICATION_LANE_MAX_REQUESTS;
     await reconcilePublications(env, db, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+
+    // note: 1b. Post-apply line lane (spec §7.9a condition 2) — the same half share:
+    // applied publications that still owe a line batch, or owe its capture.
+    await reconcileLineBatches(db, now, budget, reviewerFactory, env, transport, reviewerCache, log, summary);
 
     // note: 2. Thread lane — the remaining run budget (its own ≤15-request
     // per-operation envelope is the admission estimate; the actual requests
@@ -610,7 +623,7 @@ export async function reconcileReviewLifecycle(
 const pairKeyOf = (scope: Scope): string => `${scope.appId}:${scope.installationId}`;
 
 /**
- * note: Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
+ * invariant: Resolve (and cache) the reviewer for a pair; on `unavailable` suspend the
  * pair's pending rows durably (once per pair per run — attempts untouched,
  * no cross-App substitution).
  *
@@ -626,7 +639,7 @@ async function reviewerForPair(
   db: D1Like,
   env: ScheduledEnv,
   scope: Scope,
-  nowMs: number,
+  now: () => number,
   budget: RunBudget,
   reviewerFactory: ReviewerFactory,
   transport: ReconcileTransport,
@@ -644,7 +657,7 @@ async function reviewerForPair(
       // transport choke point, so no per-operation reservation is charged
       // here — reserving an estimate AND metering the real requests would
       // double-count and shrink the run's true allowance.
-      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport });
+      return await reviewerFactory({ db, env, appId: scope.appId, installationId: scope.installationId, transport, now });
     } catch (error) {
       // safety: A throwing factory is a credential-path failure — fail closed to a
       // durable suspension rather than letting it escape the lane.
@@ -667,8 +680,8 @@ async function reviewerForPair(
         ? {}
         : { credentialFingerprint: settled.credentialFingerprint }),
     };
-    const pubs = await suspendPublicationRecovery(db, pair, suspension, nowMs);
-    const threads = await suspendResolutionRecovery(db, pair, suspension, nowMs);
+    const pubs = await suspendPublicationRecovery(db, pair, suspension, now());
+    const threads = await suspendResolutionRecovery(db, pair, suspension, now());
     summary.suspended += pubs + threads;
     log.warn(
       { event: "ops_lifecycle_pair_suspended", detail: reason },
@@ -707,7 +720,7 @@ async function reconcilePublications(
   const rows = await listPublicationRecovery(db, now(), RECONCILE_SELECT_LIMIT);
   for (const row of rows) {
     summary.examined += 1;
-    // note: A definitively failed send is not re-sent by recovery (the operator
+    // invariant: A definitively failed send is not re-sent by recovery (the operator
     // retry retains that phase deliberately); applied/superseded pending
     // rows are bookkeeping residue — examined, never re-worked.
     if (row.phase === "failed" || row.phase === "applied" || row.phase === "superseded") continue;
@@ -715,13 +728,13 @@ async function reconcilePublications(
       await applyConfirmedPublication(db, now, row, summary);
       continue;
     }
-    // note: prepared / sending / unknown need GitHub — route credentials first.
+    // safety: prepared / sending / unknown need GitHub — route credentials first.
     // The identity probe and every other real request are metered at the
     // transport; this gate only decides whether even ONE request could still
     // fit the run, so an exhausted run stops the lane before any claim.
     const scope = row.payload.scope;
     if (!canSpend(budget, now(), 1, true)) continue; // note: stays due, no claim
-    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // note: pair suspended durably
     if (row.phase === "prepared") {
       await sendPreparedPublication(db, now, budget, resolved, row, log, summary);
@@ -729,6 +742,33 @@ async function reconcilePublications(
       await discoverUncertainPublication(db, now, budget, resolved, row, summary);
     }
   }
+}
+
+/**
+ * invariant: A recovery apply COMPLETES the attempt that staged the publication. The
+ * settlement statement is planned from the attempt's durable obligations
+ * before the batch and rides the apply's own transaction, so the applied mark
+ * and the attempt's end cannot diverge — and when an obligation is still open
+ * (an open Check), the statement records the publication effect WITHOUT
+ * `settled_ms`. A pre-deploy row carries no `attemptId`: there is no attempt.
+ */
+async function settlementTailStatements(
+  db: D1Like,
+  row: PublicationRow,
+  nowMs: number,
+): Promise<D1StatementLike[]> {
+  const attemptId = row.payload.attemptId;
+  if (attemptId === undefined) return [];
+  const statement = await settlementStatementIfDischarged(
+    db,
+    {
+      attemptId,
+      publicationId: row.id,
+      landed: ["publication"],
+    },
+    nowMs,
+  );
+  return statement === null ? [] : [statement];
 }
 
 /**
@@ -743,10 +783,12 @@ async function applyConfirmedPublication(
   row: PublicationRow,
   summary: LifecycleReconcileSummary,
 ): Promise<void> {
-  const lease = await claimPublication(db, row.id, HOLDER, now());
+  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) return; // note: another invocation owns the live lease
   try {
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -758,7 +800,146 @@ async function applyConfirmedPublication(
 }
 
 /**
- * note: Send a prepared publication once, with the same identity (§7.7 failure
+ * invariant: §7.9a condition 2's recovery half: the post-apply line lane. It selects
+ * `applied` publications that still carry an uncaptured line intent and either
+ *   - records the dispatch intent and sends the batch under the SAME conditional
+ *     transition the foreground uses (exactly one lane wins), or
+ *   - finds an intent already recorded and performs read-only discovery —
+ *     never a second send.
+ */
+async function reconcileLineBatches(
+  db: D1Like,
+  now: () => number,
+  budget: RunBudget,
+  reviewerFactory: NonNullable<LifecycleReconcileDeps["reviewer"]>,
+  env: ScheduledEnv,
+  transport: ReconcileTransport,
+  reviewerCache: Map<string, Promise<ReviewerResolution>>,
+  log: ReconcileLog,
+  summary: LifecycleReconcileSummary,
+): Promise<void> {
+  const rows = await listLineBatchRecovery(db, now(), RECONCILE_SELECT_LIMIT);
+  for (const row of rows) {
+    const scope = row.payload.scope;
+    if (!canSpend(budget, now(), 1, true)) continue; // invariant: stays due, no claim
+    // invariant: ONE conditional transition decides who sends: the durable dispatch
+    // intent. `null` means the batch was already dispatched (or another lane
+    // holds it) — then the only work left is read-only discovery.
+    const lease = await recordLineDispatchIntent(db, row.id, `recovery-lines:${row.id}`, now());
+    if (lease === null) {
+      const state = await readLineBatchState(db, row.id);
+      if (!state.pending) continue;
+      const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+      if (resolved.kind === "unavailable") continue;
+      try {
+        const recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
+        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+        log.info(
+          { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
+          "line-comment batch discovered without a second send",
+        );
+      } catch (error) {
+        log.warn(
+          { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
+        );
+      }
+      continue;
+    }
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
+    if (resolved.kind === "unavailable") {
+      await releaseLineDispatch(db, row.id, lease, now(), false);
+      continue;
+    }
+    const input = lineInputOf(row);
+    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+    if (admitted.kind === "unresolved") {
+      await releaseLineDispatch(db, row.id, lease, now(), false);
+      log.warn(
+        { event: "ops_lifecycle_line_unresolved", detail: `publication=${row.id}: ${admitted.reason}` },
+        "line-comment batch not sent — its admitted attempt cannot be resolved",
+      );
+      continue;
+    }
+    let outcome: "sent" | "refused" | "unknown" = "unknown";
+    try {
+      const posted = await resolved.reviewer.postLineComments({
+        ...input,
+        journalClaim: lease,
+        ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
+      });
+      try {
+        await captureLineComments(db, row.id, posted.reviewId, posted.posted, now());
+      } catch (error) {
+        log.warn(
+          { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment id capture failed — the intent stays, discovery owns the rest",
+        );
+      }
+      outcome = "sent";
+    } catch (error) {
+      // invariant: A definitive pre-send refusal proves nothing was sent; anything else
+      // may have landed, so the intent is kept and only discovery may follow.
+      if (error instanceof PreparedSendRejected) outcome = "refused";
+      log.warn(
+        { event: "ops_lifecycle_line_send_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+        "line-comment batch send failed — an unresolved send stays discovery-only",
+      );
+    } finally {
+      if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
+    }
+  }
+}
+
+/** note: The exact frozen batch of one applied publication. */
+function lineInputOf(row: PublicationRow): PostPreparedLineCommentsInput {
+  const scope = row.payload.scope;
+  return {
+    installationId: scope.installationId,
+    owner: scope.owner,
+    repo: scope.repo,
+    prNumber: scope.prNumber,
+    headSha: row.payload.headSha,
+    round: row.payload.round,
+    publicationId: row.id,
+    intents: row.payload.lineIntents,
+  };
+}
+
+/** invariant: The identity a publication was admitted under, resolved from its FROZEN
+ *  evidence — the staged payload's launch-attempt id plus that row's
+ *  `(attempt_key, generation)` pair. Never a recency lookup. */
+type AdmittedAttempt =
+  | { kind: "check"; attemptId: string }
+  | { kind: "no-check" }
+  | { kind: "unresolved"; reason: string };
+
+async function admittedAttemptOf(db: D1Like, admittedAttemptId: string | undefined): Promise<AdmittedAttempt> {
+  if (admittedAttemptId === undefined) {
+    return { kind: "unresolved", reason: "the staged payload records no admitted attempt (pre-binding row)" };
+  }
+  const launch = await db
+    .prepare(`SELECT attempt_key, attempt_generation FROM review_launches WHERE attempt_id = ?`)
+    .bind(admittedAttemptId)
+    .first<{ attempt_key: string | null; attempt_generation: number | null }>();
+  if (launch === null) return { kind: "unresolved", reason: `admitted attempt ${admittedAttemptId} has no launch row` };
+  if (launch.attempt_key === null || launch.attempt_generation === null) return { kind: "no-check" };
+  const check = await db
+    .prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND generation = ?`)
+    .bind(launch.attempt_key, launch.attempt_generation)
+    .first<{ id: string }>();
+  if (check === null) {
+    // invariant: The frozen identity names this attempt, and it never created a Check
+    // run (no Checks surface): the lane the foreground also uses — the
+    // journal claim — is its one authority. Rows are retained, so absence is
+    // not a lost link.
+    return { kind: "no-check" };
+  }
+  return { kind: "check", attemptId: check.id };
+}
+
+/**
+ * invariant: Send a prepared publication once, with the same identity (§7.7 failure
  * matrix: "Staged, before send → M8 sends once with same identity when
  * enabled/current"). Order: pause gate → age gate → budget → read-only
  * staleness pre-check (supersede instead of a stale send over a newer
@@ -783,7 +964,7 @@ async function sendPreparedPublication(
   if (createdMs === null || now() - createdMs < PREPARED_SEND_MIN_AGE_MS) return;
   // Preflight admission only — the plan/send requests are metered as they are
   // actually issued at the transport, so nothing is charged twice.
-  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // note: remains due, no attempt
+  if (!canSpend(budget, now(), PLAN_REQUESTS + SEND_REQUESTS, true)) return; // invariant: remains due, no attempt
   // invariant: Read-only staleness pre-check: never send a stale publication over a
   // newer round. A pre-check failure is typed "stay due" — no claim, no
   // attempt.
@@ -813,10 +994,48 @@ async function sendPreparedPublication(
     }
     return;
   }
-  const lease = await claimPublication(db, row.id, HOLDER, now());
-  if (lease === null) return; // note: claimed elsewhere between pre-check and claim
+  // invariant: §7.9a condition 3: a degraded UPDATE reuses the comment a cleanup may be
+  // deleting. The same target exclusion the staging path holds covers this
+  // recovery send (and a target whose delete is unresolved refuses it).
+  const degradedTarget =
+    row.payload.kind === "degraded" && row.payload.targetCommentId !== null
+      ? { scope, commentId: row.payload.targetCommentId }
+      : null;
+  let degradedTargetLease: Lease | null = null;
+  if (degradedTarget !== null) {
+    degradedTargetLease = await claimDegradedTarget(db, {
+      ...degradedTarget,
+      holder: `recovery-degraded:${row.id}`,
+      nowMs: now(),
+    });
+    if (degradedTargetLease === null) {
+      log.warn(
+        { event: "ops_lifecycle_degraded_target_busy", detail: `publication=${row.id} comment=${degradedTarget.commentId}` },
+        "degraded target is held by its cleanup or unresolved — no send",
+      );
+      return;
+    }
+  }
+  const lease = await claimPublication(db, row.id, HOLDER, now(), "prepared");
+  if (lease === null) {
+    if (degradedTarget !== null && degradedTargetLease !== null) {
+      await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
+    }
+    return; // note: claimed elsewhere between pre-check and claim
+  }
   try {
+    // invariant: §7.9a condition 1: a Check-backed publication's recovery send must meet
+    // the foreground send on the SAME per-action lease. That key is the attempt
+    // the publication was ADMITTED under — resolved from the launch row's
+    // frozen pair, never "the newest Check linked to this publication". An
+    // identity that cannot be resolved refuses; a fallback would be a second
+    // authority.
+    const admitted = await admittedAttemptOf(db, row.payload.admittedAttemptId);
+    if (admitted.kind === "unresolved") {
+      throw new PublicationAuthorityUnavailable(`${admitted.reason} — nothing was sent`);
+    }
     const target = {
+      appId: scope.appId,
       installationId: scope.installationId,
       owner: scope.owner,
       repo: scope.repo,
@@ -826,6 +1045,12 @@ async function sendPreparedPublication(
       targetCommentId: row.payload.targetCommentId,
       body: row.payload.body,
       publicationId: row.id,
+      // note: The per-action lease is the one authority when the admitted attempt
+      // has a Check row; the journal claim is the authority for the lane that
+      // has no Check attempt to key one on (and the foreground uses the same
+      // one there).
+      journalClaim: lease,
+      ...(admitted.kind === "check" ? { attemptId: admitted.attemptId } : {}),
     };
     let commentId: number;
     if (row.payload.kind === "degraded") {
@@ -851,15 +1076,36 @@ async function sendPreparedPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the confirmation", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
     }
     await settleFailedPublicationAttempt(db, now, row, lease, "post-proof apply did not complete", summary, false);
   } catch (error) {
+    if (error instanceof PublicationAuthorityUnavailable) {
+      // invariant: Another lane holds this action's lease and is the sender: nothing was
+      // sent here, so the claim is unspent. Hand the row back as due instead
+      // of recording a definitive failure we never observed (§7.9a).
+      const restored = await releaseUnspentPublicationClaim(db, row.id, lease, now());
+      if (!restored) {
+        summary.errors += 1;
+        log.warn(
+          { event: "ops_lifecycle_publication_claim_restore_missed", detail: `publication=${row.id}` },
+          "action contended by another lane and the claim had already moved — row left to its current owner",
+        );
+        return;
+      }
+      log.info(
+        { event: "ops_lifecycle_publication_authority_busy", detail: `publication=${row.id}: ${error.message}` },
+        "publication action held by another lane — no send, claim returned, row stays due",
+      );
+      return;
+    }
     if (error instanceof PreparedSendRejected) {
-      // note: A definitive pre-send rejection (§7.7): no request left the Worker,
+      // invariant: A definitive pre-send rejection (§7.7): no request left the Worker,
       // so `failed` is the truthful durable phase — never the post-attempt
       // `unknown`. Payload, digest and attempts are retained; recovery never
       // re-sends a failed row (the phase is skipped on selection). The
@@ -877,7 +1123,7 @@ async function sendPreparedPublication(
       return;
     }
     if (isBudgetRefusal(error)) {
-      // note: The allowance refused a request BEFORE dispatch (§7.11.1: "budget
+      // invariant: The allowance refused a request BEFORE dispatch (§7.11.1: "budget
       // exhaustion is not a failed attempt"). This send never left the
       // Worker, so the claim is unwound — the row returns to due `prepared`
       // with its attempt returned and stays re-sendable next run. Recording
@@ -902,14 +1148,18 @@ async function sendPreparedPublication(
       );
       return;
     }
-    // note: The send MAY have landed (§7.7): the honest phase is unknown —
+    // invariant: The send MAY have landed (§7.7): the honest phase is unknown —
     // read-only discovery only, never a blind second create.
     await settleFailedPublicationAttempt(db, now, row, lease, error instanceof Error ? error.message : String(error), summary, true);
+  } finally {
+    if (degradedTarget !== null && degradedTargetLease !== null) {
+      await releaseDegradedTarget(db, { ...degradedTarget, lease: degradedTargetLease, nowMs: now(), keep: false });
+    }
   }
 }
 
 /**
- * invariant: Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
+ * safety: Read-only discovery for `sending`/`unknown` rows (§7.7 "Remote unknowns"):
  * scan the PR's bounded newest issue comments for the EXACT prepared body
  * (marker + digest — body equality implies both). Ownership is proven from the
  * AUTHENTICATED provenance the capture carries for this installation token
@@ -931,7 +1181,7 @@ async function discoverUncertainPublication(
 ): Promise<void> {
   const scope = row.payload.scope;
   if (!canSpend(budget, now(), DISCOVERY_REQUESTS, true)) return; // note: stays unknown/due, no attempt
-  const lease = await claimPublication(db, row.id, HOLDER, now());
+  const lease = await claimPublication(db, row.id, HOLDER, now(), row.phase);
   if (lease === null) return; // note: another invocation owns discovery
   try {
     const discussion = await resolved.reviewer.listDiscussion({
@@ -940,7 +1190,7 @@ async function discoverUncertainPublication(
       repo: scope.repo,
       prNumber: scope.prNumber,
       threads: [], // invariant: issue comments only — the publication lives on the PR conversation
-      // note: The comment this lane is looking for IS one of our own publications,
+      // invariant: The comment this lane is looking for IS one of our own publications,
       // so the capture must not hide it from the walk.
       includeOwnPublications: true,
     });
@@ -970,7 +1220,9 @@ async function discoverUncertainPublication(
       await settleFailedPublicationAttempt(db, now, row, lease, "proof persistence rejected the discovered publication", summary, true);
       return;
     }
-    const applied = await applyPublishedLifecycle(db, row.id, lease, now(), now);
+    const at = now();
+    const tail = await settlementTailStatements(db, row, at);
+    const applied = await applyPublishedLifecycle(db, row.id, lease, at, now, () => tail);
     if (applied) {
       summary.applied += 1;
       return;
@@ -982,7 +1234,7 @@ async function discoverUncertainPublication(
 }
 
 /**
- * note: One failed publication attempt: backoff (1/2/4/8/16 min) or, at the
+ * invariant: One failed publication attempt: backoff (1/2/4/8/16 min) or, at the
  * 5-attempt cap, a terminal durable local-error with the structured
  * App/scope/work-ID line — the row is retained for operator inspection,
  * never deleted. Budget exhaustion never reaches this path (no attempt was
@@ -995,7 +1247,7 @@ async function settleFailedPublicationAttempt(
   lease: Lease,
   reason: string,
   summary: LifecycleReconcileSummary,
-  /** why: true = the attempt was an uncertain send/discovery → phase `unknown`. */
+  /** note: true = the attempt was an uncertain send/discovery → phase `unknown`. */
   uncertain: boolean,
 ): Promise<void> {
   const attemptsAfter = row.attempts + 1; // invariant: the claim counted exactly one
@@ -1027,19 +1279,19 @@ async function reconcileResolutions(
 ): Promise<void> {
   const rows = await listResolutionRecovery(db, now(), RECONCILE_SELECT_LIMIT);
   for (const { associationId, scope } of rows) {
-    // note: Preflight admission BEFORE any claim: one operation may spend up to the
+    // invariant: Preflight admission BEFORE any claim: one operation may spend up to the
     // §7.11.1 ≤15-request thread envelope (estimate only — the ACTUAL requests
     // are metered at the transport). A false gate stops the lane WITHOUT a
     // claim or an attempt — the row simply stays due (§7.11.1: budget
     // exhaustion is not a failed attempt).
     if (!canSpend(budget, now(), RECONCILE_THREAD_OPERATION_REQUESTS, false)) return;
     summary.examined += 1;
-    // note: Pair credentials come FIRST; the §7.5 surface claims and counts its
+    // safety: Pair credentials come FIRST; the §7.5 surface claims and counts its
     // attempt only inside `resolveFindingThread`, which the admission above
     // precedes.
-    const resolved = await reviewerForPair(db, env, scope, now(), budget, reviewerFactory, transport, reviewerCache, log, summary);
+    const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
     if (resolved.kind === "unavailable") continue; // note: pair suspended durably
-    // safety: A paused App keeps "previously-authorized resolution retry" running
+    // note: A paused App keeps "previously-authorized resolution retry" running
     // (frozen pause policy) — no extra gate here.
     const work = await getResolutionRecoveryRow(db, associationId);
     if (work === null) continue; // note: row vanished (operator action) — nothing to drive
@@ -1060,7 +1312,7 @@ async function reconcileResolutions(
           summary.resolved += 1;
           break;
         case "abandoned":
-          break; // why: terminal; the §7.5 surface persisted the state + reason
+          break; // note: terminal; the §7.5 surface persisted the state + reason
         case "needs-recheck":
           await recordNeedsRecheck(db, associationId, `resolve deferred to the next real review: ${outcome.reason}`, now());
           summary.unknown += 1;
@@ -1078,7 +1330,7 @@ async function reconcileResolutions(
 }
 
 /**
- * note: One failed resolve attempt: backoff (1/2/4/8/16 min) after the attempt
+ * invariant: One failed resolve attempt: backoff (1/2/4/8/16 min) after the attempt
  * the §7.5 claim consumed, or the terminal visible local-error at the
  * 5-attempt cap — structured App/scope/work-ID line, row retained (never
  * deleted).

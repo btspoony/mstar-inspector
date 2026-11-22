@@ -36,6 +36,7 @@ import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
   applyPublishedLifecycle,
   claimPublication,
+  PUBLICATION_LEASE_MS,
   listPublicationRecovery,
   listResolutionRecovery,
   recordPublicationProof,
@@ -48,6 +49,7 @@ import {
   type PublicationProof,
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
+import { CHECK_LEASE_MS, claimAttempt, linkCheckPublication, releaseCheckClaim } from "../../src/store/review-checks";
 import type { D1Like } from "../../src/store/types";
 import {
   buildLineCommentBody,
@@ -75,8 +77,10 @@ import {
 import type { UpsertPlan } from "../../src/pipeline/comment";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { ScheduledEnv } from "../../src/worker/env";
-import { PreparedSendRejected } from "../../src/pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected } from "../../src/pipeline/comment";
 import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { testAppPem } from "../helpers/rsa-key";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -207,10 +211,18 @@ function lifecycleRound(seenRowIds: string[]): LifecycleRound {
   };
 }
 
+/**
+ * The default admitted attempt: a launch row with NO frozen Check identity —
+ * the lane whose authority is the journal claim (an App without Checks). The
+ * Check-backed case seeds its own row with the frozen pair.
+ */
+const DEFAULT_ADMITTED_ATTEMPT = "attempt-no-check-0001";
+
 function reviewPayload(scope: Scope, overrides: Partial<PublicationPayload> = {}): PublicationPayload {
   return {
     version: 1,
     scope,
+    admittedAttemptId: DEFAULT_ADMITTED_ATTEMPT,
     headSha: SHA,
     kind: "review",
     round: 1,
@@ -228,6 +240,7 @@ function degradedPayload(scope: Scope, overrides: Partial<PublicationPayload> = 
   return {
     version: 1,
     scope,
+    admittedAttemptId: DEFAULT_ADMITTED_ATTEMPT,
     headSha: SHA,
     kind: "degraded",
     round: 1,
@@ -257,7 +270,7 @@ function proofOf(id: string, pay: PublicationPayload, confirmedMs: number): Publ
 /** Stage → claim → record proof → expire the lease (the crashed-window shape). */
 async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayload, nowMs = T0): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs });
-  const lease = await claimPublication(db, id, "consumer", nowMs + 1);
+  const lease = await claimPublication(db, id, "consumer", nowMs + 1, "prepared");
   if (lease === null) throw new Error("test setup: claim failed");
   const recorded = await recordPublicationProof(db, id, lease, proofOf(id, pay, nowMs + 2));
   if (!recorded) throw new Error("test setup: proof recording failed");
@@ -267,6 +280,13 @@ async function seedConfirmedCrashed(db: TestD1, id: string, pay: PublicationPayl
 /** Seed a prepared (never sent) publication row staged `ageMs` ago. */
 async function seedPrepared(db: TestD1, id: string, pay: PublicationPayload, ageMs: number): Promise<void> {
   await stagePublication(db, { id, payload: pay, nowMs: T0 - ageMs });
+  // The payload's admitted attempt must be readable by every later lane: a
+  // no-Check binding is a launch row whose pair was never frozen.
+  if (pay.admittedAttemptId === DEFAULT_ADMITTED_ATTEMPT) {
+    db.raw
+      .prepare(`INSERT OR IGNORE INTO review_launches (attempt_id, state, claimed_at_ms) VALUES (?, 'provisioned', ?)`)
+      .run(DEFAULT_ADMITTED_ATTEMPT, T0 - ageMs);
+  }
 }
 
 /**
@@ -396,6 +416,12 @@ function okResolution(
       postPreparedDegraded: async () => {
         throw new Error("postPreparedDegraded not expected");
       },
+      postLineComments: async () => {
+        throw new Error("postLineComments not expected");
+      },
+      recoverLineComments: async () => {
+        throw new Error("recoverLineComments not expected");
+      },
       listDiscussion: async () => {
         throw new Error("listDiscussion not expected");
       },
@@ -498,6 +524,101 @@ describe("publication lane — confirmed apply", () => {
     expect(reviews.n).toBe(1);
     expect(findings.n).toBe(1);
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "applied", recovery_state: "done" });
+  });
+
+  test("the apply that completes a recovered publication also settles its attempt", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    const attemptId = "attempt-recovered-apply";
+    // The consumer staged the publication and crashed before the apply; the
+    // staged payload names the attempt that must be measured.
+    await seedConfirmedCrashed(db, "pub-settled", reviewPayload(SCOPE, { attemptId }));
+    const payload: ReviewJobPayload = {
+      installation_id: SCOPE.installationId,
+      owner: SCOPE.owner,
+      repo: SCOPE.repo,
+      pr_number: SCOPE.prNumber,
+      head_sha: SHA,
+      action: "opened",
+      triggered_by: "pull_request",
+      botRef: { appId: SCOPE.appId },
+      targetId: `target-${SCOPE.appId}`,
+    };
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: "delivery-recovered-apply",
+      attemptId,
+      payload,
+      nowMs: T0,
+      enqueuedMs: T0 - 2_000,
+      deadlineMs: T0 + 600_000,
+    });
+
+    const summary = await reconcile(db, { now: () => T0 + 1_000 });
+
+    expect(summary.applied).toBe(1);
+    // The applied mark and the attempt's end landed together: a recovered
+    // attempt is measurable by the operator report.
+    const handoff = await readAttemptHandoff(db as never, "delivery-recovered-apply");
+    expect(handoff?.settledMs).toEqual(expect.any(Number));
+    expect(handoff?.settledEffects).toContain("publication");
+  });
+
+  test("a recovery apply records the publication but leaves an open Check's attempt unmeasured", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    const attemptId = "attempt-recovered-open-check";
+    // The attempt froze an OPEN Check on its launch row.
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${attemptId}`,
+      nowMs: T0,
+      executionDeadlineMs: T0 + 600_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`test setup: claim failed: ${claimed.kind}`);
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(claimed.attempt.identity.attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome,
+            attempt_key, attempt_generation)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?, ?)`,
+      )
+      .run(attemptId, T0, T0 + 1, T0 + 2, check.attempt_key, check.generation);
+    await seedConfirmedCrashed(db, "pub-open-check", reviewPayload(SCOPE, { attemptId }));
+    const payload: ReviewJobPayload = {
+      installation_id: SCOPE.installationId,
+      owner: SCOPE.owner,
+      repo: SCOPE.repo,
+      pr_number: SCOPE.prNumber,
+      head_sha: SHA,
+      action: "opened",
+      triggered_by: "pull_request",
+      botRef: { appId: SCOPE.appId },
+      targetId: `target-${SCOPE.appId}`,
+    };
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: "delivery-open-check",
+      attemptId,
+      payload,
+      nowMs: T0,
+      enqueuedMs: T0 - 2_000,
+      deadlineMs: T0 + 600_000,
+    });
+
+    const summary = await reconcile(db, { now: () => T0 + 1_000 });
+
+    expect(summary.applied).toBe(1);
+    // The publication effect is recorded, but the Check lane is still open, so
+    // the attempt is not settled: the obligation model refuses to certify it.
+    const handoff = await readAttemptHandoff(db as never, "delivery-open-check");
+    expect(handoff?.settledMs).toBeNull();
+    expect(handoff?.settledEffects).toContain("publication");
   });
 
   test("re-apply is idempotent; a crash between store.put and the applied mark re-runs the artifact as a no-op", async () => {
@@ -623,6 +744,419 @@ describe("publication lane — prepared send", () => {
     expect(summary.examined).toBe(1);
     expect(routed).toBe(1);
     expect(pubRow(db, "pub-1")).toMatchObject({ phase: "prepared", recovery_state: "pending", attempts: 0 });
+  });
+});
+
+describe("§7.9a condition 1 — a Check-backed send and its recovery share one action lease", () => {
+  const ADMITTED_ATTEMPT = "attempt-two-lane-0001";
+
+  /**
+   * A prepared publication admitted under a Check attempt, with the launch
+   * row's FROZEN `(attempt_key, generation)` pair and a real encrypted PEM.
+   * Nothing links the publication by recency: the binding is the payload's
+   * admitted attempt plus that row.
+   */
+  async function seedCheckAdmittedPrepared(db: TestD1, id: string): Promise<string> {
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, id, reviewPayload(SCOPE, { round: 2, admittedAttemptId: ADMITTED_ATTEMPT }), 120_000);
+    const claimed = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      holder: "run-a",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claimed.kind}`);
+    const attemptId = claimed.attempt.identity.attemptId;
+    const identity = db.raw
+      .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
+      .get(attemptId) as { attempt_key: string; generation: number };
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, attempt_key, attempt_generation)
+         VALUES (?, 'provisioned', ?, ?, ?)`,
+      )
+      .run(ADMITTED_ATTEMPT, T0, identity.attempt_key, identity.generation);
+    // A LATER generation also linked to the same publication: resolving by
+    // recency would take ITS action lease instead of the admitted one. Close
+    // the admitted row so the same key's next generation may open.
+    expect(await releaseCheckClaim(db as never, attemptId, claimed.lease, T0)).toBe(true);
+    db.raw.prepare(`UPDATE review_checks SET terminal_ms = ? WHERE id = ?`).run(T0, attemptId);
+    const decoy = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 1001,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      holder: "run-b",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (decoy.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${decoy.kind}`);
+    expect(await linkCheckPublication(db as never, decoy.attempt.identity.attemptId, decoy.lease, id, T0)).toBe(true);
+    return attemptId;
+  }
+
+  test("foreground mid-send and recovery on the same admitted action produce exactly one mutation", async () => {
+    const db = createMigratedTestD1();
+    const attemptId = await seedCheckAdmittedPrepared(db, "pub-lease");
+    const clock = { now: T0 };
+    const fg = { posts: 0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const token = (name: string) =>
+      json(200, {
+        token: name,
+        expires_at: new Date(T0 + 3_600_000).toISOString(),
+        repositories: [{ id: 1, name: "widgets" }],
+        permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+        repository_selection: "selected",
+      });
+
+    // The recovery lane is STARTED FIRST and paused inside its plan: it has
+    // already selected the publication as `prepared`, exactly the window in
+    // which the foreground may take it.
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const backgroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) return token("ghs_bg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          bg.posts += 1;
+          return json(201, { id: 9100, body: "second" });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
+        }
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = backgroundFetch;
+    const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+    // Recovery selects the row as `prepared` and suspends in its plan.
+    const running = reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => clock.now });
+    await planReached.promise;
+    // The foreground's journal claim was taken one window ago and has lapsed
+    // (the row is now `sending`); its ACTION lease is taken at T0 and is live
+    // for the whole send.
+    const journalLease = await claimPublication(db as never, "pub-lease", "consumer:fg", T0 - PUBLICATION_LEASE_MS - 1, "prepared");
+    if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
+    clock.now = T0;
+
+    const foregroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) return token("ghs_fg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          fg.posts += 1;
+          return json(201, { id: 9001, body: "posted" });
+        }
+        // Mid-send: let the paused recovery finish against this exact
+        // publication while the action lease is still held here.
+        planGate.resolve();
+        await running;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      const commenter = createReviewCommenter(
+        { APP_ID: "1001", PRIVATE_KEY: await testAppPem() },
+        { db, nowMs: () => clock.now, fetchImpl: foregroundFetch },
+      );
+      const sent = await commenter.postPreparedReview({
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: SHA,
+        round: 2,
+        targetCommentId: null,
+        body: "review body",
+        publicationId: "pub-lease",
+        attemptId,
+        journalClaim: journalLease,
+      });
+
+      expect(sent.commentId).toBe(9001);
+      // ONE mutation for the one eligible action: the foreground's create. The
+      // recovery had resumed `prepared`; the row had left it, so the claim
+      // re-checked inside the dispatching statement refused and nothing was
+      // sent — the row still carries the foreground's claim.
+      expect(fg.posts).toBe(1);
+      expect(bg.posts).toBe(0);
+      expect(pubRow(db, "pub-lease")).toMatchObject({ phase: "sending", attempts: 1, last_error: null });
+    } finally {
+      globalThis.fetch = realFetch;
+      await running;
+    }
+  });
+
+  test("the no-Check lane: foreground and recovery contend on the SAME journal claim — one mutation", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    // The payload's admitted attempt is the launch row with NO frozen Check
+    // identity: this is the lane whose authority is the journal claim.
+    await seedPrepared(db, "pub-journal", reviewPayload(SCOPE, { round: 2 }), 120_000);
+    const clock = { now: T0 };
+    const fg = { posts: 0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const token = (name: string) =>
+      json(200, {
+        token: name,
+        expires_at: new Date(T0 + 3_600_000).toISOString(),
+        repositories: [{ id: 1, name: "widgets" }],
+        permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+        repository_selection: "selected",
+      });
+
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const backgroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) return token("ghs_bg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          bg.posts += 1;
+          return json(201, { id: 9100, body: "second" });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
+        }
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = backgroundFetch;
+    const env = { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE };
+    const running = reconcileReviewLifecycle(env, { log: SILENT_LOG, now: () => clock.now });
+
+    // The recovery has selected the row as `prepared` and is suspended in its
+    // plan. The foreground now takes THE claim for this publication.
+    await planReached.promise;
+    const journalLease = await claimPublication(db as never, "pub-journal", "consumer:fg", T0, "prepared");
+    if (journalLease === null) throw new Error("fixture: the foreground journal claim was refused");
+    clock.now = T0;
+
+    const foregroundFetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/access_tokens")) return token("ghs_fg");
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          fg.posts += 1;
+          return json(201, { id: 9001, body: "posted" });
+        }
+        planGate.resolve();
+        await running;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      const commenter = createReviewCommenter(
+        { APP_ID: "1001", PRIVATE_KEY: await testAppPem() },
+        { db, nowMs: () => clock.now, fetchImpl: foregroundFetch },
+      );
+      const sent = await commenter.postPreparedReview({
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: SHA,
+        round: 2,
+        targetCommentId: null,
+        body: "review body",
+        publicationId: "pub-journal",
+        journalClaim: journalLease,
+      });
+
+      expect(sent.commentId).toBe(9001);
+      // The recovery's claim on the same row was refused: one mutation, and the
+      // row still carries the foreground's claim (holder + epoch), untouched.
+      expect(fg.posts).toBe(1);
+      expect(bg.posts).toBe(0);
+      const row = db.raw
+        .prepare(`SELECT holder, lease_epoch, phase FROM review_publications WHERE id = ?`)
+        .get("pub-journal") as { holder: string | null; lease_epoch: number; phase: string };
+      expect(row.holder).toBe(journalLease.holder);
+      expect(row.lease_epoch).toBe(journalLease.epoch);
+      expect(row.phase).toBe("sending");
+    } finally {
+      globalThis.fetch = realFetch;
+      await running;
+    }
+  });
+});
+
+describe("§7.9a condition 1 — a recovery acts only on the state it resumed", () => {
+  test("a row that left `prepared` while recovery was planning is refused inside the claim", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    await seedPrepared(db, "pub-stale", reviewPayload(SCOPE, { round: 2 }), 120_000);
+    const clock = { now: T0 };
+    const bg = { posts: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+
+    const planGate = Promise.withResolvers<void>();
+    const planReached = Promise.withResolvers<void>();
+    let planSuspensionUsed = false;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_stale",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/issues/42/comments")) {
+        if (init?.method === "POST") {
+          bg.posts += 1;
+          return json(201, { id: 9300 });
+        }
+        if (!planSuspensionUsed) {
+          planSuspensionUsed = true;
+          planReached.resolve();
+          await planGate.promise;
+        }
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      const running = reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
+        { log: SILENT_LOG, now: () => clock.now },
+      );
+      // The recovery selected the row as `prepared` and is suspended in its
+      // plan. Another lane now takes it and its lease lapses (a crashed send).
+      await planReached.promise;
+      expect(
+        await claimPublication(db as never, "pub-stale", "consumer:crashed", T0, "prepared"),
+      ).not.toBeNull();
+      db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = ?`).run(T0 - 1, "pub-stale");
+      clock.now = T0;
+      planGate.resolve();
+      await running;
+
+      // The claim re-checked the phase inside the dispatching statement: the
+      // row is `sending` now, not the `prepared` this lane resumed for.
+      expect(bg.posts).toBe(0);
+      const row = db.raw
+        .prepare(`SELECT phase, holder FROM review_publications WHERE id = ?`)
+        .get("pub-stale") as { phase: string; holder: string | null };
+      expect(row.phase).toBe("sending");
+      expect(row.holder).toBe("consumer:crashed");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});
+
+describe("§7.9a condition 2 — a pre-intent line batch is discovery-only", () => {
+  test("a row staged before dispatch intents existed is never sent by the recovery lane", async () => {
+    const db = createMigratedTestD1();
+    await seedRealApp(db, APP, 1001);
+    const intent: LineIntent = {
+      associationId: "assoc-old",
+      findingRowId: "finding-old",
+      publicationId: "pub-old",
+      scope: SCOPE,
+      originalSha: SHA,
+      round: 1,
+      path: "src/a.ts",
+      line: 10,
+      body: "fix",
+      bodySha256: "a".repeat(64),
+    };
+    await seedPrepared(db, "pub-old", reviewPayload(SCOPE, { lineIntents: [intent] }), 120_000);
+    // The shape a pre-migration applied row has: work pending, intent UNKNOWN.
+    db.raw
+      .prepare(`UPDATE review_publications SET phase = 'applied', applied_ms = ?, recovery_state = 'done', line_dispatch_ms = -1 WHERE id = ?`)
+      .run(T0, "pub-old");
+    seedFindingRow(db, "finding-old", "pub-old", SCOPE);
+    db.raw
+      .prepare(
+        `INSERT INTO review_threads
+           (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+            original_sha, round, intent_json, resolution_state, verified_json, attempts, created_ms, updated_ms)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, '{}', 'pending', NULL, 0, ?, ?)`,
+      )
+      .run("assoc-old", "finding-old", "pub-old", SCOPE.appId, SCOPE.installationId, SCOPE.owner, SCOPE.repo, SCOPE.prNumber, SHA, T0, T0);
+
+    const seen = { creates: 0, reviews: 0 };
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/app")) return json(200, { id: 1001, slug: "acme-inspector" });
+      if (url.endsWith("/access_tokens")) {
+        return json(200, {
+          token: "ghs_old",
+          expires_at: new Date(T0 + 3_600_000).toISOString(),
+          repositories: [{ id: 1, name: "widgets" }],
+          permissions: { contents: "write", metadata: "read", pull_requests: "write", issues: "write" },
+          repository_selection: "selected",
+        });
+      }
+      if (url.includes("/pulls/") && url.includes("/reviews")) {
+        if (init?.method === "POST") {
+          seen.creates += 1;
+          return json(201, { id: 9200 });
+        }
+        seen.reviews += 1;
+        return json(200, []);
+      }
+      return json(200, {});
+    }) as unknown as typeof fetch;
+
+    try {
+      await reconcileReviewLifecycle(
+        { DB: db as unknown as ScheduledEnv["DB"], DASHBOARD_ENCRYPTION_KEY: TEST_ENCRYPTION_KEY, REVIEW_QUEUE: NOOP_QUEUE },
+        { log: SILENT_LOG, now: () => T0 },
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // The sentinel is intent-UNKNOWN: the batch may already be sent, so the
+    // lane may only read it back (and capture nothing here).
+    expect(seen.creates).toBe(0);
+    expect(seen.reviews).toBeGreaterThanOrEqual(1);
+    const row = db.raw
+      .prepare(`SELECT phase, line_dispatch_ms FROM review_publications WHERE id = ?`)
+      .get("pub-old") as { phase: string; line_dispatch_ms: number | null };
+    expect(row.phase).toBe("applied");
+    expect(row.line_dispatch_ms).toBe(-1);
   });
 });
 

@@ -680,6 +680,14 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       createdBy: "tester",
     });
     if (target.outcome !== "created") throw new Error("the fixture target was not created");
+    // The route's operating switch: ON here (the acceptance gate is OFF by
+    // default per spec § Deployment gate; this suite exercises delivery rows).
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'on', datetime('now'))`,
+      )
+      .run();
     return { id, slug: opts.slug, targetId: target.target.id };
   }
 

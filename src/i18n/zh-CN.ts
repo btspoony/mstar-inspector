@@ -1,5 +1,5 @@
 /**
- * why: Simplified-Chinese dictionary.
+ * note: Simplified-Chinese dictionary.
  *
  * Typed as `Dictionary` (derived from en.ts via `typeof en`): a missing or
  * extra key is a compile error. Values are plain text; `{placeholder}`
@@ -1279,6 +1279,34 @@ export const zhCN: Dictionary = {
       /** note: 已存储的预算无法读取——显示的数值是文档默认值。 */
       recheckUnreadable:
         "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
+      /** note: 平台唯一的端到端审查时长上限。 */
+      attemptCapTitle: "审查最长时长",
+      attemptCapDescription:
+        "整个审查尝试在此上限处停止：排队等待、执行与发布合计。被该上限停止的审查即终结，不会自动重跑。",
+      attemptCapLabel: "最长时长（毫秒）",
+      /** note: {min}/{max} 以毫秒与分钟给出；拒绝文案使用同一范围。 */
+      attemptCapRange:
+        "接受范围：{min}–{max} 毫秒（{minMinutes}–{maxMinutes} 分钟）。超出该范围的数值会被拒绝。",
+      attemptCapSave: "保存",
+      attemptCapSaved: "已保存。",
+      /** note: 写入失败且错误无法识别时的兜底文案。 */
+      attemptCapFailed: "修改审查最长时长失败。",
+      /** note: {value} = 已存储的上限，因此运维知道这是保存值。 */
+      attemptCapCurrentSaved: "下一次审查生效：{value} 毫秒（已保存值）。",
+      /** note: {value} = 行缺失时的默认值——绝不会显示为已保存值。 */
+      attemptCapCurrentDefault: "下一次审查生效：{value} 毫秒（平台默认值——尚未保存任何值）。",
+      /** note: 保存后的重读与回显不一致：以存储中的值为准。 */
+      attemptCapChangedElsewhere:
+        "本页面打开期间，另一处保存改动了已存储的值；生效值现为 {value} 毫秒，这正是存储中的值。",
+      /** note: 保存已发出或已受理；在回读之前不显示任何数值。 */
+      attemptCapConfirming:
+        "保存已发出，正在确认存储中的值。在能够回读之前，不显示任何生效值。",
+      /** note: 请求没有回应（网络、超时、5xx）：可能已落库，绝不能说“失败”。 */
+      attemptCapUnknown:
+        "保存结果未知：请求没有回应，可能已存储也可能没有。点“重试”可回读存储中的值；在回读之前不显示任何数值。",
+      /** note: 已存储的上限无法读取时不会准入任何审查。 */
+      attemptCapUnreadable:
+        "无法读取已存储的审查最长时长，因此在重新可读或保存新值之前，不会准入任何新审查。",
       /** note: 流水线在最近 24 小时记录的准入拒绝。 */
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:
@@ -1313,6 +1341,39 @@ export const zhCN: Dictionary = {
       /** note: 没有消息在排队，因此计数没有最旧时间戳。 */
       queueEmpty: "空队列",
       githubRateLimitedLabel: "GitHub 次级限流（24 小时）",
+      /** note: 时长分析：运营方选择时长上限的依据。 */
+      durationTitle: "审查时长分布",
+      durationDescription:
+        "最近 {days} 天内被准入的尝试。百分位只统计已写入结算时点、且该次结算把发布义务记为已解除的区间；尝试若有冻结的 Check，该 Check 须不晚于结算时点得出结论。空窗口就显示为空，绝不当作 0。",
+      durationEmpty: "此窗口内没有准入任何尝试。",
+      durationEmptyExcluded:
+        "此窗口内没有可测量的尝试：{n} 个已准入尝试全部被排除——{checkOpen} 个结算时 Check 未被证明关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
+      durationSample: "{n} 个完整尝试",
+      durationTotal: "端到端",
+      durationQueueWait: "队列等待",
+      durationExecution: "执行",
+      durationPublication: "发布 / 恢复",
+      durationP50: "p50",
+      durationP90: "p90",
+      durationMax: "最大值",
+      durationBuckets: "每个尝试的区间都拆分为这三个阶段。百分位按行计算，同一列不可跨行相加。",
+      durationExcluded:
+        "未计入百分位：{checkOpen} 个结算时 Check 未被证明关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
+      durationFailureTail:
+        "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它在结算时点、队列发送时间戳、边界顺序或结算记录缺失时被排除，或在其冻结的 Check 于结算时未被证明关闭时被排除。",
+      durationSettlementBasis:
+        "样本之所以可测，是因为它的这次结算把发布义务记为已解除；尝试若有冻结的 Check，该 Check 不晚于结算时点得出结论。投递幂等性不属于该区间。",
+      durationCandidateLabel: "候选上限（毫秒）",
+      /** note: 仅当输入的候选值超出分析范围时显示。 */
+      durationCandidateRange: "分析只接受 {min}–{max} 毫秒的整数。",
+      durationCandidateApply: "查看截断",
+      durationCutoff: "{cap} 毫秒的上限会排除 {n} 个尝试中的 {over} 个（{share}）。",
+      durationCutoffNone: "没有已完成的尝试会超过 {cap} 毫秒。",
+      durationCutoffEmpty: "没有可比对的样本。",
+      durationCrossed:
+        "首次越过上限的阶段：队列等待 {queueWait}、执行 {execution}、发布或恢复 {publication}。",
+      durationCaveat:
+        "被上限终止的尝试即为最终状态：它已经完成的工作不会自动重跑，而被上限终止的付费审查是否计费仍是未决问题。",
       // note: 部署版本页脚。{version} 为带 v 前缀的展示形（v${APP_VERSION}），
       // 与 /healthz 字段及 release tag 同形。
       version: "版本 {version}",

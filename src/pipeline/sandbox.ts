@@ -89,16 +89,205 @@ export const MAX_EXEC_ENV_VALUE_BYTES = 8 * 1024;
  */
 export { shellCommand, type ShellCommand };
 
+/** note: One exec's options (command, env and stdin bounds all apply). */
+type CommandOpts = {
+  env?: Record<string, string>;
+  cwd?: string;
+  timeout?: number;
+  /**
+   * invariant: An ABSOLUTE Unix-ms instant the child must be gone by. When set, `timeout`
+   * is ignored: the remaining window is derived inside the CONTAINER's shell
+   * immediately before it starts the bounded command, so the request queue, the
+   * RPC, any marker proof and the DO's own scheduling are all charged to it. A
+   * window at or below the kill grace starts nothing.
+   */
+  deadlineEpochMs?: number;
+  stdin?: string;
+};
+
+/** invariant: The exec that never started: the absolute deadline (less the kill grace) was already gone. */
+type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
+
+/**
+ * The result of a marker-guarded operation: either it ran on a container that
+ * still carries the attempt's exact marker bytes, or the container could not
+ * be proven to be that one and NOTHING ran.
+ */
+export type MarkedRun =
+  | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
+  | { kind: "unknown" }
+  /**
+   * invariant: The absolute deadline (less the kill grace) was gone before the child
+   * started: NOTHING ran, so the caller owes a confirmed cap stop — never
+   * `unknown` (which would hold the container and capacity).
+   */
+  | { kind: "deadline-spent"; remainingMs: number };
+
 /** Locked contract (compass contracts B). */
 export type ReviewSandbox = {
   runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
+    opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+  /**
+   * invariant: Write this attempt's marker exactly once. `matched` = the container already
+   * carries those exact bytes (a replay of the same attempt's prepare);
+   * `unknown` = it carries other bytes, so it is NOT this attempt's container
+   * and the marker is never repaired over it.
+   */
+  claimMarker(marker: string): Promise<"written" | "matched" | "unknown">;
+  /**
+   * invariant: Run `command` ONLY on an already-running container whose marker is exactly
+   * `marker`. Never starts a container: a missing/different marker, or no live
+   * container at all, runs nothing and reports `unknown` (not a failure — the
+   * state of the container is unknown, so no result may be claimed from it).
+   */
+  runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun>;
+  /**
+   * invariant: Destroy ONLY an already-running container whose marker is exactly `marker`
+   * AND whose result the caller has shown to be retained (or whose paid call
+   * never started). A missing/different marker or a missing proof destroys
+   * nothing and reports `unknown`: a replacement incarnation is never torn down
+   * on another attempt's behalf, and a paid command whose completion is
+   * unproven is left to the platform's inactivity reclamation.
+   */
+  destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown">;
+  /**
+   * note: Unproven teardown, for a container that is not an attempt's (the smoke's
+   * own health-check sandbox). Attempt-owned containers use `destroyMarked`.
+   */
   destroy(): Promise<void>;
+  /**
+   * invariant: Observe, then revoke: ONE critical section answers whether this attempt's
+   * container is running, and revokes the attempt only when it is NOT.
+   *
+   * `{ revoked: true, running: false }` is the fact a successor may take the
+   * attempt's PR on — nothing can act now, and the durable flag stops every
+   * later start. `{ revoked: false, running: true }` is a live holder: nothing
+   * was revoked and the PR must stay where it is (`revoked: false` is the
+   * promise that no authority was taken away from an attempt that can still
+   * act). Absent means the host cannot observe, which is not a stop either.
+   */
+  revoke?(): Promise<{ revoked: boolean; running: boolean }>;
 };
 
-/** why: Container image key in `wrangler.jsonc` → `containers[].images`. */
+/**
+ * Why destroying this container cannot lose a result. A matching marker proves
+ * WHICH container it is, never that anything in it is safe to discard, so the
+ * caller must name a fact — and only two facts authorise destruction:
+ *
+ * - `retained`: the paid call RETURNED and its result is durably persisted.
+ * - `no-paid-work`: the attempt never reached the paid call.
+ *
+ * Nothing else qualifies. A rejected exec, a lost reply, an output-stream
+ * error, a timeout or a DO restart is not evidence that a child stopped, so
+ * none of them authorises destruction — an unproven container is left to the
+ * platform's inactivity reclamation instead.
+ */
+export type RetentionProof = { readonly kind: "retained" } | { readonly kind: "no-paid-work" };
+
+function isRetentionProof(proof: RetentionProof | undefined): proof is RetentionProof {
+  return proof?.kind === "retained" || proof?.kind === "no-paid-work";
+}
+
+/**
+ * invariant: Headroom a host-side bound gives a locked operation beyond the child's own
+ * GNU-timeout bound. The shell bound only covers a process after it starts; the
+ * platform calls around it (setInactivityTimeout, exec admission, the output
+ * stream) have no deadline of their own, and one that never settles would hold
+ * the DO's critical section forever.
+ */
+const LOCKED_AWAIT_MARGIN_MS = 15_000;
+
+const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
+
+/**
+ * invariant: GNU `timeout`'s SIGKILL grace (ms): SIGTERM first, SIGKILL this much later.
+ * An absolute deadline reserves it OUT of the remaining window, so the kill
+ * never lands after the deadline. Drives BOTH the in-container subtraction and
+ * the `--kill-after` argument.
+ */
+const KILL_GRACE_MS = 5_000;
+
+/**
+ * The in-container deadline evaluation, run by the container's own shell:
+ * `$1` = the absolute deadline in Unix SECONDS, `$2` = the SIGKILL grace in ms,
+ * `$3` = the command. `container.exec`'s relative timeout restarts when the
+ * process actually starts, so a host-side number can never be absolute; the
+ * wrapper reads `date +%s` inside the container and a window at or below the
+ * grace exits 124 WITHOUT starting anything.
+ *
+ * The clock is sampled TWICE, the second time immediately before the exec: a
+ * single early sample can be stale by a container suspension, and a duration
+ * derived from it would let the child outlive the instant on resume. The first
+ * sample still answers the cheap case (a window already spent when the shell
+ * started) without paying the rest of the wrapper.
+ *
+ * Residual (documented in the review-budget deployment gate): a suspension
+ * strictly between the FINAL sample and `exec timeout` still hands the child a
+ * duration computed before the freeze. No shell can close that — it needs a
+ * kernel-side watchdog the platform does not expose — and it is now a window of
+ * a few syscalls rather than the whole request.
+ *
+ * Exported so the suite can execute the exact wrapper the container runs.
+ */
+export const EXEC_DEADLINE_WRAPPER = [
+  "deadline_s=$1; grace_ms=$2; shift 2",
+  "grace_s=$((grace_ms / 1000))",
+  "remaining=$((deadline_s - $(date +%s) - 1))",
+  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  // invariant: Re-sample: the first read may predate a suspension, and the duration the
+  // child is granted must be what is left NOW, not what was left then. The
+  // extra second is shaved so SIGKILL still lands at or before the millisecond
+  // deadline, never up to a second after it.
+  "remaining=$((deadline_s - $(date +%s) - 1))",
+  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  'exec timeout --kill-after=$grace_s "$((remaining - grace_s))" /bin/sh -lc "$1"',
+].join("; ");
+
+/** note: The ONE clamp: a zero/negative/NaN override is not a duration (GNU `timeout 0` disables its bound). */
+function normalizedTimeoutMs(requested: number | undefined): number {
+  const ms = requested ?? DEFAULT_EXEC_TIMEOUT_MS;
+  return Number.isFinite(ms) ? Math.max(1, ms) : DEFAULT_EXEC_TIMEOUT_MS;
+}
+
+/** note: Bound one await inside the critical section; the work is abandoned, not cancelled. */
+async function boundedAwait<T>(work: Promise<T>, ms: number): Promise<T | typeof LOCKED_AWAIT_TIMEOUT> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<typeof LOCKED_AWAIT_TIMEOUT>((resolve) => {
+        timer = setTimeout(() => resolve(LOCKED_AWAIT_TIMEOUT), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** note: The attempt marker's fixed in-container path: ephemeral `/tmp`, outside the checkout and any mount. */
+const MARKER_PATH = "/tmp/mstar-review-attempt";
+/**
+ * invariant: Read the marker; exit 3 names "absent" so a missing file stays distinct from
+ * an unreadable one (both refuse, but only one means "wrong container").
+ */
+const MARKER_READ_COMMAND = shellCommand(`[ -f '${MARKER_PATH}' ] || exit 3; cat -- '${MARKER_PATH}'`);
+/**
+ * invariant: Exclusive create: noclobber makes the redirection itself fail when the file
+ * exists, so an existing marker is never truncated or replaced. The payload
+ * rides the env (bounded above), never the command string.
+ */
+const MARKER_CLAIM_COMMAND = shellCommand(
+  `umask 077; set -C; printf '%s' "$MSTAR_ATTEMPT_MARKER" > '${MARKER_PATH}'`,
+);
+/** invariant: The marker is ~60 bytes; a hung read must not hold an attempt's collection. */
+const MARKER_READ_TIMEOUT_MS = 30_000;
+
+/** note: The DO's durable revocation flag (see `revoke`); read before any start. */
+const REVOKED_KEY = "attempt-revoked";
+
+/** note: Container image key in `wrangler.jsonc` → `containers[].images`. */
 const CONTAINER_IMAGE_KEY = "sandbox";
 /**
  * note: Instance size. `lite` (256 MiB, 1/16 vCPU) carried the pin over from the
@@ -125,7 +314,7 @@ const CONTAINER_IMAGE_KEY = "sandbox";
  */
 const CONTAINER_INSTANCE = "basic" as const;
 /**
- * note: Container inactivity bound. The DO stays active while a `runCommand` RPC is
+ * invariant: Container inactivity bound. The DO stays active while a `runCommand` RPC is
  * in flight, so this guards the gaps BETWEEN calls — it must outlive the
  * longest single review (deep: 14 min runner + git steps, src/pipeline/
  * consumer.ts runnerTimeoutMs + the 15-min queue wall-clock cap).
@@ -136,7 +325,7 @@ const utf8 = new TextDecoder();
 const utf8Encoder = new TextEncoder();
 
 /**
- * note: Write one payload into the child's stdin and CLOSE it.
+ * invariant: Write one payload into the child's stdin and CLOSE it.
  *
  * Closing is what sends **EOF**: a reader that consumes stdin to the end (the
  * in-image runner reads its credential payload and its runner-input document
@@ -170,18 +359,27 @@ async function writeExecStdin(stream: WritableStream | null, payload: Uint8Array
  */
 export class SandboxV1 extends DurableObject {
   /**
-   * note: A restarted DO (deploy, eviction) loses the container's inactivity
+   * why: A restarted DO (deploy, eviction) loses the container's inactivity
    * timeout while the container keeps running, so the timeout is armed again
    * here — before any request — for a container this DO finds already
    * running. `blockConcurrencyWhile` keeps requests behind the re-arm. The
    * request-path guard re-arms it as well (both are idempotent).
    */
+  /**
+   * note: A revocation outlives an eviction: a restarted DO that forgot it could
+   * start a container for an attempt a successor already owns.
+   */
+  private revoked = false;
+
   constructor(ctx: DurableObjectState, env: unknown) {
     super(ctx, env);
     const container = ctx.container;
     if (container?.running) {
       void ctx.blockConcurrencyWhile(() => container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS));
     }
+    void ctx.blockConcurrencyWhile(async () => {
+      this.revoked = (await ctx.storage.get<boolean>(REVOKED_KEY)) === true;
+    });
   }
 
   /** invariant: The container bound to this DO (absent only when the binding is misconfigured). */
@@ -194,12 +392,17 @@ export class SandboxV1 extends DurableObject {
   /**
    * why: Start the container when needed and (re)set the inactivity timeout —
    * idempotent by construction: `running` is true as soon as `start()`
-   * returns, the check→start sequence has no await in between (concurrent
-   * calls cannot double-start), and every step after `start()` is safe to
-   * repeat because a deploy restarts the DO.
+   * returns, the check→start sequence has no await in between (the
+   * incarnation lock makes concurrent calls impossible), and every step after
+   * `start()` is safe to repeat because a deploy restarts the DO.
    */
-  private async ensureRunning(): Promise<void> {
-    const container = this.container;
+  private async ensureRunning(container: Container): Promise<void> {
+    // invariant: THE revocation gate: every start-permitted call goes through here, so a
+    // revoked attempt cannot provision a container again — not with a replay,
+    // not after an eviction, not with a command queued before the revocation.
+    if (this.revoked) {
+      throw new Error("this attempt was revoked by the successor that took its PR — nothing may start");
+    }
     if (!container.running) {
       const image = container.images[CONTAINER_IMAGE_KEY];
       if (image === undefined) {
@@ -211,7 +414,34 @@ export class SandboxV1 extends DurableObject {
   }
 
   /**
-   * note: THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
+   * invariant: One guarded critical section at a time on this DO: a guarded operation's
+   * proof-and-action pair, and the start decision of a plain run (the only
+   * start-permitted path). Holding it across the pair is what stops another
+   * request from provisioning between the marker read and the command/destroy
+   * that read justifies.
+   *
+   * It is deliberately NOT held across a paid execution: `runCommand` leaves
+   * the queue as soon as its container is ready, so a hung exec can never keep
+   * a later teardown from acquiring the lock and checking sameness.
+   *
+   * Bound: an out-of-band platform restart between the marker read and the
+   * action is outside what this DO can serialise. The guarantee is "the same
+   * handle this request proved", not "the same process across a platform
+   * restart".
+   */
+  private gate: Promise<unknown> = Promise.resolve();
+
+  private exclusive<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.gate.then(run, run);
+    this.gate = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  /**
+   * safety: THE shell sink. `command` is a branded `ShellCommand`; it reaches a shell
    * exactly once, as the `-c` payload of `/bin/sh` under the GNU `timeout`
    * bound. The bound is forwarded in seconds WITHOUT rounding — GNU `timeout`
    * takes fractional durations, so an explicit millisecond override keeps the
@@ -226,8 +456,157 @@ export class SandboxV1 extends DurableObject {
    */
   async runCommand(
     command: ShellCommand,
-    opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; stdin?: string },
+    opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    // invariant: Bounds first: a payload that can never be delivered must not start a
+    // container. The start is serialized with the guarded pair; the exec that
+    // follows is not — a long run must not hold the queue.
+    const prepared = { stdin: this.assertBounds(command, opts) };
+    const container = await this.exclusive(async () => {
+      const handle = this.container;
+      const started = await boundedAwait(this.ensureRunning(handle), LOCKED_AWAIT_MARGIN_MS);
+      if (started === LOCKED_AWAIT_TIMEOUT) {
+        throw new Error(`container did not become ready within ${LOCKED_AWAIT_MARGIN_MS}ms`);
+      }
+      return handle;
+    });
+    const result = await this.execCommand(container, command, opts, prepared);
+    if ("kind" in result) {
+      // invariant: No caller passes an absolute deadline on the unguarded path; a refusal
+      // here is a programming error, never a startable run.
+      throw new Error("the exec deadline was spent before the process started");
+    }
+    return result;
+  }
+
+  /**
+   * why: Write the attempt marker once. Starting is deliberate: prepare owns
+   * provisioning, so this is the ONE marker path allowed to start a container.
+   * A lost reply is resolved by reading the marker back from the same handle —
+   * a replay sees the same bytes and reports `matched` instead of failing.
+   */
+  async claimMarker(marker: string): Promise<"written" | "matched" | "unknown"> {
+    const opts = { env: { MSTAR_ATTEMPT_MARKER: marker } };
+    this.assertBounds(MARKER_CLAIM_COMMAND, opts);
+    return this.exclusive(async () => {
+      const container = this.container;
+      const started = await boundedAwait(this.ensureRunning(container), LOCKED_AWAIT_MARGIN_MS);
+      if (started === LOCKED_AWAIT_TIMEOUT) return "unknown";
+      let exitCode: number;
+      try {
+        const claimed = await boundedAwait(
+          this.execCommand(container, MARKER_CLAIM_COMMAND, opts),
+          MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS,
+        );
+        // why: A timed-out write is not retried and not read back: the marker's
+        // presence is unprovable, so the outcome is unknown.
+        if (claimed === LOCKED_AWAIT_TIMEOUT) return "unknown";
+        // invariant: No deadline rides this path, so a refusal cannot happen; if it did,
+        // nothing was written and the marker is unprovable.
+        if ("kind" in claimed) return "unknown";
+        exitCode = claimed.exitCode;
+      } catch {
+        // invariant: The write failed (noclobber refusal, container loss). Only a matching
+        // marker can turn that into a replay; anything else is not provable.
+        exitCode = 1;
+      }
+      if (exitCode === 0) return "written";
+      const current = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      return current === marker ? "matched" : "unknown";
+    });
+  }
+
+  /**
+   * invariant: The sameness gate. The handle is captured ONCE, the marker is read from
+   * it, and the command runs on that same handle — never a fresh
+   * `this.container` read after the awaited probe, and no start-permitted path
+   * can run in between (`exclusive`). `running` is checked first, so a probe
+   * never starts a container.
+   */
+  async runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun> {
+    return this.exclusive(async () => {
+      const container = this.container;
+      if (!container.running) return { kind: "unknown" };
+      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      // invariant: A timed-out proof never reaches the action: the container is unknown,
+      // and a proof that settled later must not race the replacement it may
+      // have described.
+      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return { kind: "unknown" };
+      // invariant: The host-side await must outlive what the child was granted: with an
+      // absolute deadline that is the window left AFTER this proof, not the
+      // caller's relative `timeout`.
+      const awaitBoundMs =
+        opts?.deadlineEpochMs === undefined
+          ? normalizedTimeoutMs(opts?.timeout)
+          : Math.max(0, opts.deadlineEpochMs - Date.now()) + KILL_GRACE_MS;
+      try {
+        const ran = await boundedAwait(
+          this.execCommand(container, command, opts),
+          awaitBoundMs + LOCKED_AWAIT_MARGIN_MS,
+        );
+        if (ran === LOCKED_AWAIT_TIMEOUT) return { kind: "unknown" };
+        return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
+      } catch {
+        // invariant: The exec reply was lost: whether the command ran is unprovable, so
+        // the outcome is `unknown` — never a document read as unreadable.
+        return { kind: "unknown" };
+      }
+    });
+  }
+
+  /**
+   * invariant: Prove sameness on the captured handle, then destroy that same container —
+   * but only on a fact that says nothing can be lost.
+   *
+   * Refused (`unknown`, nothing destroyed) when the proof is missing or is not
+   * one of the two facts, when the container is not live, when it carries other
+   * bytes, or when the marker read cannot be bounded. There is deliberately no
+   * allowance for an unsettled run: an in-memory count, elapsed time or a lost
+   * reply never proves a paid child stopped. The refused container is left to
+   * the platform, whose absolute reclamation bound is UNVERIFIED — the
+   * configured inactivity timeout bounds idle gaps only, not a still-active
+   * process or a stalled destroy.
+   *
+   * `destroy()` is NOT bounded and never abandoned: when it is issued the
+   * attempt is already safe to lose, and abandoning it mid-flight would let it
+   * land later against a container another run has started.
+   *
+   * Destroying for an attempt this caller did not run (a Workflow recovery
+   * deciding for someone else) is the durable attempt row's job: it must own
+   * the first-provisioning claim before that authority exists. No such caller
+   * exists yet, and this proof cannot be borrowed for it.
+   */
+  async destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown"> {
+    if (!isRetentionProof(retention)) return "unknown";
+    return this.exclusive(async () => {
+      const container = this.container;
+      if (!container.running) return "unknown";
+      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
+      // invariant: A stalled proof never reaches the destroy below.
+      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return "unknown";
+      await container.destroy();
+      return "destroyed";
+    });
+  }
+
+  /** invariant: The marker's exact bytes, or null when it is absent/unreadable. Never starts a container. */
+  private async readMarker(container: Container): Promise<string | null> {
+    try {
+      const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS });
+      // invariant: No deadline rides this path; a refusal would mean nothing was read.
+      if ("kind" in read) return null;
+      return read.exitCode === 0 ? read.stdout : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * invariant: The exec bounds, checked before anything starts: an argv or payload that
+   * can never be delivered must not provision a container. Returns the encoded
+   * stdin so the caller can hand it to `execCommand` instead of re-encoding.
+   */
+  private assertBounds(command: ShellCommand, opts: CommandOpts | undefined): Uint8Array | undefined {
     // note: Linux caps ONE argv string at MAX_ARG_STRLEN (128 KiB); these bounds leave
     // headroom and fail before `execve` can report E2BIG. No value is echoed.
     const commandBytes = utf8Encoder.encode(command).byteLength;
@@ -240,32 +619,68 @@ export class SandboxV1 extends DurableObject {
         throw new Error(`exec env ${name} is ${valueBytes} bytes, above the ${MAX_EXEC_ENV_VALUE_BYTES}-byte bound`);
       }
     }
-    // note: Every bound — including the stdin payload — runs BEFORE the container
-    // starts: a payload that can never be delivered must not start one. The
-    // encode still happens before `exec`, which is where it is written.
     const stdinPayload = opts?.stdin === undefined ? undefined : utf8Encoder.encode(opts.stdin);
     if (stdinPayload !== undefined && stdinPayload.byteLength > MAX_EXEC_STDIN_BYTES) {
       throw new Error(
         `the exec stdin payload is ${stdinPayload.byteLength} bytes, above the ${MAX_EXEC_STDIN_BYTES}-byte bound`,
       );
     }
-    await this.ensureRunning();
-    // invariant: Clamp before converting: a zero/negative value must never reach the argv
-    // as a zero or negative duration (GNU `timeout 0` DISABLES the bound), and a
-    // non-finite override (NaN/Infinity) is not a duration at all — default.
-    const requestedMs = opts?.timeout ?? DEFAULT_EXEC_TIMEOUT_MS;
-    const timeoutMs = Number.isFinite(requestedMs) ? Math.max(1, requestedMs) : DEFAULT_EXEC_TIMEOUT_MS;
-    const timeoutSeconds = timeoutMs / 1000;
-    const process = await this.container.exec(
-      ["timeout", "--kill-after=5", String(timeoutSeconds), "/bin/sh", "-lc", command],
-      {
+    return stdinPayload;
+  }
+
+  /**
+   * invariant: The bounded exec itself, on the caller's handle. Never starts a container:
+   * a start is the caller's separate, locked decision.
+   */
+  private async execCommand(
+    container: Container,
+    command: ShellCommand,
+    opts: CommandOpts | undefined,
+    prepared?: { stdin: Uint8Array | undefined },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number } | ExecDeadlineSpent> {
+    const stdinPayload = prepared === undefined ? this.assertBounds(command, opts) : prepared.stdin;
+    const deadlineMs = opts?.deadlineEpochMs;
+    // invariant: FAST PATH only: the shell below is the GUARANTEE. A window the DO can
+    // already see as spent returns before a process exists; a window this
+    // check still believes in is evaluated again by the container's own clock,
+    // so queueing between this request and the process start cannot move it.
+    if (deadlineMs !== undefined && deadlineMs - Date.now() <= KILL_GRACE_MS) {
+      return { kind: "deadline-spent", remainingMs: deadlineMs - Date.now() };
+    }
+    // invariant: Two shapes: the relative bound every ordinary step uses, and the
+    // absolute one whose arithmetic the container's shell performs. The shell
+    // receives the epoch in seconds and the grace in ms — never a frozen
+    // duration — so the `timeout` it starts is derived at the last instant.
+    const argv =
+      deadlineMs === undefined
+        ? [
+            "timeout",
+            `--kill-after=${KILL_GRACE_MS / 1000}`,
+            // invariant: Clamp before converting: a zero/negative value must never reach
+            // the argv as a zero or negative duration (GNU `timeout 0`
+            // DISABLES the bound); a non-finite override is not a duration.
+            String(normalizedTimeoutMs(opts?.timeout) / 1000),
+            "/bin/sh",
+            "-lc",
+            command,
+          ]
+        : [
+            "/bin/sh",
+            "-c",
+            EXEC_DEADLINE_WRAPPER,
+            "mstar-deadline",
+            String(Math.floor(deadlineMs / 1000)),
+            String(KILL_GRACE_MS),
+            command,
+          ];
+    const process = await container.exec(argv, {
         cwd: opts?.cwd,
         env: opts?.env,
         // note: No `stdin` option at all = the platform closes stdin and sends EOF.
         ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
       },
     );
-    // note: Drain stdout/stderr CONCURRENTLY with the write: a child that emits ahead
+    // why: Drain stdout/stderr CONCURRENTLY with the write: a child that emits ahead
     // of reading its stdin would otherwise deadlock against a full output pipe.
     // (`output()` is readable once, so it is started here and awaited once.)
     const drained = process.output();
@@ -278,14 +693,14 @@ export class SandboxV1 extends DurableObject {
       }
     }
     const output = await drained;
-    // why: A child that exited while reporting its own failure keeps its result —
+    // invariant: A child that exited while reporting its own failure keeps its result —
     // that stderr is the real diagnosis. One that claims SUCCESS after the
     // payload failed to land is refused: never report a credential-carrying run
     // as completed when its credentials never arrived.
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
     }
-    // why: A non-zero exit keeps the child's own stderr, but a stdin write failure
+    // invariant: A non-zero exit keeps the child's own stderr, but a stdin write failure
     // is still evidence and must not vanish with it: "the payload never landed"
     // and "the payload landed and the child then failed" are different
     // diagnoses, and the caller only sees this string.
@@ -305,7 +720,28 @@ export class SandboxV1 extends DurableObject {
 
   /** invariant: Terminate the container. Ids are never reused (see getSandbox). */
   async destroy(): Promise<void> {
-    await this.container.destroy();
+    return this.exclusive(() => this.container.destroy());
+  }
+
+  /**
+   * invariant: The successor's takeover fact (spec §7.9): observe, then revoke — both
+   * inside the ONE critical section that also serialises starts, so a start
+   * either completed before this call (`running: true`, nothing revoked, the
+   * successor refuses) or meets the flag on its way in. The answer never
+   * reports a container this DO did not just prove.
+   */
+  async revoke(): Promise<{ revoked: boolean; running: boolean }> {
+    return this.exclusive(async () => {
+      // note: Observe FIRST. A live container is reported untouched: revoking it
+      // would take away authority from an attempt that can still act, which is
+      // the one limb the successor rule forbids.
+      if (this.ctx.container?.running === true) return { revoked: false, running: true };
+      if (!this.revoked) {
+        this.revoked = true;
+        await this.ctx.storage.put(REVOKED_KEY, true);
+      }
+      return { revoked: true, running: false };
+    });
   }
 }
 
@@ -336,7 +772,7 @@ export class Sandbox extends DurableObject {
  * (0.12's `normalizeId` is gone).
  */
 export async function getSandbox(binding: SandboxBinding, id: string): Promise<ReviewSandbox> {
-  // safety: The stub exposes exactly the RPC methods the DO class defines
+  // invariant: The stub exposes exactly the RPC methods the DO class defines
   // (runCommand/destroy) — the ReviewSandbox shape.
   const namespace = binding as { getByName(name: string): ReviewSandbox };
   return namespace.getByName(id.toLowerCase());

@@ -75,6 +75,7 @@ import {
   releaseExpiredCheckClaim,
   rollbackCheckCreateDispatch,
   retryCheckRecovery,
+  type ClaimAttemptResult,
   type Scope,
   setCheckCreateState,
   setCheckDesired,
@@ -142,6 +143,12 @@ function claimInput(overrides: Partial<ClaimInput> = {}): ClaimInput {
   };
 }
 
+/** A claim answer that must name a row (every kind but `absent` does). */
+function attemptOfClaim(result: ClaimAttemptResult): CheckAttempt {
+  if (result.kind === "absent") throw new Error("fixture: the claim found no row for the key");
+  return result.attempt;
+}
+
 /** Claim, failing loudly if the result is anything but `claimed`. */
 async function claim(
   db: TestD1,
@@ -149,7 +156,7 @@ async function claim(
 ): Promise<{ attempt: CheckAttempt; lease: Lease }> {
   const result = await claimAttempt(db, claimInput(overrides));
   if (result.kind !== "claimed") {
-    throw new Error(`expected a claimed attempt, got ${result.kind} (generation ${result.attempt.identity.generation})`);
+    throw new Error(`expected a claimed attempt, got ${result.kind}`);
   }
   return result;
 }
@@ -188,6 +195,7 @@ function remoteFor(
     app?: { id: number } | null;
     status?: string;
     conclusion?: string | null;
+    summary?: string | null;
   } = {},
   intent: CheckConclusion["desired"] = "success",
 ): CheckRemote {
@@ -202,6 +210,7 @@ function remoteFor(
     app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
     status: overrides.status ?? "completed",
     conclusion: overrides.conclusion === undefined ? intent : overrides.conclusion,
+    summary: overrides.summary === undefined ? null : overrides.summary,
   };
 }
 
@@ -408,14 +417,14 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
 
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.attemptId).toBe(id);
-    expect(again.attempt.identity.externalId).toBe(attempt.identity.externalId);
-    expect(again.attempt.checkRunId).toBe(4242);
-    expect(again.attempt.terminalMs).toBe(T0);
+    expect(attemptOfClaim(again).identity.attemptId).toBe(id);
+    expect(attemptOfClaim(again).identity.externalId).toBe(attempt.identity.externalId);
+    expect(attemptOfClaim(again).checkRunId).toBe(4242);
+    expect(attemptOfClaim(again).terminalMs).toBe(T0);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -436,7 +445,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     // return terminal and must NOT mint generation N+1 for a published head.
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.generation).toBe(1);
+    expect(attemptOfClaim(again).identity.generation).toBe(1);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -487,7 +496,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(await setCheckDesired(db, id, stale, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckDesired(db, id, foreign, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckCreateState(db, id, foreign, "sending", undefined, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     expect(await getCheckOwnership(db, id, stale, T0)).toBeNull();
 
     const row = await getCheckAttempt(db, id);
@@ -523,13 +532,13 @@ describe("fenced mutations (spec §7.9)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await getCheckAttempt(db, id))?.terminalMs).not.toBeNull();
 
     // The lease is still the caller's; the row's terminality is the fence.
     expect(await setCheckDesired(db, id, lease, FAILURE, null, T0)).toBe(false);
     expect(await attachCheckRunId(db, id, lease, 9999, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     const after = await getCheckAttempt(db, id);
     expect(after?.desired).toBe("success");
     expect(after?.observed).toBe("success");
@@ -639,7 +648,7 @@ describe("fenced mutations (spec §7.9)", () => {
     // Terminal history is never rewritten (runFenced's NONTERMINAL_WHERE).
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await rawRow(db, id)).terminal_ms).not.toBeNull();
     expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(false);
     expect((await rawRow(db, id)).publication_id).toBeNull();
@@ -723,7 +732,7 @@ describe("fenced mutations (spec §7.9)", () => {
     await attachRun(db, id, lease);
     expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { id: 777 }, "success"), T0)).toBe(false);
     // The intended terminal state on our own run is what advances observation.
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.recovery_state).toBe("done");
@@ -731,6 +740,28 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.check_run_id).toBe(4242);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
+  });
+
+  test("a completed reply is a delivery only when it carries the frozen text", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+
+    // The conclusion matches, the wording does not (absent, or an earlier
+    // writer's): the user never read what this attempt froze.
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: null }, "success"), T0)).toBe(false);
+    expect((await getCheckAttempt(db, id))?.observed).toBe("unknown");
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: "Review failed." }, "success"), T0)).toBe(false);
+    const unread = await getCheckAttempt(db, id);
+    expect(unread?.observed).toBe("unknown");
+    expect(unread?.terminalMs).toBeNull();
+
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
+    const delivered = await getCheckAttempt(db, id);
+    expect(delivered?.observed).toBe("success");
+    expect(delivered?.terminalMs).toBe(T0);
   });
 
   test("an in-progress observation attaches the id but never terminalizes", async () => {
@@ -766,10 +797,12 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
     summary: `Review gate missed for ${SHA.slice(0, 7)}: verdict "needs fixes", score 40 (floor 80; allowed: ship it).`,
   };
 
-  test("the frozen intent wins in either write order", async () => {
-    // (1) The fallback lands while the row still wants `in_progress`, then the
-    // terminalize freezes its precise gate failure — same `desired`, so the
-    // real decision replaces the fallback text.
+  test("the first frozen intent is immutable in either write order", async () => {
+    // (1) The fallback lands while the row still wants `in_progress`; a later
+    // write with the SAME `desired` is a no-op on the frozen fields — the text
+    // and the category are what a user may already have seen. In production the
+    // real terminalize freezes BEFORE its send, so it is the first writer; the
+    // only later change that can still land is a DIFFERENT desired with proof.
     {
       const db = seededDb();
       const { attempt, lease } = await claim(db);
@@ -778,7 +811,7 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
       expect(await setCheckDesired(db, id, lease, GATE_FAILURE, null, T0)).toBe(true);
       const row = await rawRow(db, id);
       expect(row.desired).toBe("failure");
-      expect(row.desired_summary).toBe(GATE_FAILURE.summary);
+      expect(row.desired_summary).toBe(FAILURE.summary);
     }
     // (2) The terminalize freezes first: the fallback's own predicate refuses,
     // so the exact text and the recovery state stay untouched.
@@ -920,7 +953,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0);
+    await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0);
     expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
   });
 });
@@ -1101,6 +1134,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
           app: { id: APP_NUMERIC_ID },
           status: "completed",
           conclusion: "neutral",
+          summary: "review paused",
         },
         T0,
       ),
@@ -1271,7 +1305,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
 
-    expect(await queuedAs(db, "mine")).toBe(4242);
+    expect(await queuedAs(db, "mine")).toEqual({ id, checkRunId: 4242 });
     const row = await rawRow(db, id);
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.desired_summary).toBe("Queued behind the review in flight for this pull request.");
@@ -1365,7 +1399,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
     expect(
-      await recordCheckObservation(db, id, lease, remoteFor(attempt), T0),
+      await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }), T0),
     ).toBe(true);
 
     expect(await queuedAs(db, "mine")).toBeNull();
@@ -1634,7 +1668,8 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
     const { id } = await localErrorAttempt(db);
     linkPublication(db, id, crypto.randomUUID(), { owner: "someone-else", headSha: `f${SHA.slice(1)}` });
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
-    expect(again.kind).toBe("claimed"); // unproven for THIS scope/SHA → retryable
+    // Unproven for THIS scope/SHA → retryable.
+    if (again.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${again.kind}`);
     expect(again.attempt.identity.generation).toBe(2);
   });
 
@@ -1755,10 +1790,52 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
         }),
       });
       const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      if (again.kind !== "terminal") throw new Error(`fixture: expected terminal, got ${again.kind}`);
       expect(again.kind, `kind=${kind} should dedup`).toBe("terminal");
       expect(again.attempt.identity.generation).toBe(1);
       expect(await rowCount(db)).toBe(1);
     }
+  });
+});
+
+describe("a frozen-pair claim never mints", () => {
+  /** The generation this key froze, read off the row that owns it. */
+  async function frozenPair(db: TestD1, id: string) {
+    const row = await rawRow(db, id);
+    return { key: row.attempt_key as string, generation: row.generation as number };
+  }
+
+  test("an OPEN frozen generation answers busy with that row, never a fresh claim", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const frozen = await frozenPair(db, attempt.identity.attemptId);
+
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    // Never `claimed`: the only row this caller may take is the frozen one, and
+    // taking it is the fenced adoption UPDATE that follows, not a mint.
+    expect(again.kind).toBe("busy");
+    expect(attemptOfClaim(again).identity.generation).toBe(frozen.generation);
+    expect(await rowCount(db)).toBe(1);
+  });
+
+  test("a frozen generation that ENDED answers absent and inserts nothing", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const frozen = await frozenPair(db, id);
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+    // Ends without a proven publication: the unrestricted path would happily
+    // mint generation 2 for this key, which is exactly what must not happen.
+    expect(await markCheckLocalError(db, id, lease, "gave up", T0)).toBe(true);
+    expect((await rawRow(db, id)).terminal_ms).toBe(T0);
+
+    const before = await rowCount(db);
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    expect(again.kind).toBe("absent");
+    expect(await rowCount(db)).toBe(before);
   });
 });
 
@@ -1802,7 +1879,7 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     // resurrected.
     const recovery = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
     expect(recovery).not.toBeNull();
-    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, {}, "success"), T0 + 1)).toBe(true);
+    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0 + 1)).toBe(true);
 
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 2 })).toBe(false);
     const row = await rawRow(db, id);
@@ -1932,7 +2009,7 @@ async function stageProof(
   headSha = SHA,
 ): Promise<PublicationProof> {
   await stagePublication(db, { id: publicationId, payload: payloadFor(publicationId, kind, prNumber, headSha), nowMs: T0 });
-  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0);
+  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0, "prepared");
   if (lease === null) throw new Error("fixture: publication claim failed");
   const proof: PublicationProof = {
     publicationId,

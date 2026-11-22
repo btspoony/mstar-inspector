@@ -60,4 +60,15 @@ export type ReviewJobPayload = {
    * paths must settle nothing rather than take another delivery's run.
    */
   attachDeliveryId?: string;
+  /**
+   * invariant: The delivery key of the skipped attempt whose observed head this job
+   * reviews — set ONLY on a successor a moved head re-admitted.
+   *
+   * It preserves the delivery's comment identity: the comment claim that
+   * produced the original job was already consumed, so admission must not
+   * re-consume it for the successor. The successor's at-most-once guarantee is
+   * its outbox dedupe key (the observed head) plus this delivery's own handoff
+   * record, never a second comment claim.
+   */
+  successor_of?: string;
 };

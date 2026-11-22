@@ -1,5 +1,5 @@
 /**
- * English dictionary — the i18n source of truth.
+ * note: English dictionary — the i18n source of truth.
  *
  * Contract:
  *   - `Dictionary` is derived from this object via `typeof en`; `zh-CN.ts`
@@ -33,7 +33,7 @@ export const en = {
     language: "中文",
     /** note: First focusable control in the shell: skips the sidebar straight to `<main>`. */
     skipToContent: "Skip to content",
-    /** note: Theme toggle: icon-only button; state + action live in the aria copy. */
+    /** invariant: Theme toggle: icon-only button; state + action live in the aria copy. */
     /** note: {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
     themeDark: "dark",
@@ -101,7 +101,7 @@ export const en = {
       missingCode: "GitHub did not return an authorization code.",
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
-      /** note: `signup_open` is off: an unknown login cannot create an account. */
+      /** invariant: `signup_open` is off: an unknown login cannot create an account. */
       signupClosed: "Sign-up is closed on this platform right now.",
     },
     loading: "Loading…",
@@ -142,7 +142,7 @@ export const en = {
     },
   },
   /**
-   * why: App detail page: the tabbed shell. The review policy that used to be its
+   * invariant: App detail page: the tabbed shell. The review policy that used to be its
    * settings tab lives on the review-target surface (`targets.*`), so the
    * tabs here are the App's own faces only.
    */
@@ -168,7 +168,7 @@ export const en = {
      */
     delivery: {
       copy: "Every webhook delivery this bot received — what arrived, from which repository, and what happened to it.",
-      /** note: The Blocked face has no bot-owned data, so the tab states that instead. */
+      /** why: The Blocked face has no bot-owned data, so the tab states that instead. */
       unavailable: "This bot's deliveries belong to another workspace while its share is revoked.",
       columnRepo: "Repository",
       columnType: "Type",
@@ -188,7 +188,7 @@ export const en = {
       emptyDescription: "This bot has received no webhook delivery matching these filters.",
       pagePrev: "Previous",
       pageNext: "Next",
-      /** note: {from}–{to} of the filtered total, never of the whole log. */
+      /** invariant: {from}–{to} of the filtered total, never of the whole log. */
       pageRange: "{from}–{to} / {total}",
       refreshAria: "Refresh deliveries",
     },
@@ -198,7 +198,7 @@ export const en = {
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
-   * why: The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
+   * note: The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
    * a workspace's claim on a bot, listed and edited on its own page. Its detail
    * body keeps the `settings.*` labels of the tab it was moved from.
    */
@@ -226,7 +226,7 @@ export const en = {
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
     /**
-     * note: The 评审配置 tab's own copy; `heading` doubles as the tab label.
+     * invariant: The 评审配置 tab's own copy; `heading` doubles as the tab label.
      * `boundApp` names the bot the repository reviews under — read-only, since
      * rebinding is not supported yet.
      */
@@ -312,7 +312,7 @@ export const en = {
     sandboxCopy: "The runtime harness every review of this bot runs under.",
     providersNone: "No provider key or custom provider yet.",
     chainsCopy: "The model chains this bot's reviews select their models from.",
-    /** note: The share switch. Rendered only for the official workspace's manager. */
+    /** invariant: The share switch. Rendered only for the official workspace's manager. */
     shareTitle: "Share this bot",
     shareCopy:
       "Let other workspaces use this bot on their own repositories. Its credentials and model chains stay configured here.",
@@ -326,7 +326,7 @@ export const en = {
     confirmUnshareTitle: "Stop sharing {name}?",
     confirmUnshareBody:
       "Targets other workspaces hold on this bot become Blocked — they stop reviewing — until it is shared again.",
-    // note: The share route's two recoverable refusals.
+    // invariant: The share route's two recoverable refusals.
     shareOutsideOfficial:
       "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
     shareForbidden: "Only an owner or admin of this workspace can share its bot.",
@@ -338,11 +338,11 @@ export const en = {
    */
   pullRequests: {
     backToList: "Back to list",
-    /** note: Toolbar row above the ledger (list face only). */
+    /** invariant: Toolbar row above the ledger (list face only). */
     filterRepo: "Repository",
     filterRepoAll: "All repositories",
     refreshAria: "Refresh the pull request list",
-    /** note: The list table's columns — the row's own facts only. */
+    /** invariant: The list table's columns — the row's own facts only. */
     columnPr: "Pull request",
     columnState: "State",
     columnVerdict: "Latest verdict",
@@ -369,12 +369,12 @@ export const en = {
     reviews: "Reviews",
     noReviews: "No reviews for this pull request.",
     reviewMeta: "{model} · {provider}",
-    /** why: A review row's round ordinal. The findings row reuses it for the round that first reported the finding. */
+    /** note: A review row's round ordinal. The findings row reuses it for the round that first reported the finding. */
     reviewRound: "Round {round}",
     /** note: A round's wall clock: sub-minute runs read in seconds, longer ones as m/s. */
     reviewDurationSeconds: "{seconds}s",
     reviewDurationMinutes: "{minutes}m {seconds}s",
-    /** why: The run-time span's tooltip, like the head-sha chip's: names what the value measures. */
+    /** note: The run-time span's tooltip, like the head-sha chip's: names what the value measures. */
     reviewDurationLabel: "Round run time",
     failures: "Failures",
     noFailures: "No failures for this pull request.",
@@ -387,7 +387,7 @@ export const en = {
     firstSeen: "First seen",
     lastSeen: "Last seen",
     latestReview: "Latest review",
-    /** why: The verdict metric's screen-reader text when no review exists yet. */
+    /** note: The verdict metric's screen-reader text when no review exists yet. */
     noVerdict: "no verdict yet",
     /** note: The D11 reviewing marker: a LIVE review lock, carrying the attempt's
         head sha, or its acquisition time when a comment trigger carried none. */
@@ -410,12 +410,12 @@ export const en = {
     pageNext: "Next",
     pageRange: "{from}–{to} / {total}",
     /**
-     * note: Beside the range: rows this page's parser refused. They stay inside
+     * invariant: Beside the range: rows this page's parser refused. They stay inside
      * `total`, so the list cannot reach them from any window.
      */
     pageDropped: "{count} rows could not be shown",
     /**
-     * note: A severity group's count. The groups are built from the loaded window,
+     * why: A severity group's count. The groups are built from the loaded window,
      * while the tab's count is the PR's whole total — so the header names
      * which one it counts.
      */
@@ -433,10 +433,10 @@ export const en = {
     foldLabel: "{action} — {record} · #{position}",
     /** note: The same name for a record with no identity text: its position alone. */
     foldLabelBare: "{action} — #{position}",
-    /** why: The failure block's remaining-output fold (the diagnosis above is the first line) and copy action. */
+    /** note: The failure block's remaining-output fold (the diagnosis above is the first line) and copy action. */
     failureRemainingOutput: "Remaining output",
     copyError: "Copy error",
-    /** why: The copy action's transient outcome, shown on the button for a couple of seconds. */
+    /** note: The copy action's transient outcome, shown on the button for a couple of seconds. */
     copyCopied: "Copied",
     copyFailed: "Copy failed",
     /** note: The aside: PR facts and the merged activity timeline. */
@@ -447,13 +447,13 @@ export const en = {
     factState: "State",
     factHead: "Head",
     timelineReview: "Review · {verdict}",
-    /** why: A review whose verdict the payload did not record: the row still renders, without a dangling separator. */
+    /** note: A review whose verdict the payload did not record: the row still renders, without a dangling separator. */
     timelineReviewNoVerdict: "Review · no verdict",
     timelineFailure: "Review failed · {stage}",
-    /** why: A failure whose payload recorded no stage: the row still renders, without a dangling separator. */
+    /** note: A failure whose payload recorded no stage: the row still renders, without a dangling separator. */
     timelineFailureNoStage: "Review failed",
     timelineFirstSeen: "PR first seen",
-    /** why: The trailing row when the cap dropped older events (count reads correctly at 1). */
+    /** note: The trailing row when the cap dropped older events (count reads correctly at 1). */
     timelineHidden: "Earlier events not shown: {count}",
   },
   /**
@@ -484,7 +484,7 @@ export const en = {
     seriesReviews: "Reviews",
     seriesFindings: "Findings",
     trendSummary: "In this window: {reviews} · {findings}",
-    /** why: Composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
+    /** note: Composed zero-review empty state — no-action variant (reviews arrive via installed Apps). */
     emptyTitle: "No reviews yet",
     emptyDescription: "Insights fill in as your installed GitHub Apps review pull requests.",
   },
@@ -494,7 +494,7 @@ export const en = {
     headingDescription: "Each row is one GitHub App; installation scope lives on the App detail.",
     create: "Create GitHub App",
     /**
-     * note: The metric band. Four figures, each proved by `AppsPayload`: the App
+     * invariant: The metric band. Four figures, each proved by `AppsPayload`: the App
      * count, the count whose status is not `disabled` (the enable/disable
      * axis — a paused App is still enabled), the count whose `review_enabled`
      * is 0 (the pause axis, the field's own value), and the sum of
@@ -621,7 +621,7 @@ export const en = {
     emptyDescriptionMember: "This workspace has no other members yet.",
   },
   /**
-   * note: Workspace creation — the signed-in landing for a login that belongs to no
+   * invariant: Workspace creation — the signed-in landing for a login that belongs to no
    * workspace yet. Sign-in joins nobody, so this is the only path
    * into a first workspace besides accepting an invitation.
    */
@@ -632,7 +632,7 @@ export const en = {
     setupDescription:
       "You are not a member of a workspace yet. Create one and you become its owner — you can invite teammates afterwards.",
     /**
-     * note: The switcher menu's creation dialog: the same POST, opened by
+     * invariant: The switcher menu's creation dialog: the same POST, opened by
      * a member who already has a workspace — so it cannot claim "no workspace
      * yet", and it makes no plan statement (the surface is not mode-gated).
      */
@@ -684,7 +684,7 @@ export const en = {
     usageNotDesignatedHint:
       "No shared bot is designated on this platform. A platform operator designates it; until then your own GitHub Apps review your pull requests.",
     /**
-     * note: The credit block that sits above the published-review counts. The wire
+     * invariant: The credit block that sits above the published-review counts. The wire
      * sends integer RP and the card divides by the judging profile's
      * `rp_per_credit` to two decimals — credits are the only unit the operator
      * ever reads. The LABEL carries the unit and the value is the bare pair —
@@ -799,7 +799,7 @@ export const en = {
     disconnected: "This App is disconnected — enable it to review.",
     lastWebhook: "Last webhook: {time}",
     /**
-     * note: The installations section of the settings flow: heading, count subtitle
+     * invariant: The installations section of the settings flow: heading, count subtitle
      * and the table's columns. `installations.length` is the only installation
      * figure the product carries (compass D13); the settings payload has no
      * per-installation repository count, so there is no repository column.
@@ -939,10 +939,10 @@ export const en = {
       githubMetadataRefreshFailed:
         "GitHub did not return the App's metadata — nothing was refreshed. Check the App still exists, then retry.",
       concurrencyInvalid: "Concurrency must be a whole number from {min} to {max}. Nothing was stored.",
-      /** why: Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
+      /** invariant: Usage probe's off-vendor refusal: the declaration's host is not one the probe calls. */
       usageProbeOffVendorHost:
         "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at {host}.",
-      /** why: Same refusal when the declaration yields no readable host at all. */
+      /** invariant: Same refusal when the declaration yields no readable host at all. */
       usageProbeUnreadableEndpoint:
         "The usage probe for {provider} only calls the vendor's own quota host; this declaration points at an endpoint that cannot be read.",
     },
@@ -968,11 +968,11 @@ export const en = {
     triggerModeMention: "PR author or repo owner: comment this on the PR to (re-)start a review:",
     triggerModeMentionAria: "Bot mention: {mention}",
     /**
-     * note: The target-owned draft admission switch (0070, D12) — per repository,
+     * invariant: The target-owned draft admission switch (0070, D12) — per repository,
      * never a workspace default. On = review a draft like any other PR.
      */
     reviewDrafts: "Review draft pull requests",
-    // note: Review depth (migration 0047): the four faces of the App's depth select.
+    // invariant: Review depth (migration 0047): the four faces of the App's depth select.
     // Wire values stay quick/default/deep (plus the inherit face's own
     // sentinel); only the labels localize. "Standard" is the `default` enum's
     // tenant-facing name — a degree word beside Quick and Deep.
@@ -1019,13 +1019,13 @@ export const en = {
       modelCount: "{count} models",
       modelCountOne: "{count} model",
       /**
-       * note: I-000644: a provider the App has NOT declared yet shows the catalog
+       * invariant: I-000644: a provider the App has NOT declared yet shows the catalog
        * snapshot's vocabulary as a prefill. It is labelled as such — the card
        * must never pass a third-party snapshot off as what the App runs.
        */
       catalogVocabulary: "catalog vocabulary",
       /**
-       * note: I-000644: the sync flow — ask the provider's own /models endpoint for the
+       * invariant: I-000644: the sync flow — ask the provider's own /models endpoint for the
        * vocabulary it really serves and replace the stored list with it. The
        * counts are the confirmation: a stale snapshot shows up as the ids it
        * drops and the ids it never had.
@@ -1060,7 +1060,7 @@ export const en = {
         noMatch: 'No models match "{query}".',
         save: "Save models",
         /**
-         * note: The folded per-model facts group: its toggle, the single-model picker
+         * invariant: The folded per-model facts group: its toggle, the single-model picker
          * and what the sizes do. A blank size is NOT a save precondition — the
          * copy states the behaviour (catalog pre-fill, blank saves as
          * unstated) and never asks for a number the product already has. The
@@ -1074,7 +1074,7 @@ export const en = {
         requirements:
           "Context window and max token count set when context gets compacted and how long one reply can run — a catalog size is pre-filled, and a blank one saves as unstated.",
         /**
-         * note: A DATA statement, not a runtime promise: an unstated size is the
+         * invariant: A DATA statement, not a runtime promise: an unstated size is the
          * pinned omp runtime's own default, and the save is never refused for
          * a missing number. The copy says only what this product does — keeps
          * the declaration as unstated and does not invent the numbers.
@@ -1110,7 +1110,7 @@ export const en = {
           reasoningNo: "No reasoning",
         },
       },
-      /** why: The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
+      /** note: The two-step add-provider dialog: its indicator, its back step and its in-progress copy. */
       stepPick: "Choose",
       stepConfigure: "Configure",
       back: "Back",
@@ -1156,7 +1156,7 @@ export const en = {
       addKeyUnreadable:
         "The server answered in a form this page could not read — nothing was stored. If it keeps happening, ask the platform operator for the Worker log.",
       /**
-       * note: The per-key usage probe: the key-row action, the inline panel it
+       * invariant: The per-key usage probe: the key-row action, the inline panel it
        * reveals under the row, and the four faces — ok (window bar /
        * balance), unauthorized, absent, error. The wire's diagnostic
        * `reason` never renders verbatim.
@@ -1174,7 +1174,7 @@ export const en = {
         extraRemaining: "+ {amount} {unit} on-demand",
         /** invariant: One account-wide pool behind several keys, never a per-key allowance. */
         shared: "account-wide",
-        /** why: Semantic per-row labels derived from the normalized limit id's segment after the last ":". */
+        /** note: Semantic per-row labels derived from the normalized limit id's segment after the last ":". */
         window: {
           session: "Session",
           week: "Weekly",
@@ -1183,7 +1183,7 @@ export const en = {
           balance: "Balance",
         },
         /**
-         * note: Fallback for a limit id whose segment is not a known semantic
+         * invariant: Fallback for a limit id whose segment is not a known semantic
          * bucket — the id segment is never rendered (it can be vendor
          * bucket text), so unknown rows get a numbered generic label.
          */
@@ -1254,7 +1254,7 @@ export const en = {
     runtimeHarnessValue: "Reviews for this App run under the {id} runtime harness.",
     saveRuntimeHarness: "Save runtime harness",
     /**
-     * note: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
+     * invariant: GitHub identity card. `{name}`/`{id}`/`{time}` carry the
      * synced profile name, the numeric App id, and a relative synced-at time
      * (formatRelativeTime output) — nullable server fields degrade per-field,
      * so each key renders only when its value exists.
@@ -1270,7 +1270,7 @@ export const en = {
     // deploy doc sends the operator to this card for it.
     appInfoDeliveryUrl: "Webhook URL:",
     appInfoViewOnGithub: "View {name} on GitHub",
-    // note: (AD-623): the manager-face label — the name link targets the
+    // why: (AD-623): the manager-face label — the name link targets the
     // App's GitHub settings page, so the accessible name says "manage", not
     // "view". Member face keeps appInfoViewOnGithub.
     appInfoManageOnGithub: "Manage {name} on GitHub",
@@ -1336,7 +1336,7 @@ export const en = {
       heading: "GitHub App connected",
       connected: "GitHub App {appName} (id {id}) is connected to this deployment.",
       slug: "Slug: {slug}",
-      // why: The NULL-slug face: what the page shows is the numeric App id, so the
+      // invariant: The NULL-slug face: what the page shows is the numeric App id, so the
       // label says so (the fallback must not hand the operator a number under
       // a "Slug" label).
       appId: "App ID: {id}",
@@ -1373,7 +1373,7 @@ export const en = {
       workspaceFloorUnreadable:
         "The App could not be connected — this workspace's default score floor cannot be read, so nothing was stored. Repair the setting, then resubmit.",
       /**
-       * note: The workspace row came back without the floor field: the database
+       * invariant: The workspace row came back without the floor field: the database
        * predates the column, so a settings visit cannot repair it. The copy
        * names the migration that adds it (`0049`).
        */
@@ -1397,7 +1397,7 @@ export const en = {
     },
   },
   /**
-   * note: Platform console (`/_internal_admin`) — the operator surface. Bilingual
+   * invariant: Platform console (`/_internal_admin`) — the operator surface. Bilingual
    * through the same locale cookie as the workspace shell: `main.tsx` reads
    * `boot.locale`, every screen takes it as a prop, and page copy resolves
    * via `t(locale, …)`. These keys are operator-facing and never reuse the
@@ -1409,7 +1409,7 @@ export const en = {
     /** note: The header/nav shell of `src/spa/admin/main.tsx`. */
     header: {
       title: "Platform operations",
-      /** why: Shown under the title when the boot carries no login. */
+      /** note: Shown under the title when the boot carries no login. */
       signedOut: "signed out",
       /** note: Link back to the operator's own workspace shell. */
       dashboardLink: "Workspace dashboard",
@@ -1427,7 +1427,7 @@ export const en = {
       dataUpgrades: "Data upgrades",
     },
     /**
-     * note: A refused console write: the page's generic failure message stays
+     * invariant: A refused console write: the page's generic failure message stays
      * primary and the server's own `{error}` text rides along as secondary
      * detail (PageNotice's single message string carries both).
      */
@@ -1460,7 +1460,7 @@ export const en = {
       cancelButton: "Cancel",
       /** note: Inline confirmation next to the row right after a successful write. */
       saved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       toggleFailed: "Could not change {flag}.",
       /** note: Toggle accessible name: "{flag} {state}" with the ON/OFF state. */
       stateAria: "{flag} {state}",
@@ -1476,11 +1476,11 @@ export const en = {
       concurrencyLabel: "Concurrent reviews",
       concurrencySave: "Save",
       concurrencySaved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       concurrencyFailed: "Could not change the system concurrency.",
       /** note: {value} = the cap currently stored (or the documented default). */
       concurrencyCurrent: "Effective on the next review: {value}.",
-      /** why: The stored cap could not be read — the numbers are a fallback, not the stored setting. */
+      /** note: The stored cap could not be read — the numbers are a fallback, not the stored setting. */
       concurrencyUnreadable:
         "The stored system concurrency could not be read, so every workspace is running one review at a time. Entering a value in range saves a new one, and retrying the read re-checks the stored row.",
       checkTitle: "Check budgets",
@@ -1490,9 +1490,9 @@ export const en = {
       updateLabel: "Check update (ms)",
       checkSave: "Save",
       checkSaved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       checkFailed: "Could not change the check budgets.",
-      /** why: {terminalize}/{update} = the budgets currently stored (or the documented defaults). */
+      /** note: {terminalize}/{update} = the budgets currently stored (or the documented defaults). */
       checkCurrent: "Effective on the next review: terminalize {terminalize} ms, update {update} ms.",
       /** note: Neither stored budget could be read — the numbers are the documented defaults. */
       checkUnreadable:
@@ -1505,7 +1505,7 @@ export const en = {
       outboxLabel: "Outbox batch",
       claimSave: "Save",
       claimSaved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       claimFailed: "Could not change the comment-trigger recovery settings.",
       /** note: {retry}/{attempts}/{outbox} = the stored settings (or the documented defaults). */
       claimCurrent:
@@ -1536,14 +1536,46 @@ export const en = {
       recheckLabel: "Assignment budget (bytes)",
       recheckSave: "Save",
       recheckSaved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       recheckFailed: "Could not change the recheck assignment budget.",
       /** note: {value} = the budget currently stored (or the documented default). */
       recheckCurrent: "Effective on the next review: {value} bytes.",
       /** note: The stored budget could not be read — the number is the documented default. */
       recheckUnreadable:
         "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
-      /** note: Admission refusals the pipeline recorded over the trailing 24h. */
+      /** note: The platform's one end-to-end maximum review duration. */
+      attemptCapTitle: "Maximum review duration",
+      attemptCapDescription:
+        "The whole attempt stops at this cap: queue wait, execution and publication together. A review stopped by it is terminal and is not re-run automatically.",
+      attemptCapLabel: "Maximum duration (ms)",
+      /** invariant: {min}/{max} in ms plus minutes; a refusal names the same range. */
+      attemptCapRange:
+        "Accepted range: {min}–{max} ms ({minMinutes}–{maxMinutes} minutes). A value outside it is refused.",
+      attemptCapSave: "Save",
+      attemptCapSaved: "Saved.",
+      /** note: Fallback when the write fails with an unrecognised error. */
+      attemptCapFailed: "Could not change the maximum review duration.",
+      /** why: {value} = the stored cap, so the operator knows it is a save. */
+      attemptCapCurrentSaved: "Effective on the next review: {value} ms (saved value).",
+      /** invariant: {value} = the absent-row default — never presented as a saved value. */
+      attemptCapCurrentDefault:
+        "Effective on the next review: {value} ms (platform default — no value is saved).",
+      /** note: A save's re-read disagreed with its echo: the store's value wins. */
+      attemptCapChangedElsewhere:
+        "Another save changed the stored value while this page was open; the effective value is now {value} ms, which is what the store holds.",
+      /** note: A save is in flight or accepted; no value shows until it is read back. */
+      attemptCapConfirming:
+        "A save was sent and the stored value is being confirmed. No effective value is shown until it can be read back.",
+      /**
+       * invariant: The save did not answer (network, timeout, 5xx): it may have landed.
+       * Never say it failed — say the outcome is unknown.
+       */
+      attemptCapUnknown:
+        "The save's outcome is unknown: the request did not answer, so it may or may not have been stored. Retry reads the stored value back; no number is shown until it does.",
+      /** invariant: No attempt is admitted while the stored cap cannot be read. */
+      attemptCapUnreadable:
+        "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
+      /** invariant: Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",
@@ -1563,7 +1595,7 @@ export const en = {
       maintenanceOn: "Close the platform",
       maintenanceOff: "Reopen the platform",
       maintenanceSaved: "Saved.",
-      /** why: Fallback when the write fails with an unrecognised error. */
+      /** note: Fallback when the write fails with an unrecognised error. */
       maintenanceFailed: "Could not change the maintenance mode.",
       /** note: The window's opening stamp, rendered as a relative time. */
       maintenanceSinceLabel: "Closed since",
@@ -1577,6 +1609,40 @@ export const en = {
       /** why: No message is waiting, so the gauge reports no oldest stamp. */
       queueEmpty: "Empty",
       githubRateLimitedLabel: "GitHub secondary limits (24 h)",
+      /** note: The duration analysis: the evidence for choosing the attempt cap. */
+      durationTitle: "Review duration distribution",
+      durationDescription:
+        "Attempts admitted in the last {days} days. Percentiles use only intervals whose settlement instant is written and whose settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than that instant. An empty window stays empty — it never reads as a zero.",
+      durationEmpty: "No attempt was admitted in this window.",
+      durationEmptyExcluded:
+        "No attempt was measured: all {n} admitted attempts were excluded — {checkOpen} with a Check not proven closed at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+      durationSample: "{n} complete attempts",
+      durationTotal: "End to end",
+      durationQueueWait: "Queue wait",
+      durationExecution: "Execution",
+      durationPublication: "Publication / recovery",
+      durationP50: "p50",
+      durationP90: "p90",
+      durationMax: "max",
+      durationBuckets:
+        "Every attempt's interval splits into these three phases. Percentiles are per row, so one column does not add up across rows.",
+      durationExcluded:
+        "Excluded from the percentiles: {checkOpen} with a Check not proven closed at settlement, {recordMissing} with no settlement record, {noBoundary} without a measurable boundary, {unsettled} unsettled, {prePrepare} stopped before prepare.",
+      durationFailureTail:
+        "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the queue stamp, the boundary order or the settlement record is missing, or when the attempt froze a Check that was not proven closed at settlement.",
+      durationSettlementBasis:
+        "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
+      durationCandidateLabel: "Candidate cap (ms)",
+      /** invariant: The analysis range, stated only when a typed candidate falls outside it. */
+      durationCandidateRange: "The analysis accepts an integer from {min} to {max} ms.",
+      durationCandidateApply: "Show cutoff",
+      durationCutoff: "A {cap} ms cap would exclude {over} of {n} attempts ({share}).",
+      durationCutoffNone: "No completed attempt would exceed {cap} ms.",
+      durationCutoffEmpty: "No sample to compare against.",
+      durationCrossed:
+        "First phase past the cap: queue wait {queueWait}, execution {execution}, publication or recovery {publication}.",
+      durationCaveat:
+        "A capped attempt is terminal: the work it already observed is not re-run automatically, and whether a cap-stopped paid review is billed remains an open question.",
       /**
        * note: Deployment version footer. `{version}` carries the
        * v-prefixed display form (`v${APP_VERSION}`) — the same shape as the
@@ -1599,7 +1665,7 @@ export const en = {
       seatsColumn: "Seats",
       planColumn: "Plan",
       createdColumn: "Created",
-      /** why: Fallback when the plan write fails with an unrecognised error. */
+      /** note: Fallback when the plan write fails with an unrecognised error. */
       planChangeFailed: "Could not change the plan for {name}.",
       /** note: The plan picker's accessible name. */
       planAria: "Plan for {name}",
@@ -1617,10 +1683,10 @@ export const en = {
       slugLabel: "Slug",
       slugSave: "Save slug",
       cancelAction: "Cancel",
-      /** why: Fallback when the slug write fails with an unrecognised error. */
+      /** note: Fallback when the slug write fails with an unrecognised error. */
       slugChangeFailed: "Could not change the slug for {name}.",
       /**
-       * note: The official-workspace card above the table: the one tenant whose bots
+       * invariant: The official-workspace card above the table: the one tenant whose bots
        * may be offered platform-wide. Clearing is its own action, never an
        * empty save, and it does not revoke a share already granted.
        */
@@ -1636,7 +1702,7 @@ export const en = {
       officialClear: "Clear",
       officialSaved: "Official workspace saved.",
       officialCleared: "Official workspace cleared. Shares already granted stay revocable.",
-      /** why: Fallback when either write fails with an unrecognised error. */
+      /** note: Fallback when either write fails with an unrecognised error. */
       officialSaveFailed: "Could not change the official workspace.",
       officialLoadFailed: "Could not load the official workspace.",
     },
@@ -1659,7 +1725,7 @@ export const en = {
       targetsColumn: "Live targets",
       shareAction: "Share",
       unshareAction: "Unshare",
-      /** why: The action's label when the bot's workspace is not the official one. */
+      /** note: The action's label when the bot's workspace is not the official one. */
       shareUnavailable: "Sharing unavailable",
       notOfficialReason: "Only bots in the official workspace can be shared.",
       /** note: Share confirmation — {name} is the bot. */
@@ -1672,7 +1738,7 @@ export const en = {
         "Targets in other workspaces become Blocked until the bot is shared again. This workspace keeps configuring it.",
       confirmAction: "Confirm",
       cancelAction: "Cancel",
-      /** why: Fallback when the scope write fails with an unrecognised error. */
+      /** note: Fallback when the scope write fails with an unrecognised error. */
       scopeChangeFailed: "Could not change the sharing of {name}.",
     },
     /** note: Review usage page (spec bot-scope-and-claiming § Review usage). */
@@ -1777,7 +1843,7 @@ export const en = {
       description:
         "Time-boxed cross-workspace access. Creating and revoking a grant each append one audit row.",
       loadFailed: "Could not load the support grants.",
-      /** why: Fallback when a write fails with an unrecognised error. */
+      /** note: Fallback when a write fails with an unrecognised error. */
       createFailed: "Could not create the support grant.",
       revokeFailed: "Could not revoke the support grant.",
       newWindowTitle: "New support window",
@@ -1812,7 +1878,7 @@ export const en = {
       currentNone: "None",
       progressLabel: "Progress",
       errorLabel: "Last error",
-      /** why: {count} = the rows the batches have moved so far. */
+      /** note: {count} = the rows the batches have moved so far. */
       progressProcessed: "{count} rows processed.",
       /** note: {batch} = batches this run committed, {count} = rows processed. */
       progressRunning: "Running — batch {batch}, {count} rows processed.",
@@ -1824,9 +1890,9 @@ export const en = {
       statusVerifying: "Verifying",
       statusCompleted: "Completed",
       statusFailed: "Failed",
-      /** note: The item refuses a second batch outside the maintenance window. */
+      /** invariant: The item refuses a second batch outside the maintenance window. */
       downtimeBadge: "Needs downtime",
-      /** why: A folded completed row: the rows it processed and when it last ran. */
+      /** note: A folded completed row: the rows it processed and when it last ran. */
       completedSummary: "{count} rows · last run {time}",
       showDetails: "Show details",
       hideDetails: "Hide details",
@@ -1847,7 +1913,7 @@ export const en = {
       restartConsequence: "Rows already migrated are not rolled back.",
       /** note: Every preflight counter is zero: a run would move nothing. */
       nothingToMigrate: "Nothing to migrate — this upgrade has no work left.",
-      /** note: {title} = the item's title; the server's refusal rides as detail. */
+      /** invariant: {title} = the item's title; the server's refusal rides as detail. */
       preflightFailed: "Could not run the preflight for {title}.",
       stepFailed: "The batch for {title} was refused.",
       verifyFailed: "Could not verify {title}.",
