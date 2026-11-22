@@ -1050,3 +1050,220 @@ describe("the recorded publication failure leaves the head re-triggerable", () =
     expect(h.messageRetryCalls).toHaveLength(0);
   });
 });
+
+// note: ---------------------------------------------------------------------------
+// QC findings on the publication-failure settlement (route pass)
+// ---------------------------------------------------------------------------
+
+/**
+ * note: The same database that plays the overlapping-pass interleaving the moment a
+ * stale pass re-reads its handoff: A's settlement lands and a fresh delivery re-claims
+ * the head, BOTH before that pass decides whether to write the head-wide claim.
+ */
+function settleDuringFenceRead(
+  db: TestD1,
+  input: { deliveryKey: string; claimKey: string; claims: Map<string, string>; nowMs: number },
+): TestD1 {
+  let fired = false;
+  const wrap = (statement: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(statement.bind(...values)),
+    first: async () => {
+      fired = true;
+      await markAttemptSettled(
+        db as never,
+        input.deliveryKey,
+        ["claim-stamp", "failure-row"],
+        ["claim-stamp", "failure-row"],
+        input.nowMs,
+      );
+      input.claims.set(input.claimKey, "1");
+      return statement.first();
+    },
+    all: () => statement.all(),
+    run: () => statement.run(),
+  });
+  return {
+    prepare(sql: string) {
+      const statement = db.prepare(sql);
+      return fired || !/FROM review_attempt_handoffs WHERE attempt_id = \?/.test(sql) ? statement : wrap(statement);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
+describe("the publication-failure settlement under QC scrutiny", () => {
+  const NOW = 10_000_000;
+
+  /** A KV whose reads and writes share one readable map (a real claim store). */
+  function claimKv(seed: Record<string, string> = {}): {
+    claims: Map<string, string>;
+    kv: { get: (key: string) => Promise<string | null>; put: (key: string, value: string) => Promise<void>; delete: (key: string) => Promise<void> };
+    claimKey: string;
+  } {
+    const claims = new Map(Object.entries(seed));
+    return {
+      claims,
+      kv: {
+        get: async (key) => claims.get(key) ?? null,
+        put: async (key, value) => {
+          claims.set(key, value);
+        },
+        delete: async (key) => {
+          claims.delete(key);
+        },
+      },
+      claimKey: "",
+    };
+  }
+
+  async function seed(db: TestD1, payload: ReviewJobPayload, attemptId = "attempt-qc"): Promise<void> {
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId,
+      payload,
+      nowMs: NOW - 900_000,
+      enqueuedMs: 0,
+      deadlineMs: NOW - 1,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run(attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run(attemptId, NOW - 900_000, NOW - 800_000, NOW - 700_000);
+  }
+
+  function settlement(db: TestD1, attemptId = "attempt-qc"): { settled_ms: number | null; settled_effects: string | null } {
+    return db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+  }
+
+  test("F-A: an unreadable claim is owed, not settled — the healthy pass still abandons it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    const { claims, kv } = claimKv();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    claims.set(claimKey, "1");
+    let failReads = true;
+    const env = {
+      ...(await h.makeEnv({ DB: db as never })),
+      IDEMPOTENCY_KV: {
+        ...kv,
+        get: async (key: string) => {
+          if (failReads) throw new Error("KV read failed");
+          return kv.get(key);
+        },
+      } as never,
+    };
+    const queue = { send: async () => {} };
+
+    // note: The row and its fact land, but the claim could not be READ — so the stamp is
+    // not a fact and the settlement must stay owed.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toBeNull();
+    expect(claims.get(claimKey)).toBe("1");
+
+    // note: The healthy pass proves the write and settles — the head can be re-triggered.
+    failReads = false;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW + 60_000);
+    expect(claims.get(claimKey)).toBe("failed");
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("F-B: a completed settlement never acts on the head-wide claim", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    const { claims, kv } = claimKv();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    claims.set(claimKey, "1");
+    const env = { ...(await h.makeEnv({ DB: db as never })), IDEMPOTENCY_KV: kv as never };
+    const queue = { send: async () => {} };
+
+    // note: A settles and a fresh delivery re-claims the head before this stale pass
+    // writes: it must leave the fresh claim alone.
+    const racing = settleDuringFenceRead(db, {
+      deliveryKey: deliveryKeyOf(payload),
+      claimKey,
+      claims,
+      nowMs: NOW,
+    });
+    await reconcileReviewRoute({ ...env, DB: racing as never, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(claims.get(claimKey)).toBe("1");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-C: a prior generation's terminal journal never suppresses this attempt's failure", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    // note: One row exists per scope/head/kind; this is the OLD attempt's closed journal.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-old', ?, ?, ?, ?, ?, ?, 'review', 'failed', ?, NULL, 1, 'done', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        JSON.stringify({ admittedAttemptId: "attempt-old" }),
+        NOW - 800_000,
+        NOW - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("publication never started");
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-C: a headless persisted launch is still recorded, with no claim write", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null });
+    await seed(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.head_sha).toBe("");
+    // note: A headless delivery has no claim key: the settlement completes on the failure
+    // row alone (no journal, no head-wide write, no body restage).
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(false);
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(settlement(db).settled_effects!)).toEqual(["failure-row"]);
+  });
+});

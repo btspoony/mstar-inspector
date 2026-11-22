@@ -28,9 +28,7 @@ import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
-  IDEM_FAILED,
   idemKey,
-  putAbandonClaim,
 } from "../contracts/idem";
 import { readReviewLaunch } from "./review-attempt";
 import {
@@ -43,6 +41,7 @@ import {
   markSuccessorDelivered,
   restoreCommentClaimForRecovery,
   settleAttemptIfDischarged,
+  stampOwedSettlementClaim,
   successorGeneration,
   touchAttemptHandoff,
   type AttemptHandoff,
@@ -103,19 +102,22 @@ async function landSettlementEffects(
     landed.add("failure-row");
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
-    await putAbandonClaim(
-      env.IDEMPOTENCY_KV,
-      idemKey({
+    // Only a settlement that is STILL OWED may touch the head-wide key (an
+    // overlapping pass must not overwrite a fresh delivery's claim), and only a
+    // PROVEN write — or a proven `done` — is the stamped effect: an unreadable
+    // claim stays owed, so the head remains re-triggerable.
+    const stamped = await stampOwedSettlementClaim(env.DB, env.IDEMPOTENCY_KV, {
+      attemptId: handoff.attemptId,
+      key: idemKey({
         installation_id: handoff.payload.installation_id,
         owner: handoff.payload.owner,
         repo: handoff.payload.repo,
         pr_number: handoff.payload.pr_number,
         head_sha: handoff.payload.head_sha,
       }),
-      IDEM_FAILED,
-      IDEMPOTENCY_SECONDS,
-    );
-    landed.add("claim-stamp");
+      ttlSeconds: IDEMPOTENCY_SECONDS,
+    });
+    if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }
   await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
 }

@@ -28,6 +28,7 @@ import { createSeededTestD1, VALID_OUTPUT } from "../helpers/consumer-fixtures";
 import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
 import { deliveryKeyOf, readAttemptHandoff } from "../../src/store/review-route-store";
+import { readReviewLaunch } from "../../src/pipeline/review-attempt";
 import { REVIEW_ATTEMPT_CAP_DEFAULT_MS } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
@@ -288,7 +289,7 @@ describe("claim 10 — a delayed delivery is anchored on its claim, not its enqu
         )
         .run(key, "attempt-spent", JSON.stringify(payload), spent, spent, spent);
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-      await expect(consumer(h.makeBatch(payload))).resolves.toBeUndefined();
+      await consumer(h.makeBatch(payload));
     });
 
     // note: One ack, no retry: the stop is terminal because a durable row records it.
@@ -297,6 +298,9 @@ describe("claim 10 — a delayed delivery is anchored on its claim, not its enqu
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
-    expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
+    // note: The durable launch fact: no paid outcome was ever recorded for the attempt
+    // (an unlaunched row ends `provisioned` or `abandoned`), so no paid work ran.
+    const launch = await readReviewLaunch(db as never, "attempt-spent");
+    expect(launch?.state === "provisioned" || launch?.state === "abandoned").toBe(true);
   });
 });

@@ -632,6 +632,83 @@ describe("a launch whose paid result is durable but whose Check is still open (I
     expect(row.terminal_ms).toBe(T0);
   });
 
+  test("F-D: an already-concluded remote run is never rewritten", async () => {
+    const db = seededDb();
+    // note: The reported shape: a released Check row, a persisted launch and a landed
+    // publication proof — while the remote run was concluded by another actor with its
+    // own text. An already-concluded run is never rewritten.
+    const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85), T0 - 100_000);
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
+    let rewrites = 0;
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "success", summary: "the run's own earlier text" }),
+          }),
+          complete: async () => {
+            rewrites += 1;
+            throw new Error("an already-concluded run must never be rewritten");
+          },
+        }),
+      });
+      expect(rewrites).toBe(0);
+      expect(summary.completed).toBe(0);
+      // note: The row takes the attempt ladder's deferral instead of a remote write.
+      expect(summary.unconfirmed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-D: an in-progress remote run still concludes as before", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db, { nowMs: T0 - 240_000, executionDeadlineMs: T0 + 900_000 });
+    seedPersistedLaunch(db, attempt);
+    db.raw
+      .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`)
+      .run(attempt.identity.attemptId);
+    const proof = proofFor(attempt.identity, "review");
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "ship it", 85), T0 - 100_000);
+    linkPublication(db, attempt.identity.attemptId, proof.publicationId);
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          complete: async (identity, _id, conclusion) => ({
+            kind: "completed",
+            remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }),
+          }),
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+    const row = await rawRow(db, attempt.identity.attemptId);
+    expect(row.observed).toBe("success");
+    expect(row.terminal_ms).toBe(T0);
+  });
+
   test("a live execution holder keeps its lease and its own conclusion still lands", async () => {
     const db = seededDb();
     // note: The paid step just persisted its result and the consumer is still

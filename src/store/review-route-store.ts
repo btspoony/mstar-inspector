@@ -17,7 +17,9 @@
  * Store module boundary (compass contracts A): D1 types only, no pipeline or
  * worker imports.
  */
+import type { KVNamespace } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
@@ -452,6 +454,24 @@ export async function landFailureEffect(
 }
 
 /**
+ * Stamp the head's abandoned claim ONLY while this attempt's settlement is still
+ * owed. A pass keeps the handoff it selected in memory, and by the time it writes
+ * the settlement may be complete AND a fresh delivery may have re-claimed the
+ * head: a stale pass must then write nothing at all. `null` means nothing was
+ * written (settled, or no handoff row). The write's own proof is the caller's to
+ * judge (`written`/`done` are facts, `unreadable` is still owed).
+ */
+export async function stampOwedSettlementClaim(
+  db: D1Like,
+  kv: KVNamespace,
+  input: { attemptId: string; key: string; ttlSeconds: number },
+): Promise<AbandonClaimWrite | null> {
+  const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
+  if (handoff === null || handoff.settledMs !== null) return null;
+  return putAbandonClaim(kv, input.key, IDEM_FAILED, input.ttlSeconds);
+}
+
+/**
  * Apply the rule now: merge what this execution landed and complete the mark
  * only when the attempt's obligations are discharged. `false` means nothing was
  * written (no lane closed, or no handoff row).
@@ -604,7 +624,7 @@ export async function listIncompleteSettlements(
 /**
  * The persisted-but-unpublished crash window (I-000684): the attempt's paid
  * result is durable, its own hard stop has passed, and NOTHING was ever staged
- * for its scope/head — so the publication lane (which only ever walks journal
+ * for THIS attempt — so the publication lane (which only ever walks journal
  * rows) can never pick it up and no settlement ever started. The pass turns that
  * into the recorded terminal failure a failed review already gets, so the state
  * is visible and re-triggerable instead of a paid result hidden behind a queued
@@ -612,11 +632,16 @@ export async function listIncompleteSettlements(
  *
  * `state = 'created'` keeps the instances that never got one in the re-enqueue
  * family's hands; `settling_ms IS NULL` keeps a settlement that already started
- * in `listIncompleteSettlements`. A journal row for the same scope/head — even a
- * `failed` or `applied` one — means the publication lane owns the outcome and
- * this selection leaves it alone. The payload's own head is required: a
- * delivery that carried none cannot be matched to a publication, and this pass
- * never guesses.
+ * in `listIncompleteSettlements`. The journal anti-join is keyed on the
+ * PRODUCER's own identity (`payload.admittedAttemptId`, else `payload.attemptId`
+ * — the fields `collect` freezes into the staged payload) instead of
+ * scope/head, because one row exists per scope/head/kind and a PRIOR
+ * generation's terminal `failed`/`degraded` journal must not suppress this
+ * attempt's failure record. Rows written before the identity existed carry
+ * neither field: those keep the old conservative scope/head rule (no migration
+ * invents an identity). A HEADLESS delivery (`head_sha: null`) has no journal
+ * key at all and always qualifies — its failure is recorded with the empty-head
+ * convention and without a claim write.
  */
 export async function listUnpublishedLaunchSettlements(
   db: D1Like,
@@ -631,15 +656,27 @@ export async function listUnpublishedLaunchSettlements(
         WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
           AND l.state = 'persisted'
           AND h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?
-          AND json_extract(h.payload_json, '$.head_sha') IS NOT NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM review_publications p
-             WHERE p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
-               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
-               AND p.owner = json_extract(h.payload_json, '$.owner')
-               AND p.repo = json_extract(h.payload_json, '$.repo')
-               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
-               AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
+          AND (
+            json_extract(h.payload_json, '$.head_sha') IS NULL
+            OR NOT EXISTS (
+              SELECT 1 FROM review_publications p
+               WHERE p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+                 AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+                 AND p.owner = json_extract(h.payload_json, '$.owner')
+                 AND p.repo = json_extract(h.payload_json, '$.repo')
+                 AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+                 AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
+                 AND (
+                   COALESCE(
+                     json_extract(p.payload_json, '$.admittedAttemptId'),
+                     json_extract(p.payload_json, '$.attemptId')
+                   ) IS NULL
+                   OR COALESCE(
+                     json_extract(p.payload_json, '$.admittedAttemptId'),
+                     json_extract(p.payload_json, '$.attemptId')
+                   ) = h.attempt_id
+                 )
+            )
           )
         ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?`,
