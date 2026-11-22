@@ -861,15 +861,17 @@ async function reconcileLineBatches(
         } catch (error) {
           // A thrown read observed nothing: one failed pass under the read-scope
           // reason, never a capture.
-          if (await noteLineDiscoveryFailure(db, row, "readback-scope", now(), log)) retired += 1;
+          if (await noteLineDiscoveryFailure(db, row, "readback-scope", state.captures, now(), log)) retired += 1;
           log.warn(
             { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
             "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
           );
           continue;
         }
+        let capturePersisted = false;
         try {
           await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+          capturePersisted = true;
         } catch (error) {
           log.warn(
             { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
@@ -878,10 +880,14 @@ async function reconcileLineBatches(
         }
         // A pass that captured nothing is the observation the bound counts: the
         // batch cannot leave the eligible set by ordering, only by this count.
-        if (recovered.captured) {
+        // A capture that did not persist is neither a success to reset on nor a
+        // readback failure to count.
+        if (!recovered.captured) {
+          if (await noteLineDiscoveryFailure(db, row, recovered.failure ?? "marker-missing", state.captures, now(), log)) {
+            retired += 1;
+          }
+        } else if (capturePersisted) {
           await resetLineDiscoveryFailures(db, row.id, now());
-        } else if (await noteLineDiscoveryFailure(db, row, recovered.failure ?? "marker-missing", now(), log)) {
-          retired += 1;
         }
         log.info(
           { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
@@ -943,15 +949,19 @@ async function reconcileLineBatches(
  * never returns the row again — and the row, its count and its reason stay
  * readable, so an operator can see why recovery stopped. Returns true only
  * when this call retired the batch (the caller re-queries the selection then).
+ *
+ * `observedCaptures` is the capture state this pass was taken against; a
+ * capture that landed since (full or partial) makes the write a no-op.
  */
 async function noteLineDiscoveryFailure(
   db: D1Like,
   row: PublicationRow,
   reason: LineDiscoveryFailure,
+  observedCaptures: number,
   nowMs: number,
   log: ReconcileLog,
 ): Promise<boolean> {
-  const settled = await recordLineDiscoveryFailure(db, row.id, reason, nowMs);
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, observedCaptures, nowMs);
   if (settled === null || !settled.unresolvable) return false;
   log.warn(
     {

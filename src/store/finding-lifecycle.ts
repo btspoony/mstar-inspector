@@ -1392,28 +1392,35 @@ export async function releaseUnspentPublicationClaim(
   return result.meta.changes > 0;
 }
 
-/** One applied publication's post-apply line batch: is work still pending, and
- *  has a dispatch intent already been recorded (the batch may have been sent)? */
-export type LineBatchState = { pending: boolean; dispatched: boolean };
+/** One applied publication's post-apply line batch: is work still pending, has
+ *  a dispatch intent already been recorded (the batch may have been sent), and
+ *  how many capture writes have persisted against it. */
+export type LineBatchState = { pending: boolean; dispatched: boolean; captures: number };
 
 /**
  * Read the batch's durable state. `dispatched` is the §7.9a evidence question:
  * an intent means some lane took the send right for this exact batch, so the
  * only remaining work is read-only discovery — never a second send. A row that
  * predates the column carries `LINE_DISPATCH_UNKNOWN` and is treated the same
- * way: its intent is unknown, not absent.
+ * way: its intent is unknown, not absent. `captures` is the optimistic token a
+ * failure observation carries: it must still match when the failure is
+ * recorded, or a concurrent capture (full or partial) invalidates it.
  */
 export async function readLineBatchState(db: D1Like, id: string): Promise<LineBatchState> {
   const row = await db
-    .prepare(`SELECT line_dispatch_ms FROM review_publications WHERE id = ?`)
+    .prepare(`SELECT line_dispatch_ms, line_capture_count FROM review_publications WHERE id = ?`)
     .bind(id)
-    .first<{ line_dispatch_ms: number | null }>();
-  if (row === null) return { pending: false, dispatched: false };
+    .first<{ line_dispatch_ms: number | null; line_capture_count: number }>();
+  if (row === null) return { pending: false, dispatched: false, captures: 0 };
   const pending = await db
     .prepare(`SELECT 1 AS hit FROM review_threads WHERE publication_id = ? AND review_id IS NULL LIMIT 1`)
     .bind(id)
     .first<{ hit: number }>();
-  return { pending: pending !== null, dispatched: row.line_dispatch_ms !== null };
+  return {
+    pending: pending !== null,
+    dispatched: row.line_dispatch_ms !== null,
+    captures: row.line_capture_count,
+  };
 }
 
 /**
@@ -1495,14 +1502,17 @@ export type LineDiscoveryOutcome = { attempts: number; unresolvable: boolean };
  * deletion), and a row already unresolvable returns `null` — the caller has
  * nothing new to report.
  *
- * The same statement re-checks that the batch is STILL UNCAPTURED: a
- * concurrent pass that saved every comment id makes this stale observation
- * false, so a completed batch can never be marked unresolvable.
+ * The write is OPTIMISTIC on the capture state this attempt observed
+ * (`readLineBatchState().captures`): a concurrent pass that saved comment ids
+ * bumps `line_capture_count`, so this stale observation changes nothing — not
+ * the count, not the marker — instead of retiring a batch that is still making
+ * progress. The same predicate keeps a completed batch unmarkable.
  */
 export async function recordLineDiscoveryFailure(
   db: D1Like,
   id: string,
   reason: string,
+  observedCaptures: number,
   nowMs: number,
   bound: number = LIFECYCLE_MAX_ATTEMPTS,
 ): Promise<LineDiscoveryOutcome | null> {
@@ -1516,10 +1526,11 @@ export async function recordLineDiscoveryFailure(
                 CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_reason END,
               updated_ms = ?
         WHERE id = ? AND phase = 'applied' AND line_unresolvable_ms IS NULL
+          AND line_capture_count = ?
           AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
         RETURNING line_discovery_attempts, line_unresolvable_ms`,
     )
-    .bind(bound, nowMs, bound, reason, nowMs, id, id)
+    .bind(bound, nowMs, bound, reason, nowMs, id, observedCaptures, id)
     .run<{ line_discovery_attempts: number; line_unresolvable_ms: number | null }>();
   const written = result.results[0];
   if (written === undefined) return null;
@@ -1551,6 +1562,12 @@ export async function resetLineDiscoveryFailures(db: D1Like, id: string, nowMs: 
  * Persist the captured line-comment ids against their associations (the §7.7
  * step 10 capture). Replay-safe and scoped to the publication, so a discovery
  * pass in another lane can complete what a send could not read back.
+ *
+ * The SAME batch bumps the publication's capture counter — even when only some
+ * associations were captured. That is the durable assertion that a capture
+ * persisted, and the optimistic token every in-flight failure observation is
+ * checked against, so a stale "readback observed nothing" cannot retire a batch
+ * that is making progress.
  */
 export async function captureLineComments(
   db: D1Like,
@@ -1560,13 +1577,16 @@ export async function captureLineComments(
   nowMs: number,
 ): Promise<void> {
   if (posted.length === 0) return;
-  await db.batch(
-    posted.map((p) =>
+  await db.batch([
+    ...posted.map((p) =>
       db
         .prepare(`UPDATE review_threads SET review_id = ?, comment_id = ?, updated_ms = ? WHERE id = ? AND publication_id = ?`)
         .bind(reviewId, p.commentId, nowMs, p.associationId, publicationId),
     ),
-  );
+    db
+      .prepare(`UPDATE review_publications SET line_capture_count = line_capture_count + 1 WHERE id = ?`)
+      .bind(publicationId),
+  ]);
 }
 
 /**

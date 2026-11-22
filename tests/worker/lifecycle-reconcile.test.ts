@@ -43,6 +43,7 @@ import {
   listResolutionRecovery,
   LIFECYCLE_MAX_ATTEMPTS,
   recordPublicationProof,
+  readLineBatchState,
   recordLineDiscoveryFailure,
   stagePublication,
   suspendPublicationRecovery,
@@ -1184,13 +1185,20 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
   /** An applied publication whose line batch is still uncaptured. */
   async function seedAppliedLineBatch(
     db: TestD1,
-    input: { id: string; appliedAgeMs: number; dispatched: boolean; discoveryAttempts?: number; headSha?: string },
+    input: {
+      id: string;
+      appliedAgeMs: number;
+      dispatched: boolean;
+      discoveryAttempts?: number;
+      headSha?: string;
+      intentCount?: number;
+    },
   ): Promise<void> {
     // The journal is unique per (scope, head, kind): two live batches in one
     // test need distinct heads or the second staging replays the first row.
     const headSha = input.headSha ?? SHA;
-    const intent: LineIntent = {
-      associationId: `assoc-${input.id}`,
+    const intents: LineIntent[] = Array.from({ length: input.intentCount ?? 1 }, (_, i) => ({
+      associationId: `assoc-${input.id}${i === 0 ? "" : `-${i}`}`,
       findingRowId: `finding-${input.id}`,
       publicationId: input.id,
       scope: SCOPE,
@@ -1200,8 +1208,8 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       line: 10,
       body: "fix",
       bodySha256: "a".repeat(64),
-    };
-    await seedPrepared(db, input.id, reviewPayload(SCOPE, { headSha, lineIntents: [intent] }), input.appliedAgeMs + 1);
+    }));
+    await seedPrepared(db, input.id, reviewPayload(SCOPE, { headSha, lineIntents: intents }), input.appliedAgeMs + 1);
     // A dispatched batch is discovery-only; an undispatched one is still sendable.
     db.raw
       .prepare(
@@ -1212,13 +1220,15 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
       )
       .run(T0 - input.appliedAgeMs, input.dispatched ? T0 - 5_000 : null, input.discoveryAttempts ?? 0, input.id);
     seedFindingRow(db, `finding-${input.id}`, input.id, SCOPE);
-    seedThreadRow(db, {
-      id: intent.associationId,
-      publicationId: input.id,
-      findingRowId: intent.findingRowId,
-      scope: SCOPE,
-      verified: verifiedFor(intent.associationId, intent.findingRowId),
-    });
+    for (const intent of intents) {
+      seedThreadRow(db, {
+        id: intent.associationId,
+        publicationId: input.id,
+        findingRowId: intent.findingRowId,
+        scope: SCOPE,
+        verified: verifiedFor(intent.associationId, intent.findingRowId),
+      });
+    }
   }
 
   function recordingLog() {
@@ -1432,11 +1442,82 @@ describe("line-batch discovery bound — an unmatchable batch stops starving new
     // The concurrent recovery task saved the comment first...
     await captureLineComments(db, "pub-raced", 9000, [{ associationId: "assoc-pub-raced", commentId: 9001 }], T0);
     // ...so the stale "readback observed nothing" at the bound must be a no-op.
-    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", T0)).toBeNull();
+    expect(await recordLineDiscoveryFailure(db, "pub-raced", "marker-missing", 0, T0)).toBeNull();
     expect(batchColumns(db, "pub-raced")).toMatchObject({
       line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
       line_unresolvable_ms: null,
       line_unresolvable_reason: null,
+    });
+  });
+
+  test("a stale failure cannot mark a partially captured batch", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, {
+      id: "pub-partial",
+      appliedAgeMs: 100_000,
+      dispatched: true,
+      discoveryAttempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      intentCount: 2,
+    });
+
+    // The observation this pass carries: no capture had persisted yet.
+    expect((await readLineBatchState(db, "pub-partial")).captures).toBe(0);
+
+    // A concurrent pass saves ONE of the two comments; the batch stays pending,
+    // so the "any thread still uncaptured" predicate alone would let it retire.
+    await captureLineComments(db, "pub-partial", 9100, [{ associationId: "assoc-pub-partial", commentId: 9101 }], T0);
+    expect(await readLineBatchState(db, "pub-partial")).toMatchObject({ pending: true, captures: 1 });
+
+    // The stale failure at the bound changes nothing: neither the count nor the marker.
+    expect(await recordLineDiscoveryFailure(db, "pub-partial", "comment-gone", 0, T0)).toBeNull();
+    expect(batchColumns(db, "pub-partial")).toMatchObject({
+      line_discovery_attempts: LIFECYCLE_MAX_ATTEMPTS - 1,
+      line_unresolvable_ms: null,
+      line_unresolvable_reason: null,
+    });
+  });
+
+  test("a capture write that fails does not reset the failed-readback count", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, APP);
+    await seedAppliedLineBatch(db, { id: "pub-fault", appliedAgeMs: 100_000, dispatched: true, discoveryAttempts: 1 });
+
+    // The remote read succeeds, but persisting the ids fails on that statement.
+    const failingDb = new Proxy(db as unknown as Record<string, unknown>, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (prop !== "prepare" || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (sql: string) => {
+          if (sql.includes("SET review_id")) {
+            // Fails where the capture binds its ids: nothing reaches the batch.
+            return { bind: () => { throw new Error("capture write failed"); } };
+          }
+          return value.call(target, sql);
+        };
+      },
+    });
+    const reviewer = async () =>
+      okResolution({
+        recoverLineComments: async () => ({
+          posted: [{ associationId: "assoc-pub-fault", commentId: 9201, path: "src/a.ts", line: 10 }],
+          ambiguous: [],
+          captured: true,
+          reviewId: 9200,
+        }),
+      });
+
+    await reconcileReviewLifecycle(
+      { DB: failingDb as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE },
+      { now: () => T0, reviewer, log: SILENT_LOG },
+    );
+
+    // Nothing persisted, so the count neither resets nor advances.
+    expect(batchColumns(db, "pub-fault")).toMatchObject({
+      line_discovery_attempts: 1,
+      line_unresolvable_ms: null,
     });
   });
 });
