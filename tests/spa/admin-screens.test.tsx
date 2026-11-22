@@ -1122,6 +1122,174 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the route card calls an untrusted row off and names its raw value", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      }),
+    );
+    // The read path refuses this row, so the card never echoes it as `on`…
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      'off — untrusted (stored value "ON")',
+    );
+    // …and states the answer the queue handler acts on.
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "off — deliveries are refused and nothing is created",
+    );
+    await surface.close();
+  });
+
+  test("saving the route card repairs an untrusted row and shows the gate's answer", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ routeWorkflow: { stored: "off", effective: { mode: "off", saved: true, degraded: false } } })
+        : json({
+            ...RUNTIME,
+            routeWorkflow: {
+              mode: "off",
+              saved: false,
+              degraded: true,
+              reason: "untrusted",
+              rejected: '"ON"',
+            },
+          }),
+    );
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { routeWorkflow: { value: "off" } },
+      },
+    ]);
+    // The card adopts the server's read-back, so the repaired row no longer
+    // reads as untrusted and the effective line is what the gate answered.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "off — saved",
+    );
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "off — deliveries are refused and nothing is created",
+    );
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("an unreadable save echo is confirmed by a re-read, never echoed back", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      return json({
+        ...RUNTIME,
+        // Page load: an untrusted row. The post-save re-read: the store's word.
+        routeWorkflow:
+          runtimeReads === 1
+            ? { mode: "off", saved: false, degraded: true, reason: "untrusted", rejected: '"ON"' }
+            : { mode: "on", saved: true, degraded: false },
+      });
+    });
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The echo carried no gate answer, so the page asked the read path…
+    expect(
+      surface.sent.filter(
+        (request) => request.method === "GET" && request.url === "/_internal_admin/api/runtime",
+      ),
+    ).toHaveLength(2);
+    // …and rendered THAT: the save asked for `off`, the store answered `on`.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "on — saved",
+    );
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "on — deliveries create a Workflow instance",
+    );
+    await surface.close();
+  });
+
+  test("an unreadable echo with a failed re-read says the state is unconfirmed", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      if (runtimeReads > 1) return new Response("unavailable", { status: 503 });
+      return json({
+        ...RUNTIME,
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      });
+    });
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.text()).toContain("The save could not be confirmed");
+    // The requested mode is not presented as the stored one.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      'off — untrusted (stored value "ON")',
+    );
+    await surface.close();
+  });
+
+  test("an unconfirmed save puts the switch back on the gate's answer", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      if (runtimeReads > 1) return new Response("unavailable", { status: 503 });
+      return json({ ...RUNTIME, routeWorkflow: { mode: "off", saved: true, degraded: false } });
+    });
+    // Start on a known `off`, then ask for `on`.
+    await surface.click(
+      surface.container.querySelector('button[aria-label="Review route OFF"]'),
+    );
+    expect(surface.container.querySelector('button[aria-label="Review route ON"]')).not.toBeNull();
+
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { routeWorkflow: { value: "on" } },
+      },
+    ]);
+
+    // Neither the echo nor the re-read confirmed it, so the switch returns to
+    // the gate's answer: the control and the status line cannot disagree.
+    expect(surface.text()).toContain("The save could not be confirmed");
+    expect(surface.container.querySelector('button[aria-label="Review route ON"]')).toBeNull();
+    const toggle = surface.container.querySelector(
+      'button[aria-label="Review route OFF"]',
+    ) as unknown as HTMLButtonElement | null;
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "off — saved",
+    );
+    await surface.close();
+  });
+
+  test("an older server without a routeWorkflow field hides only that card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector('[data-route-workflow="form"]')).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
+
   test("the admission-drop card renders all four reasons and their 24h counts", async () => {
     const surface = await runtimeScreen(() =>
       json({

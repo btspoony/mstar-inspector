@@ -39,6 +39,7 @@ import {
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
+  getReviewRouteWorkflowGate,
   getSweepSettings,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -51,6 +52,7 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
+  setReviewRouteWorkflow,
   setSweepSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -230,6 +232,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     level,
     recheck,
     attemptCap,
+    routeWorkflow,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
@@ -242,6 +245,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
+    getReviewRouteWorkflowGate(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
@@ -298,6 +302,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
+    // The review route's operating switch as the gate reads it: `mode` is the
+    // answer the queue handler acts on, `saved` and `rejected` say what the row
+    // holds behind it (a hand-edited value reads `off` with `reason: untrusted`).
+    routeWorkflow,
     // Admission drops the pipeline already records as `review_failures` rows,
     // grouped by the reason token of the drop prefix over the last 24h — the
     // sub-threshold signal the failure sweep cannot page on.
@@ -367,6 +375,16 @@ function reviewLevelValue(value: unknown): string | null {
   return typeof level === "string" ? level : null;
 }
 
+/**
+ * The accepted `routeWorkflow` body shape: the `value` of the store's strict
+ * vocabulary. Any other string is the store's 400; a non-string is a shape 400.
+ */
+function routeWorkflowValue(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { value: mode } = value as { value?: unknown };
+  return typeof mode === "string" ? mode : null;
+}
+
 /** The accepted `checkBudgets` body shape; the store owns the accepted ranges. */
 function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
@@ -397,6 +415,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawLevel: unknown;
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
+  let rawRouteWorkflow: unknown;
   let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
@@ -407,6 +426,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
       attemptCap?: unknown;
+      routeWorkflow?: unknown;
       maintenance?: unknown;
     };
     concurrency = body.concurrency;
@@ -416,6 +436,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
+    rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
   } catch {
     // malformed body → the shape gate's 400, never a 500
@@ -431,13 +452,14 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawLevel,
       rawRecheck,
       rawAttemptCap,
+      rawRouteWorkflow,
       rawMaintenance,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | routeWorkflow | maintenance",
       },
       400,
     );
@@ -506,6 +528,20 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     try {
       // The store owns the accepted range and names it in the refusal.
       return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawRouteWorkflow !== undefined) {
+    const value = routeWorkflowValue(rawRouteWorkflow);
+    if (value === null) {
+      return c.json({ error: "body must be { routeWorkflow: { value } }" }, 400);
+    }
+    try {
+      // The store owns the `on` | `off` vocabulary and answers the gate's own
+      // read-back as `effective`, so the console never has to guess.
+      return c.json({ routeWorkflow: await setReviewRouteWorkflow(db, value, login) });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
