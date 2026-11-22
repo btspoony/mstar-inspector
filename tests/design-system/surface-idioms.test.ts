@@ -1,5 +1,5 @@
 /**
- * Surface idioms (r3 shell rebuild, 2026-10-31).
+ * invariant: Surface idioms (r3 shell rebuild, 2026-10-31).
  *
  * The r3 rule these assert is a property, not a class name: a card is defined
  * by a hairline plus a surface step, and its edge colour must be a declared
@@ -48,7 +48,7 @@ import { AppInfoSection } from "../../src/spa/pages/SettingsPage";
 import { withLocation } from "../spa/browser-stub";
 import { installDom } from "../spa/dom";
 
-/** The generated stylesheet is the declared-token oracle: every `--name` a
+/** note: The generated stylesheet is the declared-token oracle: every `--name` a
  *  component may reference has to appear here, in both themes. */
 const DECLARED = new Map<string, string>();
 const TOKENS_CSS = readFileSync(new URL("../../src/spa/styles/tokens.css", import.meta.url), "utf8");
@@ -59,7 +59,7 @@ for (const match of TOKENS_CSS.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
 
 const VAR_VALUE = /^var\((--[\w-]+)\)$/;
 
-/** Follows `var(--a)` → `var(--b)` → a literal; "" when a hop is undeclared
+/** note: Follows `var(--a)` → `var(--b)` → a literal; "" when a hop is undeclared
  *  (the browser would then fall back to currentColor, which is the trap). */
 function resolveToken(name: string): string {
   let value: string | undefined = DECLARED.get(name);
@@ -74,7 +74,7 @@ function resolveToken(name: string): string {
 const ARBITRARY_VAR = /^border-\((--[\w-]+)\)$/;
 const BRACKET_VAR = /^border-\[var\((--[\w-]+)\)\]$/;
 
-/** Border utilities that carry geometry or style, never a colour. */
+/** note: Border utilities that carry geometry or style, never a colour. */
 const NOT_A_COLOUR =
   /^border-(?:\d+|\[[^\]]*\]|[trblesxy](?:-\d+)?|solid|dashed|dotted|double|hidden|none|collapse|separate)$/;
 
@@ -83,12 +83,12 @@ function classesOf(markup: string): string[] {
   return attribute.split(/\s+/).filter(Boolean);
 }
 
-/** The colour-bearing border utilities in one class list. */
+/** note: The colour-bearing border utilities in one class list. */
 function borderColours(classes: string[]): string[] {
   return classes.filter((name) => name.startsWith("border-") && !NOT_A_COLOUR.test(name));
 }
 
-/** The card's hairline: one colour-bearing border utility, backed by a token.
+/** note: The card's hairline: one colour-bearing border utility, backed by a token.
  *  `width: false` for a face whose width utility is spelled `border-b` (or
  *  under an arbitrary variant) rather than the bare `border`. */
 function expectTokenHairline(markup: string, options: { width?: boolean } = {}): void {
@@ -99,7 +99,7 @@ function expectTokenHairline(markup: string, options: { width?: boolean } = {}):
     .toHaveLength(1);
   const colour = colours[0] ?? "";
   const match = ARBITRARY_VAR.exec(colour) ?? BRACKET_VAR.exec(colour);
-  // `border-current`, a palette step or a raw literal would satisfy the
+  // why: `border-current`, a palette step or a raw literal would satisfy the
   // browser and tell us nothing about the token layer.
   expect(match, `${colour} names no token`).not.toBeNull();
   const token = match?.[1] ?? colour;
@@ -113,7 +113,7 @@ function expectNoElevation(markup: string): void {
   expect(shadows, `inline surface declares ${shadows.join(" ")}`).toEqual([]);
 }
 
-/** The tags in a markup that paint `slot`, so a row can be located by the
+/** note: The tags in a markup that paint `slot`, so a row can be located by the
  *  identity it declares rather than by its position in the string. */
 function tagsOfSlot(markup: string, slot: string): string[] {
   return [...markup.matchAll(new RegExp(`<[^>]*data-slot="${slot}"[^>]*>`, "g"))].map(
@@ -121,10 +121,10 @@ function tagsOfSlot(markup: string, slot: string): string[] {
   );
 }
 
-/** A height utility that carries its height as a token: `h-(--x)` / `min-h-(--x)`. */
+/** note: A height utility that carries its height as a token: `h-(--x)` / `min-h-(--x)`. */
 const ROW_HEIGHT = /^(?:min-)?h-\((--[\w-]+)\)$/;
 
-/** A row face names exactly one height utility, it is the declared `--row-h-*`
+/** why: A row face names exactly one height utility, it is the declared `--row-h-*`
  *  step, and that step resolves to a length in `tokens.css`. A raw `h-10`, a
  *  missing height or an undeclared token all fail here; returns the utility so
  *  the caller can assert the min/grow form. */
@@ -141,7 +141,7 @@ function expectRowHeight(tag: string, token: string, where: string): string {
   return utility;
 }
 
-/** Every card that sits on the page, rendered at its rest face. */
+/** note: Every card that sits on the page, rendered at its rest face. */
 const CARD_LAYER: ReadonlyArray<readonly [string, string]> = [
   ["Card", renderToStaticMarkup(createElement(Card, null, "content"))],
   [
@@ -177,7 +177,7 @@ describe("card surface rule (r3)", () => {
 });
 
 describe("row heights (DESIGN.md Table, list-row, group-card)", () => {
-  // The three surfaces that sit on the named row steps. The classes are read
+  // why: The three surfaces that sit on the named row steps. The classes are read
   // off the rendered faces so a regression is caught where the page would
   // wear it, and every height resolves through the declared token — the same
   // oracle the hairlines use.
@@ -205,14 +205,14 @@ describe("row heights (DESIGN.md Table, list-row, group-card)", () => {
 
   test("ListRow sits on the compact step", () => {
     const utility = expectRowHeight(listRow, "--row-h-compact", "ListRow");
-    // A bare `h-` would pin the row and clip its content; the list row is a
+    // why: A bare `h-` would pin the row and clip its content; the list row is a
     // fixed face, so it names the height outright.
     expect(utility).not.toMatch(/^min-h-/);
   });
 
   test("the GroupCard header band is at least one comfort row", () => {
     const utility = expectRowHeight(groupHeader, "--row-h-comfort", "GroupCardHeader");
-    // `min-h-` is the documented growth contract: a header with a summary
+    // why: `min-h-` is the documented growth contract: a header with a summary
     // line grows past the comfort row.
     expect(utility).toMatch(/^min-h-/);
   });
@@ -230,20 +230,20 @@ describe("flow-section idiom", () => {
   test("a section divides the page plane instead of framing its own", () => {
     const classes = classesOf(markup);
     expect(markup).toContain('data-slot="flow-section"');
-    // The divider is the subtle hairline, declared as a token — and it is a
+    // why: The divider is the subtle hairline, declared as a token — and it is a
     // divider only: no fill, no elevation, no framed box.
     const colours = borderColours(classes);
     expect(colours, colours.join(" ")).toHaveLength(1);
     expect(resolveToken(ARBITRARY_VAR.exec(colours[0] ?? "")?.[1] ?? "")).not.toBe("");
     expect(classes.some((name) => name.startsWith("bg-"))).toBe(false);
     expectNoElevation(markup);
-    // The flow trims its own first and last edges so it meets the page's
+    // why: The flow trims its own first and last edges so it meets the page's
     // padding without a doubled gap or a trailing divider.
     expect(classes).toContain("last:border-b-0");
   });
 
   test("the section title is a real heading set on the type-token scale", () => {
-    // The title must be a heading element, and its size must resolve to a
+    // why: The title must be a heading element, and its size must resolve to a
     // declared typography token — a raw px value would bypass the fixed scale.
     const heading = /<h2 class="([^"]*)"[^>]*>App info<\/h2>/.exec(markup);
     expect(heading, "the title is not an h2").not.toBeNull();
@@ -259,7 +259,7 @@ describe("flow-section idiom", () => {
 });
 
 /**
- * The provider picker opened on a live DOM: the popover edge only exists while
+ * why: The provider picker opened on a live DOM: the popover edge only exists while
  * the list is open, and focus is what opens it.
  */
 async function openPickerPopover(): Promise<string> {
@@ -297,7 +297,7 @@ async function openPickerPopover(): Promise<string> {
     await act(async () => {
       input?.dispatchEvent(new win.FocusEvent("focusin", { bubbles: true }));
     });
-    // The listbox's own parent is the popover surface the edge belongs to.
+    // note: The listbox's own parent is the popover surface the edge belongs to.
     const popover = container.querySelector('[role="listbox"]')?.parentElement ?? null;
     expect(popover, "the picker did not open — nothing to read").not.toBeNull();
     return popover?.outerHTML ?? "";
@@ -307,7 +307,7 @@ async function openPickerPopover(): Promise<string> {
   }
 }
 
-/** The two dashboard faces that carry an App avatar (both inline, not in AppAvatar). */
+/** note: The two dashboard faces that carry an App avatar (both inline, not in AppAvatar). */
 const APPS_LIST = withLocation("/dashboard/acme/apps", () =>
   renderToStaticMarkup(
     createElement(AppsList, {
@@ -363,7 +363,7 @@ describe("hairline sites outside the card layer (I-000235)", () => {
       expect(tag, slot).not.toBe("");
       expectTokenHairline(tag, { width: false });
     }
-    // Every row, not the first: the row face carries its colour under an
+    // why: Every row, not the first: the row face carries its colour under an
     // arbitrary variant, which is the spelling a spot check would miss.
     const rows = tagsOfSlot(table, "skeleton-table-row");
     expect(rows.length).toBeGreaterThan(1);
@@ -387,7 +387,7 @@ describe("hairline sites outside the card layer (I-000235)", () => {
         .map((match) => match[0])
         .filter((tag) => classesOf(tag).includes("rounded-full"));
     const avatars = [...avatarsOf(APPS_LIST), ...avatarsOf(APP_INFO)];
-    // One per face: the assertion is about the faces that ship them, not a
+    // why: One per face: the assertion is about the faces that ship them, not a
     // count in the abstract.
     expect(avatars).toHaveLength(2);
     for (const avatar of avatars) expectTokenHairline(avatar);

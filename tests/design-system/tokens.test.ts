@@ -1,5 +1,5 @@
 /**
- * Token source contract (design-system rebuild, 2026-10-31).
+ * why: Token source contract (design-system rebuild, 2026-10-31).
  *
  * The load-bearing assertions, as opposed to descriptive ones:
  *
@@ -63,14 +63,14 @@ describe("palette reduction (D14)", () => {
   test("the declared palette steps are exactly the 26 survivors", () => {
     const declaredPalette = tokenNames()
       .primitive.filter((name) => !name.startsWith("font-") && !name.startsWith("breakpoint-"));
-    // Both directions, so a step added without a band and a survivor dropped by
+    // why: Both directions, so a step added without a band and a survivor dropped by
     // accident both fail.
     expect([...declaredPalette].sort()).toEqual([...D14_SURVIVORS].sort());
     expect(declaredPalette).toHaveLength(26);
   });
 
   test("the D14a transitional set is empty and the survivor set is whole", () => {
-    // The live list closed 2026-11-01: `gray-800` and `gray-alpha-200` left
+    // why: The live list closed 2026-11-01: `gray-800` and `gray-alpha-200` left
     // when `src/spa/admin.html` stopped reading raw steps. An entry here would
     // have to name the plan that closes it, so the generator can print the
     // deadline above the declaration.
@@ -90,7 +90,7 @@ describe("palette reduction (D14)", () => {
   });
 
   test("the teal and pink families are gone", () => {
-    // D14 removed them from the bands; the chart-vocabulary closure
+    // why: D14 removed them from the bands; the chart-vocabulary closure
     // (2026-10-31) migrated charts.css onto the six closed slots, which was
     // their last consumer, so no step of either family is declared any more
     // — not even transitionally.
@@ -136,7 +136,7 @@ describe("theme parity", () => {
     for (const name of ["surface-page", "surface-card", "text-primary", "tone-success-bg", "on-brand"]) {
       expect(varying, `--${name} should differ per theme`).toContain(name);
     }
-    // Heights, radii and type must not: a control that changes size with the
+    // why: Heights, radii and type must not: a control that changes size with the
     // theme is a layout bug, not a theme.
     for (const name of ["control-h-md", "radius-control", "typo-copy-14-size", "row-h-comfort"]) {
       expect(varying, `--${name} must be theme-invariant`).not.toContain(name);
@@ -152,7 +152,7 @@ describe("resolution", () => {
         .filter(([, value]) => value === "" || /var\(--/.test(value))
         .map(([name]) => name);
       expect(unresolved, `${theme} leaves tokens referencing var()`).toEqual([]);
-      // Not just non-empty: a resolved colour must be a concrete value.
+      // why: Not just non-empty: a resolved colour must be a concrete value.
       const colours = Object.keys(tokenLayers(theme).semantic).filter(
         (name) => /^(surface|border|text|tone|chart)-/.test(name) || name === "on-brand" || name === "focus-ring",
       );
@@ -175,7 +175,7 @@ describe("resolution", () => {
   });
 
   test("a hover or disabled face never resolves to its own rest face", () => {
-    // The failure this catches: `button-primary-hover-bg` pointing at
+    // why: The failure this catches: `button-primary-hover-bg` pointing at
     // `tone-accent-fg`, which equals `tone-accent-solid` — a hover state that
     // renders identically and therefore does not exist.
     const pairs = [
@@ -191,7 +191,7 @@ describe("resolution", () => {
   });
 
   test("an undefined reference throws instead of yielding a hollow value", () => {
-    // The resolver's contract, exercised through a value it can be handed.
+    // why: The resolver's contract, exercised through a value it can be handed.
     expect(() => resolveTheme("dark")).not.toThrow();
     const error = new UnresolvedTokenError("dark", "surface-page", "nope");
     expect(error.message).toContain("--surface-page");
@@ -209,7 +209,7 @@ describe("resolution", () => {
 
 describe("chart fill/mark split", () => {
   /**
-   * Slots whose two faces are the same colour *in the light theme*, and why:
+   * why: Slots whose two faces are the same colour *in the light theme*, and why:
    * the approved fill is a theme-fixed 600-step literal, and in the light
    * palette `green-700` and `purple-700` are those exact values (#16a34a,
    * #9333ea). D14's rule — fill = quiet 600 literal, mark = family 700 — has
@@ -244,7 +244,7 @@ describe("chart fill/mark split", () => {
       .map((i) => `chart-${i}`)
       .filter((slot) => light[slot] === light[`${slot}-mark`]);
     expect(colliding).toEqual([...LIGHT_SAME_FACE]);
-    // Dark always distinguishes: its 700 steps are the bright faces.
+    // why: Dark always distinguishes: its 700 steps are the bright faces.
     expect([1, 2, 3, 4, 5, 6].map((i) => `chart-${i}`).filter((slot) => dark[slot] === dark[`${slot}-mark`])).toEqual([]);
   });
 
@@ -253,7 +253,7 @@ describe("chart fill/mark split", () => {
     const light = resolveTheme("light").semantic;
     expect(dark["chart-1"]?.toLowerCase()).toBe(resolveTheme("dark").primitive["brand-600"]?.toLowerCase());
     expect(light["chart-1"]?.toLowerCase()).toBe(resolveTheme("light").primitive["brand-600"]?.toLowerCase());
-    // Theme-fixed: the same quiet 600-step value in both faces. Dark chart-5
+    // why: Theme-fixed: the same quiet 600-step value in both faces. Dark chart-5
     // is the exception — lifted so it clears the 3:1 non-text bar on the dark
     // raised planes (`I-000232`); `tests/design-system/contrast.test.ts` owns
     // those ratios.
@@ -279,7 +279,7 @@ describe("ops surface variant (D15)", () => {
   });
 
   test("the re-mapped primary still has a visible hover", () => {
-    // Same defect class as the base layer: a re-map that points hover at the
+    // why: Same defect class as the base layer: a re-map that points hover at the
     // rest fill deletes the hover state without failing anything else.
     for (const theme of THEMES) {
       const resolved = resolveTheme(theme).semantic;

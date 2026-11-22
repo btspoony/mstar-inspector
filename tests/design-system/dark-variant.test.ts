@@ -1,5 +1,5 @@
 /**
- * The `dark:` binding — the app's theme, not the OS.
+ * why: The `dark:` binding — the app's theme, not the OS.
  *
  * Tailwind v4 resolves `dark:` from `prefers-color-scheme` unless a
  * `@custom-variant` re-binds it. The standard shadcn recipe keys on
@@ -35,7 +35,7 @@ const compiled = (
 describe("dark: variant binding", () => {
   test("the shipped binding drops prefers-color-scheme and never keys on [data-theme=dark]", () => {
     expect(compiled).not.toContain("prefers-color-scheme");
-    // The never-toggled visitor renders dark with the attribute unset; the
+    // why: The never-toggled visitor renders dark with the attribute unset; the
     // shadcn recipe would leave that visitor with no dark: rule at all.
     expect(binding).toContain(':root:not([data-theme="light"])');
     expect(binding).not.toContain('[data-theme="dark"]');
@@ -43,7 +43,7 @@ describe("dark: variant binding", () => {
 
   test("a dark: utility fires under the attribute-unset root and data-theme=dark, never under light", () => {
     expect(compiled).toMatch(/\.dark\\:bg-red-500[^{]*\{\s*background-color:/);
-    // The guards the compiled rule actually carries: the root itself, and any
+    // why: The guards the compiled rule actually carries: the root itself, and any
     // descendant of such a root. Extracted, never pinned as one string — a
     // Tailwind reformat of `:where` must not fail this without a behaviour
     // change.
@@ -52,7 +52,7 @@ describe("dark: variant binding", () => {
     const guards = variant.slice(":where(".length, -1).split(", ");
     expect(guards).toEqual([':root:not([data-theme="light"])', ':root:not([data-theme="light"]) *']);
 
-    // Evaluated per root: absence of the attribute is dark (the deterministic
+    // why: Evaluated per root: absence of the attribute is dark (the deterministic
     // default), an explicit dark matches, light never does — root and
     // descendant alike.
     for (const [theme, expected] of [
