@@ -98,21 +98,27 @@ describe("the review route's deployment gate", () => {
   });
 
   test("an unreadable row refuses, and says why", async () => {
-    reset();
-    const db = createMigratedTestD1();
-    store(db, "maybe");
+    // Anything that is not exactly `on`/`off` is a refusal — including a
+    // padded `"on "`: a setting whose meaning flips on a stray space is the
+    // bug class this switch exists to avoid.
+    for (const raw of ["on ", " on", "on\t", "\non", "ON", "1", "true", "maybe"]) {
+      reset();
+      const db = createMigratedTestD1();
+      store(db, raw);
 
-    await runReviewQueueBatch(BATCH, { DB: db } as never, CTX, fakeConsumer);
+      await runReviewQueueBatch(BATCH, { DB: db } as never, CTX, fakeConsumer);
 
-    expect(consumerLoads).toBe(0);
-    // Unreadable evidence is a fault, so the line rides warn; the refusal is
-    // the same as an absent row.
-    expect(logLines).toHaveLength(0);
-    expect(warnLines).toHaveLength(1);
-    const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;
-    expect(line.event).toBe("review_route_gate_closed");
-    expect(line.gate_degraded).toBe(true);
-    expect(line.gate_reason).toBe("untrusted");
+      expect(consumerLoads).toBe(0);
+      // Unreadable evidence is a fault, so the line rides warn; the refusal is
+      // the same as an absent row, and it names the raw value it rejected.
+      expect(logLines).toHaveLength(0);
+      expect(warnLines).toHaveLength(1);
+      const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;
+      expect(line.event).toBe("review_route_gate_closed");
+      expect(line.gate_degraded).toBe(true);
+      expect(line.gate_reason).toBe("untrusted");
+      expect(line.gate_rejected).toBe(JSON.stringify(raw));
+    }
   });
 
   test("a failing read refuses too — never permission", async () => {
