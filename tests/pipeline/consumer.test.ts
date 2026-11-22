@@ -1,5 +1,5 @@
 /**
- * Consumer tests (Phase 5 Wave A) — full-mock flow. The
+ * why: Consumer tests (Phase 5 Wave A) — full-mock flow. The
  * sandbox adapter and the commenter are injected via createReviewConsumer's
  * overrides (DI — no process-wide mock.module on relative module paths, which
  * leaks across test files sharing a worker on CI, run 32946710695); the review
@@ -70,7 +70,7 @@ import { REDACTED } from "../../src/pipeline/redact";
 import type { PipelineEnv } from "../../src/pipeline/consumer";
 import type { DiscoveryResult, InstallationTokenGrant, ReviewCommenter, UpsertPlan } from "../../src/pipeline/comment";
 import type { CommenterCall } from "../helpers/review-commenter";
-// the Check lifecycle is driven through PRODUCTION code — the real
+// invariant: the Check lifecycle is driven through PRODUCTION code — the real
 // registry double plus a scripted GitHub Checks surface (no live request).
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
@@ -147,16 +147,16 @@ import {
   recheckDocWith,
 } from "../helpers/consumer-fixtures";
 
-/** The review gate the seeded test App carries (the product's default floor). */
+/** note: The review gate the seeded test App carries (the product's default floor). */
 const GATE = { minScore: 60, passVerdicts: ["ship it"] } as const;
 
-/** A numstat that saturates the size request at the work-unit bound: the
+/** note: A numstat that saturates the size request at the work-unit bound: the
  * request is the tier maximum, so budget cases below can pin tier-bound
  * arithmetic without a mid-ramp request diluting the pin. */
 const SATURATED_NUMSTAT = "9000\t11000\tsrc/generated.ts\n";
 
-// --- shared runtime doubles -------------------------------------------------
-// One `createConsumerHarness()` per test owns the sandbox/commenter/KV doubles,
+// note: --- shared runtime doubles -------------------------------------------------
+// note: One `createConsumerHarness()` per test owns the sandbox/commenter/KV doubles,
 // the payload + batch builders and the log sink (tests/helpers/consumer-harness,
 // the same factory the recheck suites use), so `reset` no longer exists. Only
 // the Check-lifecycle surface below is local to this file.
@@ -175,7 +175,7 @@ import {
   attributionEntries,
   formatFailureAttribution,
 } from "../../packages/runner/src/seat-failover-probe";
-// The budget owner is a pure module with no workerd dependency: imported
+// why: The budget owner is a pure module with no workerd dependency: imported
 // directly, so the suite pins the same values both the consumer and the Check
 // store bill.
 import {
@@ -191,7 +191,7 @@ import {
   runnerTimeoutMs,
 } from "../../src/review-budget";
 
-// The consumer under test and the binding helper it exports, through ONE
+// note: The consumer under test and the binding helper it exports, through ONE
 // loader: the harness registers the workerd shim before this dynamic import.
 const {
   BIND_UNBOUND_THREADS_MAX_ENTRIES,
@@ -202,37 +202,37 @@ const {
   guardRetryDelaysSeconds,
 } = await loadConsumer();
 
-/** This file's harness instance: rebuilt per test, so no case inherits a double. */
+/** note: This file's harness instance: rebuilt per test, so no case inherits a double. */
 let h = createConsumerHarness();
 beforeEach(() => {
   h = createConsumerHarness();
   freshChecks();
 });
 
-/** Runner exec call's env (the sandbox fake stores opts as unknown). */
+/** note: Runner exec call's env (the sandbox fake stores opts as unknown). */
 function runnerExecEnv(): Record<string, string> {
   const call = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   return (call.opts as { env?: Record<string, string> }).env ?? {};
 }
-/** The credential pools the runner exec transported over STDIN (the only channel). */
+/** note: The credential pools the runner exec transported over STDIN (the only channel). */
 function runnerCredentialPools(): Record<string, string[]> | undefined {
   const call = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   const stdin = (call.opts as { stdin?: string }).stdin;
   return stdin === undefined ? undefined : (JSON.parse(stdin) as { pools: Record<string, string[]> }).pools;
 }
-/** Runner exec call's timeout (the sandbox fake stores opts as unknown). */
+/** note: Runner exec call's timeout (the sandbox fake stores opts as unknown). */
 function runnerExecTimeout(): number | undefined {
   const call = h.sandbox.calls.find((c) => c.cmd.includes("bun run"))!;
   return (call.opts as { timeout?: number }).timeout;
 }
 
-/** The runner-input write's exec opts; the fake stores `opts` as unknown. */
+/** note: The runner-input write's exec opts; the fake stores `opts` as unknown. */
 function inputWriteOpts(): { stdin?: string } | undefined {
   const write = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'");
   return write?.opts as { stdin?: string } | undefined;
 }
 
-/** Hold the next runner exec; `reached` resolves once it is parked. */
+/** note: Hold the next runner exec; `reached` resolves once it is parked. */
 function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
   const released = Promise.withResolvers<void>();
   const reached = Promise.withResolvers<void>();
@@ -240,20 +240,20 @@ function holdFirstRunner(): { reached: Promise<void>; release: () => void } {
   return { reached: reached.promise, release: released.resolve };
 }
 
-/** Count review rows in the real D1 double. */
+/** note: Count review rows in the real D1 double. */
 function reviewCount(db: TestD1): number {
   const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
   return row.n;
 }
 
-/** A sandbox call's exec timeout (the fake stores `opts` as unknown). */
+/** note: A sandbox call's exec timeout (the fake stores `opts` as unknown). */
 function execTimeout(call: { opts?: unknown }): number | undefined {
   const opts = call.opts as { timeout?: number } | undefined;
   return opts?.timeout;
 }
 
 /**
- * Sandbox overrides for the clock cases: `needle`'s command consumes `spentMs`
+ * note: Sandbox overrides for the clock cases: `needle`'s command consumes `spentMs`
  * of the round (and of any window it shares), so the deadline arithmetic is
  * observable without waiting. Everything else is the shared fake, and every
  * command still lands in `sandbox.calls`.
@@ -271,7 +271,7 @@ function clockSpendingSandbox(needle: string, spentMs: number, clock: { now: num
 }
 
 /**
- * This file's own scripted Checks surface (declared further down): the harness
+ * note: This file's own scripted Checks surface (declared further down): the harness
  * instance is rebuilt per test, so only the Check state needs clearing here.
  * A case that runs several rounds in one test calls this itself between them.
  */
@@ -283,14 +283,14 @@ function freshChecks(): void {
   checkState.clockMs = 1_700_000_000_000;
 }
 
-/** All rows of the usage_events ledger in the real D1 double. */
+/** note: All rows of the usage_events ledger in the real D1 double. */
 function usageRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM usage_events ORDER BY review_id, seq").all() as Array<
     Record<string, unknown>
   >;
 }
 
-/** The operator default depth row (`review.level.default`). */
+/** note: The operator default depth row (`review.level.default`). */
 function seedDefaultReviewLevel(db: TestD1, level: string): void {
   db.raw
     .prepare(
@@ -299,11 +299,11 @@ function seedDefaultReviewLevel(db: TestD1, level: string): void {
     .run(REVIEW_LEVEL_KEY, level);
 }
 
-/** The leaf's own statement — matched exactly, so no other settings read counts. */
+/** note: The leaf's own statement — matched exactly, so no other settings read counts. */
 const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
 
 /**
- * Wrap the D1 double to count the operator-default depth reads: the resolved
+ * why: Wrap the D1 double to count the operator-default depth reads: the resolved
  * depth must cost ZERO of them when the App row carries its own value, and
  * exactly ONE when it does not.
  */
@@ -322,19 +322,19 @@ function countDefaultLevelReads(db: TestD1): { db: TestD1; reads: () => number }
 }
 
 /**
- * The delivery that follows the guard's LAST rung: past the schedule the job is
+ * note: The delivery that follows the guard's LAST rung: past the schedule the job is
  * acked (a further retry() would land it on the DLQ), so the terminal branches
  * of handleGuardHeld run here. Derived from the schedule, so adding a rung moves
  * every "final delivery" case with it instead of leaving a stale literal.
  */
 const GUARD_FINAL_ATTEMPT = guardRetryDelaysSeconds("default").length + 1;
 
-/** Live admission rows — the per-PR lock plus the capacity reservation. */
+/** note: Live admission rows — the per-PR lock plus the capacity reservation. */
 function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
-/** Seed one live admission row through the REAL store: the state a running review leaves behind. */
+/** note: Seed one live admission row through the REAL store: the state a running review leaves behind. */
 async function seedInflight(
   db: TestD1,
   overrides: {
@@ -369,7 +369,7 @@ async function seedInflight(
 }
 
 /**
- * Seed the PR ledger's head watermark through the REAL store (migration
+ * note: Seed the PR ledger's head watermark through the REAL store (migration
  * 0039/0044): the state a later `synchronize` delivery has already left
  * behind when an earlier one is dequeued.
  */
@@ -389,7 +389,7 @@ async function seedPrHead(
   });
 }
 
-/** The real D1 double with one statement family throwing (fail-closed probes). */
+/** note: The real D1 double with one statement family throwing (fail-closed probes). */
 function dbFailingOn(db: TestD1, match: string) {
   return {
     prepare: (sql: string) => {
@@ -401,7 +401,7 @@ function dbFailingOn(db: TestD1, match: string) {
 }
 
 /**
- * The REAL lifecycle over a store wrapper that faults ONE of the give-up's two
+ * why: The REAL lifecycle over a store wrapper that faults ONE of the give-up's two
  * fenced writes by CALL ORDINAL (1 = the intent, 2 = the release). The fault is
  * armed the moment the seam is entered and is chosen by ORDER — no SQL text and
  * no re-implementation — so the consumer ↔ lifecycle integration for a store
@@ -421,7 +421,7 @@ function handoffFaultStore(db: TestD1, failAt: 1 | 2) {
   } as unknown as TestD1;
   return {
     db: faulty,
-    /** Arm the fault for the next hand-off: the only writer at that point. */
+    /** note: Arm the fault for the next hand-off: the only writer at that point. */
     arm: () => {
       state.armed = true;
       state.calls = 0;
@@ -430,7 +430,7 @@ function handoffFaultStore(db: TestD1, failAt: 1 | 2) {
 }
 
 /**
- * The REAL store with ONE journal hand-off write replaced — a refusal
+ * why: The REAL store with ONE journal hand-off write replaced — a refusal
  * (`changes: 0`, nothing written) or a fault — chosen by CALL ORDINAL after
  * arming: the publication link is call 1, the claim release call 2. Arming is
  * driven by the consumer's own "publication journal hit" line (`arm` below),
@@ -451,7 +451,7 @@ function journalHandoffFault(db: TestD1, at: 1 | 2, kind: "refused" | "throw") {
   } as unknown as TestD1;
   return {
     db: faulty,
-    /** Arm the fault for the next hand-off. */
+    /** note: Arm the fault for the next hand-off. */
     arm: () => {
       state.armed = true;
       state.calls = 0;
@@ -459,7 +459,7 @@ function journalHandoffFault(db: TestD1, at: 1 | 2, kind: "refused" | "throw") {
   };
 }
 
-/** The consumer log, with `arm` run at the journal hand-off seam it documents. */
+/** note: The consumer log, with `arm` run at the journal hand-off seam it documents. */
 function logArmingOnJournalHandoff(arm: () => void) {
   return {
     ...h.testLog,
@@ -470,7 +470,7 @@ function logArmingOnJournalHandoff(arm: () => void) {
   };
 }
 
-/** Seed a publication-journal row for the delivered head (the hand-off probe). */
+/** note: Seed a publication-journal row for the delivered head (the hand-off probe). */
 function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payloadJson = "{}"): void {
   db.raw
     .prepare(
@@ -482,7 +482,7 @@ function seedJournalRow(db: TestD1, headSha: string, phase = "prepared", payload
     .run(`journal-${phase}`, TEST_APP_ID, headSha, phase, payloadJson);
 }
 
-/** Seed the App/installation mapping the reconciler's D1 pair gate reads. */
+/** note: Seed the App/installation mapping the reconciler's D1 pair gate reads. */
 function seedAppInstallation(db: TestD1): void {
   db.raw
     .prepare(
@@ -492,7 +492,7 @@ function seedAppInstallation(db: TestD1): void {
     .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
 }
 
-/** Seed one `review_runtime_settings` row (the operator configuration surface). */
+/** note: Seed one `review_runtime_settings` row (the operator configuration surface). */
 function seedCheckBudget(db: TestD1, key: string, value: string): void {
   db.raw
     .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
@@ -515,23 +515,23 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The payload names the head, so the D1 hit acks BEFORE the claim and the
+    // invariant: The payload names the head, so the D1 hit acks BEFORE the claim and the
     // container: a reviewed commit costs no sandbox.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.kvPuts).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
-    expect(reviewCount(db)).toBe(1); // untouched
+    expect(reviewCount(db)).toBe(1); // note: untouched
   });
 
   test("full flow: clone → rev-parse → diff → numstat → input → runner → parse → post → insert → KV done → destroy", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The production round window (900s) funds the capture (120s worst case)
+    // note: The production round window (900s) funds the capture (120s worst case)
     // next to the default run (600s), so the widest flow runs untouched.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    // The round runs under a FROZEN clock: the fake spends no wall time, so the
+    // invariant: The round runs under a FROZEN clock: the fake spends no wall time, so the
     // runner gets exactly what the derived deadline still owes. A real clock
     // would make this a band (a paused CI minute moves it), never a pin.
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
@@ -541,18 +541,18 @@ describe("createReviewConsumer", () => {
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       expect.stringContaining("git apply --numstat '/workspace/pr.diff'"),
-      // The report seat's PR context read (best-effort; `gh` failing here
+      // note: The report seat's PR context read (best-effort; `gh` failing here
       // only drops the narrative sections).
       expect.stringContaining("gh pr view '42' --repo 'acme/widgets' --json body"),
       expect.stringContaining("base64 -d > '/workspace/review-input.json'"),
       expect.stringContaining(
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
       ),
-      // The applied-model read: the runner's own observation of which
+      // note: The applied-model read: the runner's own observation of which
       // provider served, projected onto the review row.
       expect.stringContaining("review-applied-model.json"),
     ]);
-    // The runner input JSON carries the reconFacts the runtime folds into
+    // note: The runner input JSON carries the reconFacts the runtime folds into
     // the envelope target (owner/repo#pr + the AUTHORITATIVE checkout sha),
     // the numstat seat-partition universe, and an EMPTY capability-host base —
     // the image declares no provider; the App's own declarations are the surface.
@@ -560,12 +560,12 @@ describe("createReviewConsumer", () => {
       worktreePath: "/workspace/repo",
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: [],
-      // The input names the ABSOLUTE instant the exec is killed at, so the
+      // invariant: The input names the ABSOLUTE instant the exec is killed at, so the
       // runner anchors its own review deadline there (a duration would be
       // re-added onto its late start).
       outerDeadlineEpochMs: expect.any(Number),
     });
-    // Clone: git transport auth via scoped extraheader env (bugbot A1) — the
+    // safety: Clone: git transport auth via scoped extraheader env (bugbot A1) — the
     // token lives in GIT_CONFIG_VALUE_0, never in the command string. Form is
     // basic auth with username `x-access-token` (GitHub app-token git auth);
     // a `Bearer` header would be rejected by GitHub even on public repos.
@@ -577,22 +577,22 @@ describe("createReviewConsumer", () => {
       },
       timeout: 120_000,
     });
-    // rev-parse: no credentials needed.
+    // note: rev-parse: no credentials needed.
     expect(h.sandbox.calls[1]!.opts).toEqual({ timeout: 120_000 });
-    // Diff: gh step, GH_TOKEN via exec env only.
+    // note: Diff: gh step, GH_TOKEN via exec env only.
     expect(h.sandbox.calls[2]!.opts).toEqual({ env: { GH_TOKEN: gh("s", "installation_token") }, timeout: 120_000 });
-    // Numstat: a plain git step, git timeout.
+    // note: Numstat: a plain git step, git timeout.
     expect(h.sandbox.calls[3]!.opts).toEqual({ timeout: 120_000 });
-    // PR context read: gh step, GH_TOKEN via exec env only, under the capture's
+    // note: PR context read: gh step, GH_TOKEN via exec env only, under the capture's
     // own tighter bound (the narrative never gets a full git window).
     expect(h.sandbox.calls[4]!.opts).toEqual({
       env: { GH_TOKEN: gh("s", "installation_token") },
       timeout: PR_CONTEXT_EXEC_TIMEOUT_MS,
     });
-    // Input write carries the document on the exec STDIN pipe (asserted decoded
+    // safety: Input write carries the document on the exec STDIN pipe (asserted decoded
     // below), never in its command.
     expect(h.sandbox.calls[5]!.opts).toMatchObject({ timeout: 120_000, stdin: expect.any(String) });
-    // Runner: cwd = clone dir; harness paths + the model chain via exec env,
+    // note: Runner: cwd = clone dir; harness paths + the model chain via exec env,
     // and the App's key pool via the exec STDIN payload (the only credential
     // channel — the env carries no key).
     expect(h.sandbox.calls[6]!.opts).toEqual({
@@ -605,18 +605,18 @@ describe("createReviewConsumer", () => {
       stdin: encodeCredentialPayload({ ark: ["ark-key"] }),
       timeout: expect.any(Number),
     });
-    // The exec gets what the declared instant still owes, read after the input
+    // invariant: The exec gets what the declared instant still owes, read after the input
     // write: the frozen clock makes that the whole request. The fixture's
     // numstat is 17 work units, so the size-derived request — 500_000 +
     // (600_000 − 500_000) × 17/5_000 = 500_340ms, not the tier maximum — is
     // what the anchor allocates.
     expect(runnerExecTimeout()).toBe(500_340);
-    // inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
+    // note: inside VALID_DIFF's right hunk [18,23]). §7.7 order: the
     // intent-prepared line comments run after the apply; the degraded-comment
     // delete runs last, only after the normal publication proof.
     expect(h.commenterCalls.filter((c) => c.op === "token")).toHaveLength(1);
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
-    // The prepared publication send: ONE exact-body upsert (§7.7 step 8).
+    // invariant: The prepared publication send: ONE exact-body upsert (§7.7 step 8).
     const prepared = h.commenterCalls[2]!.args as {
       installationId: number;
       owner: string;
@@ -640,12 +640,12 @@ describe("createReviewConsumer", () => {
     expect(prepared.body).toContain("<!-- mstar-inspector:review:v1 round=1 -->");
     expect(prepared.body).toContain("## ⚠️ Verdict: `needs fixes`");
     expect(prepared.body).toContain("Two issues found in the diff.");
-    // §7.10 prior-findings section: the report body carries exactly one.
+    // invariant: §7.10 prior-findings section: the report body carries exactly one.
     expect(prepared.body).toContain("<summary>Revalidated findings</summary>");
     expect(prepared.body).toMatch(
       /<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=0123456789abcdef0123456789abcdef01234567 kind=review -->/,
     );
-    // The line-comments input: intent-prepared (trusted thread markers),
+    // invariant: The line-comments input: intent-prepared (trusted thread markers),
     // pinned to the staged publication id.
     const lineInput = h.commenterCalls[3]!.args as {
       round: number;
@@ -658,7 +658,7 @@ describe("createReviewConsumer", () => {
     expect(lineInput.intents[0]).toMatchObject({ path: "src/auth.ts", line: 21 });
     expect(lineInput.intents[0]!.body).toContain("Fractional expiry comparison");
 
-    // The review row + findings landed in the real D1 double.
+    // invariant: The review row + findings landed in the real D1 double.
     expect(reviewCount(db)).toBe(1);
     const row = db.raw.query("SELECT * FROM reviews").get() as {
       head_sha: string;
@@ -669,18 +669,18 @@ describe("createReviewConsumer", () => {
     };
     expect(row.head_sha).toBe(SHA);
     expect(row.verdict).toBe("needs fixes");
-    // The review row carries the App attribution (appRef is
+    // invariant: The review row carries the App attribution (appRef is
     // required — every new row is attributed; bot_id NULL survives only on
     // pre-per-App historical rows).
     expect(row.bot_id).toBe(TEST_APP_ID);
-    // Version records (AL-24-5): the seed App's own chain is
+    // note: Version records (AL-24-5): the seed App's own chain is
     // the only chain source — `model` records its head selector (never NULL
     // on a new row); `provider` is NULL on BOTH paths (architect AL-2).
     expect(row.model).toBe("ark/deepseek-v4-flash");
     expect(row.provider).toBeNull();
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
-    // KV completion state written with the idem key + TTL.
+    // note: KV completion state written with the idem key + TTL.
     expect(h.kvPuts).toEqual([
       {
         key: `idem:123:acme/widgets:42:${SHA}`,
@@ -695,7 +695,7 @@ describe("createReviewConsumer", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    // Script only the wall clock (timers stay real): the round starts, the
+    // note: Script only the wall clock (timers stay real): the round starts, the
     // runner parks, and the clock advances 5 s before it releases. The stored
     // duration must be exactly that elapsed 5 s from `roundStartedAt` — a
     // dropped measurement is NULL, a second clock taken at the runner or at
@@ -722,7 +722,7 @@ describe("createReviewConsumer", () => {
 
   test("a runner input past Linux's 128 KiB argv cap rides stdin, never an argument", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // 2,800 numstat rows put the serialized runner input well past
+    // invariant: 2,800 numstat rows put the serialized runner input well past
     // MAX_ARG_STRLEN (128 KiB): that is the size at which a recheck round used
     // to kill the exec with E2BIG before `timeout` could start.
     h.sandbox.numstatStdout = "12\t34\tsrc/generated/bulk-module-with-a-long-name.ts\n".repeat(2_800);
@@ -731,13 +731,13 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The write step is a fixed command: the document has no place in argv.
+    // safety: The write step is a fixed command: the document has no place in argv.
     const writeIndex = h.sandbox.calls.findIndex((c) => c.cmd === "base64 -d > '/workspace/review-input.json'");
     expect(writeIndex).toBeGreaterThanOrEqual(0);
     const stdin = inputWriteOpts()?.stdin;
     expect(stdin).toBeDefined();
     expect(Buffer.byteLength(stdin!)).toBeGreaterThan(128 * 1024);
-    // No exec argument carries the payload at all, and the runner still starts
+    // invariant: No exec argument carries the payload at all, and the runner still starts
     // on the same --input path, reading what the container decoded from the pipe.
     expect(h.sandbox.calls.every((c) => !c.cmd.includes(stdin!.slice(0, 256)))).toBe(true);
     const runnerCmd = h.sandbox.calls[writeIndex + 1]!.cmd;
@@ -755,7 +755,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment" })));
 
-    // The authoritative sha comes from the clone: no gh read runs before the
+    // invariant: The authoritative sha comes from the clone: no gh read runs before the
     // checkout, and rev-parse is the second command of the round.
     expect(h.sandbox.calls[0]!.cmd).toContain("git init '/workspace/repo'");
     expect(h.sandbox.calls[1]!.cmd).toContain("git -C '/workspace/repo' rev-parse HEAD");
@@ -779,9 +779,9 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA (stale)
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA (stale)
 
-    // The posted commit_id, the D1 row and the KV key all key off the
+    // invariant: The posted commit_id, the D1 row and the KV key all key off the
     // checkout sha — the diff/files/commit_id triple stays consistent even
     // when the webhook payload sha is stale (force-push mid-flight).
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
@@ -803,9 +803,9 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — acked, never DLQed
+    await consumer(h.makeBatch(makePayload())); // note: resolves — acked, never DLQed
 
-    // No real-review side effects: no overall post, no reviews row, no KV
+    // invariant: No real-review side effects: no overall post, no reviews row, no KV
     // done-state. The worker's "1" claim is stamped `degraded` instead — a
     // degraded notice is not a review, so a redelivery must enqueue again.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
@@ -817,7 +817,7 @@ describe("createReviewConsumer", () => {
         options: { expirationTtl: IDEMPOTENCY_SECONDS },
       },
     ]);
-    // Degraded comment posted with the parse error + the RAW stdout (the
+    // safety: Degraded comment posted with the parse error + the RAW stdout (the
     // commenter side is the redaction/truncation choke point).
     const degrades = h.commenterCalls.filter((c) => c.op === "post-prepared-degraded");
     expect(degrades).toHaveLength(1);
@@ -827,13 +827,13 @@ describe("createReviewConsumer", () => {
     expect(degradeInput.body).toContain("not valid ReviewOutput JSON");
     expect(degradeInput.body).toContain("not json at all");
     expect(degradeInput.body).toMatch(/<!-- mstar-inspector:publication:v1 id=[0-9a-f-]+ sha=[0-9a-f]+ kind=degraded -->/);
-    // The degraded publication went through the journal and was applied
+    // invariant: The degraded publication went through the journal and was applied
     // (no normal review/lifecycle rows are ever created from it).
     const degradedPub = db.raw
       .query("SELECT phase, kind FROM review_publications")
       .all() as Array<{ phase: string; kind: string }>;
     expect(degradedPub).toEqual([{ phase: "applied", kind: "degraded" }]);
-    // Failure row: stage=parse, keyed off the AUTHORITATIVE checkout sha.
+    // invariant: Failure row: stage=parse, keyed off the AUTHORITATIVE checkout sha.
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
@@ -845,14 +845,14 @@ describe("createReviewConsumer", () => {
       stage: "parse",
       error: "not valid ReviewOutput JSON",
     });
-    // Queue redelivery stops via the ack — no throw, no retry call.
+    // invariant: Queue redelivery stops via the ack — no throw, no retry call.
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
   test("parse error echoing a model-emitted token is REDACTED in the failure row and the warn log (qc3 F-001 / qc2 F-001)", async () => {
-    // The engine gate echoes the received verdict verbatim — a
+    // safety: The engine gate echoes the received verdict verbatim — a
     // prompt-injected token as the verdict lands in parsed.error, and the
     // durable review_failures row + operator warn log must carry only the
     // [REDACTED] form (the public degraded comment was already redacted by
@@ -867,13 +867,13 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — acked
+    await consumer(h.makeBatch(makePayload())); // note: resolves — acked
 
     const rows = failureRows(db);
     expect(rows).toHaveLength(1);
     expect(String(rows[0]!.error)).toContain(REDACTED);
     expect(String(rows[0]!.error)).not.toContain(token);
-    // SEC-01: the degraded publication body arrives PRE-REDACTED (shape +
+    // safety: SEC-01: the degraded publication body arrives PRE-REDACTED (shape +
     // exact-value passes applied before the prepared send) — the token never
     // reaches the commenter, and buildDegradedBody's own redaction remains
     // the in-module choke point for anything it adds.
@@ -897,7 +897,7 @@ describe("createReviewConsumer", () => {
       },
     });
 
-    await consumer(h.makeBatch(makePayload())); // resolves — the insert must not mask the degrade
+    await consumer(h.makeBatch(makePayload())); // note: resolves — the insert must not mask the degrade
 
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared-degraded")).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -912,15 +912,15 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — a send failure is a log line only
+    await consumer(h.makeBatch(makePayload())); // note: resolves — a send failure is a log line only
 
     expect(failureRows(db)).toHaveLength(1);
     expect(h.messageAckCalls).toHaveLength(1);
-    // A throw at the SEND is post-attempt uncertainty — never classified as
+    // invariant: A throw at the SEND is post-attempt uncertainty — never classified as
     // a definitive not-posted (§7.9: only definitive rejections are).
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication unknown"));
     expect(warn).toBeDefined();
-    // The staged degraded payload stays sending/pending (no proof) for M8
+    // invariant: The staged degraded payload stays sending/pending (no proof) for M8
     // read-only discovery.
     const pub = db.raw.query("SELECT phase, recovery_state, proof_json FROM review_publications").get() as {
       phase: string;
@@ -959,7 +959,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("propagated GitHub secondary rate limit → the persisted error starts with the stable prefix, after redaction", async () => {
-    // The octokit request-error shape a rejected GitHub call throws: a 403
+    // note: The octokit request-error shape a rejected GitHub call throws: a 403
     // that carries `retry-after` is GitHub's secondary limit, not a
     // permission problem. The tag is written once at the consumer's single
     // catch, BEFORE redaction, so the durable row (and the store count that
@@ -976,7 +976,7 @@ describe("createReviewConsumer", () => {
     expect(rows).toHaveLength(1);
     const error = String(rows[0]!.error);
     expect(error.startsWith(GITHUB_RATE_LIMIT_PREFIX)).toBe(true);
-    // The original message survives beside the tag — the prefix classifies,
+    // invariant: The original message survives beside the tag — the prefix classifies,
     // it never replaces the evidence.
     expect(error).toBe(`${GITHUB_RATE_LIMIT_PREFIX}Forbidden`);
     expect(h.sandbox.destroyCalls).toBe(1);
@@ -991,7 +991,7 @@ describe("createReviewConsumer", () => {
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
-    // The mint rides the payload sha (head not yet resolved) and the
+    // note: The mint rides the payload sha (head not yet resolved) and the
     // "pipeline" stage — it sits between the sandbox window's edges.
     expect(failureRows(db)[0]).toMatchObject({ stage: "pipeline", head_sha: SHA });
     expect(h.sandbox.destroyCalls).toBe(1);
@@ -1016,7 +1016,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — stderr is never a gate
+    await consumer(h.makeBatch(makePayload())); // note: resolves — stderr is never a gate
 
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
@@ -1025,7 +1025,7 @@ describe("createReviewConsumer", () => {
 
   test("runner exitCode !== 0 → failure row (stage=runner) + rethrow, destroy, no post/insert (AL-6)", async () => {
     h.sandbox.runnerExitCode = 1;
-    // The seeded App's ark key is "ark-key" — it rides the credential payload
+    // safety: The seeded App's ark key is "ark-key" — it rides the credential payload
     // and a prompt-injected seat can echo it onto stderr.
     h.sandbox.runnerStderr = "review: session failed: boom\nprovider echo: ark-key\n";
     const db = await createSeededTestD1();
@@ -1036,9 +1036,9 @@ describe("createReviewConsumer", () => {
       (err: unknown) => (err instanceof Error ? err.message : String(err)),
     );
     expect(message).toContain("runner failed");
-    // stderr is the only diagnosis a non-zero exit carries (exit 124 → 0B stdout).
+    // note: stderr is the only diagnosis a non-zero exit carries (exit 124 → 0B stdout).
     expect(message).toContain("boom");
-    // SEC-01: a transported provider key echoed onto stderr never reaches the
+    // safety: SEC-01: a transported provider key echoed onto stderr never reaches the
     // thrown message (nor the durable row built from it) — only the marker.
     expect(message).not.toContain("ark-key");
     expect(message).toContain(REDACTED);
@@ -1051,7 +1051,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("runner failure with empty stderr says so explicitly", async () => {
-    h.sandbox.runnerExitCode = 1; // a plain runner fault — nothing on stderr
+    h.sandbox.runnerExitCode = 1; // note: a plain runner fault — nothing on stderr
     h.sandbox.runnerStderr = "";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
@@ -1063,7 +1063,7 @@ describe("createReviewConsumer", () => {
 
   test("runner failure reports stdout in UTF-8 bytes, not UTF-16 units", async () => {
     h.sandbox.runnerExitCode = 1;
-    // Two code units, six UTF-8 bytes: `String.length` would print 2.
+    // invariant: Two code units, six UTF-8 bytes: `String.length` would print 2.
     h.sandbox.runnerStdout = "✓✓";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
@@ -1073,7 +1073,7 @@ describe("createReviewConsumer", () => {
       (err: unknown) => (err instanceof Error ? err.message : String(err)),
     );
     expect(message).toContain("stdout 6B");
-    // The durable row carries the same unit as the thrown message.
+    // invariant: The durable row carries the same unit as the thrown message.
     expect(failureRows(db)[0]!.error).toContain("stdout 6B");
   });
 
@@ -1104,11 +1104,11 @@ describe("createReviewConsumer", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    // No throw → the handler acks; the review never reached an envelope, so
+    // invariant: No throw → the handler acks; the review never reached an envelope, so
     // no publication, no comment and no review row.
     await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
-    // ACKED, never retried: a confirmed stop is terminal.
+    // invariant: ACKED, never retried: a confirmed stop is terminal.
     expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
@@ -1120,7 +1120,7 @@ describe("createReviewConsumer", () => {
     expect(row).toContain('"seatsDispatched":5');
     expect(row).toContain('"seatsStopped":3');
 
-    // The Check this stop owes is the FULL sentence — the runner window and
+    // invariant: The Check this stop owes is the FULL sentence — the runner window and
     // every counter (5 dispatched, 3 stopped, the numstat's 17 changed lines)
     // were all observed before the signal resolved.
     const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
@@ -1155,7 +1155,7 @@ describe("createReviewConsumer", () => {
   test("a sandbox kill persists only trusted fields — provider stderr rides the log, never the row", async () => {
     h.sandbox.runnerExitCode = 124;
     h.sandbox.runnerStdout = "";
-    // Untrusted provider text: the durable row must carry only the typed
+    // safety: Untrusted provider text: the durable row must carry only the typed
     // budget fields and fixed diagnostics — never model-controlled stderr.
     h.sandbox.runnerStderr = "provider stderr: leaked seat transcript tail";
     const db = await createSeededTestD1();
@@ -1166,14 +1166,14 @@ describe("createReviewConsumer", () => {
     const row = String(failureRows(db)[0]!.error);
     expect(row).toContain('"cause":"sandbox-kill"');
     expect(row).not.toContain("leaked seat transcript tail");
-    // The diagnosis still exists — on the redacted log line, not the row.
+    // invariant: The diagnosis still exists — on the redacted log line, not the row.
     const warn = h.logLines.find((l) => l.level === "warn" && typeof l.fields.stderr_tail === "string");
     expect(warn).toBeDefined();
     expect(String(warn!.fields.stderr_tail)).toContain("leaked seat transcript tail");
   });
 
   test("runner failure keeps the CAUSE and the counted chain fold inside the persisted tail", async () => {
-    // The runner's OWN bounded representation, built the way runner.ts builds it
+    // invariant: The runner's OWN bounded representation, built the way runner.ts builds it
     // for a chain whose full disposition is far longer than the 600-character
     // tail the Worker persists.
     const chain = Array.from({ length: 24 }, (_, i) => `provider-with-a-long-id-${i}/model-with-a-long-id-${i}`);
@@ -1186,7 +1186,7 @@ describe("createReviewConsumer", () => {
       poolKey: { configured: false },
       context: { fits: null, retryContextTokens: null, contextWindow: null, fitBudget: null },
     }));
-    // The unbounded form would be several times the tail — the case this pins.
+    // invariant: The unbounded form would be several times the tail — the case this pins.
     const unbounded = `review: runtime failed: seat 0 failed: 400 You have insufficient credits\n` +
       verdicts.map((v) => `${v.selector} dropped`).join("; ");
     expect(unbounded.length).toBeGreaterThan(600);
@@ -1202,13 +1202,13 @@ describe("createReviewConsumer", () => {
       () => "",
       (err: unknown) => (err instanceof Error ? err.message : String(err)),
     );
-    // The original cause survived the cut …
+    // invariant: The original cause survived the cut …
     expect(message).toContain("400 You have insufficient credits");
-    // … the first configured entry's disposition survived …
+    // invariant: … the first configured entry's disposition survived …
     expect(message).toContain("provider-with-a-long-id-0/model-with-a-long-id-0");
-    // … and the overflow is a counted fold, not a silent truncation.
+    // invariant: … and the overflow is a counted fold, not a silent truncation.
     expect(message).toMatch(/\+\d+ more chain entries omitted/);
-    // The whole persisted detail stays inside the tail budget plus its prefix.
+    // invariant: The whole persisted detail stays inside the tail budget plus its prefix.
     expect(message.length).toBeLessThan(600 + 60);
   });
 
@@ -1234,13 +1234,13 @@ describe("createReviewConsumer", () => {
 
   test("the final delivery stamps the key failed so the commit stops counting as queued", async () => {
     h.sandbox.runnerExitCode = 1;
-    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // 1 initial delivery + max_retries 5 → the next stop is the DLQ
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // note: 1 initial delivery + max_retries 5 → the next stop is the DLQ
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
-    // The stale "1" the worker claimed is overwritten: that commit was never
+    // invariant: The stale "1" the worker claimed is overwritten: that commit was never
     // reviewed, so a redelivery must enqueue again instead of being skipped.
     expect(h.kvPuts).toEqual([
       {
@@ -1253,11 +1253,11 @@ describe("createReviewConsumer", () => {
 
   test("a delivery the queue will retry leaves the enqueue claim alone", async () => {
     h.sandbox.runnerExitCode = 1;
-    h.queueState.attempts = 3; // a retry still follows
+    h.queueState.attempts = 3; // note: a retry still follows
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // The throw IS the retry signal: processMessage rethrows and the handler
+    // invariant: The throw IS the retry signal: processMessage rethrows and the handler
     // never acks, so the queue redelivers this message — and the "1" claim
     // keeps proving the job is still in flight.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
@@ -1283,7 +1283,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // The in-flight legacy shape: a pre-deploy queue message whose payload
+    // note: The in-flight legacy shape: a pre-deploy queue message whose payload
     // carries no `botRef` (impossible at the type layer — cast to simulate the
     // stranded message AL-24-4 accepts). It sits AFTER a healthy sibling in the
     // same batch: the sibling's review completes, then the legacy message
@@ -1316,11 +1316,11 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(batch)).rejects.toThrow(TypeError);
 
-    // The healthy sibling completed before the legacy message threw.
+    // invariant: The healthy sibling completed before the legacy message threw.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(h.sandbox.destroyCalls).toBe(1);
-    // The structured channel caught the legacy message: error log + AL-6 row.
+    // invariant: The structured channel caught the legacy message: error log + AL-6 row.
     const errLine = h.logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
     expect(errLine).toBeDefined();
     expect(errLine!.msg).toContain("appId");
@@ -1343,7 +1343,7 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", head_sha: SHA });
     expect(String(failureRows(db)[0]!.error)).toContain("numstat failed");
-    // A genuine failure names BOTH its causes: git's own stderr (in the stage
+    // invariant: A genuine failure names BOTH its causes: git's own stderr (in the stage
     // detail) and the diff-path state the same round read — so an unusable
     // empty file and an unreadable captured one never read as one failure.
     expect(String(failureRows(db)[0]!.error)).toContain("diff file: captured");
@@ -1353,7 +1353,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("numstat failure does not carry an exact secret", async () => {
-    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // safety: A credential every shape pattern misses (no token prefix, no 40-char hex
     // run), assembled at runtime so no contiguous credential literal exists.
     // Only the exact-value pass can remove it from the stage's message.
     const secretToken = ["3a7f9c02", "d51e", "4b86", "a97f", "6c04e2b81d35"].join("-");
@@ -1371,7 +1371,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("diff failure → failure row (stage=sandbox) + no runner/post/insert, rethrow, destroy", async () => {
-    // `gh pr diff` failing fails the chain BEFORE the bounded read, so the exec
+    // invariant: `gh pr diff` failing fails the chain BEFORE the bounded read, so the exec
     // carries no stdout at all (the double answers the same shape). The round
     // must take the failure path — never read the empty stdout as an empty
     // document.
@@ -1397,7 +1397,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("git-stage failure does not carry an exact secret", async () => {
-    // A credential every shape pattern misses (no token prefix, no 40-char hex
+    // safety: A credential every shape pattern misses (no token prefix, no 40-char hex
     // run), assembled at runtime so no contiguous credential literal exists.
     // Only the exact-value pass can remove it from the stage's message.
     const secretToken = ["9f1c4a77", "2b6d", "4e05", "8c31", "7d5be0a2f684"].join("-");
@@ -1426,7 +1426,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Base ref → merge base → depth-1 fetch of that merge base → local diff,
+    // note: Base ref → merge base → depth-1 fetch of that merge base → local diff,
     // in that order, right after the refused gh capture.
     const cmds = h.sandbox.calls.map((c) => c.cmd);
     expect(cmds.slice(3, 7)).toEqual([
@@ -1435,11 +1435,11 @@ describe("createReviewConsumer", () => {
       fetchDepthOneCommand(CLONE_DIR, h.sandbox.mergeBaseSha),
       localDiffCommand(CLONE_DIR, h.sandbox.mergeBaseSha, SHA, DIFF_PATH),
     ]);
-    // The round continues on the SAME downstream path: numstat, then the
+    // invariant: The round continues on the SAME downstream path: numstat, then the
     // runner-input write. The local capture is one bounded read, not two.
     expect(cmds).toContain(numstatCommand(DIFF_PATH));
     expect(cmds.some((c) => c.includes("--input"))).toBe(true);
-    // Credentials stay exec-env only: the fetch carries the shared transport
+    // safety: Credentials stay exec-env only: the fetch carries the shared transport
     // header, the local diff needs none. Both share the 30s window, so the four
     // fallback steps cost exactly the one 120s `full-diff` ledger window.
     expect(h.sandbox.calls[3]!.opts).toEqual({
@@ -1463,7 +1463,7 @@ describe("createReviewConsumer", () => {
 
   test("a non-oversized diff failure rethrows the original message and runs no fallback command", async () => {
     h.sandbox.diffExitCode = 1;
-    // An auth failure is NOT the API ceiling: the fallback would mask the cause.
+    // invariant: An auth failure is NOT the API ceiling: the fallback would mask the cause.
     h.sandbox.diffStderr = "HTTP 401: Bad credentials (https://api.github.com/repos/acme/widgets/pulls/42)";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -1472,7 +1472,7 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 401: Bad credentials/,
     );
 
-    // Exactly clone → rev-parse → diff: no base-ref, merge-base, fetch or
+    // invariant: Exactly clone → rev-parse → diff: no base-ref, merge-base, fetch or
     // local-diff step follows a failure that is not the API ceiling.
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
@@ -1494,14 +1494,14 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: base-ref-empty at base ref$/,
     );
 
-    // The lookup ran; the chain stopped before any merge-base/fetch/local diff.
+    // invariant: The lookup ran; the chain stopped before any merge-base/fetch/local diff.
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
     ]);
-    // An empty answer is diagnosed, never silent: the durable row names the
+    // invariant: An empty answer is diagnosed, never silent: the durable row names the
     // step and reason, and the attempt leaves its one warn.
     expect(h.logLines.filter((l) => l.fields.diff_fallback !== undefined)).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(1);
@@ -1519,14 +1519,14 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: base-ref-empty at base ref$/,
     );
 
-    // The read ran and failed: merge-base, fetch and the local diff never ran.
+    // invariant: The read ran and failed: merge-base, fetch and the local diff never ran.
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
     ]);
-    // ONE structured warn per attempt: which step, its exit code, and its
+    // invariant: ONE structured warn per attempt: which step, its exit code, and its
     // redacted stderr tail — the operator never has to guess the cause.
     const fallbackWarns = h.logLines.filter((l) => l.fields.diff_fallback !== undefined);
     expect(fallbackWarns).toHaveLength(1);
@@ -1565,7 +1565,7 @@ describe("createReviewConsumer", () => {
     expect(String(failureRows(db)[0]!.error)).toContain("oversized fallback: merge-base-empty at merge base");
   });
 
-  // The answer is the API's, not the shell's: a 7-char truncated reply and
+  // invariant: The answer is the API's, not the shell's: a 7-char truncated reply and
   // `--jq`'s `null` both exit 0 and are unusable — the shell allowlist would
   // accept the truncated one, so this check must be stricter than it.
   for (const answer of ["c".repeat(7), "null"]) {
@@ -1580,7 +1580,7 @@ describe("createReviewConsumer", () => {
         /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: merge-base-unreadable at merge base$/,
       );
 
-      // Nothing was built from the answer: no fetch, no local diff.
+      // invariant: Nothing was built from the answer: no fetch, no local diff.
       expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
         expect.stringContaining("git init '/workspace/repo'"),
         expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
@@ -1594,7 +1594,7 @@ describe("createReviewConsumer", () => {
         diff_fallback: "merge-base-unreadable",
         diff_fallback_step: "merge base",
       });
-      // The exec itself SUCCEEDED: the warn names exit 0, never an exec failure.
+      // invariant: The exec itself SUCCEEDED: the warn names exit 0, never an exec failure.
       expect(fallbackWarns[0]!.msg).toContain("exit 0");
       expect(reviewCount(db)).toBe(0);
       expect(failureRows(db)).toHaveLength(1);
@@ -1605,7 +1605,7 @@ describe("createReviewConsumer", () => {
   test("a hostile base ref is rejected by the guard and named — never built into a shell string", async () => {
     h.sandbox.diffExitCode = 1;
     h.sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
-    // A ref GitHub could never return, but a compromised API reply might.
+    // safety: A ref GitHub could never return, but a compromised API reply might.
     h.sandbox.diffBaseRef = "main; rm -rf /";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -1614,14 +1614,14 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: guard-rejected at merge base$/,
     );
 
-    // The merge-base command was never built (no exec, no shell string).
+    // safety: The merge-base command was never built (no exec, no shell string).
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
       expect.stringContaining("gh pr diff '42' --repo 'acme/widgets'"),
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
     ]);
-    // A guard refusal is its own reason — never confused with a failing exec.
+    // invariant: A guard refusal is its own reason — never confused with a failing exec.
     const fallbackWarn = h.logLines.find((l) => l.fields.diff_fallback !== undefined);
     expect(fallbackWarn?.fields).toMatchObject({ diff_fallback: "guard-rejected", diff_fallback_step: "merge base" });
     expect(fallbackWarn?.msg).toContain("no exec ran");
@@ -1639,7 +1639,7 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: fetch-exit at fetch$/,
     );
 
-    // The chain stopped at the failed fetch: no local diff, no numstat, no
+    // invariant: The chain stopped at the failed fetch: no local diff, no numstat, no
     // runner — the fallback's own fault never becomes the round's cause, but
     // the decline names it instead of vanishing.
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
@@ -1660,7 +1660,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("an oversized-diff fallback decline does not carry an exact secret from the failed step", async () => {
-    // The decline warn tails the FAILED STEP's stderr, not the refused gh
+    // safety: The decline warn tails the FAILED STEP's stderr, not the refused gh
     // capture's. A credential every shape pattern misses (assembled at
     // runtime, so no contiguous literal exists) survives shape redaction and
     // only the exact-value pass can remove it before the tail cut.
@@ -1684,7 +1684,7 @@ describe("createReviewConsumer", () => {
       (l) => l.level === "warn" && l.msg.startsWith("oversized diff fallback declined:"),
     );
     expect(declineWarn).toBeDefined();
-    // The failed step's tail really reached the sink (it is not empty), and
+    // safety: The failed step's tail really reached the sink (it is not empty), and
     // the value itself is gone from it.
     expect(declineWarn!.msg).toContain("challenge");
     expect(declineWarn!.msg).not.toContain(secretToken);
@@ -1701,7 +1701,7 @@ describe("createReviewConsumer", () => {
       /diff failed: exit 1, stdout 0B, stderr tail: HTTP 406: Sorry, the diff exceeded.*; oversized fallback: local-diff-exit at local diff$/,
     );
 
-    // The local diff rewrote DIFF_PATH from 0B, but a failed read is no
+    // invariant: The local diff rewrote DIFF_PATH from 0B, but a failed read is no
     // capture: nothing downstream reads the half-written file.
     expect(h.sandbox.calls.map((c) => c.cmd).slice(3, 7)).toEqual([
       pullRequestBaseRefCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER),
@@ -1726,16 +1726,16 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // The round window is already spent: decline BEFORE the diff exec rather
+      // invariant: The round window is already spent: decline BEFORE the diff exec rather
       // than start it with a manufactured 1ms timeout (or a fresh 120s one).
       roundBudgetMs: 1,
     });
 
-    // A confirmed stop is terminal: the handler acks (no throw → no queue
+    // invariant: A confirmed stop is terminal: the handler acks (no throw → no queue
     // retry) after the Check row and the typed failure row landed.
     await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
-    // Clone → rev-parse only: no exec ran on a spent deadline.
+    // invariant: Clone → rev-parse only: no exec ran on a spent deadline.
     expect(h.sandbox.calls).toHaveLength(2);
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
@@ -1755,7 +1755,7 @@ describe("createReviewConsumer", () => {
       Date.now = () => clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        // A round long enough for the budget gate: this case pins the DIFF
+        // note: A round long enough for the budget gate: this case pins the DIFF
         // window, which the refused capture has already spent 100s of.
         roundBudgetMs: 1_200_000,
         ...clockSpendingSandbox("gh pr diff", 100_000, clock),
@@ -1765,7 +1765,7 @@ describe("createReviewConsumer", () => {
       Date.now = realNow;
     }
 
-    // The `gh pr diff` exec keeps the whole window it opens; the four fallback
+    // invariant: The `gh pr diff` exec keeps the whole window it opens; the four fallback
     // steps then share what is LEFT of that same deadline (20s each), never
     // four fresh 30s buckets — the stage bills at most one 120s `full-diff`
     // window across both captures.
@@ -1786,7 +1786,7 @@ describe("createReviewConsumer", () => {
       Date.now = () => clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        // The round still has 18 of its 20 minutes, so the budget gate passes:
+        // note: The round still has 18 of its 20 minutes, so the budget gate passes:
         // what is gone is the shared diff window, at exactly 120s.
         roundBudgetMs: 1_200_000,
         ...clockSpendingSandbox("gh pr diff", EXEC_TIMEOUT_GIT_MS, clock),
@@ -1799,7 +1799,7 @@ describe("createReviewConsumer", () => {
     }
 
     expect(h.sandbox.calls).toHaveLength(3);
-    // The window is spent BEFORE the base-ref exec: `step-timeout` names that,
+    // invariant: The window is spent BEFORE the base-ref exec: `step-timeout` names that,
     // and the warn says no exec ran.
     const fallbackWarn = h.logLines.find((l) => l.fields.diff_fallback !== undefined);
     expect(fallbackWarn?.fields).toMatchObject({ diff_fallback: "step-timeout", diff_fallback_step: "base ref" });
@@ -1815,13 +1815,13 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        // 200s of the 900s round are gone before the diff stage.
+        // note: 200s of the 900s round are gone before the diff stage.
         ...clockSpendingSandbox("git init", 200_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // The gate asks for the derived runner deadline — `ROUND_BUDGET_MS` −
+    // invariant: The gate asks for the derived runner deadline — `ROUND_BUDGET_MS` −
     // `postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT)` = 900s − 234s = 666s —
     // never the level's whole 600s table: at 200s elapsed the fallback runs and
     // the round still completes.
@@ -1842,18 +1842,18 @@ describe("createReviewConsumer", () => {
     await withFrozenClock(async (clock) => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        // 600s elapsed: of the 666s derived deadline only 66s are left, below
+        // invariant: 600s elapsed: of the 666s derived deadline only 66s are left, below
         // the 120s capture allowance — a fallback could only starve the runner.
         ...clockSpendingSandbox("git init", 600_000, clock),
       });
-      // The 406 and the derived deadline together end the attempt: the row
+      // invariant: The 406 and the derived deadline together end the attempt: the row
       // keeps the git-stage cause verbatim under the typed prefix, and the
       // handler acks instead of retrying a spent clock.
       await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
     expect(h.sandbox.calls).toHaveLength(3);
-    // "Not attempted" is a diagnosis of its own, not the same silence as a
+    // invariant: "Not attempted" is a diagnosis of its own, not the same silence as a
     // failed step: no exec ran, and the reason says so.
     expect(h.logLines.find((l) => l.fields.diff_fallback !== undefined)?.fields).toMatchObject({
       diff_fallback: "budget",
@@ -1867,7 +1867,7 @@ describe("createReviewConsumer", () => {
   test("deep reaches the fallback: its runner budget is capped by the derived deadline, not reserved in full", async () => {
     h.sandbox.diffExitCode = 1;
     h.sandbox.diffStderr = "HTTP 406: Sorry, the diff exceeded the maximum number of lines (20000)";
-    // Saturated size ⇒ the request IS the tier maximum, so the exec timeout
+    // note: Saturated size ⇒ the request IS the tier maximum, so the exec timeout
     // below still pins the deep ceiling rather than a mid-ramp request.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -1878,7 +1878,7 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // The capture runs and the round completes; the runner exec gets the
+    // invariant: The capture runs and the round completes; the runner exec gets the
     // deeper of the two limits — its 646s table maximum, still inside the
     // default 666s pre-runner cutoff.
     expect(execTimeout(h.sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
@@ -1900,7 +1900,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 500s before the diff stage, then 100s inside the fallback's
+            // note: 500s before the diff stage, then 100s inside the fallback's
             // fetch: the 666s deadline leaves 66s of every later step — never
             // a fresh 120s window, on any of them.
             if (cmd.includes("git init")) clock.now += 500_000;
@@ -1913,23 +1913,23 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // The refused capture keeps the window it opened; the fallback's last step
+    // invariant: The refused capture keeps the window it opened; the fallback's last step
     // gets what the SAME 120s diff window has left.
     expect(execTimeout(h.sandbox.calls[2]!)).toBe(EXEC_TIMEOUT_GIT_MS);
     expect(execTimeout(h.sandbox.calls[6]!)).toBe(20_000);
-    // numstat, the runner-input write and the runner all bill the same derived
+    // invariant: numstat, the runner-input write and the runner all bill the same derived
     // 666s deadline: 66s are left, so no step starts on a fresh 120s/600s.
     const numstatCall = h.sandbox.calls.find((c) => c.cmd === numstatCommand(DIFF_PATH))!;
     expect(execTimeout(numstatCall)).toBe(66_000);
     const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
     expect(execTimeout(inputWrite)).toBe(66_000);
     expect(runnerExecTimeout()).toBe(66_000);
-    // The runner input carries that SAME derived deadline as an instant: the
+    // invariant: The runner input carries that SAME derived deadline as an instant: the
     // runner anchors at it, so a shortened exec no longer lets the round plan
     // synthesis at the end of a tier budget it will never be given.
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     expect(writtenInput.outerDeadlineEpochMs).toBe(roundStart + 666_000);
-    // 66s cannot fund the narrative (120s) plus the post-runner reads (90s).
+    // invariant: 66s cannot fund the narrative (120s) plus the post-runner reads (90s).
     expect(h.logLines.some((l) => l.fields.report_context === "budget")).toBe(true);
     expect(reviewCount(db)).toBe(1);
     expect(failureRows(db)).toHaveLength(0);
@@ -1937,7 +1937,7 @@ describe("createReviewConsumer", () => {
 
   test("a slow runner-input write shrinks the exec timeout by exactly the time it spent", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Saturated size ⇒ the anchor requests the 600s tier maximum, so this
+    // note: Saturated size ⇒ the anchor requests the 600s tier maximum, so this
     // case still pins the cutoff-bound arithmetic it was written for.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
@@ -1948,7 +1948,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 500s of the 666s derived deadline are gone before the write, and
+            // note: 500s of the 666s derived deadline are gone before the write, and
             // the write itself then spends 100s of the 166s that remained.
             if (cmd.includes("git init")) clock.now += 500_000;
             if (cmd.startsWith("base64 -d >")) clock.now += 100_000;
@@ -1963,7 +1963,7 @@ describe("createReviewConsumer", () => {
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const deadline = writtenInput.outerDeadlineEpochMs!;
     expect(deadline).toBe(roundStart + 666_000);
-    // The deadline owed 166s when the write started and 66s when the exec
+    // invariant: The deadline owed 166s when the write started and 66s when the exec
     // started: the write's own 100s is spent, never re-added to the exec.
     expect(deadline - (roundStart + 500_000)).toBe(166_000);
     expect(deadline - (roundStart + 600_000)).toBe(66_000);
@@ -1973,7 +1973,7 @@ describe("createReviewConsumer", () => {
 
   test("the declared instant is exactly where the exec ends when the tier cap binds", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Saturated size ⇒ the tier cap binds exactly as this case pins.
+    // note: Saturated size ⇒ the tier cap binds exactly as this case pins.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     let roundStart = 0;
@@ -1982,7 +1982,7 @@ describe("createReviewConsumer", () => {
       roundStart = clock.now;
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
-        // Nothing is spent before the runner: 666s of derived deadline remain,
+        // note: Nothing is spent before the runner: 666s of derived deadline remain,
         // but a quick/default exec is capped at 600s — the CAP, not the derived
         // deadline, decides where this exec is killed.
         getSandbox: async () => ({
@@ -1998,7 +1998,7 @@ describe("createReviewConsumer", () => {
 
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     expect(runnerExecTimeout()).toBe(600_000);
-    // The input declares the exec's OWN end, never the later derived deadline a
+    // invariant: The input declares the exec's OWN end, never the later derived deadline a
     // cap-bound exec cannot reach: a seat planned against it is never killed
     // inside the exec window it runs under.
     expect(writtenInput.outerDeadlineEpochMs).toBe(execStart + runnerExecTimeout()!);
@@ -2009,7 +2009,7 @@ describe("createReviewConsumer", () => {
 
   test("a tier-bound input write that spends time bills the ONE anchored deadline, not the later cutoff", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Saturated size ⇒ the tier maximum binds at the anchor, the case this
+    // note: Saturated size ⇒ the tier maximum binds at the anchor, the case this
     // test isolates (anchored deadline vs the later cutoff).
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
@@ -2021,7 +2021,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 50s of clone leaves 650s before the derived 666s cutoff: the
+            // note: 50s of clone leaves 650s before the derived 666s cutoff: the
             // 600s tier maximum binds the allocation instead of the cutoff.
             // The input write then spends 80s of the anchored deadline.
             if (cmd.includes("git init")) clock.now += 50_000;
@@ -2034,7 +2034,7 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      // No await separates the anchor from the write-timeout read, but the
+      // invariant: No await separates the anchor from the write-timeout read, but the
       // input construction between them is real synchronous work: a scoped
       // stringify spy (self-restoring on the first runner-input document)
       // spends 500s of the clock there, so at the read the anchored exec
@@ -2063,10 +2063,10 @@ describe("createReviewConsumer", () => {
     const writtenInput = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const deadline = writtenInput.outerDeadlineEpochMs!;
     const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
-    // The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
+    // invariant: The wire deadline is the ANCHOR's exec end — anchor + 600s tier max —
     // not the 666s pre-runner cutoff a tier-bound write never reaches.
     expect(deadline).toBe(roundStart + 650_000);
-    // Serialization ended 500s after the anchor, so the write-timeout read
+    // invariant: Serialization ended 500s after the anchor, so the write-timeout read
     // gets min(120s cap, 100s anchored remainder) = 100s. The cutoff still
     // owed 116s there: under the old defect the write would have billed it.
     expect(writeStart).toBe(roundStart + 550_000);
@@ -2076,7 +2076,7 @@ describe("createReviewConsumer", () => {
     expect(runnerLine.fields.runner_deadline_ms).toBe(roundStart + 650_000);
     expect(runnerLine.fields.runner_effective_ms).toBe(600_000);
     expect(runnerLine.fields.runner_requested_ms).toBe(600_000);
-    // The exec gets what the ONE deadline still owes after the write spent
+    // invariant: The exec gets what the ONE deadline still owes after the write spent
     // its 80s — 20s, never the write's own window added back onto it.
     expect(runnerExecTimeout()).toBe(deadline - (writeStart + 80_000));
     expect(runnerExecTimeout()).toBe(20_000);
@@ -2090,7 +2090,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 546s elapsed leaves exactly the 120s write window; the write
+            // note: 546s elapsed leaves exactly the 120s write window; the write
             // spends all of it, so nothing is left when the exec would start.
             if (cmd.includes("git init")) clock.now += 546_000;
             if (cmd.startsWith("base64 -d >")) clock.now += 120_000;
@@ -2099,7 +2099,7 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      // The write spent the whole anchored window, so the exec is declined
+      // invariant: The write spent the whole anchored window, so the exec is declined
       // with the typed outcome instead of starting a 1ms run: the handler
       // acks (a retry would only lose the same clock) after the failure row.
       await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
@@ -2112,14 +2112,14 @@ describe("createReviewConsumer", () => {
   });
 
   test("an input write at the step-cap boundary with the deadline inside it attributes its 124 to the deadline", async () => {
-    // qc1 F5: the write's armed bound and its `124` attribution read ONE
+    // invariant: qc1 F5: the write's armed bound and its `124` attribution read ONE
     // clock sample taken after serialization. Here serialization pushes the
     // deadline remainder from 122s to exactly the 120s step cap: the write's
     // bound is the deadline's remainder (never the pre-serialization window),
     // so its kill is the typed stop — the stale first sample would have read
     // `122s > cap` and retried the same clock.
     h.sandbox.writeInputExitCode = 124;
-    // 150 work units requests 123.6s, so the anchored deadline lands at the
+    // note: 150 work units requests 123.6s, so the anchored deadline lands at the
     // cutoff (roundStart + 666s) without needing saturation.
     h.sandbox.numstatStdout = "100\t50\tsrc/big.ts\n";
     const db = await createSeededTestD1();
@@ -2128,7 +2128,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 544s of clone leaves the anchored 666s deadline 122s of
+            // note: 544s of clone leaves the anchored 666s deadline 122s of
             // remaining — strictly above the 120s write cap.
             if (cmd.includes("git init")) clock.now += 544_000;
             return h.fakeSandbox.runCommand(cmd, opts);
@@ -2136,7 +2136,7 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      // Real synchronous serialization runs between the payload build and the
+      // note: Real synchronous serialization runs between the payload build and the
       // write's clock read: this self-restoring spy spends 2s there, so the
       // single sample sees the deadline remainder sit EXACTLY at the cap —
       // and the two-sample code read its stale 122s remainder instead.
@@ -2156,7 +2156,7 @@ describe("createReviewConsumer", () => {
         return Reflect.apply(realStringify, JSON, [value, ...rest]) as string;
       }) as typeof JSON.stringify;
       try {
-        // ACK, not a retry: a confirmed deadline kill is terminal.
+        // invariant: ACK, not a retry: a confirmed deadline kill is terminal.
         await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
       } finally {
         JSON.stringify = realStringify;
@@ -2165,7 +2165,7 @@ describe("createReviewConsumer", () => {
     });
 
     const inputWrite = h.sandbox.calls.find((c) => c.cmd === "base64 -d > '/workspace/review-input.json'")!;
-    // The armed bound is min(120s cap, 120s deadline remainder): the write
+    // invariant: The armed bound is min(120s cap, 120s deadline remainder): the write
     // sits exactly at the step-cap boundary and the frozen deadline is the
     // same instant — attribution to exhaustion is the safe direction (a
     // retry would only lose the same clock again).
@@ -2202,7 +2202,7 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // The default fixture is 17 work units, so the request is the floor plus
+    // note: The default fixture is 17 work units, so the request is the floor plus
     // the ramp: 500_000 + (600_000 − 500_000) × 17/5_000 = 500_340ms.
     const requestedMs =
       RUNNER_BUDGET_FLOOR_MS.default +
@@ -2210,12 +2210,12 @@ describe("createReviewConsumer", () => {
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_work_units).toBe(17);
     expect(line.fields.runner_requested_ms).toBe(requestedMs);
-    // Request-bound: the request itself is the effective value — the logged
+    // invariant: Request-bound: the request itself is the effective value — the logged
     // cutoff is the derived one and strictly LATER than the deadline.
     expect(line.fields.runner_effective_ms).toBe(requestedMs);
     expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + requestedMs);
-    // ONE deadline: the wire value, the logged deadline and the exec's own end
+    // invariant: ONE deadline: the wire value, the logged deadline and the exec's own end
     // are the same instant, so the input write never moved it.
     const deadlineMs = line.fields.runner_deadline_ms as number;
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
@@ -2249,7 +2249,7 @@ describe("createReviewConsumer", () => {
     let roundStart = 0;
     await withFrozenClock(async (clock) => {
       roundStart = clock.now;
-      // 600s of clone leaves 66s of the 666s cutoff — under the 500_340ms
+      // note: 600s of clone leaves 66s of the 666s cutoff — under the 500_340ms
       // request, so the cutoff (not the request) decides the allocation.
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
@@ -2262,12 +2262,12 @@ describe("createReviewConsumer", () => {
     expect(line.fields.runner_requested_ms).toBe(500_340);
     expect(line.fields.runner_effective_ms).toBe(66_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
-    // Cutoff-bound: the derived pre-runner cutoff — not the request — is
+    // invariant: Cutoff-bound: the derived pre-runner cutoff — not the request — is
     // what produced the effective value, and the logged cutoff IS the
     // deadline the exec ended at.
     expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
     expect(line.fields.runner_deadline_ms).toBe(line.fields.runner_cutoff_ms);
-    // The wire deadline is the anchored one: the input write spent nothing, so
+    // invariant: The wire deadline is the anchored one: the input write spent nothing, so
     // the exec's end is still the derived cutoff.
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     expect(written.outerDeadlineEpochMs).toBe(roundStart + 666_000);
@@ -2282,7 +2282,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 600s of clone, then the numstat itself spends the last 66s: the
+            // note: 600s of clone, then the numstat itself spends the last 66s: the
             // cutoff is exactly spent when the anchor runs.
             if (cmd.includes("git init")) clock.now += 600_000;
             if (cmd === numstatCommand(DIFF_PATH)) clock.now += 66_000;
@@ -2294,7 +2294,7 @@ describe("createReviewConsumer", () => {
       await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
-    // No payload write, no paid exec: the refusal landed BEFORE both.
+    // invariant: No payload write, no paid exec: the refusal landed BEFORE both.
     expect(h.sandbox.calls.some((c) => c.cmd.startsWith("base64 -d >"))).toBe(false);
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(failureRows(db)).toHaveLength(1);
@@ -2324,7 +2324,7 @@ describe("createReviewConsumer", () => {
         ...h.overrides,
         getSandbox: async () => ({
           runCommand: async (cmd: string, opts?: unknown) => {
-            // 580s of clone leaves 86s of the 666s derived deadline — under the
+            // note: 580s of clone leaves 86s of the 666s derived deadline — under the
             // 120s step cap, so the anchored deadline is what bound the write
             // and the kill it reports is that deadline's, not the cap's.
             if (cmd.includes("git init")) clock.now += 580_000;
@@ -2333,7 +2333,7 @@ describe("createReviewConsumer", () => {
           destroy: h.fakeSandbox.destroy,
         }),
       });
-      // A confirmed stop is terminal: ack, never a paid retry for the same clock.
+      // invariant: A confirmed stop is terminal: ack, never a paid retry for the same clock.
       await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
     });
 
@@ -2343,7 +2343,7 @@ describe("createReviewConsumer", () => {
     const row = String(failureRows(db)[0]!.error);
     expect(row).toContain('"cause":"sandbox-kill"');
     expect(row).toContain('"budgetWindow":"runner"');
-    // The runner never started: the seats are provably 0/0, not null.
+    // invariant: The runner never started: the seats are provably 0/0, not null.
     expect(row).toContain('"seatsDispatched":0');
     expect(row).toContain('"seatsStopped":0');
   });
@@ -2353,7 +2353,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    // ~666s of derived deadline remain at the write: the step's own 120s cap
+    // invariant: ~666s of derived deadline remain at the write: the step's own 120s cap
     // bound it, so the 124 is a plain write failure — the queue retries.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
       /runner input write failed: exit 124/,
@@ -2378,7 +2378,7 @@ describe("createReviewConsumer", () => {
 
     const runnerCall = h.sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'default'");
-    // The App column is NULL, so the operator default IS consulted — once.
+    // invariant: The App column is NULL, so the operator default IS consulted — once.
     expect(counted.reads()).toBe(1);
   });
 
@@ -2397,7 +2397,7 @@ describe("createReviewConsumer", () => {
 
     const runnerCall = h.sandbox.calls.find((c) => c.cmd.includes("--input"))!;
     expect(runnerCall.cmd).toContain("--level 'quick'");
-    // The App chose a depth: the operator default is never read.
+    // invariant: The App chose a depth: the operator default is never read.
     expect(counted.reads()).toBe(0);
     expect(reviewCount(db)).toBe(1);
   });
@@ -2437,7 +2437,7 @@ describe("createReviewConsumer", () => {
   test("a corrupt operator default degrades to 'default' and warns once (migration 0047)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Present but off the shared vocabulary: `readDefaultReviewLevel` answers
+    // invariant: Present but off the shared vocabulary: `readDefaultReviewLevel` answers
     // the documented default with `degraded: true` instead of throwing, so the
     // review still runs — and the consumer says so on its structured channel.
     seedDefaultReviewLevel(db, "sideways");
@@ -2464,7 +2464,7 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
     await consumer(h.makeBatch(makePayload({ pr_number: 43, botRef: { appId: TEST_SECOND_APP_ID }, targetId: `target-${TEST_SECOND_APP_ID}` })));
 
-    // Same deployment, same consumer, two depths — no env var involved.
+    // invariant: Same deployment, same consumer, two depths — no env var involved.
     const levels = h.sandbox.calls
       .filter((c) => c.cmd.includes("--input"))
       .map((c) => /--level '(\w+)'/.exec(c.cmd)?.[1]);
@@ -2474,7 +2474,7 @@ describe("createReviewConsumer", () => {
 
   test("App row review_level 'deep' → derived runner exec timeout 646_000 + admission TTL 2458; quick/default are 480_000/600_000 (AC-S10-clock)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Saturated size ⇒ deep's exec timeout pins its tier maximum, not a
+    // note: Saturated size ⇒ deep's exec timeout pins its tier maximum, not a
     // mid-ramp request.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
@@ -2490,17 +2490,17 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // Deep's table maximum is the CEILING, not the reservation: the exec gets
+    // invariant: Deep's table maximum is the CEILING, not the reservation: the exec gets
     // the smaller of that maximum and what the round deadline still owes
     // (900s − the 234s live post-runner reserve), so an oversized-diff
     // fallback fits inside the same 900s cap.
     expect(runnerExecTimeout()).toBe(646_000);
-    // The admission row's TTL follows the same level table (AC-S10-guard):
+    // note: The admission row's TTL follows the same level table (AC-S10-guard):
     // deep is 2458s. Pinned as the table's figure, like the runner budgets
     // below — the arithmetic that produces it is pinned once, by the guard
     // test.
     expect(admissionTtlMs).toBe(2_458_000);
-    // The table is tiered INSIDE the worst-case ceiling: quick one 120s step
+    // invariant: The table is tiered INSIDE the worst-case ceiling: quick one 120s step
     // window below default, default at the frozen 10 minutes, deep at the
     // minimum platform-derived ceiling over the whole terminalize range.
     expect(runnerTimeoutMs("quick")).toBe(480_000);
@@ -2510,16 +2510,16 @@ describe("createReviewConsumer", () => {
 
   test("the reserve uses the message's LIVE terminalize budget: a 30s operator value shrinks the runner deadline by 20s (qc2 F-001 / qc3 F-801)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Saturated size ⇒ the request is deep's tier maximum, so the pin below
+    // note: Saturated size ⇒ the request is deep's tier maximum, so the pin below
     // isolates the LIVE terminalize budget, not the size interpolation.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
-    // The operator's ceiling value, read per message exactly like the hook's.
+    // invariant: The operator's ceiling value, read per message exactly like the hook's.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "30000");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // A Check surface is what makes the consumer read the budgets; the hook
+      // note: A Check surface is what makes the consumer read the budgets; the hook
       // itself never runs here (begin returns no handle).
       checks: { begin: async () => null, terminalize: async () => {} },
     });
@@ -2528,7 +2528,7 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // 900s − (90s reads + 12s inline + 2s begin + 120s slack + 30s live
+    // note: 900s − (90s reads + 12s inline + 2s begin + 120s slack + 30s live
     // terminalize) = 646s, 20s below the default-budget 666s — the operator's
     // value reaches the derivation, not CHECK_TERMINALIZE_DEFAULT.
     expect(runnerExecTimeout()).toBe(646_000);
@@ -2542,7 +2542,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // One runner attempt → at least one budget line on the existing
+    // invariant: One runner attempt → at least one budget line on the existing
     // structured-log channel (spec d5-budget L5).
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"));
     expect(line).toBeDefined();
@@ -2566,7 +2566,7 @@ describe("createReviewConsumer", () => {
     expect(line!.fields.level).toBe("deep");
     expect(line!.fields.runner_timeout_ms).toBe(646_000);
     expect(typeof line!.fields.elapsed_ms).toBe("number");
-    // Deep runs the three-stage parent session — never a fabricated Bun
+    // invariant: Deep runs the three-stage parent session — never a fabricated Bun
     // seat count (spec § Queue visibility: 禁止写假 seat_count: 7).
     expect(line!.fields.orchestration).toBe("parent");
     expect("seat_count" in line!.fields).toBe(false);
@@ -2580,7 +2580,7 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
-    // The failure line is the runner attempt's budget line on this path —
+    // invariant: The failure line is the runner attempt's budget line on this path —
     // elapsed_ms is recorded, never used to abort (spec 不 abort: only the
     // sandbox exec timeout itself fails the wall-clock).
     const errLine = h.logLines.find((l) => l.level === "error");
@@ -2608,7 +2608,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("infra failure logs a structured error with idempotency key + sandbox id before rethrow", async () => {
-    // A parse failure no longer rethrows (it degrades + acks) — the
+    // note: A parse failure no longer rethrows (it degrades + acks) — the
     // structured error-log-before-rethrow contract is pinned on a genuine
     // infra failure (runner non-zero exit).
     h.sandbox.runnerExitCode = 1;
@@ -2651,11 +2651,11 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — KV failure is warn-only
+    await consumer(h.makeBatch(makePayload())); // note: resolves — KV failure is warn-only
 
     expect(reviewCount(db)).toBe(1);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    // The completion-write warn (the guard KV warn fires earlier with only
+    // note: The completion-write warn (the guard KV warn fires earlier with only
     // baseFields — no idempotency key yet).
     const warnLine = h.logLines.find((l) => l.level === "warn" && l.msg.includes("KV completion write failed"));
     expect(warnLine).toBeDefined();
@@ -2668,7 +2668,7 @@ describe("createReviewConsumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — destroy failure is warn-only
+    await consumer(h.makeBatch(makePayload())); // note: resolves — destroy failure is warn-only
 
     expect(reviewCount(db)).toBe(1);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
@@ -2708,16 +2708,16 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The POSTED prepared body (rendered from the SAME capped array that is
+    // safety: The POSTED prepared body (rendered from the SAME capped array that is
     // stored) carries no secret-shaped text.
     const posted = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(posted.body).not.toContain(gh("s", "abcdef1234567890"));
-    // qc2 F-001: title / category / file_path are model-controlled public
+    // safety: qc2 F-001: title / category / file_path are model-controlled public
     // channels too — redacted through the same consumer choke point.
     expect(posted.body).not.toContain(gh("p", "abcdef1234567890"));
     expect(posted.body).not.toContain(AWS_CANARY_KEY);
 
-    // The stored row (summary_md + envelope) carries no secret-shaped text;
+    // safety: The stored row (summary_md + envelope) carries no secret-shaped text;
     // raw_output is never written on the v1 path (envelope is authoritative).
     const row = db.raw.query("SELECT summary_md, envelope, raw_output FROM reviews").get() as {
       summary_md: string;
@@ -2739,7 +2739,7 @@ describe("createReviewConsumer", () => {
       findings: [
         {
           mergeClass: "nit",
-          // Non-hex filler: a long [0-9a-fA-F] run would be redacted
+          // note: Non-hex filler: a long [0-9a-fA-F] run would be redacted
           // (long-hex pattern) before the clamp under test ever runs.
           title: "T".repeat(FINDING_TITLE_MAX + 10),
           body: "Z".repeat(FINDING_BODY_MAX + 10),
@@ -2752,13 +2752,13 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The clamp trims to MAX-1 chars + an ellipsis (the schema's clamp shape).
+    // invariant: The clamp trims to MAX-1 chars + an ellipsis (the schema's clamp shape).
     const posted = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(posted.body).toContain("T".repeat(FINDING_TITLE_MAX - 1));
     expect(posted.body).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
     expect(posted.body).toContain("Z".repeat(FINDING_BODY_MAX - 1));
     expect(posted.body).not.toContain("Z".repeat(FINDING_BODY_MAX + 10));
-    // The D1 envelope carries the same clamped array (B4: one capped array).
+    // invariant: The D1 envelope carries the same clamped array (B4: one capped array).
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
     expect(row.envelope).not.toContain("T".repeat(FINDING_TITLE_MAX + 10));
   });
@@ -2779,8 +2779,8 @@ describe("createReviewConsumer", () => {
       title: `F${i}`,
       body: `body ${i}`,
     }));
-    findings[0]!.mergeClass = "must-fix"; // earliest must-fix keeps its slot
-    findings[59]!.mergeClass = "must-fix"; // later must-fix sorts after F0
+    findings[0]!.mergeClass = "must-fix"; // note: earliest must-fix keeps its slot
+    findings[59]!.mergeClass = "must-fix"; // note: later must-fix sorts after F0
     findings[58]!.mergeClass = "should-fix";
     h.sandbox.runnerStdout = JSON.stringify({
       schema: "mstar.review/v1",
@@ -2795,7 +2795,7 @@ describe("createReviewConsumer", () => {
 
     const posted = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(posted.body).toContain("*(+10 more findings omitted)*");
-    // Merge-class priority: the two must-fix first (stable — F0 before F59),
+    // invariant: Merge-class priority: the two must-fix first (stable — F0 before F59),
     // then the should-fix, then the nits — visible in the rendered order.
     const f0 = posted.body.indexOf("#### 🔴 F0");
     const f59 = posted.body.indexOf("#### 🔴 F59");
@@ -2804,7 +2804,7 @@ describe("createReviewConsumer", () => {
     expect(f59).toBeGreaterThan(f0);
     expect(f58).toBeGreaterThan(f59);
 
-    // The same capped array landed in D1 (渲染与落库同一裁剪数组).
+    // invariant: The same capped array landed in D1 (渲染与落库同一裁剪数组).
     const stored = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(stored.n).toBe(50);
   });
@@ -2817,7 +2817,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The done claim answers for the payload head before the claim, so even
+    // invariant: The done claim answers for the payload head before the claim, so even
     // the container is skipped — the ack precedes every acquisition.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
@@ -2831,7 +2831,7 @@ describe("createReviewConsumer", () => {
   test("lifecycle apply failure after a successful post → one comment, proof + KV done, warn + ack, no rethrow", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // §7.7 step 9: the store.put + lifecycle batch live INSIDE
+    // note: §7.7 step 9: the store.put + lifecycle batch live INSIDE
     // applyPublishedLifecycle — the local-write failure is injected at the
     // D1 batch (the apply's transaction primitive), after the publication
     // was already confirmed.
@@ -2843,9 +2843,9 @@ describe("createReviewConsumer", () => {
     } as typeof db;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: failingDb as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves (ack) — no rethrow
+    await consumer(h.makeBatch(makePayload())); // note: resolves (ack) — no rethrow
 
-    // Exactly one comment was posted; the proof persisted (the publication
+    // invariant: Exactly one comment was posted; the proof persisted (the publication
     // is CONFIRMED, recovery_state pending — M8 owns the apply), and the KV
     // done-state follows durable confirmation.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
@@ -2871,13 +2871,13 @@ describe("createReviewConsumer", () => {
   test("BB-1: the App's modelChain is forwarded verbatim into the runner exec env (per-App only, AL-24-5)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The chain's openrouter provider needs its per-App key (fail-closed gate).
+    // note: The chain's openrouter provider needs its per-App key (fail-closed gate).
     await seedAppConfig(db, TEST_APP_ID, "ark/deepseek-v4-flash,openrouter/anthropic/claude-sonnet-4", {
       openrouter: sk("or-app"),
     });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
-    // The round runs under a FROZEN clock: the fake spends no wall time, so the
+    // invariant: The round runs under a FROZEN clock: the fake spends no wall time, so the
     // runner exec gets exactly what the derived deadline still owes — the
     // size-derived 500_340ms request from the fixture's 17 work units.
     await withFrozenClock(() => consumer(h.makeBatch(makePayload())));
@@ -2897,7 +2897,7 @@ describe("createReviewConsumer", () => {
       version: 1,
       pools: { ark: ["ark-key"], openrouter: [sk("or-app")] },
     });
-    // Version record: the row records the App chain's HEAD
+    // invariant: Version record: the row records the App chain's HEAD
     // selector; provider stays NULL.
     const versionRow = db.raw.query("SELECT model, provider FROM reviews").get() as {
       model: string | null;
@@ -2910,7 +2910,7 @@ describe("createReviewConsumer", () => {
   test("BB-1: an App with NO modelChain fails closed — no in-image default run, structured channel (AL-24-5)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Clear the seeded chain (setModelChain("") removes the row).
+    // note: Clear the seeded chain (setModelChain("") removes the row).
     await createAppConfigStore(db, TEST_KEY).setModelChain(TEST_APP_ID, "");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -2918,7 +2918,7 @@ describe("createReviewConsumer", () => {
       /per-App config incomplete: app .*missing model chain/,
     );
 
-    // F-001 channel: no runner exec, no review row, stage=pipeline failure
+    // invariant: F-001 channel: no runner exec, no review row, stage=pipeline failure
     // row, rethrow (retry → DLQ). The in-image default never runs.
     expect(h.sandbox.calls.some((c) => c.cmd.includes("bun run"))).toBe(false);
     expect(reviewCount(db)).toBe(0);
@@ -2931,7 +2931,7 @@ describe("createReviewConsumer", () => {
   test("BB-1: a comma-only modelChain (',' — zero selectors) fails closed — structured channel, sibling completes (AL-24-5)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A second App whose stored chain parses to ZERO selectors. The store
+    // invariant: A second App whose stored chain parses to ZERO selectors. The store
     // persists `","` verbatim (setModelChain only deletes null/whitespace),
     // so a direct-DB or store caller can persist it; the fail-closed gate
     // must treat it as "missing model chain" — the runner's
@@ -2965,7 +2965,7 @@ describe("createReviewConsumer", () => {
     await seedAppConfig(db, commaAppId, ",");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // Healthy sibling FIRST (completes), comma-only message second (throws
+    // invariant: Healthy sibling FIRST (completes), comma-only message second (throws
     // inside the try → structured channel → rethrow).
     const batch = {
       queue: "review-queue",
@@ -2991,11 +2991,11 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(batch)).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
 
-    // The healthy sibling completed before the comma-only message threw.
+    // invariant: The healthy sibling completed before the comma-only message threw.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(h.sandbox.destroyCalls).toBe(1);
-    // Structured channel: error log + stage=pipeline failure row; the
+    // invariant: Structured channel: error log + stage=pipeline failure row; the
     // failing message never reached the sandbox or wrote a review row.
     const errLine = h.logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
     expect(errLine).toBeDefined();
@@ -3008,7 +3008,7 @@ describe("createReviewConsumer", () => {
   test("BB-1: a comma-only ROLE OVERRIDE chain (',' — zero selectors) fails closed — structured channel, sibling completes (PR #11 BUG-01)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A second App with a HEALTHY base chain (passes the base gate) but a
+    // invariant: A second App with a HEALTHY base chain (passes the base gate) but a
     // raw `,` override chain inserted DIRECTLY into bot_model_chains with a
     // seat reference row (the shape). The dashboard store rejects
     // this chain value (upsertModelChain → InvalidModelSelectorError), so
@@ -3045,7 +3045,7 @@ describe("createReviewConsumer", () => {
          VALUES (?, 'default', ?, 'comma-override-app', 'tester', datetime('now'), datetime('now'))`,
       )
       .run(`target-${overrideAppId}`, overrideAppId);
-    await seedAppConfig(db, overrideAppId); // healthy base chain + ark key
+    await seedAppConfig(db, overrideAppId); // note: healthy base chain + ark key
     db.raw
       .prepare(
         `INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at)
@@ -3057,7 +3057,7 @@ describe("createReviewConsumer", () => {
       .run(overrideAppId);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // Healthy sibling FIRST (completes), comma-override message second
+    // invariant: Healthy sibling FIRST (completes), comma-override message second
     // (throws inside the try → structured channel → rethrow).
     const batch = {
       queue: "review-queue",
@@ -3085,11 +3085,11 @@ describe("createReviewConsumer", () => {
       /per-App config incomplete: app .*role override `code-reviewer`: missing model chain/,
     );
 
-    // The healthy sibling completed before the comma-override message threw.
+    // invariant: The healthy sibling completed before the comma-override message threw.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
     expect(h.sandbox.destroyCalls).toBe(1);
-    // Structured channel: error log + stage=pipeline failure row; the
+    // invariant: Structured channel: error log + stage=pipeline failure row; the
     // failing message never reached the sandbox.
     const errLine = h.logLines.find((l) => l.level === "error" && l.msg.startsWith("review failed:"));
     expect(errLine).toBeDefined();
@@ -3103,14 +3103,14 @@ describe("createReviewConsumer", () => {
 
   test("migration equivalence: a pre-chains App (0006/0009 shape) resolves byte-identically after 0017's backfill (spec §4.4)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
+    // note: Pre-0017 DB: 0001–0016 in filename order (the chains migration NOT
     // yet applied) — the wrangler state before the chains migration. Migrations
     // 0017–0020 are applied after the 0017 backfill below; the lifecycle
     // journal tables (0020) are required by the §7.7 step-2 read
     // and are unrelated to the 0017 backfill under test.
     const db = createTestD1();
     applyMigrations(db, CONSUMER_PRE_CHAINS_MIGRATIONS);
-    // Seed the pre-chains shape: github_apps + app_model_config chain +
+    // note: Seed the pre-chains shape: github_apps + app_model_config chain +
     // app_model_roles rows + the ark BYOK key (the fail-closed gate needs
     // it). The chain and selectors are the byte-identical baseline.
     const appId = "99999999-0000-1111-2222-333333333333";
@@ -3141,12 +3141,12 @@ describe("createReviewConsumer", () => {
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES (?, 'code-reviewer', ?)`)
       .run(appId, preOverrides["code-reviewer"]);
-    // The pre-pool BYOK rows this App carried: written with the pre-0024
+    // note: The pre-pool BYOK rows this App carried: written with the pre-0024
     // two-segment AAD and no key_id, exactly like a live deployment's rows
     // when 0024 applies (the store API cannot write them — it is pool-shaped).
     for (const [provider, key] of [
       ["ark", "ark-key"],
-      // The overrides reference openai/anthropic — the pre-migration App
+      // invariant: The overrides reference openai/anthropic — the pre-migration App
       // carried those keys too (the fail-closed gate requires them).
       ["openai", sk("legacy-openai")],
       ["anthropic", sk("legacy-anthropic")],
@@ -3158,19 +3158,19 @@ describe("createReviewConsumer", () => {
         )
         .run(appId, provider, await box.encryptSecret(key, `app_provider_keys.key_enc:${appId}:${provider}`));
     }
-    // Apply 0017 (the backfill) — the migration under test.
+    // note: Apply 0017 (the backfill) — the migration under test.
     applyMigrations(db, ["0017_app_model_chains.sql"]);
-    // 0018 ships with the consumer that resolves the App's sandbox
+    // note: 0018 ships with the consumer that resolves the App's sandbox
     // image — the row backfills to the 'omp' default exactly like a real
     // pre-37 App under this deployment pair; the rest of the half completes
     // the current migration set (see CONSUMER_POST_CHAINS_MIGRATIONS).
     applyMigrations(db, CONSUMER_POST_CHAINS_MIGRATIONS);
-    // The target migration creates this App's one target with a random id;
+    // note: The target migration creates this App's one target with a random id;
     // tests join on bot_id (the ids are never pinned).
     const migratedTarget = db.raw.query("SELECT id FROM review_targets WHERE bot_id = ?").get(appId) as {
       id: string;
     };
-    // Post-migration resolution is byte-identical: the default row holds
+    // invariant: Post-migration resolution is byte-identical: the default row holds
     // the chain verbatim; the seat-<role> chains + reference rows resolve
     // to the same overrides map; every carried key row was promoted to its
     // derived pool id and re-encrypted under the three-segment AAD.
@@ -3185,7 +3185,7 @@ describe("createReviewConsumer", () => {
       modelChain: preChain,
     });
     expect(await store.getModelOverridesForConsumer(appId)).toEqual(preOverrides);
-    // And the full consumer flow: the runner input JSON carries the SAME
+    // invariant: And the full consumer flow: the runner input JSON carries the SAME
     // modelOverrides map and the exec env the SAME chain — byte-identical
     // runner input for the migrated App.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -3198,7 +3198,7 @@ describe("createReviewConsumer", () => {
   test("BB-2: the App's stored keys are forwarded as their provider pool env; blank rows never inject (per-App BYOK)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A chain needing openai + groq; anthropic/openrouter key rows ride along
+    // note: A chain needing openai + groq; anthropic/openrouter key rows ride along
     // in their provider pools; an empty mistral row never injects.
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app,groq/query", {
       anthropic: sk("ant-test"),
@@ -3212,14 +3212,14 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const runnerEnv = runnerExecEnv();
-    // Each configured provider gets its own pool in the credential payload.
+    // invariant: Each configured provider gets its own pool in the credential payload.
     expect(runnerCredentialPools()).toMatchObject({
       ark: ["ark-key"],
       anthropic: [sk("ant-test")],
       openrouter: [sk("or-test")],
       openai: [sk("openai-x")],
     });
-    // The blank mistral row transported no pool at all, and the exec env
+    // invariant: The blank mistral row transported no pool at all, and the exec env
     // carries no pool name (the retired channel).
     expect(runnerEnv.MISTRAL_API_KEY).toBeUndefined();
     expect(runnerCredentialPools()!.mistral).toBeUndefined();
@@ -3230,7 +3230,7 @@ describe("createReviewConsumer", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: "gem-test", openai: sk("openai-x") });
-    // Vars that are NOT in the PROVIDERS allowlist sit on the Worker env —
+    // safety: Vars that are NOT in the PROVIDERS allowlist sit on the Worker env —
     // they must never leak into the container. GEMINI_API_KEY on the env is
     // a stale duplicate of the App-stored key (AL-24-5: env is never read).
     const env = (await h.makeEnv({ DB: db as never })) as PipelineEnv & Record<string, string>;
@@ -3241,7 +3241,7 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const runnerEnv = runnerExecEnv();
-    // The gemini key comes from the APP config, never the env duplicate.
+    // safety: The gemini key comes from the APP config, never the env duplicate.
     expect(runnerEnv).toEqual({
       HARNESS_PLUGIN_ROOT: "/opt/mstar-harness",
       PI_CODING_AGENT_DIR: "/opt/omp-agent",
@@ -3263,25 +3263,25 @@ describe("createReviewConsumer", () => {
     await seedInflight(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
+    // invariant: BB-3: the consumer RESOLVES — guard-held is a typed outcome, not a
     // rethrow. Rethrowing would burn the queue's three immediate retries and
     // DLQ the job (plus later synchronize events for the same PR) while the
     // first review is still running.
     await consumer(h.makeBatch(makePayload()));
 
-    // Fail fast: no sandbox, no token, no post, no insert, no extra row.
+    // invariant: Fail fast: no sandbox, no token, no post, no insert, no extra row.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
+    expect(inflightRows(db)).toHaveLength(1); // note: the live row, untouched
     expect(h.sandbox.destroyCalls).toBe(0);
-    // A DELAYED per-message retry is scheduled — 60s on the first attempt.
+    // invariant: A DELAYED per-message retry is scheduled — 60s on the first attempt.
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(h.messageAckCalls).toHaveLength(0);
     const infoLine = h.logLines.find((l) => l.level === "info" && l.msg.includes("already in flight"));
     expect(infoLine).toBeDefined();
     expect(infoLine!.msg).toContain("60s");
-    // Review-concurrency §1.3: the refusal is observable — which bound held the
+    // invariant: Review-concurrency §1.3: the refusal is observable — which bound held the
     // message, against which caps. The live row is this PR's own.
     expect(infoLine!.fields.reason).toBe("pr-held");
     expect(infoLine!.fields.system_cap).toBe(SYSTEM_CONCURRENCY_DEFAULT);
@@ -3362,19 +3362,19 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
 
-    // The run stays wherever it is; only its text says why nothing started, and
+    // invariant: The run stays wherever it is; only its text says why nothing started, and
     // it names the review holding the slot instead of the commit waiting.
     expect(queued).toHaveLength(1);
     expect(queued[0]!.summary).toContain("Queued");
     expect(queued[0]!.summary).toContain(`head ${heldHeadSha.slice(0, 7)}`);
-    // The row lookup follows the PAYLOAD's commit — the one this delivery
+    // invariant: The row lookup follows the PAYLOAD's commit — the one this delivery
     // attached — and this delivery's own attach identity.
     expect(queued[0]!.headSha).toBe(SHA);
     expect(queued[0]!.attachDeliveryId).toBe("delivery-1");
-    // The send is bounded by the operator budget the path read (absent row →
+    // invariant: The send is bounded by the operator budget the path read (absent row →
     // the documented default), so a slow GitHub can never hold the retry.
     expect(queued[0]!.updateBudgetMs).toBe(CHECK_UPDATE_DEFAULT);
-    // The relabel never changes the guard outcome: the delayed retry still runs.
+    // invariant: The relabel never changes the guard outcome: the delayed retry still runs.
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(h.messageAckCalls).toHaveLength(0);
   });
@@ -3405,7 +3405,7 @@ describe("createReviewConsumer", () => {
   test("a relabel that never answers is cut at the budget and the retry still ships", async () => {
     const db = await createSeededTestD1();
     await seedInflight(db);
-    // The smallest storable update budget: the relabel's store write + PATCH
+    // invariant: The smallest storable update budget: the relabel's store write + PATCH
     // share it, and the whole step runs BEFORE the delayed retry.
     seedCheckBudget(db, "review.check.update_timeout_ms", "500");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -3420,7 +3420,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
 
-    // Never the platform's kill: the deadline ends the wait and the retry is
+    // invariant: Never the platform's kill: the deadline ends the wait and the retry is
     // still scheduled (a hung Check must not cost the delivery).
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
@@ -3433,7 +3433,7 @@ describe("createReviewConsumer", () => {
   test("the TERMINAL refusal settles the run and does not relabel it as queued", async () => {
     h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
-    // A DIFFERENT commit holds the PR: this delivery is a real drop, not the
+    // invariant: A DIFFERENT commit holds the PR: this delivery is a real drop, not the
     // benign same-sha duplicate that returns before any settlement.
     await seedInflight(db, { headSha: "beefbeefbeefbeefbeefbeefbeefbeefbeefbeef" });
     const queued: unknown[] = [];
@@ -3456,7 +3456,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: "delivery-1" })));
 
-    // Past the schedule the delivery is dropped: "queued" would be a lie, so the
+    // invariant: Past the schedule the delivery is dropped: "queued" would be a lie, so the
     // terminal branch keeps its own settlement and never relabels.
     expect(h.messageAckCalls).toHaveLength(1);
     expect(queued).toHaveLength(0);
@@ -3466,7 +3466,7 @@ describe("createReviewConsumer", () => {
 
   test("a cap refusal has no live review to name, so the Check is not relabelled", async () => {
     const db = await createSeededTestD1();
-    // The WORKSPACE cap holds this message while the PR itself is free: no live
+    // invariant: The WORKSPACE cap holds this message while the PR itself is free: no live
     // review exists, so "queued behind the review in flight" would send an
     // operator looking for a review that was never started.
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
@@ -3491,12 +3491,12 @@ describe("createReviewConsumer", () => {
   });
 
   test("guard still held after the 3 delayed retries → ack with a warning, no DLQ (BB-3)", async () => {
-    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery before the queue would DLQ
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // note: final delivery before the queue would DLQ
     const db = await createSeededTestD1();
     await seedInflight(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — acked, never DLQed
+    await consumer(h.makeBatch(makePayload())); // note: resolves — acked, never DLQed
 
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.messageRetryCalls).toHaveLength(0);
@@ -3506,16 +3506,16 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("no DLQ");
     expect(warnLine!.fields.pr_number).toBe(42);
     expect(warnLine!.fields.installation_id).toBe(123);
-    // `pr-held` at the terminal ack: a live review for this PR is doing the
+    // note: `pr-held` at the terminal ack: a live review for this PR is doing the
     // work, so the drop is normal traffic — no failure row (W-1).
     expect(failureRows(db)).toHaveLength(0);
   });
 
-  // --- supersede skip (migration 0044; acceptance AC-1..AC-3, AC-6, AC-7) ---
+  // note: --- supersede skip (migration 0044; acceptance AC-1..AC-3, AC-6, AC-7) ---
   const OLD_AT = "2026-01-01T00:00:00.000Z";
   const NEW_AT = "2026-01-01T00:05:00.000Z";
   const NEW_SHA = "1111111111111111111111111111111111111111";
-  // The worker's enqueue claim for one commit (value "1" = queued, not done),
+  // note: The worker's enqueue claim for one commit (value "1" = queued, not done),
   // built through the contract helper from the SAME payload fixture the
   // deliveries use: a fixture drift can then never unmatch the claim and make
   // the "must review" cases vacuous.
@@ -3528,14 +3528,14 @@ describe("createReviewConsumer", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
-    // The advancing delivery enqueued its own job — the KV claim the worker
+    // invariant: The advancing delivery enqueued its own job — the KV claim the worker
     // writes after a successful send is the skip's proof.
     h.kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
 
-    // Acked with no retry, no DLQ and no failure row: the newer delivery is
+    // invariant: Acked with no retry, no DLQ and no failure row: the newer delivery is
     // the one that reviews.
     expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
     expect(h.messageRetryCalls).toHaveLength(0);
@@ -3543,20 +3543,20 @@ describe("createReviewConsumer", () => {
     expect(h.commenterCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(0);
-    // The skip runs BEFORE admission: no per-PR lock, no capacity reservation
+    // invariant: The skip runs BEFORE admission: no per-PR lock, no capacity reservation
     // and no metered usage row for a delivery that does nothing.
     expect(inflightRows(db)).toHaveLength(0);
     expect(usageRows(db)).toHaveLength(0);
     const line = h.logLines.find((l) => l.fields.reason === "superseded");
     expect(line).toBeDefined();
     expect(line!.level).toBe("info");
-    // The skip is findable by the documented `event=` grep (the paused
+    // note: The skip is findable by the documented `event=` grep (the paused
     // sibling's precedent), not only by the reason shared with refusals.
     expect(line!.fields.event).toBe("review_superseded");
     expect(line!.fields.superseded_by_head_at).toBe(NEW_AT);
-    // No sandbox id on the skip line — nothing was created.
+    // invariant: No sandbox id on the skip line — nothing was created.
     expect(line!.fields.sandbox_id).toBeUndefined();
-    // The ack stamps its own claim so the worker never re-enqueues a sha a
+    // invariant: The ack stamps its own claim so the worker never re-enqueues a sha a
     // newer commit already replaced.
     expect(h.kvPuts).toContainEqual({
       key: ENQUEUED_KEY(SHA),
@@ -3579,16 +3579,16 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
 
-    // The App row's depth is NULL, so a delivery that went on to review WOULD
+    // invariant: The App row's depth is NULL, so a delivery that went on to review WOULD
     // consult the operator default (the sibling cases above pin that read).
     expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
-    // A superseded delivery is not the live review: it resolves nothing, so it
+    // invariant: A superseded delivery is not the live review: it resolves nothing, so it
     // pays no settings read and cannot degrade the skip on one.
     expect(counted.reads()).toBe(0);
   });
 
   test("a newer ledger commit with NO queued job is reviewed, not skipped (open mode / ignored delivery)", async () => {
-    // The ledger advances on deliveries that enqueue nothing (`synchronize` in
+    // invariant: The ledger advances on deliveries that enqueue nothing (`synchronize` in
     // `open` mode, a paused App, a failed send). Skipping on the ledger alone
     // would drop the PR's only review, so the missing KV claim keeps this
     // delivery alive.
@@ -3605,7 +3605,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("an unknown ledger stamp fails open even with a queued job for another sha", async () => {
-    // A pre-0044 row holds a sha but no stamp, and two readable stamps are
+    // invariant: A pre-0044 row holds a sha but no stamp, and two readable stamps are
     // what order deliveries — the missing one must review, never skip.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -3621,7 +3621,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a newer commit whose job was dropped, failed, paused, degraded or superseded is reviewed, not skipped", async () => {
-    // `dropped` (the guard's terminal ack), `failed` (the final delivery is
+    // note: `dropped` (the guard's terminal ack), `failed` (the final delivery is
     // heading to the DLQ), `paused` (the App is paused), `degraded` (the run
     // ended in a degraded notice) and `superseded` (that newer commit was
     // itself replaced) all name a commit that was never reviewed: the key is
@@ -3643,7 +3643,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a completed review of the newer commit is proof — the delivery is skipped", async () => {
-    // `done` means this consumer already reviewed that commit, so no second
+    // invariant: `done` means this consumer already reviewed that commit, so no second
     // job is needed: the ledger stamp plus the done claim are the whole proof.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
@@ -3660,7 +3660,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a supersede skip never erases an already-reviewed sha's done claim", async () => {
-    // Force-push A → B → A → B: A was reviewed (`done`) and is now obsolete
+    // invariant: Force-push A → B → A → B: A was reviewed (`done`) and is now obsolete
     // again. Skipping A's redelivery must not stamp `superseded` over that
     // proof — the next redelivery would re-review (and re-pay for) A.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -3672,7 +3672,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
 
-    // The skip still happened; only the claim is left alone.
+    // invariant: The skip still happened; only the claim is left alone.
     expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
     expect(reviewCount(db)).toBe(0);
     expect(h.kvPuts.some((p) => p.value === "superseded")).toBe(false);
@@ -3680,7 +3680,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a force-push back to a superseded sha reviews it — the claim is not a tombstone (A → B → A)", async () => {
-    // A was skipped once (its claim reads `superseded`), then B was pushed and
+    // invariant: A was skipped once (its claim reads `superseded`), then B was pushed and
     // now A is the head again. The ledger's head IS A, so the skip's
     // "different commit" term cannot fire, and the stale claim must not stop
     // the review either: the ledger comparison is the whole decision.
@@ -3712,7 +3712,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {
-    // Same commit on both sides: this delivery IS the newest one, so no stamp
+    // invariant: Same commit on both sides: this delivery IS the newest one, so no stamp
     // ordering can make it a leftover — only the sha term holds it back. The
     // third pair (ledger newer) isolates exactly that term: the stamp test
     // alone would skip it. A queued claim for the ledger's own commit is
@@ -3739,7 +3739,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a different sha at the ledger's own stamp is reviewed, not skipped (AC-3)", async () => {
-    // `>` and not `>=`: a delivery stamped at the same instant as the ledger's
+    // invariant: `>` and not `>=`: a delivery stamped at the same instant as the ledger's
     // head is not a leftover, so relaxing the comparison would lose it. The
     // newer commit's own claim is seeded so only the stamp term holds it back.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -3758,7 +3758,7 @@ describe("createReviewConsumer", () => {
   test("an older ledger stamp never blocks a newer payload stamp (AC-3)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The ledger's head is a different commit stamped BEFORE this delivery,
+    // invariant: The ledger's head is a different commit stamped BEFORE this delivery,
     // and it owns a queued job: only the stamp ordering can save the delivery.
     await seedPrHead(db, { headSha: NEW_SHA, headAt: OLD_AT });
     h.kvState.entries.set(ENQUEUED_KEY(NEW_SHA), "1");
@@ -3786,7 +3786,7 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.length).toBeGreaterThan(0);
     expect(reviewCount(db)).toBe(1);
     expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
-    // The fail-open read leaves a warn line so the fault is still visible.
+    // note: The fail-open read leaves a warn line so the fault is still visible.
     expect(h.logLines.some((l) => l.level === "warn" && l.msg.includes("fail-open"))).toBe(true);
   });
 
@@ -3803,7 +3803,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a job without a payload stamp takes today's path untouched (AC-6)", async () => {
-    // `issue_comment` jobs and every pre-deploy message carry no `head_at`;
+    // invariant: `issue_comment` jobs and every pre-deploy message carry no `head_at`;
     // the ledger holding a newer commit must not change their behavior.
     for (const payload of [
       makePayload({ head_sha: SHA, triggered_by: "issue_comment", action: "created" }),
@@ -3824,13 +3824,13 @@ describe("createReviewConsumer", () => {
   });
 
   test("a distinct sha held through the whole backoff records ONE drop row (W-1 / round-8)", async () => {
-    // The live review covers the sha it acquired for. A push for a NEW commit
+    // invariant: The live review covers the sha it acquired for. A push for a NEW commit
     // that exhausts the whole backoff against a longer review is never
     // reviewed by it, so the drop must reach the failure sweep — a warn line
     // alone leaves the commit with no trace at all.
     h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
-    await seedInflight(db); // holds SHA
+    await seedInflight(db); // note: holds SHA
     const newer = "1111111111111111111111111111111111111111";
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -3838,12 +3838,12 @@ describe("createReviewConsumer", () => {
 
     expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
     expect(h.sandbox.calls).toHaveLength(0);
-    expect(inflightRows(db)).toHaveLength(1); // the live row, untouched
+    expect(inflightRows(db)).toHaveLength(1); // note: the live row, untouched
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline", head_sha: newer });
     const dropped = String(failureRows(db)[0]!.error);
     expect(dropped).toContain("pr-held");
-    // Producer→reader contract: the row the REAL drop path just wrote, read
+    // invariant: Producer→reader contract: the row the REAL drop path just wrote, read
     // through the production reader, lands in its own operator bucket and
     // nowhere else. A writer reword the reader stops matching fails HERE.
     expect(await createFailureStore(db).countAdmissionDrops24h()).toEqual({
@@ -3852,10 +3852,10 @@ describe("createReviewConsumer", () => {
       "workspace-cap": 0,
       error: 0,
     });
-    // Both shas are named: the skipped commit and the one the review holds.
+    // invariant: Both shas are named: the skipped commit and the one the review holds.
     expect(dropped).toContain(newer);
     expect(dropped).toContain(SHA);
-    // The abandoned job stops being the supersede skip's proof for that commit.
+    // invariant: The abandoned job stops being the supersede skip's proof for that commit.
     expect(h.kvPuts).toContainEqual({
       key: ENQUEUED_KEY(newer),
       value: "dropped",
@@ -3864,12 +3864,12 @@ describe("createReviewConsumer", () => {
   });
 
   test("a terminal guard-held drop never downgrades an already-reviewed sha's done claim", async () => {
-    // `done` proves this consumer already reviewed that commit. The guard's
+    // invariant: `done` proves this consumer already reviewed that commit. The guard's
     // terminal ack for a DIFFERENT sha must leave it alone — overwriting it
     // with `dropped` would let a redelivery re-review a reviewed commit.
     h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
-    await seedInflight(db); // holds SHA
+    await seedInflight(db); // note: holds SHA
     const newer = "3333333333333333333333333333333333333333";
     h.kvState.entries.set(ENQUEUED_KEY(newer), "done");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -3877,19 +3877,19 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload({ head_sha: newer })));
 
     expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
-    // The drop is still traced — only the claim is left untouched.
+    // invariant: The drop is still traced — only the claim is left untouched.
     expect(failureRows(db)).toHaveLength(1);
     expect(h.kvPuts).toHaveLength(0);
     expect(h.kvState.entries.get(ENQUEUED_KEY(newer))).toBe("done");
   });
 
   test("an unreadable claim skips the drop write and keeps the enqueue claim", async () => {
-    // A read fault must not turn into a blind overwrite: `putAbandonClaim`
+    // invariant: A read fault must not turn into a blind overwrite: `putAbandonClaim`
     // returns without writing, so the claim stays as it was ("1", today's
     // behavior), which the skip then accepts and the drop row above traces.
     h.queueState.attempts = GUARD_FINAL_ATTEMPT;
     const db = await createSeededTestD1();
-    await seedInflight(db); // holds SHA
+    await seedInflight(db); // note: holds SHA
     h.kvState.getError = new Error("kv down");
     const newer = "4444444444444444444444444444444444444444";
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -3901,7 +3901,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("the terminal drop row needs two non-empty, different shas (round-11)", async () => {
-    // A held row's `""` is the same "no commit identity recorded" convention as
+    // invariant: A held row's `""` is the same "no commit identity recorded" convention as
     // a null payload sha (comment trigger) — never evidence of a DIFFERENT
     // commit, so it must not manufacture a "commit never reviewed" row.
     const newer = "2222222222222222222222222222222222222222";
@@ -3913,7 +3913,7 @@ describe("createReviewConsumer", () => {
     ] as const) {
       h = createConsumerHarness();
       freshChecks();
-      h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery: the job is dropped here
+      h.queueState.attempts = GUARD_FINAL_ATTEMPT; // note: final delivery: the job is dropped here
       const db = await createSeededTestD1();
       await seedInflight(db, { headSha: held });
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -3941,7 +3941,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a cap refusal that survives the whole backoff records ONE failure row (W-1)", async () => {
-    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // final delivery: the job is dropped here
+    h.queueState.attempts = GUARD_FINAL_ATTEMPT; // note: final delivery: the job is dropped here
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw
@@ -3957,13 +3957,13 @@ describe("createReviewConsumer", () => {
 
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.messageAckCalls).toEqual([{ attempts: GUARD_FINAL_ATTEMPT }]);
-    // The sweep counts `review_failures`; a dropped review must be visible
+    // invariant: The sweep counts `review_failures`; a dropped review must be visible
     // there, with the reason it was dropped.
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]).toMatchObject({ pr_number: 42, stage: "pipeline" });
     expect(String(failureRows(db)[0]!.head_sha)).toBe(makePayload().head_sha!);
     expect(String(failureRows(db)[0]!.error)).toContain("system-cap");
-    // Wording is reason-specific: a cap refusal never claims a review is live.
+    // invariant: Wording is reason-specific: a cap refusal never claims a review is live.
     const warnLine = h.logLines.find((l) => l.level === "warn" && l.msg.includes("acking"));
     expect(warnLine!.msg).toContain("review not admitted");
     expect(warnLine!.msg).not.toContain("still in flight");
@@ -3984,13 +3984,13 @@ describe("createReviewConsumer", () => {
     expect(failureRows(db)).toHaveLength(1);
     const dropped = String(failureRows(db)[0]!.error);
     expect(dropped).toContain("error");
-    // The drop row names the FAULT, not just the refusal code: without the
+    // invariant: The drop row names the FAULT, not just the refusal code: without the
     // cause it is indistinguishable from a released-between-statements race.
     expect(dropped).toContain("fault: D1 unavailable");
   });
 
   test("a comment-triggered drop row keeps its PR identity despite an empty sha (W-1)", async () => {
-    // A comment-mention job carries no payload sha, so the row's head_sha is
+    // invariant: A comment-mention job carries no payload sha, so the row's head_sha is
     // "" by convention (migration 0010 allows it) — but the PR identity must
     // still be readable from the row, or the drop cannot be joined back to a
     // PR at all.
@@ -4030,7 +4030,7 @@ describe("createReviewConsumer", () => {
          VALUES ('review.concurrency.system', '1', datetime('now'), 'tester')`,
       )
       .run();
-    // Another workspace's review holds the single global slot; the untrusted
+    // note: Another workspace's review holds the single global slot; the untrusted
     // bit here is the MESSAGE's workspace, whose effective cap becomes 1.
     await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -4040,16 +4040,16 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
-    // The foreign row is neither deleted nor duplicated by the refusal.
+    // invariant: The foreign row is neither deleted nor duplicated by the refusal.
     expect(inflightRows(db)).toHaveLength(1);
-    // §1.3 observability: the global bound is the one that held the message,
+    // invariant: §1.3 observability: the global bound is the one that held the message,
     // and the line carries the caps it was measured against. W-1: a cap
     // refusal is NOT "in flight" — no review for this PR exists.
     const heldLine = h.logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("system-cap");
     expect(heldLine!.fields.system_cap).toBe(1);
     expect(heldLine!.fields.workspace_cap).toBe(WORKSPACE_CONCURRENCY_DEFAULT);
-    // W-1: a retried refusal is NOT yet a failure — the attempt may still be
+    // invariant: W-1: a retried refusal is NOT yet a failure — the attempt may still be
     // admitted later, so no failure row is owed.
     expect(failureRows(db)).toHaveLength(0);
   });
@@ -4057,9 +4057,9 @@ describe("createReviewConsumer", () => {
   test("a reached WORKSPACE cap refuses admission while the global count has headroom (spec §1.3)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The system cap stays at its default 256; this workspace may hold ONE review.
+    // note: The system cap stays at its default 256; this workspace may hold ONE review.
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
-    // A DIFFERENT PR of the SAME workspace holds that one slot.
+    // invariant: A DIFFERENT PR of the SAME workspace holds that one slot.
     await seedInflight(db, { pr_number: 7 });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -4069,7 +4069,7 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(0);
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(inflightRows(db)).toHaveLength(1);
-    // §1.3 observability: the tenant's own bound held it, with both caps shown
+    // invariant: §1.3 observability: the tenant's own bound held it, with both caps shown
     // so the operator can tell a busy workspace from a full deployment.
     const heldLine = h.logLines.find((l) => l.msg.includes("review not admitted"));
     expect(heldLine!.fields.reason).toBe("workspace-cap");
@@ -4082,7 +4082,7 @@ describe("createReviewConsumer", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     db.raw.prepare(`UPDATE workspaces SET max_concurrent_reviews = 1 WHERE id = 'default'`).run();
-    // The live row belongs to ANOTHER workspace, so `default` still has its slot.
+    // invariant: The live row belongs to ANOTHER workspace, so `default` still has its slot.
     // Collapsing both caps into `effective` (1) would refuse this message.
     await seedInflight(db, { owner: "other", repo: "app", pr_number: 7, workspace_id: "other" });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -4092,7 +4092,7 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.length).toBeGreaterThan(0);
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
-    expect(inflightRows(db)).toHaveLength(1); // the foreign row, untouched
+    expect(inflightRows(db)).toHaveLength(1); // note: the foreign row, untouched
   });
 
   test("the global count is bounded by the system cap even when every workspace is under its own cap", async () => {
@@ -4104,7 +4104,7 @@ describe("createReviewConsumer", () => {
          VALUES ('review.concurrency.system', '2', datetime('now'), 'tester')`,
       )
       .run();
-    // Two live reviews spread over two OTHER workspaces: each well under its
+    // invariant: Two live reviews spread over two OTHER workspaces: each well under its
     // workspace cap (default 16), and the message's own workspace holds none.
     await seedInflight(db, { owner: "a", repo: "app", pr_number: 1, workspace_id: "a" });
     await seedInflight(db, { owner: "b", repo: "app", pr_number: 2, workspace_id: "b" });
@@ -4136,7 +4136,7 @@ describe("createReviewConsumer", () => {
     const warnLine = h.logLines.find((l) => l.level === "warn" && l.msg.includes("admission failed"));
     expect(warnLine).toBeDefined();
     expect(warnLine!.msg).toContain("treating as held");
-    // The warn names the cause, so a storage fault is never read as the
+    // invariant: The warn names the cause, so a storage fault is never read as the
     // benign released-between-statements race.
     expect(warnLine!.fields.error_cause).toBe("fault: D1 unavailable");
     expect(failureRows(db)).toHaveLength(0);
@@ -4145,7 +4145,7 @@ describe("createReviewConsumer", () => {
   test("a degraded caps read warns once and admits at the conservative cap (never unlimited)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The fault names the CAPS statement, not the table: the maintenance read
+    // invariant: The fault names the CAPS statement, not the table: the maintenance read
     // shares `review_runtime_settings`, and an unreadable window now defers the
     // batch (fail closed) before admission is ever asked — so a table-wide fault
     // would pin the deferral instead of the degraded cap.
@@ -4163,16 +4163,16 @@ describe("createReviewConsumer", () => {
     expect(warnLine).toBeDefined();
     expect(warnLine!.fields.workspace_id).toBe("default");
     expect(warnLine!.fields.effective).toBe(1);
-    // The line names the store's cause, not just that it degraded.
+    // note: The line names the store's cause, not just that it degraded.
     expect(warnLine!.fields.degraded_reason).toBe("read-failed");
-    // The conservative cap still admits an idle deployment, and the row is
+    // invariant: The conservative cap still admits an idle deployment, and the row is
     // released normally.
     expect(reviewCount(db)).toBe(1);
     expect(inflightRows(db)).toHaveLength(0);
   });
 
   test("real failures keep the throw → queue retry → DLQ behavior (BB-3 unchanged)", async () => {
-    // A parse failure now DEGRADES (acks) — the real-failure throw path is
+    // note: A parse failure now DEGRADES (acks) — the real-failure throw path is
     // pinned on a genuine infra failure instead (runner non-zero exit).
     h.sandbox.runnerExitCode = 1;
     h.sandbox.runnerStderr = "review: session failed: boom";
@@ -4181,12 +4181,12 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
 
-    // Only the guard-held path is handled with message-level retry/ack; a
+    // invariant: Only the guard-held path is handled with message-level retry/ack; a
     // real failure rethrows exactly as before.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.messageAckCalls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(1);
-    // The admission row is released on the failure path too.
+    // invariant: The admission row is released on the failure path too.
     expect(inflightRows(db)).toHaveLength(0);
   });
 
@@ -4201,7 +4201,7 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The row is the per-PR lock AND the capacity reservation: it exists when
+    // invariant: The row is the per-PR lock AND the capacity reservation: it exists when
     // the FIRST sandbox command runs, keyed by the PR (no head_sha), with the
     // level's TTL, and is gone once the post settled.
     expect(atFirstSandbox).toHaveLength(1);
@@ -4223,7 +4223,7 @@ describe("createReviewConsumer", () => {
   test("the admission row is released AFTER the sandbox is destroyed (S-3)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A release that ran before destroy would let the next attempt admit a
+    // invariant: A release that ran before destroy would let the next attempt admit a
     // second live container while this one still runs.
     let rowsAtDestroy = -1;
     const original = h.fakeSandbox.destroy;
@@ -4240,7 +4240,7 @@ describe("createReviewConsumer", () => {
       h.fakeSandbox.destroy = original;
     }
 
-    expect(rowsAtDestroy).toBe(1); // this attempt's row is still the lock
+    expect(rowsAtDestroy).toBe(1); // note: this attempt's row is still the lock
     expect(inflightRows(db)).toHaveLength(0);
   });
 
@@ -4251,13 +4251,13 @@ describe("createReviewConsumer", () => {
     const gate = holdFirstRunner();
 
     const first = consumer(h.makeBatch(makePayload()));
-    await gate.reached; // the first review is inside the runner; its row is live
+    await gate.reached; // note: the first review is inside the runner; its row is live
 
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.messageRetryCalls).toEqual([{ attempts: 1, delaySeconds: 60 }]);
     expect(h.sandbox.calls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
-    expect(reviewCount(db)).toBe(0); // the second message never ran a pipeline
+    expect(reviewCount(db)).toBe(0); // note: the second message never ran a pipeline
 
     gate.release();
     await first;
@@ -4277,8 +4277,8 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload({ pr_number: 43 })));
 
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(reviewCount(db)).toBe(1); // the second review completed end to end
-    expect(inflightRows(db)).toHaveLength(1); // only the first row is still held
+    expect(reviewCount(db)).toBe(1); // note: the second review completed end to end
+    expect(inflightRows(db)).toHaveLength(1); // note: only the first row is still held
 
     gate.release();
     await first;
@@ -4298,7 +4298,7 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(reviewCount(db)).toBe(1);
-    // The delete could not run; the row expires by TTL instead of failing a
+    // invariant: The delete could not run; the row expires by TTL instead of failing a
     // message whose review already posted (a throw would retry it).
     expect(inflightRows(db)).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);
@@ -4308,7 +4308,7 @@ describe("createReviewConsumer", () => {
     expect(warnLine!.msg).toContain("expires by TTL");
   });
   test("reviewGuardTtlSeconds covers the full step-budget arithmetic per level (qc3 F-301 pin / AC-S10-guard)", () => {
-    // Exact pin: FOURTEEN timed sandbox steps (clone, rev-parse, compare
+    // invariant: Exact pin: FOURTEEN timed sandbox steps (clone, rev-parse, compare
     // status, full diff, increment diff, numstat, runner-input write, report
     // `gh pr view`, up to 3 report `gh issue view` reads, recheck reads,
     // report-document read, applied-model read) × 120s + the LEVEL's tier
@@ -4324,27 +4324,27 @@ describe("createReviewConsumer", () => {
   });
 
   test("round budget: the reserve covers the live post-runner tail and derives the runner cutoff", () => {
-    // Every term is pinned by value: a move in any one of them, in the cap or
+    // invariant: Every term is pinned by value: a move in any one of them, in the cap or
     // in the reserve must fail this case, not drift silently.
     expect(runnerTimeoutMs("quick")).toBe(480_000);
     expect(runnerTimeoutMs("default")).toBe(600_000);
     expect(runnerTimeoutMs("deep")).toBe(646_000);
     expect(CHECK_HOOK_TIMEOUT_MS).toBe(2_000);
     expect(CHECK_TERMINALIZE_DEFAULT).toBe(10_000);
-    // The reserve is composed from existing values, never a new knob:
+    // invariant: The reserve is composed from existing values, never a new knob:
     // post-runner reads (90s) + inline tail (12s) + begin hook (2s) + guard
     // slack (120s) + the message's LIVE terminalize budget (10s default).
     expect(postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT)).toBe(234_000);
-    // An operator-tunable terminalize moves the reserve 1:1 (its 30s ceiling).
+    // invariant: An operator-tunable terminalize moves the reserve 1:1 (its 30s ceiling).
     expect(postRunnerReserveMs(30_000)).toBe(254_000);
-    // The table is a ceiling, never a reservation: at the default reserve the
+    // invariant: The table is a ceiling, never a reservation: at the default reserve the
     // cutoff is 666s, so quick/default/deep all fit inside it with 186s/66s/20s
     // to spare — and the 120s fallback capture still fits ahead of the cutoff.
     const runnerDeadlineMs = ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
     expect(runnerDeadlineMs).toBe(666_000);
     expect(runnerDeadlineMs - runnerTimeoutMs("deep")).toBe(20_000);
     expect(runnerDeadlineMs - EXEC_TIMEOUT_GIT_MS).toBe(546_000);
-    // The tier invariants hold over the whole supported terminalize range:
+    // invariant: The tier invariants hold over the whole supported terminalize range:
     // quick < default < deep <= cap - reserve.
     for (const terminalizeMs of [1_000, 10_000, 30_000]) {
       const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
@@ -4355,7 +4355,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a maximal round issues exactly the steps the guard TTL bills", async () => {
-    // The widest round the consumer can build: a previously reviewed base (the
+    // invariant: The widest round the consumer can build: a previously reviewed base (the
     // compare gate + increment capture), three linked issues, an open prior
     // finding to recheck (two bounded reads), and a report seat with context.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -4383,7 +4383,7 @@ describe("createReviewConsumer", () => {
     await seedAssociation(db, "PRRT_thread1");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, {
       ...h.overrides,
-      // Any previously reviewed head makes the compare gate reachable without
+      // note: Any previously reviewed head makes the compare gate reachable without
       // seeding the `reviews` table.
       findIncrementBase: async () => PRIOR_SHA,
     });
@@ -4394,29 +4394,29 @@ describe("createReviewConsumer", () => {
       readRecheckCommand(RECHECK_OUTPUT_PATH),
       readRecheckStatusCommand(RECHECK_STATUS_PATH),
       readReportCommand(REPORT_OUTPUT_PATH),
-      // The applied-model document: one more post-runner bounded read, on the
+      // note: The applied-model document: one more post-runner bounded read, on the
       // same tighter bound as its siblings.
       readReportCommand(APPLIED_MODEL_PATH),
     ]);
     const timed = h.sandbox.calls.filter(
       (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
     );
-    // The post-runner bounded reads carry their own tighter bound, not the
+    // invariant: The post-runner bounded reads carry their own tighter bound, not the
     // git window (nor the capture's, which it happens to share numerically).
     const postRunner = h.sandbox.calls.filter((call) => postRunnerCmds.has(call.cmd));
     expect(postRunner).toHaveLength(4);
     for (const read of postRunner) {
       expect((read.opts as { timeout?: number } | undefined)?.timeout).toBe(POST_RUNNER_READ_TIMEOUT_MS);
     }
-    // The four PR-context reads carry the tighter capture bound instead.
+    // invariant: The four PR-context reads carry the tighter capture bound instead.
     const captured = h.sandbox.calls.filter(
       (call) =>
         (call.opts as { timeout?: number } | undefined)?.timeout === PR_CONTEXT_EXEC_TIMEOUT_MS &&
         !postRunnerCmds.has(call.cmd),
     );
-    // `gh pr view` + one `gh issue view` per linked issue (the cap).
+    // invariant: `gh pr view` + one `gh issue view` per linked issue (the cap).
     expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
-    // One command per billed window — except `readRecheckDoc`, which races the
+    // invariant: One command per billed window — except `readRecheckDoc`, which races the
     // document and status reads in ONE Promise.all window (two commands, one
     // entry, the `+1`). Every other post-runner read is itemised in
     // GUARD_TIMED_SANDBOX_STEPS, so a new sandbox step without its ledger entry
@@ -4427,7 +4427,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {
-    // quick/default 60/300/300/900/900; deep 90/480/300/900/900.
+    // invariant: quick/default 60/300/300/900/900; deep 90/480/300/900/900.
     // GUARD_RETRY_DELAYS_SECONDS is a literal table — nothing derives it — so
     // this test is what keeps it honest as the TTL moves: every entry must stay
     // BELOW reviewGuardTtlSeconds(level) (2292s quick, 2412s default, 2458s
@@ -4452,13 +4452,13 @@ describe("createReviewConsumer", () => {
   });
 
   test("a late runner start: the guard and Check expiries cover execDeadline + reserve from their own origins", async () => {
-    // The origins are the ROWS the production paths wrote — the inflight
+    // invariant: The origins are the ROWS the production paths wrote — the inflight
     // row's acquired_at/expires_at pair and the Check claim's created_ms /
     // execution_deadline_ms pair — never the derived windows re-computed.
     // The frozen clock makes every production Date.now() read exact, so the
     // coverage is measured, not assumed.
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-    // Saturated size ⇒ the request exceeds what the late start leaves, so the
+    // note: Saturated size ⇒ the request exceeds what the late start leaves, so the
     // derived cutoff binds the exec deadline this case measures.
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
@@ -4473,7 +4473,7 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 200s of the 900s round is gone before the clone: the anchor happens
+        // note: 200s of the 900s round is gone before the clone: the anchor happens
         // well after the round start, so the derived cutoff — not the tier
         // maximum — binds the allocation.
         ...clockSpendingSandbox("git init", 200_000, clock),
@@ -4483,17 +4483,17 @@ describe("createReviewConsumer", () => {
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // Late start ⇒ the 666s cutoff binds: exec end + reserve IS the round end.
+    // invariant: Late start ⇒ the 666s cutoff binds: exec end + reserve IS the round end.
     expect(execDeadlineMs).toBe(roundStart + 666_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
 
-    // Guard: the row the consumer ACQUIRED at round start outlives the whole
+    // invariant: Guard: the row the consumer ACQUIRED at round start outlives the whole
     // reserved tail — its own expiry, not the TTL arithmetic.
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
     expect(Date.parse(String(guardRow!.expires_at))).toBeGreaterThanOrEqual(tailMs);
 
-    // Check: claimed at ADMISSION — before the 200s was spent — so its
+    // note: Check: claimed at ADMISSION — before the 200s was spent — so its
     // execution deadline is exactly the end of this round's reserved tail,
     // the tightest the lease may ever run.
     const claim = checkRowFor(db, SHA);
@@ -4502,14 +4502,14 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
-  // The two maximum-terminalize fixtures below must differ in allocation:
+  // invariant: The two maximum-terminalize fixtures below must differ in allocation:
   // each pins its own logged `runner_effective_ms` and asserts it is not the
   // sibling's, so the pair cannot pass by both runs taking the same path.
   const LATE_SATURATED_EFFECTIVE_MS = 446_000;
   const LATE_FLOOR_EFFECTIVE_MS = 500_020;
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
-    // terminalizeMs = 30_000 is the supported ceiling the reserve charges,
+    // note: terminalizeMs = 30_000 is the supported ceiling the reserve charges,
     // the request is the tier maximum, and 200s of preparation leaves the
     // anchor 446s of the deep cutoff — the derived cutoff, not the request,
     // binds the allocation, so the tail lands exactly at the round end. A
@@ -4519,7 +4519,7 @@ describe("createReviewConsumer", () => {
     h.sandbox.numstatStdout = SATURATED_NUMSTAT;
     const db = await createSeededTestD1();
     setAppReviewLevel(db, TEST_APP_ID, "deep");
-    // The operator's ceiling value, read per message exactly like the hook's.
+    // invariant: The operator's ceiling value, read per message exactly like the hook's.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "30000");
     let guardRow: Record<string, unknown> | undefined;
     h.sandbox.probe = () => {
@@ -4532,7 +4532,7 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 200s gone before the clone: the anchor lands at roundStart + 200s
+        // note: 200s gone before the clone: the anchor lands at roundStart + 200s
         // and takes the 446s the cutoff still owes — a real late start, not
         // a fresh one.
         ...clockSpendingSandbox("git init", 200_000, clock),
@@ -4542,16 +4542,16 @@ describe("createReviewConsumer", () => {
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // Cutoff-bound: 900s − 254s reserve ⇒ the late anchor ends AT 646s.
+    // invariant: Cutoff-bound: 900s − 254s reserve ⇒ the late anchor ends AT 646s.
     expect(execDeadlineMs).toBe(roundStart + 646_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
-    // The request asked the tier maximum (646s); the late start delivered a
+    // invariant: The request asked the tier maximum (646s); the late start delivered a
     // different, cutoff-bound allocation than the sibling floor fixture.
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
     expect(line.fields.runner_effective_ms).not.toBe(LATE_FLOOR_EFFECTIVE_MS);
 
-    // Guard and Check were both taken at the round start; each must outlive
+    // invariant: Guard and Check were both taken at the round start; each must outlive
     // the tail the runner's deadline cannot reach — `tailMs` IS the round
     // end here, so `>=` covers the complete inequality.
     expect(guardRow).toBeDefined();
@@ -4564,7 +4564,7 @@ describe("createReviewConsumer", () => {
   });
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (floor request)", async () => {
-    // The other allocation extreme under the same 30s terminalize ceiling —
+    // invariant: The other allocation extreme under the same 30s terminalize ceiling —
     // this fixture spends 100s before the clone where its sibling spends
     // 200s: a binary-only numstat requests the floor
     // (500_020ms at 1 work unit), and 100s spent leaves more than that
@@ -4588,7 +4588,7 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        // 100s gone before the clone: the anchor lands at roundStart + 100s
+        // note: 100s gone before the clone: the anchor lands at roundStart + 100s
         // and still has 546s of cutoff left — above the 500s floor request.
         ...clockSpendingSandbox("git init", 100_000, clock),
       });
@@ -4597,19 +4597,19 @@ describe("createReviewConsumer", () => {
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    // request-bound, not cutoff-bound: the request ended BEFORE the cutoff,
+    // invariant: request-bound, not cutoff-bound: the request ended BEFORE the cutoff,
     // so the reserve tail is strictly inside the round — and the windows that
     // cover it were stamped at the round's own start at the ceiling's width.
     expect(execDeadlineMs).toBeLessThan(roundStart + 646_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
     expect(tailMs).toBeLessThanOrEqual(roundStart + ROUND_BUDGET_MS);
-    // The floor delivered a different allocation than the sibling saturated
+    // invariant: The floor delivered a different allocation than the sibling saturated
     // fixture: the pair cannot pass by both runs taking the same path.
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_effective_ms).toBe(LATE_FLOOR_EFFECTIVE_MS);
     expect(line.fields.runner_effective_ms).not.toBe(LATE_SATURATED_EFFECTIVE_MS);
 
-    // Coverage AND equality: the acquired windows outlive the whole reserved
+    // invariant: Coverage AND equality: the acquired windows outlive the whole reserved
     // tail AND the round end — the tail stops short of the round here, so both
     // halves of `execDeadline + reserve <= roundEnd <= expiry` are pinned —
     // and they still carry the ceiling-derived width: the floor request
@@ -4646,7 +4646,7 @@ describe("line comments (AL-3 layered delivery)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Overall comment + persistence all landed; the diff is NOT even
+    // invariant: Overall comment + persistence all landed; the diff is NOT even
     // prefetched when the base filter is empty (no extra API call). The
     // degraded-comment delete scan still runs (no stale comment → no call).
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "delete-degraded"]);
@@ -4676,11 +4676,11 @@ describe("line comments (AL-3 layered delivery)", () => {
 
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
     const lineInput = h.commenterCalls[3]!.args as { intents: Array<{ path: string; line: number; body: string }> };
-    // Only the hunk-internal finding becomes a line intent.
+    // invariant: Only the hunk-internal finding becomes a line intent.
     expect(lineInput.intents.map((i) => i.line)).toEqual([21]);
     expect(lineInput.intents[0]!.body).toContain("Inside");
 
-    // And when NOTHING survives, the createReview call is skipped entirely.
+    // invariant: And when NOTHING survives, the createReview call is skipped entirely.
     h = createConsumerHarness();
     freshChecks();
     h.sandbox.runnerStdout = JSON.stringify({
@@ -4698,7 +4698,7 @@ describe("line comments (AL-3 layered delivery)", () => {
   });
 
   test("no diff text (capture unavailable) → base-filter attempt (draft semantics)", async () => {
-    // The bounded read delivers nothing while numstat shows a diff: the trusted
+    // invariant: The bounded read delivers nothing while numstat shows a diff: the trusted
     // diff is unavailable, so the prefilter has no text to compare against and
     // the base layer alone decides (GitHub validates at send; the hunk layer is
     // skipped, never fabricated).
@@ -4709,7 +4709,7 @@ describe("line comments (AL-3 layered delivery)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The createReview attempt still runs, on the UNFILTERED base set.
+    // invariant: The createReview attempt still runs, on the UNFILTERED base set.
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
     const lineInput = h.commenterCalls[3]!.args as { intents: unknown[] };
     expect(lineInput.intents).toHaveLength(1);
@@ -4720,7 +4720,7 @@ describe("line comments (AL-3 layered delivery)", () => {
   });
 
   test("diff over the in-memory bound → the hunk prefilter is skipped exactly like an unavailable diff (qc3 F-101)", async () => {
-    // A finding OUTSIDE every VALID_DIFF hunk (line 100): with a bounded
+    // invariant: A finding OUTSIDE every VALID_DIFF hunk (line 100): with a bounded
     // diff the hunk layer would EXCLUDE it — an over-cap diff must degrade
     // to the base-filter attempt, never materialize a multi-MB line array.
     h.sandbox.runnerStdout = JSON.stringify({
@@ -4733,12 +4733,12 @@ describe("line comments (AL-3 layered delivery)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The attempt still ran on the base-filtered set — the hunk-external
+    // invariant: The attempt still ran on the base-filtered set — the hunk-external
     // finding SURVIVED because the hunk layer never saw the diff.
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
     const lineInput = h.commenterCalls[3]!.args as { intents: unknown[] };
     expect(lineInput.intents).toHaveLength(1);
-    // Not a delivery fallback — the createReview attempt proceeded.
+    // invariant: Not a delivery fallback — the createReview attempt proceeded.
     expect(h.logLines.some((l) => l.fields.line_comments_fallback === true)).toBe(false);
     expect(reviewCount(db)).toBe(1);
     expect(h.kvPuts).toHaveLength(1);
@@ -4769,15 +4769,15 @@ describe("line comments (AL-3 layered delivery)", () => {
       intents: Array<{ line: number; lineStart: number | null; body: string }>;
     };
     expect(lineInput.intents).toHaveLength(1);
-    // Undiffed range is unverified → single-line anchor at line_end, no start.
+    // invariant: Undiffed range is unverified → single-line anchor at line_end, no start.
     expect(lineInput.intents[0]).toMatchObject({ line: 21, lineStart: null });
-    // The demotion strips the applyable multi-line replacement.
+    // invariant: The demotion strips the applyable multi-line replacement.
     expect(lineInput.intents[0]!.body).not.toContain("```");
     expect(lineInput.intents[0]!.body).not.toContain("const x = 1;");
   });
 
   test("a cross-hunk range is demoted to the single-line anchor and its suggestion block is dropped (QC R3)", async () => {
-    // VALID_DIFF covers right range [18,23]; the appended hunk covers [40,43].
+    // invariant: VALID_DIFF covers right range [18,23]; the appended hunk covers [40,43].
     // The finding ends at 41 but starts at 19, so the range is not publishable.
     h.sandbox.diffStdout = `${VALID_DIFF}@@ -40,3 +40,4 @@\n keep\n+added\n keep2\n keep3\n`;
     h.sandbox.runnerStdout = JSON.stringify({
@@ -4820,7 +4820,7 @@ describe("line comments (AL-3 layered delivery)", () => {
       const db = await createSeededTestD1();
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-      // NEVER throws after the overall comment succeeded: the run resolves,
+      // invariant: NEVER throws after the overall comment succeeded: the run resolves,
       // the message acks, KV done + D1 row land exactly as without line
       // comments.
       await consumer(h.makeBatch(makePayload()));
@@ -4834,7 +4834,7 @@ describe("line comments (AL-3 layered delivery)", () => {
       expect(h.kvPuts).toEqual([
         { key: `idem:123:acme/widgets:42:${SHA}`, value: "done", options: { expirationTtl: 86400 } },
       ]);
-      // The ok path resolves silently (queue auto-ack) — the point is that
+      // invariant: The ok path resolves silently (queue auto-ack) — the point is that
       // NOTHING retried: the failure never escaped processMessage.
       expect(h.messageRetryCalls).toHaveLength(0);
       expect(h.sandbox.destroyCalls).toBe(1);
@@ -4851,7 +4851,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The delete scan runs between the overall upsert and the line-comments
+    // invariant: The delete scan runs between the overall upsert and the line-comments
     // step (the fake's deleteDegradedComment records the call; the real
     // implementation scans + deletes the stale bot-authored comments).
     expect(h.commenterCalls.map((c) => c.op)).toEqual(["token", "plan", "post-prepared", "line-comments", "delete-degraded"]);
@@ -4862,19 +4862,19 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
       prNumber: number;
     };
     expect(deleteInput).toMatchObject({ installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 });
-    // The outcome is logged as a structured warn (never throws, never blocks).
+    // invariant: The outcome is logged as a structured warn (never throws, never blocks).
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("stale degraded comment cleanup"));
     expect(warn).toBeDefined();
     expect(warn!.msg).toContain("deleted=1, skipped=1");
     expect(warn!.msg).toContain("rate limited");
     expect(warn!.fields.degraded_delete_deleted).toBe(1);
     expect(warn!.fields.degraded_delete_skipped).toBe(1);
-    // A plain 403/404 skip or a per-match error is NOT a rate limit: no
+    // invariant: A plain 403/404 skip or a per-match error is NOT a rate limit: no
     // continuation row is written.
     expect(failureRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(h.kvPuts).toHaveLength(1);
-    // The ok path resolves silently (queue auto-ack) — nothing retried.
+    // invariant: The ok path resolves silently (queue auto-ack) — nothing retried.
     expect(h.messageRetryCalls).toHaveLength(0);
   });
 
@@ -4886,7 +4886,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The delete failure is a structured warn — the review flow continues
+    // invariant: The delete failure is a structured warn — the review flow continues
     // (line comments + KV done + D1 row all land) and nothing retries.
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("stale degraded comment delete failed"));
     expect(warn).toBeDefined();
@@ -4906,7 +4906,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The throttled sweep is a CONTINUATION event, not a review failure: one
+    // invariant: The throttled sweep is a CONTINUATION event, not a review failure: one
     // row under the non-failure stage, prefixed so the store and the operator
     // can count it — and the successful review is untouched.
     const rows = failureRows(db);
@@ -4927,7 +4927,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // A primary-limit sweep is the same continuation event as a secondary
+    // invariant: A primary-limit sweep is the same continuation event as a secondary
     // one, but its row carries the primary prefix so the 24 h
     // secondary-limit count (keyed on GITHUB_RATE_LIMIT_PREFIX) stays 0.
     const rows = failureRows(db);
@@ -4954,7 +4954,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     const rows = failureRows(db);
     expect(rows).toHaveLength(2);
     expect(rows.map((row) => row.stage)).toEqual(["rate-limit", "rate-limit"]);
-    // Two independent rows, one per kind: looked up by prefix rather than by
+    // invariant: Two independent rows, one per kind: looked up by prefix rather than by
     // list position, which the insert order does not promise.
     const primary = rows.filter((row) => String(row.error).startsWith(GITHUB_PRIMARY_RATE_LIMIT_PREFIX));
     const secondary = rows.filter((row) => String(row.error).startsWith(GITHUB_RATE_LIMIT_PREFIX));
@@ -4982,7 +4982,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
       },
     });
 
-    await consumer(h.makeBatch(makePayload())); // resolves — the insert must not mask the review
+    await consumer(h.makeBatch(makePayload())); // note: resolves — the insert must not mask the review
 
     expect(reviewCount(db)).toBe(1);
     expect(h.kvPuts).toHaveLength(1);
@@ -4994,7 +4994,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
 describe("line-comments round pin (AL-3)", () => {
   test("the line-comments round pins to the round the overall upsert returned", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // A create plan at round 4 is type-illegal (create pins round 1) — the
+    // invariant: A create plan at round 4 is type-illegal (create pins round 1) — the
     // double is cast: the consumer pins the line comments to plan.round.
     h.commenterState.plan = { action: "create", round: 4 } as unknown as UpsertPlan;
     const db = await createSeededTestD1();
@@ -5009,7 +5009,7 @@ describe("line-comments round pin (AL-3)", () => {
 
 describe("SEC-01 exact-value redaction through the consumer", () => {
   test("a UUID-shaped provider key in the runner env never reaches the comment body or the D1 envelope", async () => {
-    // A UUID-shaped key evades every shape pattern — only the exact-value
+    // safety: A UUID-shaped key evades every shape pattern — only the exact-value
     // pass (sessionSecretValues from the runner env) can remove it.
     const uuidKey = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";
     h.sandbox.runnerStdout = JSON.stringify({
@@ -5020,17 +5020,17 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
       ],
     });
     const db = await createSeededTestD1();
-    // The UUID key rides the App's per-App config (per-App BYOK, AL-24-5) —
+    // note: The UUID key rides the App's per-App config (per-App BYOK, AL-24-5) —
     // the exact-redact pass must pull it from the assembled runner env.
     await seedAppConfig(db, TEST_APP_ID, "openai/gpt-app", { gemini: uuidKey, openai: sk("openai-x") });
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The posted comment body never carries the key.
+    // safety: The posted comment body never carries the key.
     const postInput = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(postInput.body).not.toContain(uuidKey);
-    // The D1 envelope never carries the key either.
+    // safety: The D1 envelope never carries the key either.
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string };
     expect(row.envelope).not.toContain(uuidKey);
     expect(row.envelope).toContain(REDACTED);
@@ -5038,7 +5038,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
 
   test("the minted installation token is exact-redacted from the degraded comment input", async () => {
     h.commenterState.token = gh("s", "installation_token");
-    // The parse error echoes the installation token verbatim (a
+    // safety: The parse error echoes the installation token verbatim (a
     // prompt-injected echo) — the exact-value pass must remove it before
     // the prepared degraded send and the failure row.
     h.sandbox.runnerStdout = JSON.stringify({
@@ -5050,7 +5050,7 @@ describe("SEC-01 exact-value redaction through the consumer", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // resolves — acked
+    await consumer(h.makeBatch(makePayload())); // note: resolves — acked
 
     const degradeBody = (h.commenterCalls.filter((c) => c.op === "post-prepared-degraded")[0]!.args as { body: string }).body;
     expect(degradeBody).not.toContain(gh("s", "installation_token"));
@@ -5071,9 +5071,9 @@ describe("fingerprint choke point (S-1)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
-    // The full hint never reaches the index column…
+    // invariant: The full hint never reaches the index column…
     expect(row.fingerprint).not.toContain(oversizedHint);
-    // …the clamped hint (title budget + ellipsis) is what lands.
+    // invariant: …the clamped hint (title budget + ellipsis) is what lands.
     expect(row.fingerprint).toBe(oversizedHint.slice(0, FINDING_TITLE_MAX - 1) + "…");
   });
 });
@@ -5112,7 +5112,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Step 5: the runner input carries the typed recheck document (targets
+    // invariant: Step 5: the runner input carries the typed recheck document (targets
     // with the ORIGINAL concern + trusted evidence + discussion), and the
     // runner gains --recheck-out, read back through the audited read.
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
@@ -5120,7 +5120,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       recheckAssignmentMaxBytes?: number;
     };
     expect(runnerInput.recheck).toBeDefined();
-    // The seat's ask budget is a TOP-LEVEL runner field — the frozen
+    // invariant: The seat's ask budget is a TOP-LEVEL runner field — the frozen
     // `mstar.recheck-input/v1` document never carries it. Absent row = the
     // store's documented default.
     expect(runnerInput.recheckAssignmentMaxBytes).toBe(65_536);
@@ -5134,7 +5134,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(runnerCmd).toContain("--recheck-out '/tmp/mstar-recheck.json'");
     expect(h.sandbox.calls.some((c) => c.cmd.includes("head -c") && c.cmd.includes("/tmp/mstar-recheck.json"))).toBe(true);
 
-    // Step 8/§7.10: the prepared body renders the closure with the verified
+    // invariant: Step 8/§7.10: the prepared body renders the closure with the verified
     // disposition and the queued resolve as not-yet-resolved (never a
     // prediction).
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
@@ -5143,7 +5143,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("not yet resolved");
     expect(prepared.body).toContain("Reassessed 1/1 prior finding(s)");
 
-    // Step 9: the round assessment is durable — the row closed addressed and
+    // invariant: Step 9: the round assessment is durable — the row closed addressed and
     // BOTH rotation clocks advanced (selected → scheduled, assessed → assessed).
     const findingRow = db.raw.query("SELECT state, last_assessed_ms, last_scheduled_ms FROM review_findings").get() as {
       state: string;
@@ -5157,7 +5157,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(rounds).toHaveLength(1);
     expect(JSON.parse(rounds[0]!.assessment_json).disposition).toBe("addressed");
 
-    // Step 11 — resolution LAST: the verified snapshot was enqueued BEFORE
+    // invariant: Step 11 — resolution LAST: the verified snapshot was enqueued BEFORE
     // the inline attempt (the D1 row carries it), then discovery bound the
     // thread and the single resolve attempt ran, in that order.
     const threadRow = db.raw.query("SELECT verified_json, resolution_state FROM review_threads").get() as {
@@ -5175,7 +5175,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(resolveInput.associationId).toBe(ASSOC_ID);
     expect(resolveInput.verified.snapshot.digest).toBe("thread-digest-1");
     expect(h.commenterState.resolveResult.kind).toBe("resolved");
-    // The post-publish line comments + degraded cleanup still ran.
+    // invariant: The post-publish line comments + degraded cleanup still ran.
     expect(h.commenterCalls.some((c) => c.op === "line-comments")).toBe(true);
     expect(h.commenterCalls.some((c) => c.op === "delete-degraded")).toBe(true);
   });
@@ -5186,7 +5186,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     h.sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    // One open row (answered this round) plus one ADDRESSED row whose thread
+    // note: One open row (answered this round) plus one ADDRESSED row whose thread
     // is still unresolved — the second is only recheckable because of it.
     await seedOpenTarget(db);
     const addressedRowId = "bbbbbbbb-0000-4000-8000-000000000009";
@@ -5203,7 +5203,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The published line reports the recheckable universe and keeps the
+    // invariant: The published line reports the recheckable universe and keeps the
     // partition identity: assessed + invalid-output + omitted = selected.
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("Reassessed 1/2 prior finding(s) this round");
@@ -5223,7 +5223,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("an addressed row re-selected by the rotation is re-verified in the round and its thread resolves", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The seat re-verifies the concern against the CURRENT discussion and says
+    // note: The seat re-verifies the concern against the CURRENT discussion and says
     // it is still fixed.
     h.sandbox.recheckFileContent = recheckDocWith({});
     const db = await createSeededTestD1();
@@ -5254,18 +5254,18 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The addressed row really rode the rotation: it is the round's only
+    // invariant: The addressed row really rode the rotation: it is the round's only
     // recheck target, so the seat verified it against the current discussion.
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as { recheck?: { targets: RecheckTarget[] } };
     expect(runnerInput.recheck!.targets.map((target) => target.rowId)).toEqual([TARGET_ROW_ID]);
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("Reassessed 1/1 prior finding(s) this round");
-    // ...and the ordinary resolution path resolved it with THIS round's snapshot.
+    // invariant: ...and the ordinary resolution path resolved it with THIS round's snapshot.
     const discoverIdx = h.commenterCalls.findIndex((c) => c.op === "discover");
     const resolveIdx = h.commenterCalls.findIndex((c) => c.op === "resolve");
     expect(discoverIdx).toBeGreaterThan(-1);
     expect(resolveIdx).toBe(discoverIdx + 1);
-    // Recorded double args: the kernel received this round's verified snapshot.
+    // note: Recorded double args: the kernel received this round's verified snapshot.
     const resolveCall = h.commenterCalls[resolveIdx]!.args as { associationId: string; verified: { snapshot: { digest: string }; assessment: { disposition: string } } };
     expect(resolveCall.associationId).toBe(ASSOC_ID);
     expect(resolveCall.verified.snapshot.digest).toBe("thread-digest-1");
@@ -5286,7 +5286,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, "PRRT_thread1");
-    // The operator raised the seat's ask budget: the consumer reads the row
+    // invariant: The operator raised the seat's ask budget: the consumer reads the row
     // once and passes the value to the runner.
     db.raw
       .prepare(
@@ -5304,12 +5304,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     };
     expect(runnerInput.recheck).toBeDefined();
     expect(runnerInput.recheckAssignmentMaxBytes).toBe(131_072);
-    // The wire document is frozen: the budget is not part of it.
+    // invariant: The wire document is frozen: the budget is not part of it.
     expect(runnerInput.recheck).not.toHaveProperty("recheckAssignmentMaxBytes");
   });
 
   test("P67-QC-006: the real newline-terminated recheck bytes are parsed; an overflow flag fails closed", async () => {
-    // The double above now mirrors `readRecheckCommand` byte-for-byte
+    // note: The double above now mirrors `readRecheckCommand` byte-for-byte
     // (`<content>\n0\n` — `wc -c` terminates its own count). Assert both
     // directions of the read contract on the SAME round: flag 0 → the typed
     // document drives closure; flag 1 → NO recheck at all, every selected row
@@ -5354,7 +5354,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
       const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
       expect(prepared.body).toContain(expected);
-      // A rejected read never queues a resolve; the accepted one does.
+      // invariant: A rejected read never queues a resolve; the accepted one does.
       expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(overflow === "0");
     }
   });
@@ -5417,7 +5417,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       };
     };
     const wire = runnerInput.recheck!.discussion;
-    // The raw body never reaches the model: marker syntax, delimiter runs and
+    // safety: The raw body never reaches the model: marker syntax, delimiter runs and
     // control characters are gone and the text is clamped to the item cap.
     expect(wire.items).toHaveLength(1);
     expect(wire.items[0]!.body).not.toContain("mstar-inspector:");
@@ -5425,12 +5425,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(wire.items[0]!.body).not.toContain("\x00");
     expect(wire.items[0]!.body.length).toBeLessThan(hostile.length);
     expect(wire.items[0]!.body).toContain("[... body truncated ...]");
-    // Coverage honesty: the FETCH was complete, the model-view caps clamped the
+    // invariant: Coverage honesty: the FETCH was complete, the model-view caps clamped the
     // body, and each fact stays on its own flag.
     expect(wire.issueCoverage).toBe("complete");
     expect(wire.issueModelCoverage).toBe("truncated");
-    expect(wire.threads[0]!.modelCoverage).toBe("complete"); // its own items were untouched
-    // The round is NOT labelled complete, and a clamped HUMAN item is a
+    expect(wire.threads[0]!.modelCoverage).toBe("complete"); // note: its own items were untouched
+    // invariant: The round is NOT labelled complete, and a clamped HUMAN item is a
     // resolution fence: the model never saw that body in full, so a digest
     // alone must not authorize a resolve (§7.4/§7.5).
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
@@ -5441,8 +5441,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
   test("same-round recurrence overrides the recheck closure (§7.4): unverifiable/conflict, row stays open, no resolution", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
-    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT); // current finding = same concern as the current envelope's
-    // The doc claims the concern was fixed — but the SAME round re-reports
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT); // note: current finding = same concern as the current envelope's
+    // invariant: The doc claims the concern was fixed — but the SAME round re-reports
     // it: the seeded target's ORIGINAL normalizes exactly to the current
     // finding (same path/bucket/title) under a DIFFERENT fingerprint (its
     // hint) — §7.4 forces unverifiable/conflict over recheck closure.
@@ -5461,8 +5461,8 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     const prepared = h.commenterCalls.find((c) => c.op === "post-prepared")!.args as { body: string };
     expect(prepared.body).toContain("unverifiable (conflict)");
-    expect(prepared.body).not.toContain("not yet resolved"); // nothing queued
-    // The row is truly assessed (the doc assessed it) but conservatively open.
+    expect(prepared.body).not.toContain("not yet resolved"); // note: nothing queued
+    // invariant: The row is truly assessed (the doc assessed it) but conservatively open.
     const rounds = db.raw.query("SELECT assessment_json FROM review_finding_rounds").all() as Array<{ assessment_json: string }>;
     expect(rounds).toHaveLength(1);
     const assessment = JSON.parse(rounds[0]!.assessment_json);
@@ -5470,7 +5470,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(assessment.reason).toBe("conflict");
     const findingRow = db.raw.query("SELECT state FROM review_findings").get() as { state: string };
     expect(findingRow.state).toBe("open");
-    // No discovery, no resolve.
+    // invariant: No discovery, no resolve.
     expect(h.commenterCalls.some((c) => c.op === "discover")).toBe(false);
     expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
   });
@@ -5478,7 +5478,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("an omitted selected row is accounted but never assessed: coverage omitted, last_assessed_ms untouched", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The recheck document is EMPTY — the selected target was omitted.
+    // invariant: The recheck document is EMPTY — the selected target was omitted.
     h.sandbox.recheckFileContent = JSON.stringify({ schema: "mstar.recheck/v1", headSha: SHA, results: [] });
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
@@ -5492,7 +5492,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(prepared.body).toContain("Reassessed 0/1 prior finding(s)");
     expect(prepared.body).toContain("1 omitted");
     expect(prepared.body).toContain("unverifiable (omitted)");
-    // Scheduling advanced (selected rows rotate) but the row was NOT assessed.
+    // invariant: Scheduling advanced (selected rows rotate) but the row was NOT assessed.
     const findingRow = db.raw.query("SELECT last_assessed_ms, last_scheduled_ms, state FROM review_findings").get() as {
       last_assessed_ms: number | null;
       last_scheduled_ms: number | null;
@@ -5501,7 +5501,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(findingRow.last_scheduled_ms).not.toBeNull();
     expect(findingRow.last_assessed_ms).toBeNull();
     expect(findingRow.state).toBe("open");
-    // No round-history row for a synthesized outcome (PM resolution: only
+    // invariant: No round-history row for a synthesized outcome (PM resolution: only
     // truly assessed targets advance last_assessed_ms / get history).
     const rounds = db.raw.query("SELECT COUNT(*) AS n FROM review_finding_rounds").get() as { n: number };
     expect(rounds.n).toBe(0);
@@ -5510,7 +5510,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("same-SHA issue-comment-triggered review with a pending journal row → hands off to recovery and acks (no recheck, no resolve, rows untouched)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A PREPARED publication for this exact scope+SHA (a crashed round).
+    // note: A PREPARED publication for this exact scope+SHA (a crashed round).
     db.raw
       .prepare(
         `INSERT INTO review_publications
@@ -5525,18 +5525,18 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The model work never started and nothing was published or resolved.
+    // invariant: The model work never started and nothing was published or resolved.
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--input"))).toBe(false);
     expect(h.commenterCalls.some((c) => c.op === "post-prepared")).toBe(false);
     expect(h.commenterCalls.some((c) => c.op === "resolve")).toBe(false);
     expect(reviewCount(db)).toBe(0);
     expect(h.kvPuts).toHaveLength(0);
-    // The ok path resolves silently (queue auto-ack) — nothing retried.
+    // invariant: The ok path resolves silently (queue auto-ack) — nothing retried.
     expect(h.messageRetryCalls).toHaveLength(0);
-    // The handoff returns before the usage insert: a journal hit is not a
+    // invariant: The handoff returns before the usage insert: a journal hit is not a
     // started execution and writes no ledger row.
     expect(usageRows(db)).toHaveLength(0);
-    // The journal row is untouched (pending recovery is never deleted).
+    // invariant: The journal row is untouched (pending recovery is never deleted).
     const pub = db.raw.query("SELECT phase, recovery_state FROM review_publications WHERE id = 'dddddddd-0000-4000-8000-000000000004'").get() as {
       phase: string;
       recovery_state: string;
@@ -5549,7 +5549,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("staging failure BEFORE any GitHub mutation → no publication, no KV, no reviews row; structured channel", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Break ONLY the journal INSERT (stagePublication) — everything before
+    // invariant: Break ONLY the journal INSERT (stagePublication) — everything before
     // it (journal reads) keeps working.
     const failingDb = {
       ...db,
@@ -5568,7 +5568,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("d1 down at staging");
 
-    // No GitHub MUTATION at all: the pre-staging plan read is read-only and
+    // invariant: No GitHub MUTATION at all: the pre-staging plan read is read-only and
     // may have run, but no prepared send, no line comments; no KV done; no
     // reviews row. The failure rides the AL-6 channel (review_failures +
     // rethrow).
@@ -5585,7 +5585,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("the honest unknown-publication window: send succeeded, proof write lost → no KV done, no local rows, phase stays sending", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Break ONLY the proof UPDATE (recordPublicationProof) — the send has
+    // invariant: Break ONLY the proof UPDATE (recordPublicationProof) — the send has
     // already happened when this runs.
     const failingDb = {
       ...db,
@@ -5602,9 +5602,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     } as typeof db;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: failingDb as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // acks — recovery owns the window
+    await consumer(h.makeBatch(makePayload())); // note: acks — recovery owns the window
 
-    // The publication is NOT claimed: no KV done, no reviews row, no
+    // invariant: The publication is NOT claimed: no KV done, no reviews row, no
     // lifecycle apply. The staged row stays sending/pending for M8
     // read-only discovery (never a blind second create).
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
@@ -5620,14 +5620,14 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(pub.proof_json).toBeNull();
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("proof could not be persisted"));
     expect(warn).toBeDefined();
-    expect(h.messageRetryCalls).toHaveLength(0); // acked — recovery owns the window
+    expect(h.messageRetryCalls).toHaveLength(0); // note: acked — recovery owns the window
   });
 
   test("recurrence reopen: a re-reported finding reopens its closed row with reopen_count+1 (§7.2)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
-    // A row CLOSED addressed in an earlier round whose finding_id is the
+    // note: A row CLOSED addressed in an earlier round whose finding_id is the
     // CURRENT finding's fingerprint — the current review re-reports it.
     const currentFingerprint = computeFindingFingerprint(VALID_OUTPUT.findings[0]!);
     db.raw
@@ -5651,7 +5651,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The seen-upsert reopened the row: state back to open, reopen_count 1.
+    // invariant: The seen-upsert reopened the row: state back to open, reopen_count 1.
     const row = db.raw
       .query("SELECT state, reopen_count, last_seen_sha FROM review_findings WHERE id = 'eeeeeeee-0000-4000-8000-000000000005'")
       .get() as { state: string; reopen_count: number; last_seen_sha: string };
@@ -5691,9 +5691,9 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     h.commenterState.resolveResult = { kind: "needs-recheck", reason: "head-changed" };
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    await consumer(h.makeBatch(makePayload())); // never throws out of the message
+    await consumer(h.makeBatch(makePayload())); // note: never throws out of the message
 
-    // The resolve attempt ran ONCE and was refused — the verified snapshot
+    // invariant: The resolve attempt ran ONCE and was refused — the verified snapshot
     // is durable (M8 can retry within the same fences), nothing resolved.
     expect(h.commenterCalls.filter((c) => c.op === "resolve")).toHaveLength(1);
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("returned needs-recheck (head-changed)"));
@@ -5703,7 +5703,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       verified_json: string | null;
     };
     expect(threadRow.verified_json).not.toBeNull();
-    expect(h.messageAckCalls).toHaveLength(0); // ok path — queue auto-ack, nothing retried
+    expect(h.messageAckCalls).toHaveLength(0); // note: ok path — queue auto-ack, nothing retried
   });
 
   test("marker ambiguity / foreign marker at discovery → the verified resolve stays queued, resolveFindingThread never called", async () => {
@@ -5790,13 +5790,13 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(h.commenterCalls.filter((c) => c.op === "resolve")).toHaveLength(1);
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("returned retry (api)"));
     expect(warn).toBeDefined();
-    expect(reviewCount(db)).toBe(1); // the review itself is unaffected
+    expect(reviewCount(db)).toBe(1); // note: the review itself is unaffected
   });
 
   test("the Check seam: ONE begin at admission before model work; ONE terminalize after the proof is durable; hook throws are isolated", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The operator-configured update budget must reach the lifecycle seam.
+    // invariant: The operator-configured update budget must reach the lifecycle seam.
     db.raw
       .prepare("INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?1, ?2, ?3)")
       .run("review.check.update_timeout_ms", "7000", new Date().toISOString());
@@ -5825,21 +5825,21 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
             outcome: input.outcome,
             updateBudgetMs: input.updateBudgetMs,
           });
-          throw new Error("hook boom"); // isolated — never breaks the pipeline
+          throw new Error("hook boom"); // note: isolated — never breaks the pipeline
         }),
       },
     });
 
     await consumer(h.makeBatch(makePayload()));
 
-    // begin: exactly once, at ADMISSION (before the container and the
+    // invariant: begin: exactly once, at ADMISSION (before the container and the
     // authoritative sha), with the row's numeric App id and the §7.9 window.
     expect(beginCalls).toHaveLength(1);
     const beginInput = beginCalls[0] as { githubAppId: number; headSha: string; triggeredBy: string; action: string; executionDeadlineMs: number };
     expect(beginInput.githubAppId).toBe(424242);
     expect(beginInput.headSha).toBe(SHA);
     expect(beginInput.triggeredBy).toBe("pull_request");
-    // §7.9: claim time + 900,000ms — the Queues per-invocation cap, not a
+    // invariant: §7.9: claim time + 900,000ms — the Queues per-invocation cap, not a
     // tunable (a wider window would only delay recovery).
     const claimedWindowMs = beginInput.executionDeadlineMs - Date.now();
     expect(claimedWindowMs).toBeGreaterThan(895_000);
@@ -5851,13 +5851,13 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
     expect(shaIdx).toBeGreaterThan(-1);
     expect(runnerIdx).toBeGreaterThan(shaIdx);
 
-    // terminalize: exactly ONCE on the success path, with the publication id
+    // invariant: terminalize: exactly ONCE on the success path, with the publication id
     // (the hook reads the persisted proof; the outcome is the honest
     // fallback). Its throw was a warn, and the publication still landed.
     expect(terminalizeCalls).toHaveLength(1);
     expect(terminalizeCalls[0]!.outcome).toBe("publication-unknown");
     expect(terminalizeCalls[0]!.publicationId).toBeTruthy();
-    // Read once per message from `review_runtime_settings`, not a constant.
+    // invariant: Read once per message from `review_runtime_settings`, not a constant.
     expect(terminalizeCalls[0]!.updateBudgetMs).toBe(7_000);
     const pub = db.raw.query("SELECT phase, proof_json FROM review_publications").get() as { phase: string; proof_json: string | null };
     expect(pub.phase).toBe("applied");
@@ -5870,10 +5870,10 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   test("check terminalize: the invocation context receives the promise, and an overrun is left to it with ONE warn", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A small configured budget: the case is the overrun hand-off, not the
+    // note: A small configured budget: the case is the overrun hand-off, not the
     // default 10 s wait, so the file does not burn it on a real clock.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
-    // The hook parks past the terminalize budget: the consumer must hand the
+    // invariant: The hook parks past the terminalize budget: the consumer must hand the
     // promise to the invocation context, warn once, and return anyway.
     const parked = Promise.withResolvers<void>();
     const handed: Array<Promise<unknown>> = [];
@@ -5902,19 +5902,19 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       },
     );
 
-    // Returns on the budget, not on the hook: an overrun never blocks the review.
+    // invariant: Returns on the budget, not on the hook: an overrun never blocks the review.
     await consumer(h.makeBatch(makePayload()));
 
     expect(handed).toHaveLength(1);
     const overruns = h.logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
     expect(overruns).toHaveLength(1);
     expect(overruns[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
-    expect(reviewCount(db)).toBe(1); // the publication still landed
+    expect(reviewCount(db)).toBe(1); // note: the publication still landed
 
-    // A rejection landing after the budget has no inline waiter left: the
+    // invariant: A rejection landing after the budget has no inline waiter left: the
     // hand-off reports it as one warn and keeps the promise non-throwing.
     parked.reject(new Error("detached boom"));
-    await handed[0]; // settles through the context, never unhandled
+    await handed[0]; // invariant: settles through the context, never unhandled
     const detached = h.logLines.filter((l) => l.level === "warn" && l.msg.includes("failed after its budget (detached)"));
     expect(detached).toHaveLength(1);
     expect(detached[0]!.fields).toMatchObject({ attempt_id: "attempt-1" });
@@ -5938,7 +5938,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
             headSha: SHA,
             lease: { holder: "h", epoch: 1, untilMs: 1 },
           })),
-          // Slower than CHECK_HOOK_TIMEOUT_MS, well inside the terminalize
+          // note: Slower than CHECK_HOOK_TIMEOUT_MS, well inside the terminalize
           // budget: the old 2 s bound abandoned it, so nothing was recorded.
           // Real timers on purpose — the case is the consumer's own budget
           // race (a fake clock cannot drive withHookTimeout's setTimeout
@@ -5961,7 +5961,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
   }, 10_000);
 
   test("check terminalize: the configured budget bounds the consumer's wait", async () => {
-    // Two DIFFERENT configured budgets, each measured against its own window:
+    // note: Two DIFFERENT configured budgets, each measured against its own window:
     // a hard-coded constant (or the 10 s default) lands outside BOTH, so the
     // pair discriminates "reads the setting" from "happens to be about 1 s".
     for (const configured of [1_000, 1_600]) {
@@ -5970,7 +5970,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
       const db = await createSeededTestD1();
       seedCheckBudget(db, "review.check.terminalize_timeout_ms", String(configured));
-      // The writer's relation must hold on a pair the reader trusts: the send
+      // invariant: The writer's relation must hold on a pair the reader trusts: the send
       // budget stays below every configured wait.
       seedCheckBudget(db, "review.check.update_timeout_ms", "500");
       const handed: Array<Promise<unknown>> = [];
@@ -5987,7 +5987,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
               headSha: SHA,
               lease: { holder: "h", epoch: 1, untilMs: 1 },
             })),
-            // Parks forever: only the configured budget can end the wait.
+            // invariant: Parks forever: only the configured budget can end the wait.
             terminalize: mock(async () => {
               await Promise.withResolvers<void>().promise;
             }),
@@ -6005,12 +6005,12 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
       expect(handed).toHaveLength(1);
       const overruns = h.logLines.filter((l) => l.level === "warn" && l.msg.includes("exceeded its budget"));
       expect(overruns).toHaveLength(1);
-      expect(reviewCount(db)).toBe(1); // the publication still landed
+      expect(reviewCount(db)).toBe(1); // note: the publication still landed
     }
   }, 20_000);
 
   test("catch-path Check classification: send-throw → publication-unknown with the id; claim-fail → pre-publication-failure", async () => {
-    // (a) A throw AT the prepared send is post-attempt uncertainty: the hook
+    // note: (a) A throw AT the prepared send is post-attempt uncertainty: the hook
     // is terminalized WITH the publication id so its proof read decides.
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.commenterState.preparedReviewError = new Error("socket hangup after send");
@@ -6036,7 +6036,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 
     expect(terminalizeCalls).toEqual([{ publicationId: expect.any(String), outcome: "publication-unknown" }]);
 
-    // (b) A throw BEFORE any send (epoch-fenced claim refused) is a clean
+    // invariant: (b) A throw BEFORE any send (epoch-fenced claim refused) is a clean
     // pre-publication failure: terminalized with a null publication id.
     h = createConsumerHarness();
     freshChecks();
@@ -6079,8 +6079,7 @@ describe("finding recheck & closure (§7.7/§7.4/§7.10)", () => {
 });
 
 describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-020)", () => {
-  /**
-   * Seed `count` open lifecycle rows, each with its own pending association,
+  /** note: Seed `count` open lifecycle rows, each with its own pending association,
    * so the round produces more eligible resolutions than the inline lane may
    * start. Distinct `created_ms` values keep the §7.2 selection order (and
    * therefore which entry goes unvisited) deterministic.
@@ -6129,7 +6128,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     return seeded;
   }
 
-  /** Complete thread snapshots for `seeded` — the §7.4 fence for auto-resolution. */
+  /** note: Complete thread snapshots for `seeded` — the §7.4 fence for auto-resolution. */
   function discussionFor(seeded: Array<{ rowId: string; assocId: string }>) {
     return {
       items: [],
@@ -6151,7 +6150,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     };
   }
 
-  /** An `addressed` recheck result for every seeded row (all eligible to resolve). */
+  /** note: An `addressed` recheck result for every seeded row (all eligible to resolve). */
   function recheckDocFor(seeded: Array<{ rowId: string }>): string {
     return JSON.stringify({
       schema: "mstar.recheck/v1",
@@ -6187,7 +6186,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
   test("admission exhaustion leaves the unvisited row durably pending with zero attempts and no resolve", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // One more eligible association than the inline lane may start.
+    // note: One more eligible association than the inline lane may start.
     const count = INLINE_RESOLVE_MAX_ENTRIES + 1;
     const db = await createSeededTestD1();
     await seedPriorPublication(db);
@@ -6198,7 +6197,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The lane really ran: every admitted entry reached discovery then resolve,
+    // note: The lane really ran: every admitted entry reached discovery then resolve,
     // so this is a bound being exercised — not a vacuous pass.
     // The shared double records raw `args: unknown`; the consumer always
     // passes the §7.5 shapes, so these two named casts are the boundary.
@@ -6215,13 +6214,13 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     expect(discovered).toEqual(seeded.slice(0, INLINE_RESOLVE_MAX_ENTRIES).map((s) => s.assocId));
     expect(resolved).toEqual(discovered);
 
-    // The entry the lane declined to start is the ONLY observable difference:
+    // invariant: The entry the lane declined to start is the ONLY observable difference:
     // it never reached discovery or the mutation...
     const unvisited = seeded[count - 1]!;
     expect(discovered).not.toContain(unvisited.assocId);
     expect(resolved).not.toContain(unvisited.assocId);
 
-    // ...and its durable row is exactly what M8 selects: still pending, the
+    // invariant: ...and its durable row is exactly what M8 selects: still pending, the
     // verified snapshot retained, zero attempts and no lease from this lane.
     expect(threadRowOf(db, unvisited.assocId)).toMatchObject({
       resolution_state: "pending",
@@ -6230,7 +6229,7 @@ describe("inline resolution admission bound (spec §7.11.1, P67-QC-017 / P67-QC-
     });
     expect(threadRowOf(db, unvisited.assocId).verified_json).not.toBeNull();
 
-    // The operator-visible reason names the bound and the deferred work.
+    // note: The operator-visible reason names the bound and the deferred work.
     expect(
       h.logLines.some((l) => l.msg.includes("inline resolution admission exhausted") && l.msg.includes(unvisited.assocId)),
     ).toBe(true);
@@ -6241,8 +6240,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
   const SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
   const TARGETS = [{ rowId: TARGET_ROW_ID } as RecheckTarget];
 
-  /**
-   * One association row for the seeded target. The row id IS the association
+  /** note: One association row for the seeded target. The row id IS the association
    * id, so a discovery call can be attributed to exactly one row.
    */
   function seedThread(
@@ -6352,7 +6350,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
         .filter((c) => c.op === "discover")
         .map((c) => (c.args as { intent: { associationId: string } }).intent.associationId);
 
-    // Round one spends its whole budget on the oldest rows and binds none.
+    // note: Round one spends its whole budget on the oldest rows and binds none.
     h.commenterState.discoverResult = { kind: "unknown" };
     const first = await bindUnboundThreads(deps, SCOPE, TARGETS);
     expect(first).toEqual({ bound: 0, skipped: BIND_UNBOUND_THREADS_MAX_ENTRIES });
@@ -6360,7 +6358,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
       Array.from({ length: BIND_UNBOUND_THREADS_MAX_ENTRIES }, (_, i) => `rot-assoc-${i}`),
     );
 
-    // Round two must reach the two rows round one could not: the failed head
+    // invariant: Round two must reach the two rows round one could not: the failed head
     // rotated behind them instead of pinning the selection.
     h.commenterState.discoverResult = { kind: "found", reviewId: 9, commentId: 8, threadId: "PRRT_late" };
     const second = await bindUnboundThreads(deps, SCOPE, TARGETS);
@@ -6377,7 +6375,7 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
     await seedPriorPublication(db);
     await seedOpenTarget(db);
     await seedAssociation(db, null);
-    // Doubles that honour the production contract the fix depends on:
+    // note: Doubles that honour the production contract the fix depends on:
     // discovery PERSISTS the ids (as discoverThreadWithDeps does) and the
     // capture answers ONLY the threads it was asked for. A broken
     // bind -> DB -> capture bridge therefore fails this case, instead of being
@@ -6425,10 +6423,10 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
 
     await consumer(h.makeBatch(makePayload()));
 
-    // 1. The capture was asked for the thread this round bound (the binding
+    // note: 1. The capture was asked for the thread this round bound (the binding
     //    reached the DB before the capture query).
     expect(capturedThreads).toContainEqual({ associationId: ASSOC_ID, threadId: boundThreadId });
-    // 2. That captured thread reached the model-visible recheck input.
+    // note: 2. That captured thread reached the model-visible recheck input.
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as {
       recheck?: { discussion: { threads: { associationId: string; threadId: string }[] } };
     };
@@ -6438,12 +6436,12 @@ describe("bind unbound review threads before the discussion capture (§7.5/§7.8
         threadId: thread.threadId,
       })),
     ).toContainEqual({ associationId: ASSOC_ID, threadId: boundThreadId });
-    // 3. The resolution gate admitted it durably...
+    // note: 3. The resolution gate admitted it durably...
     const threadRow = db.raw
       .query("SELECT verified_json FROM review_threads WHERE id = ?")
       .get(ASSOC_ID) as { verified_json: string | null };
     expect(JSON.parse(threadRow.verified_json!).snapshot.threadId).toBe(boundThreadId);
-    // ...and the resolve ran for exactly that association.
+    // invariant: ...and the resolve ran for exactly that association.
     expect(
       h.commenterCalls.filter((c) => c.op === "resolve").map((c) => (c.args as { associationId: string }).associationId),
     ).toEqual([ASSOC_ID]);
@@ -6454,7 +6452,7 @@ describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)
   test("a prepared review refusal marks the journal failed, not unknown, and terminalizes pre-publication-failure", async () => {
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The send refuses BEFORE any request leaves the Worker (a foreign marker
+    // safety: The send refuses BEFORE any request leaves the Worker (a foreign marker
     // appeared after the plan / the target lost its expected previous version).
     h.commenterState.preparedReviewReject = true;
     const db = await createSeededTestD1();
@@ -6474,17 +6472,17 @@ describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)
     const row = db.raw
       .query(`SELECT phase, payload_json, proof_json, attempts FROM review_publications`)
       .get() as { phase: string; payload_json: string; proof_json: string | null; attempts: number };
-    // Not published, and durably recorded as NOT sent.
+    // note: Not published, and durably recorded as NOT sent.
     expect(row.phase).toBe("failed");
     expect(row.proof_json).toBeNull();
-    // The complete payload survives for operator inspection.
+    // invariant: The complete payload survives for operator inspection.
     expect(JSON.parse(row.payload_json).body).toContain("mstar-inspector:publication:v1");
-    // The Check conclusion is the honest pre-publication failure, not unknown.
+    // note: The Check conclusion is the honest pre-publication failure, not unknown.
     expect(terminalized).toHaveLength(1);
     expect(terminalized[0]!.outcome).toBe("pre-publication-failure");
     expect(terminalized[0]!.publicationId).toBeNull();
 
-    // No KV done: the message acked on the honest failure path only.
+    // invariant: No KV done: the message acked on the honest failure path only.
     expect(h.kvPuts).toHaveLength(0);
   });
 
@@ -6507,7 +6505,7 @@ describe("definitive pre-send rejection in the consumer (spec §7.7, P67-QC-010)
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("socket hangup after send");
 
     const row = db.raw.query(`SELECT phase FROM review_publications`).get() as { phase: string };
-    expect(row.phase).toBe("sending"); // read-only discovery owns it
+    expect(row.phase).toBe("sending"); // invariant: read-only discovery owns it
     expect(terminalized).toHaveLength(1);
     expect(terminalized[0]!.outcome).toBe("publication-unknown");
     expect(terminalized[0]!.publicationId).not.toBeNull();
@@ -6518,7 +6516,7 @@ describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)",
   test("a degraded staging conflict refuses to send under the existing identity", async () => {
     h.sandbox.runnerStdout = "not valid json at all";
     const db = await createSeededTestD1();
-    // Pre-seed a TERMINAL degraded row for the SAME (scope, sha, kind) under
+    // note: Pre-seed a TERMINAL degraded row for the SAME (scope, sha, kind) under
     // another id. It is terminal, so the earlier journal handoff does not ack
     // the message, but stagePublication still conflicts on the unique
     // (scope, sha, kind) key and returns the existing row — the consumer must
@@ -6535,9 +6533,9 @@ describe("degraded publication journal conflict guard (spec §7.7, P67-QC-012)",
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The degraded send was never attempted under the existing identity.
+    // invariant: The degraded send was never attempted under the existing identity.
     expect(h.commenterCalls.some((c) => c.op === "post-prepared-degraded")).toBe(false);
-    // The pre-existing payload is untouched (immutable payload wins).
+    // invariant: The pre-existing payload is untouched (immutable payload wins).
     const row = db.raw.query(`SELECT payload_json FROM review_publications WHERE id = 'existing-deg'`).get() as { payload_json: string };
     expect(JSON.parse(row.payload_json).body).toBe("existing immutable payload");
     const warn = h.logLines.find((l) => l.msg.includes("journal conflict"));
@@ -6550,7 +6548,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
     h.sandbox.diffStdout = VALID_DIFF;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A prior degraded send whose proof was lost: its body is the ONLY
+    // invariant: A prior degraded send whose proof was lost: its body is the ONLY
     // recovery evidence for a possibly-landed publication.
     db.raw
       .prepare(
@@ -6564,7 +6562,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Cleanup was SKIPPED: deleting the comment would destroy that evidence.
+    // why: Cleanup was SKIPPED: deleting the comment would destroy that evidence.
     expect(h.commenterCalls.some((c) => c.op === "delete-degraded")).toBe(false);
     const warn = h.logLines.find((l) => l.msg.includes("cleanup skipped"));
     expect(warn).toBeDefined();
@@ -6590,7 +6588,7 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Check lifecycle binding (spec §7.10 seam + §7.9 semantics) — the
 // PRODUCTION `createCheckLifecycle` driven through the real consumer over the
 // bun:sqlite registry double, with the GitHub Checks surface scripted.
@@ -6600,15 +6598,14 @@ describe("degraded cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () =>
 // LIVE-VERIFIED: no GitHub request is made or claimed (spec §7.13).
 // ---------------------------------------------------------------------------
 
-/** The numeric GitHub App id of the seeded `consumer-test-app` row. */
+/** note: The numeric GitHub App id of the seeded `consumer-test-app` row. */
 const TEST_GITHUB_APP_ID = 424242;
-/** A second authoritative head SHA (the superseded-SHA case). */
+/** note: A second authoritative head SHA (the superseded-SHA case). */
 const SHA2 = "89abcdef89abcdef89abcdef89abcdef89abcdef";
-/** The scope every Check-lifecycle test drives (matches the seeded App row). */
+/** note: The scope every Check-lifecycle test drives (matches the seeded App row). */
 const CHECK_SCOPE = { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
 
-/**
- * A review that satisfies the migration-default gate (`ship it`, floor 80) —
+/** note: A review that satisfies the migration-default gate (`ship it`, floor 80) —
  * the Check success path. `VALID_OUTPUT` (`needs fixes`, no tally) exercises
  * the missed/unreadable gate instead.
  */
@@ -6626,33 +6623,31 @@ const GATED_OUTPUT = {
 type ChecksRequest = {
   op: "create" | "update" | "get" | "list";
   params: Record<string, unknown>;
-  /** Sandbox commands already executed when this request was issued (call order). */
+  /** note: Sandbox commands already executed when this request was issued (call order). */
   sandboxCalls: number;
-  /** Commenter ops already recorded when this request was issued (call order). */
+  /** note: Commenter ops already recorded when this request was issued (call order). */
   commenterCalls: number;
 };
 
 const FIRST_CHECK_RUN_ID = 8000;
 const checkRequests: ChecksRequest[] = [];
-/** The runs the scripted GitHub "created", by id — update/get answer from here. */
+/** note: The runs the scripted GitHub "created", by id — update/get answer from here. */
 const checkRuns = new Map<number, CheckRunPayload>();
 let checkRequestOverrides: {
   create?: (params: ChecksCreateParams) => CheckRunPayload;
-  /** A promise is a SLOW request (never answered inside the consumer's budget). */
+  /** invariant: A promise is a SLOW request (never answered inside the consumer's budget). */
   update?: (params: ChecksRelabelParams) => CheckRunPayload | Promise<CheckRunPayload>;
 } = {};
 let checkRunSeq = FIRST_CHECK_RUN_ID;
-/**
- * The clock the Check cases drive — shared by the lifecycle and the adapter, so
+/** note: The clock the Check cases drive — shared by the lifecycle and the adapter, so
  * advancing it simulates the attempt's execution window closing while an
  * asynchronous read is in flight.
  */
 const checkState = { clockMs: 1_700_000_000_000 };
-/** The clock a test drives for the checks adapter (production uses Date.now). */
+/** note: The clock a test drives for the checks adapter (production uses Date.now). */
 const checkClock = (): number => checkState.clockMs;
 
-/**
- * The scripted Checks surface. Every request is recorded together with the
+/** note: The scripted Checks surface. Every request is recorded together with the
  * sandbox/commenter progress at issue time, so call order is observable, and
  * answered the way GitHub answers: the create mints a run for the sent
  * external id, the update echoes that run as completed with the sent
@@ -6675,7 +6670,7 @@ function scriptedChecks(): ChecksOctokit {
             name: params.name,
             head_sha: params.head_sha,
             external_id: params.external_id,
-            // The adapter creates `queued`; the promotion moves it later.
+            // note: The adapter creates `queued`; the promotion moves it later.
             status: params.status,
             conclusion: null,
             app: { id: TEST_GITHUB_APP_ID },
@@ -6689,7 +6684,7 @@ function scriptedChecks(): ChecksOctokit {
           if (respond !== undefined) return { data: await respond(params) };
           const run = checkRuns.get(params.check_run_id);
           if (run === undefined) throw Object.assign(new Error(`no scripted run ${params.check_run_id}`), { status: 404 });
-          // A request WITHOUT status/conclusion is the held-check relabel: it
+          // note: A request WITHOUT status/conclusion is the held-check relabel: it
           // moves the text only, so the run must stay exactly as it was —
           // writing `completed` with a null conclusion would fabricate a state
           // the API never produces. A `queued` → `in_progress` promotion moves
@@ -6718,12 +6713,12 @@ function scriptedChecks(): ChecksOctokit {
   };
 }
 
-/** The real registry plus the scripted transport, as the consumer's per-App adapter. */
+/** note: The real registry plus the scripted transport, as the consumer's per-App adapter. */
 function checksAdapterFor(db: TestD1, nowMs: () => number = () => Date.now()): ChecksAdapter {
   return createChecksAdapter({ db, nowMs, getOctokit: async () => scriptedChecks() });
 }
 
-/** The fake commenter carrying a real Checks adapter — the production route. */
+/** note: The fake commenter carrying a real Checks adapter — the production route. */
 function commenterWithChecks(adapter: ChecksAdapter): ReviewCommenter {
   return { ...h.fakeCommenter, checks: adapter };
 }
@@ -6750,7 +6745,7 @@ type CheckRowShape = {
   terminal_ms: number | null;
   terminalize_outcome: string | null;
   terminalize_elapsed_ms: number | null;
-  /** The claim's own origin — the `nowMs` the insert was stamped with. */
+  /** note: The claim's own origin — the `nowMs` the insert was stamped with. */
   created_ms: number;
   execution_deadline_ms: number;
   updated_ms: number;
@@ -6764,8 +6759,7 @@ function checkRowFor(db: TestD1, sha: string): CheckRowShape {
   return db.raw.query("SELECT * FROM review_checks WHERE head_sha = ?").get(sha) as unknown as CheckRowShape;
 }
 
-/**
- * TEST-ONLY row retrieval for multi-message cases: every message resolves the
+/** note: TEST-ONLY row retrieval for multi-message cases: every message resolves the
  * SAME checkout SHA (the consumer keys Checks off the authoritative checkout,
  * not the payload), so a fixture that runs two messages must fetch the
  * resulting row by PR. This is pure test-side reading — production state is
@@ -6785,8 +6779,7 @@ function publicationRow(db: TestD1): { id: string; kind: string; phase: string; 
   };
 }
 
-/**
- * The Check gate of the bot's target — the read the production Check lane
+/** note: The Check gate of the bot's target — the read the production Check lane
  * makes (the scope names the bot, not the target). These fixtures give a bot
  * exactly one live target, so the bot's single row is the gate.
  */
@@ -6799,7 +6792,7 @@ async function targetGate(db: TestD1, appId: string) {
   return target === null ? null : checkGateOf(await readEffectiveTargetSettings(db, target));
 }
 
-/** One production lifecycle over the registry double with the scripted transport. */
+/** note: One production lifecycle over the registry double with the scripted transport. */
 function lifecycleFor(db: TestD1, nowMs: () => number = () => Date.now()) {
   const adapter = checksAdapterFor(db, nowMs);
   return createCheckLifecycle({
@@ -6833,7 +6826,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Exactly one create, ONE promotion (queued → in_progress when the review
+    // invariant: Exactly one create, ONE promotion (queued → in_progress when the review
     // starts) and one terminal update — nothing else.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const create = checkRequests[0]!.params as unknown as ChecksCreateParams;
@@ -6859,7 +6852,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(update.output.summary).toContain("score 85");
     expect(update.output.summary).toContain(`floor ${GATE.minScore}`);
 
-    // Order (spec §7.9): the claim lands at ADMISSION — before the container
+    // invariant: Order (spec §7.9): the claim lands at ADMISSION — before the container
     // runs a single command and long before the authoritative SHA — while the
     // terminal update still lands after the publication was posted.
     const revParseIdx = h.sandbox.calls.findIndex((c) => c.cmd.includes("rev-parse"));
@@ -6868,14 +6861,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(revParseIdx).toBeGreaterThan(-1);
     expect(runnerIdx).toBeGreaterThan(revParseIdx);
     expect(checkRequests[0]!.sandboxCalls).toBe(0);
-    // The promotion is part of the claim step too: it lands before the
+    // invariant: The promotion is part of the claim step too: it lands before the
     // container, and the terminal send still waits for the publication.
     expect(checkRequests[1]!.sandboxCalls).toBe(0);
     expect(checkRequests[2]!.sandboxCalls).toBeGreaterThan(runnerIdx);
     expect(postIdx).toBeGreaterThan(-1);
     expect(checkRequests[2]!.commenterCalls).toBeGreaterThan(postIdx);
 
-    // Durable row: the run is OUR attached run, the intent was frozen BEFORE
+    // invariant: Durable row: the run is OUR attached run, the intent was frozen BEFORE
     // the update, the observation came from the validated response, and the
     // proof link names the journal row that was actually published.
     const pub = publicationRow(db);
@@ -6898,7 +6891,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an inheriting target's gate is the workspace floor, not its inert row placeholder", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The row answers nothing while it inherits (migration 0067): its floor is
+    // invariant: The row answers nothing while it inherits (migration 0067): its floor is
     // a 95 placeholder the workspace default (unset → 60) never reads. Judging
     // the 85-point review against the placeholder would fail a Check the target
     // actually passes.
@@ -6950,7 +6943,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       title: CHECK_NAME,
       summary: `Review started for ${SHA.slice(0, 7)} — this run reports the review of this commit.`,
     });
-    // The status is truthful while the review works, not only when it ends.
+    // invariant: The status is truthful while the review works, not only when it ends.
     expect(promotion.sandboxCalls).toBe(0);
     expect(checkRowFor(db, SHA).observed).toBe("success");
   });
@@ -6974,7 +6967,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.logLines.filter((line) => line.fields.event === "check_in_progress_failed")).toHaveLength(1);
-    // The handle still returned, so the run still terminalized from proof.
+    // why: The handle still returned, so the run still terminalized from proof.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     expect(checkRowFor(db, SHA).observed).toBe("success");
     expect(publicationRow(db).phase).toBe("applied");
@@ -6983,12 +6976,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an abandoned promotion sends NO terminal update and hands the run to recovery", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The smallest legal update budget: the hung PATCH is ended by the bound
+    // note: The smallest legal update budget: the hung PATCH is ended by the bound
     // the adapter and the consumer's wait BOTH share.
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
     const hungPromotion = Promise.withResolvers<CheckRunPayload>();
     checkRequestOverrides.update = (params) => {
-      // Only the promotion (a status send with no conclusion) hangs — it stays
+      // invariant: Only the promotion (a status send with no conclusion) hangs — it stays
       // on the wire, which is exactly why this invocation must not close the
       // run behind it.
       if ("status" in params && !("conclusion" in params)) return hungPromotion.promise;
@@ -7001,7 +6994,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       return updated;
     };
     const adapter = checksAdapterFor(db);
-    // The lifecycle runs on the FIXTURE's clock, so the scheduled recovery
+    // why: The lifecycle runs on the FIXTURE's clock, so the scheduled recovery
     // instant is exact arithmetic rather than wall-clock measurement.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
@@ -7011,13 +7004,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // One hung PATCH, one line: the adapter names the real cause and the
+    // note: One hung PATCH, one line: the adapter names the real cause and the
     // consumer's own wait staying silent is what keeps this from doubling.
     const warns = h.logLines.filter((line) => line.fields.event === "check_in_progress_failed");
     expect(warns).toHaveLength(1);
     expect(warns[0]!.msg).toContain("exceeded 1000ms");
 
-    // NO terminal update from this invocation: only the create and the
+    // invariant: NO terminal update from this invocation: only the create and the
     // abandoned promotion were sent.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const released = checkRowFor(db, SHA);
@@ -7025,24 +7018,24 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.lease_until_ms).toBeNull();
     expect(released.recovery_state).toBe("remote-unconfirmed");
     expect(released.terminal_ms).toBeNull();
-    // The give-up fallback is frozen the way the budget-exceeded terminalize
+    // note: The give-up fallback is frozen the way the budget-exceeded terminalize
     // leaves it; the cron corrects it from publication proof below.
     expect(released.desired).toBe("failure");
     expect(released.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
-    // This exit records the honest handoff outcome (no send ever happened),
+    // note: This exit records the honest handoff outcome (no send ever happened),
     // with NO elapsed time: the hook never ran, and a few milliseconds would
     // read as a fast success.
     expect(released.terminalize_outcome).toBe("handed-off");
     expect(released.terminalize_elapsed_ms).toBeNull();
-    // The first recovery attempt is scheduled past the abandoned request's
+    // note: The first recovery attempt is scheduled past the abandoned request's
     // possible lifetime, not at the shared rung: max(60_000, 2 × 1000 + 60_000)
     // — pinned against the clock the fixture controls.
     expect(released.next_attempt_ms).toBe(checkState.clockMs + 62_000);
-    // The review itself is untouched.
+    // invariant: The review itself is untouched.
     expect(publicationRow(db).phase).toBe("applied");
 
-    // The recovery lane owns the conclusion, minutes later: it reads the proof
+    // note: The recovery lane owns the conclusion, minutes later: it reads the proof
     // this attempt's publication persisted and completes the run with it.
     seedAppInstallation(db);
     const dueAt = released.next_attempt_ms!;
@@ -7075,7 +7068,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // The duplicate here is the CONCURRENT one: the head's gate-PASSING
+      // note: The duplicate here is the CONCURRENT one: the head's gate-PASSING
       // review lands after this delivery's pre-claim read (the early ack
       // misses, so the claim exists) and before its own dedup read. The
       // admitted run owes that review's result — the give-up fallback must
@@ -7101,10 +7094,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The abandoned promotion sends nothing terminally (the cron owns it)...
+    // invariant: The abandoned promotion sends nothing terminally (the cron owns it)...
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const row = checkRowFor(db, SHA);
-    // ...and what it hands over is the INHERITED result, never `failure`.
+    // invariant: ...and what it hands over is the INHERITED result, never `failure`.
     expect(row.desired).toBe("success");
     expect(row.desired_summary).toBe(
       `No new changes since the reviewed head ${SHA.slice(0, 7)}; its own gate result is inherited: verdict "ship it", score 85 (floor ${GATE.minScore}; allowed: ship it).`,
@@ -7113,7 +7106,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.holder).toBeNull();
     expect(row.terminal_ms).toBeNull();
 
-    // The recovery lane sends that frozen conclusion once the attempt is due.
+    // note: The recovery lane sends that frozen conclusion once the attempt is due.
     seedAppInstallation(db);
     const dueAt = row.execution_deadline_ms + 1;
     const pass = await reconcileReviewChecks({ DB: db as never } as never, {
@@ -7137,9 +7130,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
 
     await consumer(h.makeBatch(makePayload()));
-    await consumer(h.makeBatch(makePayload())); // the same message delivered twice
+    await consumer(h.makeBatch(makePayload())); // note: the same message delivered twice
 
-    // The second delivery is acked by the idempotency check BEFORE step 4, so
+    // invariant: The second delivery is acked by the idempotency check BEFORE step 4, so
     // it never reaches the Check lane: one attempt, one run (with its one
     // promotion), one publication.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
@@ -7155,7 +7148,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check budgets: an untrusted terminalize value degrades to the documented defaults with ONE warn, and the review still lands", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // A PRESENT value the reader cannot trust: BOTH budgets answer their
+    // note: A PRESENT value the reader cannot trust: BOTH budgets answer their
     // documented defaults, announced exactly once on the consumer's channel.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "not-a-number");
     const adapter = checksAdapterFor(db);
@@ -7172,7 +7165,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       terminalize_ms: CHECK_TERMINALIZE_DEFAULT,
       update_ms: CHECK_UPDATE_DEFAULT,
     });
-    // Degradation is a warn, never a behaviour change: the review publishes and
+    // invariant: Degradation is a warn, never a behaviour change: the review publishes and
     // its Check still concludes from the proof under the defaults.
     expect(publicationRow(db).phase).toBe("applied");
     expect(reviewCount(db)).toBe(1);
@@ -7184,7 +7177,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a same-SHA mention journal handoff claims no attempt and runs no Check", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A PREPARED publication for this exact scope+SHA (a crashed round).
+    // note: A PREPARED publication for this exact scope+SHA (a crashed round).
     db.raw
       .prepare(
         `INSERT INTO review_publications
@@ -7224,7 +7217,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The guard returns before the Check step: a delayed retry, zero Checks.
+    // invariant: The guard returns before the Check step: a delayed retry, zero Checks.
     expect(h.messageRetryCalls).toHaveLength(1);
     expect(checkRequests).toHaveLength(0);
     expect(checkRows(db)).toHaveLength(0);
@@ -7253,7 +7246,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run(TEST_APP_ID);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // Unknown configuration is the failure channel (retry → DLQ), not the
+    // note: Unknown configuration is the failure channel (retry → DLQ), not the
     // operator default: the job never runs with one row's credential and
     // another row's — or no — gate.
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
@@ -7267,7 +7260,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const payload = makePayload();
-    // The delivery path already attached this message's run, and the App is
+    // note: The delivery path already attached this message's run, and the App is
     // paused before the consumer runs: the consumer ACKs without a review, so
     // the attached run must be settled neutral instead of waiting out the
     // attach window and closing red (RL-10).
@@ -7285,13 +7278,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
-        // The delivery identity the attach records on its row; it rides the
+        // note: The delivery identity the attach records on its row; it rides the
         // message so a skip can settle exactly this delivery's run.
         deliveryId: "consumer-test-delivery",
       },
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
-    // The delivery identity travels on the message: it is what lets the skip
+    // note: The delivery identity travels on the message: it is what lets the skip
     // settlement tell THIS delivery's row from another's (§7.9).
     payload.attachDeliveryId = attached.deliveryId;
     db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
@@ -7303,7 +7296,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(payload));
 
     expect(h.messageAckCalls).toHaveLength(1);
-    // The paused gate makes ZERO credential/GitHub calls (architect lock L4),
+    // safety: The paused gate makes ZERO credential/GitHub calls (architect lock L4),
     // so the settlement here is STORE-ONLY: the neutral intent is frozen and
     // the lease given back, and the minute reconciler sends the one update.
     const row = checkRowFor(db, SHA);
@@ -7316,7 +7309,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
-  /** Attach one run for the default payload and arm the guard. */
+  /** note: Attach one run for the default payload and arm the guard. */
   async function guardHeldWithAttachedRun(
     db: TestD1,
     adapter: ChecksAdapter,
@@ -7337,7 +7330,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
-        // The delivery identity the attach records on its row; it rides the
+        // note: The delivery identity the attach records on its row; it rides the
         // message so a skip can settle exactly this delivery's run.
         deliveryId: "consumer-test-delivery",
       },
@@ -7353,7 +7346,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const adapter = checksAdapterFor(db);
     const payload = makePayload();
     const attached = await guardHeldWithAttachedRun(db, adapter, payload);
-    // The delivery identity the attach recorded on the row: the queue message
+    // note: The delivery identity the attach recorded on the row: the queue message
     // carries it, and both the relabel and a settlement key on it so a duplicate
     // delivery can never touch this row.
     payload.attachDeliveryId = attached.deliveryId;
@@ -7362,7 +7355,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    // Refusals 1-3 are RETRIED: they settle nothing. A duplicate delivery
+    // invariant: Refusals 1-3 are RETRIED: they settle nothing. A duplicate delivery
     // shares this attempt_key, so a settlement here could close the live
     // review's own run — a premature `neutral` pass.
     for (const attempts of [1, 2, 3]) {
@@ -7374,7 +7367,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(row.terminal_ms).toBeNull();
     }
     expect(h.messageRetryCalls).toHaveLength(3);
-    // One PATCH per retried refusal, and it only says WHY the run is waiting:
+    // invariant: One PATCH per retried refusal, and it only says WHY the run is waiting:
     // no status, no conclusion, so no run was settled (a settlement here could
     // close the live review's own run — a premature `neutral` pass).
     const updates = checkRequests.filter((request) => request.op === "update");
@@ -7386,11 +7379,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(params.output).toMatchObject({ title: CHECK_NAME });
       expect((params.output as { summary: string }).summary).toContain("Queued");
     }
-    // …and the RUN the double holds is still non-terminal. A text-only PATCH
+    // invariant: …and the RUN the double holds is still non-terminal. A text-only PATCH
     // recorded as `completed` with a null conclusion would fabricate a state
     // GitHub never produces and hide a settlement behind the request log.
     const run = checkRuns.get(FIRST_CHECK_RUN_ID + 1)!;
-    // Created `queued` and never promoted (the guard refused before begin), so
+    // invariant: Created `queued` and never promoted (the guard refused before begin), so
     // the text-only relabels left it exactly as the attach created it.
     expect(run.status).toBe("queued");
     expect(run.conclusion).toBeNull();
@@ -7401,7 +7394,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
     const payload = makePayload();
-    // The in-flight review holds a DIFFERENT commit, so this delivery is a real
+    // why: The in-flight review holds a DIFFERENT commit, so this delivery is a real
     // drop (never reviewed), not the benign same-sha duplicate that returns
     // before the drop record.
     const attached = await guardHeldWithAttachedRun(db, adapter, payload, "feedfacefeedfacefeedfacefeedfacefeedface");
@@ -7411,7 +7404,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    // The delivery past the last rung is the terminal drop: this message will
+    // note: The delivery past the last rung is the terminal drop: this message will
     // never run, so
     // its released attach row is settled `neutral` with the refusal named.
     h.queueState.attempts = GUARD_FINAL_ATTEMPT;
@@ -7432,10 +7425,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const checkoutSha = "feedfacefeedfacefeedfacefeedfacefeedface";
     h.sandbox.resolvedSha = checkoutSha;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    h.kvState.getValue = "done"; // the CHECKOUT sha already has a completed review
+    h.kvState.getValue = "done"; // note: the CHECKOUT sha already has a completed review
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
-    const payload = makePayload(); // payload head_sha = SHA
+    const payload = makePayload(); // note: payload head_sha = SHA
     const attached = await attachCheckAtAcceptance(
       { db: db as never, adapter, nowMs: () => Date.now() },
       {
@@ -7450,14 +7443,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         headSha: SHA,
         triggeredBy: payload.triggered_by,
         action: payload.action,
-        // The delivery identity the attach records on its row; it rides the
+        // note: The delivery identity the attach records on its row; it rides the
         // message so a skip can settle exactly this delivery's run.
         deliveryId: "consumer-test-delivery",
       },
     );
     if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
     payload.attachDeliveryId = attached.deliveryId;
-    // The overlap: this invocation's begin yields no handle, so the skip path
+    // why: The overlap: this invocation's begin yields no handle, so the skip path
     // is what has to close the delivery's own row.
     const real = createCheckLifecycle({
       db: db as never,
@@ -7473,7 +7466,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(payload));
 
-    // The row attached at the PAYLOAD sha is settled; a settlement keyed on the
+    // note: The row attached at the PAYLOAD sha is settled; a settlement keyed on the
     // checkout sha would have found no row and left this one in progress.
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("neutral");
@@ -7495,7 +7488,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("runner failed");
 
-    // The attempt begun at step 4 is closed ONCE, from the code path's honest
+    // note: The attempt begun at step 4 is closed ONCE, from the code path's honest
     // knowledge (no publication send ever happened) — and never a second row.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
@@ -7552,7 +7545,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
     expect(update.output.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
-    // ONE attempt: the rejection closes the same row, it never mints a second.
+    // invariant: ONE attempt: the rejection closes the same row, it never mints a second.
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("failure");
@@ -7577,7 +7570,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The create was attempted (and its `sending` state persisted first), the
+    // note: The create was attempted (and its `sending` state persisted first), the
     // attempt stays recoverable on the backoff ladder, and the review is
     // completely unaffected.
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
@@ -7600,7 +7593,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a confirmed publication is judged by its own envelope even when the local apply failed", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // Fail ONLY a batch issued after the publication proof is durable. The
+    // invariant: Fail ONLY a batch issued after the publication proof is durable. The
     // proof is persisted, the applied `reviews` row is not — the gate must
     // still read the envelope THIS publication carried (spec §7.9), because
     // the row is a projection that can lag or hold another attempt's result.
@@ -7628,7 +7621,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired).toBe("success");
     expect(row.observed).toBe("success");
     expect(row.terminal_ms).not.toBeNull();
-    // The publication stayed confirmed (the local apply is M8's), the proof
+    // note: The publication stayed confirmed (the local apply is M8's), the proof
     // was durable, and the KV done-state followed the confirmation.
     expect(publicationRow(db).phase).toBe("confirmed");
     expect(h.kvPuts).toHaveLength(1);
@@ -7637,7 +7630,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a lost proof write concludes failure — never a false success", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Break ONLY the proof UPDATE (recordPublicationProof): the send already
+    // invariant: Break ONLY the proof UPDATE (recordPublicationProof): the send already
     // happened, so the honest durable state is the unknown-publication window.
     const failingDb = {
       ...db,
@@ -7660,7 +7653,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // No proof ⇒ the Check must NOT claim success; the same attempt closes as
+    // invariant: No proof ⇒ the Check must NOT claim success; the same attempt closes as
     // the truthful unconfirmed failure.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
@@ -7687,13 +7680,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(handle).not.toBeNull();
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
 
-    // The review outlived the attempt's execution window: this invocation's
+    // note: The review outlived the attempt's execution window: this invocation's
     // lease is dead, so its terminal decision must not be written anywhere —
     // the scheduled recovery lane owns the attempt from here.
     clock = handle!.lease.untilMs + 1;
     await hooks.terminalize({ handle: handle!, publicationId: null, outcome: "expired" });
 
-    expect(checkRequests.map((r) => r.op)).toEqual(["create"]); // no update
+    expect(checkRequests.map((r) => r.op)).toEqual(["create"]); // note: no update
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
@@ -7711,12 +7704,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(handle).not.toBeNull();
     const attemptId = handle!.attemptId;
 
-    // The lease expires and recovery reacquires the SAME attempt at a new epoch.
+    // note: The lease expires and recovery reacquires the SAME attempt at a new epoch.
     clock = handle!.lease.untilMs + 1;
     const reacquired = await claimCheckRecovery(db, attemptId, "reconciler", clock);
     expect(reacquired).toEqual({ holder: "reconciler", epoch: 2, untilMs: clock + CHECK_RECOVERY_LEASE_MS });
 
-    // The old invocation's catch still runs — and must write nothing.
+    // invariant: The old invocation's catch still runs — and must write nothing.
     await hooks.terminalize({ handle: handle!, publicationId: null, outcome: "publication-unknown" });
 
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
@@ -7742,7 +7735,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await hooks.terminalize({ handle: newer!, publicationId: null, outcome: "pre-publication-failure" });
 
-    // Only the invocation's OWN attempt is closed; the superseded SHA's row is
+    // invariant: Only the invocation's OWN attempt is closed; the superseded SHA's row is
     // exactly as its (still running) invocation left it.
     const superseded = checkRowFor(db, SHA);
     expect(superseded.desired).toBe("in_progress");
@@ -7757,7 +7750,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a hung terminal hook cannot hold the published review past its configured terminalize bound", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A SMALL configured pair, so this case pays ~1 s instead of the 10 s
+    // why: A SMALL configured pair, so this case pays ~1 s instead of the 10 s
     // absent-row default. The documented default itself is pinned by the
     // degraded-budget case above (its warn carries both defaults) — this case
     // is the wall-clock containment, not the default's value.
@@ -7768,7 +7761,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ...h.overrides,
       checks: {
         begin: real.begin,
-        // The hook NEVER settles (the locked seam exposes no AbortSignal). Real
+        // invariant: The hook NEVER settles (the locked seam exposes no AbortSignal). Real
         // timers are the point of this case: the production containment IS a
         // `setTimeout`, so the assertion under test is the wall-clock bound.
         terminalize: () => Promise.withResolvers<void>().promise,
@@ -7776,7 +7769,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     const startedAt = Date.now();
 
-    // §7.10 (amended): the terminalize hook owns its own budget — the begin
+    // note: §7.10 (amended): the terminalize hook owns its own budget — the begin
     // hook keeps CHECK_HOOK_TIMEOUT_MS below — and the read pair is what
     // bounds the wait.
     const TERMINALIZE_BUDGET_MS = 1_200;
@@ -7807,7 +7800,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       checks: {
         begin: async () => {
           beginCalls += 1;
-          // Late by ~1s, NOT cancelled (mirrors a create that outlives the
+          // note: Late by ~1s, NOT cancelled (mirrors a create that outlives the
           // budget). Real timers are required: the containment under test is
           // the consumer's own `setTimeout`.
           setTimeout(() => late.resolve(), CHECK_HOOK_TIMEOUT_MS + 1_000);
@@ -7824,7 +7817,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
     const elapsed = Date.now() - startedAt;
 
-    // Publication happened FIRST and the bound was honoured: this delivery did
+    // note: Publication happened FIRST and the bound was honoured: this delivery did
     // no Check work at all (the hook resolution was the null fallback).
     expect(elapsed).toBeGreaterThanOrEqual(CHECK_HOOK_TIMEOUT_MS - 50);
     expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
@@ -7834,7 +7827,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.kvPuts).toHaveLength(1);
 
-    // Honest late behavior: the abandoned hook settles ~1s later, is never
+    // invariant: Honest late behavior: the abandoned hook settles ~1s later, is never
     // re-entered, and still produces no attempt row or remote call.
     await late.promise;
     await lateSettled.promise;
@@ -7856,7 +7849,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(handle).not.toBeNull();
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
 
-    // The terminal decision arrives after the execution window closed: the
+    // invariant: The terminal decision arrives after the execution window closed: the
     // proof read straddles `lease_until_ms`, so the fenced writes re-sample the
     // clock and must refuse rather than write with the pre-read timestamp.
     checkState.clockMs = handle!.lease.untilMs + 1;
@@ -7866,7 +7859,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       outcome: "publication-unknown",
     });
 
-    // No remote update, no desired mutation, no recovery bookkeeping: the
+    // note: No remote update, no desired mutation, no recovery bookkeeping: the
     // attempt is left exactly as its (now expired) holder left it.
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
     const row = checkRowFor(db, SHA);
@@ -7882,7 +7875,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an unavailable terminal update keeps the frozen intent and defers honestly", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The create succeeds, the terminal UPDATE is rejected by GitHub (403).
+    // note: The create succeeds, the terminal UPDATE is rejected by GitHub (403).
     checkRequestOverrides.update = () => {
       throw Object.assign(new Error("forbidden"), { status: 403 });
     };
@@ -7896,7 +7889,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const row = checkRowFor(db, SHA);
-    // One attempt, its frozen success intent retained, observed NOT advanced.
+    // note: One attempt, its frozen success intent retained, observed NOT advanced.
     expect(checkRows(db)).toHaveLength(1);
     expect(row.check_run_id).not.toBeNull();
     expect(row.desired).toBe("success");
@@ -7907,7 +7900,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released to the recovery lane with its backoff, honest about the fact
+    // note: Released to the recovery lane with its backoff, honest about the fact
     // that a remote request was issued.
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.holder).toBeNull();
@@ -7915,7 +7908,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeGreaterThan(Date.now());
     expect(row.last_error).toContain("403");
-    // Publication is untouched by a Check failure.
+    // invariant: Publication is untouched by a Check failure.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.kvPuts).toHaveLength(1);
@@ -7925,7 +7918,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an attempt whose create never landed is released, not left holding its lease", async () => {
     const db = await createSeededTestD1();
     const hooks = lifecycleFor(db, checkClock);
-    // The create response was lost (the run may exist) and the create state is
+    // note: The create response was lost (the run may exist) and the create state is
     // `sending`, so the failed begin releases the row as remote-unconfirmed.
     checkRequestOverrides.create = () => {
       throw Object.assign(new Error("socket hangup"), { status: 500 });
@@ -7941,14 +7934,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.next_attempt_ms).toBeGreaterThan(checkState.clockMs);
     expect(released.desired).toBe("in_progress");
 
-    // Released: lease-free and recoverable, but gated by the integrated due
+    // note: Released: lease-free and recoverable, but gated by the integrated due
     // predicate — before the persisted due instant no claim is granted, and
     // the refusal leaves the row exactly as released.
     const beforeDue = await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms! - 1);
     expect(beforeDue).toBeNull();
     expect(checkRowFor(db, SHA).holder).toBeNull();
 
-    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2).
+    // note: The integrated claim repeats the FULL candidate predicate (spec §7.11.2).
     // This row was RELEASED, so its own recorded backoff is the due instant —
     // the lane may own it long before the execution deadline and decide from
     // whatever proof lands in that window.
@@ -7975,7 +7968,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a terminalize on an attempt with no attached run releases it instead of holding the lease", async () => {
     const db = await createSeededTestD1();
     const hooks = lifecycleFor(db, checkClock);
-    // A claimed, OWNED attempt whose create never attached a run id — the
+    // invariant: A claimed, OWNED attempt whose create never attached a run id — the
     // nullable branch `CheckLifecycleHandle` still structurally permits.
     const claim = await claimAttempt(db, {
       scope: CHECK_SCOPE,
@@ -8001,7 +7994,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       outcome: "expired",
     });
 
-    // The desired intent is frozen, and the attempt is handed to recovery with
+    // note: The desired intent is frozen, and the attempt is handed to recovery with
     // an honest remote-unconfirmed state instead of sitting on the lease until
     // the execution deadline.
     const row = checkRowFor(db, SHA);
@@ -8018,7 +8011,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a refused attach on a live lease hands the attempt to recovery", async () => {
     const db = await createSeededTestD1();
-    // The create is marked `sending` and answered, but the attach is REFUSED
+    // note: The create is marked `sending` and answered, but the attach is REFUSED
     // (a different run id is already recorded — a concurrent writer got there
     // first, and T1 never clears a known id). The claimed attempt is owned and
     // live, so it must be released instead of holding a lease nobody drives.
@@ -8044,18 +8037,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(handle).toBeNull();
 
     const row = checkRowFor(db, SHA);
-    // The pre-existing run id is retained (never cleared for a lookalike).
+    // invariant: The pre-existing run id is retained (never cleared for a lookalike).
     expect(row.check_run_id).toBe(777);
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released for recovery with its backoff: a create may have been sent.
+    // note: Released for recovery with its backoff: a create may have been sent.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(checkState.clockMs + 60_000);
-    // The integrated claim repeats the FULL candidate predicate (spec §7.11.2):
+    // note: The integrated claim repeats the FULL candidate predicate (spec §7.11.2):
     // lease-free and past its recorded backoff, the RELEASED row is claimable
     // before its execution deadline — nothing about `desired` withholds it.
     expect(await claimCheckRecovery(db, row.id, "reconciler", row.next_attempt_ms! - 1)).toBeNull();
@@ -8065,7 +8058,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a lease lost while the create was in flight writes nothing further", async () => {
     const db = await createSeededTestD1();
-    // The lease expires during the create request: the attach fence refuses AND
+    // note: The lease expires during the create request: the attach fence refuses AND
     // the release fence is dead too, so the row keeps exactly what the adapter
     // persisted (`sending`) until the recovery lane takes it at the deadline.
     const hooks = createCheckLifecycle({
@@ -8095,7 +8088,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // The dead invocation wrote nothing on its way out (attempts stayed 0, the
+    // invariant: The dead invocation wrote nothing on its way out (attempts stayed 0, the
     // row was not marked remote-unconfirmed), and the naturally expired lease
     // is what makes the attempt claimable — the recovery lease is 120s and the
     // execution deadline it must respect is UNCHANGED by that bookkeeping.
@@ -8113,7 +8106,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a terminalize that cannot obtain its Checks adapter releases to recovery, never blocking publication", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The App DOES have a Checks surface at `begin` (the run is created and
+    // note: The App DOES have a Checks surface at `begin` (the run is created and
     // attached), but the surface is resolved per call and is gone by the time
     // terminalize runs — a representable state for this seam. An OWNED attempt
     // must then be released to recovery under the live fence rather than left
@@ -8124,7 +8117,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => ({
         ...h.fakeCommenter,
         get checks() {
-          // Present for the step-4 create; gone once the review is published.
+          // note: Present for the step-4 create; gone once the review is published.
           // Absent is `undefined` (the ReviewCommenter contract: `checks?`),
           // which is exactly what the consumer's
           // `commenter.checks ?? null` seam turns into a local `null`.
@@ -8135,26 +8128,26 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The full publication path ran: the review is posted, applied and the KV
+    // note: The full publication path ran: the review is posted, applied and the KV
     // done-state is written — the missing adapter did not block it.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.kvPuts).toHaveLength(1);
-    // Exactly one create plus its promotion (the adapter was still there at
+    // invariant: Exactly one create plus its promotion (the adapter was still there at
     // begin); NO TERMINAL update could be sent once it was gone.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
 
     const row = checkRowFor(db, SHA);
-    // The attempt keeps its identity and the run it created.
+    // note: The attempt keeps its identity and the run it created.
     expect(row.check_run_id).toBe(FIRST_CHECK_RUN_ID + 1);
     expect(row.external_id).toBe((checkRequests[0]!.params as unknown as ChecksCreateParams).external_id);
-    // The review DID publish, so the persisted proof drives the frozen intent
+    // why: The review DID publish, so the persisted proof drives the frozen intent
     // (success) — the missing adapter only prevents the remote terminal update.
     expect(row.desired).toBe("success");
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released for recovery under the live fence, with its backoff.
+    // note: Released for recovery under the live fence, with its backoff.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
@@ -8165,7 +8158,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a real begin that outlives the budget leaves its run recoverable, not concluded", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The REAL lifecycle with a create that outlives the consumer's bound: the
+    // note: The REAL lifecycle with a create that outlives the consumer's bound: the
     // adapter's Checks callable is held open past the 2-second budget, then
     // completes and really creates the run.
     const held = Promise.withResolvers<void>();
@@ -8182,7 +8175,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
                 sandboxCalls: h.sandbox.calls.length,
                 commenterCalls: h.commenterCalls.length,
               });
-              await held.promise; // outlives CHECK_HOOK_TIMEOUT_MS
+              await held.promise; // note: outlives CHECK_HOOK_TIMEOUT_MS
               const id = (checkRunSeq += 1);
               checkRuns.set(id, {
                 id,
@@ -8197,7 +8190,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              // Partial PATCH (a relabel) moves no terminal state; a
+              // note: Partial PATCH (a relabel) moves no terminal state; a
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
@@ -8224,23 +8217,23 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     const startedAt = Date.now();
 
-    // Release the held create AFTER the consumer has already stopped waiting.
+    // invariant: Release the held create AFTER the consumer has already stopped waiting.
     setTimeout(() => held.resolve(), CHECK_HOOK_TIMEOUT_MS + 500);
     await consumer(h.makeBatch(makePayload()));
     const elapsed = Date.now() - startedAt;
 
-    // (1) The consumer honoured its bound and published regardless.
+    // note: (1) The consumer honoured its bound and published regardless.
     expect(elapsed).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.kvPuts).toHaveLength(1);
 
-    // (2) The late real begin attached its run and, being abandoned, handed the
+    // note: (2) The late real begin attached its run and, being abandoned, handed the
     //     attempt to recovery with NO conclusion of its own: abandoning is not
     //     terminalizing, so the reconciler decides from the persisted proof (or
     //     at the execution deadline).
     await held.promise;
-    // The detached begin continues asynchronously: wait for its durable result
+    // note: The detached begin continues asynchronously: wait for its durable result
     // (the attach) rather than guessing a delay.
     for (let attempt = 0; attempt < 200 && checkRowFor(db, SHA).check_run_id === null; attempt += 1) {
       await Bun.sleep(5);
@@ -8252,14 +8245,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired_summary).toBeNull();
     expect(row.observed).toBe("unknown");
     expect(row.terminal_ms).toBeNull();
-    // Released: no lease held, and the first backoff rung recorded.
+    // note: Released: no lease held, and the first backoff rung recorded.
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBeLessThan(row.execution_deadline_ms);
 
-    // (3) The release made the row due on its own backoff rung, BEFORE the
+    // invariant: (3) The release made the row due on its own backoff rung, BEFORE the
     //     deadline: the lane owns it there even though `desired` still wants
     //     `in_progress` — the conclusion it owes is the one a proof that lands
     //     in that window will decide. No second create is ever issued.
@@ -8272,7 +8265,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an attempt abandoned by the begin budget concludes from the publication it went on to make", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The create outlives the consumer's 2 s begin budget, so the lifecycle
+    // why: The create outlives the consumer's 2 s begin budget, so the lifecycle
     // abandons the attempt — row released, NO conclusion, `publication_id`
     // NULL — while the SAME message goes on to publish its review.
     const held = Promise.withResolvers<void>();
@@ -8285,7 +8278,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           checks: {
             ...base.rest.checks,
             async create(params) {
-              // Recorded at ISSUE, then held past the budget.
+              // note: Recorded at ISSUE, then held past the budget.
               checkRequests.push({
                 op: "create",
                 params: params as unknown as Record<string, unknown>,
@@ -8318,12 +8311,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     setTimeout(() => held.resolve(), CHECK_HOOK_TIMEOUT_MS + 500);
     await consumer(h.makeBatch(makePayload()));
 
-    // The message published regardless: the journal row is applied with proof.
+    // note: The message published regardless: the journal row is applied with proof.
     const publication = publicationRow(db);
     expect(publication.phase).toBe("applied");
     expect(publication.proof_json).not.toBeNull();
 
-    // The abandoned begin then attaches its run and hands the attempt over with
+    // note: The abandoned begin then attaches its run and hands the attempt over with
     // no conclusion of its own and no publication link.
     for (let attempt = 0; attempt < 200 && checkRowFor(db, SHA).next_attempt_ms === null; attempt += 1) {
       await Bun.sleep(5);
@@ -8335,13 +8328,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(abandoned.recovery_state).toBe("remote-unconfirmed");
     expect(abandoned.terminal_ms).toBeNull();
 
-    // ONE reconciler pass at the released row's own due time — inside the
+    // note: ONE reconciler pass at the released row's own due time — inside the
     // execution deadline — concludes the Check from THAT publication's proof:
     // the newest journal row for this head was staged by this attempt, so its
     // exact id is the proof this attempt owes a conclusion to.
     const dueAt = abandoned.next_attempt_ms!;
     expect(dueAt).toBeLessThan(abandoned.execution_deadline_ms);
-    // The reconciler's D1 pair gate reads the App/installation mapping the
+    // note: The reconciler's D1 pair gate reads the App/installation mapping the
     // production route always carries; this suite seeds the App only.
     db.raw
       .prepare(
@@ -8359,13 +8352,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(summary.completed).toBe(1);
     expect(summary.deferred).toBe(0);
     expect(summary.unconfirmed).toBe(0);
-    // Gate-derived: the published review meets the App gate.
+    // note: Gate-derived: the published review meets the App gate.
     const update = checkRequests.filter((r) => r.op === "update").at(-1);
     expect(update).toBeDefined();
     expect(update!.params.conclusion).toBe("success");
     expect(String((update!.params.output as { summary: string }).summary)).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
 
-    // The conclusion write links the publication it was decided from, so the
+    // note: The conclusion write links the publication it was decided from, so the
     // row is no longer unlinked and the frozen Check is the published one.
     const settled = checkRowFor(db, SHA);
     expect(settled.publication_id).toBe(publication.id);
@@ -8376,7 +8369,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a later message cannot un-abandon an earlier detached begin", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // Message A's create is held open past the budget; message B then runs its
+    // note: Message A's create is held open past the budget; message B then runs its
     // OWN begin to completion; only THEN does A's create settle.
     const heldA = Promise.withResolvers<void>();
     const createCalls: string[] = [];
@@ -8394,7 +8387,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
                 sandboxCalls: h.sandbox.calls.length,
                 commenterCalls: h.commenterCalls.length,
               });
-              // Only MESSAGE A's create (the first) is held open past the
+              // invariant: Only MESSAGE A's create (the first) is held open past the
               // budget; B's create resolves immediately, as a normal begin does.
               if (createCalls.length === 1) await heldA.promise;
               const id = (checkRunSeq += 1);
@@ -8411,7 +8404,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
             },
             async update(params) {
               const run = checkRuns.get(params.check_run_id)!;
-              // Partial PATCH (a relabel) moves no terminal state; a
+              // note: Partial PATCH (a relabel) moves no terminal state; a
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
@@ -8437,32 +8430,32 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    // A: times out at the budget and is abandoned by the consumer.
+    // note: A: times out at the budget and is abandoned by the consumer.
     const startedA = Date.now();
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, pr_number: 42 })));
     expect(Date.now() - startedA).toBeLessThan(CHECK_HOOK_TIMEOUT_MS + 1_500);
 
-    // B: a SECOND message, which starts its own begin call and its own latch,
+    // note: B: a SECOND message, which starts its own begin call and its own latch,
     //     and completes normally while A's create is still in flight. Under the
     //     old shared-reset shape this cleared A's abandonment.
     await consumer(h.makeBatch(makePayload({ pr_number: 43 })));
     const rowB = checkRowForPr(db, 43);
-    expect(rowB.desired).toBe("success"); // B terminalized normally
+    expect(rowB.desired).toBe("success"); // note: B terminalized normally
     expect(rowB.observed).toBe("success");
-    // B's own success is not affected by A's abandonment.
+    // note: B's own success is not affected by A's abandonment.
     expect(createCalls).toHaveLength(2);
 
-    // A's create finally settles, AFTER B's whole invocation.
+    // invariant: A's create finally settles, AFTER B's whole invocation.
     heldA.resolve();
     for (let attempt = 0; attempt < 200 && checkRowForPr(db, 42).check_run_id === null; attempt += 1) {
       await Bun.sleep(5);
     }
 
-    // A still followed the ABANDONED path: its run is attached (adoptable) and
+    // note: A still followed the ABANDONED path: its run is attached (adoptable) and
     // it carries NO conclusion of its own — not the unobservable normal handle a
     // stale shared flag would have produced.
     const rowA = checkRowForPr(db, 42);
-    // The run attached to A is exactly the one A created (B's create resolved
+    // invariant: The run attached to A is exactly the one A created (B's create resolved
     // first while A was held, so the numeric id is not A's to predict).
     expect(rowA.check_run_id).not.toBeNull();
     expect(
@@ -8478,7 +8471,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(rowA.recovery_state).toBe("remote-unconfirmed");
     expect(rowA.attempts).toBe(1);
     expect(rowA.next_attempt_ms).toBeLessThan(rowA.execution_deadline_ms);
-    // No second create for A, and B's row is untouched by A's late settle.
+    // invariant: No second create for A, and B's row is untouched by A's late settle.
     expect(createCalls).toHaveLength(2);
     expect(checkRowForPr(db, 43).observed).toBe("success");
   });
@@ -8492,7 +8485,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    // Both messages begin and terminalize normally, well inside the budget: no
+    // note: Both messages begin and terminalize normally, well inside the budget: no
     // latch is ever tripped, so each Check completes as success.
     await consumer(h.makeBatch(makePayload({ pr_number: 42 })));
     await consumer(h.makeBatch(makePayload({ pr_number: 43 })));
@@ -8509,7 +8502,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const rowB = checkRowForPr(db, 43);
     for (const row of [rowA, rowB]) {
       expect(row.desired).toBe("success");
-      // `observed` is the validated terminal conclusion; the lease is retained
+      // note: `observed` is the validated terminal conclusion; the lease is retained
       // for the execution window (no release is needed on the completed path).
       expect(row.observed).toBe("success");
       expect(row.recovery_state).toBe("done");
@@ -8520,7 +8513,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: an App without a Checks surface claims no attempt and still publishes", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // `h.overrides` builds the fake commenter (no Checks adapter): the
+    // note: `h.overrides` builds the fake commenter (no Checks adapter): the
     // production seam is present, the App has no Checks surface, so the
     // lifecycle is ineligible — no row, no remote call, M8 fully operational.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
@@ -8536,14 +8529,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a terminal update that exceeds its budget releases the lease, so recovery is due at the first backoff", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // The pair is LEGAL (§7.10: the inline wait must exceed the send budget),
+    // invariant: The pair is LEGAL (§7.10: the inline wait must exceed the send budget),
     // and the adapter never answers, so the send budget — always the shorter
     // side of a legal pair — is what ends this path. An illegal pair (wait
     // shorter than the send) is refused by the reader's cross-field fence
     // before it could ever reach this adapter.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1600");
     seedCheckBudget(db, "review.check.update_timeout_ms", "1500");
-    // Only the TERMINAL send parks: the promotion must settle, otherwise this
+    // why: Only the TERMINAL send parks: the promotion must settle, otherwise this
     // case would exercise the abandoned-promotion handoff instead of the
     // terminalize budget this assertion is about.
     checkRequestOverrides.update = (params) => {
@@ -8568,7 +8561,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await Promise.all(handed);
 
     const row = checkRowFor(db, SHA);
-    // Released at the instant the consumer gave up, not at the execution
+    // note: Released at the instant the consumer gave up, not at the execution
     // deadline (which is what made the old path wait for the next quarter hour).
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
@@ -8578,10 +8571,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.attempts).toBe(1);
     expect(row.terminal_ms).toBeNull();
     expect(row.last_error).toContain("check update exceeded");
-    // A Check give-up never reaches the publication path.
+    // invariant: A Check give-up never reaches the publication path.
     expect(publicationRow(db).phase).toBe("applied");
 
-    // The adapter owns the send-budget failure here (a legal pair always ends
+    // note: The adapter owns the send-budget failure here (a legal pair always ends
     // on the shorter update budget), so the lease release is asserted on the
     // row above rather than on the consumer's terminalize give-up log line.
   }, 10_000);
@@ -8594,7 +8587,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ...h.overrides,
       checks: {
         begin: (input) => real.begin(input),
-        // The HOOK fails (not the adapter): the consumer's catch must still
+        // invariant: The HOOK fails (not the adapter): the consumer's catch must still
         // hand the attempt it claimed to recovery instead of holding its lease
         // to the execution deadline.
         terminalize: async () => {
@@ -8607,7 +8600,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(h.logLines.filter((line) => line.fields.event === "check_terminalize_failed")).toHaveLength(1);
-    // A real release: and NOT the benign no-op event, nor a fault event.
+    // note: A real release: and NOT the benign no-op event, nor a fault event.
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_not_owned")).toHaveLength(0);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
@@ -8618,10 +8611,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.last_error).toContain("terminalize boom");
     expect(row.desired).toBe("failure");
     expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
-    // The failed hook is its OWN outcome: without it, this hand-off is
+    // note: The failed hook is its OWN outcome: without it, this hand-off is
     // indistinguishable from a terminal send that landed.
     expect(row.terminalize_outcome).toBe("hook-failed");
-    // Nothing escaped the Check lane, and the review still published.
+    // invariant: Nothing escaped the Check lane, and the review still published.
     expect(publicationRow(db).phase).toBe("applied");
   }, 10_000);
 
@@ -8630,7 +8623,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const db = await createSeededTestD1();
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
     const parked = Promise.withResolvers<void>();
-    // A SLOW store write. Real 150 ms on purpose: the consumer's hook budget
+    // note: A SLOW store write. Real 150 ms on purpose: the consumer's hook budget
     // runs on the platform clock and no clock is injectable here, so "the
     // release landed before this consumer returned" is only observable in real
     // time (fake timers cannot drive the D1 awaits around it).
@@ -8654,11 +8647,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           return true;
         },
       },
-    }); // NO invocation context: §7.10's inline fallback is the only owner
+    }); // invariant: NO invocation context: §7.10's inline fallback is the only owner
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The consumer could only have returned after the slow write landed.
+    // invariant: The consumer could only have returned after the slow write landed.
     expect(releaseLanded).toBe(true);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_not_owned")).toHaveLength(0);
@@ -8683,12 +8676,12 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // ONE admission-time attempt, isolated: the post-`rev-parse` fallback must
+    // invariant: ONE admission-time attempt, isolated: the post-`rev-parse` fallback must
     // NOT claim again for a handle that was never created.
     expect(beginCalls).toBe(1);
     expect(checkRows(db)).toHaveLength(0);
     expect(checkRequests).toHaveLength(0);
-    // The review itself is untouched by the Check failure.
+    // invariant: The review itself is untouched by the Check failure.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(publicationRow(db).phase).toBe("applied");
     expect(h.logLines.some((line) => line.msg.includes("check begin hook failed"))).toBe(true);
@@ -8717,7 +8710,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // ONE claim, made from the delivery's sha and BEFORE `getSandbox` — the
+    // invariant: ONE claim, made from the delivery's sha and BEFORE `getSandbox` — the
     // run appears when the review starts working, not after the clone. The
     // authoritative `rev-parse` agrees, so the handle is reused and no second
     // attempt is claimed.
@@ -8730,7 +8723,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a comment trigger claims the Check from the PR head watermark, before the container", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     const db = await createSeededTestD1();
-    // A mention carries no head_sha: the ledger watermark is the ONLY SHA
+    // invariant: A mention carries no head_sha: the ledger watermark is the ONLY SHA
     // knowable at admission, so it is what the early claim must use.
     await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
     const real = lifecycleFor(db);
@@ -8753,7 +8746,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
 
-    // ONE claim, from the watermark, before the container. The authoritative
+    // invariant: ONE claim, from the watermark, before the container. The authoritative
     // checkout agrees, so the post-`rev-parse` fallback claims nothing and a
     // second begin never happens.
     expect(beginOrder).toEqual([{ headSha: SHA, afterSandbox: false }]);
@@ -8765,7 +8758,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a claim the checkout contradicts is closed as superseded, then re-claimed at the authoritative sha", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-    // The clone landed a NEWER commit than the delivery's payload sha.
+    // note: The clone landed a NEWER commit than the delivery's payload sha.
     h.sandbox.resolvedSha = SHA2;
     const db = await createSeededTestD1();
     const adapter = checksAdapterFor(db);
@@ -8774,9 +8767,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(adapter),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
-    // create(A) + its promotion, then create(B) + its promotion and B's
+    // note: create(A) + its promotion, then create(B) + its promotion and B's
     // terminal update. A's `superseded` send is owned by the minute recovery
     // cron, so nothing on the new head's path waits for it; the early run is
     // still local-terminal immediately.
@@ -8786,7 +8779,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const early = checkRowFor(db, SHA);
     expect(early.desired).toBe("failure");
     expect(early.desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
-    // Terminal intent + released: never left `in_progress` holding its lease.
+    // invariant: Terminal intent + released: never left `in_progress` holding its lease.
     expect(early.observed).toBe("unknown");
     expect(early.terminal_ms).toBeNull();
     expect(early.holder).toBeNull();
@@ -8798,7 +8791,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const authoritative = checkRowFor(db, SHA2);
     expect(authoritative.desired).toBe("success");
     expect(authoritative.observed).toBe("success");
-    // The review itself still landed once, for the checked-out commit.
+    // note: The review itself still landed once, for the checked-out commit.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
   });
 
@@ -8806,10 +8799,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     h.sandbox.resolvedSha = SHA2;
     const db = await createSeededTestD1();
-    // The operator terminalize wait is 5 s: if the supersede path used it, this
+    // note: The operator terminalize wait is 5 s: if the supersede path used it, this
     // case would take at least that long.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "5000");
-    // The EARLY run's TERMINAL update parks forever. The supersede path must
+    // invariant: The EARLY run's TERMINAL update parks forever. The supersede path must
     // never send it (recovery does), so this override is never even reached;
     // the early run's queued → in_progress promotion is a different,
     // non-terminal send and does land.
@@ -8837,7 +8830,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The old run's update was never sent, and the operation order proves the
+    // invariant: The old run's update was never sent, and the operation order proves the
     // new head's path never went through the terminalize budget.
     expect(earlyUpdateSent).toBe(false);
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "create", "update", "update"]);
@@ -8848,10 +8841,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a superseded attempt whose promotion was abandoned also gets the longer recovery delay", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-    h.sandbox.resolvedSha = SHA2; // the clone landed a newer commit
+    h.sandbox.resolvedSha = SHA2; // note: the clone landed a newer commit
     const db = await createSeededTestD1();
     seedCheckBudget(db, "review.check.update_timeout_ms", "1000");
-    // ONLY the early attempt's promotion (run FIRST+1) hangs: its `in_progress`
+    // invariant: ONLY the early attempt's promotion (run FIRST+1) hangs: its `in_progress`
     // PATCH may still be in flight when the checkout contradicts the claim, so
     // this handoff must not be scheduled a minute later like an ordinary one.
     checkRequestOverrides.update = (params) => {
@@ -8869,7 +8862,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       return updated;
     };
     const adapter = checksAdapterFor(db);
-    // Same fixture clock as the terminalize case: the delay is asserted exactly.
+    // invariant: Same fixture clock as the terminalize case: the delay is asserted exactly.
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       createAppCommenter: () => commenterWithChecks(adapter),
@@ -8879,20 +8872,20 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const early = checkRowFor(db, SHA);
-    // The contradicted attempt still freezes ITS conclusion, not the fallback.
+    // note: The contradicted attempt still freezes ITS conclusion, not the fallback.
     expect(early.desired).toBe("failure");
     expect(early.desired_summary).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
     expect(early.recovery_state).toBe("remote-unconfirmed");
     expect(early.holder).toBeNull();
-    // The property belongs to the ATTEMPT: this exit gets the same margin past
+    // note: The property belongs to the ATTEMPT: this exit gets the same margin past
     // the abandoned request as the terminalize exit does.
     expect(early.next_attempt_ms).toBe(checkState.clockMs + 62_000);
-    // The new head's review is unaffected.
+    // note: The new head's review is unaffected.
     expect(checkRowFor(db, SHA2).observed).toBe("success");
   }, 20_000);
 
   test("check lifecycle: a give-up that did not release keeps the review and claims NO second Check", async () => {
-    // `intent`/`release` fault one of the hand-off's two store writes through a
+    // note: `intent`/`release` fault one of the hand-off's two store writes through a
     // thin DB wrapper while the REAL lifecycle runs; only the legitimate no-op
     // (a fence that is no longer ours) uses a seam double, because it has to
     // synthesize `false` without pretending any store wrote anything.
@@ -8900,9 +8893,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       h = createConsumerHarness();
       freshChecks();
       h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-      h.sandbox.resolvedSha = SHA2; // the checkout moved on from the payload sha
+      h.sandbox.resolvedSha = SHA2; // note: the checkout moved on from the payload sha
       const db = await createSeededTestD1();
-      // A faulting store is only needed for the two failure steps; `no-op`
+      // invariant: A faulting store is only needed for the two failure steps; `no-op`
       // keeps the seam fake because it has to answer `false` without writing.
       const fault = step === "no-op" ? null : handoffFaultStore(db, step === "intent" ? 1 : 2);
       const real = lifecycleFor((fault?.db ?? db) as never);
@@ -8927,10 +8920,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
       await consumer(h.makeBatch(makePayload()));
 
-      // The handoff reported no release, so NO claim was made at the new head —
+      // why: The handoff reported no release, so NO claim was made at the new head —
       // the contradicted attempt may still hold this invocation's lease.
       expect(beginCalls, step).toEqual([SHA]);
-      // The seam double here supplies no `markInProgress`, so the run keeps
+      // why: The seam double here supplies no `markInProgress`, so the run keeps
       // only its create.
       expect(checkRequests.map((r) => r.op), step).toEqual(["create"]);
       expect(checkRows(db), step).toHaveLength(1);
@@ -8939,19 +8932,19 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(early.holder, step).not.toBeNull();
       expect(early.lease_until_ms, step).not.toBeNull();
       if (step === "release") {
-        // The intent landed, the release faulted: terminal text, held lease.
+        // note: The intent landed, the release faulted: terminal text, held lease.
         expect(early.desired, step).toBe("failure");
         expect(early.desired_summary, step).toBe(CHECK_SUMMARIES.superseded(SHA.slice(0, 7)));
       } else {
-        // Nothing landed: the intent write faulted, or the fence was not ours.
+        // invariant: Nothing landed: the intent write faulted, or the fence was not ours.
         expect(early.desired, step).toBe("in_progress");
       }
 
-      // A Check fault never blocks the review.
+      // invariant: A Check fault never blocks the review.
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared"), step).toHaveLength(1);
       expect(publicationRow(db).phase, step).toBe("applied");
 
-      // Two different meanings, two events: a faulted write is `_failed`, a
+      // note: Two different meanings, two events: a faulted write is `_failed`, a
       // legitimate no-op is `_not_owned`; neither claims a release.
       const failed = h.logLines.filter((line) => line.fields.event === "check_abandon_failed");
       const notOwned = h.logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
@@ -8973,7 +8966,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     for (const dedup of ["kv", "d1"] as const) {
       h = createConsumerHarness();
       freshChecks();
-      h.sandbox.resolvedSha = SHA2; // the checkout moved to a NEWER commit
+      h.sandbox.resolvedSha = SHA2; // note: the checkout moved to a NEWER commit
       const db = await createSeededTestD1();
       const key = idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA2 });
       if (dedup === "kv") {
@@ -8994,9 +8987,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         createAppCommenter: () => commenterWithChecks(adapter),
       });
 
-      await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+      await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
-      // The contradicted claim is decided BEFORE the dedup read, so it stays
+      // why: The contradicted claim is decided BEFORE the dedup read, so it stays
       // superseded; the NEW head is never claimed — the hit acks it, so no
       // attempt is left for the reconciler to close red. Its remote send
       // belongs to the recovery cron.
@@ -9013,13 +9006,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: a reviewed head acks BEFORE the claim — no attempt row, no container, no token", async () => {
-    // Both shapes that know the head before the claim: the payload's own sha
+    // invariant: Both shapes that know the head before the claim: the payload's own sha
     // (`pull_request`) and the PR watermark a mention carries instead.
     for (const route of ["payload", "watermark"] as const) {
       h = createConsumerHarness();
       freshChecks();
       const db = await createSeededTestD1();
-      // The head was already reviewed, gate-PASSING: a second attempt for it
+      // note: The head was already reviewed, gate-PASSING: a second attempt for it
       // could only be closed red, overwriting this result.
       await createArtifactStore(db).put({
         kind: "review",
@@ -9048,7 +9041,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
         ),
       );
 
-      // Nothing was created or acquired: no Check attempt (remote or local),
+      // invariant: Nothing was created or acquired: no Check attempt (remote or local),
       // no container, no installation token, no comment, no KV write.
       expect(checkRequests, route).toHaveLength(0);
       expect(checkRows(db), route).toHaveLength(0);
@@ -9056,7 +9049,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       expect(h.commenterCalls.filter((c) => c.op === "token"), route).toHaveLength(0);
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared"), route).toHaveLength(0);
       expect(h.kvPuts, route).toHaveLength(0);
-      // `ok` is the implicit ack: the handler resolved without a retry.
+      // note: `ok` is the implicit ack: the handler resolved without a retry.
       expect(h.messageRetryCalls, route).toHaveLength(0);
       expect(h.messageAckCalls, route).toHaveLength(0);
       expect(
@@ -9077,7 +9070,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // A read that cannot answer is not an answer: the round claims, runs and
+    // note: A read that cannot answer is not an answer: the round claims, runs and
     // posts exactly as it did before the early check existed.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     expect(reviewCount(db)).toBe(1);
@@ -9089,7 +9082,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: an unreadable D1 pre-read falls through — the delivery is not ended by it", async () => {
     const db = await createSeededTestD1();
-    // The pre-read is the ONE faulted statement: the authoritative
+    // note: The pre-read is the ONE faulted statement: the authoritative
     // checkout-keyed read that follows answers normally, so a fall-through is
     // observable as a completed review.
     let preReadFault = 1;
@@ -9108,7 +9101,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The pre-read fault is announced and nothing else changes: the round
+    // invariant: The pre-read fault is announced and nothing else changes: the round
     // claims, runs and posts exactly as it did before the early check existed.
     expect(h.logLines.filter((l) => l.level === "warn" && l.msg.includes("early idempotency read failed"))).toHaveLength(1);
     expect(reviewCount(db)).toBe(1);
@@ -9117,7 +9110,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: a force-push after delivery is still caught by the checkout-keyed dedup", async () => {
-    // The payload names SHA (never reviewed); the clone lands SHA2, which was
+    // invariant: The payload names SHA (never reviewed); the clone lands SHA2, which was
     // reviewed while this delivery waited. The early read keys the PAYLOAD sha,
     // so it misses — only the post-checkout read, keyed on what the clone
     // actually holds, may acknowledge.
@@ -9132,14 +9125,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
-    // The container ran, so the early check did not stop the delivery...
+    // why: The container ran, so the early check did not stop the delivery...
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
-    // ...and the checkout hit acks BEFORE the new head is claimed, so no
+    // invariant: ...and the checkout hit acks BEFORE the new head is claimed, so no
     // attempt exists for the commit this delivery never named — nothing is
     // left for the reconciler to close red. Only the payload claim remains,
     // frozen `superseded` for the recovery cron.
@@ -9151,7 +9144,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: one watermark fault makes ONE warning across the supersede and ack paths", async () => {
-    // The delivery carries a stamp, so the supersede path reads the watermark;
+    // why: The delivery carries a stamp, so the supersede path reads the watermark;
     // its head is also already reviewed, so the ack path would read it again.
     // Both would fault for the same root cause — the delivery must read once
     // and log once.
@@ -9179,13 +9172,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(watermarkReads).toBe(2);
     expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("PR head watermark read failed"))).toHaveLength(1);
     expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("ack the keyed head now"))).toHaveLength(0);
-    // The ack still happens: an unreadable watermark never buys a second review.
+    // invariant: The ack still happens: an unreadable watermark never buys a second review.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
   });
 
   test("check lifecycle: the hit-time read still happens after an empty watermark answer", async () => {
-    // The delivery carries a stamp, so the supersede path reads the watermark
+    // why: The delivery carries a stamp, so the supersede path reads the watermark
     // and gets a row with NO head. The push lands after that answer: the hit
     // check must read again — reusing the memo would compare against "no head"
     // and ack the very commit it should review.
@@ -9214,7 +9207,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: "2026-01-01T00:00:00.000Z" })));
 
-    // The supersede answer plus the hit-time read — the second one decided it.
+    // note: The supersede answer plus the hit-time read — the second one decided it.
     expect(watermarkReads).toBe(2);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(2);
@@ -9224,7 +9217,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: an unreadable live head keeps the ack — one warning, no second paid review", async () => {
-    // The delivery names SHA, which was reviewed; the clone holds SHA2. The PR
+    // note: The delivery names SHA, which was reviewed; the clone holds SHA2. The PR
     // watermark cannot answer (no row), so the hit is UNPROVEN rather than
     // stale: the duplicate ACKS as before — an unreadable answer must never
     // become a second paid review — and says so exactly once. Neither head is
@@ -9244,18 +9237,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
     expect(h.sandbox.calls).toHaveLength(0);
     expect(checkRequests).toHaveLength(0);
     expect(checkRows(db)).toHaveLength(0);
-    expect(reviewCount(db)).toBe(1); // the reviewed head's row, untouched
+    expect(reviewCount(db)).toBe(1); // invariant: the reviewed head's row, untouched
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(h.logLines.filter((line) => line.level === "warn" && line.msg.includes("ack the keyed head now"))).toHaveLength(1);
   });
 
   test("check lifecycle: a stale reviewed head falls through and reviews the live head", async () => {
-    // The delivery names SHA (reviewed); the PR's live head is SHA2. In
+    // note: The delivery names SHA (reviewed); the PR's live head is SHA2. In
     // `manual` mode a push queues no review, so acking here would leave SHA2
     // unreviewed for good: the hit falls through and the round reviews it.
     const db = await createSeededTestD1();
@@ -9271,7 +9264,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     });
     await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
     const adapter = checksAdapterFor(db);
-    // This delivery's run for the OLD head was attached at admission: it has no
+    // note: This delivery's run for the OLD head was attached at admission: it has no
     // review coming now, so the round must settle it, not leave it in progress.
     const attached = await attachCheckAtAcceptance(
       { db: db as never, adapter, nowMs: () => Date.now() },
@@ -9303,18 +9296,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: attached.deliveryId })));
 
-    // ONE live-head read on the hit path — and it is the comparison that
+    // note: ONE live-head read on the hit path — and it is the comparison that
     // decided this delivery was stale.
     expect(liveHeadReads).toBe(1);
-    // The live head was reviewed and posted...
+    // note: The live head was reviewed and posted...
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(2);
-    // ...the old head's run is settled (it inherits that head's passing gate
+    // note: ...the old head's run is settled (it inherits that head's passing gate
     // result) instead of waiting out its lease...
     const stale = checkRowFor(db, SHA);
     expect(stale.desired).toBe("success");
     expect(stale.terminal_ms).not.toBeNull();
-    // ...and the PR holds exactly two rows: the settled old attempt and the
+    // invariant: ...and the PR holds exactly two rows: the settled old attempt and the
     // live head's own — a stray row under any other head would show here.
     expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA, SHA2]);
     expect(checkRowFor(db, SHA2).observed).toBe("success");
@@ -9323,14 +9316,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: a stale PUBLISHED head settles from its proof and reviews the live head", async () => {
-    // The old head's publication is confirmed but its `reviews` projection has
+    // note: The old head's publication is confirmed but its `reviews` projection has
     // not landed, and the PR head has moved. The old run must settle from the
     // PROOF (failure — the gate was missed) and the live head must still be
     // reviewed: no stale `in_progress` survives the round.
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
-    // The early gate hits on the publication journal: there is no `reviews` row
+    // note: The early gate hits on the publication journal: there is no `reviews` row
     // for SHA at all.
     db.raw
       .prepare(
@@ -9388,18 +9381,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ attachDeliveryId: attached.deliveryId })));
 
-    // The old run is settled FROM THE PROOF: failure, never neutral, and never
+    // invariant: The old run is settled FROM THE PROOF: failure, never neutral, and never
     // left in progress.
     const stale = checkRowFor(db, SHA);
     expect(stale.desired).toBe("failure");
     expect(stale.desired_summary).toContain("its own gate was missed");
     expect(stale.terminal_ms).not.toBeNull();
-    // The live head was reviewed and owns the surviving Check.
+    // note: The live head was reviewed and owns the surviving Check.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    // Exactly two rows for the PR: the settled old attempt and the live head's.
+    // invariant: Exactly two rows for the PR: the settled old attempt and the live head's.
     expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA, SHA2]);
     expect(checkRowFor(db, SHA2).observed).toBe("success");
-    expect(reviewCount(db)).toBe(1); // only the live head's review
+    expect(reviewCount(db)).toBe(1); // invariant: only the live head's review
   });
 
   test("check lifecycle: a reviewed head that is still live acks — no warning, no review", async () => {
@@ -9412,7 +9405,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       appId: TEST_APP_ID,
       targetId: `target-${TEST_APP_ID}`,
     });
-    // The watermark agrees with the keyed head: the hit is the live head.
+    // note: The watermark agrees with the keyed head: the hit is the live head.
     await seedPrHead(db, { headSha: SHA, headAt: new Date().toISOString() });
     let liveHeadReads = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -9424,7 +9417,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
     expect(liveHeadReads).toBe(1);
     expect(h.sandbox.calls).toHaveLength(0);
@@ -9436,7 +9429,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: a mention keyed on a stale watermark still reviews the live head", async () => {
-    // No payload SHA: admission keys the hit on the watermark it reads. The PR
+    // note: No payload SHA: admission keys the hit on the watermark it reads. The PR
     // head ADVANCES right after that read (a push queued no review in `manual`
     // mode), so the hit-time read must see the new head — comparing the
     // watermark with itself would ack and lose the commit.
@@ -9456,7 +9449,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ...h.overrides,
       selectPrHead: async () => {
         liveHeadReads += 1;
-        // First read (the admission key): SHA. Every read after it: the push.
+        // invariant: First read (the admission key): SHA. Every read after it: the push.
         return { headSha: liveHeadReads === 1 ? SHA : SHA2, headAt: new Date().toISOString() };
       },
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
@@ -9464,18 +9457,18 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
 
-    // The admission read plus ONE hit-time read, and the hit fell through.
+    // note: The admission read plus ONE hit-time read, and the hit fell through.
     expect(liveHeadReads).toBe(2);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
     expect(reviewCount(db)).toBe(2);
-    // One row for the PR, and it belongs to the head that was actually reviewed.
+    // note: One row for the PR, and it belongs to the head that was actually reviewed.
     expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA2]);
     expect(checkRowForPr(db, 42).head_sha).toBe(SHA2);
     expect(h.logLines.some((line) => line.level === "info" && line.msg.includes("reviewing the live head"))).toBe(true);
   });
 
   test("check lifecycle: a no-SHA mention settles nothing and says so once", async () => {
-    // Production attaches no run for a mention without a SHA (the webhook only
+    // invariant: Production attaches no run for a mention without a SHA (the webhook only
     // attaches for a payload SHA), so there is genuinely nothing to settle —
     // and the no-op must be one line, not silence. The live head is still
     // reviewed, under a fresh claim.
@@ -9495,7 +9488,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ...h.overrides,
       selectPrHead: async () => {
         watermarkReads += 1;
-        // The admission key is the watermark; the hit-time read sees the push.
+        // note: The admission key is the watermark; the hit-time read sees the push.
         return watermarkReads === 1
           ? { headSha: SHA, headAt: new Date().toISOString() }
           : { headSha: SHA2, headAt: new Date().toISOString() };
@@ -9505,9 +9498,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" })));
 
-    // No attach identity ⇒ the settlement names the no-op exactly once.
+    // invariant: No attach identity ⇒ the settlement names the no-op exactly once.
     expect(h.logLines.filter((line) => line.msg.includes("nothing to settle for this delivery"))).toHaveLength(1);
-    // Only the live head holds a Check, and it was reviewed.
+    // invariant: Only the live head holds a Check, and it was reviewed.
     expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA2]);
     expect(checkRowForPr(db, 42).head_sha).toBe(SHA2);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
@@ -9515,7 +9508,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: an unreviewed head reviews as before — the live head is never read", async () => {
-    // The PR watermark has already advanced, but this delivery's own head was
+    // note: The PR watermark has already advanced, but this delivery's own head was
     // never reviewed: the early gate is a MISS, and a miss must not pay for a
     // live-head read. The round reviews the payload's head exactly as before.
     const db = await createSeededTestD1();
@@ -9531,7 +9524,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
     expect(liveHeadReads).toBe(0);
     expect(reviewCount(db)).toBe(1);
@@ -9540,7 +9533,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   });
 
   test("check lifecycle: a confirmed publication for the checkout head acks without a claim", async () => {
-    // The payload names SHA (never reviewed, no journal row); the clone holds
+    // invariant: The payload names SHA (never reviewed, no journal row); the clone holds
     // SHA2, whose publication is already confirmed while its `reviews`
     // projection has not landed. A published head is as final as a reviewed
     // one, so the checkout-keyed gate hands off to recovery: no claim for
@@ -9553,15 +9546,15 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
     });
 
-    await consumer(h.makeBatch(makePayload())); // payload head_sha = SHA
+    await consumer(h.makeBatch(makePayload())); // note: payload head_sha = SHA
 
-    // The container ran — the early gate keys the payload sha, which has no
+    // note: The container ran — the early gate keys the payload sha, which has no
     // journal row...
     expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
       expect.stringContaining("git init '/workspace/repo'"),
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
-    // ...and SHA2 is never claimed: only the payload's contradicted claim
+    // invariant: ...and SHA2 is never claimed: only the payload's contradicted claim
     // remains, frozen `superseded` for the recovery cron.
     expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
@@ -9575,7 +9568,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // Recovery already owns a publication for the delivered head. It lands
+      // note: Recovery already owns a publication for the delivered head. It lands
       // AFTER the pre-claim gate (which would ack it with no claim), so the
       // admission claim is the one the hand-off must link and release.
       getSandbox: async () => {
@@ -9587,13 +9580,13 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The claim exists and was handed to recovery — create plus its promotion,
+    // note: The claim exists and was handed to recovery — create plus its promotion,
     // no terminal update. Left on the consumer's lease it would sit
     // `in_progress` for the full execution window and then close red on a
     // reviewed commit.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update"]);
     const row = checkRowFor(db, SHA);
-    // The hand-off LINKED the journal row it found: the proof that publication
+    // note: The hand-off LINKED the journal row it found: the proof that publication
     // will carry is this attempt's to conclude from, so nothing is frozen here
     // (no intent, no title/summary, no remote request).
     expect(row.publication_id).toBe("journal-prepared");
@@ -9608,10 +9601,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.next_attempt_ms!).toBeLessThan(row.execution_deadline_ms);
     expect(row.terminal_ms).toBeNull();
 
-    // The review ACK is unchanged: no post, no review row, message acked.
+    // invariant: The review ACK is unchanged: no post, no review row, message acked.
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    // `ok` is the implicit ack: the handler resolves without scheduling a retry.
+    // note: `ok` is the implicit ack: the handler resolves without scheduling a retry.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.logLines.some((line) => line.msg.includes("publication journal hit"))).toBe(true);
   });
@@ -9619,7 +9612,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a linked journal handoff concludes from the proof its publication persists", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The journal row the delivery finds already carries the envelope that
+    // note: The journal row the delivery finds already carries the envelope that
     // applies on it (one row per scope/head/kind, reused across generations).
     // It lands after the pre-claim gate, so the admission claim exists to link.
     const adapter = checksAdapterFor(db);
@@ -9638,7 +9631,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(linked.publication_id).toBe("journal-prepared");
     expect(linked.terminal_ms).toBeNull();
 
-    // The publication this attempt was LINKED to goes on to persist its proof.
+    // note: The publication this attempt was LINKED to goes on to persist its proof.
     const journalLease = await claimPublication(db, "journal-prepared", "publisher", linked.next_attempt_ms!);
     expect(journalLease).not.toBeNull();
     expect(
@@ -9654,7 +9647,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       }),
     ).toBe(true);
 
-    // The reconciler's D1 pair gate reads the App/installation mapping the
+    // note: The reconciler's D1 pair gate reads the App/installation mapping the
     // production route always carries; this suite seeds the App only.
     seedAppInstallation(db);
     const dueAt = linked.next_attempt_ms!;
@@ -9664,7 +9657,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       log: { warn: () => {}, info: () => {} },
     });
 
-    // The remote run the hand-off never closed is closed by the PROOF, not by
+    // invariant: The remote run the hand-off never closed is closed by the PROOF, not by
     // a deadline: gate-derived success on the published verdict.
     expect(summary.examined).toBe(1);
     expect(summary.completed).toBe(1);
@@ -9686,7 +9679,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const adapter = checksAdapterFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // The row lands after the pre-claim gate, so the claim exists to link.
+      // why: The row lands after the pre-claim gate, so the claim exists to link.
       getSandbox: async () => {
         seedJournalRow(db, SHA, "prepared");
         return h.fakeSandbox;
@@ -9700,7 +9693,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(linked.publication_id).toBe("journal-prepared");
     const requestsAfterDelivery = checkRequests.length;
 
-    // Due at its released time, inside the execution window: the proof has not
+    // note: Due at its released time, inside the execution window: the proof has not
     // landed, so the claim is given straight back — no attempt, no request.
     const dueAt = linked.next_attempt_ms!;
     const first = await reconcileReviewChecks({ DB: db as never } as never, {
@@ -9715,7 +9708,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(waiting.attempts).toBe(1);
     expect(checkRequests).toHaveLength(requestsAfterDelivery);
 
-    // Past the execution deadline the wait ends: the proof never landed, and
+    // invariant: Past the execution deadline the wait ends: the proof never landed, and
     // the run closes as a failure instead of waiting forever.
     const late = waiting.execution_deadline_ms + 1;
     const second = await reconcileReviewChecks({ DB: db as never } as never, {
@@ -9731,7 +9724,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(closed.publication_id).toBe("journal-prepared");
   });
 
-  // §7.7 step 2's journal hand-off is TWO independent fenced writes (link,
+  // note: §7.7 step 2's journal hand-off is TWO independent fenced writes (link,
   // release) inside one try. Each can refuse on its own: the claim runs 900 s
   // while the steps before the hand-off are network calls with no enforced
   // clock. A refusal writes nothing, so the row keeps the owner it had and the
@@ -9743,14 +9736,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const real = lifecycleFor(db);
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      // The row lands after the pre-claim gate, so the (bumped-lease) claim
+      // why: The row lands after the pre-claim gate, so the (bumped-lease) claim
       // exists and both hand-off writes have something to refuse.
       getSandbox: async () => {
         seedJournalRow(db, SHA, "prepared");
         return h.fakeSandbox;
       },
       checks: {
-        // The row is claimed for real, but the handle carries a bumped epoch:
+        // note: The row is claimed for real, but the handle carries a bumped epoch:
         // the stored fence no longer recognises it, which is exactly the stale
         // lease both writes answer with `false`.
         begin: async (input) => {
@@ -9765,14 +9758,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     const notOwned = h.logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
-    // Two refusals, two messages: each write names itself, and neither is a
+    // note: Two refusals, two messages: each write names itself, and neither is a
     // fault. This exit (a lost lease) refuses BOTH writes by construction.
     expect(notOwned).toHaveLength(2);
     expect(notOwned.some((line) => line.msg.includes("publication link refused"))).toBe(true);
     expect(notOwned.some((line) => line.msg.includes("claim release refused"))).toBe(true);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_failed")).toHaveLength(0);
 
-    // Nothing was written: the row keeps its owner, its publication link stays
+    // invariant: Nothing was written: the row keeps its owner, its publication link stays
     // empty, and the deadline path still owns the conclusion.
     const row = checkRowFor(db, SHA);
     expect(row.holder).not.toBeNull();
@@ -9781,7 +9774,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.desired).toBe("in_progress");
     expect(row.terminal_ms).toBeNull();
 
-    // The review ACK is unchanged by the Check refusal.
+    // invariant: The review ACK is unchanged by the Check refusal.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
   });
@@ -9790,7 +9783,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     const real = lifecycleFor(db);
-    // Write 2 (the release) answers `false` without touching the store; the
+    // note: Write 2 (the release) answers `false` without touching the store; the
     // link is the real write.
     const fault = journalHandoffFault(db, 2, "refused");
     const consumer = createReviewConsumer(
@@ -9798,7 +9791,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
-        // The row lands after the pre-claim gate, so the admission claim is
+        // why: The row lands after the pre-claim gate, so the admission claim is
         // the one the hand-off links and releases.
         getSandbox: async () => {
           seedJournalRow(db, SHA, "prepared");
@@ -9814,7 +9807,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Exactly one benign no-op, named after the RELEASE — not the link, and not
+    // invariant: Exactly one benign no-op, named after the RELEASE — not the link, and not
     // a fault.
     const notOwned = h.logLines.filter((line) => line.fields.event === "check_abandon_not_owned");
     expect(notOwned).toHaveLength(1);
@@ -9841,7 +9834,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       logArmingOnJournalHandoff(fault.arm),
       {
         ...h.overrides,
-        // The row lands after the pre-claim gate, so the admission claim is
+        // why: The row lands after the pre-claim gate, so the admission claim is
         // the one whose link faults.
         getSandbox: async () => {
           seedJournalRow(db, SHA, "prepared");
@@ -9857,7 +9850,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // A THROW is a fault, not a refusal: one `_failed` line carrying the store
+    // note: A THROW is a fault, not a refusal: one `_failed` line carrying the store
     // detail, and nothing written.
     const failed = h.logLines.filter((line) => line.fields.event === "check_abandon_failed");
     expect(failed).toHaveLength(1);
@@ -9869,7 +9862,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.lease_until_ms).not.toBeNull();
     expect(row.publication_id).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // The review ACK is unchanged: a Check fault never schedules a retry.
+    // invariant: The review ACK is unchanged: a Check fault never schedules a retry.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
   });
@@ -9879,7 +9872,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     const hooks = lifecycleFor(db, checkClock);
     const handle = await hooks.begin(beginInput(SHA, checkState.clockMs + CHECK_LEASE_MS));
     expect(handle).not.toBeNull();
-    // The interrupted terminalize had already frozen a PRECISE gate failure:
+    // note: The interrupted terminalize had already frozen a PRECISE gate failure:
     // the give-up must release it AS-IS, never replace it with the generic
     // `failure/unconfirmed` text (the persisted row is what recovery sends).
     const gateSummary = CHECK_SUMMARIES.gateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE);
@@ -9894,7 +9887,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ),
     ).toBe(true);
 
-    // The seam reports whether the RELEASE write changed the row.
+    // note: The seam reports whether the RELEASE write changed the row.
     expect(await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (100ms)" })).toBe(true);
 
     const released = checkRowFor(db, SHA);
@@ -9908,19 +9901,19 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(released.desired_summary).toBe(gateSummary);
     expect(released.observed).toBe("unknown");
     expect(released.terminal_ms).toBeNull();
-    // NO remote request: the create is the only one this attempt ever sent.
+    // invariant: NO remote request: the create is the only one this attempt ever sent.
     expect(checkRequests.map((r) => r.op)).toEqual(["create"]);
 
-    // Recovery now owns the row: a second give-up is a silent no-op.
+    // note: Recovery now owns the row: a second give-up is a silent no-op.
     expect(await claimCheckRecovery(db, released.id, "reconciler", released.next_attempt_ms!)).not.toBeNull();
     const owned = checkRowFor(db, SHA);
-    // Recovery now owns the attempt, so the fenced release writes nothing and
+    // why: Recovery now owns the attempt, so the fenced release writes nothing and
     // the seam reports that honestly instead of claiming a hand-off.
     expect(await hooks.abandonTerminalize({ handle: handle!, reason: "second give-up" })).toBe(false);
     expect(checkRowFor(db, SHA)).toEqual(owned);
   });
 
-  // SUPPLEMENTARY contract, not the fails-first evidence for the atomic writer:
+  // note: SUPPLEMENTARY contract, not the fails-first evidence for the atomic writer:
   // the old read-then-write ALREADY refused success→failure, so this case
   // passes against that revert too. What it pins is that a REFUSED rewrite
   // still releases the lease. The writer's atomicity evidence is the
@@ -9947,7 +9940,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(await hooks.abandonTerminalize({ handle: handle!, reason: "terminalize budget exceeded (1000ms)" })).toBe(true);
 
     const released = checkRowFor(db, SHA);
-    // The proof-derived conclusion stands; only the lease and the recovery
+    // invariant: The proof-derived conclusion stands; only the lease and the recovery
     // bookkeeping moved.
     expect(released.desired).toBe("success");
     expect(released.desired_summary).toBe(successSummary);
@@ -9960,7 +9953,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
   test("check lifecycle: a pre-numstat exhaustion with no knowable SHA still publishes the failure Check and acks", async () => {
     const db = await createSeededTestD1();
-    // An OLDER completed Check and the review it published, both for the head
+    // note: An OLDER completed Check and the review it published, both for the head
     // this delivery will check out: a re-trigger must leave them untouched.
     // The publication's own payload is a REAL prior review's record — its body
     // is the durable form of the already-published GitHub comment — so the
@@ -10002,7 +9995,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       .run(TEST_APP_ID, SHA);
     const adapter = checksAdapterFor(db);
 
-    // An issue comment: no payload SHA and no ledger watermark, so the
+    // note: An issue comment: no payload SHA and no ledger watermark, so the
     // admission-time claim is skipped and the post-checkout fallback claim sits
     // AFTER the numstat. The whole derived preparation window is gone before
     // the diff stage, so the stop lands in that gap.
@@ -10017,14 +10010,14 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       );
     });
 
-    // ACKED, never retried: a confirmed stop is terminal.
+    // invariant: ACKED, never retried: a confirmed stop is terminal.
     expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
     expect(h.messageRetryCalls).toHaveLength(0);
-    // No review, no comment: the stop published a Check and a failure row only.
+    // invariant: No review, no comment: the stop published a Check and a failure row only.
     expect(reviewCount(db)).toBe(0);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(0);
 
-    // The Check this stop owes is published against the CHECKOUT sha — the fact
+    // note: The Check this stop owes is published against the CHECKOUT sha — the fact
     // that became known after the admission claim had already been skipped.
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     expect((checkRequests[0]!.params as unknown as ChecksCreateParams).head_sha).toBe(SHA);
@@ -10032,7 +10025,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(terminal.status).toBe("completed");
     expect(terminal.conclusion).toBe("failure");
     expect(terminal.output.title).toBe(CHECK_NAME);
-    // The SHORT form: counters that were observed, in order, and no invented
+    // note: The SHORT form: counters that were observed, in order, and no invented
     // changed-line count (the numstat never ran).
     expect(terminal.output.summary).toBe(
       "Review budget exhausted: default review reached its 666s preparation budget (consumer deadline reached); " +
@@ -10046,9 +10039,9 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(fresh.head_sha).toBe(SHA);
     expect(fresh.desired).toBe("failure");
     expect(fresh.observed).toBe("failure");
-    // This attempt published nothing, so its run carries no publication link.
+    // invariant: This attempt published nothing, so its run carries no publication link.
     expect(fresh.publication_id).toBeNull();
-    // The older Check and its published review are exactly as they were.
+    // invariant: The older Check and its published review are exactly as they were.
     const prior = db.raw
       .query("SELECT * FROM review_checks WHERE id = 'prior-check'")
       .get() as CheckRowShape;
@@ -10073,7 +10066,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
   test("check lifecycle: a sandbox kill publishes the no-counter short form, never an invented count", async () => {
     h.sandbox.runnerExitCode = 124;
     h.sandbox.runnerStdout = "";
-    // A malformed numstat row: the diff SIZE is unobserved, so the summary must
+    // why: A malformed numstat row: the diff SIZE is unobserved, so the summary must
     // carry no changed-line count at all.
     h.sandbox.numstatStdout = "not-a-numstat-row\n";
     const db = await createSeededTestD1();
@@ -10093,7 +10086,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row).toContain('"seatsStopped":null');
     expect(row).toContain('"changedLines":null');
 
-    // The Check renders the outcome this attempt actually recorded — the same
+    // note: The Check renders the outcome this attempt actually recorded — the same
     // derived runner budget the failure row carries, and nothing else.
     const outcome = JSON.parse(row.slice(row.indexOf("{"), row.lastIndexOf("}") + 1)) as { budgetMs: number };
     const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
@@ -10113,7 +10106,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     h.sandbox.runnerExitCode = 124;
     h.sandbox.runnerStdout = "";
     const db = await createSeededTestD1();
-    // The terminal send parks forever, so the consumer gives up at its own
+    // why: The terminal send parks forever, so the consumer gives up at its own
     // bound and hands the attempt over instead of writing the run itself.
     seedCheckBudget(db, "review.check.terminalize_timeout_ms", "1000");
     checkRequestOverrides.update = (params) => {
@@ -10131,16 +10124,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // ACKED, never retried: the parked send is handed to recovery, and a
+    // invariant: ACKED, never retried: the parked send is handed to recovery, and a
     // confirmed stop is terminal regardless of how its send ended.
     expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
     expect(h.messageRetryCalls).toHaveLength(0);
-    // This invocation's terminal send parked on the wire and never answered, so
+    // invariant: This invocation's terminal send parked on the wire and never answered, so
     // the scripted run is still the promoted one — nothing landed.
     const frozen = checkRowFor(db, SHA);
     expect(checkRuns.get(frozen.check_run_id!)!.status).toBe("in_progress");
     expect(frozen.desired).toBe("failure");
-    // The exact text the freeze owes — derived here from the attempt's own
+    // note: The exact text the freeze owes — derived here from the attempt's own
     // recorded facts (same budget the failure row carries, no seat counts,
     // the numstat's 17 changed lines), never echoed back from the row.
     const row = String(failureRows(db)[0]!.error);
@@ -10155,7 +10148,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(frozen.recovery_state).toBe("remote-unconfirmed");
     expect(frozen.publication_id).toBeNull();
 
-    // The recovery lane owns the conclusion: at the attempt's own deadline it
+    // note: The recovery lane owns the conclusion: at the attempt's own deadline it
     // sends the SAME frozen intent — no re-derivation and no paid rerun. The
     // parked transport is cleared first: it was THIS invocation's abandoned
     // send, not the lane's.
@@ -10177,8 +10170,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
 });
 
 describe("workspace attribution gate (one read face)", () => {
-  /**
-   * The seeded App minus its `bot_workspaces` row: what a pre-0026 row looks
+  /** note: The seeded App minus its `bot_workspaces` row: what a pre-0026 row looks
    * like when the backfill never ran. The join read face cannot see it at all,
    * so the pipeline must fail closed rather than review an unattributed App.
    */
@@ -10196,13 +10188,13 @@ describe("workspace attribution gate (one read face)", () => {
       /per-App credential resolution failed: app 11111111-2222-3333-4444-555555555555 not found, has no workspace mapping, or its workspace is deleted/,
     );
 
-    // Structural: nothing ran — no sandbox step, no commenter instance (so no
+    // invariant: Structural: nothing ran — no sandbox step, no commenter instance (so no
     // token mint), no admission row, no GitHub call, no review row.
     expect(h.sandbox.calls).toHaveLength(0);
     expect(h.commenterCalls).toHaveLength(0);
     expect(inflightRows(db)).toHaveLength(0);
     expect(reviewCount(db)).toBe(0);
-    // The existing failure path is untouched: the throw IS the queue's
+    // invariant: The existing failure path is untouched: the throw IS the queue's
     // retry→DLQ signal (no ack, no message-level retry), with the AL-6 row.
     expect(h.messageAckCalls).toHaveLength(0);
     expect(h.messageRetryCalls).toHaveLength(0);
@@ -10247,11 +10239,11 @@ describe("usage ledger (migration 0031)", () => {
         execution_token: expect.any(String),
         workspace_id: "default",
         occurred_at: expect.any(String),
-        // The charge, in the SAME row: the seeded App owns its bot (BYOK,
+        // note: The charge, in the SAME row: the seeded App owns its bot (BYOK,
         // source 1) and reviews at the operator default (base 2) under the v1
         // profile — `rpFor("default", "byok")` = 2.
         rp: 2,
-        // …and the source that price was computed from (migration 0065), so
+        // note: …and the source that price was computed from (migration 0065), so
         // the card's split never has to guess it from the product.
         source: "byok",
       },
@@ -10282,13 +10274,13 @@ describe("usage ledger (migration 0031)", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // The first delivery reviews the sha and meters it.
+    // note: The first delivery reviews the sha and meters it.
     await consumer(h.makeBatch(makePayload()));
     const month = quotaMonth(new Date());
     const charged = await sumMonthlyRp(db, "default", month.startIso, month.endIso);
     expect(charged).toBe(2);
 
-    // GitHub redelivers the same commit: the KV done-claim plus the stored
+    // note: GitHub redelivers the same commit: the KV done-claim plus the stored
     // review both answer "already reviewed", so no second row and no second
     // charge.
     await consumer(h.makeBatch(makePayload()));
@@ -10297,7 +10289,7 @@ describe("usage ledger (migration 0031)", () => {
   });
 
   test("a duplicate delivery after a completed review with the KV claim absent or faulting still runs no second review", async () => {
-    // §7.7 step 2: the KV done claim is only the FAST dedup — D1 is the durable
+    // invariant: §7.7 step 2: the KV done claim is only the FAST dedup — D1 is the durable
     // backstop. Both states that make the claim unreadable are covered, because
     // "KV says done" is exactly what neither of these has.
     for (const kv of ["absent", "faulting"] as const) {
@@ -10307,7 +10299,7 @@ describe("usage ledger (migration 0031)", () => {
       const db = await createSeededTestD1();
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-      // The first delivery completes the review for this sha: one row, one
+      // note: The first delivery completes the review for this sha: one row, one
       // charge, one posted review, one model run.
       await consumer(h.makeBatch(makePayload()));
       expect(reviewCount(db)).toBe(1);
@@ -10315,7 +10307,7 @@ describe("usage ledger (migration 0031)", () => {
       expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
       expect(h.sandbox.calls.filter((c) => c.cmd.includes("bun run"))).toHaveLength(1);
 
-      // GitHub redelivers the same commit with no readable done claim: the
+      // note: GitHub redelivers the same commit with no readable done claim: the
       // key is absent, or every read throws.
       h.kvState.entries.clear();
       h.kvState.getValue = null;
@@ -10323,7 +10315,7 @@ describe("usage ledger (migration 0031)", () => {
 
       await consumer(h.makeBatch(makePayload()));
 
-      // The D1 row for this exact head is what answers "already reviewed":
+      // note: The D1 row for this exact head is what answers "already reviewed":
       // no second completed review, no second charge, no second post, and no
       // second paid model run.
       expect(reviewCount(db)).toBe(1);
@@ -10340,7 +10332,7 @@ describe("usage ledger (migration 0031)", () => {
   test("an unreadable quota profile does not abort the review: it posts, and one usage row records the lost charge", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // `resolveQuotaProfile` throws this way when `quota_profiles` is empty — and
+    // note: `resolveQuotaProfile` throws this way when `quota_profiles` is empty — and
     // on `self-hosted` the enqueue gate never runs to absorb it, so this read is
     // the ONLY place the fault can be caught. Outside the ledger's error
     // boundary it was a retry→DLQ with no review and no `usage` row.
@@ -10350,15 +10342,15 @@ describe("usage ledger (migration 0031)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // The review ran to completion: returning without `retry()` is the ack, so
+    // note: The review ran to completion: returning without `retry()` is the ack, so
     // no retry call and a stored review is the proof — the queue never sees the
     // fault and never redelivers into the DLQ.
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(reviewCount(db)).toBe(1);
     expect(h.commenterCalls.filter((c) => c.op === "post-prepared")).toHaveLength(1);
-    // No ledger row (the charge could not be computed) …
+    // note: No ledger row (the charge could not be computed) …
     expect(usageRows(db)).toHaveLength(0);
-    // … and exactly ONE recorded `usage` row carrying the identity a repair or
+    // invariant: … and exactly ONE recorded `usage` row carrying the identity a repair or
     // backfill needs, so the lost charge is reconcilable rather than invisible.
     expect(failureRows(db)).toHaveLength(1);
     const row = failureRows(db)[0]!;
@@ -10375,7 +10367,7 @@ describe("usage ledger (migration 0031)", () => {
   test("a shared-bot attempt is charged to the TARGET's workspace, never the bot owner's", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // A tenant that is not the bot's owner, plus a shared bot owned by
+    // note: A tenant that is not the bot's owner, plus a shared bot owned by
     // `default`: `createOnSharedBot` writes only the TARGET into the tenant's
     // workspace, and the `bot_workspaces` mapping still names the owner.
     db.raw
@@ -10394,12 +10386,12 @@ describe("usage ledger (migration 0031)", () => {
       consumer(h.makeBatch(makePayload({ botRef: { appId: TEST_SECOND_APP_ID }, targetId: "target-tenant" }))),
     );
 
-    // Deep + shared = 6 x 10 = 60 RP, recorded against the TENANT.
+    // note: Deep + shared = 6 x 10 = 60 RP, recorded against the TENANT.
     expect(usageRows(db).map((row) => ({ workspace_id: row.workspace_id, rp: row.rp, source: row.source }))).toEqual([
       { workspace_id: "tenant", rp: 60, source: "shared" },
     ]);
 
-    // The tenant's ceiling counts it; the bot owner's month does not grow.
+    // note: The tenant's ceiling counts it; the bot owner's month does not grow.
     const month = quotaMonth(new Date());
     expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(60);
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
@@ -10408,13 +10400,13 @@ describe("usage ledger (migration 0031)", () => {
   test("an owned-bot attempt and a shared-bot attempt from ONE tenant both land in that tenant's month", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The tenant owns one bot (BYOK, source 1, Standard = 2 RP) …
+    // note: The tenant owns one bot (BYOK, source 1, Standard = 2 RP) …
     db.raw
       .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
       .run();
     db.raw.prepare(`UPDATE bot_workspaces SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
     db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE bot_id = ?`).run(TEST_APP_ID);
-    // … and reviews through ANOTHER workspace's shared bot on a second target
+    // note: … and reviews through ANOTHER workspace's shared bot on a second target
     // (Quick + shared = 1 x 10 = 10 RP).
     await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "quick");
     db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
@@ -10427,7 +10419,7 @@ describe("usage ledger (migration 0031)", () => {
     const owned = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
     await owned(h.makeBatch(makePayload()));
     const shared = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    // A second PR: the two attempts must be two REVIEWS, or the dedup would
+    // invariant: A second PR: the two attempts must be two REVIEWS, or the dedup would
     // answer the second delivery from the first review's row.
     await shared(
       h.makeBatch(
@@ -10436,15 +10428,15 @@ describe("usage ledger (migration 0031)", () => {
     );
 
     const month = quotaMonth(new Date());
-    // Both attempts are in the TENANT's month, 2 + 10.
+    // note: Both attempts are in the TENANT's month, 2 + 10.
     expect(await sumMonthlyRp(db, "tenant", month.startIso, month.endIso)).toBe(12);
-    // …and the shared bot's owner counts nothing for either.
+    // invariant: …and the shared bot's owner counts nothing for either.
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
   });
 
   test("a genuine retry mints the next seq with ITS OWN rp", async () => {
     const db = await createSeededTestD1();
-    // Attempt 1: the runner fails AFTER the ledger write (step 4b precedes the
+    // invariant: Attempt 1: the runner fails AFTER the ledger write (step 4b precedes the
     // runner), so this execution is metered and the review still has to run.
     h.sandbox.runnerExitCode = 1;
     h.sandbox.runnerStderr = "review: session failed: boom\n";
@@ -10452,7 +10444,7 @@ describe("usage ledger (migration 0031)", () => {
     await first(h.makeBatch(makePayload())).catch(() => undefined);
     expect(usageRows(db)).toHaveLength(1);
 
-    // The operator switches the App to quick, and the queue redelivers: nothing
+    // invariant: The operator switches the App to quick, and the queue redelivers: nothing
     // was published, so this is the same review's next attempt — a new `seq`
     // priced at the depth that actually ran this time (quick + BYOK = 1 RP).
     setAppReviewLevel(db, TEST_APP_ID, "quick");
@@ -10472,7 +10464,7 @@ describe("usage ledger (migration 0031)", () => {
   test("a shared bot meters the source multiplier: deep × shared records 60 RP", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The shared bot is offered platform-wide (migration 0058); the source
+    // note: The shared bot is offered platform-wide (migration 0058); the source
     // multiplier is 10 for it and 1 for a workspace's own App (D7).
     db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_APP_ID);
     setAppReviewLevel(db, TEST_APP_ID, "deep");
@@ -10499,7 +10491,7 @@ describe("usage ledger (migration 0031)", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let insertAttempts = 0;
-    // Smallest possible double: only the usage insert throws — and counts its
+    // invariant: Smallest possible double: only the usage insert throws — and counts its
     // attempts; every other statement (the failure row included) is real.
     const failingUsageDb: TestD1 = {
       ...db,
@@ -10523,29 +10515,29 @@ describe("usage ledger (migration 0031)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    // Exactly one attempt: the insert mints `seq + 1`, so retrying after an
+    // invariant: Exactly one attempt: the insert mints `seq + 1`, so retrying after an
     // ambiguous failure (write applied, driver threw) would double-count.
     expect(insertAttempts).toBe(1);
-    // "count, never refuse": the review ran to completion.
+    // invariant: "count, never refuse": the review ran to completion.
     expect(reviewCount(db)).toBe(1);
     expect(usageRows(db)).toHaveLength(0);
     expect(failureRows(db)).toHaveLength(1);
     const row = failureRows(db)[0]!;
     expect(row).toMatchObject({ stage: "usage" });
-    // The dropped attempt is reconcilable: the failure row carries the exact
+    // note: The dropped attempt is reconcilable: the failure row carries the exact
     // ledger identity the insert would have written, plus the workspace.
     expect(row.error).toContain(
       idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
     );
     expect(row.error).toContain('"workspaceId":"default"');
-    // Nothing landed: this is the one backfillable variant.
+    // invariant: Nothing landed: this is the one backfillable variant.
     expect(row.error).toContain('"applied":false');
   });
 
   test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // The real insert runs, THEN the driver "throws" — the ambiguous failure
+    // note: The real insert runs, THEN the driver "throws" — the ambiguous failure
     // the ledger read-back exists to tell apart from a pre-commit one.
     const appliedThenThrew: TestD1 = {
       ...db,
@@ -10571,7 +10563,7 @@ describe("usage ledger (migration 0031)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(reviewCount(db)).toBe(1);
-    // The row exists, so `applied: true` marks the failure as noise and keeps
+    // note: The row exists, so `applied: true` marks the failure as noise and keeps
     // a backfill from minting a second `seq` for the same execution.
     expect(usageRows(db)).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(1);
@@ -10588,7 +10580,7 @@ describe("usage ledger (migration 0031)", () => {
       pr_number: 42,
       head_sha: SHA,
     });
-    // A prior attempt already metered seq 1 for this review.
+    // note: A prior attempt already metered seq 1 for this review.
     db.raw
       .prepare(
         `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at)
@@ -10619,7 +10611,7 @@ describe("usage ledger (migration 0031)", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(insertAttempts).toBe(1);
-    // THIS execution wrote nothing, so it is backfillable — asking by row count
+    // why: THIS execution wrote nothing, so it is backfillable — asking by row count
     // for the review would have answered "applied" from the earlier attempt.
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]!.error).toContain('"applied":false');
@@ -10629,7 +10621,7 @@ describe("usage ledger (migration 0031)", () => {
   test("an unreadable ledger records applied: \"unknown\" instead of a false claim", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Both the insert AND the token read-back fail: the failure row must say
+    // safety: Both the insert AND the token read-back fail: the failure row must say
     // so instead of reporting "not applied", which would authorise a backfill.
     const unreadableDb: TestD1 = {
       ...db,
@@ -10670,13 +10662,13 @@ describe("usage ledger (migration 0031)", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // Attempt 1: the runner fails, so no reviews row, KV done or journal row
+    // why: Attempt 1: the runner fails, so no reviews row, KV done or journal row
     // exists — both dedup reads and the journal handoff miss on the retry.
     h.sandbox.runnerExitCode = 1;
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(/runner failed/);
     expect(usageRows(db).map((row) => row.seq)).toEqual([1]);
 
-    // The consumer stays bound to this instance's doubles; only the failed
+    // invariant: The consumer stays bound to this instance's doubles; only the failed
     // runner knob has to be cleared for the retry.
     h.sandbox.runnerExitCode = 0;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
@@ -10693,7 +10685,7 @@ describe("usage ledger (migration 0031)", () => {
       [key, 1],
       [key, 2],
     ]);
-    // Each attempt carries its own durable identity, so a later failure can be
+    // why: Each attempt carries its own durable identity, so a later failure can be
     // read back by token instead of by the review's row count.
     expect(new Set(usageRows(db).map((row) => row.execution_token)).size).toBe(2);
     expect(reviewCount(db)).toBe(1);
@@ -10704,7 +10696,7 @@ describe("usage ledger (migration 0031)", () => {
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
-    // Each delivery's clone lands a commit the payload never named, so the
+    // invariant: Each delivery's clone lands a commit the payload never named, so the
     // payload head itself stays unreviewed and both executions start: the
     // review row follows each checkout, the metered identity stays the
     // payload's.
@@ -10752,8 +10744,7 @@ describe("usage ledger (migration 0031)", () => {
   });
 });
 
-/**
- * Migration 0048 — the pipeline's atomic consume. The worker inserts the claim
+/** note: Migration 0048 — the pipeline's atomic consume. The worker inserts the claim
  * `queued` BEFORE it enqueues, so the first delivery to reach `processMessage`
  * flips it to `consumed` and every later delivery of that comment acks without
  * running anything: at-least-once queue delivery, at-most-once execution.
@@ -10795,7 +10786,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     const payload = makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: 9001 });
     seedClaim(db, payload, 9001, "queued");
 
-    // An unresolvable App throws AFTER the claim: the row must already be
+    // invariant: An unresolvable App throws AFTER the claim: the row must already be
     // `consumed`, because a failed comment-triggered run is re-run by posting a
     // new comment, never by replaying this one.
     db.raw.prepare("UPDATE review_bots SET status = 'disabled' WHERE id = ?").run(TEST_APP_ID);
@@ -10805,19 +10796,19 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       h.overrides,
     );
     await expect(consumer(h.makeBatch(payload))).rejects.toThrow();
-    // The claim row becomes a terminal tombstone: consumed, payload dropped,
+    // note: The claim row becomes a terminal tombstone: consumed, payload dropped,
     // and never deleted — it is what refuses every later delivery.
     expect(claimRows(db)).toEqual([
       { state: "consumed", consumed_ms: expect.any(Number), payload_json: null },
     ]);
 
-    // The redelivery is refused BEFORE that same App resolution, so it neither
+    // why: The redelivery is refused BEFORE that same App resolution, so it neither
     // throws nor reaches the sandbox.
     await consumer(h.makeBatch(payload));
 
     expect(h.logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(true);
     expect(h.sandbox.calls).toHaveLength(0);
-    // The tombstone survives the refused redelivery.
+    // invariant: The tombstone survives the refused redelivery.
     expect(claimRows(db)).toHaveLength(1);
   });
 
@@ -10962,7 +10953,7 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     expect(h.logLines.some((l) => l.msg.includes("comment trigger already claimed"))).toBe(false);
   });
 
-  // Fail-closed consume: a delivery whose row is gone (the worker's
+  // note: Fail-closed consume: a delivery whose row is gone (the worker's
   // send-failure release) or terminal (the outbox attempt cap) must ack
   // WITHOUT running — it must never execute the same comment a second time.
   for (const [label, state] of [
@@ -10982,14 +10973,14 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
 
       await consumer(h.makeBatch(payload));
 
-      // `{kind:"ok"}` = no retry, so the queue auto-acks: nothing is retried
+      // why: `{kind:"ok"}` = no retry, so the queue auto-acks: nothing is retried
       // or dead-lettered, and nothing costly runs.
       expect(h.messageRetryCalls).toHaveLength(0);
       expect(h.messageAckCalls).toHaveLength(0);
       expect(
         h.logLines.some((l) => l.msg.includes("comment trigger already claimed — ack without running")),
       ).toBe(true);
-      // Nothing costly ran: no sandbox, no GitHub write.
+      // invariant: Nothing costly ran: no sandbox, no GitHub write.
       expect(h.sandbox.calls).toHaveLength(0);
       expect(h.commenterCalls).toHaveLength(0);
     });
