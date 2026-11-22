@@ -188,45 +188,45 @@ export const en = {
       emptyDescription: "This bot has received no webhook delivery matching these filters.",
       pagePrev: "Previous",
       pageNext: "Next",
-      /** {from}–{to} of the filtered total, never of the whole log. */
+      /** note: {from}–{to} of the filtered total, never of the whole log. */
       pageRange: "{from}–{to} / {total}",
       refreshAria: "Refresh deliveries",
     },
-    // The derived Blocked banner: the server reads the bot's scope and the
+    // why: The derived Blocked banner: the server reads the bot's scope and the
     // target's workspace on every read, so the copy names the one cause.
     blockedBotNotShared:
       "This bot is no longer shared with this workspace, so this target reviews nothing. Ask the platform operator to share it again.",
   },
   /**
-   * The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
+   * why: The repository surface (`/dashboard/<ref>/repos`, the dashboard default):
    * a workspace's claim on a bot, listed and edited on its own page. Its detail
    * body keeps the `settings.*` labels of the tab it was moved from.
    */
   targets: {
     heading: "Repositories",
-    /** The overview's one explanatory block (the app-overview layout). */
+    /** note: The overview's one explanatory block (the app-overview layout). */
     headingDescription:
       "Each row is one repository this workspace reviews. Review settings live on the repository itself; insights and pull requests are shared across the workspace.",
-    /** The overview band — review volume, summed from the rows' aggregates. */
+    /** note: The overview band — review volume, summed from the rows' aggregates. */
     metricRepositories: "Repositories",
     metricReviews: "Reviews",
     metricReviews7d: "Reviews · last 7 days",
-    /** The list's columns (the Apps list's vocabulary). */
+    /** note: The list's columns (the Apps list's vocabulary). */
     columnRepository: "Repository",
     columnState: "State",
     columnReviews: "Reviews",
     columnReviews7d: "Last 7 days",
     columnLastReview: "Last review",
-    /** The 待安装 filter: a segment with the count of rows awaiting install. */
+    /** note: The 待安装 filter: a segment with the count of rows awaiting install. */
     filterLabel: "Filter repositories",
     filterAll: "All",
     filterUninstalled: "Awaiting install ({count})",
     backToList: "Back to repositories",
-    /** The three detail tabs. */
+    /** note: The three detail tabs. */
     tabInsights: "Insights",
     tabPullRequests: "Pull requests",
     /**
-     * The 评审配置 tab's own copy; `heading` doubles as the tab label.
+     * note: The 评审配置 tab's own copy; `heading` doubles as the tab label.
      * `boundApp` names the bot the repository reviews under — read-only, since
      * rebinding is not supported yet.
      */
@@ -237,20 +237,20 @@ export const en = {
         "Following the workspace defaults; turn inheritance off to override them individually.",
       boundApp: "Bound App",
       boundAppPlanned: "Changing the App a repository is bound to is planned, not supported yet.",
-      /** The Review state section: the inheritance and pause switches (target state, not policy). */
+      /** note: The Review state section: the inheritance and pause switches (target state, not policy). */
       sectionState: "Review state",
     },
-    /** Composed empty state (EmptyState title + description). */
+    /** note: Composed empty state (EmptyState title + description). */
     emptyTitle: "No repositories yet",
     emptyDescription: "Add one of the repositories your App is installed on.",
-    /** The fixed first row (J1): the workspace default configuration. */
+    /** note: The fixed first row (J1): the workspace default configuration. */
     allRepositories: "All repositories",
     allRepositoriesMeta: "Workspace defaults · workspace-wide insights and pull requests",
-    /** Count pill on the fixed row; the count is the workspace's live targets. */
+    /** note: Count pill on the fixed row; the count is the workspace's live targets. */
     repositoryCount: "0 repositories",
     repositoryCountOne: "1 repository",
     repositoryCountMany: "{count} repositories",
-    /** Status pills of a repository row (J1). */
+    /** note: Status pills of a repository row (J1). */
     status: {
       reviewing: "Reviewing",
       uninstalled: "Awaiting install",
@@ -260,7 +260,7 @@ export const en = {
     addDialog: {
       title: "Add repository",
       description: "Choose the App, check its installation, then find the repositories to review.",
-      /** The three steps, in render order. */
+      /** note: The three steps, in render order. */
       stepApp: "1 · App (bot)",
       stepInstall: "2 · Installation",
       stepRepos: "3 · Repositories",
@@ -273,7 +273,7 @@ export const en = {
       loadInstallationsFailed: "Could not read this App's installations.",
       noInstallations: "This App is not installed on any account yet.",
       recheck: "Re-check",
-      /** One installation row: account, id and the last time it was seen. */
+      /** note: One installation row: account, id and the last time it was seen. */
       installationRow: "{account} · installation {id} · seen {time}",
       installationNoAccount: "unknown account",
       repoLabel: "Repositories",
@@ -287,32 +287,32 @@ export const en = {
       loadingRepos: "Searching repositories…",
       loadReposFailed: "Could not load this App's repositories.",
       alreadyAdded: "Added",
-      /** A repository another workspace already reviews under this App. */
+      /** note: A repository another workspace already reviews under this App. */
       claimedElsewhere: "Taken by another workspace",
       degraded: "Some installations could not be read — this list may be incomplete.",
       duplicates: "Already added: {names}",
       confirm: "Add",
     },
-    /** The 待安装 filter's own empty face (rows exist, none are awaiting install). */
+    /** note: The 待安装 filter's own empty face (rows exist, none are awaiting install). */
     filterEmpty: "No repository is awaiting its install.",
-    /** The App list (the add dialog's source) failed while the list itself read. */
+    /** note: The App list (the add dialog's source) failed while the list itself read. */
     appsReadFailed: "Could not read this workspace's applications — adding a repository is unavailable for now.",
   },
   /**
-   * The bot-owned configuration the App detail's 应用设置 tab composes under
+   * note: The bot-owned configuration the App detail's 应用设置 tab composes under
    * the App's identity header. The target-scoped labels stay under `settings.*`.
    */
   botSettings: {
     scopeOwned: "Owned",
     scopeShared: "Shared",
-    /** Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
+    /** note: Shown whenever `can_manage` is false — a shared bot, or a non-manager. */
     readOnly: "Configuration here is read-only. A shared bot is configured by its owning workspace only.",
     health: "Credentials health",
     healthCopy: "Deliveries GitHub sent to this bot's webhook, and the ones it refused.",
     sandboxCopy: "The runtime harness every review of this bot runs under.",
     providersNone: "No provider key or custom provider yet.",
     chainsCopy: "The model chains this bot's reviews select their models from.",
-    /** The share switch. Rendered only for the official workspace's manager. */
+    /** note: The share switch. Rendered only for the official workspace's manager. */
     shareTitle: "Share this bot",
     shareCopy:
       "Let other workspaces use this bot on their own repositories. Its credentials and model chains stay configured here.",
@@ -326,29 +326,29 @@ export const en = {
     confirmUnshareTitle: "Stop sharing {name}?",
     confirmUnshareBody:
       "Targets other workspaces hold on this bot become Blocked — they stop reviewing — until it is shared again.",
-    // The share route's two recoverable refusals.
+    // note: The share route's two recoverable refusals.
     shareOutsideOfficial:
       "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
     shareForbidden: "Only an owner or admin of this workspace can share its bot.",
   },
   /**
-   * Per-App Pull requests tab: the ledger of every PR the App received.
+   * note: Per-App Pull requests tab: the ledger of every PR the App received.
    * The detail face is addressed by owner/repo/number (one App can see the
    * same number on several repos) and rides the URL as `pr=owner/repo/number`.
    */
   pullRequests: {
     backToList: "Back to list",
-    /** Toolbar row above the ledger (list face only). */
+    /** note: Toolbar row above the ledger (list face only). */
     filterRepo: "Repository",
     filterRepoAll: "All repositories",
     refreshAria: "Refresh the pull request list",
-    /** The list table's columns — the row's own facts only. */
+    /** note: The list table's columns — the row's own facts only. */
     columnPr: "Pull request",
     columnState: "State",
     columnVerdict: "Latest verdict",
     columnLastSeen: "Last seen",
     columnFailures: "Failures",
-    /** Composed empty state — no-action variant (PRs arrive via webhooks). */
+    /** note: Composed empty state — no-action variant (PRs arrive via webhooks). */
     emptyTitle: "No pull requests yet",
     emptyDescription: "Every pull request your GitHub App receives shows up here.",
     state: {
@@ -356,11 +356,11 @@ export const en = {
       closed: "closed",
       merged: "merged",
     },
-    /** The detail header line: `{owner}/{repo} #{number}`. */
+    /** note: The detail header line: `{owner}/{repo} #{number}`. */
     prNumber: "{owner}/{repo} #{number}",
-    /** The header line's accessible name: the PR's GitHub address. */
+    /** note: The header line's accessible name: the PR's GitHub address. */
     openOnGithub: "Open {owner}/{repo}#{number} on GitHub",
-    /** The aside repo value's accessible name: the repository's GitHub address. */
+    /** note: The aside repo value's accessible name: the repository's GitHub address. */
     openRepoOnGithub: "Open {owner}/{repo} on GitHub",
     /** The review row's commit link: names the commit the short sha opens. */
     openCommitOnGithub: "Open commit {sha} on GitHub",

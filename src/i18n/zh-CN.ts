@@ -1,5 +1,5 @@
 /**
- * Simplified-Chinese dictionary.
+ * why: Simplified-Chinese dictionary.
  *
  * Typed as `Dictionary` (derived from en.ts via `typeof en`): a missing or
  * extra key is a compile error. Values are plain text; `{placeholder}`
@@ -159,39 +159,39 @@ export const zhCN: Dictionary = {
       emptyDescription: "该机器人还没有符合这些筛选条件的 webhook 投递。",
       pagePrev: "上一页",
       pageNext: "下一页",
-      /** {from}–{to} 是筛选后总数中的区间，不是整份日志。 */
+      /** note: {from}–{to} 是筛选后总数中的区间，不是整份日志。 */
       pageRange: "{from}–{to} / {total}",
       refreshAria: "刷新投递列表",
     },
     blockedBotNotShared:
       "该机器人已不再共享给本工作区，因此此目标不会进行任何评审。请联系平台运营者重新共享。",
   },
-  /** 仓库页（`/dashboard/<ref>/repos`，仪表盘默认页）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
+  /** note: 仓库页（`/dashboard/<ref>/repos`，仪表盘默认页）：工作区对一个仓库的认领，独立成页。详情页沿用被移出的“应用设置”标签的 `settings.*` 文案。 */
   targets: {
     heading: "仓库",
-    /** 总览页唯一的说明段落（应用总览版式）。 */
+    /** note: 总览页唯一的说明段落（应用总览版式）。 */
     headingDescription:
       "每一行代表本工作区正在评审的一个仓库。评审配置在各自仓库页里；洞察与拉取请求由整个工作区共享。",
-    /** 总览指标带：由行聚合求和得出的评审量。 */
+    /** note: 总览指标带：由行聚合求和得出的评审量。 */
     metricRepositories: "仓库",
     metricReviews: "评审总数",
     metricReviews7d: "近 7 天评审",
-    /** 列表的列（沿用应用列表的用词）。 */
+    /** note: 列表的列（沿用应用列表的用词）。 */
     columnRepository: "仓库",
     columnState: "状态",
     columnReviews: "评审数",
     columnReviews7d: "近 7 天",
     columnLastReview: "最近评审",
-    /** 待安装筛选：一个带计数的分段控件。 */
+    /** note: 待安装筛选：一个带计数的分段控件。 */
     filterLabel: "筛选仓库",
     filterAll: "全部",
     filterUninstalled: "待安装（{count}）",
     backToList: "返回仓库",
-    /** 详情页的三个标签。 */
+    /** note: 详情页的三个标签。 */
     tabInsights: "洞察",
     tabPullRequests: "拉取请求",
     /**
-     * 评审配置标签自身的文案；`heading` 同时作为标签名。
+     * note: 评审配置标签自身的文案；`heading` 同时作为标签名。
      * `boundApp` 说明该仓库评审所用的机器人（只读：暂不支持改绑）。
      */
     settings: {
@@ -200,20 +200,20 @@ export const zhCN: Dictionary = {
       following: "跟随工作区默认；关闭继承后可单独覆盖。",
       boundApp: "绑定的应用",
       boundAppPlanned: "更改仓库绑定的应用已在计划中，暂不支持。",
-      /** 审查状态：继承与暂停开关。 */
+      /** note: 审查状态：继承与暂停开关。 */
       sectionState: "审查状态",
     },
-    /** 组合空状态（EmptyState 的标题 + 描述）。 */
+    /** note: 组合空状态（EmptyState 的标题 + 描述）。 */
     emptyTitle: "还没有仓库",
     emptyDescription: "添加一个你的应用已安装的仓库。",
-    /** 固定首行（J1）：工作区默认配置。 */
+    /** note: 固定首行（J1）：工作区默认配置。 */
     allRepositories: "所有仓库",
     allRepositoriesMeta: "工作区默认评审配置 · 全工作区洞察与拉取请求",
-    /** 固定行的计数 pill；数字是工作区的活跃 target 数。 */
+    /** note: 固定行的计数 pill；数字是工作区的活跃 target 数。 */
     repositoryCount: "0 个仓库",
     repositoryCountOne: "1 个仓库",
     repositoryCountMany: "{count} 个仓库",
-    /** 仓库行的状态 pill（J1）。 */
+    /** note: 仓库行的状态 pill（J1）。 */
     status: {
       reviewing: "审查中",
       uninstalled: "待安装",
@@ -223,7 +223,7 @@ export const zhCN: Dictionary = {
     addDialog: {
       title: "添加仓库",
       description: "先选应用，再确认安装，最后搜索要审查的仓库。",
-      /** 三步流程，按渲染顺序。 */
+      /** note: 三步流程，按渲染顺序。 */
       stepApp: "1 · 应用（机器人）",
       stepInstall: "2 · 安装",
       stepRepos: "3 · 仓库",
@@ -235,7 +235,7 @@ export const zhCN: Dictionary = {
       loadInstallationsFailed: "无法读取该应用的安装信息。",
       noInstallations: "该应用尚未安装到任何账号。",
       recheck: "重新检查",
-      /** 一行安装信息：账号、安装 ID 与最近一次可见时间。 */
+      /** note: 一行安装信息：账号、安装 ID 与最近一次可见时间。 */
       installationRow: "{account} · 安装 {id} · 最近可见 {time}",
       installationNoAccount: "未知账号",
       repoLabel: "仓库",
@@ -249,15 +249,15 @@ export const zhCN: Dictionary = {
       loadingRepos: "正在搜索仓库…",
       loadReposFailed: "无法加载该应用的仓库。",
       alreadyAdded: "已添加",
-      /** 另一个工作区已在这个应用下评审该仓库。 */
+      /** note: 另一个工作区已在这个应用下评审该仓库。 */
       claimedElsewhere: "已被其他工作区占用",
       degraded: "部分安装无法读取 — 此列表可能不完整。",
       duplicates: "以下仓库已存在：{names}",
       confirm: "添加",
     },
-    /** 待安装筛选自身的空状态（有行，但没有待安装的）。 */
+    /** note: 待安装筛选自身的空状态（有行，但没有待安装的）。 */
     filterEmpty: "没有等待安装的仓库。",
-    /** 应用列表（添加对话框的数据源）读取失败，列表本身读取成功。 */
+    /** note: 应用列表（添加对话框的数据源）读取失败，列表本身读取成功。 */
     appsReadFailed: "无法读取本工作区的应用 — 暂时无法添加仓库。",
   },
   /** 机器人自身拥有的配置，由 App 详情页的“应用设置”标签组合在身份头下。target 级文案沿用 `settings.*`。 */
