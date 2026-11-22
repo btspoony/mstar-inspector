@@ -48,8 +48,8 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
 /** Marker replacing every transformed occurrence of a secret. */
 const TRANSFORMED_REDACTED = "[redacted]";
 
-/** Stands in for an existing marker while secrets are replaced; restored after. */
-const MARKER_SENTINEL = "\u0000marker\u0000";
+/** Regex metacharacters, escaped so a credential form matches literally. */
+const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
 // why: a value shorter than a credential cannot be redacted safely — it would
 // match ordinary text (and a 3-char secret matches inside a SHA).
@@ -155,23 +155,21 @@ export function skippedSecrets(secrets: readonly string[]): number {
 /**
  * Redact ONE retained document root.
  *
- * Identity is protected by explicit path (`IDENTITY_PATHS` for `document`), not
- * by key name: each value found at a host-written path is parked behind a
- * sentinel, the whole document is redacted, and the value is restored. A path
- * the document does not carry is simply absent. Forged model text — e.g. a
- * `summary_md` containing `{"head_sha": …}` — is at no protected path, so it is
- * redacted like any other text.
+ * Identity is protected by traversal path (`IDENTITY_PATHS` for `document`),
+ * not by key name and not by substituting values: a node whose path matches the
+ * table is left untouched, every other string leaf is redacted in place. A path
+ * the document does not carry is simply absent, and forged model text — e.g. a
+ * `summary_md` containing `{"head_sha": …}` — is at no protected path, so the
+ * credential match finds it like any other characters.
  *
  * A string document that parses as JSON (after trimming) is worked on as a
  * structure: `\u002f`, `\/` and `\n` are decoded before matching, and the result
  * is serialized again ONLY when a replacement happened — an untouched document
  * keeps its exact bytes, surrounding whitespace included. A changed one loses
- * that padding. Any other string is redacted as text.
+ * that padding. A string leaf is NEVER parsed to look inside it: a leaf is text.
  *
  * Every string leaf at every depth is redacted; non-string leaves, object keys
- * and container shape pass through. Idempotence is structural: an existing
- * `[redacted]` marker is parked before secret replacement and restored after, so
- * a second pass is a no-op and a model-printed marker shields nothing.
+ * and container shape pass through.
  *
  * Shape patterns (`redactSecrets`) stay OUT: their long-hex rule rewrites a
  * host-written `head_sha`.
@@ -183,59 +181,86 @@ export function redactDocument<T>(
   document: RetainedDocument,
 ): RedactionOutcome<T> {
   const forms = applicableForms(secrets);
-  const state: RedactionState = { replaced: 0 };
   if (forms.length === 0) return { value, replaced: 0 };
-  const redacted = redactRoot(value, forms, state, IDENTITY_PATHS[document]);
+  const state: RedactionState = { replaced: 0 };
+  const pattern = formPattern(forms);
+  const redacted = redactRoot(value, pattern, state, IDENTITY_PATHS[document]);
   return { value: redacted as T, replaced: state.replaced };
 }
 
 function redactRoot(
   value: unknown,
-  forms: readonly string[],
+  pattern: RegExp,
   state: RedactionState,
   paths: readonly (readonly string[])[],
 ): unknown {
-  const saved = new Map<string, string>();
   if (typeof value === "string") {
     const parsed = parseDocument(value);
-    if (parsed === undefined) return redactText(value, forms, state);
-    const protectedDoc = protectIdentity(parsed, paths, saved);
-    const redacted = redactAny(protectedDoc, forms, state);
+    if (parsed === undefined) return redactText(value, pattern, state);
+    const redacted = redactTree(parsed, [], paths, pattern, state);
     // Untouched document: return the original bytes, trimming included.
-    return state.replaced === 0 ? value : JSON.stringify(restoreIdentity(redacted, saved));
+    return state.replaced === 0 ? value : JSON.stringify(redacted);
   }
-  return restoreIdentity(redactAny(protectIdentity(value, paths, saved), forms, state), saved);
+  return redactTree(value, [], paths, pattern, state);
 }
 
-/** Every string leaf at every depth; no key is exempt at this stage. */
-function redactAny(value: unknown, forms: readonly string[], state: RedactionState): unknown {
-  if (typeof value === "string") return redactText(value, forms, state);
+/**
+ * Walk a parsed structure carrying its path. A node on a protected path is
+ * returned untouched; every other string is one text leaf. `*` in a table path
+ * matches an array index.
+ */
+function redactTree(
+  value: unknown,
+  at: readonly string[],
+  paths: readonly (readonly string[])[],
+  pattern: RegExp,
+  state: RedactionState,
+): unknown {
+  if (typeof value === "string") {
+    const protectedPath = paths.some(
+      (path) => path.length === at.length && path.every((segment, index) => segment === at[index]),
+    );
+    return protectedPath ? value : redactText(value, pattern, state);
+  }
   // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
-  if (value instanceof Set) return new Set([...value].map((item) => redactAny(item, forms, state)));
-  if (Array.isArray(value)) return value.map((item) => redactAny(item, forms, state));
+  if (value instanceof Set) {
+    return new Set([...value].map((item) => redactTree(item, [...at, "*"], paths, pattern, state)));
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactTree(item, [...at, "*"], paths, pattern, state));
+  }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactAny(item, forms, state)]),
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactTree(item, [...at, key], paths, pattern, state),
+      ]),
     );
   }
   return value;
 }
 
 /**
- * One text leaf: park every existing marker, replace every form of every
- * secret, restore the markers. Parking is what makes a second pass a no-op and
- * stops a model-printed `[redacted]` from shielding anything.
+ * One scan per leaf. Existing markers are BOUNDARIES, not scanned text: the leaf
+ * is split on the literal marker, each segment is scanned once, and the markers
+ * are rejoined verbatim. So a credential that is a substring of `[redacted]`
+ * (or spans its edge) can never rewrite it, a model-printed marker shields
+ * nothing but itself, and text the scan emitted is never re-examined — a second
+ * pass is a no-op with no placeholder involved.
  */
-function redactText(text: string, forms: readonly string[], state: RedactionState): string {
-  const parked = text.split(TRANSFORMED_REDACTED).join(MARKER_SENTINEL);
-  let out = parked;
-  for (const form of forms) {
-    const parts = out.split(form);
-    if (parts.length === 1) continue;
-    state.replaced += parts.length - 1;
-    out = parts.join(TRANSFORMED_REDACTED);
-  }
-  return out === parked ? text : out.split(MARKER_SENTINEL).join(TRANSFORMED_REDACTED);
+function redactText(text: string, pattern: RegExp, state: RedactionState): string {
+  let count = 0;
+  const out = text
+    .split(TRANSFORMED_REDACTED)
+    .map((segment) =>
+      segment.replace(pattern, () => {
+        count += 1;
+        return TRANSFORMED_REDACTED;
+      }),
+    )
+    .join(TRANSFORMED_REDACTED);
+  state.replaced += count;
+  return count === 0 ? text : out;
 }
 
 /** Parsed object/array of an optionally whitespace-padded JSON document. */
@@ -250,46 +275,10 @@ function parseDocument(text: string): unknown {
   }
 }
 
-/** Replace each protected path's string value with a sentinel, remembering it. */
-function protectIdentity(
-  value: unknown,
-  paths: readonly (readonly string[])[],
-  saved: Map<string, string>,
-): unknown {
-  const walk = (node: unknown, at: readonly string[]): unknown => {
-    if (typeof node === "string") {
-      // `*` in a table path matches an array index; everything else exactly.
-      const protectedPath = paths.some(
-        (path) => path.length === at.length && path.every((segment, index) => segment === at[index]),
-      );
-      if (!protectedPath) return node;
-      const token = `\u0000id:${saved.size}\u0000`;
-      saved.set(token, node);
-      return token;
-    }
-    if (node instanceof Set) return new Set([...node].map((item) => walk(item, [...at, "*"])));
-    if (Array.isArray(node)) return node.map((item) => walk(item, [...at, "*"]));
-    if (node !== null && typeof node === "object") {
-      return Object.fromEntries(
-        Object.entries(node).map(([key, item]) => [key, walk(item, [...at, key])]),
-      );
-    }
-    return node;
-  };
-  return walk(value, []);
-}
-
-/** Put every parked identity value back. */
-function restoreIdentity(value: unknown, saved: ReadonlyMap<string, string>): unknown {
-  if (typeof value === "string") return saved.get(value) ?? value;
-  if (value instanceof Set) return new Set([...value].map((item) => restoreIdentity(item, saved)));
-  if (Array.isArray(value)) return value.map((item) => restoreIdentity(item, saved));
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, restoreIdentity(item, saved)]),
-    );
-  }
-  return value;
+/** One pattern for every form, longest first (leftmost match wins). */
+function formPattern(forms: readonly string[]): RegExp {
+  const alternatives = forms.map((form) => form.replace(REGEX_METACHARACTERS, "\\$&")).join("|");
+  return new RegExp(alternatives, "g");
 }
 
 /** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
