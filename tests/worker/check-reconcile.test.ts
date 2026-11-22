@@ -1107,9 +1107,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     });
     expect(summary.completed).toBe(0);
     expect(summary.errors).toBe(0);
-    // Dropped, stopped and PARKED: the debt and the intent it froze are gone,
-    // and the row is out of both selection branches so no later pass can
-    // conclude from a generation it no longer owns.
+    // Dropped, unfrozen and parked by ONE write: no intermediate non-terminal
+    // state is observable, and the debt and the intent it froze are gone.
     const row = await rawRow(db, attemptId);
     expect(row.correction_desired).toBeNull();
     expect(row.correction_generation).toBeNull();
@@ -1117,7 +1116,12 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
     expect(row.recovery_state).toBe("local-error");
+    expect(row.next_attempt_ms).toBeNull();
+    expect(row.attempts).toBe(1);
     expect(row.last_error).toContain("no longer targets this row");
+    // The selection query cannot see it at all — neither branch.
+    const selected = await listCheckReconcileBatch(db, clock + 60_000, CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
+    expect(selected.map((candidate) => candidate.identity.attemptId)).not.toContain(attemptId);
 
     // The pass AFTER the dropping pass sends nothing: the parked row is not
     // selected at all.

@@ -1975,14 +1975,13 @@ export async function reopenTerminalCorrection(
 }
 
 /**
- * Drop a correction this row can no longer owe — its target generation moved,
- * or the evidence now concludes something else. The obligation goes AND so does
- * the intent the owed revision froze: leaving a positive `success` behind would
- * let the ordinary lane send a conclusion this attempt no longer establishes,
- * because the monotonic freeze refuses to lower it again. The row is returned
- * to recovery immediately (`next_attempt_ms = now`) so the next pass decides
- * from CURRENT evidence instead of a stale draft — a `desired = 'in_progress'`
- * row with no due time would otherwise wait for the execution deadline.
+ * Drop a correction this row can no longer owe because the EVIDENCE moved.
+ * The obligation goes AND so does the intent the owed revision froze: leaving a
+ * positive `success` behind would let the ordinary lane send a conclusion this
+ * attempt no longer establishes, because the monotonic freeze refuses to lower
+ * it again. The row stays SELECTABLE (`pending`, due now) so the next pass
+ * decides from CURRENT evidence — unlike `parkCheckCorrection`, whose target
+ * generation can never conclude.
  */
 export async function dropCheckCorrection(
   db: D1Like,
@@ -1999,6 +1998,39 @@ export async function dropCheckCorrection(
             terminal_failure_status = NULL,
             recovery_state = 'pending', next_attempt_ms = ?, last_error = NULL`,
     [nowMs],
+    nowMs,
+  );
+}
+
+/**
+ * The generation-moved end, as ONE fenced transition: drop the debt, unfreeze
+ * the intent it wrote, and park the row (`local-error` + `terminal_ms`).
+ *
+ * The three facts must land together. Dropping first and parking second — two
+ * statements — leaves a window (a crash, or a lease that dies between them) in
+ * which the row is again a non-terminal, selectable attempt whose frozen
+ * conclusion no longer has a debt to justify it, so the ordinary lane could
+ * send a conclusion this generation does not own. One UPDATE makes that state
+ * unobservable: after it, the row is outside both selection branches (the
+ * non-terminal one and the `remote-unconfirmed` reopen one) forever.
+ */
+export async function parkCheckCorrection(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  reason: string,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(
+    db,
+    id,
+    lease,
+    `correction_desired = NULL, correction_generation = NULL,
+            desired = 'in_progress', desired_title = NULL, desired_summary = NULL,
+            terminal_failure_status = NULL,
+            recovery_state = 'local-error', terminal_ms = ?,
+            next_attempt_ms = NULL, attempts = attempts + 1, last_error = ?`,
+    [nowMs, checkReason(reason)],
     nowMs,
   );
 }
@@ -2038,9 +2070,9 @@ export async function deferCheckRecovery(
  * finished.
  *
  * Also the honest end for a row that can NEVER conclude: a §7.9a correction
- * whose target generation moved (see `dropCheckCorrection`). Parking it
- * terminal keeps it out of both selection branches, so no later pass can send
- * a conclusion that generation never owned.
+ * whose target generation moved. `parkCheckCorrection` performs that end as ONE
+ * transition (drop, unfreeze and this park together) so no intermediate
+ * selectable state exists.
  */
 export async function markCheckLocalError(
   db: D1Like,

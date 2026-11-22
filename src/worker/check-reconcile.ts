@@ -66,6 +66,7 @@ import {
   listCheckReconcileBatch,
   listReenableableCheckPairs,
   markCheckLocalError,
+  parkCheckCorrection,
   readPublicationProof,
   readPublishedReview,
   readTerminalDispatch,
@@ -1045,13 +1046,12 @@ async function reconcileCheckAttempt(
     current.correctionGeneration === current.identity.generation ? current.correctionDesired : null;
   isCorrection = correction || owedDesired !== null;
   // A generation that moved means this row is not the subject of the owed
-  // revision any more, and it never will be: leaving it non-terminal would put
-  // it back in the ordinary lane next pass, where the confirmed proof would be
-  // re-applied to a Check this generation no longer owns. The debt and the
-  // intent it froze are dropped, and the row is parked as the honest local end.
+  // revision any more, and it never will be. ONE transition drops the debt,
+  // unfreezes the intent it wrote, and parks the row: leaving it non-terminal
+  // (or splitting these writes) would let a later pass — even after a crash
+  // between two statements — send a conclusion this generation does not own.
   if (!correction && current.correctionGeneration !== null && owedDesired === null) {
-    await dropCheckCorrection(db, attemptId, lease, now());
-    await markCheckLocalError(
+    await parkCheckCorrection(
       db,
       attemptId,
       lease,
