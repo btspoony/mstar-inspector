@@ -5,11 +5,13 @@ import { listLineBatchRecovery } from "../src/store/finding-lifecycle";
 // note: Run from the repository root: bun scripts/bench-line-batch-recovery.ts
 // Times the 15-minute lifecycle reconcile's line-batch selection: before is the
 // previous statement (EXISTS probe per applied publication) without
-// idx_thread_uncaptured, after is listLineBatchRecovery with it. Each
+// idx_thread_uncaptured, after is the current statement with it; both arms time
+// the raw statement, and listLineBatchRecovery (untimed) must return the same ids. Each
 // publication is applied and owns three threads; only the newest few still
 // hold an uncaptured thread, which is the set both arms must return. The
-// "+publication index" rows add the (publication_id, review_id) index other
-// lookups use, to show it does not change the outcome.
+// "+publication index" rows add a full-history (publication_id, review_id)
+// index (not in this branch's migrations; #359 proposes it) to show it does not
+// displace the partial one.
 const warmups = 5;
 const runs = 31;
 const pending = 10;
@@ -23,6 +25,10 @@ const BEFORE = `SELECT * FROM review_publications p
     AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
   ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id
   LIMIT ?`;
+const AFTER = BEFORE.replace(
+  "AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)",
+  "AND p.id IN (SELECT t.publication_id FROM review_threads t WHERE t.review_id IS NULL)",
+);
 
 function median(values: number[]): number {
   return values.sort((a, b) => a - b)[Math.floor(values.length / 2)]!;
@@ -63,10 +69,11 @@ for (const withPublicationIndex of [false, true]) {
     }
     db.exec("COMMIT");
 
-    const after = await time(async () => (await listLineBatchRecovery(handle, now, limit)).map((row) => row.id));
+    const production = (await listLineBatchRecovery(handle, now, limit)).map((row) => row.id);
+    const after = await time(async () => (await handle.prepare(AFTER).bind(now, limit).all<{ id: string }>()).results.map((row) => row.id));
     execMigrationScript(db, "DROP INDEX idx_thread_uncaptured;");
     const before = await time(async () => (await handle.prepare(BEFORE).bind(now, limit).all<{ id: string }>()).results.map((row) => row.id));
-    if (after.ids.length !== pending || JSON.stringify(before.ids) !== JSON.stringify(after.ids)) throw new Error("line-batch selection changed");
+    if (after.ids.length !== pending || JSON.stringify(before.ids) !== JSON.stringify(after.ids) || JSON.stringify(production) !== JSON.stringify(after.ids)) throw new Error("line-batch selection changed");
     const label = `${publications}${withPublicationIndex ? " +publication index" : ""}`;
     console.log(`${label}\t${before.ms.toFixed(2)}\t${after.ms.toFixed(3)}\t${(before.ms / after.ms).toFixed(0)}x\t${after.ids.length}`);
   }
