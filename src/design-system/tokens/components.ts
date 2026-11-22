@@ -1,5 +1,5 @@
 /**
- * Component layer — assembled from the semantic layer, never from a primitive
+ * why: Component layer — assembled from the semantic layer, never from a primitive
  * and never from a literal. A component token here is an expression, so it
  * follows the active theme without a second declaration per theme; only the
  * ops surface variant overrides it (see `surface-variants.ts`).
@@ -14,7 +14,7 @@
 const v = (name: string): string => `var(--${name})`;
 
 export const components = {
-  // Primary action. `on-brand` is the label face because the fill is brand and
+  // why: Primary action. `on-brand` is the label face because the fill is brand and
   // the label must flip with the theme; `border` duplicates `bg` so a surface
   // variant can change the edge alone (that is what the ops re-map does).
   // Hover is `brand-600`, not `tone-accent-fg`: the accent fg equals the accent
@@ -38,7 +38,7 @@ export const components = {
   "button-disabled-fg": v("text-faint"),
   "button-disabled-border": v("border-default"),
 
-  // Sizes: three named control heights, padding and label step per size.
+  // note: Sizes: three named control heights, padding and label step per size.
   "button-height-xs": v("control-h-xs"),
   "button-height-sm": v("control-h-sm"),
   "button-height-md": v("control-h-md"),

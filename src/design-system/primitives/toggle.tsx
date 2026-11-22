@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (motion-token sweep — every
+// note: Locally revised shadcn/ui copy-in (motion-token sweep — every
 // duration/easing consumes --duration-*/--ease-*, transition properties
 // unchanged; a later copy-in supersede — do not regen over).
 import * as React from "react"
@@ -16,7 +16,7 @@ const toggleVariants = cva(
         outline:
           "border border-input bg-transparent shadow-xs hover:bg-accent hover:text-accent-foreground",
       },
-      // Same three named control heights as the button; `lg` shares `md`.
+      // note: Same three named control heights as the button; `lg` shares `md`.
       size: {
         default: "h-(--control-h-md) min-w-(--control-h-md) px-2",
         sm: "h-(--control-h-sm) min-w-(--control-h-sm) px-1.5",

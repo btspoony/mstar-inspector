@@ -1,5 +1,5 @@
 /**
- * Status pill — the ONE status face (DESIGN.md § Tone × strength). A state is
+ * why: Status pill — the ONE status face (DESIGN.md § Tone × strength). A state is
  * a tone, painted at one of three strengths: `quiet` withholds the tint (edge
  * and label carry the meaning), `soft` is the tinted pill every status today
  * wears, and `solid` is the fill reserved for the one state that must be seen
@@ -21,7 +21,7 @@ export type StatusTone = "neutral" | "accent" | "success" | "warn" | "danger";
 export type StatusStrength = "quiet" | "soft" | "solid";
 
 /**
- * Strength × tone faces — the only place the pill's colours are spelled out.
+ * why: Strength × tone faces — the only place the pill's colours are spelled out.
  * The class names are literal because Tailwind scans source text; a composed
  * `--tone-${tone}-bg` would never reach the stylesheet.
  */
@@ -41,7 +41,7 @@ const FACES: Record<StatusStrength, Record<StatusTone, string>> = {
     danger: "border-(--tone-danger-border) bg-(--tone-danger-bg) text-(--tone-danger-fg)",
   },
   solid: {
-    // A tone fg is chosen to sit on its tint, not on its own solid step, so
+    // why: A tone fg is chosen to sit on its tint, not on its own solid step, so
     // the label on a solid is the page ink — except accent, whose solid is the
     // primary-action fill and whose label there is `on-brand`.
     neutral: "border-transparent bg-(--tone-neutral-solid) text-(--surface-page)",
@@ -59,7 +59,7 @@ export function StatusBadge({
   ...props
 }: ComponentProps<"span"> & {
   tone: StatusTone;
-  /** Defaults to `soft`, the tinted pill. */
+  /** note: Defaults to `soft`, the tinted pill. */
   strength?: StatusStrength;
 }) {
   return (

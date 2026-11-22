@@ -1,5 +1,5 @@
 /**
- * Semantic layer — names the job, not the value. Component tokens and page
+ * why: Semantic layer — names the job, not the value. Component tokens and page
  * code may reference only this layer.
  *
  * The colour vocabulary is the r3 prototype's, verbatim. Two things the
@@ -35,11 +35,11 @@
 
 import type { ThemeName } from "./primitives";
 
-/** `var(--x)` — the only way this layer may reach a primitive. */
+/** note: `var(--x)` — the only way this layer may reach a primitive. */
 const v = (name: string): string => `var(--${name})`;
 
 /**
- * Semantic values that do not vary by theme: heights, radii, spacing,
+ * note: Semantic values that do not vary by theme: heights, radii, spacing,
  * typography, motion.
  */
 const commonSemantics = {
@@ -133,11 +133,11 @@ export const reducedMotionDurations: Readonly<Record<string, string>> = {
   "duration-slow": "1ms",
 };
 
-/** Theme-varying semantics. `SemanticName` is derived from these keys, so the
+/** note: Theme-varying semantics. `SemanticName` is derived from these keys, so the
  * light map cannot lose or gain a key without a typecheck failure. */
 const darkSemantics = {
   "surface-page": v("background-100"),
-  // Not a palette step: the shell band sits between page and raised.
+  // note: Not a palette step: the shell band sits between page and raised.
   "surface-shell": "#0d1015",
   "surface-raised": "#12151b",
   "surface-card": v("background-200"),
@@ -153,7 +153,7 @@ const darkSemantics = {
   // ladder is already drawn from (`#101928`).
   "surface-scrim": "#0a0c10cc",
 
-  // The hairline under the palette's own alpha ladder.
+  // note: The hairline under the palette's own alpha ladder.
   "border-subtle": "#ffffff1a",
   "border-default": v("gray-alpha-400"),
   "border-strong": v("gray-alpha-500"),
@@ -167,7 +167,7 @@ const darkSemantics = {
   "tone-neutral-border": v("gray-alpha-400"),
   "tone-neutral-fg": v("gray-900"),
   "tone-neutral-solid": v("gray-700"),
-  // Cyan's 100/300 steps are not in the D14 survivors: the approved values
+  // why: Cyan's 100/300 steps are not in the D14 survivors: the approved values
   // have no step, so the tone carries them.
   "tone-accent-bg": "#042f2e",
   "tone-accent-border": "#155e75",
@@ -208,7 +208,7 @@ const darkSemantics = {
   "chart-5-mark": v("blue-700"),
   "chart-6-mark": v("purple-700"),
 
-  // Dark wears the bright cyan face, so the primary label is ink.
+  // why: Dark wears the bright cyan face, so the primary label is ink.
   "on-brand": "#06222a",
   "focus-ring": v("blue-700"),
 
@@ -226,7 +226,7 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
   "surface-card": v("background-100"),
   "surface-inset": v("background-200"),
   "surface-overlay": v("background-300"),
-  // Same 80% dim, flipped pole — see the note on the dark value.
+  // note: Same 80% dim, flipped pole — see the note on the dark value.
   "surface-scrim": "#101928cc",
 
   "border-subtle": "#1019280f",
@@ -248,20 +248,20 @@ const lightSemantics: Readonly<Record<SemanticColorName, string>> = {
   "tone-accent-solid": v("brand-700"),
   "tone-success-bg": v("green-100"),
   "tone-success-border": v("green-300"),
-  // green-700 fails 4.5:1 on the success tint; green-800 is the one step D14
+  // why: green-700 fails 4.5:1 on the success tint; green-800 is the one step D14
   // keeps for exactly this pair.
   "tone-success-fg": v("green-800"),
   "tone-success-solid": v("green-700"),
   "tone-warn-bg": v("amber-100"),
-  // amber-300 is not a D14 survivor; the approved value has no step.
+  // note: amber-300 is not a D14 survivor; the approved value has no step.
   "tone-warn-border": "#fde68a",
   "tone-warn-fg": v("amber-700"),
   "tone-warn-solid": v("amber-600"),
   "tone-danger-bg": v("red-100"),
-  // red-300 is not a D14 survivor; the approved value has no step.
+  // note: red-300 is not a D14 survivor; the approved value has no step.
   "tone-danger-border": "#fecaca",
   "tone-danger-fg": v("red-700"),
-  // Light danger solid may not take red-600 (D14 names amber-600 only).
+  // note: Light danger solid may not take red-600 (D14 names amber-600 only).
   "tone-danger-solid": "#dc2626",
 
   "chart-1": v("brand-600"),

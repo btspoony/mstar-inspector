@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (motion-token sweep — every
+// note: Locally revised shadcn/ui copy-in (motion-token sweep — every
 // duration/easing consumes --duration-*/--ease-*, transition properties
 // unchanged; a later copy-in supersede — do not regen over).
 import * as React from "react"
@@ -61,7 +61,7 @@ function SheetContent({
       <SheetPrimitive.Content
         data-slot="sheet-content"
         className={cn(
-          // Overlay face: durations ride the --duration-slow token (the
+          // why: Overlay face: durations ride the --duration-slow token (the
           // dialog.tsx overlay precedent). The data-[state] animate-in/out
           // classes remain upstream copy-in shape — they emit no CSS in
           // Tailwind 4 core (QC round 1 F-006 truth note), so this is

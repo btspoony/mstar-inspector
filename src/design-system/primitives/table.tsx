@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (v0.3 restyle;
+// note: Locally revised shadcn/ui copy-in (v0.3 restyle;
 // padding raise — TableHead/TableCell horizontal padding steps up to px-3
 // (cell vertical stays py-2) so bordered tables breathe; 018 copy-in
 // supersede — do not regen over).
@@ -59,7 +59,7 @@ function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
     <tr
       data-slot="table-row"
       className={cn(
-        // Row hover is the full muted token (DESIGN.md Table: row hover
+        // note: Row hover is the full muted token (DESIGN.md Table: row hover
         // gray-100), token-eased per the v0.3 motion discipline.
         "border-b border-(--border-subtle) transition-colors duration-(--duration-base) ease-(--ease-in-out) hover:bg-muted has-aria-expanded:bg-muted/50 data-[state=selected]:bg-muted",
         className
@@ -74,7 +74,7 @@ function TableHead({ className, ...props }: React.ComponentProps<"th">) {
     <th
       data-slot="table-head"
       className={cn(
-        // D5: horizontal padding rides the spacing-3 step (12px)
+        // note: D5: horizontal padding rides the spacing-3 step (12px)
         // so bordered tables breathe; vertical density stays untouched.
         "h-10 px-3 text-left align-middle font-medium whitespace-nowrap text-foreground [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
@@ -89,7 +89,7 @@ function TableCell({ className, ...props }: React.ComponentProps<"td">) {
     <td
       data-slot="table-cell"
       className={cn(
-        // D5: px-3 py-2 — horizontal 12px, vertical stays 8px.
+        // note: D5: px-3 py-2 — horizontal 12px, vertical stays 8px.
         "px-3 py-2 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
         className
       )}

@@ -1,5 +1,5 @@
 /**
- * The detail-page section flow (r3 baseline § 5): one content plane divided
+ * why: The detail-page section flow (r3 baseline § 5): one content plane divided
  * by hairlines, instead of a card per section.
  *
  * A page that stacks section cards gives every block the same frame, so
@@ -24,7 +24,7 @@ export function FlowSection({
   children,
 }: {
   title: ReactNode;
-  /** Optional one-line summary, set on the muted label step. */
+  /** note: Optional one-line summary, set on the muted label step. */
   subtitle?: ReactNode;
   className?: string;
   children?: ReactNode;

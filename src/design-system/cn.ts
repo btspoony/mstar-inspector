@@ -1,5 +1,5 @@
 /**
- * Class-name composition for the primitive tier.
+ * why: Class-name composition for the primitive tier.
  *
  * `tailwind-merge` collapses conflicting utilities so a caller's `className`
  * overrides the primitive's own face instead of racing it; `clsx` handles the

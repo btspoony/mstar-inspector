@@ -22,7 +22,7 @@
 export type ThemeName = "dark" | "light";
 
 /**
- * The survivor ladders. Light must declare exactly these steps:
+ * why: The survivor ladders. Light must declare exactly these steps:
  * `PrimitiveColors` is derived from the dark keys, so a step added on one side
  * and not the other fails typecheck instead of shipping a half-mapped theme.
  */
@@ -130,7 +130,7 @@ export const transitionalSteps: TransitionalSteps = [];
  */
 export const survivorSteps: readonly SurvivorStep[] = Object.keys(survivorDark) as SurvivorStep[];
 
-/** Raw values with no theme dimension. */
+/** note: Raw values with no theme dimension. */
 const invariant = {
   "font-sans": '"Geist Sans", ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
   "font-mono": "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",

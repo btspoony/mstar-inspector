@@ -1,4 +1,4 @@
-// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
+// note: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 import { XIcon } from "lucide-react"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
@@ -60,7 +60,7 @@ function DialogContent({
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          // rounded-lg resolves to the container tier via the bridge remap;
+          // why: rounded-lg resolves to the container tier via the bridge remap;
           // elevation is the tinted --shadow-pop token. Truth note (QC round
           // 1 F-006): the data-[state] animate-in/out + fade/zoom classes are
           // NO-OPS — Tailwind 4 core ships no such utilities and the
