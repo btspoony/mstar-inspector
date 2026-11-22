@@ -44,6 +44,7 @@ import {
 import { PUBLICATION_LEASE_MS, applyPublishedLifecycle, claimDegradedTarget, claimPublication, claimPublicationLease, readLineBatchState, recordLineDispatchIntent, recordPublicationProof, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
+  listIncompleteSettlements,
   readAttemptHandoff,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
@@ -2219,6 +2220,52 @@ describe("the SEC-01 publish gate", () => {
     expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
   });
 
+  test("a key whose hex collides with the commit SHA does not refuse a clean review", async () => {
+    // 0x01 0x23 0x45 renders as "012345" — the SHA's own prefix.
+    const key = String.fromCharCode(0x01, 0x23, 0x45);
+    expect(Buffer.from(key, "utf8").toString("hex")).toBe(SHA.slice(0, 6));
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    // Host template is model-free: the SHA never enters the scan.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+    const send = h.commenterCalls.find((call) => call.op === "post-prepared");
+    const body = (send?.args as { body: string } | undefined)?.body ?? "";
+    expect(body).toContain(`commit ${SHA.slice(0, 7)}`);
+    expect(body).toContain(`sha=${SHA}`);
+  });
+
+  test("a redacted suggestion is downgraded to a plain block before publish", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = 'before\n```suggestion\nconst key = "sk-test";\n```\nafter';
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      artifact: { payload: { findings: Array<{ body: string }> } };
+    };
+    const body = payload.artifact.payload.findings[0]!.body;
+    expect(body).toContain("[REDACTED]");
+    expect(body).not.toContain("```suggestion");
+    expect(body).toContain('```\nconst key = "[REDACTED]";');
+  });
+
   /** The paid result rewritten to a schema-invalid body carrying `echo`. */
   async function brokenStdout(echo: string, whole = false) {
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
@@ -2309,5 +2356,12 @@ describe("the SEC-01 publish gate", () => {
       .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
       .get(SHA) as { n: number };
     expect(staged.n).toBe(0);
+    // The handoff is marked settling before the settlement, so the reconciler
+    // still selects this unknown outcome.
+    const pending = await listIncompleteSettlements(db as never, {
+      settlingBeforeMs: Date.now() + 1,
+      limit: 10,
+    });
+    expect(pending.some((row) => row.attemptId === ATTEMPT_ID)).toBe(true);
   });
 });

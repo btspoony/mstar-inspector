@@ -30,6 +30,7 @@ import {
   FINDING_BODY_MAX,
   FINDING_TITLE_MAX,
   capFindings,
+  neutralizeRedactedSuggestions,
   parseReviewOutput,
   suggestionFenceSpans,
   type ReviewOutput,
@@ -795,5 +796,21 @@ describe("suggestionFenceSpans (CommonMark fence grammar, QC R2)", () => {
   test("an ordinary ```js fence still opens a block", () => {
     const text = "```js\nconst a = 1;\n```\n```suggestion\nconst x = 1;\n```";
     expect(blocks(text)).toEqual([{ block: "```suggestion\nconst x = 1;\n```", closed: true }]);
+  });
+});
+
+describe("neutralizeRedactedSuggestions", () => {
+  test("a suggestion whose patch carries the marker becomes a plain fence", () => {
+    const text = "before\n```suggestion\nconst x = \"[REDACTED]\";\n```\nafter";
+    expect(neutralizeRedactedSuggestions(text)).toBe(
+      "before\n```\nconst x = \"[REDACTED]\";\n```\nafter",
+    );
+  });
+
+  test("a clean suggestion is untouched; only a marker-bearing one is downgraded", () => {
+    const clean = "```suggestion\nconst x = 1;\n```";
+    expect(neutralizeRedactedSuggestions(clean)).toBe(clean);
+    const withInfo = "```suggestion js\nconst x = \"[REDACTED]\";\n```";
+    expect(neutralizeRedactedSuggestions(withInfo)).toBe("```\nconst x = \"[REDACTED]\";\n```");
   });
 });

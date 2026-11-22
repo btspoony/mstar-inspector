@@ -35,7 +35,7 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { dropAllSuggestionFences, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { dropAllSuggestionFences, neutralizeRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
@@ -68,8 +68,10 @@ import {
   setCheckDesired,
 } from "../store/review-checks";
 import {
+  beginAttemptSettlement,
   deliveryKeyOf,
   readAttemptCheckKey,
+  readAttemptHandoff,
   recordSuccessorIntent,
   settleAttemptIfDischarged,
   settlementStatementIfDischarged,
@@ -4888,6 +4890,33 @@ export async function collectAttempt(
 }
 
 /**
+ * The model-controlled strings of a review output — the same fields write-time
+ * redaction covers. The rendered body also carries host template (markers,
+ * commit SHA, schema tags), which must never enter the gate.
+ */
+function modelTexts(output: ReviewOutput, report: ReviewAttemptExecution["report"]): string[] {
+  const texts: string[] = [];
+  if (output.summary_md !== undefined) texts.push(output.summary_md);
+  if (output.incomplete !== undefined) texts.push(output.incomplete.reason, ...output.incomplete.unscanned);
+  if (output.tally !== undefined) {
+    texts.push(output.tally.chatHeader);
+    if (output.tally.incomplete !== undefined) {
+      texts.push(output.tally.incomplete.reason, ...output.tally.incomplete.unscanned);
+    }
+  }
+  for (const finding of output.findings) {
+    texts.push(finding.title, finding.body);
+    if (finding.category !== undefined) texts.push(finding.category);
+    if (finding.file_path != null) texts.push(finding.file_path);
+    if (finding.fingerprint_hint !== undefined) texts.push(finding.fingerprint_hint);
+  }
+  if (report !== null) {
+    texts.push(report.overview, report.linkedIssueAc, report.verified, report.rejected, report.planToFix);
+  }
+  return texts.filter((text) => text !== "");
+}
+
+/**
  * SEC-01 publish gate: return the refusal outcome for the first text that
  * carries a credential form. A refusal settles through the ATTEMPT'S FAILURE
  * path (failure row + failed claim + Check conclusion) — the review genuinely
@@ -4922,6 +4951,13 @@ async function refusesCredentialEcho(
     changedLines: prepared.observedChangedLines,
     sendAttemptPublicationId: null,
   });
+  // Mark the handoff as settling BEFORE the settlement, exactly like the
+  // workflow's catch: an `unknown` outcome must stay selectable by the
+  // reconciler's incomplete-settlement sweep.
+  const deliveryKey = deliveryKeyOf(ref.payload);
+  if ((await readAttemptHandoff(deps.env.DB, deliveryKey)) !== null) {
+    await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
+  }
   let settlement: ProcessOutcome | null = null;
   try {
     settlement = await settleAttemptFailure(deps, ref, wrapped, { headSha: prepared.headSha });
@@ -5128,7 +5164,29 @@ async function collectPhase(
   const capped = capFindings(
     clampFindingSizes(redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues)),
   );
-  const output = capped.output;
+  // A redaction inside a suggestion fence must not stay a one-click apply:
+  // downgrade that fence to a plain block before any renderer sees the body.
+  const output: ReviewOutput = {
+    ...capped.output,
+    findings: capped.output.findings.map((finding) => ({
+      ...finding,
+      body: neutralizeRedactedSuggestions(finding.body),
+    })),
+  };
+  // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
+  // template (markers, commit SHA, schema tags) is not model output, so a key
+  // whose encoding collides with it can never refuse a clean review.
+  const publishGate = await refusesCredentialEcho(
+    deps,
+    ref,
+    prepared,
+    progress,
+    modelTexts(output, report),
+    fields,
+  );
+  if (publishGate !== "clear") {
+    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
+  }
   // 11. §7.7 step 6 — validation + conservative reconciliation + closure
   // assembly + final body. The recheck document is reconciled against the
   // SAME round's final capped findings (§7.4 conservative precedence:
@@ -5300,14 +5358,6 @@ async function collectPhase(
     reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
   });
   const bodySha256 = await sha256Hex(preparedBody);
-
-  // SEC-01 publish gate: the body is the last thing before GitHub. The
-  // write-time redaction is the guarantee; this second scan refuses a body the
-  // resumed host's stored payload let through.
-  const publishGate = await refusesCredentialEcho(deps, ref, prepared, progress, [preparedBody], fields);
-  if (publishGate !== "clear") {
-    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
-  }
 
   // Seen records for the current findings: the stable finding identity is
   // the fingerprint — an existing lifecycle row (open or CLOSED) with the

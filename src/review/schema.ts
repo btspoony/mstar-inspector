@@ -45,6 +45,7 @@ import {
   type PrIncomplete,
 } from "@mstar-harness/engine";
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
+import { REDACTED } from "../../packages/shared/src/secret-shapes";
 import { z } from "zod";
 
 // The budget-exhausted outcome vocabulary lives in the shared wire module
@@ -377,6 +378,31 @@ export function dropAllSuggestionFences(text: string): string {
   }
   out += text.slice(cursor);
   return out.trim() === "" ? SUGGESTION_OMITTED : out;
+}
+
+/**
+ * Downgrade every fenced `suggestion` block whose body carries the redaction
+ * marker to a plain fenced block: GitHub must render the altered patch as
+ * text, never offer a one-click apply of `[REDACTED]`.
+ */
+export function neutralizeRedactedSuggestions(text: string): string {
+  const spans = suggestionFenceSpans(text);
+  if (spans.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  for (const { start, end } of spans) {
+    if (!text.slice(start, end).includes(REDACTED)) continue;
+    const lineEnd = text.indexOf("\n", start);
+    const openerEnd = lineEnd === -1 || lineEnd >= end ? end : lineEnd;
+    const opener = text.slice(start, openerEnd);
+    const plain = opener.replace(
+      /^(\s*)(`{3,}|~{3,})(.*)$/,
+      (_match, lead: string, fence: string) => `${lead}${fence}`,
+    );
+    out += text.slice(cursor, start) + plain + text.slice(openerEnd, end);
+    cursor = end;
+  }
+  return cursor === 0 ? text : out + text.slice(cursor);
 }
 
 /** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
