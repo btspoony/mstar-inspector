@@ -1237,15 +1237,26 @@ async function reconcileCheckAttempt(
     if (fetched.remote.conclusion !== frozen.desired) {
       // A different CONCLUSION is not a wording gap: overwriting it here would
       // replace an outcome this lane never recorded. Reported honestly and
-      // left to the attempt ladder, exactly as before.
-      await settleFailedAttempt(
-        db, now, attemptsBefore, row, lease,
-        `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
-        log, summary,
+      // left to the attempt ladder, exactly as before — EXCEPT on the §7.9a
+      // correction path, where that published conclusion IS this row's own
+      // unconfirmed record (`reopenTerminalCorrection` matched exactly that
+      // row and cleared its mark once, in the same statement), and this row's
+      // own publication now contradicts it. There the new conclusion must
+      // reach THAT run — refusing GitHub's existing failure would leave the
+      // correction local, which is the same defect one layer later.
+      if (!correction) {
+        await settleFailedAttempt(
+          db, now, attemptsBefore, row, lease,
+          `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
+          log, summary,
+        );
+        return;
+      }
+      log.info(
+        { event: "ops_check_terminal_correction_replaces", attempt_id: attemptId, publication_id: proof?.publicationId ?? null },
+        `terminal Check run carries the unconfirmed ${fetched.remote.conclusion ?? "null"} this row published — replacing it with the proof's ${frozen.desired}`,
       );
-      return;
-    }
-    if (fetched.remote.summary === frozen.summary) {
+    } else if (fetched.remote.summary === frozen.summary) {
       // The conclusion AND the approved text already match this attempt's
       // frozen intent: an earlier send LANDED and only its reply was lost.
       // Reading it back is reconciliation — re-sending the same text would

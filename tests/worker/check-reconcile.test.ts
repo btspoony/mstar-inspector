@@ -819,6 +819,100 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
   });
 
+  test("§7.9a: the correction replaces the failure GitHub already carries, on that same run", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+    let clock = CLAIM_AT + 1_000;
+    const sent: CheckConclusion[] = [];
+    const lifecycle = terminalizeHarness(db, () => clock, sent);
+
+    // The ordinary path: the unconfirmed failure reaches GitHub, so the run
+    // itself already shows `failure` with the fallback text.
+    await lifecycle.terminalize({
+      handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+      publicationId: journalId,
+      outcome: "publication-unknown",
+    });
+    let row = await rawRow(db, attemptId);
+    expect(sent).toHaveLength(1);
+    expect(row.desired).toBe("failure");
+    expect(row.desired_summary).toBe(UNCONFIRMED);
+    expect(row.observed).toBe("failure");
+    expect(row.recovery_state).toBe("remote-unconfirmed");
+
+    // Its own publication then confirms with an evaluable verdict.
+    db.raw
+      .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+      .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
+    const confirmedAt = clock + 60_000;
+    const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
+    if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+    expect(
+      await recordPublicationProof(db as never, journalId, proofLease, {
+        publicationId: journalId,
+        scope: SCOPE,
+        headSha: SHA,
+        kind: "review",
+        round: 3,
+        commentId: 9001,
+        bodySha256: "a".repeat(64),
+        confirmedMs: confirmedAt,
+      }),
+    ).toBe(true);
+
+    clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          adopt: async () => ({ kind: "absent" }),
+          begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
+          // The run GitHub carries is ALREADY a completed failure — the record
+          // this row published when the outcome was unknown.
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+          }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      fetchStub.restore();
+    }
+
+    // The correction reached the run that carried the failure — not just D1.
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect(pushed[0]!.summary).toContain('verdict "ship it"');
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+
+    // EXACTLY once: the consumed mark cannot be reopened, and a later pass
+    // sends nothing more.
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        complete: async () => {
+          throw new Error("a second correction must not be sent");
+        },
+      }),
+    });
+    expect(second.examined).toBe(0);
+    expect(pushed).toHaveLength(1);
+  });
+
   test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
