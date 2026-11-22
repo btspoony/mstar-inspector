@@ -87,6 +87,7 @@ import {
   markResolutionLocalError,
   PREPARED_SEND_MIN_AGE_MS,
   readLineBatchState,
+  recordLineDiscoveryFailure,
   recordNeedsRecheck,
   recordPublicationProof,
   recordLineDispatchIntent,
@@ -101,7 +102,7 @@ import {
   type PublicationRow,
 } from "../store/finding-lifecycle";
 import { createSecretbox } from "../dashboard/secretbox";
-import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type PostPreparedLineCommentsInput, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
+import { createReviewCommenter, PreparedSendRejected, PublicationAuthorityUnavailable, type CommenterFetch, type LineDiscoveryFailure, type PostPreparedLineCommentsInput, type PostedLineComments, type ReviewCommenter, type UpsertPlan } from "../pipeline/comment";
 import { sha256Hex } from "../pipeline/review-threads";
 import { settlementStatementIfDischarged } from "../store/review-route-store";
 
@@ -841,19 +842,36 @@ async function reconcileLineBatches(
       if (!state.pending) continue;
       const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
       if (resolved.kind === "unavailable") continue;
+      let recovered: PostedLineComments;
       try {
-        const recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
-        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
-        log.info(
-          { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
-          "line-comment batch discovered without a second send",
-        );
+        recovered = await resolved.reviewer.recoverLineComments(lineInputOf(row));
       } catch (error) {
+        // A thrown read observed nothing: one failed pass under the read-scope
+        // reason, never a capture.
+        await noteLineDiscoveryFailure(db, row, "readback-scope", now(), log);
         log.warn(
           { event: "ops_lifecycle_line_discovery_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
           "line-comment discovery failed — the dispatch intent keeps the batch discovery-only",
         );
+        continue;
       }
+      try {
+        await captureLineComments(db, row.id, recovered.reviewId, recovered.posted, now());
+      } catch (error) {
+        log.warn(
+          { event: "ops_lifecycle_line_capture_failed", detail: `publication=${row.id}: ${error instanceof Error ? error.message : String(error)}` },
+          "line-comment id capture failed — the intent stays, discovery owns the rest",
+        );
+      }
+      // A pass that captured nothing is the observation the bound counts: the
+      // batch cannot leave the eligible set by ordering, only by this count.
+      if (!recovered.captured) {
+        await noteLineDiscoveryFailure(db, row, recovered.failure ?? "marker-missing", now(), log);
+      }
+      log.info(
+        { event: "ops_lifecycle_line_discovery", detail: `publication=${row.id} captured=${recovered.captured}` },
+        "line-comment batch discovered without a second send",
+      );
       continue;
     }
     const resolved = await reviewerForPair(db, env, scope, now, budget, reviewerFactory, transport, reviewerCache, log, summary);
@@ -899,6 +917,31 @@ async function reconcileLineBatches(
       if (outcome !== "unknown") await releaseLineDispatch(db, row.id, lease, now(), outcome === "sent");
     }
   }
+}
+
+/**
+ * ONE discovery pass that captured nothing: the durable count moves toward the
+ * bound and, at it, the batch leaves the eligible set with the reason this
+ * pass observed. Reported ONCE — that transition is the report; the selector
+ * never returns the row again — and the row, its count and its reason stay
+ * readable, so an operator can see why recovery stopped.
+ */
+async function noteLineDiscoveryFailure(
+  db: D1Like,
+  row: PublicationRow,
+  reason: LineDiscoveryFailure,
+  nowMs: number,
+  log: ReconcileLog,
+): Promise<void> {
+  const settled = await recordLineDiscoveryFailure(db, row.id, reason, nowMs);
+  if (settled === null || !settled.unresolvable) return;
+  log.warn(
+    {
+      event: "ops_lifecycle_line_unresolvable",
+      detail: `publication=${row.id} reason=${reason} attempts=${settled.attempts}`,
+    },
+    "line-comment batch left the recovery set — its remote batch cannot be read back",
+  );
 }
 
 /** The exact frozen batch of one applied publication. */
