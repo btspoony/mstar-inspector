@@ -31,6 +31,7 @@ import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
+import type * as ConsumerModule from "../pipeline/consumer";
 import type { AttemptRef } from "../pipeline/review-attempt-execution";
 import {
   classifyWebhook,
@@ -59,6 +60,7 @@ import {
 } from "../dashboard/targets-store";
 import {
   getMaintenanceMode,
+  getReviewRouteWorkflowGate,
   maintenanceClosed,
   readDefaultReviewLevel,
 } from "../dashboard/runtime-config-store";
@@ -1161,6 +1163,74 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
  */
 type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRef> };
 
+/** The consumer surface the queue face needs, loadable at call time. */
+type ReviewQueueConsumerModule = Pick<
+  typeof ConsumerModule,
+  "createReviewConsumer" | "createWorkflowInstance"
+>;
+
+/**
+ * ONE queue batch, end to end: the deployment gate, then the consumer through
+ * the Workflow starter.
+ *
+ * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
+ * test can drive this wiring with a fake module instead of stubbing
+ * `src/pipeline/consumer` process-wide — `mock.module` cannot be undone in Bun
+ * (measured: neither `mock.restore()` nor re-mocking restores the real one), so
+ * a stub here would leak into every later file that imports the consumer.
+ */
+export async function runReviewQueueBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  env: ReviewQueueEnv,
+  ctx: ExecutionContext,
+  loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
+): Promise<void> {
+  // THE DEPLOYMENT GATE (spec § Deployment gate). Merging this code does not
+  // enable the review route: the operator flips `review.route.workflow` only
+  // after the nine claims hold and I-000666 closes. Until then a delivery is
+  // REFUSED here — acknowledged, one structured line — never silently
+  // re-routed to a path that no longer exists. Absent and unreadable rows are
+  // OFF (see `getReviewRouteWorkflowGate`).
+  const gate = await getReviewRouteWorkflowGate(env.DB);
+  if (gate.mode !== "on") {
+    const line = JSON.stringify({
+      event: "review_route_gate_closed",
+      review_route_workflow: "off",
+      gate_saved: gate.saved,
+      gate_degraded: gate.degraded,
+      gate_reason: gate.reason ?? null,
+      batch_messages: batch.messages.length,
+      msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
+    });
+    // A stored `off` is the operator's intended state; an unreadable row is a
+    // fault worth surfacing, and both refuse the same way.
+    if (gate.degraded) console.warn(line);
+    else console.log(line);
+    return;
+  }
+  // ONE execution route: the consumer admits, dedupes and settles skips, and
+  // its hand-off calls THIS starter, which creates exactly one Workflow
+  // instance per admitted attempt — instance id = attempt id. The handler
+  // itself never touches a container, a sandbox credential or the model.
+  const workflow = env.REVIEW_WORKFLOW;
+  if (workflow === undefined) {
+    // A deploy without the binding could only drop every review it admits:
+    // fail loud into the queue's retry/DLQ path instead.
+    throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+  }
+  const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
+  // The invocation context owns the detached Check terminalization: the
+  // consumer hands it the promise, so an overrun still finishes after the
+  // handler returns instead of being reclaimed with the isolate.
+  await createReviewConsumer(
+    env,
+    undefined,
+    {},
+    { waitUntil: (promise) => ctx.waitUntil(promise) },
+    (_deps, ref) => createWorkflowInstance(workflow, ref),
+  )(batch);
+}
+
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
@@ -1171,27 +1241,7 @@ export default {
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
   async queue(batch: MessageBatch<ReviewJobPayload>, env: ReviewQueueEnv, ctx: ExecutionContext): Promise<void> {
-    // ONE execution route: the consumer admits, dedupes and settles skips, and
-    // its hand-off calls THIS starter, which creates exactly one Workflow
-    // instance per admitted attempt — instance id = attempt id. The handler
-    // itself never touches a container, a sandbox credential or the model.
-    const workflow = env.REVIEW_WORKFLOW;
-    if (workflow === undefined) {
-      // A deploy without the binding could only drop every review it admits:
-      // fail loud into the queue's retry/DLQ path instead.
-      throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
-    }
-    const { createReviewConsumer, createWorkflowInstance } = await import("../pipeline/consumer");
-    // The invocation context owns the detached Check terminalization: the
-    // consumer hands it the promise, so an overrun still finishes after the
-    // handler returns instead of being reclaimed with the isolate.
-    await createReviewConsumer(
-      env,
-      undefined,
-      {},
-      { waitUntil: (promise) => ctx.waitUntil(promise) },
-      (_deps, ref) => createWorkflowInstance(workflow, ref),
-    )(batch);
+    await runReviewQueueBatch(batch, env, ctx);
   },
   // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
