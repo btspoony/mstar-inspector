@@ -123,6 +123,13 @@ export type CheckDesired = "in_progress" | "success" | "neutral" | "failure";
 export type CheckObserved = "unknown" | CheckDesired;
 export type CheckCreateState = "not-sent" | "sending" | "known" | "unknown";
 export type CheckRecoveryState = "pending" | "done" | "remote-unconfirmed" | "local-error" | "suspended";
+/**
+ * The approved category of a terminal review failure (compass D9, migration
+ * 0087). It SELECTS the approved wording; the text itself is never derived from
+ * an error. A review that produced a verdict has no category — a missed gate is
+ * a result, not a failure — and a waiting attempt has none either.
+ */
+export type CheckFailureStatus = "paused" | "unknown-failure" | "budget-stop" | "cap-stop";
 
 /** The immutable identity of one attempt generation (spec §7.9). */
 export type CheckIdentity = {
@@ -148,6 +155,8 @@ export type CheckAttempt = {
   executionDeadlineMs: number;
   attempts: number;
   terminalMs: number | null;
+  /** The approved failure category frozen with the intent; NULL when none applies. */
+  terminalFailureStatus: CheckFailureStatus | null;
   /**
    * When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
@@ -165,6 +174,12 @@ export type CheckRemote = {
   app: { id: number } | null;
   status: string;
   conclusion: string | null;
+  /**
+   * The run's human-facing summary, or `null` when the payload carried no
+   * readable text. A conclusion alone does not prove the approved wording
+   * landed, so delivery is judged on this field (spec §7.9).
+   */
+  summary: string | null;
 };
 
 /** A terminal intent: `in_progress` is structurally excluded (spec §7.11.2). */
@@ -172,6 +187,16 @@ export type CheckConclusion = {
   desired: Exclude<CheckDesired, "in_progress">;
   title: string;
   summary: string;
+  /**
+   * The approved category this intent carries, frozen in the SAME write as the
+   * text. It names why the intent reports something the user must act on, so it
+   * is absent only where no fault is reported (a verdict, a superseded attempt,
+   * a plain skip). A paused run is the one `neutral` conclusion that carries
+   * one: `neutral` + `"paused"` is the honest outcome, not a failure. `desired`
+   * excludes `in_progress` by type, so a category can never be written for an
+   * attempt that is still waiting.
+   */
+  failureStatus?: CheckFailureStatus;
 };
 
 /**
@@ -416,6 +441,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     executionDeadlineMs: row.execution_deadline_ms,
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
+    terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     createdAtMs: row.created_ms,
   };
 }
@@ -506,6 +532,8 @@ export type CheckOwnership = {
   observed: CheckObserved;
   desiredTitle: string | null;
   desiredSummary: string | null;
+  /** The frozen failure category, so a re-freeze of the same intent keeps it. */
+  terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
 };
 
@@ -537,6 +565,7 @@ export async function getCheckOwnership(
     observed: attempt.observed,
     desiredTitle: row.desired_title,
     desiredSummary: row.desired_summary,
+    terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     publicationId: row.publication_id,
   };
 }
@@ -1374,18 +1403,26 @@ export async function rollbackCheckCreateDispatch(
 
 /**
  * Freeze the terminal intent BEFORE any remote update (spec §7.9 "Desired
- * versus observed"): conclusion, bounded title/summary and the publication
- * proof link. The type excludes `in_progress`.
+ * versus observed"): conclusion, bounded title/summary, the approved failure
+ * category and the publication proof link. The type excludes `in_progress`.
  *
  * Monotonic with exactly one documented exception: a `failure` decided while
  * publication was unknown may be corrected to `success`/`neutral` when positive
  * proof turns up, and the correction is honored ONLY when the caller supplies
  * that proof link (spec §7.9: "newly discovered positive publication proof may
  * correct a previously unknown failure into success/neutral on the same owned
- * run; record that correction, do not create another run"). Re-writing the SAME
- * intent is the idempotent replay case and still links the proof. Any other
- * change — a downgrade, a lateral swap, or a correction with no proof — returns
- * false and writes nothing.
+ * run; record that correction, do not create another run") AND the frozen
+ * category is absent or `unknown-failure` — a `cap-stop`/`budget-stop` names
+ * why the attempt ended and is never rewritten by a proof. Any other change —
+ * a downgrade, a lateral swap, a correction with no proof, or a correction of a
+ * known stop — returns false.
+ *
+ * A re-write of the SAME desired is the idempotent replay case, and it is a
+ * NO-OP on the frozen fields: the title, the text and the category that selects
+ * it are what the user may already have seen, so a second writer (a recovery
+ * pass, a duplicate settlement, an interrupted caller) can only link the proof
+ * and refresh the recovery bookkeeping. Changing the wording is the correction
+ * above — a different `desired` with proof — or nothing.
  */
 export async function setCheckDesired(
   db: D1Like,
@@ -1398,9 +1435,29 @@ export async function setCheckDesired(
   const current = await getCheckOwnership(db, id, lease, nowMs);
   if (current === null) return false;
   const was = current.desired;
-  if (was !== "in_progress" && was !== conclusion.desired) {
-    const correction = was === "failure" && (conclusion.desired === "success" || conclusion.desired === "neutral");
+  const replay = was === conclusion.desired;
+  if (was !== "in_progress" && !replay) {
+    // Only a failure whose CAUSE was unknown can be corrected: a frozen
+    // `cap-stop`/`budget-stop` states why this attempt ended, so a prior
+    // generation's publication cannot rewrite it (first write wins).
+    const causeUnknown =
+      current.terminalFailureStatus === null || current.terminalFailureStatus === "unknown-failure";
+    const correction =
+      was === "failure" &&
+      causeUnknown &&
+      (conclusion.desired === "success" || conclusion.desired === "neutral");
     if (!correction || publicationId === null) return false;
+  }
+  if (replay) {
+    return runFenced(
+      db,
+      id,
+      lease,
+      `publication_id = COALESCE(?, publication_id),
+              recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
+      [publicationId],
+      nowMs,
+    );
   }
   // Freeze BOUNDED text: the persisted row is the only source the send reads,
   // so an oversized or newline-injected title/summary cannot reach the public
@@ -1411,10 +1468,10 @@ export async function setCheckDesired(
     db,
     id,
     lease,
-    `desired = ?, desired_title = ?, desired_summary = ?,
+    `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             publication_id = COALESCE(?, publication_id),
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary, publicationId],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null, publicationId],
     nowMs,
   );
 }
@@ -1442,9 +1499,9 @@ export async function setCheckFallbackDesired(
     db,
     id,
     lease,
-    `desired = ?, desired_title = ?, desired_summary = ?,
+    `desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
             recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
-    [conclusion.desired, title, summary],
+    [conclusion.desired, title, summary, conclusion.failureStatus ?? null],
     nowMs,
     "desired = 'in_progress'",
   );
@@ -1590,11 +1647,12 @@ export async function recordTerminalizeOutcome(
  * conclusion"). Identity = the run's `external_id`, `head_sha`, `name`, owning
  * `app.id`, and — once attached — the persisted `check_run_id`.
  *
- * A completed run whose conclusion is not the locally persisted intent is
- * evidence of something else (a manual close, another writer), never an
- * observation of this attempt. An in-progress payload is recorded only while
- * nothing terminal is observed yet. `false` means nothing was written; the
- * caller then records `remote-unconfirmed` through `deferCheckRecovery`.
+ * A completed run is delivery only when it carries the persisted conclusion AND
+ * the frozen summary: a conclusion-only match is what an earlier writer left
+ * behind, so it is never an observation of this attempt. An in-progress payload
+ * is recorded only while nothing terminal is observed yet. `false` means nothing
+ * was written; the caller then records `remote-unconfirmed` through
+ * `deferCheckRecovery`.
  */
 export async function recordCheckObservation(
   db: D1Like,
@@ -1612,7 +1670,11 @@ export async function recordCheckObservation(
   if (remote.app === null || remote.app.id !== identity.githubAppId) return false;
   if (owned.checkRunId !== null && owned.checkRunId !== remote.id) return false;
 
-  const agrees = remote.status === "completed" && owned.desired !== "in_progress" && remote.conclusion === owned.desired;
+  const agrees =
+    remote.status === "completed" &&
+    owned.desired !== "in_progress" &&
+    remote.conclusion === owned.desired &&
+    remote.summary === owned.desiredSummary;
   const running = remote.status === "queued" || remote.status === "in_progress" || remote.status === "pending";
   if (!agrees && !running) return false;
   if (running && owned.observed !== "unknown") return false;

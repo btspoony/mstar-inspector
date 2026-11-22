@@ -1776,7 +1776,7 @@ async function processMessage(
       }
       // §7.9: a delivery attached before the App was paused still has a run to
       // close, and this path never reaches `begin` — settle it `neutral`.
-      await settleSkippedRow(deps, payload, payload.head_sha, "review paused");
+      await settleSkippedRow(deps, payload, payload.head_sha, "review paused", { paused: true });
       return { kind: "paused" };
     }
     // `workspaceId` is the bot's owner (concurrency/inflight); the ledger is
@@ -2204,7 +2204,7 @@ async function processMessage(
           // `in_progress` until its deadline. The attach key is the payload sha
           // OR the watermark a mention carried — `earlyHeadSha` is exactly that
           // head, so a mention settles its run too.
-          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", true);
+          await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", { announceNoOp: true });
         }
         checkClaimSha = movedHeadSha ?? earlyHeadSha;
       }

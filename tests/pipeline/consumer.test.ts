@@ -76,6 +76,7 @@ import type { CommenterCall } from "../helpers/review-commenter";
 import { PreparedSendRejected } from "../../src/pipeline/comment";
 import {
   CHECK_SUMMARIES,
+  TERMINAL_FAILURE_TEXT,
   attachCheckAtAcceptance,
   createCheckLifecycle,
   createChecksAdapter,
@@ -7166,7 +7167,7 @@ function scriptedChecks(): ChecksOctokit {
           // the status and stops short of a conclusion.
           const updated: CheckRunPayload =
             "conclusion" in params
-              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+              ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
               : "status" in params
                 ? { ...run, status: "in_progress" }
                 : run;
@@ -7211,6 +7212,7 @@ type CheckRowShape = {
   desired: string;
   desired_title: string | null;
   desired_summary: string | null;
+  terminal_failure_status: string | null;
   observed: string;
   recovery_state: string;
   publication_id: string | null;
@@ -7465,7 +7467,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : { ...run, status: "in_progress" };
       checkRuns.set(params.check_run_id, updated);
       return updated;
@@ -7498,7 +7500,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     // The give-up fallback is frozen the way the budget-exceeded terminalize
     // leaves it; the cron corrects it from publication proof below.
     expect(released.desired).toBe("failure");
-    expect(released.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(released.desired_summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(h.logLines.filter((line) => line.fields.event === "check_abandon_released")).toHaveLength(1);
     // This exit records the honest handoff outcome (no send ever happened),
     // with NO elapsed time: the hook never ran, and a few milliseconds would
@@ -7537,7 +7539,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : { ...run, status: "in_progress" };
       checkRuns.set(params.check_run_id, updated);
       return updated;
@@ -7785,7 +7787,8 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.terminal_ms).toBeNull();
     expect(row.holder).toBeNull();
     expect(row.next_attempt_ms).toBeNull();
-    expect(row.desired_summary).toContain("review paused");
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT.paused);
+    expect(row.terminal_failure_status).toBe("paused");
     expect(checkRequests.some((request) => request.op === "update")).toBe(false);
   });
 
@@ -7973,7 +7976,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.prePublicationFailure("unknown pipeline failure"));
+    expect(update.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("failure");
@@ -7997,7 +8000,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.degraded);
+    expect(update.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const pub = publicationRow(db);
     expect(pub.kind).toBe("degraded");
     expect(pub.phase).toBe("applied");
@@ -8024,7 +8027,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.degradedNotPosted);
+    expect(update.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     // ONE attempt: the rejection closes the same row, it never mints a second.
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
@@ -8138,7 +8141,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.output.summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(update.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = checkRowFor(db, SHA);
     expect(checkRows(db)).toHaveLength(1);
     expect(row.desired).toBe("failure");
@@ -8505,7 +8508,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           await attachCheckRunId(db, identity.attemptId, lease, 777, checkState.clockMs);
           return {
             kind: "ready",
-            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+            remote: {
+              id: 4242,
+              name: CHECK_NAME,
+              head_sha: SHA,
+              external_id: null,
+              status: "in_progress",
+              conclusion: null,
+              summary: null,
+              app: { id: TEST_GITHUB_APP_ID },
+            },
           };
         },
         adoptCheckRun: async () => ({ kind: "absent" }),
@@ -8551,7 +8563,16 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           checkState.clockMs = lease.untilMs + 1;
           return {
             kind: "ready",
-            remote: { id: 4242, name: CHECK_NAME, head_sha: SHA, external_id: null, status: "in_progress", conclusion: null, app: { id: TEST_GITHUB_APP_ID } },
+            remote: {
+              id: 4242,
+              name: CHECK_NAME,
+              head_sha: SHA,
+              external_id: null,
+              status: "in_progress",
+              conclusion: null,
+              summary: null,
+              app: { id: TEST_GITHUB_APP_ID },
+            },
           };
         },
         adoptCheckRun: async () => ({ kind: "absent" }),
@@ -8674,7 +8695,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
-                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
                   : "status" in params
                     ? { ...run, status: "in_progress" }
                     : run;
@@ -8888,7 +8909,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
               // `queued` → `in_progress` promotion moves only the status.
               const updated: CheckRunPayload =
                 "conclusion" in params
-                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+                  ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
                   : "status" in params
                     ? { ...run, status: "in_progress" }
                     : run;
@@ -9090,7 +9111,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.last_error).toContain("terminalize boom");
     expect(row.desired).toBe("failure");
-    expect(row.desired_summary).toBe(CHECK_SUMMARIES.unconfirmed);
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     // The failed hook is its OWN outcome: without it, this hand-off is
     // indistinguishable from a terminal send that landed.
     expect(row.terminalize_outcome).toBe("hook-failed");
@@ -9295,7 +9316,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : "status" in params
             ? { ...run, status: "in_progress" }
             : run;
@@ -9334,7 +9355,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       const run = checkRuns.get(params.check_run_id)!;
       const updated: CheckRunPayload =
         "conclusion" in params
-          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion }
+          ? { ...run, status: "completed", conclusion: (params as ChecksUpdateParams).conclusion, output: params.output }
           : "status" in params
             ? { ...run, status: "in_progress" }
             : run;
@@ -10507,13 +10528,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(terminal.status).toBe("completed");
     expect(terminal.conclusion).toBe("failure");
     expect(terminal.output.title).toBe(CHECK_NAME);
-    // The SHORT form: counters that were observed, in order, and no invented
-    // changed-line count (the numstat never ran).
-    expect(terminal.output.summary).toBe(
-      "Review budget exhausted: default review reached its 666s preparation budget (consumer deadline reached); " +
-        "0/0 seats stopped before finishing — a time-budget failure, not a verdict on the PR; " +
-        "shrink the diff or use a tier whose ceiling covers it.",
-    );
+    // The derived preparation window is time left before the runner cutoff, so
+    // this stop drew on the platform's end-to-end cap, NOT on a tier budget:
+    // the approved cap-stop wording is what the run carries.
+    expect(terminal.output.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
 
     const rows = checkRows(db);
     expect(rows).toHaveLength(2);
@@ -10521,6 +10539,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(fresh.head_sha).toBe(SHA);
     expect(fresh.desired).toBe("failure");
     expect(fresh.observed).toBe("failure");
+    expect(fresh.terminal_failure_status).toBe("cap-stop");
     // This attempt published nothing, so its run carries no publication link.
     expect(fresh.publication_id).toBeNull();
     // The older Check and its published review are exactly as they were.
@@ -10582,6 +10601,37 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(terminal.output.summary).not.toContain("changed lines");
     expect(checkRowFor(db, SHA).desired).toBe("failure");
     expect(reviewCount(db)).toBe(0);
+  });
+
+  test("check lifecycle: a stop past the attempt deadline still records its category for the recovery lane", async () => {
+    const db = await createSeededTestD1();
+    const adapter = checksAdapterFor(db);
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        createAppCommenter: () => commenterWithChecks(adapter),
+        attemptCapMs: ROUND_BUDGET_MS,
+        // The clock crosses the attempt's own hard stop before the diff stage,
+        // so the Check's execution lease is dead by the time the stop is known:
+        // the category can only be frozen under the recovery lease.
+        ...clockSpendingSandbox("git init", ROUND_BUDGET_MS + 60_000, clock),
+      });
+      await consumer(h.makeBatch(makePayload()));
+    });
+
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(0);
+    // The stop we already knew is recorded rather than dropped: the row carries
+    // the category and the approved wording, and is handed back so the minute
+    // reconciler delivers it.
+    const row = checkRowFor(db, SHA);
+    expect(row.desired).toBe("failure");
+    expect(row.terminal_failure_status).toBe("cap-stop");
+    expect(row.desired_summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+    expect(row.holder).toBeNull();
+    expect(row.lease_until_ms).toBeNull();
+    expect(row.next_attempt_ms).toBeNull();
   });
 
   test("check lifecycle: an abandoned terminal send hands the exhaustion intent to recovery, which sends it", async () => {

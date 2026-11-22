@@ -72,6 +72,7 @@ import {
   setCheckFallbackDesired,
   type CheckAttempt,
   type CheckConclusion,
+  type CheckFailureStatus,
   type CheckIdentity,
   type CheckOwnership,
   type CheckRemote,
@@ -101,6 +102,13 @@ export type CheckRunPayload = {
   status: string;
   conclusion: string | null;
   app: { id: number | bigint } | null;
+  /**
+   * The human-facing text GitHub stores on the run. It is the only remote
+   * evidence that the approved wording LANDED: a conclusion alone is what an
+   * earlier writer left behind (spec §7.9, plan "Persistence and
+   * reconciliation contract").
+   */
+  output?: { title?: string | null; summary?: string | null } | null;
 };
 
 export type ChecksCreateParams = {
@@ -217,6 +225,10 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
   if (typeof payload.status !== "string") return null;
   if (payload.external_id !== null && typeof payload.external_id !== "string") return null;
   if (payload.conclusion !== null && typeof payload.conclusion !== "string") return null;
+  // A payload with no readable text is NOT malformed: it is a run whose
+  // wording cannot be proven, which `null` says without failing the read.
+  const rawSummary = payload.output?.summary;
+  const summary = typeof rawSummary === "string" ? rawSummary : null;
   if (payload.app === null || payload.app === undefined) {
     return {
       id,
@@ -225,6 +237,7 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
       external_id: payload.external_id,
       status: payload.status,
       conclusion: payload.conclusion,
+      summary,
       app: null,
     };
   }
@@ -237,6 +250,7 @@ export function toCheckRemote(payload: CheckRunPayload | null | undefined): Chec
     external_id: payload.external_id,
     status: payload.status,
     conclusion: payload.conclusion,
+    summary,
     app: { id: appId },
   };
 }
@@ -745,6 +759,12 @@ async function completeCheckWith(
   if (remote.status !== "completed" || remote.conclusion !== frozen.desired) {
     return { kind: "unavailable", requests: attempted.sent, reason: "check update response is not the intended terminal state" };
   }
+  // Delivery is the conclusion AND the frozen text (spec §7.9): a reply with no
+  // readable output proves nothing about what the user now reads, so it is an
+  // unconfirmed send and recovery re-reads/resends the SAME run.
+  if (remote.summary !== frozen.summary) {
+    return { kind: "unavailable", requests: attempted.sent, reason: "check update response does not carry the frozen text" };
+  }
   return { kind: "completed", remote };
 }
 
@@ -1067,44 +1087,25 @@ export type ReviewGate = { minScore: number; passVerdicts: readonly string[] };
 
 /**
  * Frozen summaries, exactly as spec §7.9's matrix spells them.
+ *
+ * A terminal FAILURE carries the approved wording of its category instead (see
+ * `TERMINAL_FAILURE_TEXT`): no branch here may re-introduce an interpolated
+ * cause. What remains is the vocabulary of a REVIEW RESULT — the gate verdicts
+ * and the skip texts — where the per-attempt facts (head, score, verdict) are
+ * the point rather than an internal cause.
  */
 export const CHECK_SUMMARIES = {
   gateMet: (sha7: string, round: number, verdict: string, score: number, gate: ReviewGate) =>
     `Review gate met for ${sha7} (round ${round}): verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   gateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
     `Review gate missed for ${sha7}: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  gateUnreadable: (sha7: string, gate: ReviewGate) =>
-    `Review gate could not be evaluated for ${sha7}: no published review with a readable tally (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  /**
-   * The App's own gate row is unreadable, so there is no floor or allowed
-   * list to name — the failure must not invent one.
-   */
-  gateUnreadableConfig: (sha7: string) =>
-    `Review gate could not be evaluated for ${sha7}: the App's gate configuration could not be read.`,
-  degraded: "Review output was invalid; a degraded summary comment was published.",
   /**
    * The promotion text: the run created at delivery acceptance reports THIS
    * commit's review from the moment the review starts (§7.9).
    */
   inProgress: (sha7: string) => `Review started for ${sha7} — this run reports the review of this commit.`,
-  prePublicationFailure: (reason: string) =>
-    `Review execution failed before publication: ${reason}. No review was published.`,
-  degradedNotPosted: "Review output was invalid and the degraded notice was not published.",
+  /** The fallback for a row whose frozen intent carries no text at all. */
   unconfirmed: "Review attempt could not be confirmed complete; publication status is unknown.",
-  /**
-   * The deadline ended the proof wait with no publication row staged for this
-   * attempt at all. Each named cause replaces the generic unknown above with
-   * the evidence that was missing; the conclusion and the title are unchanged.
-   */
-  unconfirmedUnstaged:
-    "Review attempt could not be confirmed complete: no publication row was staged for it.",
-  /** A publication row exists for this attempt but its proof never landed. */
-  unconfirmedUnproven:
-    "Review attempt could not be confirmed complete: its publication was staged but the proof never landed.",
-  /** The proof (or the journal itself) could not be read. */
-  unconfirmedUnreadable:
-    "Review attempt could not be confirmed complete: its publication proof could not be read.",
-  exhausted: "Finalization could not be confirmed. Manual inspection may be required.",
   /** Nothing to review: an eligible increment base with an empty `base...head`. */
   skipped: "No new changes since the last reviewed head; nothing to review for this head.",
   /**
@@ -1116,8 +1117,6 @@ export const CHECK_SUMMARIES = {
     `No new changes at ${head7} (since ${base7}); the review gate result of ${base7} is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   inheritedGateMissed: (head7: string, base7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes at ${head7} (since ${base7}); the review gate of ${base7} was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  inheritedGateUnreadable: (head7: string, base7: string, reason: string) =>
-    `No new changes at ${head7} (since ${base7}); the review gate for ${base7} could not be evaluated — ${reason}.`,
   /**
    * The SAME head is both the subject and the baseline (a duplicate delivery
    * whose own review already exists): `since <head>` would be nonsense, so the
@@ -1127,21 +1126,14 @@ export const CHECK_SUMMARIES = {
     `No new changes since the reviewed head ${sha7}; its own gate result is inherited: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
   sameHeadInheritedGateMissed: (sha7: string, verdict: string, score: number, gate: ReviewGate) =>
     `No new changes since the reviewed head ${sha7}; its own gate was missed: verdict "${boundedText(verdict, "unknown")}", score ${score} (floor ${gate.minScore}; allowed: ${verdictsText(gate)}).`,
-  sameHeadInheritedGateUnreadable: (sha7: string, reason: string) =>
-    `No new changes since the reviewed head ${sha7}; its own gate could not be evaluated — ${reason}.`,
-  sameHeadInheritedUnreadable: (sha7: string) =>
-    `No new changes since the reviewed head ${sha7}; its own review result could not be read, so no gate result could be inherited and the check is failing closed.`,
-  /**
-   * The reviewed head itself has no readable result: nothing can be inherited,
-   * so the check fails closed rather than going neutral and shedding the
-   * required check an empty commit did not earn.
-   */
-  inheritedUnreadable: (head7: string, base7: string) =>
-    `No new changes at ${head7} (since ${base7}); the review result of ${base7} could not be read, so no gate result could be inherited and the check is failing closed.`,
   /**
    * The attempt was CLAIMED early (admission time, before the container) and
    * the authoritative checkout then proved a newer commit: this run never
    * reviewed anything, so it is closed instead of being left in progress.
+   *
+   * Deliberately NOT a failure category: nothing went wrong and no action is
+   * owed — the newer commit carries the review — so the approved set (which
+   * would tell the user to re-trigger or to wait) has no entry for it.
    */
   superseded: (sha7: string) =>
     `Review attempt was superseded by a newer commit; no review was published for ${sha7}.`,
@@ -1153,6 +1145,67 @@ export const CHECK_SUMMARIES = {
   skippedByDelivery: (reason: string) =>
     `Review was skipped for this head: ${boundedText(reason, "the delivery was skipped before execution")}. No review was published.`,
 } as const;
+
+/**
+ * The approved wording of a terminal review failure, keyed by its persisted
+ * category (compass D9). Fixed text with its ONE next step — never formatted
+ * from an error, and no entry promises a retry, a recovery or a refund: the
+ * bot-mention path the text names starts a NEW attempt.
+ *
+ * `budget-stop` is absent on purpose: its approved text is the existing
+ * exhaustion summary, which is derived from the attempt's own typed record (see
+ * `terminalFailureSummary`).
+ */
+export const TERMINAL_FAILURE_TEXT = {
+  paused:
+    "Code review is paused right now. Your review has not run. Wait for the operator to resume the service; no action is needed from you.",
+  "unknown-failure":
+    "Something went wrong while running this review. Nothing is wrong with your change. Re-trigger the review by mentioning the review bot in a PR comment.",
+  "cap-stop":
+    "This review was stopped because it ran longer than the platform's maximum review duration. Nothing is wrong with your change. Re-trigger the review by mentioning the review bot in a PR comment.",
+} as const satisfies Record<Exclude<CheckFailureStatus, "budget-stop">, string>;
+
+/** The approved text for a category: its fixed wording, or the trusted formatter. */
+export function terminalFailureSummary(
+  status: CheckFailureStatus,
+  budgetExhaustion?: BudgetExhaustedOutcome,
+): string {
+  if (status !== "budget-stop") return TERMINAL_FAILURE_TEXT[status];
+  if (budgetExhaustion === undefined) {
+    throw new Error('terminalFailureSummary: "budget-stop" requires the resolved budgetExhaustion record');
+  }
+  return budgetExhaustedSummary(budgetExhaustion);
+}
+
+/** The ONE terminal-failure conclusion shape: the category selects the wording. */
+function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetExhaustedOutcome): CheckConclusion {
+  return {
+    desired: "failure",
+    title: CHECK_NAME,
+    summary: terminalFailureSummary(status, budgetExhaustion),
+    failureStatus: status,
+  };
+}
+
+/**
+ * The approved category of a typed wall-clock stop, keyed by the WINDOW the stop
+ * drew on — the one fact that says which clock ended the attempt, whoever
+ * noticed it. `cause` is an attribution of the observer, not a category: the
+ * runner input write's kill at the anchored instant reports `sandbox-kill`
+ * while the refusal right after it reports `consumer-deadline`, and both are the
+ * same spent window.
+ *
+ *   - `preparation` — the derived pre-runner cutoff exists so the runner still
+ *     gets a window before the end-to-end cap; a stop there IS that cap.
+ *   - `runner` — the window frozen for the paid runner; spending it is the
+ *     tier's time budget, not the platform's duration.
+ *
+ * Total by type, so no window can fall through to a default.
+ */
+const STOP_CATEGORY: Record<BudgetExhaustedOutcome["budgetWindow"], CheckFailureStatus> = {
+  preparation: "cap-stop",
+  runner: "budget-stop",
+};
 
 /** The cause phrase the public summary carries for each typed stop. */
 const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], string> = {
@@ -1204,19 +1257,6 @@ export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string 
     tail
   );
 }
-
-/**
- * Why no proof was readable when the deadline ended the proof wait. Only the
- * Check reconciliation lane's deadline path supplies one; every other
- * unconfirmed call keeps the generic `unconfirmed` wording.
- */
-export type UnconfirmedCause = "unstaged" | "unproven" | "unreadable";
-
-const UNCONFIRMED_BY_CAUSE: Record<UnconfirmedCause, string> = {
-  unstaged: CHECK_SUMMARIES.unconfirmedUnstaged,
-  unproven: CHECK_SUMMARIES.unconfirmedUnproven,
-  unreadable: CHECK_SUMMARIES.unconfirmedUnreadable,
-};
 
 /** The allowed-verdict list for a public summary — bounded even if a stored gate were malformed. */
 function verdictsText(gate: ReviewGate): string {
@@ -1278,6 +1318,12 @@ export type CheckTerminalOutcome =
  * for a free-standing `skipped` round with no inheritable head, where there is
  * nothing to inherit and no send to lose; a degraded publication cannot prove
  * the gate was met (clarify C3) and concludes `failure`.
+ *
+ * Every `failure` reached from an EXECUTION fault carries the approved category
+ * of that fault (`TERMINAL_FAILURE_TEXT`), so no branch may interpolate a cause
+ * into the public text. Two failures carry none on purpose: a missed gate is a
+ * verdict — the review ran and reported — and a superseded attempt is not a
+ * fault at all.
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
@@ -1297,14 +1343,6 @@ export function decideConclusion(input: {
    */
   headSha?: string;
   /**
-   * Why no proof was readable, supplied only by the reconciler's deadline
-   * path. The deadline fallthrough then names the missing evidence instead of
-   * the generic unknown; absent (the consumer's unknown send) keeps the
-   * generic wording.
-   */
-  unconfirmedCause?: UnconfirmedCause;
-  reason?: string;
-  /**
    * Required with `outcome: "budget-exhausted"`: this attempt's typed stop
    * record — the summary's sole source of tier, budget and observed counters.
    */
@@ -1314,33 +1352,26 @@ export function decideConclusion(input: {
   // A wall-clock stop resolves BEFORE any persisted proof: this attempt
   // published nothing, so a readable same-head proof can only be a PRIOR
   // generation's applied publication, and its gate result must never freeze
-  // this attempt's Check (RL-12 reuses the head SHA). The summary is a
-  // failure record, never a verdict: the Check says so once with this
-  // attempt's derived facts. `budgetExhaustion` is required by contract —
-  // the two seams that supply this outcome always carry the record they
-  // resolved, so a missing one is a caller defect, named on the throw.
+  // this attempt's Check (RL-12 reuses the head SHA). `budgetExhaustion` is
+  // required by contract — the two seams that supply this outcome always carry
+  // the record they resolved, so a missing one is a caller defect, named on the
+  // throw. The category reads the record's WINDOW, never the `cause`: the same
+  // spent instant is reported by two paths with different causes.
   if (outcome === "budget-exhausted") {
     if (input.budgetExhaustion === undefined) {
       throw new Error(
         'decideConclusion: outcome "budget-exhausted" requires the resolved budgetExhaustion record',
       );
     }
-    return {
-      desired: "failure",
-      title: CHECK_NAME,
-      summary: budgetExhaustedSummary(input.budgetExhaustion),
-    };
+    return terminalFailure(STOP_CATEGORY[input.budgetExhaustion.budgetWindow], input.budgetExhaustion);
   }
   if (proof !== null) {
-    if (proof.kind === "degraded") {
-      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded };
-    }
+    if (proof.kind === "degraded") return terminalFailure("unknown-failure");
     const sha7 = proof.headSha.slice(0, 7);
-    if (gate === null) {
-      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.gateUnreadableConfig(sha7) };
-    }
-    if (review === null || review.scorePct === null) {
-      return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.gateUnreadable(sha7, gate) };
+    // An unreadable gate row or tally is evidence this build could not read,
+    // never a verdict: it is an execution fault, not a judgement on the change.
+    if (gate === null || review === null || review.scorePct === null) {
+      return terminalFailure("unknown-failure");
     }
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
@@ -1350,6 +1381,7 @@ export function decideConclusion(input: {
           summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
         }
       : {
+          // A missed gate is the review's verdict, not a failure of the review.
           desired: "failure",
           title: CHECK_NAME,
           summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
@@ -1368,34 +1400,10 @@ export function decideConclusion(input: {
     // A duplicate delivery inherits from the head ITSELF: "since <head>" would
     // be nonsense, so that case gets its own wording.
     const sameHead = inherited.headSha === inherited.reviewedHeadSha;
-    if (review === null) {
-      return {
-        desired: "failure",
-        title: CHECK_NAME,
-        summary: sameHead
-          ? CHECK_SUMMARIES.sameHeadInheritedUnreadable(head7)
-          : CHECK_SUMMARIES.inheritedUnreadable(head7, base7),
-      };
-    }
-    if (gate === null) {
-      const reason = "the App's gate configuration could not be read";
-      return {
-        desired: "failure",
-        title: CHECK_NAME,
-        summary: sameHead
-          ? CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(head7, reason)
-          : CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, reason),
-      };
-    }
-    if (review.scorePct === null) {
-      const reason = "the inherited review carries no readable score";
-      return {
-        desired: "failure",
-        title: CHECK_NAME,
-        summary: sameHead
-          ? CHECK_SUMMARIES.sameHeadInheritedGateUnreadable(head7, reason)
-          : CHECK_SUMMARIES.inheritedGateUnreadable(head7, base7, reason),
-      };
+    // An unreadable baseline is evidence this build could not read — an
+    // execution fault either way, never a judgement on the inherited change.
+    if (review === null || gate === null || review.scorePct === null) {
+      return terminalFailure("unknown-failure");
     }
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
@@ -1407,6 +1415,7 @@ export function decideConclusion(input: {
             : CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
         }
       : {
+          // The inherited verdict missed the gate: a result, not a failure.
           desired: "failure",
           title: CHECK_NAME,
           summary: sameHead
@@ -1423,37 +1432,19 @@ export function decideConclusion(input: {
   // An early claim the checkout contradicted: this attempt's own SHA was never
   // reviewed. A PROVEN publication for that same SHA still wins above (it is
   // an older attempt's result and the honest one for that commit); without one
-  // the run fails closed rather than claiming an approval nobody earned.
+  // the run fails closed rather than claiming an approval nobody earned. No
+  // failure category: nothing went wrong and no action is owed.
   if (outcome === "superseded") {
     // The attempt's OWN head, sliced raw like every other summary (redaction
     // is for prose, not for a commit id the caller already knows).
     const sha7 = input.headSha === undefined || input.headSha === "" ? "unknown" : input.headSha.slice(0, 7);
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.superseded(sha7) };
   }
-  if (outcome === "local-error") {
-    return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.exhausted };
-  }
-  if (outcome === "pre-publication-failure") {
-    return {
-      desired: "failure",
-      title: CHECK_NAME,
-      summary: CHECK_SUMMARIES.prePublicationFailure(boundedText(input.reason ?? "", "unknown pipeline failure")),
-    };
-  }
-  if (outcome === "degraded-not-posted") {
-    return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degradedNotPosted };
-  }
-  // publication-unknown and expired-without-proof are both unconfirmed. The
-  // deadline path names which proof it could not read; without that
-  // attribution (the consumer's unknown send) the generic wording stays.
-  return {
-    desired: "failure",
-    title: CHECK_NAME,
-    summary:
-      input.unconfirmedCause === undefined
-        ? CHECK_SUMMARIES.unconfirmed
-        : UNCONFIRMED_BY_CAUSE[input.unconfirmedCause],
-  };
+  // Every remaining outcome is an execution fault with no readable result:
+  // `pre-publication-failure`, `degraded-not-posted`, `local-error`,
+  // `publication-unknown` and `expired` without proof. The approved wording says
+  // so once — the cause stays in `review_failures` and the logs.
+  return terminalFailure("unknown-failure");
 }
 
 /** Bounded, redacted summary fragment (spec §7.9: summary ≤2000 chars). */
@@ -1644,6 +1635,12 @@ export type CheckLifecycle = {
     attachDeliveryId?: string;
     /** Why the delivery was skipped — the `neutral` summary names it. */
     reason: string;
+    /**
+     * The skip was a PAUSED App, not a completed result: the review never ran,
+     * and the approved `paused` wording says what happened and that the user
+     * owes nothing. Only reachable when nothing inherited a verdict below.
+     */
+    paused?: boolean;
     /**
      * One warn when the settlement had to fall back off the publication proof:
      * its bytes do not parse (the `reviews` projection is then the fallback),
@@ -2293,7 +2290,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // review exists, so it fails closed the same way. `neutral` is only
       // "nothing to inherit": no readable proof AND no readable review.
       const conclusion: CheckConclusion = degraded
-        ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.degraded }
+        ? terminalFailure("unknown-failure")
         : proof !== null || review !== null
           ? decideConclusion({
               proof: null,
@@ -2302,11 +2299,21 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               review,
               inherited: { headSha: input.headSha, reviewedHeadSha: input.headSha },
             })
-          : {
-              desired: "neutral",
-              title: CHECK_NAME,
-              summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
-            };
+          : input.paused === true
+            ? // Nothing ran and nothing was inherited: the approved `paused`
+              // wording (kept `neutral` — nothing was reviewed, so the run is
+              // not a verdict on the commit).
+              {
+                desired: "neutral",
+                title: CHECK_NAME,
+                summary: TERMINAL_FAILURE_TEXT.paused,
+                failureStatus: "paused",
+              }
+            : {
+                desired: "neutral",
+                title: CHECK_NAME,
+                summary: CHECK_SUMMARIES.skippedByDelivery(input.reason),
+              };
       const intentFence = fenceFor(claimed.lease);
       if (!(await setCheckDesired(deps.db, identity.attemptId, intentFence.lease, conclusion, null, intentFence.nowMs))) {
         return false;
@@ -2507,11 +2514,11 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
       // / `expired` / `degraded-not-posted` freeze the unconfirmed fallback that
       // path would have used without proof. The safety net is the recovery
       // lane — the last writer — which re-reads the proof and can correct it.
-      // `outcome` omitted is the interrupted-terminalize case, whose honest
-      // text is `unconfirmed`.
+      // `outcome` omitted is the interrupted-terminalize case: an execution
+      // fault with no readable result, so it carries the approved wording.
       const conclusion: CheckConclusion =
         input.outcome === undefined
-          ? { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.unconfirmed }
+          ? terminalFailure("unknown-failure")
           : decideConclusion({
               proof: null,
               outcome: input.outcome,

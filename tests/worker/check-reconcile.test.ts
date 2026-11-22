@@ -71,7 +71,7 @@ import {
   type CheckReconcileSummary,
   type CheckTransport,
 } from "../../src/worker/check-reconcile";
-import { CHECK_SUMMARIES, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
+import { CHECK_SUMMARIES, TERMINAL_FAILURE_TEXT, CheckRequestNotDispatched, isRequestNotDispatched, createCheckBeginLatch, createCheckLifecycle, type ChecksAdapter } from "../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../src/worker/env";
 import { defaultReconcileLog } from "../../src/worker/lifecycle-reconcile";
 import { defaultSweepLog } from "../../src/worker/sweep";
@@ -98,6 +98,7 @@ import {
   NOOP_QUEUE,
   UNCONFIRMED,
   agreeingScript,
+  frozenSummaryOf,
   asEnv,
   claim,
   linkPublication,
@@ -177,12 +178,12 @@ describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
     try {
       // Before the grace the lane does not even select it: the one-hour window
       // is no longer what decides when recovery may look.
-      const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript()) });
+      const early = await run(db, { now: () => grace - 1, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(early.examined).toBe(0);
 
       // AT the grace it is due: the pass claims it and gives the claim back to
       // wait for the publication proof. No create, no second run, no request.
-      const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => grace, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.examined).toBe(1);
       expect(summary.deferred).toBe(1);
       expect(summary.errors).toBe(0);
@@ -226,7 +227,7 @@ describe("a store-only skip settlement (spec §7.9 / RL-10)", () => {
     expect(await releaseCheckClaim(db, id, lease, T0)).toBe(true);
 
     const script: AdapterScript = {
-      ...agreeingScript("neutral", 4242),
+      ...agreeingScript(db, "neutral", 4242),
       complete: async (identity, checkRunId, conclusion) => ({
         kind: "completed",
         remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion: conclusion.desired }),
@@ -366,7 +367,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
       .run(CHECK_MAX_ATTEMPTS, capped.attempt.identity.attemptId);
     const fetchStub = stubFetch();
     try {
-      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.examined).toBe(1);
       expect(summary.completed).toBe(1);
     } finally {
@@ -478,7 +479,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.summary).toContain('verdict "ship it"');
             expect(conclusion.summary).toContain("score 85");
             expect(conclusion.summary).toContain("floor 60");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -512,8 +513,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            expect(conclusion.summary).toBe("Review output was invalid; a degraded summary comment was published.");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            expect(conclusion.failureStatus).toBe("unknown-failure");
+            expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -526,7 +528,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.observed).toBe("failure");
   });
 
-  test("an expired attempt with NO journal row names an unstaged publication", async () => {
+  test("an expired attempt with NO journal row concludes the approved failure wording", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const fetchStub = stubFetch();
@@ -540,9 +542,11 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
             // No publication row was ever staged for this attempt: the frozen
-            // text names that cause instead of asserting a generic unknown.
-            expect(conclusion.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            // text is the approved category wording, and the missing evidence
+            // rides the reconciler's own log line, never a visible field.
+            expect(conclusion.failureStatus).toBe("unknown-failure");
+            expect(conclusion.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -580,7 +584,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             pushed.push(conclusion);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -591,7 +595,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     }
     expect(pushed).toHaveLength(1);
     expect(pushed[0]?.desired).toBe("failure");
-    expect(pushed[0]?.summary).toBe("Review gate could not be evaluated for 0123456: the App's gate configuration could not be read.");
+    expect(pushed[0]?.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, attempt.identity.attemptId);
     expect(row.desired).toBe("failure");
     expect(row.observed).toBe("failure");
@@ -627,7 +631,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("success");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -667,7 +671,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
             expect(conclusion.desired).toBe("success");
             expect(conclusion.summary).toContain('verdict "ship it"');
             expect(conclusion.summary).toContain("score 95");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
@@ -695,7 +699,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           complete: async (identity, _id, conclusion) => {
             expect(conclusion.desired).toBe("failure");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -733,9 +737,9 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
             return { kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) };
           },
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }) }),
-          complete: async (identity, runId) => {
+          complete: async (identity, runId, conclusion) => {
             expect(runId).toBe(909);
-            return { kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -764,7 +768,7 @@ describe("adoption before creation (spec §7.9 / RL-12)", () => {
             return { kind: "ready", remote: remoteFor(identity, { id: 555, status: "in_progress", conclusion: null }) };
           },
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { id: 555, status: "in_progress", conclusion: null }) }),
-          complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { id: 555, conclusion: "failure" }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { id: 555, conclusion: "failure", summary: conclusion.summary }) }),
         }),
       });
       expect(summary.completed).toBe(1);
@@ -907,13 +911,13 @@ describe("response validation and stale-epoch writes (spec §7.11.2 step 4)", ()
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          complete: async (identity) => {
+          complete: async (identity, _id, conclusion) => {
             // Between the validated response and the local write, another
             // invocation's recovery claim takes the row over (new epoch).
             db.raw
               .prepare(`UPDATE review_checks SET lease_epoch = lease_epoch + 1 WHERE id = ?`)
               .run(identity.attemptId);
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "failure", summary: conclusion.summary }) };
           },
         }),
       });
@@ -1148,7 +1152,7 @@ describe("request budgets (spec §7.11.2 step 5)", () => {
           clock = T0 + CHECK_RECONCILE_RUN_BUDGET_MS;
           return value;
         },
-        credentials: scriptedCredentials(db, agreeingScript()),
+        credentials: scriptedCredentials(db, agreeingScript(db)),
       });
       expect(summary.examined).toBe(1);
       expect(summary.completed).toBe(0);
@@ -1179,7 +1183,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
       .run(bad.attempt.identity.attemptId);
     const fetchStub = stubFetch();
     try {
-      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript()) });
+      const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db, agreeingScript(db)) });
       expect(summary.completed).toBe(1);
       expect(summary.suspended).toBe(1);
     } finally {
@@ -1291,7 +1295,12 @@ describe("throw-proofing (spec §7.11 composition)", () => {
           },
           fetch: async (identity, checkRunId) => ({
             kind: "found",
-            remote: remoteFor(identity, { id: checkRunId, status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              id: checkRunId,
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }),
       });
@@ -1643,7 +1652,7 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
             kind: "found",
             remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
           }),
-          complete: async (identity) => ({ kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure" }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }) }),
         }, undefined, SCOPE, true),
       });
       expect(summary.completed).toBe(1);
@@ -1711,7 +1720,11 @@ describe("pause / kill switch (L2 fix 1 finding 3)", () => {
           },
           fetch: async (identity) => ({
             kind: "found",
-            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }, undefined, SCOPE, false),
       });
@@ -2356,7 +2369,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
         now: () => T0,
         credentials: async (input) => {
           probes += 1;
-          return scriptedCredentials(db, agreeingScript())(input);
+          return scriptedCredentials(db, agreeingScript(db))(input);
         },
       });
       // The changed digest earned exactly ONE proof, and the pair resumed.
@@ -2413,7 +2426,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
           now: () => T0,
           credentials: async (input) => {
             probed.push(input.scope.appId);
-            return scriptedCredentials(db, agreeingScript(), undefined, repairedScope)(input);
+            return scriptedCredentials(db, agreeingScript(db), undefined, repairedScope)(input);
           },
         });
       }
@@ -2509,7 +2522,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
         now: () => T0,
         credentials: async (input) => {
           probes += 1;
-          return scriptedCredentials(db, agreeingScript())(input);
+          return scriptedCredentials(db, agreeingScript(db))(input);
         },
       });
       expect(summary.completed).toBe(1);
@@ -2577,7 +2590,11 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
           },
           fetch: async (identity) => ({
             kind: "found",
-            remote: remoteFor(identity, { status: "completed", conclusion: "failure" }),
+            remote: remoteFor(identity, {
+              status: "completed",
+              conclusion: "failure",
+              summary: frozenSummaryOf(db, identity.attemptId),
+            }),
           }),
         }),
       });
@@ -2616,9 +2633,9 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
             kind: "found",
             remote: remoteFor(identity, { id: 909, status: "in_progress", conclusion: null }),
           }),
-          complete: async (identity) => ({
+          complete: async (identity, _id, conclusion) => ({
             kind: "completed",
-            remote: remoteFor(identity, { id: 909, conclusion: "failure" }),
+            remote: remoteFor(identity, { id: 909, conclusion: "failure", summary: conclusion.summary }),
           }),
         }, undefined, SCOPE, true),
       });
@@ -2887,7 +2904,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
         now: () => T0,
         credentials: async ({ scope, transport }) => {
           if (scope.appId !== APP) return { kind: "unavailable", reason: "missing" };
-          return { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), transport) };
+          return { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(db), transport) };
         },
       });
       expect(summary.completed).toBe(1);
@@ -2911,7 +2928,7 @@ describe("configured Check update budget (spec §7.10)", () => {
     return async (input) => {
       seen.push(input.updateBudgetMs);
       return input.scope.appId === SCOPE.appId
-        ? { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(), input.transport) }
+        ? { kind: "ok", paused: false, adapter: scriptedAdapter(db, agreeingScript(db), input.transport) }
         : { kind: "unavailable", reason: "missing" };
     };
   }
@@ -3037,7 +3054,9 @@ function publishingScript(sent: { desired?: string; summary?: string }): Adapter
     complete: async (identity, _runId, conclusion) => {
       sent.desired = conclusion.desired;
       sent.summary = conclusion.summary;
-      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+      // Delivery needs the frozen TEXT too (spec §7.9), so the ACK a landed
+      // update produces echoes what was sent.
+      return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
     },
   };
 }
@@ -3152,7 +3171,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
           adopt: async () => ({ kind: "absent" }),
           begin: async (identity) => ({ kind: "ready", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
           fetch: async (identity) => ({ kind: "found", remote: remoteFor(identity, { status: "in_progress", conclusion: null }) }),
-          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) }),
+          complete: async (identity, _id, conclusion) => ({ kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) }),
         }),
       });
       expect(summary.examined).toBe(1);
@@ -3450,7 +3469,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
 
     expect(thirdDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBe(own.publicationId);
     expect(row.observed).toBe("failure");
@@ -3523,11 +3542,10 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     }
 
     // No attribution: the unwritten row ended no wait, so the deadline path
-    // names the missing evidence (nothing was staged for this attempt) and
-    // never adopts that proof.
+    // concludes the approved wording and never adopts that proof.
     expect(deferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnstaged);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3592,8 +3610,9 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
     // A staged row exists (it was claimed after admission) but no proof ever
-    // landed on it: the deadline names that cause, never a proof-less success.
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    // landed on it: the deadline concludes the approved wording, never a
+    // proof-less success.
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3657,7 +3676,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     // The proof decides — a degraded publication never passes the gate.
     expect(secondDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe("Review output was invalid; a degraded summary comment was published.");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
@@ -3735,14 +3754,61 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     expect(row.observed).toBe("failure");
     expect(row.terminal_ms).not.toBeNull();
   });
+
+  test("a category frozen under the recovery lease is DELIVERED, never re-decided as unknown", async () => {
+    const db = seededDb();
+    // The consumer's own lease died with the attempt deadline, so the stop it
+    // knew could only be frozen under the recovery lease — the same one this
+    // test takes, the way `freezeKnownStop` does at the stop site.
+    const { attempt } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const frozen = await claimCheckRecovery(db, id, "recovery:fixture", T0);
+    expect(frozen).not.toBeNull();
+    expect(
+      await setCheckDesired(
+        db,
+        id,
+        frozen!,
+        {
+          desired: "failure",
+          title: CHECK_NAME,
+          summary: TERMINAL_FAILURE_TEXT["cap-stop"],
+          failureStatus: "cap-stop",
+        },
+        null,
+        T0,
+      ),
+    ).toBe(true);
+    expect(await releaseCheckClaim(db, id, frozen!, T0)).toBe(true);
+
+    const stub = stubFetch();
+    const sent: { desired?: string; summary?: string } = {};
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, publishingScript(sent)),
+      });
+      expect(summary.completed).toBe(1);
+    } finally {
+      stub.restore();
+    }
+
+    // The approved wording of the category the stop recorded — not the generic
+    // unknown failure an expired lease would otherwise produce.
+    expect(sent.desired).toBe("failure");
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+    const row = await rawRow(db, id);
+    expect(row.terminal_failure_status).toBe("cap-stop");
+    expect(row.terminal_ms).not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
 // The deadline conclusion names the proof it could not read (spec §7.9)
 // ---------------------------------------------------------------------------
 
-describe("the deadline conclusion names the missing proof", () => {
-  test("(b) a staged journal row without proof names the proof that never landed", async () => {
+describe("the deadline conclusion carries the approved wording", () => {
+  test("(b) a staged journal row without proof concludes the approved wording, never a proof-less success", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     // The hand-off shape: this attempt linked the row it was handed off to,
@@ -3763,10 +3829,10 @@ describe("the deadline conclusion names the missing proof", () => {
     }
 
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnproven);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("(c) a staged journal row whose proof read fails names the unreadable proof", async () => {
+  test("(c) a staged journal row whose proof read fails still concludes the approved wording", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 1_000);
@@ -3788,10 +3854,10 @@ describe("the deadline conclusion names the missing proof", () => {
     }
 
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
-  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then names it unreadable", async () => {
+  test("(d) an unlinked attempt's staged row with malformed proof bytes defers, then concludes the approved wording", async () => {
     const db = seededDb();
     const { id } = await abandonedAttempt(db);
     // The attributed shape the probe admits — the row's last write lands after
@@ -3847,7 +3913,7 @@ describe("the deadline conclusion names the missing proof", () => {
 
     expect(deadlineDeferred).toBe(0);
     expect(sent.desired).toBe("failure");
-    expect(sent.summary).toBe(CHECK_SUMMARIES.unconfirmedUnreadable);
+    expect(sent.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
     const row = await rawRow(db, id);
     expect(row.publication_id).toBeNull();
     expect(row.observed).toBe("failure");
@@ -3960,7 +4026,7 @@ describe("an owed Check settlement has a reader and a clearer", () => {
           complete: async (identity, _id, conclusion) => {
             completeCalls += 1;
             expect(conclusion.desired).toBe("success");
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success" }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: "success", summary: conclusion.summary }) };
           },
         }),
       });
