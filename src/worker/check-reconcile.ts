@@ -57,6 +57,7 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   claimCheckRecovery,
+  dropCheckCorrection,
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
@@ -65,6 +66,7 @@ import {
   listCheckReconcileBatch,
   listReenableableCheckPairs,
   markCheckLocalError,
+  parkCheckCorrection,
   readPublicationProof,
   readPublishedReview,
   readTerminalDispatch,
@@ -823,7 +825,25 @@ async function reopenTerminalCheck(
   // this pass writes nothing at all.
   if (proofRead.kind !== "read") return;
   if ((await pairUnusableReason(db, scope)) !== null) return;
-  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, now()))) return;
+  // The conclusion the revision owes, decided ONCE from the proof this row
+  // linked — the same decision the ordinary attempt makes, so the deferred pass
+  // has a durable conclusion to deliver instead of re-deriving one from
+  // evidence that may have moved by then. An UNAVAILABLE read is not evidence:
+  // writing a conclusion decided without the gate/review would record an owed
+  // revision the row never deserved, so the terminal record stands untouched
+  // and the next pass reads again.
+  const [gateRead, reviewRead] = await Promise.all([
+    readRecoveryGate(db, scope),
+    readRecoveryReview(db, row.identity, publicationId),
+  ]);
+  if (gateRead.kind !== "read" || reviewRead.kind !== "read") return;
+  const owed = decideConclusion({
+    proof: proofRead.proof,
+    outcome: "expired",
+    gate: gateRead.value,
+    review: reviewRead.value,
+  });
+  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, owed.desired, now()))) return;
   log.info(
     { event: "ops_check_terminal_correction_reopened", attempt_id: attemptId, publication_id: publicationId },
     "terminal Check reopened for its own publication's confirmed outcome — one revision",
@@ -881,6 +901,14 @@ async function reconcileCheckAttempt(
     return;
   }
 
+  // §7.9a carried across passes: a reopened correction the request budget
+  // deferred before dispatch is still OWED on the row. It is this pass's
+  // correction only while the generation it targets still holds; a superseded
+  // target is dropped under the claim below, never resurrected.
+  let isCorrection =
+    correction ||
+    (row.correctionGeneration === row.identity.generation && row.correctionDesired !== null);
+
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
   // not push terminal rows behind its App-identity probe. While the exact
@@ -927,7 +955,7 @@ async function reconcileCheckAttempt(
   // settlement's `neutral` (§7.9): that conclusion is final, nothing can
   // correct it and it owes no publication, so waiting for a proof that will
   // never exist would leave the run open for the whole window.
-  if (!correction && beforeDeadline && row.desired !== "neutral") {
+  if (!isCorrection && beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with
@@ -1012,6 +1040,35 @@ async function reconcileCheckAttempt(
   if (current === null) return;
   const attemptsBefore = current.attempts;
 
+  // The owed correction, authoritative under the claim (the selection row may
+  // predate another pass that settled it).
+  const owedDesired =
+    current.correctionGeneration === current.identity.generation ? current.correctionDesired : null;
+  isCorrection = correction || owedDesired !== null;
+  // A generation that moved means this row is not the subject of the owed
+  // revision any more, and it never will be. ONE transition drops the debt,
+  // unfreezes the intent it wrote, and parks the row: leaving it non-terminal
+  // (or splitting these writes) would let a later pass — even after a crash
+  // between two statements — send a conclusion this generation does not own.
+  if (!correction && current.correctionGeneration !== null && owedDesired === null) {
+    await parkCheckCorrection(
+      db,
+      attemptId,
+      lease,
+      `a correction owed for generation ${current.correctionGeneration} no longer targets this row (generation ${current.identity.generation}) — cannot conclude`,
+      now(),
+    );
+    log.info(
+      {
+        event: "ops_check_terminal_correction_dropped",
+        attempt_id: attemptId,
+        detail: `generation ${current.identity.generation} no longer matches the owed correction`,
+      },
+      "owed correction dropped — its target generation moved, row parked, nothing sent",
+    );
+    return;
+  }
+
   // 2. Proof by exact App/scope/SHA, preferring this attempt's publication id.
   //    M8's lane precedes this one and owns read-only discovery; the Check
   //    lane only ever READS what that lane persisted — never a send, replay
@@ -1026,11 +1083,41 @@ async function reconcileCheckAttempt(
   // Both reads are guarded like the proof read above: a persistent read
   // failure must still leave the row a persisted terminal conclusion, never a
   // throw that keeps re-selecting the same due attempt forever.
-  const [gate, review] = await Promise.all([
+  const [gateRead, reviewRead] = await Promise.all([
     readRecoveryGate(db, scope),
-    readRecoveryReview(db, owned, proof?.publicationId ?? null),
+    readRecoveryReview(db, owned.identity, proof?.publicationId ?? null),
   ]);
+  // An UNAVAILABLE read is not changed evidence. A correction pass that cannot
+  // read the gate, the review or the proof bytes this time keeps the owed
+  // outcome and retries next pass; deciding from a failed read would replace
+  // (or self-deliver) a conclusion the evidence never stated.
+  if (
+    isCorrection &&
+    (gateRead.kind !== "read" || reviewRead.kind !== "read" || proofRead.kind === "unreadable")
+  ) {
+    await releaseCheckClaim(db, attemptId, lease, now());
+    log.info(
+      { event: "ops_check_terminal_correction_held", attempt_id: attemptId },
+      "correction held — evidence unreadable this pass; the owed conclusion is retried",
+    );
+    return;
+  }
+  const gate = gateRead.kind === "read" ? gateRead.value : null;
+  const review = reviewRead.kind === "read" ? reviewRead.value : null;
   const conclusion = terminalConclusion(owned, proof, gate, review);
+  // A REAL change in the evidence voids the obligation. The debt and the intent
+  // it froze are dropped under this claim, and the pass stops: delivering the
+  // new conclusion now would send it before the next pass re-decides from the
+  // evidence it just read.
+  if (!correction && owedDesired !== null && conclusion.desired !== owedDesired) {
+    await dropCheckCorrection(db, attemptId, lease, now());
+    await releaseCheckClaim(db, attemptId, lease, now());
+    log.info(
+      { event: "ops_check_terminal_correction_dropped", attempt_id: attemptId, detail: `evidence now concludes ${conclusion.desired}, owed ${owedDesired}` },
+      "owed correction dropped — the evidence changed, nothing sent",
+    );
+    return;
+  }
   // The approved wording no longer names which evidence the deadline could not
   // read, so that attribution lands where the operator reads diagnosis: one log
   // line per unconfirmed conclusion, never a user-visible field.
@@ -1051,7 +1138,7 @@ async function reconcileCheckAttempt(
   // keeps its own `publication_id` NULL); a row that already links its own
   // publication keeps that link, which is what a proof-free conclusion must
   // stay correctable from (§7.9a).
-  await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
+  const intentFrozen = await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
   if (intent === null) return;
   // A row whose persisted intent is still `in_progress` has nothing terminal
@@ -1063,6 +1150,16 @@ async function reconcileCheckAttempt(
     return;
   }
   if (intent.desiredTitle === null || intent.desiredSummary === null) return;
+
+  // The intent write was REFUSED, so the persisted conclusion is not the one
+  // this evidence produced. A positive intent the evidence now denies must
+  // never be sent on its own authority (only the documented known-stop refusal
+  // keeps today's behaviour: a cap/budget stop is never rewritten, and its
+  // frozen text is still the honest record). The attempt settles instead.
+  const supersededPositive =
+    !intentFrozen &&
+    intent.desired !== "failure" &&
+    conclusion.desired === "failure";
 
   const frozen: CheckConclusion = {
     desired: intent.desired,
@@ -1244,7 +1341,7 @@ async function reconcileCheckAttempt(
       // own publication now contradicts it. There the new conclusion must
       // reach THAT run — refusing GitHub's existing failure would leave the
       // correction local, which is the same defect one layer later.
-      if (!correction) {
+      if (!isCorrection) {
         await settleFailedAttempt(
           db, now, attemptsBefore, row, lease,
           `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
@@ -1297,6 +1394,19 @@ async function reconcileCheckAttempt(
     await settleFailedAttempt(
       db, now, attemptsBefore, row, lease,
       "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
+      log, summary,
+    );
+    return;
+  }
+
+  // The persisted positive intent could not be replaced by the conclusion this
+  // evidence produced: sending it would publish a pass nothing supports. The
+  // readback above already resolved the "it landed earlier" shape; past it,
+  // the honest end is the attempt ladder, never a send.
+  if (supersededPositive) {
+    await settleFailedAttempt(
+      db, now, attemptsBefore, row, lease,
+      `the persisted ${intent.desired} intent could not be replaced by ${conclusion.desired} — not sent`,
       log, summary,
     );
     return;
@@ -1605,10 +1715,19 @@ async function readProof(
 }
 
 /**
- * The target's gate for a Check row, or `null` when it cannot be read (no
- * target, corrupt stored verdicts, or a failed read) — the same "unreadable"
- * meaning the consumer lane gets, so a review proof concludes `failure`. A read
- * failure is never a reason to abandon the row: the conclusion below still
+ * A guarded evidence read. `null` is a REAL answer (no target row, no review
+ * recorded); a failed read is not — treating the two alike is what lets a D1
+ * hiccup masquerade as changed evidence and drop an owed correction.
+ */
+type EvidenceRead<T> = { kind: "read"; value: T } | { kind: "unavailable" };
+
+/**
+ * The target's gate for a Check row — the same gate the consumer lane decides
+ * against, so a review proof concludes from it. `read` with a `null` value
+ * means the gate itself is unreadable or absent (no target, corrupt stored
+ * verdicts), which `decideConclusion` already treats as a failure; an
+ * `unavailable` answer means the READ failed and says nothing about the gate.
+ * A read failure is never a reason to abandon the row: the conclusion still
  * gets persisted.
  *
  * A target IS a repository (migration 0067), and a Check's stored scope names
@@ -1616,7 +1735,7 @@ async function readProof(
  * the lookup is one index seek on `idx_review_targets_bot_owner_name` and no
  * second resolution (the delivery already refreshed those caches).
  */
-async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | null> {
+async function readRecoveryGate(db: D1Like, scope: Scope): Promise<EvidenceRead<ReviewGate | null>> {
   try {
     const row = await db
       .prepare(
@@ -1627,13 +1746,13 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | 
       )
       .bind(scope.appId, scope.owner, scope.repo)
       .first<ReviewTargetRow>();
-    if (row === null) return null;
+    if (row === null) return { kind: "read", value: null };
     // The EFFECTIVE gate (migration 0067): an inheriting target is judged by
     // the workspace floor it actually runs on, not by the inert placeholder
     // columns its row still carries.
-    return checkGateOf(await readEffectiveTargetSettings(db, row));
+    return { kind: "read", value: checkGateOf(await readEffectiveTargetSettings(db, row)) };
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
 }
 
@@ -1641,23 +1760,27 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | 
  * The review THIS proof publication carried — the same preference the proof
  * read makes, so the Check is judged by the envelope the attempt published
  * rather than by the scope/SHA `reviews` projection, which can lag the apply
- * or belong to an earlier attempt for the same head SHA. A read failure is
- * UNREADABLE (`null`), which `decideConclusion` already treats as a failure —
- * never a pass, and never a throw out of the lane.
+ * or belong to an earlier attempt for the same head SHA. A failed read is
+ * `unavailable`, never a `null` that `decideConclusion` would read as "no
+ * review": that would lower an owed correction's conclusion for a reason D1
+ * never stated.
  */
 async function readRecoveryReview(
   db: D1Like,
-  owned: CheckOwnership,
+  identity: CheckIdentity,
   publicationId: string | null,
-): Promise<PublishedReview | null> {
+): Promise<EvidenceRead<PublishedReview | null>> {
   try {
-    return await readPublishedReview(db, {
-      scope: owned.identity.scope,
-      headSha: owned.identity.headSha,
-      ...(publicationId === null ? {} : { publicationId }),
-    });
+    return {
+      kind: "read",
+      value: await readPublishedReview(db, {
+        scope: identity.scope,
+        headSha: identity.headSha,
+        ...(publicationId === null ? {} : { publicationId }),
+      }),
+    };
   } catch {
-    return null;
+    return { kind: "unavailable" };
   }
 }
 

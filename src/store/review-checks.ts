@@ -158,6 +158,12 @@ export type CheckAttempt = {
   /** The approved failure category frozen with the intent; NULL when none applies. */
   terminalFailureStatus: CheckFailureStatus | null;
   /**
+   * The §7.9a correction this row still owes a deferred send (migration 0093),
+   * and the generation it targets. Both NULL means no correction is owed.
+   */
+  correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
+  correctionGeneration: number | null;
+  /**
    * When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
    * publication this attempt set in motion.
@@ -442,6 +448,8 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
+    correctionDesired: row.correction_desired as Exclude<CheckDesired, "in_progress"> | null,
+    correctionGeneration: row.correction_generation,
     createdAtMs: row.created_ms,
   };
 }
@@ -535,6 +543,13 @@ export type CheckOwnership = {
   /** The frozen failure category, so a re-freeze of the same intent keeps it. */
   terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
+  /**
+   * The §7.9a conclusion this row still owes (migration 0093) and the
+   * generation it targets — NULL when no correction is owed. A validated
+   * response settles the debt only when it delivered THIS conclusion.
+   */
+  correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
+  correctionGeneration: number | null;
 };
 
 /** Null when the row is gone, the fence is not the caller's live lease, or the attempt already ended. */
@@ -567,6 +582,8 @@ export async function getCheckOwnership(
     desiredSummary: row.desired_summary,
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     publicationId: row.publication_id,
+    correctionDesired: attempt.correctionDesired,
+    correctionGeneration: attempt.correctionGeneration,
   };
 }
 
@@ -1808,6 +1825,18 @@ export async function recordCheckObservation(
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
   const unproven =
     agrees && options?.conclusionUnproven === true && owned.publicationId !== null;
+  // An owed §7.9a correction is settled only by a validated response that
+  // DELIVERED it: the intent this row agreed on must be the owed conclusion,
+  // for the owed generation. An agreement with any other intent (the old
+  // failure, when the correction could not be decided this pass) leaves the
+  // debt standing AND the row non-terminal — a `done` row outside the
+  // `remote-unconfirmed` shape would never be reconciled again, so the debt
+  // could never retry.
+  const debtSettled =
+    owned.correctionDesired === null ||
+    (owned.correctionDesired === owned.desired &&
+      owned.correctionGeneration === owned.identity.generation);
+  const settles = agrees && debtSettled;
   return runFenced(
     db,
     id,
@@ -1819,19 +1848,28 @@ export async function recordCheckObservation(
             terminal_ms = CASE WHEN ? THEN ? ELSE terminal_ms END,
             terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
-            last_error = CASE WHEN ? THEN NULL ELSE last_error END`,
+            last_error = CASE WHEN ? THEN NULL ELSE last_error END,
+            correction_desired = CASE WHEN ? THEN NULL ELSE correction_desired END,
+            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END`,
     [
       observed,
       remote.id,
-      agrees && !unproven ? 1 : 0,
-      unproven ? 1 : 0,
-      agrees ? 1 : 0,
+      // recovery_state: 'done' when this response settled the attempt, the
+      // reopenable 'remote-unconfirmed' when it settled an unproven one.
+      settles && !unproven ? 1 : 0,
+      settles && unproven ? 1 : 0,
+      // terminal_ms is set only by a SETTLING response.
+      settles ? 1 : 0,
       nowMs ?? lease.untilMs,
       // The dispatch intent clears only when THIS observation is the terminal
       // it dispatched: a mere `running` read proves nothing about the request.
       agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
+      // Clear together only on a settling response; an unsettled debt keeps
+      // both its conclusion and its target generation for the next pass.
+      settles ? 1 : 0,
+      settles ? 1 : 0,
     ],
     nowMs,
   );
@@ -1900,6 +1938,13 @@ const CORRECTABLE_NOW_SQL = `EXISTS (
  * new obligation carrying new evidence, not another try of the failed one; its
  * own sends are then bounded by the ordinary recovery cap.
  *
+ * The SAME statement records the obligation as OWED: `conclusion` (decided from
+ * that proof) plus the generation it targets. A pass the request budget defers
+ * before dispatch therefore leaves the correction durable, and the pass that
+ * finally sends it clears the record through `recordCheckObservation` — the
+ * same fenced write that resolves a successful send. One pair of columns is one
+ * slot, so a row can never queue a second correction behind an owed one.
+ *
  * `false` means the row is no longer that shape — already reopened (a second
  * caller, or a second confirmation), already corrected, or never marked.
  */
@@ -1907,23 +1952,87 @@ export async function reopenTerminalCorrection(
   db: D1Like,
   id: string,
   publicationId: string,
+  conclusion: Exclude<CheckDesired, "in_progress">,
   nowMs: CheckClock,
 ): Promise<boolean> {
   const result = await db
     .prepare(
       `UPDATE review_checks
-          SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
-              next_attempt_ms = NULL, last_error = NULL, holder = NULL,
-              lease_until_ms = NULL, updated_ms = ?
-        WHERE id = ? AND terminal_ms IS NOT NULL
-          AND recovery_state = 'remote-unconfirmed'
-          AND desired = 'failure' AND observed = 'failure'
-          AND publication_id = ?
-          AND ${CORRECTABLE_NOW_SQL}`,
+         SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
+             next_attempt_ms = NULL, last_error = NULL, holder = NULL,
+             lease_until_ms = NULL,
+             correction_desired = ?, correction_generation = generation,
+             updated_ms = ?
+       WHERE id = ? AND terminal_ms IS NOT NULL
+         AND recovery_state = 'remote-unconfirmed'
+         AND desired = 'failure' AND observed = 'failure'
+         AND publication_id = ?
+         AND ${CORRECTABLE_NOW_SQL}`,
     )
-    .bind(nowMs, id, publicationId)
+    .bind(conclusion, nowMs, id, publicationId)
     .run();
   return result.meta.changes === 1;
+}
+
+/**
+ * Drop a correction this row can no longer owe because the EVIDENCE moved.
+ * The obligation goes AND so does the intent the owed revision froze: leaving a
+ * positive `success` behind would let the ordinary lane send a conclusion this
+ * attempt no longer establishes, because the monotonic freeze refuses to lower
+ * it again. The row stays SELECTABLE (`pending`, due now) so the next pass
+ * decides from CURRENT evidence — unlike `parkCheckCorrection`, whose target
+ * generation can never conclude.
+ */
+export async function dropCheckCorrection(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(
+    db,
+    id,
+    lease,
+    `correction_desired = NULL, correction_generation = NULL,
+            desired = 'in_progress', desired_title = NULL, desired_summary = NULL,
+            terminal_failure_status = NULL,
+            recovery_state = 'pending', next_attempt_ms = ?, last_error = NULL`,
+    [nowMs],
+    nowMs,
+  );
+}
+
+/**
+ * The generation-moved end, as ONE fenced transition: drop the debt, unfreeze
+ * the intent it wrote, and park the row (`local-error` + `terminal_ms`).
+ *
+ * The three facts must land together. Dropping first and parking second — two
+ * statements — leaves a window (a crash, or a lease that dies between them) in
+ * which the row is again a non-terminal, selectable attempt whose frozen
+ * conclusion no longer has a debt to justify it, so the ordinary lane could
+ * send a conclusion this generation does not own. One UPDATE makes that state
+ * unobservable: after it, the row is outside both selection branches (the
+ * non-terminal one and the `remote-unconfirmed` reopen one) forever.
+ */
+export async function parkCheckCorrection(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  reason: string,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(
+    db,
+    id,
+    lease,
+    `correction_desired = NULL, correction_generation = NULL,
+            desired = 'in_progress', desired_title = NULL, desired_summary = NULL,
+            terminal_failure_status = NULL,
+            recovery_state = 'local-error', terminal_ms = ?,
+            next_attempt_ms = NULL, attempts = attempts + 1, last_error = ?`,
+    [nowMs, checkReason(reason)],
+    nowMs,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1959,6 +2068,11 @@ export async function deferCheckRecovery(
  * `terminal_ms` under the current fence. The row, its external id and any known
  * remote run id are RETAINED — nothing here deletes work or claims the remote
  * finished.
+ *
+ * Also the honest end for a row that can NEVER conclude: a §7.9a correction
+ * whose target generation moved. `parkCheckCorrection` performs that end as ONE
+ * transition (drop, unfreeze and this park together) so no intermediate
+ * selectable state exists.
  */
 export async function markCheckLocalError(
   db: D1Like,

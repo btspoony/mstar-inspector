@@ -206,6 +206,10 @@ export type ReviewCheckRow = {
   desired_summary: string | null;
   /** Approved terminal-failure category (migration 0087); NULL when none applies. */
   terminal_failure_status: string | null;
+  /** The §7.9a conclusion a deferred correction still owes (migration 0093). */
+  correction_desired: string | null;
+  /** The row generation that owed conclusion targets; NULL when none is owed. */
+  correction_generation: number | null;
   observed: string;
   recovery_state: string;
   publication_id: string | null;
