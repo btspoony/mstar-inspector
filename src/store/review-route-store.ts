@@ -767,7 +767,7 @@ export async function listUnpublishedLaunchSettlements(
                -- OWNERSHIP FIRST, head-independent: a journal this attempt staged is
                -- its own body (a headless delivery's checkout head, or a resolved head
                -- that differs from the payload) and the publication lane owns it. The
-               -- tenant scope leads so the expression index (0097) seeks by prefix and
+               -- tenant scope leads so the expression index (0101) seeks by prefix and
                -- an unrelated tenant's history is never touched.
                p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
                AND p.installation_id = json_extract(h.payload_json, '$.installation_id')

@@ -1,4 +1,4 @@
--- 0096_review_launches_attempt_identity.sql — index a launch by the
+-- 0100_review_launches_attempt_identity.sql — index a launch by the
 -- (attempt_key, generation) its Check carries.
 --
 -- The per-minute Check reconcile selects a Check whose attempt persisted its

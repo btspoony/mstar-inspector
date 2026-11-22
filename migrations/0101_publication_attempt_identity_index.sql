@@ -1,4 +1,4 @@
--- 0097_publication_attempt_identity_index.sql — index the attempt that staged a
+-- 0101_publication_attempt_identity_index.sql — index the attempt that staged a
 -- publication journal row.
 --
 -- The route recovery pass asks, per persisted-but-unpublished candidate, whether
