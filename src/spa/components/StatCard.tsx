@@ -11,7 +11,7 @@ import { cn } from "@design-system";
 /**
  * The fill width is a static class ladder because Tailwind only compiles
  * classes it can find in source. shortcut: the bar quantises to 10% steps,
- * upgrade to a CSS-var width if sub-step precision is ever needed.
+ * upgrade: to a CSS-var width if sub-step precision is ever needed.
  */
 const FILL_WIDTHS = [
   "w-0",

@@ -476,7 +476,7 @@ export function readRecheckStatusCommand(path: string = RECHECK_STATUS_PATH): Sh
  *
  * shortcut: `test -e` cannot tell "no such file" from a parent directory the
  * shell may not search, so an EACCES-only miss reads as absent; a sandboxed
- * report path has no untraversable parent, so upgrade if one ever appears.
+ * report path has no untraversable parent, so upgrade: if one ever appears.
  */
 export function readReportCommand(path: string = REPORT_OUTPUT_PATH): ShellCommand {
   assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");

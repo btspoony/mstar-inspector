@@ -4013,7 +4013,7 @@ export function createReviewConsumer(
     //
     // shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
     // longer spends every delivery, and each spent one is now alerted through
-    // `review_failures` — upgrade to a re-enqueue-on-close drain then.
+    // `review_failures` — upgrade: to a re-enqueue-on-close drain then.
     const maintenance = await getMaintenanceMode(env.DB);
     if (maintenanceClosed(maintenance)) {
       // An empty batch has nothing to defer (and no identity to name it with).
@@ -5566,7 +5566,7 @@ async function processMessage(
         } else {
           const gate = parseCompareGate(compare.stdout);
           // shortcut: any merge commit in the increment forces a full-diff round,
-          // upgrade when merge-heavy PR branches make re-reviews common.
+          // upgrade: when merge-heavy PR branches make re-reviews common.
           if (gate === null) {
             deps.log.info(
               { ...fields, increment_status: "unusable" },

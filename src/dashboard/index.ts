@@ -2936,7 +2936,7 @@ function blockedReasonFor(
  * live target on (`targetedBotIds`) — the target is the entitlement, so a
  * target created on an official bot does not vanish from this list.
  * shortcut: the workspace filter runs over the joined list in memory
- * (single-tenant scale today); upgrade to a workspace-filtered store query
+ * (single-tenant scale today); upgrade: to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
  */
 async function appsListWithHealth(

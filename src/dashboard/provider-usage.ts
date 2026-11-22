@@ -669,7 +669,7 @@ function minimaxUsage(host: string): UsageProbe {
 
 const CLINE_USAGE_URL = "https://api.cline.bot/api/v1/users/me/plan/usage-limits";
 const CLINE_CLIENT_VERSION = "3.5.54";
-// shortcut: version pinned from magpie 3.5.54; bump it if the endpoint starts version-gating
+// shortcut: version pinned from magpie 3.5.54; upgrade: if the endpoint starts version-gating
 /** The desktop client headers the route is gated on (vendor constants, not credentials). */
 const CLINE_HEADERS: Readonly<Record<string, string>> = {
   accept: "application/json",

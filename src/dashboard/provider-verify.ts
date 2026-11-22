@@ -574,8 +574,8 @@ function customModelsUrl(baseUrl: string): URL | null {
  * with another path (`/console`) derives a different URL and stays unproven.
  *
  * shortcut: one endpoint per provider only, so every other custom/template
- * declaration lands `reachable`. Add a supplement only with evidence its probe
- * URL answers non-2xx for a bogus key.
+ * declaration lands `reachable`. upgrade: when evidence shows another
+ * declaration's probe URL answers non-2xx for a bogus key.
  */
 const KEY_REJECTING_SUPPLEMENT_URLS: readonly string[] = [
   // TypeSafe's omp auth rule validates GET https://api.typesafe.ai/v1/models
