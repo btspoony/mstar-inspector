@@ -2121,6 +2121,15 @@ describe("the SEC-01 publish gate", () => {
     if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
     const prepared = JSON.parse(JSON.stringify(step.prepared)) as PreparedAttempt;
     await reviewAttempt(deps, ref, prepared);
+    // The settlement mark the gate writes lives on the attempt's handoff row.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
     return { deps, db, ref, prepared };
   }
 
@@ -2172,8 +2181,18 @@ describe("the SEC-01 publish gate", () => {
       expect(staged.n).toBe(0);
       expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
       expect(
-        h.logLines.some((line) => line.level === "warn" && line.msg.includes("publish gate refused")),
+        h.logLines.some((line) => line.msg.includes("publish gate refused")),
       ).toBe(true);
+      // The attempt is durably settled through the FAILURE path, not just
+      // returned as settled: a failure row exists and the handoff says closed.
+      const failure = db.raw
+        .prepare("SELECT error FROM review_failures WHERE head_sha = ?")
+        .all(SHA) as { error: string }[];
+      expect(failure.some((row) => row.error.includes("publish gate refused"))).toBe(true);
+      const handoff = db.raw
+        .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+        .get(ATTEMPT_ID) as { settled_ms: number | null };
+      expect(handoff.settled_ms).not.toBeNull();
     });
   }
 
@@ -2185,8 +2204,59 @@ describe("the SEC-01 publish gate", () => {
     const collected = await collectAttempt(deps, ref, prepared);
     expect(collected.kind).toBe("collected");
     expect(
-      h.logLines.some((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
-    ).toBe(true);
+      h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
+    ).toHaveLength(1);
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 1 });
+  });
+
+  test("a short key equal to trusted marker text is not refused", async () => {
+    // The body always carries `mstar-inspector` markers; the raw spelling of a
+    // short key is exact-leaf redaction's job, never the publish gate's.
+    const { deps, ref, prepared } = await reviewedEcho("plain text", false);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: ["mstar"] });
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("collected");
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
+  });
+
+  /** The paid result rewritten to a schema-invalid body carrying `echo`. */
+  async function brokenStdout(echo: string) {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    execution.run.stdout = `not a review ${echo}`;
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+    return { deps, db, ref, prepared };
+  }
+
+  test("the degraded publish path refuses a body carrying an encoded echo", async () => {
+    const { deps, db, ref, prepared } = await brokenStdout(ECHOES.base64);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+    const handoff = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(handoff.settled_ms).not.toBeNull();
+  });
+
+  test("a resumed degraded publish warns once and continues", async () => {
+    const { deps, ref, prepared } = await brokenStdout(ECHOES.base64);
+    deps.credentials.delete(ATTEMPT_ID);
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("settled");
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
+    expect(
+      h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
+    ).toHaveLength(1);
   });
 });

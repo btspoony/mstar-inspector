@@ -336,13 +336,39 @@ describe("redactDocument", () => {
     expect(redacted.exact).toBe("[REDACTED]");
   });
 
-  test("carriesSecretForm sees verbatim and encoded forms anywhere", () => {
+  test("an encoding below the substring floor is exact-leaf only", () => {
+    const key = "ab";
+    const forms = secretTransforms(key);
+    expect(forms.hex.length).toBeLessThan(6);
+    const envelope = JSON.stringify({
+      schema: "mstar.review/v1",
+      note: `prefix ${forms.hex} suffix`,
+      exact: forms.hex,
+    });
+
+    const outcome = redactDocument(envelope, [key], "run");
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as { schema: string; note: string; exact: string };
+
+    // A 4-char hex form is too weak to scan: embedded text stays intact...
+    expect(redacted.note).toBe(`prefix ${forms.hex} suffix`);
+    // ...while a leaf that IS the encoding is still replaced.
+    expect(redacted.exact).toBe("[REDACTED]");
+    expect(redacted.schema).toBe("mstar.review/v1");
+    expect(outcome.replaced).toBe(1);
+  });
+
+  test("carriesSecretForm skips a short raw echo and sees its encodings", () => {
     const key = "p/a b";
     const forms = secretTransforms(key);
 
-    expect(carriesSecretForm(`x ${key} y`, [key])).toBe(true);
+    // A short raw spelling is the exact-leaf redaction's job; matching it at
+    // publish would only hit trusted marker text.
+    expect(carriesSecretForm(`x ${key} y`, [key])).toBe(false);
     expect(carriesSecretForm(`x ${forms.base64} y`, [key])).toBe(true);
     expect(carriesSecretForm(`x ${forms.urlEncoded} y`, [key])).toBe(true);
+    // A long secret keeps its verbatim substring match.
+    expect(carriesSecretForm("x sk-live/paid-session-secret-01 y", ["sk-live/paid-session-secret-01"])).toBe(true);
     expect(carriesSecretForm("mstar.review/v1", [key])).toBe(false);
     expect(carriesSecretForm("plain", ["", key])).toBe(false);
   });

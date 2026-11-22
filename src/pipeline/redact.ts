@@ -53,6 +53,11 @@ const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 // encoded forms are specific strings and stay substring-matched below.
 const SUBSTRING_MIN_LENGTH = 8;
 
+// why: a short encoding is both a weak leak carrier and a strong false
+// positive (a 2-char base64url sits inside ordinary schema text), so only
+// encodings this long are matched as substrings; shorter ones stay exact-leaf.
+const MIN_ENCODED_SUBSTRING_LENGTH = 6;
+
 /** A retained document whose host-written identity paths are protected. */
 export type RetainedDocument = "run" | "recheck" | "report" | "text";
 
@@ -114,16 +119,19 @@ export function secretTransforms(secret: string): SecretTransforms {
 }
 
 /**
- * Whether `text` carries any form of a credential (SEC-01 publish gate).
- * Unlike `redactDocument`, the RAW form is matched as a substring too: an
- * embedded echo is exactly what the gate must refuse, and a false refusal only
- * costs one publication.
+ * Whether `text` carries a credential form the publish gate must refuse
+ * (SEC-01). A short secret's RAW spelling is skipped: write-time exact-leaf
+ * redaction already removed it, and the trusted markers contain ordinary words
+ * a short key may equal. Encodings still match — as substrings only when long
+ * enough to be specific; shorter ones are exact-only.
  */
 export function carriesSecretForm(text: string, secrets: readonly string[]): boolean {
   for (const secret of secrets) {
     if (secret === "") continue;
+    const short = secret.length < SUBSTRING_MIN_LENGTH;
     for (const form of Object.values(secretTransforms(secret))) {
-      if (form !== "" && text.includes(form)) return true;
+      if (form === "" || (short && form === secret)) continue;
+      if (form.length >= MIN_ENCODED_SUBSTRING_LENGTH ? text.includes(form) : text === form) return true;
     }
   }
   return false;
@@ -151,7 +159,9 @@ type CredentialMatcher = {
  * Split the credentials into the two match modes. A value at or above
  * `SUBSTRING_MIN_LENGTH` contributes every form and is matched anywhere; a
  * shorter one keeps its RAW form exact-leaf only, while its encoded forms join
- * the substring scan — those are position-specific strings, not ordinary words.
+ * the substring scan — those are position-specific strings, not ordinary
+ * words. An encoded form shorter than `MIN_ENCODED_SUBSTRING_LENGTH` is too
+ * weak to scan and stays exact-leaf too.
  */
 function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
   const forms = new Set<string>();
@@ -164,6 +174,10 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
       // why: url-encoding leaves ordinary short values unchanged; that raw
       // spelling must not become a substring match.
       if (form === "" || (short && form === secret)) continue;
+      if (form.length < MIN_ENCODED_SUBSTRING_LENGTH) {
+        exact.add(form);
+        continue;
+      }
       forms.add(form);
     }
   }
