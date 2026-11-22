@@ -1,5 +1,5 @@
 /**
- * The review route's durable handoffs (migration 0083).
+ * invariant: The review route's durable handoffs (migration 0083).
  *
  * Two records make the route's transitions survive an interrupted host:
  *
@@ -28,7 +28,7 @@ export type AttemptHandoff = {
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
   /**
-   * The attempt's absolute hard stop, frozen when this row was first written:
+   * invariant: The attempt's absolute hard stop, frozen when this row was first written:
    * the delivery's Queue send stamp plus the operator's end-to-end cap. Every
    * replay of the same attempt reads it instead of re-deriving it. `null` only
    * on a row written before the column existed — "not yet anchored"; the next
@@ -37,26 +37,26 @@ export type AttemptHandoff = {
    */
   deadlineMs: number | null;
   /**
-   * The original Queue send stamp (migration 0087): the attempt's queue wait is
+   * invariant: The original Queue send stamp (migration 0087): the attempt's queue wait is
    * `createdMs - enqueuedMs`. `null` on rows written before the column — the
    * boundary is genuinely missing, never a zero.
    */
   enqueuedMs: number | null;
   /**
-   * When this row was first written — the immutable origin a pre-migration row
+   * invariant: When this row was first written — the immutable origin a pre-migration row
    * is anchored from. Read-only after its insert.
    */
   createdMs: number;
-  /** The settle-once mark the Workflow's settlement step takes after completing. */
+  /** note: The settle-once mark the Workflow's settlement step takes after completing. */
   settledMs: number | null;
   /**
-   * The effects that settlement actually landed. `settledMs` is set only when
+   * invariant: The effects that settlement actually landed. `settledMs` is set only when
    * the required set is complete, so this array is how a replay (or an
    * operator) sees what is still owed.
    */
   settledEffects: SettlementEffect[] | null;
   /**
-   * When the settlement step STARTED. A settlement that started and never
+   * invariant: When the settlement step STARTED. A settlement that started and never
    * completed is the recovery pass's obligation; `settledMs` alone cannot tell
    * it apart from an attempt that has not failed yet.
    */
@@ -69,7 +69,7 @@ export type AttemptHandoff = {
  * comment, another push) differs in at least one of these fields.
  */
 export function deliveryKeyOf(payload: ReviewJobPayload): string {
-  // A pre-deploy message may carry no `botRef` (AL-24-4 accepts the TypeError
+  // invariant: A pre-deploy message may carry no `botRef` (AL-24-4 accepts the TypeError
   // on the admission path); the key must not throw before the structured
   // failure channel can speak for it.
   const botRef = payload.botRef as { appId?: string } | undefined;
@@ -91,7 +91,7 @@ export function deliveryKeyOf(payload: ReviewJobPayload): string {
 }
 
 /**
- * One moved head of ONE origin, one successor. The key names the owner (App and
+ * invariant: One moved head of ONE origin, one successor. The key names the owner (App and
  * target), the observed head, and the delivery whose attempt observed it, so:
  * a replay of the SAME intent (a re-executed step, the immediate send racing
  * the reconciler) collapses into one row; an independent App/target observing
@@ -149,15 +149,15 @@ export function successorIntentOf(
     payload: {
       ...payload,
       head_sha: movedHeadSha,
-      // Ordering authority: the delivery's own stamp only when it describes the
+      // invariant: Ordering authority: the delivery's own stamp only when it describes the
       // SAME head. When the observed head differs, we hold no stamp for it, so
       // the successor carries none — a fabricated "now" could outrank a
       // genuinely newer head in the admission comparison.
       head_at: movedHeadSha === payload.head_sha ? payload.head_at : undefined,
-      // The comment identity is preserved; the marker tells admission its claim
+      // note: The comment identity is preserved; the marker tells admission its claim
       // was already consumed by the skipped attempt.
       successor_of: origin,
-      // The successor's own attach identity, stable across outbox retries.
+      // note: The successor's own attach identity, stable across outbox retries.
       attachDeliveryId: successorAttachIdOf(dedupeKey),
     },
   };
@@ -272,7 +272,7 @@ export async function reserveAttemptHandoff(
     nowMs: number;
     deadlineMs: number;
     /**
-     * The original Queue send stamp, or `null` when the platform supplied none.
+     * invariant: The original Queue send stamp, or `null` when the platform supplied none.
      * Copied here because the queue's own timestamp is not durable: after this
      * delivery the only record of when the attempt started waiting is this
      * column, and an absent stamp must stay absent rather than be invented.
@@ -366,7 +366,7 @@ export type AttemptSettlementInput = {
 };
 
 /**
- * THE settlement rule. An attempt settles only when every obligation it
+ * invariant: THE settlement rule. An attempt settles only when every obligation it
  * incurred is discharged; a caller reports the effects it actually made durable
  * and never decides completeness for itself.
  *
@@ -392,7 +392,7 @@ async function settlementPlan(
   const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
   if (handoff === null) return null;
   const landed = new Set<SettlementEffect>([...(handoff.settledEffects ?? []), ...input.landed]);
-  // The pair the attempt froze is the ONLY fact that says a Check exists; the
+  // invariant: The pair the attempt froze is the ONLY fact that says a Check exists; the
   // caller's handle says what it could reach, not what the attempt owes.
   const checkInvolved = (await readAttemptCheckKey(db, input.attemptId)) !== null;
   const checkOpen = checkInvolved ? await attemptCheckIsOpen(db, input.attemptId) : false;
@@ -454,7 +454,7 @@ export async function settlementStatementIfDischarged(
 }
 
 /**
- * ONE statement, because two settlements can run for one row (a step retry
+ * why: ONE statement, because two settlements can run for one row (a step retry
  * racing a resumed host): the effects ACCUMULATE (the union keeps what the
  * other execution landed) and completeness is decided against the union, so
  * neither write can erase the other's progress and neither can certify an
@@ -652,7 +652,7 @@ export async function markSuccessorDelivered(
   generation: number,
   nowMs: number,
 ): Promise<boolean> {
-  // Generation-scoped: a re-arm that landed while this send was in flight must
+  // invariant: Generation-scoped: a re-arm that landed while this send was in flight must
   // stay owed, so the next pass delivers it. `false` means exactly that.
   const written = await db
     .prepare(

@@ -1,5 +1,5 @@
 /**
- * The review route's durable recovery pass (migration 0083).
+ * invariant: The review route's durable recovery pass (migration 0083).
  *
  * Three things can be owed after a host is interrupted:
  *
@@ -55,7 +55,7 @@ export const ROUTE_RECOVERY_LIMIT = 25;
 export type ReviewRouteEnv = {
   DB: D1Database;
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
-  /** The commit claim the failed-claim stamp is written to. */
+  /** note: The commit claim the failed-claim stamp is written to. */
   IDEMPOTENCY_KV: KVNamespace;
 };
 
@@ -65,19 +65,19 @@ export type ReviewRouteEnv = {
  */
 export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now()): Promise<void> {
   const queue = env.REVIEW_QUEUE;
-  // A settled skip's successor is the more urgent one: a head with no review at
+  // invariant: A settled skip's successor is the more urgent one: a head with no review at
   // all. Send first, mark only after the queue accepted it.
   for (const successor of await listOwedSuccessors(env.DB, ROUTE_RECOVERY_LIMIT)) {
     try {
-      // Pre-send check: this pass read the row earlier, and a re-arm since then
+      // note: Pre-send check: this pass read the row earlier, and a re-arm since then
       // makes the copy in hand stale. Sending it would deliver an obligation the
       // drop has already superseded; the next pass reads the fresher one.
       if ((await successorGeneration(env.DB, successor.dedupeKey)) !== successor.generation) continue;
       await queue.send(successor.payload);
-      // Generation-scoped: a re-arm during the send keeps the row owed.
+      // note: Generation-scoped: a re-arm during the send keeps the row owed.
       await markSuccessorDelivered(env.DB, successor.dedupeKey, successor.generation, nowMs);
     } catch {
-      // Stays owed; the next pass retries it.
+      // note: Stays owed; the next pass retries it.
     }
   }
   for (const handoff of await listHandoffsForRecovery(env.DB, {
@@ -88,10 +88,10 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       await queue.send(handoff.payload);
       await touchAttemptHandoff(env.DB, handoff.deliveryKey, nowMs);
     } catch {
-      // Stays owed (the clock is untouched); the next pass retries it.
+      // note: Stays owed (the clock is untouched); the next pass retries it.
     }
   }
-  // A settlement that STARTED and never completed. The Workflow's own retry
+  // invariant: A settlement that STARTED and never completed. The Workflow's own retry
   // covers a transient fault inside the step, and a resumed instance re-runs a
   // step whose result was lost — but neither covers a settlement that outlived
   // both (a persistent fault, or an instance the platform failed). This pass is
@@ -106,10 +106,10 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   })) {
     try {
       const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
-      // A skip is not a failure: the moved-head settlement owns that outcome,
+      // note: A skip is not a failure: the moved-head settlement owns that outcome,
       // and the successor outbox already carries the head it displaced.
       if (landed.has("skip")) continue;
-      // ACT ONLY ON A DURABLE OUTCOME. `launched` without an outcome is the
+      // invariant: ACT ONLY ON A DURABLE OUTCOME. `launched` without an outcome is the
       // unknown paid state — the container may still be running — and a
       // delivery that never provisioned has no outcome to replay. Nothing is
       // written for either; retention owns them.
@@ -145,7 +145,7 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
         );
         landed.add("claim-stamp");
       }
-      // The ONE settlement rule decides completeness from durable facts: the
+      // invariant: The ONE settlement rule decides completeness from durable facts: the
       // Check must actually be terminal (this pass never concludes it), and the
       // failed-claim stamp is required only when the lane names a commit. The
       // effects this pass landed are the facts; it never certifies the rest.
@@ -155,10 +155,10 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
         nowMs,
       );
     } catch {
-      // Stays incomplete; the next pass retries it.
+      // note: Stays incomplete; the next pass retries it.
     }
   }
-  // A claim whose delivery died before recording anything. The state transition
+  // note: A claim whose delivery died before recording anything. The state transition
   // is the exclusive hand-back (a second pass finds it `queued`), and sending
   // AFTER it means a failed send is still owned by the comment outbox lane,
   // which applies that row's own attempt cap.
@@ -170,7 +170,7 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       if (!(await restoreCommentClaimForRecovery(env.DB, claim, nowMs))) continue;
       await queue.send(claim.payload);
     } catch {
-      // Already `queued` with its payload: the outbox lane retries it.
+      // note: Already `queued` with its payload: the outbox lane retries it.
     }
   }
 }
