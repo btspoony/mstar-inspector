@@ -1,5 +1,5 @@
 /**
- * Worker fetch-face environment (compass contracts B).
+ * note: Worker fetch-face environment (compass contracts B).
  * `DB` (folded into this shared env intersection)
  * is declared optional: the deployed Worker binds it on every face
  * (wrangler.jsonc 05), but this shared type also covers the dashboard
@@ -13,7 +13,7 @@ export type Env = {
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   IDEMPOTENCY_KV: KVNamespace;
   /**
-   * Vite SPA assets: wrangler `assets` binding, directory
+   * note: Vite SPA assets: wrangler `assets` binding, directory
    * `dist/spa`. Optional on the type so Bun fetch-path tests that omit it
    * fall through to the legacy Hono app; production wrangler.jsonc always
    * binds it. `run_worker_first` means the Worker must `ASSETS.fetch()`
@@ -21,7 +21,7 @@ export type Env = {
    */
   ASSETS?: Fetcher;
   /**
-   * D1 binding: the per-App webhook face (`POST
+   * note: D1 binding: the per-App webhook face (`POST
    * /webhook/:workspaceId/:appId`) resolves the `review_bots` row by that
    * pair and touches `bot_installations` through
    * src/dashboard/apps-store.ts (lock L1 leaf);
@@ -32,7 +32,7 @@ export type Env = {
    */
   DB?: D1Database;
   /**
-   * Dashboard GitHub OAuth App credentials — user-to-server
+   * note: Dashboard GitHub OAuth App credentials — user-to-server
    * login, DISTINCT from the review GitHub App (whose Worker-env secrets
    * were retired — per-App credentials now live encrypted in D1;
    * distinct from a GitHub App). Unset →
@@ -41,12 +41,12 @@ export type Env = {
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   /**
-   * Independent HMAC key for dashboard session/state cookies (≥32 random
+   * note: Independent HMAC key for dashboard session/state cookies (≥32 random
    * bytes; never reuse GITHUB_OAUTH_CLIENT_SECRET — rotation decoupled).
    */
   DASHBOARD_SESSION_SECRET?: string;
   /**
-   * Envelope master key for D1-stored dashboard secrets (spec
+   * note: Envelope master key for D1-stored dashboard secrets (spec
    * dashboard-multi-app-platform § Crypto envelope): base64 of exactly 32
    * random bytes (AES-256-GCM secretbox, src/dashboard/secretbox.ts) —
    * encrypts review_bots credentials (PEM / webhook secret, plus
@@ -57,7 +57,7 @@ export type Env = {
    */
   DASHBOARD_ENCRYPTION_KEY?: string;
   /**
-   * Optional ops alert webhook (architect verdict AL-6): when
+   * why: Optional ops alert webhook (architect verdict AL-6): when
    * set, the cron sweep POSTs the `ops_sweep_alert` payload here on
    * threshold breach (JSON body, 3s timeout; a POST failure degrades to a
    * warn log — src/worker/sweep.ts). Absent/empty = log-only alerting.
@@ -65,7 +65,7 @@ export type Env = {
    */
   ALERT_WEBHOOK_URL?: string;
   /**
-   * Platform-operator allowlist (platform-operator support, 2026-10):
+   * note: Platform-operator allowlist (platform-operator support, 2026-10):
    * comma-separated GitHub logins, compared case-insensitively through
    * `parseLoginList`. An operator holds NO business rights: without a live
    * `support_grants` row for a workspace they get the outsider 404, and with
@@ -74,7 +74,7 @@ export type Env = {
    */
   PLATFORM_OPERATORS?: string;
   /**
-   * Deployment shape: `"self-hosted"` or `"saas"`. It decides ONE product
+   * note: Deployment shape: `"self-hosted"` or `"saas"`. It decides ONE product
    * question — whether an instance with no accounts yet tells its first
    * signer-in that this sign-in created the first account. A SaaS user never
    * sees that instance story. Resolve it through `deploymentModeOf`: unset,
@@ -119,7 +119,7 @@ export type DeploymentMode = "self-hosted" | "saas";
  */
 export function deploymentModeOf(value: string | undefined): DeploymentMode {
   if (value === "self-hosted" || value === "saas") return value;
-  // `<value>` is rendered so a blank var is distinguishable from an absent
+  // why: `<value>` is rendered so a blank var is distinguishable from an absent
   // one: `unset` vs `""` — an operator reading the 500 needs to know which.
   const received = value === undefined ? "unset" : JSON.stringify(value);
   throw new Error(`DEPLOYMENT_MODE must be "self-hosted" or "saas", received ${received}`);

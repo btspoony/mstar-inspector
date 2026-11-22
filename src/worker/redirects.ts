@@ -1,5 +1,5 @@
 /**
- * `/dashboard*` GET/HEAD redirect normalization.
+ * note: `/dashboard*` GET/HEAD redirect normalization.
  *
  * Trailing-slash strip: a path ending in `/` (other than `/dashboard`
  * itself) loses the slash. GET/HEAD only — a 301 would convert POST to GET

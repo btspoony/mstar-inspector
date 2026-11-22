@@ -1,5 +1,5 @@
 /**
- * Webhook job handlers — structured logging, KV idempotency pre-check,
+ * note: Webhook job handlers — structured logging, KV idempotency pre-check,
  * queue enqueue.
  *
  * Hot path: no GitHub API calls, no diff fetch, no review — verify + enqueue
@@ -74,7 +74,7 @@ export type WebhookStageWarnLog = {
 };
 
 export type HandlerLog = {
-  // info widened to the stage-warn shape (AL-23-2): the webhook face's
+  // note: info widened to the stage-warn shape (AL-23-2): the webhook face's
   // review_paused line rides info — paused is a legitimate ops state
   // answering 2xx — with the same structured fields as its warn siblings.
   info: (fields: WorkerEventLog | WebhookStageWarnLog, msg?: string) => void;
@@ -82,12 +82,12 @@ export type HandlerLog = {
 };
 
 export type HandlerDeps = {
-  // `DB` is required here even though fetch-face `Env.DB` is optional: the
+  // invariant: `DB` is required here even though fetch-face `Env.DB` is optional: the
   // per-App route fails closed on an unbound DB long before this handler runs.
   env: Pick<Env, "IDEMPOTENCY_KV" | "REVIEW_QUEUE"> & { DB: D1Database };
   log: HandlerLog;
   /**
-   * Awaited after the durable claim and immediately BEFORE
+   * note: Awaited after the durable claim and immediately BEFORE
    * `REVIEW_QUEUE.send`, so a best-effort step (the Check attach) has already
    * created its run by the time the message can be admitted. The caller owns
    * its own time bound.
@@ -173,7 +173,7 @@ export async function claimIdempotency(
 }
 
 /**
- * Run the delivery's pre-enqueue step (the Check attach) and hand back what it
+ * note: Run the delivery's pre-enqueue step (the Check attach) and hand back what it
  * returned. A throw is one warn and changes nothing: the hook never decides an
  * outcome, so both callers continue with the payload they already had.
  */
@@ -206,7 +206,7 @@ export type DeliveryRefusal =
   | SharedBotRefusal
   | { kind: "quota-exhausted"; limit: number; used: number; cost: number }
   /**
-   * The gate could not answer (a store fault, an empty profile table, a plan
+   * note: The gate could not answer (a store fault, an empty profile table, a plan
    * with no ceiling row). Fail-closed: the delivery is skipped rather than
    * admitted, on the `entitlement` stage — the same stage and the same paging
    * as a capability refusal, because the failure face's job is "this delivery
@@ -238,7 +238,7 @@ export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
 }
 
 /**
- * The refused-delivery tail, in the order the product fixes. The route has
+ * note: The refused-delivery tail, in the order the product fixes. The route has
  * already decided the verdict (one call chain, on the reference surface), so
  * nothing here re-derives it:
  *
@@ -267,7 +267,7 @@ async function refuseDelivery(
     "pre-enqueue hook failed — the refusal still holds",
   );
 
-  // Best-effort like every other bookkeeping write on the delivery path: the
+  // note: Best-effort like every other bookkeeping write on the delivery path: the
   // refusal is already decided and the answer must stay 2xx.
   try {
     await createFailureStore(deps.env.DB).record({
@@ -276,7 +276,7 @@ async function refuseDelivery(
       owner: payload.owner,
       repo: payload.repo,
       pr_number: payload.pr_number,
-      // A refusal can predate any sha (`ReviewFailureInput`'s "" convention).
+      // note: A refusal can predate any sha (`ReviewFailureInput`'s "" convention).
       head_sha: payload.head_sha ?? "",
       stage: deliveryRefusalStage(refusal),
       error: CHECK_SUMMARIES.skippedByDelivery(deliveryRefusalReason(refusal)),
@@ -313,7 +313,7 @@ export async function handleReviewJob(
 
   if (refusal !== null) return refuseDelivery(payload, deps, fields, refusal);
 
-  // A commit job claims its sha; a bot-mention job (no sha) claims its comment
+  // note: A commit job claims its sha; a bot-mention job (no sha) claims its comment
   // id — KV as a 24h fast path, D1 as the durable claim below.
   const key = payload.head_sha
     ? idemKey({
@@ -341,7 +341,7 @@ export async function handleReviewJob(
     }
   }
 
-  // Durable per-comment claim: `ON CONFLICT (…identity…) DO NOTHING`, so the
+  // why: Durable per-comment claim: `ON CONFLICT (…identity…) DO NOTHING`, so the
   // row's primary key — not this isolate's read — decides which delivery owns
   // the comment, and `changes === 0` means EXACTLY that duplicate (never a
   // CHECK/NOT NULL refusal, which must not be logged as one). The losing
@@ -376,7 +376,7 @@ export async function handleReviewJob(
     }
   }
 
-  // Pre-enqueue step (the Check attach): it runs BEFORE the send so an
+  // why: Pre-enqueue step (the Check attach): it runs BEFORE the send so an
   // admitted message finds the row it will adopt instead of racing its
   // creator. It never changes the outcome.
   const outgoing = await runBeforeEnqueue(
@@ -389,7 +389,7 @@ export async function handleReviewJob(
   try {
     await deps.env.REVIEW_QUEUE.send(outgoing);
   } catch (err) {
-    // Seven-field structured log on the send failure path (QC F-002): the
+    // note: Seven-field structured log on the send failure path (QC F-002): the
     // operator must be able to map the 500 to the specific event. Rethrow —
     // the 500 signals GitHub to retry, and no KV key is claimed, so the
     // retry re-enqueues instead of being KV-skipped (C1 invariant).

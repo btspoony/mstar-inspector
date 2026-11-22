@@ -1,5 +1,5 @@
 /**
- * Server-side locale substitution on an HTML document. Both documents the
+ * note: Server-side locale substitution on an HTML document. Both documents the
  * Worker serves from `ASSETS` (the workspace shell and the gated console)
  * declare `lang="en"` in the template and carry an English `<title>`; the
  * handler that serves one already holds its text and the resolved locale, so

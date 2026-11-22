@@ -1,5 +1,5 @@
 /**
- * Worker entry — Hono app exported as the module `fetch` handler (no listen).
+ * note: Worker entry — Hono app exported as the module `fetch` handler (no listen).
  * 06 appends the queue wiring here (worker → pipeline, the only legal edge);
  * The cron face appends the `scheduled` wiring (worker → store read-only sweep,
  * AL-6 — the sweep statically imports nothing workerd-only, so the Bun test
@@ -74,7 +74,7 @@ import { spaDispatch } from "./spa-dispatch";
 import { APP_VERSION } from "../version";
 
 const app = new Hono<{ Bindings: Env }>();
-// `/dashboard*` GET/HEAD redirects (trailing
+// note: `/dashboard*` GET/HEAD redirects (trailing
 // slash), then the tenant route-family gate, then SPA dispatch. The gate runs
 // HERE, ahead of SPA dispatch: a retired App path (`/dashboard/apps…`,
 // `/dashboard/api/apps…`) must answer 404 even when the SPA shell could serve
@@ -131,7 +131,7 @@ export function deliveryOutcomeFromWebhook(
 }
 
 /**
- * Structured warn for the webhook face's rejection/bookkeeping paths (QC
+ * note: Structured warn for the webhook face's rejection/bookkeeping paths (QC
  * F-005; log hygiene): the caller passes the real stage label
  * (e.g. `webhook_body_too_large`,
  * `db_binding_missing`, `installation_upsert_failed`) and it rides `event` —
@@ -144,7 +144,7 @@ function webhookWarn(event: string, detail: string, msg: string): void {
 }
 
 /**
- * Structured INFO twin (AL-23-2): the review_paused line is a legitimate
+ * note: Structured INFO twin (AL-23-2): the review_paused line is a legitimate
  * ops state answering 2xx, so it drops from warn to info — same
  * three-field shape, filterable by event, no sampling, no aggregation
  * state.
@@ -154,7 +154,7 @@ function webhookInfo(event: string, detail: string, msg: string): void {
 }
 
 /**
- * Best-effort install bookkeeping shared by the two delivery paths that learn
+ * note: Best-effort install bookkeeping shared by the two delivery paths that learn
  * an installing account (a review `job` and an `installation.*` event): upsert
  * the (appId, installationId) row's `account_login` / `seen_at`, and on any
  * store failure log the one structured warn and carry on. It never throws —
@@ -185,7 +185,7 @@ async function recordInstallation(
 }
 
 /**
- * Byte-authoritative streamed body read for the webhook cap (61-R1): reads
+ * note: Byte-authoritative streamed body read for the webhook cap (61-R1): reads
  * the request stream up to `limit` bytes and UTF-8-decodes exactly those
  * bytes — TextDecoder's default (UTF-8, non-fatal) is the same decode
  * `request.text()` performed, so the returned string is decode-identical for
@@ -234,7 +234,7 @@ async function readBodyWithinLimit(request: Request, limit: number): Promise<str
 export const CHECK_ATTACH_INLINE_BUDGET_MS = 2_500;
 
 /**
- * Resolve when `promise` settles or the budget elapses — whichever is first.
+ * why: Resolve when `promise` settles or the budget elapses — whichever is first.
  * The promise is NOT cancelled: its owner (the invocation context) still holds
  * it, and a late attach is exactly what the consumer's takeover handles.
  */
@@ -249,7 +249,7 @@ async function withinBudget(promise: Promise<unknown>, budgetMs: number): Promis
 }
 
 /**
- * Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
+ * note: Attach the review Check on the DELIVERY path (spec §7.7 step 4 / §7.9).
  *
  * Runs BEFORE the enqueue: the attempt is claimed and its `queued` run created
  * NOW, so the Check shows up within seconds of the webhook instead of when a
@@ -273,12 +273,12 @@ async function attachCheckOnAcceptance(input: {
   env: Env;
   row: Pick<GithubAppTenantRow, "id" | "github_app_id" | "private_key_enc">;
   payload: Omit<ReviewJobPayload, "botRef" | "targetId">;
-  /** Generated BEFORE the attach starts, so the message always carries it. */
+  /** invariant: Generated BEFORE the attach starts, so the message always carries it. */
   deliveryId: string;
 }): Promise<void> {
   const { db, env, row, payload, deliveryId } = input;
   const headSha = payload.head_sha;
-  // A bot-mention delivery carries no SHA: the consumer claims after its own
+  // note: A bot-mention delivery carries no SHA: the consumer claims after its own
   // `rev-parse`, exactly as before.
   if (headSha === null) return;
   try {
@@ -316,7 +316,7 @@ async function attachCheckOnAcceptance(input: {
         deliveryId,
       },
     );
-    // One warn for a real failure (a refusal, a failed run-id write, a failed
+    // note: One warn for a real failure (a refusal, a failed run-id write, a failed
     // release). A busy/terminal skip is a legitimate no-op and stays silent.
     if (result.kind === "failed") {
       webhookWarn(
@@ -381,7 +381,7 @@ export async function settleRefusedAfterAttach(input: {
   try {
     await input.attach;
   } catch {
-    // The attach logs its own fault and does not reject today; a rejected one
+    // note: The attach logs its own fault and does not reject today; a rejected one
     // still counts as finished, so the settlement below runs and finds nothing.
   }
   try {
@@ -392,7 +392,7 @@ export async function settleRefusedAfterAttach(input: {
 }
 
 /**
- * The monthly RP ceiling for one admitted delivery: `null` means "may run",
+ * note: The monthly RP ceiling for one admitted delivery: `null` means "may run",
  * a `quota-exhausted` verdict means the enqueue is refused.
  *
  * Step 2 of the admission order (see the route's gate). The cost comes from
@@ -420,7 +420,7 @@ async function quotaRefusal(
   mode: DeploymentMode,
 ): Promise<DeliveryRefusal | null> {
   const month = quotaMonth(new Date());
-  // Pricing this attempt and resolving its ceiling each need the profile
+  // note: Pricing this attempt and resolving its ceiling each need the profile
   // covering `month.startIso`; the ctx shape carries a resolved `costRp`, so
   // this path reads that one row twice (same month, same deterministic answer)
   // rather than widening the shared verdict. It is one PK read on the gate path.
@@ -444,15 +444,15 @@ async function quotaRefusal(
     : null;
 }
 
-// `version` rides the healthz face — additive field, `ok:true`
+// note: `version` rides the healthz face — additive field, `ok:true`
 // contract unchanged; displayed with the `v` prefix (tag-shaped, eyeball-
 // reconcilable). Single source = generated src/version.ts.
 app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
-// 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
+// note: 08 B0: GitHub OAuth + dashboard shell. Route isolation: the dashboard
 // module never imports pipeline/store/review (architect decision Q2).
 app.route("/dashboard", dashboardApp);
 /**
- * Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
+ * note: Per-App webhook face (spec § Multi-App 契约; the ONLY HTTP review
  * entry — the legacy bare `/webhook` face is
  * retired). Pre-order: body-size cap (413) → DB-unbound guard (500
  * fail-closed — the dashboard-dependency convention) → workspace + app id
@@ -532,7 +532,7 @@ app.route("/dashboard", dashboardApp);
  * retries instead of the delivery slipping past an unapplied gate.
  */
 app.post("/webhook/:workspaceId/:appId", async (c) => {
-  // Body-size cap checked BEFORE buffering the body (B6). Two gates: the
+  // note: Body-size cap checked BEFORE buffering the body (B6). Two gates: the
   // truthful over-limit header short-circuits before any byte is read, and
   // the streamed read below is byte-authoritative (61-R1) — a missing,
   // chunked, or lying `content-length` header never bypasses the byte count.
@@ -557,7 +557,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
 
-  // DB-unbound guard (fold-in): unreachable on the deployed Worker
+  // note: DB-unbound guard (fold-in): unreachable on the deployed Worker
   // (wrangler.jsonc binds DB globally) — the branch exists because the
   // shared fetch-face Env keeps DB optional for the dashboard's unbound-D1
   // premises. Fail-closed 500, zero enqueue.
@@ -570,13 +570,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("db binding missing", 500);
   }
-  // The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
+  // note: The webhook path lookup is a tenant-facing `review_bots` read (AC2): the
   // store's one read face joins `bot_workspaces`, so an App with no workspace
   // mapping is unknown here too (404 with zero decrypt, zero delivery row and
   // zero enqueue).
   const appsStore = createReviewBotsStore(db);
 
-  // Workspace + App lookup: the pair must name an App that belongs to that
+  // invariant: Workspace + App lookup: the pair must name an App that belongs to that
   // workspace. Unknown / mismatched / disabled / soft-deleted are all 404 with
   // zero side effects (the log distinguishes them for the operator; the
   // response does not).
@@ -601,7 +601,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("unknown webhook path", 404);
   }
 
-  // The maintenance window (D20) refuses the delivery HERE — after the bot
+  // note: The maintenance window (D20) refuses the delivery HERE — after the bot
   // lookup, before the secret decrypt and signature verification — so an
   // unauthenticated caller learns nothing and a verified delivery is asked to
   // come back later instead of landing a pipeline write on a ledger the
@@ -617,7 +617,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("maintenance in progress", 503);
   }
 
-  // The review configuration a delivery reads lives on the bot's target, not
+  // note: The review configuration a delivery reads lives on the bot's target, not
   // on the bot row: trigger mode and the business pause. A target IS a
   // repository now (migration 0067), so resolution needs the delivery's own
   // repository — which exists only in the body, so resolution runs inside the
@@ -631,7 +631,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     installationId: null,
   };
 
-  // Decrypt this App's webhook secret (secretbox envelope, AAD pins the
+  // safety: Decrypt this App's webhook secret (secretbox envelope, AAD pins the
   // row). Fail-closed 500 on any decrypt failure — the signature is never
   // verified against anything but the stored secret, and nothing enqueues.
   let appSecret: string;
@@ -650,7 +650,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("webhook secret decrypt failed", 500);
   }
 
-  // Architect lock L1: the verifier memoizes under the row id as
+  // note: Architect lock L1: the verifier memoizes under the row id as
   // cacheKey — a rotated webhook secret (same id, new envelope → new
   // secret) is rebuilt + REPLACED on the next delivery; entries are
   // structurally bounded (≤ review_bots rows) with no eviction policy.
@@ -663,7 +663,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // existing fail-safe. The target's `review_drafts` switch rides the same
   // context, so a draft delivery is classified against the row that owns it.
   const appSlug = row.github_slug ?? "";
-  // The classifier's ONE parse, kept for the delivery row's source repository
+  // note: The classifier's ONE parse, kept for the delivery row's source repository
   // and the PR ledger below — recording either must not re-parse up-to-1 MB of
   // body.
   let classified: unknown = null;
@@ -676,20 +676,20 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     row.id,
     async ({ installationId, repository }) => {
       delivery.installationId = installationId;
-      // The classifier consults a resolver only for a body that names a
+      // invariant: The classifier consults a resolver only for a body that names a
       // repository, so this is non-null by contract.
       const repo = repository!;
       delivery.target = await targetsStore.resolveByRepo(row.id, repo);
       const target = delivery.target;
       if (target === null) return null;
-      // Only a following target reads the workspace defaults: an own-columns
+      // invariant: Only a following target reads the workspace defaults: an own-columns
       // target answers its stored mode directly (the column is CHECK-bound to
       // the vocabulary), so the common path saves one D1 read per delivery.
       const mode =
         target.follow_workspace_defaults === 1
           ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
           : target.review_trigger_mode;
-      // The draft switch is target-owned (D12), so the already-resolved row
+      // why: The draft switch is target-owned (D12), so the already-resolved row
       // answers it in both inheritance branches — the same derivation
       // `ownTargetSettings` uses, with no second defaults read.
       return { mode, appSlug, reviewDrafts: target.review_drafts !== 0 };
@@ -699,7 +699,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     },
   );
 
-  // ...which is also why an unsynced row must not fail SILENTLY: with no slug
+  // invariant: ...which is also why an unsynced row must not fail SILENTLY: with no slug
   // the mention can never match, so a `manual`-mode App (whose only trigger
   // the mention is) just stops reviewing while the delivery reads `ignored`.
   // Two gates keep this warn off every ordinary ignore: the classifier must
@@ -721,7 +721,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // No target → this delivery has no review configuration to act on. It is an
+  // why: No target → this delivery has no review configuration to act on. It is an
   // `ignore` (2xx, delivery row `ignored`, `last_webhook_at` touched), never a
   // pause or a refusal: zero enqueue, no PR ledger row, and the allowlist is
   // not consulted — nothing here can admit it. An `installation` delivery also
@@ -735,18 +735,18 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       "per-App webhook ignored with 200 — no review target resolves for this delivery (zero enqueue, no ledger row)",
     );
   }
-  // Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
+  // note: Effective pause: the bot's OPERATIONAL flag and the target's BUSINESS flag.
   // Both suppress a review, and the settings switch users flip is the target's,
   // so this webhook must consult both — one derivation, read at the delivery
   // record and at the pause gate. A delivery with no target cannot be a job,
   // so it carries no pause state.
   const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
-  // Owner allowlist admission is GONE with migration 0067 (D18): an App
+  // note: Owner allowlist admission is GONE with migration 0067 (D18): an App
   // reviews every repository its targets name, and a repository owner outside
   // any list is admitted exactly like one inside it. Nothing here can refuse a
   // verified delivery before the delivery record.
 
-  // AL-20-1: best-effort delivery recording — the R2 diagnostics
+  // note: AL-20-1: best-effort delivery recording — the R2 diagnostics
   // face ("断线看得见"). ONE row per ADMITTED verified delivery, written
   // immediately after classification (before the reject return) so every
   // classified outcome that reaches this line lands: reject → rejected
@@ -796,7 +796,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // The admission verdict, decided ONCE here, in the order the product fixes
+  // note: The admission verdict, decided ONCE here, in the order the product fixes
   // (capability first, then quota): a delivery may carry at most one refusal,
   // so the two gates can never both fire and the author is told the cause that
   // actually binds — a quota message for a workspace that may not use this bot
@@ -837,7 +837,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
     try {
       if (row.scope === "shared") {
-        // The same one entry the target-creation route calls; an OWN bot is never
+        // invariant: The same one entry the target-creation route calls; an OWN bot is never
         // asked, so this path pays no plan read for it.
         const verdict = await checkEntitlement({
           db,
@@ -854,7 +854,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         refusal = await quotaRefusal(db, target, row.scope, mode);
       }
     } catch (err) {
-      // Three faults land here: a D1 error among the gate's own reads; an empty
+      // note: Three faults land here: a D1 error among the gate's own reads; an empty
       // `quota_profiles` table (migration 0063 not applied); and a plan with no
       // ceiling row in the judging profile — a CONFIGURATION defect that throws
       // by design and would otherwise 500 every webhook of that plan until a
@@ -874,11 +874,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       eventName,
       outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal, refusal !== null),
       statusCode: outcome.kind === "reject" ? outcome.status : null,
-      // The diagnostics face's "which repo did this come from?" answer, read
+      // note: The diagnostics face's "which repo did this come from?" answer, read
       // off the classifier's own single parse of the body — null when the
       // payload carries no repository.
       repositoryFullName: webhookRepositoryFullName(classified),
-      // Why a refusal happened: the classifier's own sentence, and only for a
+      // invariant: Why a refusal happened: the classifier's own sentence, and only for a
       // reject — every other outcome has none.
       reason: outcome.kind === "reject" ? outcome.reason : null,
     });
@@ -891,7 +891,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text(outcome.reason, outcome.status);
   }
 
-  // PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
+  // note: PR ledger (migration 0039): every VERIFIED, non-reject `pull_request`
   // delivery lands in `pull_requests` — including an `ignore` (a
   // non-whitelisted action, a mode that does not auto-trigger, a paused App),
   // which is exactly the "the App received this PR but nothing ran" case the
@@ -904,7 +904,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   if (eventName === "pull_request" && target !== null) {
     const record = pullRequestRecord(classified);
     if (record === null) {
-      // Visible, not silent: this delivery ran (or was ignored) with no ledger
+      // note: Visible, not silent: this delivery ran (or was ignored) with no ledger
       // row, so the dashboard's "what did this App receive" answer is
       // incomplete for it. Same best-effort posture as every sibling path —
       // log, never change the response.
@@ -923,7 +923,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     }
   }
 
-  // Lock L5: the signature VERIFIED (classifyWebhook returned a
+  // note: Lock L5: the signature VERIFIED (classifyWebhook returned a
   // non-reject), so this delivery is touched — after signature verification,
   // regardless of the subsequent enqueue outcome (job / ignore / paused; a
   // queue-send failure in handleReviewJob below still leaves this touch
@@ -942,7 +942,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
 
-  // Install bookkeeping: every verified review-type delivery offers
+  // note: Install bookkeeping: every verified review-type delivery offers
   // `outcome.installationAccount` — the installing account's login, inferred
   // from the repository owner when the payload omits `installation.account` —
   // so installs that predate this column fill in on their next delivery instead
@@ -965,7 +965,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  // Install event (installation.created / new_permissions_accepted): the one
+  // note: Install event (installation.created / new_permissions_accepted): the one
   // delivery that observes a brand-new install before any review traffic, so
   // it records `account_login` here — BEFORE the pause gate and the global
   // flag gate, because those two gate the ENQUEUE face and this outcome never
@@ -982,7 +982,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // Uninstall (installation.deleted): stamp the local row, never delete it —
+  // invariant: Uninstall (installation.deleted): stamp the local row, never delete it —
   // the credential-routing and failure-attribution joins keep resolving, and
   // the install-health read face stops listing it. No account_login is
   // written: the payload states a removal, not a login. Best-effort like every
@@ -1003,13 +1003,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("accepted", 200);
   }
 
-  // Pause gate (spec 语义锁 — paused ≠ disabled): either pause flag
+  // note: Pause gate (spec 语义锁 — paused ≠ disabled): either pause flag
   // =0 answers 2xx with ZERO enqueue — the webhook stays healthy (and
   // touched, above) while reviews are paused. disabled/deleted already
   // returned 404 above; the consumer ack-skips the in-flight messages it
   // can no longer prevent (lock L4).
   if (paused) {
-    // AL-23-2: warn→info — paused is a legitimate ops state (2xx, zero
+    // why: AL-23-2: warn→info — paused is a legitimate ops state (2xx, zero
     // enqueue), so the line rides the info channel with the same structured
     // fields; no sampling, no aggregation state.
     webhookInfo(
@@ -1019,7 +1019,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
+  // note: Global review flag (spec §3.1, compass D21): OFF closes the ENQUEUE face
   // for every App — same contract as the per-App pause above (2xx, zero
   // enqueue) and deliberately NOT a dequeue-side check: work already queued
   // keeps running. Absent flag row = enabled. `reviewGlobal` was read once
@@ -1032,7 +1032,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
     return c.text("ignored", 200);
   }
-  // Lock L3: both ids are attached at the route handler — after the target
+  // note: Lock L3: both ids are attached at the route handler — after the target
   // resolved, before the queue send. The queue message carries the id
   // references only (lock L4: the PEM never leaves the consumer). Every
   // remaining outcome is a `job`, and a job is only produced once the resolver
@@ -1045,26 +1045,26 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // proof is judged against the App's REAL gate instead of being deferred.
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
   await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
-    // `db` is the route's already-narrowed binding (the unbound guard above
+    // note: `db` is the route's already-narrowed binding (the unbound guard above
     // returned 500): the durable comment claim must never run against a
     // possibly-unbound DB.
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
-    // The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
+    // why: The Check attaches HERE — BEFORE `REVIEW_QUEUE.send` — so an admitted
     // message finds a released row to adopt instead of racing the delivery
     // holder (spec §7.7 step 4 / §7.9). The webhook waits at most
     // `CHECK_ATTACH_INLINE_BUDGET_MS`; past that the enqueue proceeds and the
     // invocation context keeps the attach, which the consumer's bounded
     // takeover of a stalled delivery holder covers.
     beforeEnqueue: async (payload) => {
-      // Generated BEFORE the attach starts (spec §7.9): the message must carry
+      // invariant: Generated BEFORE the attach starts (spec §7.9): the message must carry
       // the identity even when the inline budget expires and the attach only
       // finishes later — that row records the same id, so a later skip can
       // still settle it.
       const attachDeliveryId = crypto.randomUUID();
       const attach = attachCheckOnAcceptance({ db, env: c.env, row, payload, deliveryId: attachDeliveryId });
       const headSha = payload.head_sha;
-      // A refused commit delivery settles the row it just attached, CHAINED
+      // note: A refused commit delivery settles the row it just attached, CHAINED
       // onto that attach: the webhook may already have stopped waiting, and an
       // inline settlement would race the create it kept running. A bot-mention
       // delivery attached nothing (no head SHA) and settles nothing.
@@ -1098,7 +1098,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       try {
         c.executionCtx.waitUntil(work);
       } catch {
-        // No invocation context (tests, a non-Worker host): the attach (and,
+        // note: No invocation context (tests, a non-Worker host): the attach (and,
         // on a refusal, its chained settlement) is already running detached
         // and is best-effort either way.
         void work;
@@ -1111,7 +1111,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 });
 
 /**
- * The `saas` router: `app` plus the hidden operator console.
+ * note: The `saas` router: `app` plus the hidden operator console.
  *
  * Built here, after every `app` registration — `route()` copies the source
  * app's route table at call time, so a route added to `app` later would be
@@ -1134,7 +1134,7 @@ const saasApp = new Hono<{ Bindings: Env }>()
 export const CHECK_RECOVERY_CRON = "* * * * *";
 
 /**
- * The M7 Check recovery stage in its OWN try/catch, shared by the minute
+ * note: The M7 Check recovery stage in its OWN try/catch, shared by the minute
  * expression and the fifteen-minute composition, so both keep one failure
  * boundary.
  */
@@ -1155,7 +1155,7 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
-  // 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
+  // invariant: 06 queue wiring — the ONLY legal worker → pipeline edge (compass A).
   // Dynamic import: the consumer statically loads the sandbox adapter, which
   // imports the workerd-only `cloudflare:workers` builtin — Bun's test runner
   // cannot resolve it, so a
@@ -1163,12 +1163,12 @@ export default {
   // module exception to the static-import rule).
   async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv, ctx: ExecutionContext): Promise<void> {
     const { createReviewConsumer } = await import("../pipeline/consumer");
-    // The invocation context owns the detached Check terminalization: the
+    // note: The invocation context owns the detached Check terminalization: the
     // consumer hands it the promise, so an overrun still finishes after the
     // handler returns instead of being reclaimed with the isolate.
     await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
   },
-  // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
+  // note: Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
   // `* * * * *` — the Check lane alone (spec §7.11.2) and its ONLY driver. A
   // Check attempt whose terminalize overran or threw releases its lease
@@ -1189,7 +1189,7 @@ export default {
   // own per-invocation budget. All stages are awaited directly, so no
   // ctx.waitUntil is needed.
   async scheduled(controller: ScheduledController, env: ScheduledEnv, _ctx: ExecutionContext): Promise<void> {
-    // The maintenance window (D20) short-circuits EVERY expression before any
+    // note: The maintenance window (D20) short-circuits EVERY expression before any
     // lane runs — the Check lane included, since its recovery writes the same
     // ledger a running backfill may be repointing. ONE read per invocation;
     // the window is read again on the next tick, so nothing is remembered.
@@ -1217,7 +1217,7 @@ export default {
       }
       await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
-      // SEC-03: the sweep-failure detail is redacted before the warn line —
+      // note: SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value
       // (defense-in-depth; clean strings pass through unchanged).
       defaultSweepLog.warn(
@@ -1228,7 +1228,7 @@ export default {
         "ops sweep failed",
       );
     }
-    // M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
+    // note: M8 recovery reconciler (§7.11) — OWN try/catch AFTER runSweep.
     // reconcileReviewLifecycle is throw-proof by contract; the catch is the
     // composition's independent-failure guarantee (and matches the
     // upcoming stage shape).
