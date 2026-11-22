@@ -1347,7 +1347,7 @@ export const zhCN: Dictionary = {
         "最近 {days} 天内被准入的尝试。百分位只统计已写入结算时点、结算把发布义务记为已解除、且数据库显示其 Check 已结论的区间；空窗口就显示为空，绝不当作 0。",
       durationEmpty: "此窗口内没有准入任何尝试。",
       durationEmptyExcluded:
-        "此窗口内没有可测量的尝试：{n} 个已准入尝试全部被排除——{checkOpen} 个结算时 Check 仍未关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
+        "此窗口内没有可测量的尝试：{n} 个已准入尝试全部被排除——{checkOpen} 个结算时 Check 未被证明关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
       durationSample: "{n} 个完整尝试",
       durationTotal: "端到端",
       durationQueueWait: "队列等待",
@@ -1358,12 +1358,14 @@ export const zhCN: Dictionary = {
       durationMax: "最大值",
       durationBuckets: "每个尝试的区间都拆分为这三个阶段。百分位按行计算，同一列不可跨行相加。",
       durationExcluded:
-        "未计入百分位：{checkOpen} 个结算时 Check 仍未关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
+        "未计入百分位：{checkOpen} 个结算时 Check 未被证明关闭、{recordMissing} 个没有结算记录、{noBoundary} 个没有可测量的边界、{unsettled} 个未结算、{prePrepare} 个在 prepare 之前就终止。",
       durationFailureTail:
-        "付费步骤失败且没有产出持久结果的尝试没有可测量的区间，按「没有可测量的边界」排除；已经产出结果的尝试即使后续某一步失败也照常统计。",
+        "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它因缺结算时点、Check 未被证明关闭、缺队列发送时间戳、边界乱序或没有结算记录而被排除。",
       durationSettlementBasis:
         "样本之所以可测，是因为它的这次结算把发布义务记为已解除；投递幂等性不属于该区间，这里也不对它作任何断言。",
       durationCandidateLabel: "候选上限（毫秒）",
+      /** 仅当输入的候选值超出分析范围时显示。 */
+      durationCandidateRange: "分析只接受 {min}–{max} 毫秒的整数。",
       durationCandidateApply: "查看截断",
       durationCutoff: "{cap} 毫秒的上限会排除 {n} 个尝试中的 {over} 个（{share}）。",
       durationCutoffNone: "没有已完成的尝试会超过 {cap} 毫秒。",

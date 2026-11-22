@@ -12,3 +12,10 @@
 --
 -- Append-only on the production DB: one nullable column, no rewrite.
 ALTER TABLE review_attempt_handoffs ADD COLUMN enqueued_ms INTEGER;
+
+-- The duration report's only predicate is the admission window
+-- (`h.created_ms >= ?1 AND h.created_ms < ?2`). The recovery index on
+-- (state, updated_ms) cannot bound that range, so without this index the
+-- report scans every handoff ever written instead of the window.
+CREATE INDEX idx_review_attempt_handoffs_created
+  ON review_attempt_handoffs (created_ms);

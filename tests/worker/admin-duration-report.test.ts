@@ -5,10 +5,13 @@
  * These cases pin the properties the report has to keep: the phase buckets are
  * disjoint and sum to the end-to-end interval; an empty window and a missing
  * boundary read as missing, never as a zero; and the cohort is only the
- * attempts whose settlement instant is written AND whose obligations are proven
- * closed — everything else lands in one of the four reasons the plan fixed.
+ * attempts whose settlement instant is written, whose settlement recorded the
+ * publication obligation as discharged, and whose frozen Check reads terminal
+ * by then — everything else lands in one of the five reasons the plan fixed.
+ * The last block pins that narrow claim on the surfaces that state it.
  */
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -793,5 +796,28 @@ describe("admission records the Queue send stamp once", () => {
       enqueuedMs: null,
     });
     expect(unstamped.enqueuedMs).toBeNull();
+  });
+});
+
+describe("what the surfaces claim the settlement record proves", () => {
+  function surfaceText(relative: string): string {
+    return readFileSync(new URL(relative, import.meta.url), "utf8");
+  }
+
+  test("the release note and module header claim only the settlement's discharge, never every obligation", () => {
+    const release = surfaceText("../../.changes/unreleased/operator-duration-report.md");
+    const module = surfaceText("../../src/admin/duration-report.ts");
+
+    // The settlement record says THIS settlement considered the publication
+    // obligation discharged. "Every obligation proven closed" is a claim a
+    // persisted row cannot support.
+    for (const text of [release, module]) {
+      expect(text).not.toContain("obligations are proven closed");
+      expect(text).not.toContain("义务全部证明关闭");
+      expect(text).not.toContain("every obligation of that attempt proven closed");
+    }
+    expect(release).toContain("that settlement recorded the publication obligation as discharged");
+    expect(release).toContain("该次结算把发布义务记为已解除");
+    expect(module).toContain("considered the publication obligation discharged");
   });
 });

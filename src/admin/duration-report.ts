@@ -4,15 +4,15 @@
  * buckets and a candidate cap's observed cutoff.
  *
  * Population: attempts ADMITTED in the window. The COHORT a percentile may use
- * is "`settled_ms` written AND every obligation of that attempt proven closed":
- * the Check pair the attempt froze must read terminal at or before that instant
+ * is "`settled_ms` written, the settlement's own completion record present, and
+ * the Check pair the attempt froze reading terminal at or before that instant"
  * (a Check that concludes later, or a row the database does not hold, means the
- * settlement instant truncated the interval), and the settlement's own completion
- * record must exist. The record is the narrower claim: it says THIS SETTLEMENT
- * considered the publication obligation discharged. It does not say the delivery
- * idempotency key is valid — that is a transporter fact, not part of the interval,
- * and nothing in this module certifies it. Everything else is counted under one of
- * the five reasons below
+ * settlement instant truncated the interval). The record says only this much:
+ * THIS SETTLEMENT considered the publication obligation discharged. It does not
+ * say every obligation of the attempt was proven closed, nor that the delivery
+ * idempotency key is valid — that is a transporter fact, not part of the
+ * interval, and nothing in this module certifies it. Everything else is counted
+ * under one of the five reasons below
  * and never supplied as a zero, because "not measured" and "took no time" are
  * different answers — and only a proven interval may steer the operator's cap.
  *
@@ -34,9 +34,6 @@ import type { D1Like } from "../store/types";
 
 /** The report's stated window: complete attempts admitted in the last 30 days. */
 export const DURATION_REPORT_WINDOW_DAYS = 30;
-/** The analysis-only candidate cap range: one day is the widest a cap can be. */
-export const DURATION_REPORT_CAP_MIN_MS = 1;
-export const DURATION_REPORT_CAP_MAX_MS = 86_400_000;
 
 const DAY_MS = 86_400_000;
 
@@ -186,11 +183,11 @@ function hasSettlementRecord(raw: string | null): boolean {
 }
 
 /**
- * Is the Check obligation proven closed AT the instant the attempt settled? The
- * pair the attempt froze is the only fact that says a Check exists; a terminal
- * row is the only fact that says it concluded, and it must have concluded no
- * later than the claimed settlement — otherwise the claimed end truncated the
- * interval. A missing row is not proof: the Check may simply not be written yet.
+ * Did the Check pair the attempt froze conclude by the instant it settled? The
+ * frozen pair is the only fact that says a Check exists; a terminal row is the
+ * only fact that says it concluded, and it must have concluded no later than
+ * the claimed settlement — otherwise the claimed end truncated the interval. A
+ * missing row is not proof: the Check may simply not be written yet.
  */
 function checkClosedAt(row: DurationRow, settledMs: number): boolean {
   if (row.check_key === null) return true;
@@ -273,11 +270,11 @@ export async function readReviewDurationReport(
       excluded["no-boundary"] += 1;
       continue;
     }
-    // The record is the settlement's own statement that the obligations it
-    // incurred were discharged: `settled_ms` is written together with it, only
-    // when the required set for that lane is complete. It is not a statement
-    // about the delivery key. A settled row without one was written before
-    // migration 0085, and nothing else witnesses what it discharged.
+    // The record is the settlement's own statement that the publication
+    // obligation it incurred was discharged: `settled_ms` is written together
+    // with it, only when the required set for that lane is complete. It is not a
+    // statement about the delivery key. A settled row without one was written
+    // before migration 0085, and nothing else witnesses what it discharged.
     if (!hasSettlementRecord(row.settled_effects)) {
       excluded["no-settlement-record"] += 1;
       continue;

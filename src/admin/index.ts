@@ -68,8 +68,8 @@ import { isServerFlagKey, listFlags } from "./flags";
 import {
   DURATION_REPORT_CAP_MAX_MS,
   DURATION_REPORT_CAP_MIN_MS,
-  readReviewDurationReport,
-} from "./duration-report";
+} from "../contracts/duration-report";
+import { readReviewDurationReport } from "./duration-report";
 import {
   findDataUpgrade,
   listDataUpgrades,

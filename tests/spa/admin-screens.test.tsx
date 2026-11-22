@@ -915,35 +915,83 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("a definite refusal (4xx) restores the confirmed number", async () => {
+  test("a definite refusal shows the value a fresh read returns, never the pre-save number", async () => {
     // The field's min/max normally keeps an out-of-range number from being sent;
-    // this case pins the server-refusal path behind it.
-    const surface = await runtimeScreen((request) =>
-      request.method === "PATCH"
-        ? new Response(
-            JSON.stringify({ error: "the attempt cap must be an integer in 900000..3600000 ms" }),
-            { status: 400, headers: { "Content-Type": "application/json" } },
-          )
-        : json({
-            ...RUNTIME,
-            attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
-          }),
-    );
+    // this case pins the server-refusal path behind it. Another operator's save
+    // lands between this page's first read and the refused PATCH, so the row
+    // does NOT hold the number this page last read.
+    let serverCap = 1_200_000;
+    let reads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") {
+        serverCap = 3_000_000;
+        return new Response(
+          JSON.stringify({ error: "the attempt cap must be an integer in 900000..3600000 ms" }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      reads += 1;
+      return json({
+        ...RUNTIME,
+        attemptCap: { capMs: serverCap, saved: true, min: 900_000, max: 3_600_000, degraded: false },
+      });
+    });
     await surface.type("#attempt-cap-ms", "1800000");
     const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
     await surface.click(form.querySelector('button[type="submit"]'));
 
-    // A refusal means the store did not change: the card returns to the last
-    // confirmed value and reports the refusal, with the typed number editable.
-    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
+    // The refusal is reported, and the effective value comes from a new read —
+    // not from the number this page held before the save.
     expect(surface.text()).toContain("Could not change the maximum review duration.");
     expect(surface.text()).toContain("must be an integer in 900000..3600000 ms");
+    expect(reads).toBe(2);
     expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
-      "Effective on the next review: 1200000 ms (platform default — no value is saved).",
+      "Effective on the next review: 3000000 ms (saved value).",
     );
+    // This save's fate was definite, but the row's value was not observed by it.
+    expect(surface.container.querySelector('[data-attempt-cap="changed-elsewhere"]')).toBeNull();
     const field = surface.container.querySelector("#attempt-cap-ms") as unknown as HTMLInputElement;
     expect(field.disabled).toBe(false);
     expect(field.value).toBe("1800000");
+    await surface.close();
+  });
+
+  test("a definite refusal whose re-read fails leaves the value unknown and offers Retry", async () => {
+    let reads = 0;
+    let readsFail = true;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") {
+        return new Response(
+          JSON.stringify({ error: "the attempt cap must be an integer in 900000..3600000 ms" }),
+          { status: 400, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      reads += 1;
+      if (reads > 1 && readsFail) return new Response("unavailable", { status: 503 });
+      return json({
+        ...RUNTIME,
+        attemptCap: { capMs: 1_200_000, saved: false, min: 900_000, max: 3_600_000, degraded: false },
+      });
+    });
+    await surface.type("#attempt-cap-ms", "1800000");
+    const form = surface.container.querySelector("#attempt-cap-ms")!.closest("form")!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    // The refusal proves this write failed, not what the row holds: with no
+    // read-back, no number is shown — neither the pre-save value nor the echo.
+    expect(surface.text()).toContain("Could not change the maximum review duration.");
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')).toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="unknown"]')).toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).not.toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="retry"]')).not.toBeNull();
+
+    // The retry reads the row and restores a number from that answer.
+    readsFail = false;
+    await surface.click(surface.container.querySelector('[data-attempt-cap="retry"]'));
+    expect(surface.container.querySelector('[data-attempt-cap="confirming"]')).toBeNull();
+    expect(surface.container.querySelector('[data-attempt-cap="effective"]')?.textContent).toBe(
+      "Effective on the next review: 1200000 ms (platform default — no value is saved).",
+    );
     await surface.close();
   });
 
@@ -1164,16 +1212,53 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector('[data-duration="total-max"]')?.textContent).toBe("50000 ms");
     expect(surface.text()).toContain("Every attempt's interval splits into these three phases.");
     expect(surface.container.querySelector('[data-duration="excluded"]')?.textContent).toBe(
-      "Excluded from the percentiles: 3 with a Check still open at settlement, 4 with no settlement record, 2 without a measurable boundary, 1 unsettled, 1 stopped before prepare.",
+      "Excluded from the percentiles: 3 with a Check not proven closed at settlement, 4 with no settlement record, 2 without a measurable boundary, 1 unsettled, 1 stopped before prepare.",
     );
     // The failure tail is excluded by ruling, so the card must say so beside the
     // counts — otherwise successful durations read as "review never fails".
+    // It follows the classifier's order: settlement owed, then the Check, then
+    // the missing result.
     expect(surface.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
-      "A launch whose paid step failed without a durable result has no interval to measure and is excluded as having no measurable boundary; an attempt that produced a result is measured even if a later step failed.",
+      "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the Check, the queue stamp, the boundary order or the settlement record is missing.",
     );
     expect(surface.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
       "A sample is measured because its settlement recorded the publication obligation as discharged; delivery idempotency is not part of the interval and is not claimed here.",
     );
+    await surface.close();
+  });
+
+  test("an out-of-range candidate shows the analysis range and keeps the report rendered", async () => {
+    const report = {
+      ...DURATION_REPORT,
+      sampleSize: 2,
+      total: { p50Ms: 30_000, p90Ms: 40_000, maxMs: 50_000 },
+      phases: {
+        queueWait: { p50Ms: 1_000, p90Ms: 2_000, maxMs: 3_000 },
+        execution: { p50Ms: 20_000, p90Ms: 30_000, maxMs: 40_000 },
+        publication: { p50Ms: 8_000, p90Ms: 9_000, maxMs: 10_000 },
+      },
+    };
+    const surface = await runtimeScreen(() => json(RUNTIME), "en", report);
+    const form = surface.container.querySelector("#duration-candidate-cap")!.closest("form")!;
+    await surface.type("#duration-candidate-cap", "86400001");
+
+    // The route answers this with a 4xx, which would replace the whole card
+    // with a load failure. The card checks the same range, so the error sits
+    // beside the field and the distribution stays on screen.
+    expect(surface.container.querySelector('[data-duration="candidate-range"]')?.textContent).toBe(
+      "The analysis accepts an integer from 1 to 86400000 ms.",
+    );
+    expect((form.querySelector('button[type="submit"]') as unknown as HTMLButtonElement).disabled).toBe(true);
+    expect(surface.container.querySelector('[data-duration="sample"]')?.textContent).toBe("2 complete attempts");
+    expect(surface.text()).not.toContain("Could not load this page.");
+    expect(surface.sent.filter((request) => request.url.includes("duration-report")).length).toBe(1);
+
+    // A candidate inside the range clears the error and is the one sent.
+    await surface.type("#duration-candidate-cap", "60000");
+    expect(surface.container.querySelector('[data-duration="candidate-range"]')).toBeNull();
+    await surface.click(form.querySelector('button[type="submit"]'));
+    expect(surface.sent.at(-1)?.url).toBe("/_internal_admin/api/runtime/duration-report?capMs=60000");
+    expect(surface.container.querySelector('[data-duration="sample"]')?.textContent).toBe("2 complete attempts");
     await surface.close();
   });
 
@@ -1190,7 +1275,7 @@ describe("Runtime screen", () => {
     };
     const excluded = await runtimeScreen(() => json(RUNTIME), "en", report);
     expect(excluded.text()).toContain("No attempt was measured: all 5 admitted attempts were excluded");
-    expect(excluded.text()).toContain("2 with a Check still open at settlement");
+    expect(excluded.text()).toContain("2 with a Check not proven closed at settlement");
     expect(excluded.text()).toContain("1 with no settlement record");
     expect(excluded.text()).toContain("1 without a measurable boundary");
     expect(excluded.text()).not.toContain("No attempt was admitted in this window.");
@@ -1198,10 +1283,10 @@ describe("Runtime screen", () => {
 
     const chinese = await runtimeScreen(() => json(RUNTIME), "zh_CN", report);
     expect(chinese.text()).toContain("此窗口内没有可测量的尝试");
-    expect(chinese.text()).toContain("2 个结算时 Check 仍未关闭");
+    expect(chinese.text()).toContain("2 个结算时 Check 未被证明关闭");
     expect(chinese.text()).toContain("1 个没有结算记录");
     expect(chinese.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
-      "付费步骤失败且没有产出持久结果的尝试没有可测量的区间，按「没有可测量的边界」排除；已经产出结果的尝试即使后续某一步失败也照常统计。",
+      "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它因缺结算时点、Check 未被证明关闭、缺队列发送时间戳、边界乱序或没有结算记录而被排除。",
     );
     expect(chinese.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
       "样本之所以可测，是因为它的这次结算把发布义务记为已解除；投递幂等性不属于该区间，这里也不对它作任何断言。",

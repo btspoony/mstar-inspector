@@ -18,6 +18,7 @@ import {
 } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { SWEEP_FIELDS, type SweepField, type SweepConfig, type SweepValues } from "../../contracts/sweep-settings";
+import { DURATION_REPORT_CAP_MAX_MS, DURATION_REPORT_CAP_MIN_MS } from "../../contracts/duration-report";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
@@ -106,7 +107,14 @@ function DurationReportCard({ locale }: { locale: Locale }) {
   const read = useMemo(() => () => readDurationReport(capMs), [capMs]);
   const { state, reload } = useLoaded(read);
   const candidateValue = Number(candidate);
-  const candidateValid = Number.isInteger(candidateValue) && candidateValue > 0;
+  // The route refuses anything outside this range with a 4xx, which would turn
+  // the whole card into a load failure. The same range is checked here so an
+  // unusable candidate never leaves the distribution unrendered.
+  const candidateValid =
+    candidate.trim() !== "" &&
+    Number.isInteger(candidateValue) &&
+    candidateValue >= DURATION_REPORT_CAP_MIN_MS &&
+    candidateValue <= DURATION_REPORT_CAP_MAX_MS;
   const formatMs = (value: number | null): string => (value === null ? "—" : `${Math.round(value)} ms`);
 
   return (
@@ -226,6 +234,14 @@ function DurationReportCard({ locale }: { locale: Locale }) {
                       value={candidate}
                       onChange={(event) => setCandidate(event.target.value)}
                     />
+                    {candidate.trim() !== "" && !candidateValid ? (
+                      <p className="text-xs text-(--tone-warn-fg)" data-duration="candidate-range">
+                        {t(locale, "admin.runtime.durationCandidateRange", {
+                          min: DURATION_REPORT_CAP_MIN_MS,
+                          max: DURATION_REPORT_CAP_MAX_MS,
+                        })}
+                      </p>
+                    ) : null}
                   </div>
                   <Button type="submit" variant="secondary" disabled={!candidateValid}>
                     {t(locale, "admin.runtime.durationCandidateApply")}
@@ -617,9 +633,10 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       await confirmAttemptCap(saved.capMs);
     } catch (error) {
       if (error instanceof AdminWriteError && error.status >= 400 && error.status < 500) {
-        // A DEFINITE refusal: the store did not change, so the last confirmed
-        // value returns and editing stays available with the typed number.
-        setAttemptCapConfirming(false);
+        // A DEFINITE refusal: THIS write did not land. It says nothing about
+        // the row another operator may have written since this page read it,
+        // so the pre-save number is not restored — the store is re-read, and
+        // until that read answers no effective value is shown.
         setAttemptCapSaveUnknown(false);
         setAttemptCapEcho(null);
         const generic = t(locale, "admin.runtime.attemptCapFailed");
@@ -629,6 +646,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           source: "attemptCap",
         });
         attemptCapSignal.fail();
+        await confirmAttemptCap(null);
       } else {
         // UNCERTAIN (network error, timeout, 5xx): the write may have landed, so
         // neither outcome is claimed. The card stays unconfirmed with no number,
