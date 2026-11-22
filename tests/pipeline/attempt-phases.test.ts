@@ -88,6 +88,7 @@ const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedRevie
 );
 const { RoundBudgetSpent, openGateSecrets, sealGateSecrets } = await import("../../src/pipeline/review-attempt");
 const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
+const { reconcileReviewRoute } = await import("../../src/pipeline/route-reconcile");
 const { TERMINAL_FAILURE_TEXT, createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 import type { ChecksOctokit } from "../../src/pipeline/checks";
 
@@ -2514,6 +2515,8 @@ describe("the SEC-01 publish gate", () => {
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+    // The claim is NOT stamped: an unobserved fence does not condemn the commit.
+    expect(h.kvPuts.filter((put) => put.key.startsWith("idem:"))).toHaveLength(0);
   });
 
   test("a refused degraded review still accounts its shipped recheck round", async () => {
@@ -2888,6 +2891,183 @@ describe("the SEC-01 publish gate", () => {
     }[];
     expect(stageRows.filter((row) => row.stage === "parse")).toHaveLength(1);
     expect(recheckRows(db)).toHaveLength(1);
+  });
+
+  test("a duty that cannot be recorded fails the refusal closed", async () => {
+    // note: F-006 edge 1 — a refusal whose obligation cannot even be written must
+    // not reach settlement: collect throws and the attempt stays unresolved.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, shippedFailedRound);
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+    const healthy = db as object;
+    const faulting = new Proxy(healthy, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (sql.includes("INSERT INTO review_recheck_duties")) throw new Error("duty write lost");
+          return (target as { prepare: (value: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    deps.env = { ...deps.env, DB: faulting as never };
+
+    await expect(collectAttempt(deps, ref, prepared)).rejects.toThrow("duty write lost");
+    // Nothing settled, no row, no line.
+    expect(recheckRows(db)).toHaveLength(0);
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(0);
+  });
+
+  test("the route recovery pass finishes a stranded round and discharges the settlement", async () => {
+    // note: F-006 edge 2 + F-009(a): the host wrote the duty and died before the row
+    // and the line. The scheduled pass is the named owner: it writes the row, emits
+    // the attribution once, and only then can the settlement discharge.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed(echo, paidKey, shippedFailedRound);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    const healthyStore = resumed.failureStore;
+    const faulty = failureInsertFault(healthyStore, "recheck", "fail", Number.POSITIVE_INFINITY);
+    resumed.failureStore = faulty.store;
+    await expect(runReviewAttemptWorkflow(resumed, ref, stepStore(steps), async () => {})).rejects.toThrow(
+      "recheck failure row insert lost",
+    );
+    expect(recheckRows(db)).toHaveLength(0);
+
+    // The dead host's settlement is now old enough for the recovery pass.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(Date.now() - 60 * 60_000, ATTEMPT_ID);
+
+    await reconcileReviewRoute(
+      {
+        DB: db as never,
+        REVIEW_QUEUE: { send: async () => {} } as never,
+        IDEMPOTENCY_KV: { get: async () => null, put: async () => {}, delete: async () => {} } as never,
+        log: { info: (fields: Record<string, unknown>, msg: string) => h.testLog.info(fields as never, msg) },
+      },
+      Date.now(),
+    );
+
+    // The row, the attribution fact and the completion all land.
+    expect(recheckRows(db)).toHaveLength(1);
+    expect(h.logLines.filter((line) => line.msg.includes("replayed by the route recovery pass"))).toHaveLength(1);
+    const settled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(settled.settled_ms).not.toBeNull();
+    // The duty is discharged.
+    expect(
+      db.raw.prepare("SELECT COUNT(*) AS n FROM review_recheck_duties WHERE attempt_id = ?").get(ATTEMPT_ID),
+    ).toMatchObject({ n: 0 });
+  });
+
+  test("a replay with the attribution fact present neither re-emits nor blocks discharge", async () => {
+    // note: F-009(b): the fact — not the log call — is the correctness evidence. A
+    // second collect must not duplicate the line, and a fault on the fact's write
+    // path is never reached.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, shippedFailedRound);
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+
+    // Any further write to the attribution fact would fault, and must not be needed.
+    const healthy = db as object;
+    const faulting = new Proxy(healthy, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (sql.includes("INSERT INTO review_recheck_attributions")) throw new Error("fact write lost");
+          return (target as { prepare: (value: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    deps.env = { ...deps.env, DB: faulting as never };
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.logLines.filter((line) => line.fields.recheck_outcome !== undefined)).toHaveLength(1);
+    const settled = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(settled.settled_ms).not.toBeNull();
+  });
+
+  test("a clean review still publishes when the round accounting cannot be stored", async () => {
+    // note: F-010 — on the publish lane the WHOLE accounting is best-effort: a
+    // cleared review stages and publishes regardless.
+    const paidKey = "sk-paid-session-1";
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: "session aborted",
+      });
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    const healthy = db as object;
+    const faulting = new Proxy(healthy, {
+      get(target, prop) {
+        if (prop !== "prepare") return Reflect.get(target, prop);
+        return (sql: string) => {
+          if (sql.includes("review_recheck")) throw new Error("accounting store lost");
+          return (target as { prepare: (value: string) => unknown }).prepare(sql);
+        };
+      },
+    });
+    deps.env = { ...deps.env, DB: faulting as never };
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("collected");
+    expect(h.logLines.some((line) => line.msg.includes("continuing to publish"))).toBe(true);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(1);
+  });
+
+  test("a degraded warning carries the redacted diagnostic, not the short encoded form", async () => {
+    // note: F-008 — the gate-CLEARED degraded path logs its diagnostic; a short
+    // encoding the publication gate cannot match (below its substring floor) must
+    // still be redacted in that warning.
+    const shortKey = "xy";
+    const shortEncoded = Buffer.from(shortKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    await sealStoredGateSecrets(db, [shortKey]);
+    stubStoredStdout(db, JSON.stringify({ ...VALID_OUTPUT, [shortEncoded]: true }));
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "degraded" } });
+
+    const warning = h.logLines.find((line) => line.msg.includes("review degraded"));
+    expect(warning).toBeDefined();
+    expect(warning!.msg).not.toContain(shortEncoded);
+    expect(warning!.msg).toContain("[REDACTED]");
   });
 
   test("a resumed collect opens the paid session's sealed set and refuses the encoded echo", async () => {

@@ -342,57 +342,101 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
 
 /**
  * The effects a settlement can make durable (see `settleAttemptFailure`).
- * `recheck-row` is the refused round's shipped `recheck` failure row: it is
- * REQUIRED while the attempt's `recheck_owed_ms` marker is set, so neither the
- * live settlement nor recovery can discharge a refusal whose row is missing.
+ *
+ * `recheck-row` and `recheck-attribution` are the refused round's two durable
+ * effects. They are REQUIRED while the attempt's duty row (`review_recheck_duties`)
+ * names them as still owed, and their existence — not a host's claim, a log call
+ * or a timestamp — is what lets the settlement rule discharge the attempt.
  */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication" | "recheck-row";
+export type SettlementEffect =
+  | "failure-row"
+  | "check"
+  | "claim-stamp"
+  | "skip"
+  | "publication"
+  | "recheck-row"
+  | "recheck-attribution";
 
-const NOTE_RECHECK_OWED_SQL = `
-UPDATE review_launches SET recheck_owed_ms = ? WHERE attempt_id = ? AND recheck_owed_ms IS NULL
+/** The seat's own round outcome — the vocabulary the attribution line reports. */
+export type RecheckOutcome = "ok" | "failed" | "absent" | "skipped";
+
+/** The round accounting a refusal still owes (everything a replay needs). */
+export type RecheckDuty = {
+  attemptId: string;
+  headSha: string;
+  /** The sanitized shipped-failure detail; `null` = no row owed. */
+  failureError: string | null;
+  outcome: RecheckOutcome;
+};
+
+const RECORD_RECHECK_DUTY_SQL = `
+INSERT INTO review_recheck_duties (attempt_id, head_sha, failure_error, outcome, created_ms)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
 `;
-const CLEAR_RECHECK_OWED_SQL = `UPDATE review_launches SET recheck_owed_ms = NULL WHERE attempt_id = ?`;
-const MARK_RECHECK_ATTRIBUTED_SQL = `
-UPDATE review_launches SET recheck_attributed_ms = ? WHERE attempt_id = ? AND recheck_attributed_ms IS NULL
+const READ_RECHECK_DUTY_SQL = `
+SELECT attempt_id, head_sha, failure_error, outcome FROM review_recheck_duties WHERE attempt_id = ?
 `;
-const READ_RECHECK_OBLIGATION_SQL = `SELECT recheck_owed_ms, recheck_attributed_ms FROM review_launches WHERE attempt_id = ?`;
+const CLEAR_RECHECK_DUTY_SQL = `DELETE FROM review_recheck_duties WHERE attempt_id = ?`;
+const RECORD_RECHECK_ATTRIBUTION_SQL = `
+INSERT INTO review_recheck_attributions (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
+const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
 
 /**
- * Open the attempt's `recheck-row` obligation — the shipped round's row is owed.
- * Idempotent: an obligation already open stays open.
+ * Open the round's duty: written BEFORE any effect, so a host that dies mid-way
+ * leaves the recovery owner everything it needs. Idempotent.
  */
-export async function noteRecheckOwed(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
-  await db.prepare(NOTE_RECHECK_OWED_SQL).bind(nowMs, attemptId).run();
+export async function recordRecheckDuty(db: D1Like, duty: RecheckDuty, nowMs: number): Promise<void> {
+  await db
+    .prepare(RECORD_RECHECK_DUTY_SQL)
+    .bind(duty.attemptId, duty.headSha, duty.failureError, duty.outcome, nowMs)
+    .run();
 }
 
-/** Discharge the obligation once the row is durable. */
-export async function clearRecheckOwed(db: D1Like, attemptId: string): Promise<void> {
-  await db.prepare(CLEAR_RECHECK_OWED_SQL).bind(attemptId).run();
-}
-
-/**
- * The attempt's round-accounting facts: whether its shipped `recheck` row is
- * still OWED (a settlement obligation) and whether its attribution LINE was
- * already emitted (the line's own replayable fact — a committed insert is not a
- * delivered log line).
- */
-export async function readRecheckObligation(
-  db: D1Like,
-  attemptId: string,
-): Promise<{ owed: boolean; attributed: boolean }> {
-  const row = await db
-    .prepare(READ_RECHECK_OBLIGATION_SQL)
-    .bind(attemptId)
-    .first<{ recheck_owed_ms: number | null; recheck_attributed_ms: number | null }>();
+/** The attempt's open round duty, or `null` when nothing is owed. */
+export async function readRecheckDuty(db: D1Like, attemptId: string): Promise<RecheckDuty | null> {
+  const row = await db.prepare(READ_RECHECK_DUTY_SQL).bind(attemptId).first<{
+    attempt_id: string;
+    head_sha: string;
+    failure_error: string | null;
+    outcome: RecheckOutcome;
+  }>();
+  if (row === null) return null;
   return {
-    owed: row?.recheck_owed_ms !== null && row?.recheck_owed_ms !== undefined,
-    attributed: row?.recheck_attributed_ms !== null && row?.recheck_attributed_ms !== undefined,
+    attemptId: row.attempt_id,
+    headSha: row.head_sha,
+    failureError: row.failure_error,
+    outcome: row.outcome,
   };
 }
 
-/** Record that this attempt's round attribution line was emitted. Idempotent. */
-export async function markRecheckAttributed(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
-  await db.prepare(MARK_RECHECK_ATTRIBUTED_SQL).bind(nowMs, attemptId).run();
+/** Discharge the duty — BOTH its effects are durable. */
+export async function clearRecheckDuty(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_RECHECK_DUTY_SQL).bind(attemptId).run();
+}
+
+/** Whether the round's attribution line was already emitted for this attempt. */
+export async function readRecheckAttribution(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_RECHECK_ATTRIBUTION_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/**
+ * Record that the round's attribution line was emitted. Inserted AFTER the log
+ * call, so the delivery contract is at-least-once: a crash in between re-emits,
+ * and the sink accepts a duplicate; it can never claim a line that never ran.
+ */
+export async function recordRecheckAttribution(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(RECORD_RECHECK_ATTRIBUTION_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether the attempt's `recheck` shipped-failure row is durable. */
+export async function recheckRowExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(RECHECK_ROW_EXISTS_SQL).bind(`${attemptId}:recheck`).first<{ present: number }>();
+  return row !== null;
 }
 
 /**
@@ -459,15 +503,29 @@ async function settlementPlan(
     required = ["skip"];
   } else if (landed.has("failure-row")) {
     required = settlementObligationsOf(handoff.payload, checkInvolved);
-    // A refused round's shipped row is owed until it is durable — the same
-    // marker the accounting writes, read by the live settlement AND recovery, so
-    // no lane can stamp `settled_ms` over an incomplete ledger (F-006).
-    if ((await readRecheckObligation(db, input.attemptId)).owed) required.push("recheck-row");
+    // (The refused round's two effects are read from durable facts below.)
   } else if (landed.has("publication")) {
     required = ["publication"];
     if (checkInvolved) required.push("check");
   } else {
     return null;
+  }
+  // The refused round's two effects come from DURABLE FACTS — the duty row says
+  // what is owed, the row and the attribution fact say what landed. The live
+  // settlement and the recovery pass share this plan, so neither can discharge
+  // an incomplete ledger, and no host's claim or timestamp can stand in for it.
+  const duty = await readRecheckDuty(db, input.attemptId);
+  if (duty !== null) {
+    if (duty.failureError === null || (await recheckRowExists(db, input.attemptId))) {
+      landed.add("recheck-row");
+    } else {
+      required.push("recheck-row");
+    }
+    if (await readRecheckAttribution(db, input.attemptId)) {
+      landed.add("recheck-attribution");
+    } else {
+      required.push("recheck-attribution");
+    }
   }
   return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
 }

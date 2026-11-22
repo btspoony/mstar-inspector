@@ -80,11 +80,11 @@ import {
 } from "../store/review-checks";
 import {
   beginAttemptSettlement,
-  clearRecheckOwed,
+  clearRecheckDuty,
   deliveryKeyOf,
-  markRecheckAttributed,
-  noteRecheckOwed,
-  readRecheckObligation,
+  readRecheckAttribution,
+  recordRecheckAttribution,
+  recordRecheckDuty,
   readAttemptCheckKey,
   readAttemptHandoff,
   recordSuccessorIntent,
@@ -4835,10 +4835,15 @@ async function preparePhase(
  * `persistedAtMs: null` means "not durable — carry on"; a fault throws
  * `AttemptUnknownError`.
  */
-export async function readDurablePaid(
-  deps: Pick<ProcessDeps, "env">,
-  attemptId: string,
-): Promise<{ persistedAtMs: number | null }> {
+export type PaidFence =
+  /** The paid result is durable: collect owns the rest, nothing may be paid again. */
+  | { kind: "persisted"; persistedAtMs: number }
+  /** No durable outcome yet and the row can still be paid once. */
+  | { kind: "payable" }
+  /** The row records a terminal non-payable state: never pay, never resolve config. */
+  | { kind: "unpayable" };
+
+export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId: string): Promise<PaidFence> {
   let verdict: ReturnType<typeof launchVerdict>;
   try {
     verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
@@ -4847,7 +4852,23 @@ export async function readDurablePaid(
       `attempt ${attemptId}: the launch fence could not be read (${err instanceof Error ? err.message : String(err)}) — the paid outcome is unconfirmed`,
     );
   }
-  return { persistedAtMs: verdict.kind === "persisted" ? verdict.persistedAtMs : null };
+  switch (verdict.kind) {
+    case "persisted":
+      return { kind: "persisted", persistedAtMs: verdict.persistedAtMs };
+    case "never-claimed":
+    case "never-paid":
+      // Nothing has been paid and the row is still releasable.
+      return { kind: "payable" };
+    case "paid-failed":
+    case "owned-by-cleanup":
+    case "unrecognised":
+      return { kind: "unpayable" };
+    case "paid-unknown":
+      // Sent, but no durable outcome: the paid-entry fence refuses a second pay.
+      return { kind: "unpayable" };
+    default:
+      return noLaunchState(verdict);
+  }
 }
 
 export async function reviewAttempt(
@@ -4860,8 +4881,16 @@ export async function reviewAttempt(
   // nothing here: the credentials the model saw are sealed on the row, and a
   // set derived from today's config would be a DIFFERENT one. Return the row's
   // state before minting a token, resolving a config or caching anything.
-  const prior = await readDurablePaid(deps, attemptId);
-  if (prior.persistedAtMs !== null) return { state: "persisted", persistedAtMs: prior.persistedAtMs };
+  const fence = await readDurablePaid(deps, attemptId);
+  if (fence.kind === "persisted") return { state: "persisted", persistedAtMs: fence.persistedAtMs };
+  if (fence.kind === "unpayable") {
+    // Nothing may be paid or collected from this row, and today's config must not
+    // be consulted to say so (a broken config would turn an unpayable replay into
+    // an ordinary failure).
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the launch row records a non-payable outcome — no paid step may be taken`,
+    );
+  }
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
   // The live objects are this phase's own. The container is resolved by attempt
@@ -5179,78 +5208,92 @@ async function collectPhase(
     // the closure section.
     const shipped =
       recheckInput !== undefined && !roundCancelled && (recheckDoc === null || recheckOutcome === "failed");
-    if (shipped) {
-      // A REFUSAL waits for this row: the obligation is opened first (so a fault
-      // leaves the attempt undischargeable, not settled) and cleared once the row
-      // is durable — by any later pass (F-006).
-      if (required) await noteRecheckOwed(deps.env.DB, attemptId, Date.now());
-      try {
+    const emitAttribution = (): void =>
+      deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
+        {
+          ...fields,
+          recheck_outcome: recheckOutcome,
+          // Same wrapper as `error`: a seat-authored `reason` can echo a
+          // credential exactly like `error` can.
+          recheck_reason: status?.reason === null || status?.reason === undefined
+            ? null
+            : seatText(status.reason),
+          recheck_error: status?.error === null || status?.error === undefined
+            ? null
+            : seatText(status.error),
+          // Named drops + the unnamed ones actually attributed (no usable
+          // rowId, so mapped by position): the count reports what happened,
+          // not only what could be named.
+          rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
+          // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+          // the sent-and-unanswered pool is excess that can claim no row. It is
+          // dropped, and reported here so the silence has a number.
+          rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
+          // Real seat answers (the published coverage count), never the
+          // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
+          // without ever having been assessed.
+          assessed: reconciled.assessedCount,
+        },
+        recheckInput !== undefined
+          ? recheckDoc === null
+            ? roundCancelled
+              ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
+              : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+            : "recheck round accounted"
+          : captureFailed
+            ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
+            : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
+      );
+    /**
+     * The round's durable accounting, in order: the DUTY first (a replay needs it),
+     * the shipped row, then the attribution line at-least-once — emitted before
+     * its own fact is recorded, so a crash in between duplicates the line at the
+     * sink but can never lose it. The duty is discharged only once both effects
+     * are durable, and the settlement rule reads those facts, never a host's say.
+     */
+    const accountDurably = async (): Promise<void> => {
+      await recordRecheckDuty(
+        deps.env.DB,
+        { attemptId, headSha, failureError: shipped ? recheckDetail : null, outcome: recheckOutcome },
+        Date.now(),
+      );
+      if (shipped) {
         // Attempt+stage id, distinct from the parse/main rows: ONE durable record
         // per shipped round, so a collect retry (or two concurrent entries)
         // cannot count the round twice.
         await deps.failureStore.record({
           id: `${attemptId}:recheck`,
           target_id: payload.targetId,
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: headSha,
-            stage: "recheck",
-            error: recheckDetail,
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: headSha,
+          stage: "recheck",
+          error: recheckDetail,
         });
-        if (required) await clearRecheckOwed(deps.env.DB, attemptId);
-      } catch (err) {
-        // A refused review keeps the obligation open (the collect retries, and a
-        // settlement cannot discharge it); a review that is about to publish
-        // keeps the best-effort rule instead — the insert must never mask the
-        // round (AL-6 pattern).
-        if (required) throw err;
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
       }
+      if (!(await readRecheckAttribution(deps.env.DB, attemptId))) {
+        emitAttribution();
+        await recordRecheckAttribution(deps.env.DB, attemptId, Date.now());
+      }
+      await clearRecheckDuty(deps.env.DB, attemptId);
+    };
+    if (!required) {
+      // The publish lane stays BEST-EFFORT end to end: nothing here may block a
+      // review the gate cleared from staging and publishing (F-010).
+      try {
+        await accountDurably();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `recheck round accounting failed (continuing to publish): ${detail}`);
+      }
+      return reconciled;
     }
-    // The attribution LINE has its own replayable fact: a committed row is not a
-    // delivered log line (D1 can lose the reply, or the host can die between the
-    // insert and the log), so the line is deduplicated by that fact and not by
-    // an insert's change count (F-007).
-    if ((await readRecheckObligation(deps.env.DB, attemptId)).attributed) return reconciled;
-    deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
-      {
-        ...fields,
-        recheck_outcome: recheckOutcome,
-        // Same wrapper as `error`: a seat-authored `reason` can echo a
-        // credential exactly like `error` can.
-        recheck_reason: status?.reason === null || status?.reason === undefined
-          ? null
-          : seatText(status.reason),
-        recheck_error: status?.error === null || status?.error === undefined
-          ? null
-          : seatText(status.error),
-        // Named drops + the unnamed ones actually attributed (no usable
-        // rowId, so mapped by position): the count reports what happened,
-        // not only what could be named.
-        rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
-        // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
-        // the sent-and-unanswered pool is excess that can claim no row. It is
-        // dropped, and reported here so the silence has a number.
-        rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
-        // Real seat answers (the published coverage count), never the
-        // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
-        // without ever having been assessed.
-        assessed: reconciled.assessedCount,
-      },
-      recheckInput !== undefined
-        ? recheckDoc === null
-          ? roundCancelled
-            ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
-            : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
-          : "recheck round accounted"
-        : captureFailed
-          ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
-          : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
-    );
-    await markRecheckAttributed(deps.env.DB, attemptId, Date.now());
+    // A REFUSAL fails closed: a duty that cannot be recorded, a row that cannot be
+    // written, or a fact that cannot be stored throws out of collect — the refusal
+    // is never settled over an accounting it does not hold (F-006 edge 1).
+    await accountDurably();
     return reconciled;
   };
 

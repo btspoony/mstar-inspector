@@ -31,11 +31,19 @@ import {
   idemKey,
 } from "../contracts/idem";
 import { readReviewLaunch } from "./review-attempt";
+import { payloadIdentityFields } from "./review-attempt-execution";
+import type { ConsumerLogFields } from "./review-attempt-execution";
+import { settlementFailureRowStatement } from "../store/failure-store";
 import {
   landFailureEffect,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
+  clearRecheckDuty,
   listIncompleteSettlements,
+  readRecheckAttribution,
+  readRecheckDuty,
+  recordRecheckAttribution,
+  recheckRowExists,
   listOwedSuccessors,
   listUnpublishedLaunchSettlements,
   markSuccessorDelivered,
@@ -58,6 +66,12 @@ export type ReviewRouteEnv = {
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
   /** The commit claim the failed-claim stamp is written to. */
   IDEMPOTENCY_KV: KVNamespace;
+  /**
+   * The pass's log sink. The recheck accounting's attribution LINE is a durable
+   * effect owned by whoever finishes the round, so a replay this pass performs
+   * has to emit it too. Absent only in a caller that does not log.
+   */
+  log?: { info?: (fields: ConsumerLogFields & { recheck_replayed?: boolean }, msg: string) => void };
 };
 
 /**
@@ -126,7 +140,65 @@ async function landSettlementEffects(
     });
     if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }
+  // The refused round's accounting comes first: the settlement rule requires its
+  // row and its attribution fact, so this pass lands them before re-deciding.
+  await ensureRecheckAccounting(env, handoff, nowMs);
   await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
+}
+
+/**
+ * Finish a refused round's durable accounting that the dead host started: the
+ * duty row (`review_recheck_duties`) says what is owed, and this pass — the named
+ * owner of an incomplete settlement — writes what is missing. Idempotent: the row
+ * is attempt+stage keyed, the attribution fact is keyed by attempt, and a delivery
+ * that already emitted is not re-emitted once its fact exists.
+ *
+ * A fault leaves the duty open; the row stays on the incomplete list and the next
+ * pass retries.
+ */
+async function ensureRecheckAccounting(
+  env: ReviewRouteEnv,
+  handoff: AttemptHandoff,
+  nowMs: number,
+): Promise<void> {
+  const duty = await readRecheckDuty(env.DB, handoff.attemptId);
+  if (duty === null) return;
+  if (duty.failureError !== null && !(await recheckRowExists(env.DB, duty.attemptId))) {
+    await settlementFailureRowStatement(
+      env.DB,
+      {
+        target_id: handoff.payload.targetId,
+        installation_id: handoff.payload.installation_id,
+        owner: handoff.payload.owner,
+        repo: handoff.payload.repo,
+        pr_number: handoff.payload.pr_number,
+        head_sha: duty.headSha,
+        stage: "recheck",
+        error: duty.failureError,
+      },
+      `${duty.attemptId}:recheck`,
+    ).run();
+  }
+  if (!(await readRecheckAttribution(env.DB, duty.attemptId))) {
+    // At-least-once, like the live emission: log first, then the fact. A pass
+    // with no sink cannot certify a line it never emitted, so the duty stays open.
+    const sink = env.log?.info;
+    if (sink === undefined) {
+      throw new Error(`recheck attribution cannot be replayed for ${duty.attemptId}: no log sink`);
+    }
+    sink(
+      {
+        ...payloadIdentityFields(handoff.payload),
+        attempt_id: duty.attemptId,
+        head_sha: duty.headSha,
+        recheck_outcome: duty.outcome,
+        recheck_replayed: true,
+      },
+      "recheck round accounted — replayed by the route recovery pass",
+    );
+    await recordRecheckAttribution(env.DB, duty.attemptId, nowMs);
+  }
+  await clearRecheckDuty(env.DB, duty.attemptId);
 }
 
 /**

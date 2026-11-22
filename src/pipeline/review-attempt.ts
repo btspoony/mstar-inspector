@@ -356,9 +356,12 @@ export async function openGateSecrets(
 }
 
 /**
- * The attempt's sealed gate set, or `null` when it carries none (paid before
- * the envelope existed, or sealing was impossible). A store fault throws: the
- * caller must retry, never publish a body it could not scan.
+ * The persisted result's sealed gate set, or `null` when that row records none.
+ * A NULL is only ever a PERSISTED-RESULT fact: the seal is taken before the paid
+ * exec (an encryption fault fails the step, so no result is written), and a
+ * sealing fault can therefore never leave a persisted row without one — the only
+ * NULL rows are attempts paid before the column existed. A store fault throws:
+ * the caller must retry, never publish a body it could not scan.
  */
 export async function readGateSecretsEnvelope(db: D1Like, attemptId: string): Promise<string | null> {
   const row = await db
@@ -671,6 +674,12 @@ export async function claimReviewLaunch(
  * `persisted` only in the statement that stores the result, so completion
  * cannot be recorded before the result is durable (the schema refuses the
  * combination). `false` means the row did not move — nothing is confirmed.
+ */
+/**
+ * @param gateSecretsEnc the seal taken BEFORE the exec (see `runReviewAttempt`).
+ *   A `null` is only legitimate for a row that predates the seal (or a test that
+ *   writes the result directly) — never for an attempt this build paid, whose
+ *   sealing fault fails the step before the result exists.
  */
 export async function completeReviewLaunch(
   db: D1Like,
@@ -2259,10 +2268,10 @@ export async function runReviewAttempt(input: {
   progress.secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
   // SEC-01 resume (I-000685): the exact set this exec is about to hand the model
   // — the provider keys it transports plus the installation token it minted — is
-  // sealed HERE, before anything is spent, and rides the statement that records
-  // the paid result. A failure to seal is a failure of the paid step itself: an
-  // unsealed attempt would be a review whose body no resumed host could ever
-  // protect, so it fails while nothing has been paid, never after.
+  // sealed HERE, BEFORE the exec: an encryption failure is a PRE-SPEND failure of
+  // the paid step (nothing paid, nothing persisted). The ciphertext then rides the
+  // POST-SPEND statement that records the result, so a persisted row and its seal
+  // are durable together and neither can exist without the other.
   const gateSecretsEnc = await sealGateSecrets(
     deps.env.DASHBOARD_ENCRYPTION_KEY,
     attemptId,

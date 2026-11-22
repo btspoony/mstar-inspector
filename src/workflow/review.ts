@@ -105,7 +105,10 @@ export async function runReviewAttemptWorkflow(
       // already-paid result depend on configuration that may have been removed,
       // and a resolution fault would settle the attempt as a failure.
       async () => {
-        if ((await readDurablePaid(deps, ref.attemptId)).persistedAtMs === null) {
+        // Config is resolved only for a step that can still PAY. A persisted
+        // result needs none (collect owns it), and a non-payable row must not
+        // make an already-decided attempt depend on today's configuration.
+        if ((await readDurablePaid(deps, ref.attemptId)).kind === "payable") {
           await ensureRunnerConfig(ref.payload, deps);
         }
         return reviewAttempt(deps, ref, prepared.prepared);
