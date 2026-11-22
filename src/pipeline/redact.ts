@@ -48,6 +48,10 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
 /** Regex metacharacters, escaped so a credential form matches literally. */
 const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
+// why: a value this short cannot be distinguished from ordinary text (`mstar`
+// inside `mstar.review/v1`), so its only safe match is an exact one.
+const SUBSTRING_MIN_LENGTH = 8;
+
 /** A retained document whose host-written identity paths are protected. */
 export type RetainedDocument = "run" | "recheck" | "report" | "text";
 
@@ -118,22 +122,36 @@ export type RedactionOutcome<T> = {
 /** Mutable counter one walk threads through its leaves. */
 type RedactionState = { replaced: number };
 
+/** How each credential form is matched against a leaf. */
+type CredentialMatcher = {
+  /** Forms of long credentials, matched anywhere in a leaf. */
+  pattern: RegExp | null;
+  /** Short credentials, matched only when the whole leaf is that value. */
+  exact: ReadonlySet<string>;
+};
+
 /**
- * Every form of every non-empty credential, longest first. No length floor: a
- * short custom provider key is still a credential, and identity fields are
- * protected by PATH, so a short value cannot reach one.
+ * Split the credentials into the two match modes. A value at or above
+ * `SUBSTRING_MIN_LENGTH` contributes every form and is matched anywhere; a
+ * shorter one is matched only against a leaf that is exactly that value.
  */
-function applicableForms(secrets: readonly string[]): string[] {
+function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
   const forms = new Set<string>();
+  const exact = new Set<string>();
   for (const secret of new Set(secrets)) {
     if (secret === "") continue;
+    if (secret.length < SUBSTRING_MIN_LENGTH) {
+      exact.add(secret);
+      continue;
+    }
     for (const form of Object.values(secretTransforms(secret))) {
       if (form !== "") forms.add(form);
     }
   }
   // A shorter form that is a substring of a longer one must not shred the
   // longer match first.
-  return [...forms].sort((left, right) => right.length - left.length);
+  const ordered = [...forms].sort((left, right) => right.length - left.length);
+  return { pattern: ordered.length === 0 ? null : formPattern(ordered), exact };
 }
 
 /**
@@ -164,28 +182,27 @@ export function redactDocument<T>(
   secrets: readonly string[],
   document: RetainedDocument,
 ): RedactionOutcome<T> {
-  const forms = applicableForms(secrets);
-  if (forms.length === 0) return { value, replaced: 0 };
+  const matcher = credentialMatcher(secrets);
+  if (matcher.pattern === null && matcher.exact.size === 0) return { value, replaced: 0 };
   const state: RedactionState = { replaced: 0 };
-  const pattern = formPattern(forms);
-  const redacted = redactRoot(value, pattern, state, IDENTITY_PATHS[document]);
+  const redacted = redactRoot(value, matcher, state, IDENTITY_PATHS[document]);
   return { value: redacted as T, replaced: state.replaced };
 }
 
 function redactRoot(
   value: unknown,
-  pattern: RegExp,
+  matcher: CredentialMatcher,
   state: RedactionState,
   paths: readonly (readonly string[])[],
 ): unknown {
   if (typeof value === "string") {
     const parsed = parseDocument(value);
-    if (parsed === undefined) return redactText(value, pattern, state);
-    const redacted = redactTree(parsed, [], paths, pattern, state);
+    if (parsed === undefined) return redactText(value, matcher, state);
+    const redacted = redactTree(parsed, [], paths, matcher, state);
     // Untouched document: return the original bytes, trimming included.
     return state.replaced === 0 ? value : JSON.stringify(redacted);
   }
-  return redactTree(value, [], paths, pattern, state);
+  return redactTree(value, [], paths, matcher, state);
 }
 
 /**
@@ -197,27 +214,27 @@ function redactTree(
   value: unknown,
   at: readonly string[],
   paths: readonly (readonly string[])[],
-  pattern: RegExp,
+  matcher: CredentialMatcher,
   state: RedactionState,
 ): unknown {
   if (typeof value === "string") {
     const protectedPath = paths.some(
       (path) => path.length === at.length && path.every((segment, index) => segment === at[index]),
     );
-    return protectedPath ? value : redactText(value, pattern, state);
+    return protectedPath ? value : redactText(value, matcher, state);
   }
   // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
   if (value instanceof Set) {
-    return new Set([...value].map((item) => redactTree(item, [...at, "*"], paths, pattern, state)));
+    return new Set([...value].map((item) => redactTree(item, [...at, "*"], paths, matcher, state)));
   }
   if (Array.isArray(value)) {
-    return value.map((item) => redactTree(item, [...at, "*"], paths, pattern, state));
+    return value.map((item) => redactTree(item, [...at, "*"], paths, matcher, state));
   }
   if (value !== null && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        redactTree(item, [...at, key], paths, pattern, state),
+        redactTree(item, [...at, key], paths, matcher, state),
       ]),
     );
   }
@@ -225,14 +242,23 @@ function redactTree(
 }
 
 /**
- * One scan per leaf. Existing markers are BOUNDARIES, not scanned text: the leaf
- * is split on the literal marker, each segment is scanned once, and the markers
- * are rejoined verbatim. So a credential that is a substring of `[REDACTED]`
- * (or spans its edge) can never rewrite it, a model-printed marker shields
- * nothing but itself, and text the scan emitted is never re-examined — a second
- * pass is a no-op with no placeholder involved.
+ * One leaf, in the matcher's two modes: a leaf that IS a short credential is
+ * replaced whole; otherwise the long-credential forms are scanned once.
+ *
+ * Existing markers are BOUNDARIES, not scanned text: the leaf is split on the
+ * literal marker, each segment is scanned once, and the markers are rejoined
+ * verbatim. So a credential that is a substring of `[REDACTED]` (or spans its
+ * edge) can never rewrite it, a model-printed marker shields nothing but
+ * itself, and text the scan emitted is never re-examined — a second pass is a
+ * no-op with no placeholder involved.
  */
-function redactText(text: string, pattern: RegExp, state: RedactionState): string {
+function redactText(text: string, matcher: CredentialMatcher, state: RedactionState): string {
+  if (matcher.exact.has(text)) {
+    state.replaced += 1;
+    return REDACTED;
+  }
+  const { pattern } = matcher;
+  if (pattern === null) return text;
   let count = 0;
   const out = text
     .split(REDACTED)

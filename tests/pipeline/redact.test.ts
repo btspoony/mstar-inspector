@@ -259,7 +259,7 @@ describe("redactDocument", () => {
     expect(again.replaced).toBe(0);
   });
 
-  test("a 3-character credential is redacted; the host identity path is still byte-identical", () => {
+  test("a 3-character credential is replaced only when the leaf is exactly it", () => {
     const key = "abc";
     const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
     const envelope = JSON.stringify({
@@ -278,9 +278,31 @@ describe("redactDocument", () => {
 
     // The path walk — not a length floor — is what protects identity.
     expect(redacted.target.head_sha).toBe(headSha);
+    // A short value matches a whole leaf, never a substring.
     expect(redacted.note).toBe("[REDACTED]");
-    expect(redacted.findings[0]?.body).toBe("leak [REDACTED]");
-    expect(outcome.replaced).toBe(2);
+    expect(redacted.findings[0]?.body).toBe("leak abc");
+    expect(outcome.replaced).toBe(1);
+  });
+
+  test("a short credential never rewrites a structural value that contains it", () => {
+    const key = "mstar";
+    const envelope = JSON.stringify({ schema: "mstar.review/v1", summary_md: key });
+
+    const outcome = redactDocument(envelope, [key], "run");
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as { schema: string; summary_md: string };
+
+    expect(redacted.schema).toBe("mstar.review/v1");
+    expect(redacted.summary_md).toBe("[REDACTED]");
+    expect(outcome.replaced).toBe(1);
+  });
+
+  test("an 8-character credential still replaces as a substring", () => {
+    const key = "abcdefgh";
+    const outcome = redactDocument({ note: `prefix ${key} suffix` }, [key], "text");
+
+    expect(outcome.value.note).toBe("prefix [REDACTED] suffix");
+    expect(outcome.replaced).toBe(1);
   });
 
   test("a payload with no secret present keeps its exact bytes", () => {
