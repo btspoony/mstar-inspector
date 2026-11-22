@@ -1,5 +1,4 @@
-/**
- * webhook_deliveries tests (architect verdict AL-20-1) —
+/** note: webhook_deliveries tests (architect verdict AL-20-1) —
  * migration 0011 + the apps-store delivery face + the per-App webhook
  * face's best-effort recording.
  *
@@ -42,11 +41,11 @@ import {
 } from "../helpers/migration-shapes";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
-/** base64 of exactly 32 bytes (the secretbox master-key requirement). */
+/** invariant: base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
 describe("migrations/0011_webhook_deliveries.sql", () => {
-  /** The parent/attribution names of THIS fixture's shape: 0056 renames both. */
+  /** note: The parent/attribution names of THIS fixture's shape: 0056 renames both. */
   function shape(db: ReturnType<typeof createTestD1>): { parent: string; attribution: string } {
     const renamed = (db.raw
       .query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'review_bots'")
@@ -54,8 +53,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     return renamed ? { parent: "review_bots", attribution: "bot_id" } : { parent: "github_apps", attribution: "app_id" };
   }
 
-  /**
-   * Raw-insert one app row (dummy envelopes — no decryption here).
+  /** note: Raw-insert one app row (dummy envelopes — no decryption here).
    * The local route key exists only on the pre-0038 shapes this describe
    * also builds, so the column list follows the fixture's shape.
    */
@@ -78,7 +76,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       .run(id, ...pathBind, id, 1000 + appNum, `App ${id}`, "v1.primary.aXZpdi5jdA==", "v1.primary.aXZpdi5jdA==");
   }
 
-  /** Raw-insert one delivery row (full column control; the field is `bot_id`, bound positionally). */
+  /** note: Raw-insert one delivery row (full column control; the field is `bot_id`, bound positionally). */
   function insertDelivery(
     db: ReturnType<typeof createTestD1>,
     overrides: Partial<Record<string, unknown>> = {},
@@ -101,7 +99,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
 
   test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows); existing tables untouched", () => {
     const db = createTestD1();
-    // A live review predates the CREATE TABLE (wrangler order).
+    // note: A live review predates the CREATE TABLE (wrangler order).
     db.raw
       .prepare(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
@@ -117,12 +115,12 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       "0008_github_apps_ops.sql",
       "0009_app_model_roles.sql",
       "0010_review_failures.sql",
-      // 0036: the fixture row carries webhook_path + github_slug.
+      // note: 0036: the fixture row carries webhook_path + github_slug.
       "0036_app_identity.sql",
     ]);
-    seedAppRow(db); // the FK parent exists before 0011
+    seedAppRow(db); // invariant: the FK parent exists before 0011
 
-    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    // invariant: Append-only CREATE TABLE over the live rows — nothing existing changes.
     expect(() => applyMigrations(db, ["0011_webhook_deliveries.sql"])).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviewCount.n).toBe(1);
@@ -130,7 +128,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_webhook_deliveries_app_created'")
       .get();
     expect(index).toBeDefined();
-    // AL-20-1: no deliverable_hint column.
+    // note: AL-20-1: no deliverable_hint column.
     const cols = db.raw.query("PRAGMA table_info(webhook_deliveries)").all() as Array<{ name: string }>;
     expect(cols.map((c) => c.name)).not.toContain("deliverable_hint");
   });
@@ -142,7 +140,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
     const row = db.raw.query("SELECT * FROM webhook_deliveries").get() as { id: string; created_at: string };
     expect(row.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
-    // A NULL in any one of the NOT NULL columns is refused while the rest stay
+    // note: A NULL in any one of the NOT NULL columns is refused while the rest stay
     // valid. The sweep derives its columns from the schema itself, so it covers
     // every NOT NULL column the table actually has (0011 plus later ALTERs)
     // instead of a hard-coded pair that can drift from the DDL.
@@ -160,7 +158,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
       repository_full_name: "acme/widgets",
       reason: null,
     };
-    // Every column carries a valid value here, so a refusal below can only
+    // invariant: Every column carries a valid value here, so a refusal below can only
     // come from the NULL under test.
     expect(Object.keys(valid).sort()).toEqual(columns.map((column) => column.name).sort());
     for (const column of columns.filter((entry) => entry.notnull === 1)) {
@@ -196,7 +194,7 @@ describe("migrations/0011_webhook_deliveries.sql", () => {
 });
 
 describe("migrations/0043_webhook_delivery_repository.sql", () => {
-  /** The delivery table's pre-0043 shape: github_apps (post-0036) + 0011. */
+  /** note: The delivery table's pre-0043 shape: github_apps (post-0036) + 0011. */
   function preSourceDb(): TestD1 {
     const db = createTestD1();
     applyMigrations(db, ["0004_github_apps.sql", "0036_app_identity.sql", "0011_webhook_deliveries.sql"]);
@@ -214,7 +212,7 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
                  'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run();
-    // A delivery recorded BEFORE the column existed — the row the
+    // invariant: A delivery recorded BEFORE the column existed — the row the
     // unknown-source label is for.
     db.raw
       .prepare(
@@ -223,13 +221,13 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
       )
       .run();
 
-    // Forward-only ALTER: no table rewrite, so the old row is still there.
+    // why: Forward-only ALTER: no table rewrite, so the old row is still there.
     expect(() => applyMigrations(db, ["0043_webhook_delivery_repository.sql"])).not.toThrow();
     expect(db.raw.query("SELECT id, repository_full_name FROM webhook_deliveries").all()).toEqual([
       { id: "delivery-old", repository_full_name: null },
     ]);
 
-    // …and a post-0043 insert carries the source.
+    // note: …and a post-0043 insert carries the source.
     db.raw
       .prepare(
         `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name)
@@ -243,7 +241,7 @@ describe("migrations/0043_webhook_delivery_repository.sql", () => {
 });
 
 describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () => {
-  /** The classifier passes its OWN parse; these cases exercise that document. */
+  /** note: The classifier passes its OWN parse; these cases exercise that document. */
   const parse = JSON.parse as (text: string) => unknown;
 
   test("full_name wins, owner/name is the fallback, and a document with no source is null — never throws", () => {
@@ -255,35 +253,35 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () 
     expect(
       webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "widgets", owner: { login: "acme" } } }))),
     ).toBe("acme/widgets");
-    // An empty name is not a repository; an absent repository block is not one either.
+    // note: An empty name is not a repository; an absent repository block is not one either.
     expect(
       webhookRepositoryFullName(parse(JSON.stringify({ repository: { name: "", owner: { login: "acme" } } }))),
     ).toBeNull();
     expect(webhookRepositoryFullName(parse(JSON.stringify({ zen: "Keep it logically awesome." })))).toBeNull();
     expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: null })))).toBeNull();
-    // A document the parse could not produce (an unparsable / JSON `null` body).
+    // note: A document the parse could not produce (an unparsable / JSON `null` body).
     expect(webhookRepositoryFullName(null)).toBeNull();
     expect(webhookRepositoryFullName(parse("null"))).toBeNull();
   });
 
   test("the preferred source is read on its own, without a valid owner/name pair", () => {
-    // The authoritative form alone — no `name`, no `owner` — still names the repo.
+    // note: The authoritative form alone — no `name`, no `owner` — still names the repo.
     expect(webhookRepositoryFullName(parse(JSON.stringify({ repository: { full_name: "acme/widgets" } })))).toBe(
       "acme/widgets",
     );
-    // A malformed fallback pair does not discard a valid preferred source.
+    // note: A malformed fallback pair does not discard a valid preferred source.
     expect(
       webhookRepositoryFullName(
         parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: 42, owner: { login: "" } } })),
       ),
     ).toBe("acme/widgets");
-    // A conflicting pair loses to full_name.
+    // note: A conflicting pair loses to full_name.
     expect(
       webhookRepositoryFullName(
         parse(JSON.stringify({ repository: { full_name: "acme/widgets", name: "other", owner: { login: "elsewhere" } } })),
       ),
     ).toBe("acme/widgets");
-    // An unusable full_name falls through to the pair; an empty one is not a name.
+    // note: An unusable full_name falls through to the pair; an empty one is not a name.
     expect(
       webhookRepositoryFullName(
         parse(JSON.stringify({ repository: { full_name: "", name: "widgets", owner: { login: "acme" } } })),
@@ -293,7 +291,7 @@ describe("webhookRepositoryFullName (delivery source repo, migration 0043)", () 
 });
 
 describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliveries)", () => {
-  /** Raw-insert one review_bots row (dummy envelopes — no decryption here). */
+  /** note: Raw-insert one review_bots row (dummy envelopes — no decryption here). */
   function seedAppRow(db: ReturnType<typeof createTestD1>, id = "app-1"): void {
     const appNum = Number(id.replace(/\D/g, "")) || 1;
     db.raw
@@ -340,7 +338,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     const store = createReviewBotsStore(db);
 
     await expect(
-      // Deliberately off-vocabulary: the runtime gate is the contract under
+      // note: Deliberately off-vocabulary: the runtime gate is the contract under
       // test, so the compiler's union is widened for this one call.
       store.recordDelivery({
         appId: "app-1",
@@ -364,7 +362,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     const db = createMigratedTestD1();
     seedAppRow(db);
     const store = createReviewBotsStore(db);
-    // Backdate every row but the newest so the order is observable
+    // why: Backdate every row but the newest so the order is observable
     // (datetime('now') has second resolution).
     await store.recordDelivery({ appId: "app-1", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
@@ -380,7 +378,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     const summary = await store.deliverySummary("app-1");
 
     expect(summary.latest).toMatchObject({ outcome: "paused", status_code: null });
-    expect(summary.rejected24h).toBe(0); // the rejected row is 25h old — outside the window
+    expect(summary.rejected24h).toBe(0); // note: the rejected row is 25h old — outside the window
   });
 
   test("deliverySummary counts ONLY rejected rows inside the 24h window", async () => {
@@ -420,7 +418,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
       await store.recordDelivery({ appId: "app-1", eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     }
     await store.recordDelivery({ appId: "app-2", eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
-    // Backdate the first six so the newest-first order is observable.
+    // why: Backdate the first six so the newest-first order is observable.
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
@@ -436,10 +434,10 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
       offset: 0,
     });
 
-    expect(page.rows).toHaveLength(5); // bounded by the caller's window
-    expect(page.total).toBe(7); // the UNPAGED, unfiltered count for this App
-    expect(page.rows.every((r) => r.bot_id === "app-1")).toBe(true); // sibling bot never included
-    expect(page.rows[0]!.created_at >= page.rows[4]!.created_at).toBe(true); // newest first
+    expect(page.rows).toHaveLength(5); // note: bounded by the caller's window
+    expect(page.total).toBe(7); // note: the UNPAGED, unfiltered count for this App
+    expect(page.rows.every((r) => r.bot_id === "app-1")).toBe(true); // invariant: sibling bot never included
+    expect(page.rows[0]!.created_at >= page.rows[4]!.created_at).toBe(true); // note: newest first
 
     const empty = await store.listDeliveries("no-such-app", {
       repo: null,
@@ -467,7 +465,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
         repositoryFullName: null,
         reason: null,
       });
-      // One second apart keeps created_at strictly ordered, so the windows are
+      // why: One second apart keeps created_at strictly ordered, so the windows are
       // decided by time rather than by the rowid tiebreak alone.
       db.raw.prepare("UPDATE webhook_deliveries SET created_at = datetime('now', ?) WHERE id = (SELECT id FROM webhook_deliveries ORDER BY rowid DESC LIMIT 1)").run(`-${10 - i} seconds`);
     }
@@ -480,11 +478,11 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     expect(second.rows).toHaveLength(2);
     expect(first.total).toBe(5);
     expect(second.total).toBe(5);
-    // No row appears in both windows: the ORDER BY ends in rowid, so the page
+    // why: No row appears in both windows: the ORDER BY ends in rowid, so the page
     // boundary is total even where created_at ties.
     const ids = new Set(first.rows.map((row) => row.id));
     expect(second.rows.every((row) => !ids.has(row.id))).toBe(true);
-    // The third page is the tail, and the fourth is past the end: an empty page
+    // note: The third page is the tail, and the fourth is past the end: an empty page
     // still reports the real total.
     expect((await store.listDeliveries("app-1", { ...filters, offset: 4 })).rows).toHaveLength(1);
     const past = await store.listDeliveries("app-1", { ...filters, offset: 6 });
@@ -508,7 +506,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     await record("pull_request", "acme/web");
     await record("check_run", "acme/web");
     await record("pull_request", "acme/api");
-    // Old enough to fall outside a 7-day window but inside the retained history.
+    // note: Old enough to fall outside a 7-day window but inside the retained history.
     await record("pull_request", "acme/web");
     db.raw
       .prepare(
@@ -524,17 +522,17 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     const byWindow = await store.listDeliveries("app-1", { repo: null, sinceDays: 7, eventName: null, ...base });
 
     expect(all.total).toBe(4);
-    // Every filter narrows both the rows and the total the pager walks.
+    // note: Every filter narrows both the rows and the total the pager walks.
     expect(byRepo.total).toBe(3);
     expect(byRepo.rows.every((row) => row.repository_full_name === "acme/web")).toBe(true);
     expect(byType.total).toBe(1);
     expect(byType.rows.every((row) => row.event_name === "check_run")).toBe(true);
     expect(byWindow.total).toBe(3);
-    // The option sets are the App's WHOLE history: a filter whose next value is
+    // note: The option sets are the App's WHOLE history: a filter whose next value is
     // outside the current result must stay selectable.
     expect(byType.repos).toEqual(["acme/api", "acme/web"]);
     expect(byType.types).toEqual(["check_run", "pull_request"]);
-    // An unknown filter value is an empty page, never an error and never an
+    // invariant: An unknown filter value is an empty page, never an error and never an
     // unfiltered one.
     const missing = await store.listDeliveries("app-1", { repo: "nobody/nothing", sinceDays: null, eventName: null, ...base });
     expect(missing.rows).toEqual([]);
@@ -580,7 +578,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     seedAppRow(db);
     const store = createReviewBotsStore(db);
 
-    // The store bounds what it persists, whatever its caller passes: the
+    // note: The store bounds what it persists, whatever its caller passes: the
     // x-github-event header is attacker-influenced on the unauthenticated
     // reject path, while the body's repository name is only capped as
     // defence-in-depth against GitHub's own length ceilings.
@@ -592,7 +590,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
       repositoryFullName: "y".repeat(2000),
       reason: null,
     });
-    // A non-BMP character STRADDLING the bound must not leave half a surrogate
+    // invariant: A non-BMP character STRADDLING the bound must not leave half a surrogate
     // pair in D1 (a lone surrogate cannot round-trip as valid UTF-8): the cut
     // backs off one unit and drops the whole code point.
     await store.recordDelivery({
@@ -613,7 +611,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     expect(rows[0]!.repository_full_name).toBe("y".repeat(160));
     expect(rows[1]!.event_name).toBe("x".repeat(63));
     expect(rows[1]!.repository_full_name).toBe("y".repeat(159));
-    // NULL (absent header / no repository) passes through untouched.
+    // invariant: NULL (absent header / no repository) passes through untouched.
     expect(rows[2]!.event_name).toBeNull();
     expect(rows[2]!.repository_full_name).toBeNull();
   });
@@ -624,11 +622,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const db = createTestD1();
     applyMigrations(db, WEBHOOK_DELIVERIES_MIGRATIONS);
     if (withDeliveries) {
-      // 0011 plus every migration after the 0038 rebuild — derived from the
+      // invariant: 0011 plus every migration after the 0038 rebuild — derived from the
       // directory, so a new one joins automatically.
       applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
     } else {
-      // The recorder's failure path needs the ROUTING reads to work, so the
+      // note: The recorder's failure path needs the ROUTING reads to work, so the
       // world is the full chain (0045's allowlist table included) and the
       // table the recorder writes is dropped: the INSERT hits "no such
       // table", which is the failure these tests inject.
@@ -640,17 +638,17 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
   type SeedOptions = {
     slug: string;
-    /** Plaintext webhook secret encrypted into the row (with the row-id AAD). */
+    /** safety: Plaintext webhook secret encrypted into the row (with the row-id AAD). */
     secret: string;
     githubAppId?: number;
   };
 
-  /** Raw-insert an active, non-deleted app row with real envelopes (either shape). */
+  /** note: Raw-insert an active, non-deleted app row with real envelopes (either shape). */
   async function seedApp(
     db: ReturnType<typeof createTestD1>,
     opts: SeedOptions,
   ): Promise<{ id: string; slug: string; targetId: string }> {
-    // The row id is the webhook URL's app segment, so the slug doubles as it.
+    // why: The row id is the webhook URL's app segment, so the slug doubles as it.
     const id = opts.slug;
     const box = createSecretbox(TEST_KEY);
     const webhookSecretEnc = await box.encryptSecret(opts.secret, `github_apps.webhook_secret_enc:${id}`);
@@ -665,11 +663,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
          VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
       )
       .run(id, opts.slug, opts.githubAppId ?? 1000 + appCount, opts.slug, privateKeyEnc, webhookSecretEnc);
-    // Production shape: the read face joins the bot's workspace mapping.
+    // note: Production shape: the read face joins the bot's workspace mapping.
     db.raw
       .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
       .run(id);
-    // …and the bot owns one repository target, where its review configuration
+    // note: …and the bot owns one repository target, where its review configuration
     // (trigger mode, business pause) lives. The delivery's repository names it.
     const target = await createTargetsStore(db).create({
       workspaceId: "default",
@@ -683,7 +681,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     return { id, slug: opts.slug, targetId: target.target.id };
   }
 
-  /** Queue stub capturing every enqueued payload. */
+  /** note: Queue stub capturing every enqueued payload. */
   function makeQueue() {
     const sent: ReviewJobPayload[] = [];
     const queue = {
@@ -694,7 +692,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     return { queue, sent };
   }
 
-  /** In-memory KV stub (idempotency pre-check + claim). */
+  /** note: In-memory KV stub (idempotency pre-check + claim). */
   function makeKv() {
     const store = new Map<string, string>();
     return {
@@ -716,7 +714,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       REVIEW_QUEUE: queue as never,
       DB: db as never,
       DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-      // Self-hosted: the shared-bot capability is unconditional in this mode,
+      // note: Self-hosted: the shared-bot capability is unconditional in this mode,
       // so these delivery-recording cases carry no plan fixture of their own.
       DEPLOYMENT_MODE: "self-hosted",
       ...overrides,
@@ -732,17 +730,17 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     return worker.fetch(new Request(`https://worker.local${path}`, { method: "POST", headers, body }), env);
   }
 
-  /** Sign a body the way GitHub does (the sha256=… header value). */
+  /** note: Sign a body the way GitHub does (the sha256=… header value). */
   async function signatureFor(secret: string, body: string): Promise<string> {
     return new Webhooks({ secret }).sign(body);
   }
 
-  /** Full GitHub webhook headers for a signed delivery. */
+  /** note: Full GitHub webhook headers for a signed delivery. */
   async function sigHeaders(secret: string, body: string, event = "pull_request"): Promise<Record<string, string>> {
     return { "x-hub-signature-256": await signatureFor(secret, body), "x-github-event": event };
   }
 
-  /** Read every delivery row for one app, oldest first. */
+  /** note: Read every delivery row for one app, oldest first. */
   function deliveriesFor(
     db: ReturnType<typeof createTestD1>,
     appId: string,
@@ -759,11 +757,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     action: "opened",
     number: 42,
     installation: { id: 123 },
-    // `state` is what the PR ledger (0039) records; without it a delivery
+    // note: `state` is what the PR ledger (0039) records; without it a delivery
     // writes no `pull_requests` row and "the refusal wrote nothing" would be
     // untestable.
     pull_request: { number: 42, state: "open", head: { sha: "abc123" }, user: { login: "alice" } },
-    // `id` is the target's identity (migration 0067): the fixture target above
+    // note: `id` is the target's identity (migration 0067): the fixture target above
     // is seeded with it.
     repository: { id: 5000, name: "test-repo", owner: { login: "test-owner" } },
   };
@@ -803,12 +801,12 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   });
 
   test("an ignored delivery still records its source repository", async () => {
-    // The ignore paths are the unauthenticated junk traffic the delivery face
+    // note: The ignore paths are the unauthenticated junk traffic the delivery face
     // still records for the operator; the source repository is the fact that
     // outlives the ignored payload.
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // A `ping` delivery: no PR ledger read (that is its own document and its
+    // note: A `ping` delivery: no PR ledger read (that is its own document and its
     // own concern), so the delivery row is the only thing this payload writes.
     const body = JSON.stringify({
       zen: "Keep it logically awesome.",
@@ -869,7 +867,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("paused path: the target's business pause (the settings switch) → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    // The switch users flip lives on the target; the bot's operational flag
+    // note: The switch users flip lives on the target; the bot's operational flag
     // stays clear, so only the target pause can suppress this delivery.
     expect(await createTargetsStore(db).setReviewEnabled("default", appRow.targetId, false)).toBe(true);
     const { queue, sent } = makeQueue();
@@ -887,7 +885,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const bot = db.raw
       .query("SELECT review_enabled FROM review_bots WHERE id = ?")
       .get(appRow.id) as { review_enabled: number } | null;
-    expect(bot?.review_enabled).toBe(1); // the operational flag was never touched
+    expect(bot?.review_enabled).toBe(1); // invariant: the operational flag was never touched
   });
 
   test("ignored path: valid signature + non-whitelisted event → 2xx ignored + row outcome='ignored'", async () => {
@@ -929,7 +927,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   });
 
   test("best-effort: a store failure logs a structured warn and the webhook response is unchanged", async () => {
-    // No 0011 in this fixture — recordDelivery's INSERT hits "no such table".
+    // note: No 0011 in this fixture — recordDelivery's INSERT hits "no such table".
     const db = createMigratedD1(false);
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -948,15 +946,14 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1); // the enqueue is unaffected
+    expect(sent).toHaveLength(1); // note: the enqueue is unaffected
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
     expect(fields.event).toBe("delivery_record_failed");
   });
 
-  /**
-   * Race injection (QC S-1): patch the D1 double so the FIRST
+  /** note: Race injection (QC S-1): patch the D1 double so the FIRST
    * webhook_deliveries INSERT runs a parent-row mutation immediately
    * before it — the delete that can land between the route's slug lookup
    * and recordDelivery.
@@ -1003,14 +1000,14 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1); // the enqueue is unaffected
+    expect(sent).toHaveLength(1); // note: the enqueue is unaffected
     expect(deliveriesFor(db, appRow.id)).toEqual([
       { event_name: "pull_request", outcome: "ok", status_code: null },
-    ]); // the historical row still lands
+    ]); // note: the historical row still lands
     const app = db.raw
       .query("SELECT deleted_at FROM review_bots WHERE id = ?")
       .get(appRow.id) as { deleted_at: string | null };
-    expect(app.deleted_at).not.toBeNull(); // the race really happened
+    expect(app.deleted_at).not.toBeNull(); // note: the race really happened
   });
 
   test("best-effort: parent HARD-deleted between classify and insert → FK insert throws → delivery_record_failed warn + response unchanged", async () => {
@@ -1033,8 +1030,8 @@ describe("per-App webhook face — best-effort delivery recording", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
-    expect(sent).toHaveLength(1); // the enqueue is unaffected
-    expect(deliveriesFor(db, appRow.id)).toEqual([]); // zero rows written
+    expect(sent).toHaveLength(1); // note: the enqueue is unaffected
+    expect(deliveriesFor(db, appRow.id)).toEqual([]); // invariant: zero rows written
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
     expect(line).toBeDefined();
     const fields = JSON.parse(line!) as { event: string };
@@ -1042,7 +1039,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   });
 
   test("best-effort: a store failure on a REJECTED record still returns the classifier's status (401), never a 500", async () => {
-    // No 0011 in this fixture — the INSERT hits "no such table".
+    // note: No 0011 in this fixture — the INSERT hits "no such table".
     const db = createMigratedD1(false);
     await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -1064,7 +1061,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       console.warn = origWarn;
     }
 
-    expect(res.status).toBe(401); // the classifier's status — never a 500
+    expect(res.status).toBe(401); // invariant: the classifier's status — never a 500
     expect(await res.text()).toBe("signature verification failed");
     expect(sent).toHaveLength(0);
     const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
@@ -1079,7 +1076,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const { queue, sent } = makeQueue();
     const body = JSON.stringify(PR_PAYLOAD);
 
-    // Unknown slug → 404 before any signature work.
+    // invariant: Unknown slug → 404 before any signature work.
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const res404 = await postWebhook(
       "/webhook/default/no-such-app",
@@ -1102,24 +1099,24 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 0, false)).toBe("rejected");
     expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1, true)).toBe("ignored");
     expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 0, false)).toBe("ignored");
-    // The per-App pause.
+    // note: The per-App pause.
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true)).toBe("paused");
-    // The global kill switch: `ok` means "job enqueued", and a globally
+    // note: The global kill switch: `ok` means "job enqueued", and a globally
     // blocked job never is.
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true)).toBe("ok");
-    // The third gate: both switches admitted the job and the shared-bot
+    // note: The third gate: both switches admitted the job and the shared-bot
     // capability refused it. `ok` would claim an enqueue, `paused` would blame
     // a switch that is on.
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true, true)).toBe("skipped");
-    // Either switch wins over the refusal: that delivery never reached it.
+    // invariant: Either switch wins over the refusal: that delivery never reached it.
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, true)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, true)).toBe("paused");
-    // A refused delivery is not a refusal of the classifier's answer.
+    // note: A refused delivery is not a refusal of the classifier's answer.
     expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true, true)).toBe("rejected");
   });
 
-  // An install delivery is neither review work nor paused: it is verified but
+  // note: An install delivery is neither review work nor paused: it is verified but
   // enqueues nothing, so it reads `ignored` — never `ok` ("job enqueued") and
   // never `paused`, regardless of either review switch.
   test.each([

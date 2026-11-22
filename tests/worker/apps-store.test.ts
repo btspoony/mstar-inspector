@@ -1,5 +1,4 @@
-/**
- * Unit tests: migrations 0004/0005 + the review_bots store layer
+/** note: Unit tests: migrations 0004/0005 + the review_bots store layer
  * (spec dashboard-multi-app-platform § Data model, architect lock L2).
  *
  * Production-shaped sequence (the brief's STOP anchor): the bun:sqlite
@@ -35,8 +34,7 @@ import type {
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
-/**
- * Parameterized write on the raw bun:sqlite handle (params go straight to
+/** note: Parameterized write on the raw bun:sqlite handle (params go straight to
  * run() — the raw statement face has no bind step). Statements throw
  * SYNCHRONOUSLY here, so failure assertions use expect(() => ...).toThrow.
  */
@@ -48,14 +46,14 @@ function rawRun(
   db.raw.prepare(sql).run(...params);
 }
 
-/** Apply one migration file through the fail-fast executor (filename order = wrangler order). */
+/** note: Apply one migration file through the fail-fast executor (filename order = wrangler order). */
 function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void {
   execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
 }
 
-/** A DB shaped like production at migration 0002: 0001/0002 + seeded rows. */function createSeededD1(): ReturnType<typeof createTestD1> {
+/** note: A DB shaped like production at migration 0002: 0001/0002 + seeded rows. */function createSeededD1(): ReturnType<typeof createTestD1> {
   const db = createTestD1();
-  // One M1-era row (raw_output, no envelope) and one v1 row (envelope).
+  // note: One M1-era row (raw_output, no envelope) and one v1 row (envelope).
   db.raw
     .prepare(
       `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, raw_output)
@@ -68,8 +66,7 @@ function applyMigration(db: ReturnType<typeof createTestD1>, name: string): void
     .run();
   return db;
 }
-/**
- * Seed DB + every migration from 0003 on, in wrangler (filename) order. 0026
+/** note: Seed DB + every migration from 0003 on, in wrangler (filename) order. 0026
  * carries the workspace data plane `createApp` now writes into, so the fixture
  * applies the production shape from 0003; the rest of the chain is applied
  * whole because 0038 rebuilds `review_bots` from the columns the intervening
@@ -91,10 +88,10 @@ function store(db: D1Like) {
 }
 
 const APP_INPUT: CreateAppInput = {
-  // T1 review pin: the caller supplies the row PK so the secretbox AAD
+  // why: T1 review pin: the caller supplies the row PK so the secretbox AAD
   // (github_apps.<column>:<id>) is computable BEFORE insert.
   id: "018f4a2e-7c1d-4e5a-9b2f-3d6c8a1e4f70",
-  // Migration 0036: GitHub's own slug is a separate cached column — NULL is
+  // note: Migration 0036: GitHub's own slug is a separate cached column — NULL is
   // the honest "never synced" default for a freshly minted App.
   githubSlug: null,
   githubAppId: 123456,
@@ -102,15 +99,15 @@ const APP_INPUT: CreateAppInput = {
   privateKeyEnc: "v1.primary.aXZpdi.Y3QmIHRhZw==",
   webhookSecretEnc: "v1.primary.aXZpdi.d2ViaG9vaw==",
   createdBy: "octocat",
-  // Required: ownership is a caller input, never a store lookup.
+  // invariant: Required: ownership is a caller input, never a store lookup.
   workspaceId: "default",
-  // Fixture seeding: these cases are about identity and storage shape, not the
+  // note: Fixture seeding: these cases are about identity and storage shape, not the
   // plan's App cap.
   maxApps: null,
 };
 
 async function seedApp(db: D1Like, overrides: Partial<CreateAppInput> = {}): Promise<GithubAppRow> {
-  // Every seed mints its OWN caller-supplied id (the T1 pin shape) unless
+  // note: Every seed mints its OWN caller-supplied id (the T1 pin shape) unless
   // the test explicitly pins one; APP_INPUT.id documents a fixed example.
   return store(db).createApp({ ...APP_INPUT, id: crypto.randomUUID(), ...overrides });
 }
@@ -146,7 +143,7 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
       expect(byName.has(name)).toBe(true);
     }
     expect(byName.get("id")!.pk).toBe(1);
-    // Migration 0036: GitHub's own slug is its own nullable column. Migration
+    // note: Migration 0036: GitHub's own slug is its own nullable column. Migration
     // 0038 dropped the old local route key — the row id carries that role now.
     expect(byName.has("slug")).toBe(false);
     expect(byName.has("webhook_path")).toBe(false);
@@ -156,7 +153,7 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
     expect(byName.get("webhook_secret_enc")!.notnull).toBe(1);
     expect(byName.get("status")!.notnull).toBe(1);
     expect(byName.get("status")!.dflt_value).toBe("'active'");
-    expect(byName.get("deleted_at")!.notnull).toBe(0); // NULL = not deleted
+    expect(byName.get("deleted_at")!.notnull).toBe(0); // note: NULL = not deleted
     expect(byName.get("created_at")!.notnull).toBe(1);
     expect(byName.get("updated_at")!.notnull).toBe(1);
   });
@@ -181,7 +178,7 @@ describe("migration 0004_github_apps.sql (on a seeded production-shaped DB)", ()
   test("bot_installations: FK to review_bots enforced, UNIQUE (bot_id, installation_id)", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    // Unknown bot_id → FK failure (review_bots created before bot_installations).
+    // invariant: Unknown bot_id → FK failure (review_bots created before bot_installations).
     await expect(
       db
         .prepare(
@@ -271,7 +268,7 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
     expect(() => rawRun(db, "DELETE FROM review_bots WHERE id = ?", app.id)).toThrow(
       /FOREIGN KEY constraint failed/,
     );
-    // Since 0026 every App has an `bot_workspaces` ownership row (NO ACTION),
+    // note: Since 0026 every App has an `bot_workspaces` ownership row (NO ACTION),
     // so even an App without review history cannot be hard-deleted: the
     // ownership map outlives the review history, and soft delete is the only
     // removal path at the schema level.
@@ -285,15 +282,15 @@ describe("migration 0005_reviews_app_id.sql (on a seeded production-shaped DB)",
 describe("apps-store (createReviewBotsStore)", () => {
   test("createApp persists a full active row with the CALLER-SUPPLIED id and timestamps", async () => {
     const db = createMigratedD1();
-    // Direct call (not seedApp) so the pinned APP_INPUT.id is the row PK.
+    // why: Direct call (not seedApp) so the pinned APP_INPUT.id is the row PK.
     const app = await store(db).createApp(APP_INPUT);
-    // T1 review pin: the row PK is exactly the caller's id — never a
+    // invariant: T1 review pin: the row PK is exactly the caller's id — never a
     // store-generated default that would break the pre-computed AAD.
     expect(app.id).toBe(APP_INPUT.id);
     expect(UUID_RE.test(app.id)).toBe(true);
     expect(app.github_app_id).toBe(APP_INPUT.githubAppId);
     expect(app.name).toBe(APP_INPUT.name);
-    // The store treats encrypted payloads as opaque strings — no peeking.
+    // note: The store treats encrypted payloads as opaque strings — no peeking.
     expect(app.private_key_enc).toBe(APP_INPUT.privateKeyEnc);
     expect(app.webhook_secret_enc).toBe(APP_INPUT.webhookSecretEnc);
     expect(app.created_by).toBe(APP_INPUT.createdBy);
@@ -312,7 +309,7 @@ describe("apps-store (createReviewBotsStore)", () => {
       githubSlug: "acme-inspector",
       githubAppId: 5150,
     });
-    // The two identities are NOT interchangeable: the local UID never leaks
+    // safety: The two identities are NOT interchangeable: the local UID never leaks
     // into the GitHub column and vice versa.
     expect(app.id).toBe(id);
     expect(app.github_slug).toBe("acme-inspector");
@@ -320,14 +317,14 @@ describe("apps-store (createReviewBotsStore)", () => {
       .query("SELECT id, github_slug FROM review_bots WHERE id = ?")
       .get(app.id) as { id: string; github_slug: string | null };
     expect(raw).toEqual({ id, github_slug: "acme-inspector" });
-    // Omitted github_slug stays NULL: "never synced" is the honest default.
+    // invariant: Omitted github_slug stays NULL: "never synced" is the honest default.
     const bare = await seedApp(db, { githubAppId: 5151, githubSlug: null });
     expect(bare.github_slug).toBeNull();
   });
 
   test("two Apps may cache the SAME github_slug (migration 0036 leaves it unindexed)", async () => {
     const db = createMigratedD1();
-    // GitHub reuses a freed slug, so a stale cached copy plus a live one is a
+    // note: GitHub reuses a freed slug, so a stale cached copy plus a live one is a
     // legitimate state: the cache is not an identity and must not gate a write.
     const first = await seedApp(db, { githubAppId: 6161, githubSlug: "shared-slug" });
     const second = await seedApp(db, { githubAppId: 6162, githubSlug: "shared-slug" });
@@ -339,7 +336,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const db = createMigratedD1();
     const id = crypto.randomUUID();
     const box = createSecretbox(Buffer.alloc(32, 9).toString("base64"));
-    // Caller encrypts BEFORE insert, with the caller-supplied id in the AAD.
+    // invariant: Caller encrypts BEFORE insert, with the caller-supplied id in the AAD.
     const privateKeyEnc = await box.encryptSecret("pem-plaintext", `github_apps.private_key_enc:${id}`);
     const row = await store(db).createApp({
       ...APP_INPUT,
@@ -348,7 +345,7 @@ describe("apps-store (createReviewBotsStore)", () => {
       privateKeyEnc,
       webhookSecretEnc: "v1.primary.aXZpdi.cGxhY2Vob2xkZXI=",
     });
-    // Read back and decrypt with the AAD derived from the RETURNED row PK:
+    // note: Read back and decrypt with the AAD derived from the RETURNED row PK:
     // decryptSecret(row.private_key_enc, `github_apps.private_key_enc:${row.id}`)
     // must succeed — the row is NOT undecryptable.
     const readBack = await store(db).getAppById(row.id);
@@ -356,7 +353,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect(
       await box.decryptSecret(readBack!.private_key_enc, `github_apps.private_key_enc:${readBack!.id}`),
     ).toBe("pem-plaintext");
-    // And the tamper anchor: any other rowKey fails the GCM tag.
+    // note: And the tamper anchor: any other rowKey fails the GCM tag.
     await expect(
       box.decryptSecret(readBack!.private_key_enc, "github_apps.private_key_enc:not-this-row"),
     ).rejects.toThrow(/AAD mismatch/);
@@ -366,7 +363,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     expect((await store(db).getAppForWebhook(APP_INPUT.workspaceId, app.id))?.id).toBe(app.id);
-    // The pair is the key: the right App under another workspace is unknown.
+    // note: The pair is the key: the right App under another workspace is unknown.
     expect(await store(db).getAppForWebhook("other-workspace", app.id)).toBeNull();
     expect(await store(db).getAppForWebhook(APP_INPUT.workspaceId, "no-such-app")).toBeNull();
     expect((await store(db).getAppById(app.id))?.id).toBe(app.id);
@@ -393,7 +390,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db, { githubAppId: 987655 });
     await store(db).softDeleteApp(app.id);
-    // Soft delete is the caller's filter — the read face still resolves it.
+    // note: Soft delete is the caller's filter — the read face still resolves it.
     expect((await store(db).getAppByGithubId(987655))?.deleted_at).not.toBeNull();
 
     rawRun(
@@ -403,7 +400,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const second = await seedApp(db, { githubAppId: 987656, workspaceId: "second" });
     expect((await store(db).getAppByGithubId(987656))?.id).toBe(second.id);
     rawRun(db, "UPDATE workspaces SET deleted_at = datetime('now') WHERE id = 'second'");
-    // A retired tenant can never start a review — same guard as getAppById.
+    // invariant: A retired tenant can never start a review — same guard as getAppById.
     expect(await store(db).getAppByGithubId(987656)).toBeNull();
   });
 
@@ -415,7 +412,7 @@ describe("apps-store (createReviewBotsStore)", () => {
       .run(APP_INPUT.workspaceId!);
     expect(await store(db).getAppForWebhook(APP_INPUT.workspaceId, app.id)).toBeNull();
     expect(await store(db).getAppById(app.id)).toBeNull();
-    // The operator list has no execution face — a retired tenant stays visible.
+    // invariant: The operator list has no execution face — a retired tenant stays visible.
     expect((await store(db).listApps()).map((row) => row.id)).toEqual([app.id]);
   });
 
@@ -424,7 +421,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const older = await seedApp(db, { githubAppId: 1 });
     const newer = await seedApp(db, { githubAppId: 2 });
     const deleted = await seedApp(db, { githubAppId: 3 });
-    // Distinct timestamps (datetime('now') has second resolution).
+    // note: Distinct timestamps (datetime('now') has second resolution).
     rawRun(db, "UPDATE review_bots SET created_at = '2026-01-01 00:00:00' WHERE id = ?", older.id);
     rawRun(db, "UPDATE review_bots SET created_at = '2026-02-01 00:00:00' WHERE id = ?", newer.id);
     await store(db).softDeleteApp(deleted.id);
@@ -450,7 +447,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     await store(db).softDeleteApp(app.id);
     expect(await store(db).setAppStatus(app.id, "active")).toBe(false);
     const row = (await store(db).getAppById(app.id))!;
-    expect(row.status).toBe("active"); // untouched by the refused update
+    expect(row.status).toBe("active"); // invariant: untouched by the refused update
     expect(row.deleted_at).not.toBeNull();
   });
 
@@ -460,7 +457,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect(await store(db).softDeleteApp(app.id)).toBe(true);
     const deleted = (await store(db).getAppById(app.id))!;
     expect(deleted.deleted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    // Second delete is a no-op: the first timestamp wins.
+    // note: Second delete is a no-op: the first timestamp wins.
     rawRun(db, "UPDATE review_bots SET deleted_at = '2026-01-01 00:00:00' WHERE id = ?", app.id);
     expect(await store(db).softDeleteApp(app.id)).toBe(false);
     const row = (await store(db).getAppById(app.id))!;
@@ -489,7 +486,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect(rows[0]!.account_login).toBe("octocat");
     expect(rows[0]!.seen_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
 
-    // Simulate time passing, then touch: same pair → still ONE row, seen_at
+    // note: Simulate time passing, then touch: same pair → still ONE row, seen_at
     // refreshed, login replaced because the writer is authoritative.
     db.raw
       .prepare("UPDATE bot_installations SET seen_at = '2020-01-01 00:00:00'")
@@ -505,7 +502,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect(rows[0]!.account_login).toBe("octocat-2");
     expect(rows[0]!.seen_at).not.toBe("2020-01-01 00:00:00");
 
-    // A touch without a login must not wipe the stored account_login.
+    // invariant: A touch without a login must not wipe the stored account_login.
     db.raw.prepare("UPDATE bot_installations SET seen_at = '2020-01-01 00:00:00'").run();
     await s.upsertInstallation({ appId: app.id, installationId: 777 });
     rows = db.raw.query("SELECT * FROM bot_installations").all() as typeof rows;
@@ -518,17 +515,17 @@ describe("apps-store (createReviewBotsStore)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    // The store's own typed read face — no raw-shape assertion needed.
+    // note: The store's own typed read face — no raw-shape assertion needed.
     const loginOf = async (): Promise<string | null> =>
       (await s.listInstallations(app.id))[0]?.account_login ?? null;
 
-    // An installation event states the account → it wins.
+    // note: An installation event states the account → it wins.
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "alice", authoritative: true });
     expect(await loginOf()).toBe("alice");
-    // A review delivery's inference cannot replace it.
+    // note: A review delivery's inference cannot replace it.
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "inferred-owner" });
     expect(await loginOf()).toBe("alice");
-    // A later installation event overwrites the authoritative value too.
+    // note: A later installation event overwrites the authoritative value too.
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "octo-org", authoritative: true });
     expect(await loginOf()).toBe("octo-org");
   });
@@ -537,17 +534,17 @@ describe("apps-store (createReviewBotsStore)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    // The store's own typed read face — no raw-shape assertion needed.
+    // note: The store's own typed read face — no raw-shape assertion needed.
     const loginOf = async (): Promise<string | null> =>
       (await s.listInstallations(app.id))[0]?.account_login ?? null;
 
-    // A bare touch creates the row with a NULL login.
+    // note: A bare touch creates the row with a NULL login.
     await s.upsertInstallation({ appId: app.id, installationId: 2 });
     expect(await loginOf()).toBeNull();
-    // The first review delivery fills that gap…
+    // note: The first review delivery fills that gap…
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "inferred-owner" });
     expect(await loginOf()).toBe("inferred-owner");
-    // …and an authoritative write with no login preserves it (COALESCE).
+    // note: …and an authoritative write with no login preserves it (COALESCE).
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: null, authoritative: true });
     expect(await loginOf()).toBe("inferred-owner");
     expect(await s.listInstallations(app.id)).toHaveLength(1);
@@ -561,7 +558,7 @@ describe("apps-store (createReviewBotsStore)", () => {
 
     await s.markInstallationRemoved(app.id, 9);
     expect(await s.listInstallations(app.id)).toHaveLength(0);
-    // The row itself survives — the credential-routing / attribution joins
+    // safety: The row itself survives — the credential-routing / attribution joins
     // read bot_installations, so an uninstall may never delete it.
     const rows = db.raw
       .query("SELECT account_login, removed_at FROM bot_installations")
@@ -570,10 +567,10 @@ describe("apps-store (createReviewBotsStore)", () => {
     expect(rows[0]!.account_login).toBe("old-org");
     expect(rows[0]!.removed_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d{3})?$/);
 
-    // Ordinary review traffic (INFERRED) says nothing about install state…
+    // invariant: Ordinary review traffic (INFERRED) says nothing about install state…
     await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "inferred-owner" });
     expect(await s.listInstallations(app.id)).toHaveLength(0);
-    // …an installation event (AUTHORITATIVE) is a reinstall: the row returns.
+    // note: …an installation event (AUTHORITATIVE) is a reinstall: the row returns.
     await s.upsertInstallation({ appId: app.id, installationId: 9, accountLogin: "new-org", authoritative: true });
     expect(await s.listInstallations(app.id)).toEqual([
       expect.objectContaining({ installation_id: 9, account_login: "new-org" }),
@@ -585,7 +582,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const app = await seedApp(db);
     const sibling = await seedApp(db, { githubAppId: 654321 });
     const s = store(db);
-    // Two rows for this App (1 = still installed, 2 = uninstalled while no
+    // note: Two rows for this App (1 = still installed, 2 = uninstalled while no
     // delivery arrived) and one row of a SIBLING App that must stay untouched.
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "still-there" });
     await s.upsertInstallation({ appId: app.id, installationId: 2, accountLogin: "gone" });
@@ -598,11 +595,11 @@ describe("apps-store (createReviewBotsStore)", () => {
       expect.objectContaining({ installation_id: 1 }),
     ]);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
-    expect(n.n).toBe(3); // nothing deleted, the sibling untouched
+    expect(n.n).toBe(3); // invariant: nothing deleted, the sibling untouched
     const siblingRows = await s.listInstallations(sibling.id);
     expect(siblingRows).toEqual([expect.objectContaining({ installation_id: 3 })]);
 
-    // GitHub lists 2 again (a reinstall): the stored stamp is cleared. The
+    // note: GitHub lists 2 again (a reinstall): the stored stamp is cleared. The
     // stamp was written moments ago; let the store clock pass it by one
     // millisecond so the clear is a strict later observation (a same-ms
     // observation is the safe no-clear case, pinned separately below).
@@ -623,14 +620,14 @@ describe("apps-store (createReviewBotsStore)", () => {
 
     expect(await s.listInstallations(app.id)).toHaveLength(0);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
-    expect(n.n).toBe(2); // stamped, never deleted
+    expect(n.n).toBe(2); // invariant: stamped, never deleted
   });
 
   test("reconcileInstallations: a full page of live ids (150) binds two parameters and still classifies every row", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    // Three local rows inside the 1..150 live set (150 already stamped removed,
+    // note: Three local rows inside the 1..150 live set (150 already stamped removed,
     // so it must come back) and two outside it (151, 999).
     await s.upsertInstallation({ appId: app.id, installationId: 1, accountLogin: "in-1" });
     await s.upsertInstallation({ appId: app.id, installationId: 100, accountLogin: "in-100" });
@@ -640,11 +637,11 @@ describe("apps-store (createReviewBotsStore)", () => {
     await s.upsertInstallation({ appId: app.id, installationId: 999, accountLogin: "out-999" });
     const live = Array.from({ length: 150 }, (_, index) => index + 1);
 
-    // The removal was stamped above; the observation must be strictly later.
+    // invariant: The removal was stamped above; the observation must be strictly later.
     await Bun.sleep(2);
     await s.reconcileInstallations(app.id, live, await s.currentTimestamp());
 
-    // The binding shape the test is named after: each statement binds one
+    // invariant: The binding shape the test is named after: each statement binds one
     // value pair (appId + the JSON snapshot), NOT one placeholder per id. A
     // revert to per-id placeholders binds 151 values per statement here and
     // fails this line.
@@ -652,14 +649,14 @@ describe("apps-store (createReviewBotsStore)", () => {
     const rows = await s.listInstallations(app.id);
     expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number };
-    expect(n.n).toBe(5); // nothing deleted
+    expect(n.n).toBe(5); // invariant: nothing deleted
   });
 
   test("reconcileInstallations: a LEGACY second-resolution removal in the observation second is still cleared", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    // A removal written before the fractional marker existed: `datetime('now')`
+    // invariant: A removal written before the fractional marker existed: `datetime('now')`
     // has no sub-second part, so it must sort BEFORE an observation taken in
     // the same second — otherwise the row stays hidden until the next TTL.
     db.raw
@@ -681,7 +678,7 @@ describe("apps-store (createReviewBotsStore)", () => {
     const app = await seedApp(db);
     const s = store(db);
     const observedAt = await s.currentTimestamp();
-    // An in-flight `installation.created`: written AFTER the snapshot, so its
+    // invariant: An in-flight `installation.created`: written AFTER the snapshot, so its
     // fractional seen_at is strictly greater and the stamp leg must skip it
     // even though the fetched live set cannot contain it yet.
     db.raw
@@ -702,21 +699,21 @@ describe("apps-store (createReviewBotsStore)", () => {
     const app = await seedApp(db);
     const s = store(db);
     const observedAt = await s.currentTimestamp();
-    // Created AFTER the snapshot (seen_at is later than it): absent from the
+    // invariant: Created AFTER the snapshot (seen_at is later than it): absent from the
     // live set only because it did not exist yet — it must stay present.
     db.raw
       .prepare(
         "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('late', ?, 10, 'late-org', datetime('now', '+10 seconds'))",
       )
       .run(app.id);
-    // A removal observed AFTER the snapshot is newer news than the live set,
+    // invariant: A removal observed AFTER the snapshot is newer news than the live set,
     // so the clear leg must leave it stamped even though 20 is present.
     db.raw
       .prepare(
         "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES ('fresh-removal', ?, 20, 'gone-org', datetime('now'), datetime('now', '+10 seconds'))",
       )
       .run(app.id);
-    // …while a row older than the snapshot and absent from the live set is
+    // note: …while a row older than the snapshot and absent from the live set is
     // exactly what the stamping leg exists for.
     db.raw
       .prepare(
@@ -753,7 +750,7 @@ describe("apps-store (createReviewBotsStore)", () => {
 describe("apps-store workspace dual write (migration 0026)", () => {
   type CountRow = { n: number };
   type MappingRow = { bot_id: string; workspace_id: string };
-  /** Minimal statement face for the SQL-recording double below. */
+  /** note: Minimal statement face for the SQL-recording double below. */
   type RecordingStatement = {
     bind(...values: unknown[]): RecordingStatement;
     first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -782,7 +779,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
 
   test("one transaction: a failing bot_workspaces insert rolls the App row back", async () => {
     const db = createMigratedD1();
-    // A split-write implementation (INSERT then a separate mapping run) leaves
+    // note: A split-write implementation (INSERT then a separate mapping run) leaves
     // the review_bots row behind when this ABORT fires — the test then fails.
     rawRun(
       db,
@@ -797,24 +794,24 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   test("the mapping write is in the same batch: a github_app_id conflict rolls back both rows", async () => {
     const db = createMigratedD1();
     const first = await seedApp(db);
-    // Same GitHub App id, fresh row id — the identity conflict the store refuses.
+    // note: Same GitHub App id, fresh row id — the identity conflict the store refuses.
     await expect(seedApp(db, { githubAppId: APP_INPUT.githubAppId })).rejects.toThrow(
       /UNIQUE constraint failed: review_bots.github_app_id/,
     );
-    // The failed batch left no mapping behind for the rejected id...
+    // note: The failed batch left no mapping behind for the rejected id...
     expect(mappingRows(db)).toEqual([{ bot_id: first.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
   });
 
   test("CreateAppInput.workspaceId is required (compile-time, strict-only)", async () => {
     const { workspaceId: _omitted, ...input } = APP_INPUT;
-    // @ts-expect-error — workspaceId is required; omitting it must not compile (the sole-workspace fallback is deleted)
+    // invariant: @ts-expect-error — workspaceId is required; omitting it must not compile (the sole-workspace fallback is deleted)
     await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow();
   });
 
   test("CreateAppInput.maxApps is required: an omitted cap cannot mean unlimited", async () => {
     const { maxApps: _omitted, ...input } = APP_INPUT;
-    // @ts-expect-error — maxApps is required; an omitted cap would be a silent bypass
+    // why: @ts-expect-error — maxApps is required; an omitted cap would be a silent bypass
     await expect(store(createMigratedD1()).createApp(input)).rejects.toThrow(/AppCountExceededError|already owns/);
   });
 
@@ -825,7 +822,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
       `INSERT INTO workspaces (id, slug, name, created_by, created_at)
        VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
-    // The named path is the multi-workspace answer: the App lands exactly where
+    // invariant: The named path is the multi-workspace answer: the App lands exactly where
     // the caller said, whichever workspace that is.
     const app = await seedApp(db, { workspaceId: "second" });
     expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "second" }]);
@@ -878,7 +875,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     const db = createMigratedD1();
     const first = await seedApp(db, { githubAppId: 7301, maxApps: 1 });
     rawRun(db, "UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?", first.id);
-    // The mapping row survives the soft delete; only the LIVE bot counts.
+    // invariant: The mapping row survives the soft delete; only the LIVE bot counts.
     const second = await seedApp(db, { githubAppId: 7302, maxApps: 1 });
     expect(mappingRows(db)).toEqual([
       { bot_id: first.id, workspace_id: "default" },
@@ -962,7 +959,7 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     const row = (await store(db).getAppById(app.id))!;
     expect(row.sandbox_image_id).toBe("omp");
     expect(row.updated_at).not.toBe("2026-01-01 00:00:00");
-    // An unknown app id changed nothing (the setAppStatus convention).
+    // invariant: An unknown app id changed nothing (the setAppStatus convention).
     expect(await store(db).setSandboxImage("no-such-id", "omp")).toBe(false);
   });
 
@@ -974,7 +971,7 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     );
     await expect(store(db).setSandboxImage(app.id, "")).rejects.toThrow(/not an enabled registry entry/);
     const row = (await store(db).getAppById(app.id))!;
-    expect(row.sandbox_image_id).toBe("omp"); // untouched — zero rows written
+    expect(row.sandbox_image_id).toBe("omp"); // invariant: untouched — zero rows written
   });
 
   test("setSandboxImage refuses soft-deleted apps (a deleted app is never mutated)", async () => {
@@ -985,7 +982,7 @@ describe("apps-store sandbox image selection (migration 0018)", () => {
     expect(await store(db).setSandboxImage(app.id, "omp")).toBe(false);
     const row = (await store(db).getAppById(app.id))!;
     expect(row.deleted_at).not.toBeNull();
-    expect(row.updated_at).toBe(deleted.updated_at); // the refused write bumped nothing
+    expect(row.updated_at).toBe(deleted.updated_at); // invariant: the refused write bumped nothing
   });
 });
 
@@ -996,7 +993,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const s = store(db);
     await s.recordDelivery({ appId: app.id, eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null, reason: null });
-    // Backdate the ignored row so the rejected row is the LATEST.
+    // why: Backdate the ignored row so the rejected row is the LATEST.
     db.raw
       .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ignored'")
       .run();
@@ -1025,13 +1022,13 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
     const s = store(db);
-    // The staging shape: one real review verdict buried under a torrent of
+    // note: The staging shape: one real review verdict buried under a torrent of
     // check_run rows that all land in `ignored`.
     await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     for (let i = 0; i < 6; i++) {
       await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     }
-    // The verdict is the OLDEST row, so plain newest-first would never show it.
+    // why: The verdict is the OLDEST row, so plain newest-first would never show it.
     db.raw
       .prepare("UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour') WHERE outcome = 'ok'")
       .run();
@@ -1046,7 +1043,7 @@ describe("apps-store delivery read faces (consumption)", () => {
 
     expect(page.rows).toHaveLength(5);
     expect(page.rows[0]).toMatchObject({ event_name: "pull_request", outcome: "ok" });
-    // The remaining four are bypass rows — the list is never five identical
+    // invariant: The remaining four are bypass rows — the list is never five identical
     // ignored lines while a verdict exists anywhere in the App's history.
     expect(page.rows.slice(1).every((r) => r.event_name === "check_run" && r.outcome === "ignored")).toBe(true);
   });
@@ -1067,7 +1064,7 @@ describe("apps-store delivery read faces (consumption)", () => {
       offset: 0,
     });
 
-    // No verdict exists, so the ranking has nothing to hoist: the newest rows
+    // why: No verdict exists, so the ranking has nothing to hoist: the newest rows
     // still render (never an empty list just because the traffic is noise).
     expect(page.rows).toHaveLength(5);
     expect(page.rows.every((r) => r.event_name === "check_run" && r.outcome === "ignored")).toBe(true);
@@ -1077,13 +1074,13 @@ describe("apps-store delivery read faces (consumption)", () => {
     const db = createMigratedD1();
     const appA = await seedApp(db);
     const appB = await seedApp(db, { githubAppId: 123457 });
-    const appC = await seedApp(db, { githubAppId: 123458 }); // zero deliveries
+    const appC = await seedApp(db, { githubAppId: 123458 }); // invariant: zero deliveries
     const s = store(db);
-    // appA: latest = rejected (in-window) after an ok + an ignored.
+    // invariant: appA: latest = rejected (in-window) after an ok + an ignored.
     await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     await s.recordDelivery({ appId: appA.id, eventName: "pull_request", outcome: "rejected", statusCode: 401, repositoryFullName: null, reason: null });
-    // appB: latest = ok; its one rejected row is aged OUT of the 24h window.
+    // note: appB: latest = ok; its one rejected row is aged OUT of the 24h window.
     await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "rejected", statusCode: 500, repositoryFullName: null, reason: null });
     await s.recordDelivery({ appId: appB.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     db.raw
@@ -1102,7 +1099,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     });
     expect(summaries[appB.id]).toMatchObject({
       latest: { event_name: "pull_request", outcome: "ok", status_code: null },
-      rejected24h: 0, // the rejected row is 25h old — outside the window
+      rejected24h: 0, // note: the rejected row is 25h old — outside the window
     });
     expect(summaries[appC.id]).toEqual({ latest: null, rejected24h: 0 });
   });
@@ -1110,7 +1107,7 @@ describe("apps-store delivery read faces (consumption)", () => {
   test("deliverySummaries returns ONLY the requested apps; an empty list is an empty map", async () => {
     const db = createMigratedD1();
     const appA = await seedApp(db);
-    await seedApp(db, { githubAppId: 123459 }); // appB — never requested
+    await seedApp(db, { githubAppId: 123459 }); // invariant: appB — never requested
     const s = store(db);
     await s.recordDelivery({ appId: appA.id, eventName: "ping", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
 
@@ -1197,7 +1194,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const s = store(db);
     await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
     await s.recordDelivery({ appId: app.id, eventName: "check_run", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
-    // The check_run row is genuinely newer, so an unconditionally-newest pick returns it.
+    // note: The check_run row is genuinely newer, so an unconditionally-newest pick returns it.
     db.raw
       .prepare(
         `UPDATE webhook_deliveries SET created_at = datetime('now', '-1 hour')
@@ -1215,7 +1212,7 @@ describe("apps-store delivery read faces (consumption)", () => {
     const app = await seedApp(db);
     const s = store(db);
     await s.recordDelivery({ appId: app.id, eventName: "pull_request", outcome: "ok", statusCode: null, repositoryFullName: null, reason: null });
-    // issue_comment is whitelisted and still ignored: no App mention, a bot
+    // note: issue_comment is whitelisted and still ignored: no App mention, a bot
     // author, or a comment outside a PR thread all land in `ignored`.
     await s.recordDelivery({ appId: app.id, eventName: "issue_comment", outcome: "ignored", statusCode: null, repositoryFullName: null, reason: null });
     db.raw
@@ -1258,7 +1255,7 @@ describe("apps-store delivery read faces (consumption)", () => {
 });
 
 describe("saveGithubMetadata (migrations 0019/0036)", () => {
-  // `satisfies` pins the saveGithubMetadata input shape while keeping the
+  // note: `satisfies` pins the saveGithubMetadata input shape while keeping the
   // literal's non-null field types for exact-value assertions below.
   const METADATA = {
     githubName: "Acme Inspector",
@@ -1285,7 +1282,7 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
   test("writes the four profile fields + github_slug + synced_at, and does NOT touch updated_at", async () => {
     const db = createMigratedTestD1();
     const app = await seedApp(db);
-    // Pin updated_at to a known past value: the write is machine-triggered
+    // note: Pin updated_at to a known past value: the write is machine-triggered
     // (the touchLastWebhook L5 precedent) and must leave the operator
     // timestamp alone — a same-second datetime('now') would mask a wrongly
     // touched column, so the pin makes the assertion deterministic.
@@ -1344,13 +1341,13 @@ describe("saveGithubMetadata (migrations 0019/0036)", () => {
     const s = store(db);
     expect(await s.saveGithubMetadata(app.id, METADATA)).toBe(true);
 
-    // A degraded later fetch (upstream shape change / bot lookup failure)
+    // note: A degraded later fetch (upstream shape change / bot lookup failure)
     // carries no slug; the cached one is the only mention target, so it stays.
     expect(
       await s.saveGithubMetadata(app.id, { ...METADATA, githubName: "Renamed App", githubSlug: null }),
     ).toBe(true);
     const row = await s.getAppById(app.id);
-    expect(row!.github_name).toBe("Renamed App"); // other columns still overwrite
+    expect(row!.github_name).toBe("Renamed App"); // note: other columns still overwrite
     expect(row!.github_slug).toBe(METADATA.githubSlug);
   });
 
@@ -1392,7 +1389,7 @@ describe("touchGithubMetadataAttempt (migration 0037)", () => {
     const app = await seedApp(db);
     expect(await store(db).softDeleteApp(app.id)).toBe(true);
 
-    // The attempt already happened upstream; refusing to record it would
+    // note: The attempt already happened upstream; refusing to record it would
     // re-open the per-read fetch loop. Neither call may throw.
     await store(db).touchGithubMetadataAttempt(app.id);
     await store(db).touchGithubMetadataAttempt(crypto.randomUUID());

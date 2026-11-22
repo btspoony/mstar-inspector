@@ -1,5 +1,4 @@
-/**
- * Ops sweep tests (architect verdict AL-6) — the cron
+/** note: Ops sweep tests (architect verdict AL-6) — the cron
  * failure sweep (src/worker/sweep.ts) over the REAL migration DDL
  * (bun:sqlite D1 double, tests/store/helpers.ts) plus an injected fetch for the webhook paths.
  *
@@ -48,8 +47,7 @@ const SWEEP_OVERRIDE = {
   inviteLapseCap: 2,
 };
 
-/**
- * A migrated DB carrying the target every recorded row names (its FK parent).
+/** note: A migrated DB carrying the target every recorded row names (its FK parent).
  * The sweep itself reads no target, but the write contract requires one.
  */
 function failureDb(): TestD1 {
@@ -86,7 +84,7 @@ function captureLog(): { log: SweepLog; calls: WarnCall[] } {
   return { log: { warn: (fields, msg) => void calls.push({ fields, msg }) }, calls };
 }
 
-/** Seed `count` in-window failure rows (created_at defaults to now). */
+/** note: Seed `count` in-window failure rows (created_at defaults to now). */
 async function seedInWindow(db: D1Like, count: number): Promise<void> {
   const store = createFailureStore(db);
   for (let i = 0; i < count; i++) {
@@ -94,7 +92,7 @@ async function seedInWindow(db: D1Like, count: number): Promise<void> {
   }
 }
 
-/** Seed one row OUTSIDE the trailing-24h window (25h ago). */
+/** note: Seed one row OUTSIDE the trailing-24h window (25h ago). */
 function seedOutsideWindow(db: D1Like & { raw: Database }): void {
   db.raw
     .query(
@@ -104,7 +102,7 @@ function seedOutsideWindow(db: D1Like & { raw: Database }): void {
     .run(crypto.randomUUID(), BASE.installation_id, BASE.owner, BASE.repo, BASE.pr_number, BASE.head_sha);
 }
 
-/** Minimal D1Like that records the query text and answers COUNT = 0. */
+/** note: Minimal D1Like that records the query text and answers COUNT = 0. */
 function recordingDb(captured: string[], bindings: Map<string, unknown[]>): D1Like {
   return {
     prepare(query: string): D1StatementLike {
@@ -115,7 +113,7 @@ function recordingDb(captured: string[], bindings: Map<string, unknown[]>): D1Li
           return stmt;
         },
         async first<T = Record<string, unknown>>(): Promise<T | null> {
-          // The only `first()` the sweep issues is the paging window read: an
+          // invariant: The only `first()` the sweep issues is the paging window read: an
           // absent MAX is "no recent alert".
           return null;
         },
@@ -167,11 +165,11 @@ describe("runSweep", () => {
     expect(bindings.get(deliveryDelete!)).toEqual(["-30 days", 500]);
     const countAt = captured.findIndex((query) => query.includes("GROUP BY stage"));
     expect(bindings.get(captured[countAt]!)).toEqual(["-24 hours"]);
-    // The maintenance signal is its own trailing-window read, in the same
+    // note: The maintenance signal is its own trailing-window read, in the same
     // window, right after the grouped one.
     expect(captured[countAt + 1]).toContain("stage = 'maintenance_deferred'");
     expect(bindings.get(captured[countAt + 1]!)).toEqual(["-24 hours"]);
-    // A healthy window has no page to de-bounce, so nothing follows the reads:
+    // why: A healthy window has no page to de-bounce, so nothing follows the reads:
     // no state write, no audit append.
     expect(captured).toHaveLength(countAt + 2);
     expect(result).toEqual({
@@ -197,7 +195,7 @@ describe("runSweep", () => {
         )
         .run(id, workspaceId, id, new Date().toISOString(), expiresAt);
     };
-    // Ages are relative to the real clock — a hard-coded calendar date slides
+    // note: Ages are relative to the real clock — a hard-coded calendar date slides
     // out of the comparison and turns this into a date bomb.
     const lapsed = new Date(Date.now() - 60_000).toISOString();
     insert("lapsed-default", "default", lapsed);
@@ -217,7 +215,7 @@ describe("runSweep", () => {
       { id: "lapsed-default", status: "expired" },
       { id: "lapsed-ws-2", status: "expired" },
     ]);
-    // A quiet flip logs nothing.
+    // invariant: A quiet flip logs nothing.
     expect(calls).toHaveLength(0);
     expect(first).toEqual({
       failures24h: 0,
@@ -245,10 +243,10 @@ describe("runSweep", () => {
     );
     const backlog = cap + 2;
     for (let i = 0; i < backlog; i++) {
-      // Spread across both workspaces: the flip is global, not workspace-scoped.
+      // note: Spread across both workspaces: the flip is global, not workspace-scoped.
       insert.run(`lapsed-${i}`, i % 2 === 0 ? "default" : "ws-2", `lapsed-${i}`, "pending", lapsed, lapsed);
     }
-    // A live pending row and an already-accepted one must survive every run.
+    // invariant: A live pending row and an already-accepted one must survive every run.
     insert.run("live", "default", "live", "pending", live, live);
     insert.run("accepted", "ws-2", "accepted", "accepted", lapsed, lapsed);
 
@@ -260,13 +258,13 @@ describe("runSweep", () => {
       .get(lapsed) as { n: number };
     expect(pendingAfterFirst.n).toBe(backlog - cap);
 
-    // The remainder is not stranded: the next run picks it up.
+    // note: The remainder is not stranded: the next run picks it up.
     const second = await runSweep(db, { log });
     expect(second.invitesExpired).toBe(backlog - cap);
     const third = await runSweep(db, { log });
     expect(third.invitesExpired).toBe(0);
 
-    // Nothing lost: every backlog row is `expired`, and the two non-lapsed
+    // invariant: Nothing lost: every backlog row is `expired`, and the two non-lapsed
     // rows kept their own status.
     const rows = db.raw.query("SELECT status, COUNT(*) AS n FROM workspace_invites GROUP BY status").all() as Array<{
       status: string;
@@ -278,7 +276,7 @@ describe("runSweep", () => {
       accepted: 1,
     });
     expect(db.raw.query("SELECT id FROM workspace_invites WHERE id = 'live' AND status = 'pending'").all()).toHaveLength(1);
-    // A bounded flip is still a quiet one: no warn line until a failure.
+    // note: A bounded flip is still a quiet one: no warn line until a failure.
     expect(calls).toHaveLength(0);
   });
 
@@ -291,12 +289,12 @@ describe("runSweep", () => {
        VALUES (?, 'default', ?, 'member', 'pending', NULL, ?, ?, NULL)`,
     );
     const ago = (minutes: number): string => new Date(Date.now() - minutes * 60_000).toISOString();
-    // The old row's login sorts LAST, so the login-ordered access path the
+    // why: The old row's login sorts LAST, so the login-ordered access path the
     // candidates had before the ORDER BY would reach it only after the whole
     // cohort — and a cap-sized inflow per run never gets that far.
     const oldestExpiry = ago(10 * 24 * 60);
     insert.run("oldest", "zzz-oldest", oldestExpiry, oldestExpiry);
-    /** A cap-sized cohort of newer lapsed rows, all sharing one expiry. */
+    /** note: A cap-sized cohort of newer lapsed rows, all sharing one expiry. */
     const feed = (generation: number, minutesAgo: number): void => {
       const expiry = ago(minutesAgo);
       for (let i = 0; i < SWEEP_INVITE_LAPSE_CAP; i++) {
@@ -313,14 +311,14 @@ describe("runSweep", () => {
       (db.raw.query("SELECT COUNT(*) AS n FROM workspace_invites WHERE status = 'pending'").get() as { n: number }).n;
 
     const first = await runSweep(db, { log: captureLog().log });
-    // The cap went to the oldest rows: the 10-day-old row, then the cohort in
+    // note: The cap went to the oldest rows: the 10-day-old row, then the cohort in
     // `id` order — NOT the login-ordered slice an unordered LIMIT returns.
     expect(first.invitesExpired).toBe(SWEEP_INVITE_LAPSE_CAP);
     expect(expired().slice(0, 2)).toEqual([{ id: "oldest" }, { id: "g1-0000" }]);
     expect(expired()).toHaveLength(SWEEP_INVITE_LAPSE_CAP);
     expect(lapsedPending()).toBe(1);
 
-    // Keep the inflow arriving at cap rate: the backlog must still drain, and
+    // invariant: Keep the inflow arriving at cap rate: the backlog must still drain, and
     // the surviving leftover row is the NEWEST of the previous generation.
     feed(2, 3);
     const second = await runSweep(db, { log: captureLog().log });
@@ -332,7 +330,7 @@ describe("runSweep", () => {
     expect(lapsedPending()).toBeLessThanOrEqual(SWEEP_INVITE_LAPSE_CAP);
     expect(lapsedPending()).toBeGreaterThan(0);
 
-    // Stop feeding and drain: nothing is stranded, oldest row included.
+    // invariant: Stop feeding and drain: nothing is stranded, oldest row included.
     let drained = 0;
     for (let run = 0; run < 4; run++) drained += (await runSweep(db, { log: captureLog().log })).invitesExpired ?? 0;
     expect(drained).toBeGreaterThan(0);
@@ -392,7 +390,7 @@ describe("runSweep", () => {
             return stmt;
           },
           async first<T = Record<string, unknown>>(): Promise<T | null> {
-            // The sweep's only `first()` is the paging window read: no MAX =
+            // invariant: The sweep's only `first()` is the paging window read: no MAX =
             // no recent alert.
             return null;
           },
@@ -414,7 +412,7 @@ describe("runSweep", () => {
     };
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
-    // The fake reports changes: 3 for EVERY statement, so both janitors log;
+    // note: The fake reports changes: 3 for EVERY statement, so both janitors log;
     // the delivery sweep's line comes first.
     expect(calls).toHaveLength(2);
     expect(calls[0]!.fields).toEqual({ event: "retention_swept", deleted: 3 });
@@ -472,7 +470,7 @@ describe("runSweep", () => {
          VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
-    // Ages are relative to the real clock — a hard-coded calendar date slides
+    // note: Ages are relative to the real clock — a hard-coded calendar date slides
     // out of the 30-day window and turns this test into a date bomb.
     const insertDelivery = (id: string, ageDays: number): void => {
       db.raw
@@ -517,10 +515,10 @@ describe("runSweep", () => {
         )
         .run(id, number, state, `-${ageDays} days`);
     };
-    insertPr("pr-merged-old", 1, "merged", 120); // swept
-    insertPr("pr-closed-old", 2, "closed", 91); // swept
-    insertPr("pr-open-old", 3, "open", 120); // KEPT — still a live target
-    insertPr("pr-merged-fresh", 4, "merged", 1); // KEPT — inside the window
+    insertPr("pr-merged-old", 1, "merged", 120); // note: swept
+    insertPr("pr-closed-old", 2, "closed", 91); // note: swept
+    insertPr("pr-open-old", 3, "open", 120); // note: KEPT — still a live target
+    insertPr("pr-merged-fresh", 4, "merged", 1); // note: KEPT — inside the window
 
     const { log, calls } = captureLog();
     await runSweep(db, { log });
@@ -528,7 +526,7 @@ describe("runSweep", () => {
       .query("SELECT id FROM pull_requests ORDER BY id")
       .all() as Array<{ id: string }>;
     expect(remaining.map((row) => row.id)).toEqual(["pr-merged-fresh", "pr-open-old"]);
-    // The delivery sweep deletes nothing here, so the ledger line is first.
+    // why: The delivery sweep deletes nothing here, so the ledger line is first.
     expect(calls[0]!.fields).toEqual({ event: "pull_request_retention_swept", deleted: 2 });
   });
 
@@ -601,14 +599,14 @@ describe("runSweep", () => {
     for (const stage of ["parse", "runner", "sandbox", "pipeline"] as const) {
       await store.record({ ...BASE, stage, error: `boom-${stage}` });
     }
-    seedOutsideWindow(db); // 25h-old row must NOT be counted
+    seedOutsideWindow(db); // invariant: 25h-old row must NOT be counted
 
     const result = await runSweep(db, { log: captureLog().log });
     expect(result.failures24h).toBe(4);
     expect(result.thresholdBreached).toBe(false);
   });
 
-  // `recheck` marks a budget skip, a dead seat or one invalid document; `usage`
+  // note: `recheck` marks a budget skip, a dead seat or one invalid document; `usage`
   // marks a usage_events insert that failed while the review kept going;
   // `rate-limit` marks a degraded-comment sweep throttled by GitHub while the
   // review itself stood. All three are attribution, not review failures, and
@@ -618,7 +616,7 @@ describe("runSweep", () => {
     test(`${stage} rows never page ops; a runner row still counts`, async () => {
       const db = failureDb();
       const store = createFailureStore(db);
-      // Six degraded-but-successful rounds is a normal day: each writes one
+      // note: Six degraded-but-successful rounds is a normal day: each writes one
       // excluded row and nothing else. None of them is a review failure.
       for (let i = 0; i < 6; i++) {
         await store.record({ ...BASE, stage, error: `degraded-${i}` });
@@ -628,10 +626,10 @@ describe("runSweep", () => {
       expect(quiet.failures24h).toBe(0);
       expect(quiet.thresholdBreached).toBe(false);
       expect(calls).toHaveLength(0);
-      // The rows stay in D1 as attribution — only the paging count ignores them.
+      // invariant: The rows stay in D1 as attribution — only the paging count ignores them.
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
 
-      // A review failure beside them still counts, so the exclusion is by stage
+      // why: A review failure beside them still counts, so the exclusion is by stage
       // and not a blanket silence.
       await store.record({ ...BASE, stage: "runner", error: "boom" });
       const counted = await runSweep(db, { log: captureLog().log });
@@ -643,7 +641,7 @@ describe("runSweep", () => {
   test("a quota refusal does not page ops while a sandbox failure does, and the breakdown names it", async () => {
     const db = failureDb();
     const store = createFailureStore(db);
-    // One tenant's exhausted month beside one real infrastructure failure: the
+    // note: One tenant's exhausted month beside one real infrastructure failure: the
     // first is a dashboard failure (commercial ceiling), the second is an
     // incident. Only the second belongs in the global alert.
     await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
@@ -658,10 +656,10 @@ describe("runSweep", () => {
       webhook: "not_attempted",
     });
     expect(calls).toHaveLength(0);
-    // The quota row is still a stored failure — only paging ignores it.
+    // invariant: The quota row is still a stored failure — only paging ignores it.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
 
-    // Push the sandbox stage over the threshold: the payload's parts are the
+    // note: Push the sandbox stage over the threshold: the payload's parts are the
     // excluded-nothing total, quota absent from both.
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD; i++) {
       await store.record({ ...BASE, stage: "sandbox", error: `boom-${i}` });
@@ -675,7 +673,7 @@ describe("runSweep", () => {
 
   test("quota rows re-enter the pager when the window refuses more than one workspace", async () => {
     const db = failureDb();
-    // The exclusion's premise is "ONE tenant's month"; a mis-published ceiling
+    // note: The exclusion's premise is "ONE tenant's month"; a mis-published ceiling
     // refuses every workspace, and that must page instead of staying silent.
     db.raw
       .prepare(
@@ -699,7 +697,7 @@ describe("runSweep", () => {
     const result = await runSweep(db, { log });
     expect(result.failures24h).toBe(8);
     expect(result.thresholdBreached).toBe(true);
-    // Readmitted rows are ordinary infrastructure rows: same total, same
+    // note: Readmitted rows are ordinary infrastructure rows: same total, same
     // breakdown, same lane.
     const alert = calls[0]!.fields as SweepAlertFields;
     expect(alert.failures_24h).toBe(8);
@@ -710,7 +708,7 @@ describe("runSweep", () => {
   test("the payload's stages preserve the query's ordered, non-empty stage groups", async () => {
     const db = failureDb();
     const store = createFailureStore(db);
-    // Two included stages with unequal counts, inserted biggest-first: the
+    // note: Two included stages with unequal counts, inserted biggest-first: the
     // payload must follow the query's stage order, not the insertion order, and
     // must carry no empty group for an excluded stage.
     for (let i = 0; i < 5; i++) {
@@ -740,7 +738,7 @@ describe("runSweep", () => {
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
     expect(result.failures24h).toBe(1);
-    // The deferral posts on its own (its own lane), but never as infrastructure:
+    // invariant: The deferral posts on its own (its own lane), but never as infrastructure:
     // the total and the breakdown are the sandbox row alone.
     const alert = calls[0]!.fields as SweepAlertFields;
     expect(alert.failures_24h).toBe(1);
@@ -758,7 +756,7 @@ describe("runSweep", () => {
 
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
-    // The deferral is not infrastructure: the total, the breach decision and the
+    // note: The deferral is not infrastructure: the total, the breach decision and the
     // breakdown are the same as without it.
     expect(result.failures24h).toBe(SWEEP_FAILURE_THRESHOLD + 1);
     expect(result.thresholdBreached).toBe(true);
@@ -771,7 +769,7 @@ describe("runSweep", () => {
 
   test("threshold boundary: ONE fully-failed message's rows do not alert", async () => {
     const db = failureDb();
-    // The threshold's own case: a single DLQ'd job leaves exactly this many rows
+    // invariant: The threshold's own case: a single DLQ'd job leaves exactly this many rows
     // (one per delivery), and one failed message must never page an operator.
     await seedInWindow(db, QUEUE_MAX_ATTEMPTS);
     const { log, calls } = captureLog();
@@ -806,7 +804,7 @@ describe("runSweep", () => {
       failures_24h: SWEEP_FAILURE_THRESHOLD + 1,
       dlq_check: "skipped",
       thresholds: { failures_24h: SWEEP_FAILURE_THRESHOLD, window_hours: 24 },
-      // The seeded rows are all `runner`: the breakdown is the total's parts.
+      // note: The seeded rows are all `runner`: the breakdown is the total's parts.
       stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
       due: ["infrastructure"],
     });
@@ -897,22 +895,21 @@ describe("runSweep", () => {
   });
 });
 
-/**
- * The AUDIT WINDOW (`alert.failure_paging` in `platform_audit_events`, compass
+/** note: The AUDIT WINDOW (`alert.failure_paging` in `platform_audit_events`, compass
  * D17): the sweep posts at most once per `SWEEP_WINDOW_HOURS` and nothing is
  * latched. The newest recorded alert suppresses the POST; a delivered POST
  * appends the row. A missed alert is impossible because no stored state has to
  * be cleared before the next breach can page.
  */
 describe("runSweep — paging audit window", () => {
-  /** Every recorded paging alert, oldest first. */
+  /** note: Every recorded paging alert, oldest first. */
   function alertRows(db: TestD1): Array<{ actor_login: string; detail_json: string; created_at: string }> {
     return db.raw
       .query("SELECT actor_login, detail_json, created_at FROM platform_audit_events WHERE action = ? ORDER BY created_at")
       .all(ALERT_PAGING_AUDIT_ACTION) as Array<{ actor_login: string; detail_json: string; created_at: string }>;
   }
 
-  /** Plant an alert as an earlier sweep would have left it, `at` ISO-stamped. */
+  /** why: Plant an alert as an earlier sweep would have left it, `at` ISO-stamped. */
   function seedAlert(db: TestD1, at: string): void {
     db.raw
       .prepare(
@@ -923,7 +920,7 @@ describe("runSweep — paging audit window", () => {
       .run(crypto.randomUUID(), ALERT_PAGING_AUDIT_ACTION, at);
   }
 
-  /** A sink that accepts every POST and counts the calls. */
+  /** note: A sink that accepts every POST and counts the calls. */
   function okSink(): { fetchImpl: typeof fetch; calls: () => number } {
     let n = 0;
     const fetchImpl = (async () => {
@@ -939,7 +936,7 @@ describe("runSweep — paging audit window", () => {
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
 
-    // Pinned clock: the suppression is "stamp strictly earlier than the
+    // note: Pinned clock: the suppression is "stamp strictly earlier than the
     // reading clock", so the second sweep must read a later millisecond than
     // the row the first one wrote.
     const start = Date.parse("2026-01-01T00:00:00.000Z");
@@ -949,7 +946,7 @@ describe("runSweep — paging audit window", () => {
       const first = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
       expect(first.webhook).toBe("posted");
       expect(calls()).toBe(1);
-      // Only a delivered alert is recorded, and the row names the sweep.
+      // invariant: Only a delivered alert is recorded, and the row names the sweep.
       expect(alertRows(db)).toHaveLength(1);
       expect(alertRows(db)[0]!.actor_login).toBe("sweep");
       expect(JSON.parse(alertRows(db)[0]!.detail_json)).toEqual({
@@ -957,7 +954,7 @@ describe("runSweep — paging audit window", () => {
         stages: [{ stage: "runner", count: SWEEP_FAILURE_THRESHOLD + 1 }],
       });
 
-      // Same breach, fresh sweep instance: the recorded alert is inside the
+      // note: Same breach, fresh sweep instance: the recorded alert is inside the
       // window, so nothing is posted and nothing is appended.
       jest.setSystemTime(start + 1_000);
       const second = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
@@ -975,7 +972,7 @@ describe("runSweep — paging audit window", () => {
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
 
-    // An alert older than the window is not a reason to stay quiet.
+    // note: An alert older than the window is not a reason to stay quiet.
     db.raw.exec("DELETE FROM platform_audit_events");
     seedAlert(db, new Date(Date.now() - (SWEEP_WINDOW_HOURS + 1) * 3_600_000).toISOString());
 
@@ -1003,7 +1000,7 @@ describe("runSweep — paging audit window", () => {
     expect(calls()).toBe(1);
     expect(warns.at(-1)!.fields).toMatchObject({ event: "ops_sweep_alert_audit_failed", detail: "audit locked" });
 
-    // Nothing was recorded, so the next breaching sweep posts once more — the
+    // why: Nothing was recorded, so the next breaching sweep posts once more — the
     // documented duplicate a failed append may cause.
     const again = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
     expect(again.webhook).toBe("posted");
@@ -1059,7 +1056,7 @@ describe("runSweep — paging audit window", () => {
     const { fetchImpl, calls } = okSink();
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
-    // A clock-ahead row must not silence paging until the wall clock catches up.
+    // invariant: A clock-ahead row must not silence paging until the wall clock catches up.
     seedAlert(db, new Date(Date.now() + 24 * 3_600_000).toISOString());
 
     const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
@@ -1073,7 +1070,7 @@ describe("runSweep — paging audit window", () => {
     const { fetchImpl, calls } = okSink();
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
-    // Seconds ahead is not a delivered alert either: only a past stamp counts.
+    // invariant: Seconds ahead is not a delivered alert either: only a past stamp counts.
     seedAlert(db, new Date(Date.now() + 30_000).toISOString());
 
     const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });
@@ -1087,7 +1084,7 @@ describe("runSweep — paging audit window", () => {
     const { fetchImpl, calls } = okSink();
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
-    // Same-millisecond stamp: only a STRICTLY past alert proves a delivered
+    // invariant: Same-millisecond stamp: only a STRICTLY past alert proves a delivered
     // page, so an equality cannot suppress the alert owed by this window.
     const now = new Date("2026-01-01T00:00:00.000Z");
     seedAlert(db, now.toISOString());
@@ -1154,8 +1151,7 @@ describe("runSweep — paging audit window", () => {
   });
 });
 
-/**
- * The maintenance lane's own audit window (`alert.maintenance_deferred`): a
+/** note: The maintenance lane's own audit window (`alert.maintenance_deferred`): a
  * deferral posts on its own even when infrastructure is healthy, de-bounces on
  * its OWN action, and shares one POST with a simultaneous infrastructure breach.
  */
@@ -1180,7 +1176,7 @@ describe("runSweep — maintenance audit window", () => {
     await createFailureStore(db).record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
   }
 
-  /** A sink that accepts every POST, recording each body it was sent. */
+  /** note: A sink that accepts every POST, recording each body it was sent. */
   function sink(): { fetchImpl: typeof fetch; bodies: () => string[] } {
     const bodies: string[] = [];
     const fetchImpl = (async (_url: unknown, init?: RequestInit) => {
@@ -1274,7 +1270,7 @@ describe("runSweep — maintenance audit window", () => {
 
     const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
     expect(result.webhook).toBe("posted");
-    // ONE POST carrying both keys, each describing its own signal.
+    // note: ONE POST carrying both keys, each describing its own signal.
     expect(bodies()).toHaveLength(1);
     expect(JSON.parse(bodies()[0]!)).toEqual({
       event: "ops_sweep_alert",
@@ -1285,7 +1281,7 @@ describe("runSweep — maintenance audit window", () => {
       maintenance_deferred: { count: 1 },
       due: ["infrastructure", "maintenance"],
     });
-    // Each due lane records under its own action.
+    // note: Each due lane records under its own action.
     expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
   });
@@ -1300,7 +1296,7 @@ describe("runSweep — maintenance audit window", () => {
     const result = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
     expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
     expect(bodies()).toHaveLength(1);
-    // `failures_24h`/`stages` keep meaning infrastructure-only and keep showing
+    // invariant: `failures_24h`/`stages` keep meaning infrastructure-only and keep showing
     // the standing breach, but `due` says the maintenance lane is the only one
     // this post is owed by: the paging lane already announced the breach.
     expect(JSON.parse(bodies()[0]!)).toEqual({
@@ -1312,7 +1308,7 @@ describe("runSweep — maintenance audit window", () => {
       maintenance_deferred: { count: 1 },
       due: ["maintenance"],
     });
-    // The latched paging lane writes no second row; only maintenance is recorded.
+    // invariant: The latched paging lane writes no second row; only maintenance is recorded.
     expect(auditRows(db, ALERT_MAINTENANCE_AUDIT_ACTION)).toHaveLength(1);
     expect(auditRows(db, ALERT_PAGING_AUDIT_ACTION)).toHaveLength(1);
   });
@@ -1342,7 +1338,7 @@ describe("runSweep — maintenance audit window", () => {
 
     await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl });
     const body = JSON.parse(bodies()[0]!) as Record<string, unknown>;
-    // The contract's shape exactly: `maintenance_deferred: {count}`, so a
+    // invariant: The contract's shape exactly: `maintenance_deferred: {count}`, so a
     // consumer reading the specified key observes the deferral count.
     expect(body.maintenance_deferred).toEqual({ count: 2 });
     expect(body).not.toHaveProperty("maintenanceDeferred");
@@ -1364,7 +1360,7 @@ describe("runSweep — maintenance audit window", () => {
     const db = failureDb();
     await seedDeferral(db);
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
-    // The deferral was announced already; only the fresh breach owes a post.
+    // invariant: The deferral was announced already; only the fresh breach owes a post.
     seedAudit(db, ALERT_MAINTENANCE_AUDIT_ACTION, "maintenance_deferred", new Date(Date.now() - 60_000).toISOString());
     const { fetchImpl, bodies } = sink();
 
@@ -1372,7 +1368,7 @@ describe("runSweep — maintenance audit window", () => {
     expect(result).toMatchObject({ thresholdBreached: true, webhook: "posted" });
     expect(bodies()).toHaveLength(1);
     const body = JSON.parse(bodies()[0]!) as Record<string, unknown> & { due: string[] };
-    // The standing deferral count is not an alert: `due` excludes the lane and
+    // note: The standing deferral count is not an alert: `due` excludes the lane and
     // the count key is absent, so the receiver cannot misread it as active.
     expect(body.due).toEqual(["infrastructure"]);
     expect(body).not.toHaveProperty("maintenance_deferred");
@@ -1381,8 +1377,7 @@ describe("runSweep — maintenance audit window", () => {
   });
 });
 
-/**
- * Comment-claim outbox (migration 0048): a claim row whose worker-side send
+/** note: Comment-claim outbox (migration 0048): a claim row whose worker-side send
  * never happened must reach the queue eventually, and a claim that never gets
  * consumed must stop being retried. Real migrated DDL for the table, a
  * recording queue double for the send.
@@ -1436,7 +1431,7 @@ describe("runSweep — comment-claim outbox", () => {
     };
   }
 
-  /** Write the operator budgets straight into the runtime-config table. */
+  /** note: Write the operator budgets straight into the runtime-config table. */
   function seedSettings(
     db: TestD1,
     values: Partial<{ retryMs: number; maxAttempts: number; outboxCap: number }>,
@@ -1472,7 +1467,7 @@ describe("runSweep — comment-claim outbox", () => {
     });
     const row = claimRow(db);
     expect(row).toMatchObject({ state: "queued", attempts: 1, consumed_ms: null });
-    // The window restarts at THIS send, so the next sweep cannot re-send it.
+    // why: The window restarts at THIS send, so the next sweep cannot re-send it.
     expect(row.queued_ms).toBeGreaterThan(Date.now() - 60_000);
     expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 1, expired: 0, failed: 0 });
   });
@@ -1510,7 +1505,7 @@ describe("runSweep — comment-claim outbox", () => {
 
   test("a claim at the stored attempt cap expires instead of being re-sent", async () => {
     const db = failureDb();
-    // The cap is an operator setting on the runtime-config surface, not a
+    // note: The cap is an operator setting on the runtime-config surface, not a
     // source constant: a stored 1 expires a claim one attempt in.
     seedSettings(db, { maxAttempts: 1 });
     seedClaim(db, { attempts: 1 });
@@ -1520,7 +1515,7 @@ describe("runSweep — comment-claim outbox", () => {
     await runSweep(db, { log, queue });
 
     expect(sent).toHaveLength(0);
-    // The tombstone survives (never deleted: it is the dedup proof) and drops
+    // invariant: The tombstone survives (never deleted: it is the dedup proof) and drops
     // the payload it no longer needs.
     expect(claimRow(db)).toMatchObject({ state: "expired", payload_json: null });
     expect(calls.at(-1)?.fields).toEqual({ event: "comment_claim_outbox", resent: 0, expired: 1, failed: 0 });
@@ -1545,7 +1540,7 @@ describe("runSweep — comment-claim outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    // The row stays `queued` for the next window, but the attempt is spent:
+    // invariant: The row stays `queued` for the next window, but the attempt is spent:
     // a send that can never succeed reaches the cap and expires instead of
     // being retried on every sweep.
     expect(claimRow(db)).toMatchObject({ state: "queued", attempts: 1 });
@@ -1554,7 +1549,7 @@ describe("runSweep — comment-claim outbox", () => {
 
   test("the stored retry window drives the scan, not a source constant", async () => {
     const db = failureDb();
-    // 60 s old: fresh under the 300 s absent-row default, stale under a stored
+    // note: 60 s old: fresh under the 300 s absent-row default, stale under a stored
     // 30 s window.
     seedClaim(db, { ageMs: 60_000 });
     const { queue, sent } = fakeQueue();
@@ -1581,21 +1576,21 @@ describe("runSweep — comment-claim outbox", () => {
     await runSweep(db, { log: captureLog().log, queue });
     expect(sent).toHaveLength(1);
 
-    // The second claim is drained by the next sweep, never dropped.
+    // invariant: The second claim is drained by the next sweep, never dropped.
     await runSweep(db, { log: captureLog().log, queue });
     expect(sent).toHaveLength(2);
   });
 
   test("a degraded settings read falls back to the documented defaults with ONE warn", async () => {
     const db = failureDb();
-    // One corrupt stored value degrades the whole trio (the store's trust rule).
+    // note: One corrupt stored value degrades the whole trio (the store's trust rule).
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
          VALUES ('review.comment_claim.retry_ms', 'abc', '2026-11-05T00:00:00.000Z', 'fixture')`,
       )
       .run();
-    seedClaim(db, { ageMs: 60_000 }); // still inside the documented 300 s window
+    seedClaim(db, { ageMs: 60_000 }); // note: still inside the documented 300 s window
     const { queue, sent } = fakeQueue();
     const { log, calls } = captureLog();
 
@@ -1614,14 +1609,13 @@ describe("runSweep — comment-claim outbox", () => {
   });
 });
 
-/**
- * Maintenance-replay outbox (migration 0071): an operator request
+/** note: Maintenance-replay outbox (migration 0071): an operator request
  * whose send never resolved is retried by the sweep, but ONLY while the
  * maintenance window is readable and open — the same fail-closed predicate the
  * replay route uses. Real migrated DDL, a recording queue double.
  */
 describe("runSweep — maintenance replay outbox", () => {
-  /** One requested-but-unsent deferred row (the operator's durable request). */
+  /** note: One requested-but-unsent deferred row (the operator's durable request). */
   async function seedPendingReplay(
     db: TestD1,
     overrides: { targetId?: string; requestedAt?: string } = {},
@@ -1683,7 +1677,7 @@ describe("runSweep — maintenance replay outbox", () => {
     await runSweep(db, { log, queue });
 
     expect(sent).toHaveLength(1);
-    // The frozen replay payload: live target/bot, authoritative head left to
+    // note: The frozen replay payload: live target/bot, authoritative head left to
     // the consumer, no comment id and no old webhook body.
     expect(sent[0]).toEqual({
       installation_id: BASE.installation_id,
@@ -1699,7 +1693,7 @@ describe("runSweep — maintenance replay outbox", () => {
     expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
     expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox")).toBe(true);
 
-    // The sent stamp is the outbox's only exit: the next sweep sends nothing.
+    // invariant: The sent stamp is the outbox's only exit: the next sweep sends nothing.
     await runSweep(db, { log, queue });
     expect(sent).toHaveLength(1);
   });
@@ -1707,7 +1701,7 @@ describe("runSweep — maintenance replay outbox", () => {
   test("cap 1 with a pending replay reserves the slot for the replay, and the comment lane is served next sweep", async () => {
     const db = failureDb();
     await seedPendingReplay(db);
-    // One stale comment claim and one pending replay under cap 1: the reservation
+    // note: One stale comment claim and one pending replay under cap 1: the reservation
     // keeps the replay lane's last slot, so the operator's request is attempted
     // THIS pass instead of waiting behind a sustained comment backlog.
     db.raw
@@ -1729,7 +1723,7 @@ describe("runSweep — maintenance replay outbox", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ action: "maintenance_replay" });
 
-    // Nothing replayable is left, so the comment lane gets the whole cap.
+    // why: Nothing replayable is left, so the comment lane gets the whole cap.
     await runSweep(db, { log: captureLog().log, queue });
     expect(sent).toHaveLength(2);
     expect(sent[1]).toMatchObject({ triggered_by: "issue_comment" });
@@ -1755,7 +1749,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log: captureLog().log, queue });
 
-    // Both lanes recovered in ONE pass, exactly one send each — no starvation,
+    // invariant: Both lanes recovered in ONE pass, exactly one send each — no starvation,
     // no double spending.
     expect(sent).toHaveLength(2);
     expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
@@ -1772,7 +1766,7 @@ describe("runSweep — maintenance replay outbox", () => {
     await runSweep(db, { log, queue });
 
     expect(sent).toHaveLength(0);
-    // The request stands, unsent, for the first open sweep.
+    // note: The request stands, unsent, for the first open sweep.
     expect(replayRow(db, id)).toMatchObject({
       maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
       maintenance_replay_sent_at: null,
@@ -1781,7 +1775,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
   test("a dead oldest target does not starve the next pending request in the same sweep", async () => {
     const db = failureDb();
-    // The oldest request names a target that is now soft-deleted: it stays
+    // invariant: The oldest request names a target that is now soft-deleted: it stays
     // pending (never resurrected), but it must not own the batch.
     const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
     db.raw
@@ -1789,7 +1783,7 @@ describe("runSweep — maintenance replay outbox", () => {
       .run("2026-11-02T00:00:00.000Z", deadTarget);
     const dead = await seedPendingReplay(db, { targetId: deadTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
     const live = await seedPendingReplay(db, { requestedAt: "2026-11-05T00:00:00.000Z" });
-    // Cap 2: one slot for the dead row's attempt, one for the live request.
+    // note: Cap 2: one slot for the dead row's attempt, one for the live request.
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
@@ -1804,7 +1798,7 @@ describe("runSweep — maintenance replay outbox", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
     expect(replayRow(db, live).maintenance_replay_sent_at).not.toBeNull();
-    // The dead request is never sent — an unavailable target cannot be
+    // invariant: The dead request is never sent — an unavailable target cannot be
     // resurrected — but its attempt IS stamped so it rotates behind the rest.
     expect(replayRow(db, dead)).toMatchObject({
       maintenance_replay_requested_at: "2026-11-01T00:00:00.000Z",
@@ -1817,7 +1811,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
   test("a dead backlog is bounded per pass: cap 1 touches one row and the next sweep moves on", async () => {
     const db = failureDb();
-    // Three requests whose target is gone. They stay pending forever by
+    // note: Three requests whose target is gone. They stay pending forever by
     // contract, so the ONLY thing keeping the sweep bounded is that each touched
     // row spends the shared budget and stamps its attempt.
     const deadTarget = seedTarget(db, "bot-sweep", { id: "target-dead" });
@@ -1840,7 +1834,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    // Cap 1 = at most ONE row touched this pass, and no queue write at all.
+    // note: Cap 1 = at most ONE row touched this pass, and no queue write at all.
     expect(sent).toHaveLength(0);
     expect(calls.find((call) => call.fields.event === "maintenance_replay_outbox")?.fields).toEqual({
       event: "maintenance_replay_outbox",
@@ -1853,7 +1847,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    // The stamped row rotates back, so the next sweep touches a DIFFERENT one
+    // why: The stamped row rotates back, so the next sweep touches a DIFFERENT one
     // instead of walking the same dead prefix again.
     expect(touched()).toHaveLength(2);
     expect(sent).toHaveLength(0);
@@ -1861,7 +1855,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
   test("a replay whose send keeps failing rotates behind the next pending request on the next sweep", async () => {
     const db = failureDb();
-    // Two live targets: only the OLDEST request's send throws, so it stays
+    // why: Two live targets: only the OLDEST request's send throws, so it stays
     // pending forever while a later request waits behind it.
     const stuckTarget = seedTarget(db, "bot-sweep", { id: "target-stuck" });
     const stuck = await seedPendingReplay(db, { targetId: stuckTarget, requestedAt: "2026-11-01T00:00:00.000Z" });
@@ -1883,7 +1877,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    // Cap 1: the oldest request got the only attempt and failed. The attempt
+    // invariant: Cap 1: the oldest request got the only attempt and failed. The attempt
     // stamp is what moves it back — no attempt cap, no persisted counter.
     expect(sent).toHaveLength(0);
     expect(replayRow(db, stuck).maintenance_replay_sent_at).toBeNull();
@@ -1891,7 +1885,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(db, { log, queue });
 
-    // The later request is attempted instead of the same failing row again.
+    // note: The later request is attempted instead of the same failing row again.
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ action: "maintenance_replay", targetId: BASE.target_id });
     expect(replayRow(db, later).maintenance_replay_sent_at).not.toBeNull();
@@ -1908,14 +1902,14 @@ describe("runSweep — maintenance replay outbox", () => {
          VALUES (123, 'acme', 'widgets', 42, 9001, 'queued', ?, 0, 0, 0)`,
       )
       .run(JSON.stringify({ ...BASE, head_sha: null, action: "created", triggered_by: "issue_comment" }));
-    // Cap 2 = one slot per lane while a replay is pending.
+    // note: Cap 2 = one slot per lane while a replay is pending.
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at, updated_by)
          VALUES ('review.comment_claim.outbox_cap', '2', '2026-11-05T00:00:00.000Z', 'fixture')`,
       )
       .run();
-    // The send succeeds, then the claim's own attempts update throws — the
+    // note: The send succeeds, then the claim's own attempts update throws — the
     // attempt is still spent, so the replay lane gets only its own reserved slot.
     const lockedUpdate: D1StatementLike = {
       bind: () => lockedUpdate,
@@ -1938,7 +1932,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     await runSweep(brokenWrites, { log, queue });
 
-    // Exactly the cap: the comment attempt happened, and the replay still got
+    // invariant: Exactly the cap: the comment attempt happened, and the replay still got
     // the slot reserved for it — no attempt was refunded.
     expect(sent).toHaveLength(2);
     expect(sent.some((message) => JSON.stringify(message).includes('"issue_comment"'))).toBe(true);
@@ -1948,7 +1942,7 @@ describe("runSweep — maintenance replay outbox", () => {
   test("a queue send that resolves but a sent stamp that fails leaves the row pending for the next sweep", async () => {
     const db = failureDb();
     const id = await seedPendingReplay(db);
-    // Cap 1: one attempt this pass, so the pending state is observed without a
+    // why: Cap 1: one attempt this pass, so the pending state is observed without a
     // second in-pass retry.
     db.raw
       .prepare(
@@ -1956,7 +1950,7 @@ describe("runSweep — maintenance replay outbox", () => {
          VALUES ('review.comment_claim.outbox_cap', '1', '2026-11-05T00:00:00.000Z', 'fixture')`,
       )
       .run();
-    // The queue accepts the job; only the sent stamp throws. The row must stay
+    // invariant: The queue accepts the job; only the sent stamp throws. The row must stay
     // pending (a send whose stamp never landed is not proof of delivery), and
     // the next open sweep must retry it — at-least-once, never a lost recovery.
     const lockedStamp: D1StatementLike = {
@@ -1983,7 +1977,7 @@ describe("runSweep — maintenance replay outbox", () => {
 
     expect(sent).toHaveLength(1);
     expect(replayRow(db, id).maintenance_replay_sent_at).toBeNull();
-    // The attempt is stamped before the send, so the row rotates back instead of
+    // why: The attempt is stamped before the send, so the row rotates back instead of
     // owning the next sweep's budget.
     expect(replayRow(db, id).maintenance_replay_last_attempt_at).not.toBeNull();
     expect(calls.some((call) => call.fields.event === "maintenance_replay_outbox_send_failed")).toBe(true);
@@ -1991,7 +1985,7 @@ describe("runSweep — maintenance replay outbox", () => {
     failStamp = false;
     await runSweep(flaky, { log, queue });
 
-    // The retry lands the stamp and the row leaves the outbox.
+    // note: The retry lands the stamp and the row leaves the outbox.
     expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();
     await runSweep(flaky, { log, queue });
     expect(sent).toHaveLength(2);
