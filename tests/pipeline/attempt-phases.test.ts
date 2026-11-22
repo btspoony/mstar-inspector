@@ -610,6 +610,8 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
                 external_id: identity.externalId,
                 status: "completed",
                 conclusion: terminal,
+                // Delivery is the conclusion AND the frozen text (spec §7.9).
+                output: "output" in params ? (params.output as { title?: string; summary?: string }) : undefined,
                 app: { id: identity.githubAppId },
               },
             };
@@ -664,6 +666,32 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     if (proofLease === null) throw new Error("fixture: the proof claim was refused");
     const staged = await readPublication(db as never, publicationId);
     if (staged === null) throw new Error("fixture: the staged publication is gone");
+    // The confirmed publication carries a readable tally, so its confirmation
+    // can actually revise the unconfirmed failure — the worker twin's shape.
+    // Without a tally the proof-derived conclusion is the SAME failure and
+    // there is nothing to revise.
+    if (staged.payload.artifact !== null) {
+      db.raw
+        .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+        .run(
+          JSON.stringify({
+            ...staged.payload,
+            artifact: {
+              ...staged.payload.artifact,
+              payload: {
+                ...(staged.payload.artifact.payload as Record<string, unknown>),
+                tally: {
+                  verdict: "needs fixes",
+                  scorePct: 92,
+                  tally: { mustFix: 0, shouldFix: 1, nit: 0 },
+                  chatHeader: "h",
+                },
+              },
+            },
+          }),
+          publicationId,
+        );
+    }
     expect(
       await recordPublicationProof(db as never, publicationId, proofLease, {
         publicationId,
@@ -701,8 +729,11 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
       terminal_ms: number | null;
     };
     expect(row.publication_id).toBe(publicationId);
+    // The confirmation REVISED the record: the proof's readable tally turns the
+    // unconfirmed failure into the gate's own verdict, not the failure fallback.
+    expect(row.desired).toBe("success");
     expect(row.desired_summary).not.toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
-    expect(row.desired_summary).toContain(`Review gate could not be evaluated for ${SHA.slice(0, 7)}`);
+    expect(row.desired_summary).toContain(`Review gate met for ${SHA.slice(0, 7)}`);
     expect(row.observed).toBe(row.desired);
     expect(row.terminal_ms).not.toBeNull();
   });
