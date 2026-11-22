@@ -1494,6 +1494,10 @@ export type LineDiscoveryOutcome = { attempts: number; unresolvable: boolean };
  * stopped. The row, its count and its reason stay (leaving the set is not
  * deletion), and a row already unresolvable returns `null` — the caller has
  * nothing new to report.
+ *
+ * The same statement re-checks that the batch is STILL UNCAPTURED: a
+ * concurrent pass that saved every comment id makes this stale observation
+ * false, so a completed batch can never be marked unresolvable.
  */
 export async function recordLineDiscoveryFailure(
   db: D1Like,
@@ -1512,9 +1516,10 @@ export async function recordLineDiscoveryFailure(
                 CASE WHEN line_discovery_attempts + 1 >= ? THEN ? ELSE line_unresolvable_reason END,
               updated_ms = ?
         WHERE id = ? AND phase = 'applied' AND line_unresolvable_ms IS NULL
+          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = ? AND t.review_id IS NULL)
         RETURNING line_discovery_attempts, line_unresolvable_ms`,
     )
-    .bind(bound, nowMs, bound, reason, nowMs, id)
+    .bind(bound, nowMs, bound, reason, nowMs, id, id)
     .run<{ line_discovery_attempts: number; line_unresolvable_ms: number | null }>();
   const written = result.results[0];
   if (written === undefined) return null;
@@ -1522,6 +1527,24 @@ export async function recordLineDiscoveryFailure(
     attempts: written.line_discovery_attempts,
     unresolvable: written.line_unresolvable_ms !== null,
   };
+}
+
+/**
+ * A discovery pass that CAPTURED the batch clears its failed-readback count:
+ * the bound counts consecutive reads that observed nothing, not lifetime
+ * attempts, so an earlier failure must not sit one pass away from a cap the
+ * batch no longer deserves. Only the counter moves — an unresolvable batch is
+ * never selected, so its marker columns cannot be cleared from here.
+ */
+export async function resetLineDiscoveryFailures(db: D1Like, id: string, nowMs: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE review_publications
+          SET line_discovery_attempts = 0, updated_ms = ?
+        WHERE id = ? AND line_discovery_attempts > 0 AND line_unresolvable_ms IS NULL`,
+    )
+    .bind(nowMs, id)
+    .run();
 }
 
 /**
