@@ -543,6 +543,13 @@ export type CheckOwnership = {
   /** The frozen failure category, so a re-freeze of the same intent keeps it. */
   terminalFailureStatus: CheckFailureStatus | null;
   publicationId: string | null;
+  /**
+   * The §7.9a conclusion this row still owes (migration 0093) and the
+   * generation it targets — NULL when no correction is owed. A validated
+   * response settles the debt only when it delivered THIS conclusion.
+   */
+  correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
+  correctionGeneration: number | null;
 };
 
 /** Null when the row is gone, the fence is not the caller's live lease, or the attempt already ended. */
@@ -575,6 +582,8 @@ export async function getCheckOwnership(
     desiredSummary: row.desired_summary,
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     publicationId: row.publication_id,
+    correctionDesired: attempt.correctionDesired,
+    correctionGeneration: attempt.correctionGeneration,
   };
 }
 
@@ -1816,6 +1825,18 @@ export async function recordCheckObservation(
   const observed: CheckObserved = agrees ? (owned.desired as Exclude<CheckDesired, "in_progress">) : "in_progress";
   const unproven =
     agrees && options?.conclusionUnproven === true && owned.publicationId !== null;
+  // An owed §7.9a correction is settled only by a validated response that
+  // DELIVERED it: the intent this row agreed on must be the owed conclusion,
+  // for the owed generation. An agreement with any other intent (the old
+  // failure, when the correction could not be decided this pass) leaves the
+  // debt standing AND the row non-terminal — a `done` row outside the
+  // `remote-unconfirmed` shape would never be reconciled again, so the debt
+  // could never retry.
+  const debtSettled =
+    owned.correctionDesired === null ||
+    (owned.correctionDesired === owned.desired &&
+      owned.correctionGeneration === owned.identity.generation);
+  const settles = agrees && debtSettled;
   return runFenced(
     db,
     id,
@@ -1828,27 +1849,27 @@ export async function recordCheckObservation(
             terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END,
-            correction_desired = CASE WHEN ? = 1 AND (correction_desired IS NULL OR (correction_desired = desired AND correction_generation = generation)) THEN NULL ELSE correction_desired END,
-            correction_generation = CASE WHEN ? = 1 AND (correction_desired IS NULL OR (correction_desired = desired AND correction_generation = generation)) THEN NULL ELSE correction_generation END`,
+            correction_desired = CASE WHEN ? THEN NULL ELSE correction_desired END,
+            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END`,
     [
       observed,
       remote.id,
-      agrees && !unproven ? 1 : 0,
-      unproven ? 1 : 0,
-      agrees ? 1 : 0,
+      // recovery_state: 'done' when this response settled the attempt, the
+      // reopenable 'remote-unconfirmed' when it settled an unproven one.
+      settles && !unproven ? 1 : 0,
+      settles && unproven ? 1 : 0,
+      // terminal_ms is set only by a SETTLING response.
+      settles ? 1 : 0,
       nowMs ?? lease.untilMs,
       // The dispatch intent clears only when THIS observation is the terminal
       // it dispatched: a mere `running` read proves nothing about the request.
       agrees ? 1 : 0,
       agrees ? 1 : 0,
       agrees ? 1 : 0,
-      // An owed §7.9a correction is settled only by a validated response that
-      // DELIVERED it: the frozen intent this row agreed on must be the owed
-      // conclusion, for the owed generation. An agreement with any other
-      // intent (an unreadable read that fell back to the old failure) leaves
-      // the debt standing instead of marking it delivered.
-      agrees ? 1 : 0,
-      agrees ? 1 : 0,
+      // Clear together only on a settling response; an unsettled debt keeps
+      // both its conclusion and its target generation for the next pass.
+      settles ? 1 : 0,
+      settles ? 1 : 0,
     ],
     nowMs,
   );
@@ -1955,11 +1976,15 @@ export async function reopenTerminalCorrection(
 
 /**
  * Drop a correction this row can no longer owe — its target generation moved,
- * or the evidence no longer supports the conclusion it was recorded with. The
- * row is not the correction's to send any more, so the obligation is cleared
- * under the CURRENT claim instead of being carried into a stale conclusion.
+ * or the evidence now concludes something else. The obligation goes AND so does
+ * the intent the owed revision froze: leaving a positive `success` behind would
+ * let the ordinary lane send a conclusion this attempt no longer establishes,
+ * because the monotonic freeze refuses to lower it again. The row is returned
+ * to recovery immediately (`next_attempt_ms = now`) so the next pass decides
+ * from CURRENT evidence instead of a stale draft — a `desired = 'in_progress'`
+ * row with no due time would otherwise wait for the execution deadline.
  */
-export async function clearCheckCorrectionOwed(
+export async function dropCheckCorrection(
   db: D1Like,
   id: string,
   lease: Lease,
@@ -1969,8 +1994,11 @@ export async function clearCheckCorrectionOwed(
     db,
     id,
     lease,
-    `correction_desired = NULL, correction_generation = NULL`,
-    [],
+    `correction_desired = NULL, correction_generation = NULL,
+            desired = 'in_progress', desired_title = NULL, desired_summary = NULL,
+            terminal_failure_status = NULL,
+            recovery_state = 'pending', next_attempt_ms = ?, last_error = NULL`,
+    [nowMs],
     nowMs,
   );
 }
@@ -2008,6 +2036,11 @@ export async function deferCheckRecovery(
  * `terminal_ms` under the current fence. The row, its external id and any known
  * remote run id are RETAINED — nothing here deletes work or claims the remote
  * finished.
+ *
+ * Also the honest end for a row that can NEVER conclude: a §7.9a correction
+ * whose target generation moved (see `dropCheckCorrection`). Parking it
+ * terminal keeps it out of both selection branches, so no later pass can send
+ * a conclusion that generation never owned.
  */
 export async function markCheckLocalError(
   db: D1Like,

@@ -57,7 +57,7 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   claimCheckRecovery,
-  clearCheckCorrectionOwed,
+  dropCheckCorrection,
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
@@ -1045,15 +1045,26 @@ async function reconcileCheckAttempt(
     current.correctionGeneration === current.identity.generation ? current.correctionDesired : null;
   isCorrection = correction || owedDesired !== null;
   // A generation that moved means this row is not the subject of the owed
-  // revision any more. The obligation is dropped and the pass STOPS: falling
-  // through would let `completeCheck` send a conclusion `setCheckDesired`
-  // already froze for the superseded target.
+  // revision any more, and it never will be: leaving it non-terminal would put
+  // it back in the ordinary lane next pass, where the confirmed proof would be
+  // re-applied to a Check this generation no longer owns. The debt and the
+  // intent it froze are dropped, and the row is parked as the honest local end.
   if (!correction && current.correctionGeneration !== null && owedDesired === null) {
-    await clearCheckCorrectionOwed(db, attemptId, lease, now());
-    await releaseCheckClaim(db, attemptId, lease, now());
+    await dropCheckCorrection(db, attemptId, lease, now());
+    await markCheckLocalError(
+      db,
+      attemptId,
+      lease,
+      `a correction owed for generation ${current.correctionGeneration} no longer targets this row (generation ${current.identity.generation}) — cannot conclude`,
+      now(),
+    );
     log.info(
-      { event: "ops_check_terminal_correction_dropped", attempt_id: attemptId, detail: `generation ${current.identity.generation} no longer matches the owed correction` },
-      "owed correction dropped — its target generation moved, nothing sent",
+      {
+        event: "ops_check_terminal_correction_dropped",
+        attempt_id: attemptId,
+        detail: `generation ${current.identity.generation} no longer matches the owed correction`,
+      },
+      "owed correction dropped — its target generation moved, row parked, nothing sent",
     );
     return;
   }
@@ -1094,11 +1105,12 @@ async function reconcileCheckAttempt(
   const gate = gateRead.kind === "read" ? gateRead.value : null;
   const review = reviewRead.kind === "read" ? reviewRead.value : null;
   const conclusion = terminalConclusion(owned, proof, gate, review);
-  // A REAL change in the evidence voids the obligation. It is dropped under
-  // this claim and the pass stops rather than delivering either conclusion this
-  // time: the frozen intent may still name the superseded one.
+  // A REAL change in the evidence voids the obligation. The debt and the intent
+  // it froze are dropped under this claim, and the pass stops: delivering the
+  // new conclusion now would send it before the next pass re-decides from the
+  // evidence it just read.
   if (!correction && owedDesired !== null && conclusion.desired !== owedDesired) {
-    await clearCheckCorrectionOwed(db, attemptId, lease, now());
+    await dropCheckCorrection(db, attemptId, lease, now());
     await releaseCheckClaim(db, attemptId, lease, now());
     log.info(
       { event: "ops_check_terminal_correction_dropped", attempt_id: attemptId, detail: `evidence now concludes ${conclusion.desired}, owed ${owedDesired}` },
@@ -1126,7 +1138,7 @@ async function reconcileCheckAttempt(
   // keeps its own `publication_id` NULL); a row that already links its own
   // publication keeps that link, which is what a proof-free conclusion must
   // stay correctable from (§7.9a).
-  await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
+  const intentFrozen = await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
   if (intent === null) return;
   // A row whose persisted intent is still `in_progress` has nothing terminal
@@ -1138,6 +1150,16 @@ async function reconcileCheckAttempt(
     return;
   }
   if (intent.desiredTitle === null || intent.desiredSummary === null) return;
+
+  // The intent write was REFUSED, so the persisted conclusion is not the one
+  // this evidence produced. A positive intent the evidence now denies must
+  // never be sent on its own authority (only the documented known-stop refusal
+  // keeps today's behaviour: a cap/budget stop is never rewritten, and its
+  // frozen text is still the honest record). The attempt settles instead.
+  const supersededPositive =
+    !intentFrozen &&
+    intent.desired !== "failure" &&
+    conclusion.desired === "failure";
 
   const frozen: CheckConclusion = {
     desired: intent.desired,
@@ -1372,6 +1394,19 @@ async function reconcileCheckAttempt(
     await settleFailedAttempt(
       db, now, attemptsBefore, row, lease,
       "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
+      log, summary,
+    );
+    return;
+  }
+
+  // The persisted positive intent could not be replaced by the conclusion this
+  // evidence produced: sending it would publish a pass nothing supports. The
+  // readback above already resolved the "it landed earlier" shape; past it,
+  // the honest end is the attempt ladder, never a send.
+  if (supersededPositive) {
+    await settleFailedAttempt(
+      db, now, attemptsBefore, row, lease,
+      `the persisted ${intent.desired} intent could not be replaced by ${conclusion.desired} — not sent`,
       log, summary,
     );
     return;

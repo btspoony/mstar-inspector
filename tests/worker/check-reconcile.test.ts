@@ -1107,14 +1107,30 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     });
     expect(summary.completed).toBe(0);
     expect(summary.errors).toBe(0);
-    // Dropped and stopped: no send, no attempt spent, no local refusal written.
+    // Dropped, stopped and PARKED: the debt and the intent it froze are gone,
+    // and the row is out of both selection branches so no later pass can
+    // conclude from a generation it no longer owns.
     const row = await rawRow(db, attemptId);
     expect(row.correction_desired).toBeNull();
     expect(row.correction_generation).toBeNull();
+    expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("failure");
-    expect(row.attempts).toBe(0);
-    expect(row.holder).toBeNull();
-    expect(row.last_error).toBeNull();
+    expect(row.terminal_ms).not.toBeNull();
+    expect(row.recovery_state).toBe("local-error");
+    expect(row.last_error).toContain("no longer targets this row");
+
+    // The pass AFTER the dropping pass sends nothing: the parked row is not
+    // selected at all.
+    const after = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        complete: async () => {
+          throw new Error("a parked correction must not be sent");
+        },
+      }),
+    });
+    expect(after.examined).toBe(0);
+    expect(after.completed).toBe(0);
   });
 
   test("§7.9a: an unreadable gate on a deferred pass keeps the owed correction", async () => {
@@ -1274,10 +1290,85 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         clock + 30_000,
       ),
     ).toBe(true);
-    const row = await rawRow(db, attemptId);
+    let row = await rawRow(db, attemptId);
     expect(row.observed).toBe("failure");
     expect(row.correction_desired).toBe("success");
     expect(row.correction_generation).toBe(1);
+    // Still RETRYABLE: agreement with the old intent must not close the row, or
+    // the debt could never be delivered (a `done` row is only ever selected
+    // through the `remote-unconfirmed` reopen shape).
+    expect(row.terminal_ms).toBeNull();
+    expect(row.recovery_state).toBe("pending");
+
+    // The next pass carries the debt and sends the success exactly once.
+    expect(await releaseCheckClaim(db, attemptId, lease, clock + 31_000)).toBe(true);
+    const pushed: CheckConclusion[] = [];
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.observed).toBe("success");
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: a positive intent the evidence denies is never sent", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+    const attemptId = attempt.identity.attemptId;
+    await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+    // A confirmed publication that MISSES the gate, while the row already froze
+    // `success`: the monotonic freeze refuses to lower it, and the readback
+    // finds nothing delivered.
+    const proof = proofFor(attempt.identity);
+    seedPublication(db, SCOPE, SHA, proof, "confirmed", reviewPayload(SCOPE, SHA, "needs work", 10));
+    expect(
+      await setCheckDesired(
+        db,
+        attemptId,
+        lease,
+        { desired: "success", title: CHECK_NAME, summary: "all good" },
+        proof.publicationId,
+        CLAIM_AT,
+      ),
+    ).toBe(true);
+
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      const summary = await run(db, {
+        now: () => T0,
+        credentials: scriptedCredentials(db, {
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+          }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(summary.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    const row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.last_error).toContain("could not be replaced by failure");
   });
 
   test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {
