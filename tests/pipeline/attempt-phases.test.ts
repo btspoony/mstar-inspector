@@ -22,13 +22,17 @@ import {
   TEST_OWNER,
   TEST_PR_NUMBER,
   TEST_REPO,
+  VALID_DIFF,
   VALID_OUTPUT,
   createSeededTestD1,
   registerGitOpsCommands,
+  seedOpenTarget,
+  seedPriorPublication,
 } from "../helpers/consumer-fixtures";
 import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
+import { FINDING_BODY_MAX } from "../../src/review/schema";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
@@ -44,6 +48,7 @@ import {
 import { PUBLICATION_LEASE_MS, applyPublishedLifecycle, claimDegradedTarget, claimPublication, claimPublicationLease, readLineBatchState, recordLineDispatchIntent, recordPublicationProof, readPublication } from "../../src/store/finding-lifecycle";
 import {
   deliveryKeyOf,
+  listIncompleteSettlements,
   readAttemptHandoff,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
@@ -2078,5 +2083,365 @@ describe("a line-batch bookkeeping fault never vetoes the close-out", () => {
       .prepare("SELECT line_dispatch_ms FROM review_publications WHERE id = ?")
       .get(publicationId) as { line_dispatch_ms: number | null };
     expect(row.line_dispatch_ms).toBeNull();
+  });
+});
+
+describe("the SEC-01 publish gate", () => {
+  // A short (<8) value: its raw form is exact-leaf only, its encoded forms
+  // are substring-matched.
+  const KEY = "p/a b";
+  const ECHOES = {
+    base64: Buffer.from(KEY).toString("base64"),
+    "url-encoded": encodeURIComponent(KEY),
+  } as const;
+
+  /** prepare + review with an echo in the first finding's body. */
+  async function reviewedEcho(
+    echo: string,
+    writeTimeKey: boolean,
+    beforePrepare?: (db: TestD1) => Promise<void>,
+  ): Promise<{
+    deps: ProcessDeps;
+    db: TestD1;
+    ref: AttemptRef;
+    prepared: PreparedAttempt;
+  }> {
+    const { deps, db } = await makeDeps();
+    if (writeTimeKey) {
+      // The host that pays holds this key, so its write-time redaction knows it.
+      deps.runnerConfigs.set(TEST_APP_ID, {
+        appCfg: { keys: { ark: [KEY] }, modelChain: "ark/deepseek-v4-flash" },
+        modelOverrides: undefined,
+        customProviders: undefined,
+      });
+    }
+    if (beforePrepare !== undefined) await beforePrepare(db);
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = JSON.stringify({
+      ...VALID_OUTPUT,
+      findings: [{ ...VALID_OUTPUT.findings[0]!, body: `echo ${echo}` }],
+    });
+    const ref = makeRef(payload);
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const prepared = JSON.parse(JSON.stringify(step.prepared)) as PreparedAttempt;
+    await reviewAttempt(deps, ref, prepared);
+    // The settlement mark the gate writes lives on the attempt's handoff row.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      enqueuedMs: 500,
+      deadlineMs: ref.deadlineMs,
+    });
+    return { deps, db, ref, prepared };
+  }
+
+  for (const [name, echo] of Object.entries(ECHOES)) {
+    test(`a short key echoed only as ${name} never reaches the stored result or the published body`, async () => {
+      const { deps, db, ref, prepared } = await reviewedEcho(echo, true);
+
+      // Write-time redaction removed the encoded echo from the stored stdout.
+      const launch = db.raw
+        .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+        .get(ATTEMPT_ID) as { result_json: string };
+      const stored = JSON.parse(launch.result_json) as { run: { stdout: string } };
+      expect(stored.run.stdout).not.toContain(echo);
+      expect(stored.run.stdout).toContain("[REDACTED]");
+
+      const collected = await collectAttempt(deps, ref, prepared);
+      if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+      const { deps: publishing } = await makeDeps({ db });
+      expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+
+      const send = h.commenterCalls.find((call) => call.op === "post-prepared");
+      const body = (send?.args as { body: string } | undefined)?.body ?? "";
+      expect(body).toContain("[REDACTED]");
+      expect(body).not.toContain(echo);
+    });
+
+    test(`the publish gate refuses an outgoing body carrying a ${name} echo`, async () => {
+      // The write-time host did NOT hold the key (the resumed-collection shape).
+      const { deps, db, ref, prepared } = await reviewedEcho(echo, false);
+      // Inject the echo into the persisted paid result.
+      const launch = db.raw
+        .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+        .get(ATTEMPT_ID) as { result_json: string };
+      const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+      const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+      output.findings[0]!.body = `echo ${echo}`;
+      execution.run.stdout = JSON.stringify(output);
+      db.raw
+        .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+        .run(JSON.stringify(execution), ATTEMPT_ID);
+
+      // This host holds the credential the writer did not.
+      deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+      expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+      const staged = db.raw
+        .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+        .get(SHA) as { n: number };
+      expect(staged.n).toBe(0);
+      expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
+      expect(
+        h.logLines.some((line) => line.msg.includes("publish gate refused")),
+      ).toBe(true);
+      // The attempt is durably settled through the FAILURE path, not just
+      // returned as settled: a failure row exists and the handoff says closed.
+      const failure = db.raw
+        .prepare("SELECT error FROM review_failures WHERE head_sha = ?")
+        .all(SHA) as { error: string }[];
+      expect(failure.some((row) => row.error.includes("publish gate refused"))).toBe(true);
+      const handoff = db.raw
+        .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+        .get(ATTEMPT_ID) as { settled_ms: number | null };
+      expect(handoff.settled_ms).not.toBeNull();
+    });
+  }
+
+  test("a resumed host without credentials records that the gate could not run", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    // The stored payload was redacted at write time; no credentials survive
+    // on this host, so the gate must warn once and not crash.
+    deps.credentials.delete(ATTEMPT_ID);
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("collected");
+    expect(
+      h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
+    ).toHaveLength(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 1 });
+  });
+
+  test("a short key equal to trusted marker text is not refused", async () => {
+    // The body always carries `mstar-inspector` markers; the raw spelling of a
+    // short key is exact-leaf redaction's job, never the publish gate's.
+    const { deps, ref, prepared } = await reviewedEcho("plain text", false);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: ["mstar"] });
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("collected");
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
+  });
+
+  test("a key whose hex collides with the commit SHA does not refuse a clean review", async () => {
+    // 0x01 0x23 0x45 renders as "012345" — the SHA's own prefix.
+    const key = String.fromCharCode(0x01, 0x23, 0x45);
+    expect(Buffer.from(key, "utf8").toString("hex")).toBe(SHA.slice(0, 6));
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    // Host template is model-free: the SHA never enters the scan.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(false);
+    const { deps: publishing } = await makeDeps({ db });
+    expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
+    const send = h.commenterCalls.find((call) => call.op === "post-prepared");
+    const body = (send?.args as { body: string } | undefined)?.body ?? "";
+    expect(body).toContain(`commit ${SHA.slice(0, 7)}`);
+    expect(body).toContain(`sha=${SHA}`);
+  });
+
+  test("a prior finding's title carrying an encoded echo is caught by the gate", async () => {
+    const echo = ECHOES.base64;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb, { original: { title: `prior echo ${echo}` } });
+    });
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+
+    expect(prepared.targets.some((target) => target.original.title.includes(echo))).toBe(true);
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+  });
+
+  test("a redacted suggestion is removed before publish", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = 'before\n```suggestion\nconst key = "sk-test";\n```\nafter';
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      artifact: { payload: { findings: Array<{ body: string }> } };
+    };
+    const body = payload.artifact.payload.findings[0]!.body;
+    expect(body).not.toContain("```suggestion");
+    expect(body).toContain("before");
+    expect(body).toContain("after");
+  });
+
+  test("an inline line comment carries no suggestion fence after a redaction", async () => {
+    h.sandbox.diffStdout = VALID_DIFF;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = 'before\n```suggestion\nconst key = "sk-test";\n```\nafter';
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      lineIntents: Array<{ body: string }>;
+    };
+    const inline = payload.lineIntents.map((intent) => intent.body).join("\n");
+    expect(payload.lineIntents.length).toBeGreaterThan(0);
+    expect(inline).not.toContain("```suggestion");
+    expect(inline).toContain("after");
+  });
+
+  test("the suggestion is dropped before the clamp, so the explanation stays intact", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const explanation = "Z".repeat(FINDING_BODY_MAX - 10);
+    const suggestion = '```suggestion\nconst key = "sk-test";\n```';
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    // The body only fits once the removed patch stops consuming the budget.
+    output.findings[0]!.body = `${suggestion}\n${explanation}`;
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      artifact: { payload: { findings: Array<{ body: string }> } };
+    };
+    const body = payload.artifact.payload.findings[0]!.body;
+    expect(body).toBe(explanation);
+    expect(body.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+  });
+
+  /** The paid result rewritten to a schema-invalid body carrying `echo`. */
+  async function brokenStdout(echo: string, whole = false) {
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    execution.run.stdout = whole ? echo : `not a review ${echo}`;
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+    return { deps, db, ref, prepared };
+  }
+
+  test("the degraded publish path refuses a body carrying an encoded echo", async () => {
+    const { deps, db, ref, prepared } = await brokenStdout(ECHOES.base64);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+    const handoff = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(handoff.settled_ms).not.toBeNull();
+  });
+
+  test("a resumed degraded publish warns once and continues", async () => {
+    const { deps, ref, prepared } = await brokenStdout(ECHOES.base64);
+    deps.credentials.delete(ATTEMPT_ID);
+    const collected = await collectAttempt(deps, ref, prepared);
+    expect(collected.kind).toBe("settled");
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
+    expect(
+      h.logLines.filter((line) => line.level === "warn" && line.msg.includes("publish gate could not run")),
+    ).toHaveLength(1);
+  });
+
+  test("the degraded gate exact-matches an encoding that is the whole stdout", async () => {
+    // `{` encodes to a 2-char base64url; the gate must see the stdout on its
+    // own, not concatenated with the parse error, or the exact match is lost.
+    const key = "{";
+    const echo = Buffer.from(key).toString("base64url");
+    expect(echo).toBe("ew");
+    const { deps, db, ref, prepared } = await brokenStdout(echo, true);
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [key] });
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+  });
+
+  test("an unproven failure settlement is not reported as a settled collect", async () => {
+    const { deps, db, ref, prepared } = await reviewedEcho(ECHOES.base64, false);
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = `echo ${ECHOES.base64}`;
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    deps.credentials.set(ATTEMPT_ID, { token: "ghs_gate_token", secretValues: [KEY] });
+    // A live launch row plus an unwritable failure row: the failure settlement
+    // returns `unknown` instead of certifying an outcome it cannot prove.
+    deps.failureStore = {
+      ...deps.failureStore,
+      record: async () => {
+        throw new Error("injected: no durable failure row");
+      },
+    };
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "unknown" } });
+    const handoff = db.raw
+      .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { settled_ms: number | null };
+    expect(handoff.settled_ms).toBeNull();
+    const staged = db.raw
+      .prepare("SELECT COUNT(*) AS n FROM review_publications WHERE head_sha = ?")
+      .get(SHA) as { n: number };
+    expect(staged.n).toBe(0);
+    // The handoff is marked settling before the settlement, so the reconciler
+    // still selects this unknown outcome.
+    const pending = await listIncompleteSettlements(db as never, {
+      settlingBeforeMs: Date.now() + 1,
+      limit: 10,
+    });
+    expect(pending.some((row) => row.attemptId === ATTEMPT_ID)).toBe(true);
   });
 });

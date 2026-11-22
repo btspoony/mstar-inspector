@@ -45,6 +45,7 @@ import {
   type PrIncomplete,
 } from "@mstar-harness/engine";
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
+import { REDACTED } from "../../packages/shared/src/secret-shapes";
 import { z } from "zod";
 
 // The budget-exhausted outcome vocabulary lives in the shared wire module
@@ -288,31 +289,77 @@ export function clampFindingSizes(output: ReviewOutput): ReviewOutput {
   };
 }
 
-/** A backtick or tilde fence line per CommonMark: up to 3 leading spaces, 3+ fence chars, then the info string. */
+/**
+ * A backtick or tilde fence line per CommonMark: zero to three leading spaces
+ * (four or more is an indented code block), 3+ fence chars, then the info
+ * string. The input is already normalized to the fence's effective indent.
+ */
 const FENCE_LINE = /^( {0,3})(`{3,}|~{3,})(.*)$/;
+
+/** A line's leading spaces. Tabs do not count: FENCE_LINE only consumes spaces. */
+function leadingSpaces(line: string): number {
+  let count = 0;
+  while (count < line.length && line.charAt(count) === " ") count += 1;
+  return count;
+}
+
+/** A list item line: its indent and marker. Its content starts one column after the marker. */
+const LIST_ITEM_LINE = /^(\s*)(\d+\.|[-*+])\s/;
 
 /** Safe non-empty body shown when a finding consists only of dropped suggestion fences. */
 export const SUGGESTION_OMITTED = "(suggestion omitted)";
 
+type FenceSpan = { start: number; end: number; closed: boolean; suggestion: boolean };
+
 /**
- * Fenced `suggestion` blocks as [start, end) offsets, plus whether the closing
- * fence arrived. ALL fenced blocks are tracked (backtick and tilde, CommonMark
- * open/close rules), so a literal ```suggestion line inside an ordinary
- * ```js / ```markdown / ~~~ fence is CONTENT, not a suggestion. A block
- * counts as a suggestion only at the top level with an info string whose first
- * token is exactly `suggestion` — `suggestions` / `suggestion-example` do not
- * open — and only a same-char run at least as long as the opening one with NO
- * info string closes it (an inner ```js line does not). An unclosed block
- * runs to the end of the text.
+ * Top-level fenced blocks as [start, end) offsets, plus whether the closing
+ * fence arrived and whether the block is a `suggestion`. ALL fences are tracked
+ * (backtick and tilde, CommonMark open/close rules), so a literal
+ * ```suggestion line inside an ordinary ```js / ```markdown / ~~~ fence is
+ * CONTENT, not a suggestion. A block counts as a suggestion only at the top
+ * level with an info string whose first token is exactly `suggestion` —
+ * `suggestions` / `suggestion-example` do not open — and only a same-char run
+ * at least as long as the opening one with NO info string closes it (an inner
+ * ```js line does not). An unclosed block runs to the end of the text. A CRLF
+ * line has its carriage return stripped before matching, so it is still a
+ * fence.
+ *
+ * Indentation is measured from the INNERMOST OPEN LIST's content column, not
+ * the document: inside `1. ` a 3-space opener and a 4-space closer are the same
+ * fence (GitHub renders both inside the item). A list closes when a non-blank
+ * line is indented less than its content column. With no list open the plain
+ * document rule applies, so a 4-space `    ```js` is still an indented code
+ * block and never opens the state machine.
  */
-export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
-  const spans: { start: number; end: number; closed: boolean }[] = [];
+function fencedBlockSpans(text: string): FenceSpan[] {
+  const spans: FenceSpan[] = [];
   let open: { start: number; ticks: number; char: string; suggestion: boolean } | null = null;
   let offset = 0;
+  const lists: { contentColumn: number }[] = [];
   for (;;) {
     const newline = text.indexOf("\n", offset);
     const lineEnd = newline === -1 ? text.length : newline;
-    const fence = FENCE_LINE.exec(text.slice(offset, lineEnd));
+    const rawLine = text.slice(offset, lineEnd);
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    const indent = leadingSpaces(line);
+    // Fence CONTENT is code, never markup: a `1. item` inside a fence must not
+    // push a list frame that a later suggestion would be measured against.
+    if (open === null) {
+      const item = LIST_ITEM_LINE.exec(line);
+      if (item !== null) {
+        const itemIndent = item[1]!.length;
+        // A sibling at the same indent leaves the innermost frame; a deeper line
+        // starts a nested list whose content column is relative to its marker.
+        while (lists.length > 0 && itemIndent < lists[lists.length - 1]!.contentColumn) lists.pop();
+        lists.push({ contentColumn: itemIndent + item[2]!.length + 1 });
+      } else if (line.trim() !== "") {
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
+      }
+    }
+    const frame = lists[lists.length - 1];
+    const inList = frame !== undefined && indent >= frame.contentColumn;
+    const candidate = inList ? line.slice(frame.contentColumn) : line;
+    const fence = FENCE_LINE.exec(candidate);
     // CommonMark: a backtick fence's info string may not contain a backtick, so
     // a line like ```oldCall()``` is inline code - it neither opens nor closes.
     const isFence = fence !== null && !(fence[2]![0] === "`" && (fence[3] ?? "").includes("`"));
@@ -324,28 +371,44 @@ export function suggestionFenceSpans(text: string): { start: number; end: number
         // Any fence opens a block; only a top-level suggestion opener counts.
         open = { start: offset, ticks, char, suggestion: info.split(/\s+/)[0] === "suggestion" };
       } else if (char === open.char && info === "" && ticks >= open.ticks) {
-        if (open.suggestion) {
-          spans.push({ start: open.start, end: newline === -1 ? text.length : lineEnd + 1, closed: true });
-        }
+        spans.push({
+          start: open.start,
+          end: newline === -1 ? text.length : lineEnd + 1,
+          closed: true,
+          suggestion: open.suggestion,
+        });
         open = null;
+        // The closing line is markup: a closer below the list's content column
+        // also ends that list item, so the stack must not outlive the block.
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
       }
     }
     if (newline === -1) break;
     offset = lineEnd + 1;
   }
-  if (open !== null && open.suggestion) spans.push({ start: open.start, end: text.length, closed: false });
+  if (open !== null) spans.push({ start: open.start, end: text.length, closed: false, suggestion: open.suggestion });
   return spans;
 }
 
+/** Fenced `suggestion` blocks only (the drop/neutralize callers). */
+export function suggestionFenceSpans(text: string): { start: number; end: number; closed: boolean }[] {
+  return fencedBlockSpans(text)
+    .filter((span) => span.suggestion)
+    .map(({ start, end, closed }) => ({ start, end, closed }));
+}
+
 /**
- * Drop whole fenced `suggestion` blocks that cannot be published safely: one
- * the `max` boundary would cut in half (so no partial fence survives a later
- * truncation), and one whose closing fence never arrives at ANY length (it
- * would swallow the trusted marker appended after the body). The surrounding
- * prose is kept. Shared by the schema clamp and the line-comment renderer so
- * the two cannot drift.
+ * Drop whole fenced blocks (suggestion OR an ordinary/neutralized one) that
+ * cannot be published safely: one the `max` boundary would cut in half (so no
+ * partial fence survives a later truncation), and one whose closing fence never
+ * arrives at ANY length (it would swallow the trusted marker appended after the
+ * body). The surrounding prose is kept. Shared by the schema clamp and the
+ * line-comment renderer so the two cannot drift.
+ *
+ * An unclosed block is dropped wholesale: when the structure is ambiguous the
+ * safe direction is content loss, never a credential.
  */
-export function dropSuggestionFences(text: string, max: number): {
+export function dropUnsafeFences(text: string, max: number): {
   text: string;
   dropped: boolean;
 } {
@@ -356,7 +419,7 @@ export function dropSuggestionFences(text: string, max: number): {
     // cuts that fence once the trailing ellipsis is appended, so it crosses too —
     // but ONLY when truncation actually happens (out.length > max); a fence
     // ending exactly at max with no truncation is published verbatim.
-    const fence = suggestionFenceSpans(out).find(
+    const fence = fencedBlockSpans(out).find(
       ({ start, end, closed }) => !closed || (out.length > max && start < max && max <= end),
     );
     if (fence === undefined) return { text: out, dropped };
@@ -379,9 +442,31 @@ export function dropAllSuggestionFences(text: string): string {
   return out.trim() === "" ? SUGGESTION_OMITTED : out;
 }
 
+/**
+ * Drop every fenced `suggestion` block whose body carries the redaction marker:
+ * GitHub must never offer a one-click apply of `[REDACTED]`. The surrounding
+ * prose is kept, or the safe omission notice when nothing survives.
+ */
+export function dropRedactedSuggestions(text: string): string {
+  const spans = suggestionFenceSpans(text);
+  if (spans.length === 0) return text;
+  let out = "";
+  let cursor = 0;
+  let dropped = false;
+  for (const { start, end } of spans) {
+    if (!text.slice(start, end).includes(REDACTED)) continue;
+    out += text.slice(cursor, start);
+    cursor = end;
+    dropped = true;
+  }
+  if (!dropped) return text;
+  out += text.slice(cursor);
+  return out.trim() === "" ? SUGGESTION_OMITTED : out;
+}
+
 /** Clamp a finding body: drop unpublishable fences, then clamp with an ellipsis. */
 function clampFindingBody(body: string): string {
-  let { text } = dropSuggestionFences(body, FINDING_BODY_MAX);
+  let { text } = dropUnsafeFences(body, FINDING_BODY_MAX);
   // A body that was ONLY suggestion fences would fail the non-blank schema and
   // lose persistence + line comments; keep a non-empty safe fallback instead.
   if (text.trim() === "") text = SUGGESTION_OMITTED;

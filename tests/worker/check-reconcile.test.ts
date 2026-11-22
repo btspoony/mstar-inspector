@@ -1373,7 +1373,11 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     // The dispatch intent is retained: that revision may still be on the run.
     expect(row.terminal_dispatch_ms).not.toBeNull();
 
-    // The following pass reads the run back and sends no second update.
+    // The following pass reads the run back and sends no second update. Count
+    // the UPDATE calls instead of throwing inside one: the reconciliation
+    // loop catches a row error, so a swallowed throw would leave this test
+    // green after an unexpected send.
+    let readbackUpdates = 0;
     const readback = await run(db, {
       now: () => clock + 120_000,
       credentials: scriptedCredentials(db, {
@@ -1382,10 +1386,13 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
           remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
         }),
         complete: async () => {
+          readbackUpdates += 1;
           throw new Error("a possibly-sent correction must never be re-sent");
         },
       }),
     });
+    // The one recorded dispatch is read back; no update leaves after it.
+    expect(readbackUpdates).toBe(0);
     expect(readback.completed).toBe(0);
   });
 

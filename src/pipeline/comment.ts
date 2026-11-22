@@ -82,7 +82,7 @@ import { REVIEW_EMOJI, renderReviewMarkdown } from "@mstar-harness/engine";
 import {
   FINDING_BODY_MAX,
   dropAllSuggestionFences,
-  dropSuggestionFences,
+  dropUnsafeFences,
   type ReviewFinding,
   type ReviewOutput,
 } from "../review/schema";
@@ -2355,14 +2355,14 @@ export function filterLineCommentFindings(
  * marker-less posting path is replaced by the intent-driven path, so thread
  * discovery has a marker to pin).
  *
- * A suggestion fence the clamp would cut in half is dropped whole (the
+ * A fence (suggestion or plain) the clamp would cut in half is dropped whole (the
  * surrounding prose survives); a body left with no prose falls back to the
  * title/tag line. Text without a suggestion fence clamps exactly as before.
  */
 export function renderLineCommentText(finding: ReviewFinding): string {
   const tag = `${REVIEW_EMOJI[finding.mergeClass]} ${finding.mergeClass}`;
   const head = `**${finding.title}** · ${tag}\n\n`;
-  const { text, dropped } = dropSuggestionFences(`${head}${finding.body}`, FINDING_BODY_MAX);
+  const { text, dropped } = dropUnsafeFences(`${head}${finding.body}`, FINDING_BODY_MAX);
   if (dropped && text.slice(head.length).trim() === "") return head.trimEnd();
   return text.length <= FINDING_BODY_MAX ? text : `${text.slice(0, FINDING_BODY_MAX - 1)}…`;
 }
