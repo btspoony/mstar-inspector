@@ -1646,8 +1646,9 @@ export async function setCheckFallbackDesired(
  * hands, or whose intent another lane froze between the read and the write is
  * left alone.
  *
- * Returns the attached run id — the caller then sends exactly one
- * `checks.update` — or null when there was nothing to label.
+ * Returns the relabelled row — its id is the key of the publication lease the
+ * caller must take before the PATCH, and the run id is the target — or null
+ * when there was nothing to label.
  */
 export async function markCheckQueuedBehindInflight(
   db: D1Like,
@@ -1662,7 +1663,7 @@ export async function markCheckQueuedBehindInflight(
     summary: string;
     nowMs: number;
   },
-): Promise<number | null> {
+): Promise<{ id: string; checkRunId: number } | null> {
   if (input.attachDeliveryId === undefined || input.attachDeliveryId.length === 0) return null;
   const key = attemptKey({
     appId: input.scope.appId,
@@ -1692,12 +1693,12 @@ export async function markCheckQueuedBehindInflight(
           AND (holder IS NULL OR holder = 'delivery:' || ?)`;
   const candidate = await db
     .prepare(
-      `SELECT check_run_id FROM review_checks
+      `SELECT id, check_run_id FROM review_checks
          WHERE attempt_key = ? AND attach_delivery_id = ? AND ${relabelable}
          ORDER BY generation DESC LIMIT 1`,
     )
     .bind(key, input.attachDeliveryId, input.attachDeliveryId)
-    .first<{ check_run_id: number }>();
+    .first<{ id: string; check_run_id: number }>();
   if (candidate === null) return null;
   const relabeled = await db
     .prepare(
@@ -1713,7 +1714,7 @@ export async function markCheckQueuedBehindInflight(
       input.attachDeliveryId,
     )
     .run();
-  return relabeled.meta.changes === 1 ? candidate.check_run_id : null;
+  return relabeled.meta.changes === 1 ? { id: candidate.id, checkRunId: candidate.check_run_id } : null;
 }
 
 /**

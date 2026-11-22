@@ -991,16 +991,44 @@ async function markQueuedBehindInflightWith(
       summary: input.summary,
       nowMs: deps.nowMs(),
     });
-    if (relabeled !== input.checkRunId) return false;
-    await client.rest.checks.update({
-      owner: input.scope.owner,
-      repo: input.scope.repo,
-      check_run_id: input.checkRunId,
-      output: { title: CHECK_NAME, summary: input.summary },
+    if (relabeled === null || relabeled.checkRunId !== input.checkRunId) return false;
+    // This PATCH writes the run's OUTPUT — the same surface the terminal send
+    // owns — so it takes that action's publication lease rather than assuming
+    // the row's eligibility is authority. A released Check an adopter may have
+    // claimed is exactly what the local write cannot see; while this lease is
+    // held, no newer Check output can be published underneath the PATCH.
+    const opened = await openPublicationFence(deps, {
+      attemptId: relabeled.id,
+      actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
+      holder: `check-relabel:${input.attachDeliveryId ?? relabeled.id}`,
     });
-    return true;
+    if ("reason" in opened) return false;
+    const fence = opened.fence;
+    try {
+      // Re-proved on the last line before the request: the client resolution
+      // and the relabel both awaited past the acquisition.
+      if (!(await fence.verify())) return false;
+      await client.rest.checks.update({
+        owner: input.scope.owner,
+        repo: input.scope.repo,
+        check_run_id: input.checkRunId,
+        output: { title: CHECK_NAME, summary: input.summary },
+      });
+      return true;
+    } finally {
+      // A PATCH that never answers never reaches this line, so the lease stays
+      // held to its own expiry and no adopter can publish over it meanwhile.
+      await fence.release();
+    }
   })();
-  const outcome = (await sendRequestsWithin(send, budgetMs, "held check relabel")).outcome;
+  const attempted = await sendRequestsWithin(send, budgetMs, "held check relabel");
+  if (!attempted.settled) {
+    // The PATCH may still be in flight — report that honestly, as the
+    // promotion lane does, instead of a relabel that may be overtaken.
+    input.warn(surfaceFailure(attempted.outcome.failure, "held check relabel"));
+    return false;
+  }
+  const outcome = attempted.outcome;
   if (typeof outcome !== "boolean") {
     input.warn(surfaceFailure(outcome.failure, "held check relabel"));
     return false;
@@ -2607,10 +2635,10 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           summary: input.summary,
           nowMs: deps.nowMs(),
         });
-      const checkRunId = await selectRelabelable();
+      const relabeled = await selectRelabelable();
       // No own attach row (another delivery owns the key), a row that is no
       // longer running, or no remote run: nothing to label.
-      if (checkRunId === null) return false;
+      if (relabeled === null) return false;
       const adapter = deps.getAdapter(input.scope);
       if (adapter === null) return false;
       const sent = await adapter.markQueuedBehindInflight?.({
@@ -2619,7 +2647,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         triggeredBy: input.triggeredBy,
         action: input.action,
         attachDeliveryId: input.attachDeliveryId,
-        checkRunId,
+        checkRunId: relabeled.checkRunId,
         summary: input.summary,
         updateBudgetMs: input.updateBudgetMs,
         warn: input.warn,

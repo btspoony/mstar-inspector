@@ -584,6 +584,65 @@ describe("the held-check relabel re-proves its row at dispatch", () => {
   });
 });
 
+describe("the held-check relabel takes the output action's publication lease", () => {
+  test("a live holder of the Check output sends first; the relabel sends nothing", async () => {
+    const db = await seededDb();
+    const claim = await claimAttempt(db, {
+      scope: SCOPE,
+      githubAppId: GITHUB_APP_ID,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
+      holder: "delivery:delivery-relabel",
+      nowMs: T0,
+      executionDeadlineMs: T0 + CHECK_LEASE_MS,
+    });
+    if (claim.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claim.kind}`);
+    const attemptId = claim.attempt.identity.attemptId;
+    expect(await setCheckCreateState(db, attemptId, claim.lease, "sending", undefined, T0)).toBe(true);
+    expect(await attachCheckRunId(db, attemptId, claim.lease, RUN_ID, T0)).toBe(true);
+    // The run's own output send (its terminal update, or a recovery of it) is
+    // in flight: while that lease is held, no relabel may publish over it.
+    expect(
+      await claimPublicationLease(db, {
+        attemptId,
+        actionKey: PUBLICATION_ACTION_CHECK_COMPLETE,
+        holder: "adopter:1",
+        mode: "send",
+        nowMs: T0,
+      }),
+    ).not.toBeNull();
+
+    const fake = fakeChecks(claim.attempt.identity);
+    let resolved = 0;
+    const adapter = createChecksAdapter({
+      db,
+      nowMs: () => CLOCK,
+      getOctokit: async () => {
+        resolved += 1;
+        return fake.octokit;
+      },
+    });
+
+    const sent = await adapter.markQueuedBehindInflight!({
+      scope: SCOPE,
+      headSha: SHA,
+      triggeredBy: "octocat",
+      action: "review",
+      attachDeliveryId: "delivery-relabel",
+      checkRunId: RUN_ID,
+      summary: "Queued behind the live review for this pull request.",
+      updateBudgetMs: 1_000,
+      warn: () => {},
+    });
+
+    expect(sent).toBe(false);
+    expect(resolved).toBe(1);
+    expect(fake.updates).toHaveLength(0);
+  });
+});
+
 describe("the degraded cleanup deletes only the marker it scanned", () => {
   test("a marker rewritten after the scan is left in place", async () => {
     const marker = (round: number) =>

@@ -126,7 +126,14 @@ export async function reviewAttemptSandbox(
   if (activation.sandboxId === null) {
     throw new AttemptUnknownError(`attempt ${attemptId}: its provisioning row carries no minted container id`);
   }
-  return deps.getSandbox(deps.env.SANDBOX, activation.sandboxId);
+  try {
+    return await deps.getSandbox(deps.env.SANDBOX, activation.sandboxId);
+  } catch (err) {
+    const detail = redactSecrets(err instanceof Error ? err.message : String(err));
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its container handle could not be resolved (${detail}) — the container's state is unknown`,
+    );
+  }
 }
 
 /** One attempt's activation state, as the provisioning row records it. */
@@ -139,12 +146,26 @@ export type AttemptActivation = {
   revoked: boolean;
 };
 
-/** The attempt's activation state, or null when it never claimed a provisioning row. */
+/**
+ * The attempt's activation state, or null when it never claimed a provisioning
+ * row. A REJECTED read is not a state: it throws `AttemptUnknownError` at this
+ * one reader, so no caller can mistake a read fault for "not activated" — that
+ * mistake would conclude the Check, destroy the container and release capacity
+ * on evidence nobody observed.
+ */
 export async function readAttemptActivation(db: D1Like, attemptId: string): Promise<AttemptActivation | null> {
-  const row = await db
-    .prepare(`SELECT sandbox_id, activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?`)
-    .bind(attemptId)
-    .first<{ sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null }>();
+  let row: { sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null } | null;
+  try {
+    row = await db
+      .prepare(`SELECT sandbox_id, activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?`)
+      .bind(attemptId)
+      .first<{ sandbox_id: string | null; activated_ms: number | null; revoked_ms: number | null }>();
+  } catch (err) {
+    const detail = redactSecrets(err instanceof Error ? err.message : String(err));
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its activation could not be read (${detail}) — nothing may be concluded about its container`,
+    );
+  }
   if (row === null) return null;
   return { sandboxId: row.sandbox_id, activated: row.activated_ms !== null, revoked: row.revoked_ms !== null };
 }

@@ -2066,8 +2066,9 @@ async function publishDegradedPublication(input: {
   admittedAttemptId: string;
   /**
    * The owning Check attempt (§7.9): the degraded comment send takes the
-   * publication lease of its action for it. Absent when this host has no
-   * attempt row (a resumed publication) — that lane asserts no authority.
+   * publication lease of its action for it. The caller resolves it from the
+   * launch row's frozen pair when this host adopted no handle, so absence
+   * really means the attempt owns no Check row.
    */
   attemptId?: string;
   redactedError: string;
@@ -3385,10 +3386,45 @@ async function settlementFor(
 }
 
 /**
- * The publication path may use ONLY the identity the launch row froze. A row
- * without one means the attempt never learned its head — nothing can be
- * associated, and the miss is named rather than papered over with a guess.
+ * The Check row THIS attempt owns, read from the identity its launch row froze
+ * — the same pair the reconciler reads, never the newest generation of a key.
+ *
+ * A resumed publisher can have another holder on the row, so adoption is
+ * refused and `settlementFor` hands back nothing. That is not authority for the
+ * journal alone: the Check row still exists, and its action lease is what the
+ * send must contend for. `undefined` is the REAL no-Check lane (the frozen
+ * pair names no row), where the journal claim is the one authority. A rejected
+ * read is `unknown` — with the association unread, no send authority exists.
  */
+async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promise<string | undefined> {
+   let identity: AttemptIdentity | null;
+   try {
+     identity = await readAttemptIdentity(deps.env.DB, attemptId);
+   } catch (err) {
+     const detail = err instanceof Error ? err.message : String(err);
+     throw new AttemptUnknownError(
+       `attempt ${attemptId}: its frozen Check identity could not be read (${detail}) — no send authority can be established`,
+     );
+   }
+   if (identity === null) return undefined;
+   try {
+     const row = await deps.env.DB.prepare(`SELECT id FROM review_checks WHERE attempt_key = ? AND generation = ?`)
+       .bind(identity.key, identity.generation)
+       .first<{ id: string }>();
+     return row?.id;
+   } catch (err) {
+     const detail = err instanceof Error ? err.message : String(err);
+     throw new AttemptUnknownError(
+       `attempt ${attemptId}: its Check row could not be read (${detail}) — no send authority can be established`,
+     );
+   }
+ }
+
+ /**
+  * The publication path may use ONLY the identity the launch row froze. A row
+  * without one means the attempt never learned its head — nothing can be
+  * associated, and the miss is named rather than papered over with a guess.
+  */
 function assertFrozenIdentity(identity: AttemptIdentity | null, attemptId: string, headSha: string): void {
   if (identity !== null) return;
   throw new Error(
@@ -4949,13 +4985,16 @@ async function collectPhase(
     // The cap fences the FIRST degraded send exactly as it fences the normal
     // one: a resumed collect whose instant already passed stages nothing.
     refusePublicationPastDeadline(ref.deadlineMs);
+    const degradedCheckAttemptId = check?.handle?.attemptId ?? (await ownedCheckAttemptId(deps, ref.attemptId));
     const degradedOutcome = await publishDegradedPublication({
       db: deps.env.DB,
       commenter,
       scope: lifecycleScope,
       headSha,
       admittedAttemptId: ref.attemptId,
-      ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
+      // A resumed collect may not have adopted the Check row; the frozen
+      // association still names it, and the send must take its action lease.
+      ...(degradedCheckAttemptId === undefined ? {} : { attemptId: degradedCheckAttemptId }),
       redactedError,
       redactedStdout,
       attemptId,
@@ -5431,6 +5470,11 @@ async function publishPhase(
   // A resumed publication must still conclude the attempt's Check: the
   // settlement is adopted from the D1 attempt row when this host has none.
   const check = await settlementFor(deps, ref, headSha);
+  // The authority of BOTH sends below is the Check row this attempt owns — the
+  // adopted handle's when this host has one, else the frozen association. A
+  // refused adoption is not a no-Check lane, and only a rejected association
+  // read (unknown) stops the send before anything is claimed.
+  const checkAttemptId = check?.handle?.attemptId ?? (await ownedCheckAttemptId(deps, ref.attemptId));
   const stagedId = publicationId;
   // The frozen instant fences the FIRST send BEFORE the journal is claimed, so
   // a refused publication leaves no `sending` row behind for a reconciler to
@@ -5473,12 +5517,12 @@ async function publishPhase(
       publicationId: stagedId,
       notAfterMs: ref.deadlineMs,
       // The LEASE key is a `review_checks.id`, never `ref.attemptId` (the
-      // container identity): the send must contend with this attempt's own
+      // container identity): the send must contend for this attempt's own
       // Check sends and with recovery, which key on the Check row. With no
       // Check row at all (an App without a Checks surface) the journal claim
       // this invocation already holds is proved at dispatch instead.
       journalClaim: lease,
-      ...(check?.handle?.attemptId === undefined ? {} : { attemptId: check.handle.attemptId }),
+      ...(checkAttemptId === undefined ? {} : { attemptId: checkAttemptId }),
     });
   } catch (err) {
     // The adapter refused at the mutation because the instant had passed:
@@ -5500,7 +5544,10 @@ async function publishPhase(
         deps.log.warn(fields, `unspent publication claim could not be returned: ${detail}`);
       }
       deps.log.warn(fields, `publication handed to the lane holding its action — ${err.message}`);
-      await check?.terminalize(null, "publication-unknown");
+      // Same rule as the refused claim above: the staged id is the link a later
+      // confirmation of THIS publication needs to correct this Check, so a
+      // refused authority never drops it.
+      await check?.terminalize(stagedId, "publication-unknown");
       return { kind: "ok" };
     }
     if (err instanceof PreparedSendRejected) {
@@ -5614,7 +5661,7 @@ async function publishPhase(
   // line failure is an explicit fallback log (the intents stay staged and
   // discoverable), never fabricated mappings.
   if (lineIntents.length > 0) {
-    const lineAttemptId = check?.handle?.attemptId;
+    const lineAttemptId = checkAttemptId;
     const lineInput = {
       installationId: payload.installation_id,
       owner: payload.owner,
@@ -5629,10 +5676,34 @@ async function publishPhase(
     // batch takes a FRESH claim — and records its DISPATCH INTENT in the same
     // conditional transition. Exactly one lane ever reaches the send; every
     // other lane, and every retry, is discovery.
-    const lineLease = await recordLineDispatchIntent(deps.env.DB, stagedId, `consumer-lines:${sandboxId}`, Date.now());
+    //
+    // The BOOKKEEPING of this batch never vetoes the close-out: the overall
+    // comment and lifecycle apply are already durable here, and a rejected
+    // claim or release would abort the Check conclusion and the owed note
+    // that follow. A fault is logged and the batch is left to discovery —
+    // never dispatched on an unreadable claim, never cleared unproven.
+    let lineLease: Lease | null = null;
+    try {
+      lineLease = await recordLineDispatchIntent(deps.env.DB, stagedId, `consumer-lines:${sandboxId}`, Date.now());
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(
+        { ...fields, line_comments_fallback: true },
+        `line-comment dispatch intent could not be recorded (nothing sent, intents stay discoverable): ${detail}`,
+      );
+    }
     if (lineLease === null) {
-      const state = await readLineBatchState(deps.env.DB, stagedId);
-      if (state.pending) {
+      let pending = false;
+      try {
+        pending = (await readLineBatchState(deps.env.DB, stagedId)).pending;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          { ...fields, line_comments_fallback: true },
+          `line-comment batch state unreadable (nothing sent, discovery owns it): ${detail}`,
+        );
+      }
+      if (pending) {
         deps.log.info(
           fields,
           "line-comment batch already dispatched or owned by another lane — discovery only, never a second send",
@@ -5676,7 +5747,15 @@ async function publishPhase(
         );
       } finally {
         if (outcome !== "unknown") {
-          await releaseLineDispatch(deps.env.DB, stagedId, lineLease, Date.now(), outcome === "sent");
+          try {
+            await releaseLineDispatch(deps.env.DB, stagedId, lineLease, Date.now(), outcome === "sent");
+          } catch (err) {
+            const detail = err instanceof Error ? err.message : String(err);
+            deps.log.warn(
+              { ...fields, line_comments_fallback: true },
+              `line-comment dispatch release failed (the recorded intent stays for discovery): ${detail}`,
+            );
+          }
         }
       }
     }
