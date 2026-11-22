@@ -188,6 +188,18 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
 }
 
 /**
+ * Redact every FORM of each secret from one text leaf — the publish gate's own
+ * coverage (`credentialMatcher`: raw, url-encoded, base64/base64url and hex for a
+ * long value; its encodings for a short one). For seat-authored text that reaches
+ * a log line or a durable row without passing through `redactDocument`.
+ */
+export function redactCredentialForms(text: string, secrets: readonly string[]): string {
+  const matcher = credentialMatcher(secrets);
+  if (matcher.pattern === null && matcher.exact.size === 0) return text;
+  return redactText(text, matcher, { replaced: 0 });
+}
+
+/**
  * Redact ONE retained document root.
  *
  * Identity is protected by traversal path (`IDENTITY_PATHS` for `document`),

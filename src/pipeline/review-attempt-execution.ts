@@ -38,7 +38,14 @@ import {
 import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
+import {
+  carriesSecretForm,
+  redactCredentialForms,
+  redactExactSecrets,
+  redactReviewOutput,
+  redactReviewOutputExact,
+  redactSecrets,
+} from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
 import { type FailureStage, type FailureStore } from "../store/failure-store";
 import {
@@ -5248,13 +5255,23 @@ async function collectPhase(
     // seat's `ok: null: null`, which says nothing about what went wrong.
     // `failed` already names the seat's own fault, so it keeps its triple.
     const docFailure = recheck?.docFailure ?? null;
-    const recheckDetail = redactExactSecrets(
-      redactSecrets(
-        recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
-          ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
-          : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
-      ),
-      progress.secretValues,
+    // The seat's `reason`/`error` are MODEL text: a credential can ride them in a
+    // form only the exact set recognizes. They are emitted only when that set is
+    // available — every form of it removed — and withheld entirely when it is not
+    // (the round is still accounted by its counts). Nothing from the seat is
+    // persisted without the set that can prove it clean.
+    const seatText = (text: string): string | null =>
+      progress.secretValues.length === 0
+        ? null
+        : redactCredentialForms(redactSecrets(text), progress.secretValues);
+    const detailSource =
+      recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
+        ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
+        : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`;
+    const recheckDetail = (
+      progress.secretValues.length === 0
+        ? `${recheckOutcome}: status text withheld — the attempt carries no sealed credential set`
+        : redactCredentialForms(redactSecrets(detailSource), progress.secretValues)
     ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
     deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
       {
@@ -5264,10 +5281,10 @@ async function collectPhase(
         // credential exactly like `error` can.
         recheck_reason: status?.reason === null || status?.reason === undefined
           ? null
-          : redactExactSecrets(redactSecrets(status.reason), progress.secretValues),
+          : seatText(status.reason),
         recheck_error: status?.error === null || status?.error === undefined
           ? null
-          : redactExactSecrets(redactSecrets(status.error), progress.secretValues),
+          : seatText(status.error),
         // Named drops + the unnamed ones actually attributed (no usable
         // rowId, so mapped by position): the count reports what happened,
         // not only what could be named.

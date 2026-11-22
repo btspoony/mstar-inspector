@@ -2572,6 +2572,89 @@ describe("the SEC-01 publish gate", () => {
     expect(rows.filter((row) => row.stage === "recheck")).toHaveLength(1);
   });
 
+  test("a gate-refused review redacts the recheck status text with the sealed set", async () => {
+    // note: The seat's own `reason`/`error` are MODEL text: an encoded echo of a
+    // sealed credential must not reach the attribution line or the failure row.
+    const paidKey = "sk-paid-session-1";
+    const echo = Buffer.from(paidKey, "utf8").toString("base64");
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      // The seat wrote no document and said why — before the paid step reads it.
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: `dump ${echo}`,
+      });
+    });
+    await sealStoredGateSecrets(db, [paidKey]);
+    stubStoredEcho(db, echo);
+    expect(prepared.recheckInput).toBeDefined();
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    // Refused, and the round is still accounted.
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    const attributed = h.logLines.find((line) => line.fields.recheck_outcome !== undefined)!;
+    expect(attributed).toBeDefined();
+    const rows = db.raw.prepare("SELECT stage, error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+      error: string;
+    }[];
+    const recheckRow = rows.find((row) => row.stage === "recheck");
+    expect(recheckRow).toBeDefined();
+
+    // Neither artifact carries a recognizable credential form. `reason` is a
+    // validated vocabulary value (no free text), the free-text `error` is redacted.
+    expect(attributed.fields.recheck_reason).toBe("seat-failed");
+    for (const text of [String(attributed.fields.recheck_error), String(recheckRow!.error)]) {
+      expect(text).not.toContain(echo);
+      expect(text).toContain("[REDACTED]");
+    }
+  });
+
+  test("a refused review with no sealed set withholds the recheck status text", async () => {
+    // note: Without the exact set nothing can be certified, so the seat's text is not
+    // emitted at all — the round is still accounted by its counts.
+    const unrecognized = "unrecognized-seat-token-9f2c";
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
+      await seedPriorPublication(seedDb);
+      await seedOpenTarget(seedDb);
+      h.sandbox.recheckFileContent = "";
+      h.sandbox.recheckStatusContent = JSON.stringify({
+        schema: "mstar.recheck-status/v1",
+        headSha: SHA,
+        outcome: "failed",
+        reason: "seat-failed",
+        rejected: 0,
+        rejected_row_ids: [],
+        error: `dump ${unrecognized}`,
+      });
+    });
+    // A pre-envelope attempt: the gate refuses it, and no set can be applied.
+    db.raw.prepare("UPDATE review_launches SET gate_secrets_enc = NULL WHERE attempt_id = ?").run(ATTEMPT_ID);
+
+    expect(await collectAttempt(deps, ref, prepared)).toEqual({ kind: "settled", outcome: { kind: "ok" } });
+
+    expect(h.logLines.some((line) => line.msg.includes("publish gate refused"))).toBe(true);
+    const attributed = h.logLines.find((line) => line.fields.recheck_outcome !== undefined)!;
+    expect(attributed.fields.recheck_reason).toBeNull();
+    expect(attributed.fields.recheck_error).toBeNull();
+    const rows = db.raw.prepare("SELECT stage, error FROM review_failures WHERE head_sha = ?").all(SHA) as {
+      stage: string;
+      error: string;
+    }[];
+    const recheckRow = rows.find((row) => row.stage === "recheck");
+    expect(recheckRow).toBeDefined();
+    expect(recheckRow!.error).not.toContain(unrecognized);
+    expect(recheckRow!.error).toContain("withheld");
+  });
+
   test("a clean collect accounts its recheck round exactly once", async () => {
     // note: Moving the accounting ahead of the gate must not double-fire it.
     const { deps, db, ref, prepared } = await reviewedEcho("plain text", false, async (seedDb) => {
