@@ -1,5 +1,5 @@
 /**
- * Finding lifecycle store tests (spec review-lifecycle
+ * why: Finding lifecycle store tests (spec review-lifecycle
  * §7.1/§7.2/§7.7/§7.11.1) — `src/store/finding-lifecycle.ts` against the
  * bun:sqlite double running the real migration SQL (the full chain, in
  * wrangler's numeric order, via createMigratedTestD1; DDL single sources).
@@ -207,7 +207,7 @@ function proof(id: string, pay: PublicationPayload, confirmedMs: number): Public
   };
 }
 
-/** stage → claim → record proof; returns the live lease. */
+/** note: stage → claim → record proof; returns the live lease. */
 async function stageClaimProve(db: TestD1, id: string, pay: PublicationPayload, nowMs: number): Promise<Lease> {
   await stagePublication(db, { id, payload: pay, nowMs });
   const lease = await claimPublication(db, id, "consumer", nowMs + 1);
@@ -240,7 +240,7 @@ describe("stagePublication (spec §7.7 staging)", () => {
     expect(row.nextAttemptMs).toBeNull();
     expect(row.payload).toEqual(pay);
 
-    // Due for recovery selection immediately (no attempt yet, no lease).
+    // note: Due for recovery selection immediately (no attempt yet, no lease).
     const recovery = await listPublicationRecovery(db, 2000, 10);
     expect(recovery.map((r) => r.id)).toEqual(["pub-1"]);
   });
@@ -280,14 +280,14 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
 
     const lease1 = await claimPublication(db, "pub-1", "consumer", 2000);
     expect(lease1).toEqual({ holder: "consumer", epoch: 1, untilMs: 2000 + PUBLICATION_LEASE_MS });
-    // prepared → sending on claim; one attempt counted.
+    // note: prepared → sending on claim; one attempt counted.
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
     expect(publicationRow(db, "pub-1").attempts).toBe(1);
 
-    // Another holder (or the same one) cannot claim a live lease.
+    // invariant: Another holder (or the same one) cannot claim a live lease.
     expect(await claimPublication(db, "pub-1", "recovery", 3000)).toBeNull();
 
-    // After expiry the recovery lane wins with epoch 2.
+    // note: After expiry the recovery lane wins with epoch 2.
     const lease2 = await claimPublication(db, "pub-1", "recovery", 2000 + PUBLICATION_LEASE_MS + 1);
     expect(lease2).toEqual({ holder: "recovery", epoch: 2, untilMs: 2000 + PUBLICATION_LEASE_MS + 1 + PUBLICATION_LEASE_MS });
     expect(publicationRow(db, "pub-1").attempts).toBe(2);
@@ -305,12 +305,12 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
 
     const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
-    // The claim already moved the row and counted one attempt.
+    // invariant: The claim already moved the row and counted one attempt.
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
     expect(publicationRow(db, "pub-1").attempts).toBe(1);
 
     expect(await releaseUnspentPublicationClaim(db, "pub-1", lease, 3000)).toBe(true);
-    // Exactly the pre-claim send state: prepared, no lease, attempt returned,
+    // invariant: Exactly the pre-claim send state: prepared, no lease, attempt returned,
     // and due — `next_attempt_ms` was never set, so the row is selectable by
     // the very next recovery pass instead of waiting out a backoff.
     const released = publicationRow(db, "pub-1");
@@ -321,7 +321,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     expect(released.next_attempt_ms).toBeNull();
     expect(await listPublicationRecovery(db, 3000, 10)).toHaveLength(1);
 
-    // It is a real release, not a terminal mark: the row re-claims normally.
+    // invariant: It is a real release, not a terminal mark: the row re-claims normally.
     const reClaim = await claimPublication(db, "pub-1", "lifecycle-reconcile", 4000);
     expect(reClaim).not.toBeNull();
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
@@ -333,12 +333,12 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
     const lease = (await claimPublication(db, "pub-1", "lifecycle-reconcile", 2000)) ?? (() => { throw new Error("setup"); })();
 
-    // A foreign holder or a stale epoch cannot unwind someone else's claim.
+    // invariant: A foreign holder or a stale epoch cannot unwind someone else's claim.
     expect(await releaseUnspentPublicationClaim(db, "pub-1", { ...lease, holder: "other" }, 3000)).toBe(false);
     expect(await releaseUnspentPublicationClaim(db, "pub-1", { ...lease, epoch: lease.epoch + 5 }, 3000)).toBe(false);
     expect(publicationRow(db, "pub-1").phase).toBe("sending");
 
-    // Once proof landed the row is confirmed — a budget refusal can no longer
+    // invariant: Once proof landed the row is confirmed — a budget refusal can no longer
     // un-send it, so the release must refuse rather than fabricate `prepared`.
     expect(await recordPublicationProof(db, "pub-1", lease, proof("pub-1", payload(), 3000))).toBe(true);
     expect(await releaseUnspentPublicationClaim(db, "pub-1", lease, 4000)).toBe(false);
@@ -369,17 +369,17 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
     await stageClaimProve(db, "pub-rev", payload({ kind: "review" }), 1000);
     await stageClaimProve(db, "pub-deg", payload({ kind: "degraded", artifact: null, lifecycle: null, lineIntents: [] }), 1000);
 
-    // Review proof takes precedence over degraded within the exact scope/SHA.
+    // note: Review proof takes precedence over degraded within the exact scope/SHA.
     const byScope = await readPublicationProof(db, { scope: SCOPE, headSha: SHA });
     expect(byScope?.publicationId).toBe("pub-rev");
     expect(byScope?.kind).toBe("review");
 
-    // The requested publication id is preferred.
+    // note: The requested publication id is preferred.
     const byId = await readPublicationProof(db, { scope: SCOPE, headSha: SHA, publicationId: "pub-deg" });
     expect(byId?.publicationId).toBe("pub-deg");
     expect(byId?.kind).toBe("degraded");
 
-    // Foreign scope/SHA proves nothing.
+    // invariant: Foreign scope/SHA proves nothing.
     expect(await readPublicationProof(db, { scope: SCOPE, headSha: SHA2 })).toBeNull();
     expect(await readPublicationProof(db, { scope: { ...SCOPE, repo: "other" }, headSha: SHA })).toBeNull();
   });
@@ -388,7 +388,7 @@ describe("claimPublication / recordPublicationProof (spec §7.7 step 8)", () => 
 describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", () => {
   test("stamps the publication round onto the stored reviews row", async () => {
     const db = createSeededTestD1();
-    // Round 4 is deliberately not the positional fallback (1): dropping the
+    // invariant: Round 4 is deliberately not the positional fallback (1): dropping the
     // `round: payload.round` hand-off leaves the column NULL, which reads as 1.
     const pay = payload({ round: 4, lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
@@ -419,27 +419,27 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
 
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
 
-    // Publication applied under the lease, recovery done, lease released.
+    // note: Publication applied under the lease, recovery done, lease released.
     const pub = publicationRow(db, "pub-1");
     expect(pub.phase).toBe("applied");
     expect(pub.recovery_state).toBe("done");
     expect(pub.holder).toBeNull();
     expect(pub.applied_ms).toBe(2000);
 
-    // store.put wrote the public result rows (envelope + finding).
+    // note: store.put wrote the public result rows (envelope + finding).
     const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviews.n).toBe(1);
     const publicFindings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(publicFindings.n).toBe(1);
 
-    // Lifecycle rows: one open finding, one round history, one intent.
+    // note: Lifecycle rows: one open finding, one round history, one intent.
     const finding = db.raw.prepare("SELECT * FROM review_findings WHERE id = 'row-1'").get() as {
       state: string; reopen_count: number; first_publication_id: string; last_publication_id: string;
       first_seen_round: number; last_seen_round: number; last_assessed_ms: number | null; last_scheduled_ms: number | null;
       target_id: string | null;
     };
     expect(finding.state).toBe("open");
-    // The row names its target: that is the only attribution the tenant read
+    // invariant: The row names its target: that is the only attribution the tenant read
     // faces bind, and it rides the publication's own artifact copy.
     expect(finding.target_id).toBe(TARGET_ID);
     expect(finding.reopen_count).toBe(0);
@@ -460,7 +460,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     expect(thread.superseded_by_publication_id).toBeNull();
     expect(JSON.parse(thread.intent_json).associationId).toBe("assoc-1");
 
-    // Applied publications leave the recovery lane.
+    // invariant: Applied publications leave the recovery lane.
     expect(await listPublicationRecovery(db, 3000, 10)).toEqual([]);
   });
 
@@ -471,14 +471,14 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     const lease = await claimPublication(db, "pub-1", "consumer", 2000);
     if (lease === null) throw new Error("setup");
 
-    // No proof yet — apply refuses.
+    // invariant: No proof yet — apply refuses.
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(false);
     const reviews = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviews.n).toBe(0);
 
     await recordPublicationProof(db, "pub-1", lease, proof("pub-1", pay, 2500));
 
-    // Wrong holder / wrong epoch / expired lease — all refuse.
+    // invariant: Wrong holder / wrong epoch / expired lease — all refuse.
     expect(await applyPublishedLifecycle(db, "pub-1", { holder: "other", epoch: lease.epoch, untilMs: lease.untilMs }, 3000)).toBe(false);
     expect(await applyPublishedLifecycle(db, "pub-1", { holder: "consumer", epoch: lease.epoch + 1, untilMs: lease.untilMs }, 3000)).toBe(false);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, lease.untilMs + 1)).toBe(false);
@@ -501,7 +501,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
-    expect(await applyPublishedLifecycle(db, "pub-1", lease, 5000)).toBe(true); // idempotent short-circuit
+    expect(await applyPublishedLifecycle(db, "pub-1", lease, 5000)).toBe(true); // note: idempotent short-circuit
 
     const counts = (table: string) => (db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
     expect(counts("reviews")).toBe(1);
@@ -525,14 +525,14 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
 
-    // Simulate the crash window: the atomic store.put committed, the
+    // note: Simulate the crash window: the atomic store.put committed, the
     // lifecycle batch never ran.
     const store = createArtifactStore(db);
     await store.put(pay.artifact!);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(0);
 
-    // Recovery replays: store.put is a UNIQUE no-op, the lifecycle batch
+    // note: Recovery replays: store.put is a UNIQUE no-op, the lifecycle batch
     // applies once.
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
@@ -565,7 +565,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
 
   test("a chunked apply stops writing once the lease is replaced (§7.11.1 chunk fence)", async () => {
     const db = createSeededTestD1();
-    // >25 statements ⇒ more than one chunk: 30 seen upserts + 30 intents.
+    // note: >25 statements ⇒ more than one chunk: 30 seen upserts + 30 intents.
     const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
     const pay = payload({
       lifecycle: lifecycleRound({ seen }),
@@ -573,14 +573,14 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
 
-    // The clock is read once per chunk fence. Before the SECOND chunk's fence
+    // invariant: The clock is read once per chunk fence. Before the SECOND chunk's fence
     // a rival invocation has already claimed a NEWER epoch (the 120s lease
     // expired mid-apply): the stale apply must stop instead of mutating
     // findings/associations under ownership it no longer holds.
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      // Probe order: entry, the artifact's own chunk, then each lifecycle
+      // note: Probe order: entry, the artifact's own chunk, then each lifecycle
       // chunk. The rival claims at the fourth read — after the artifact chunk
       // and the FIRST lifecycle chunk committed.
       if (reads === 4) {
@@ -591,14 +591,14 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
       return 2000;
     });
 
-    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
-    expect(applied).toBe(false); // the stale invocation never marks complete
-    // Only the first lifecycle chunk's writes landed; the second never ran.
+    expect(reads).toBe(4); // note: entry, artifact chunk, first lifecycle chunk, aborted second
+    expect(applied).toBe(false); // note: the stale invocation never marks complete
+    // invariant: Only the first lifecycle chunk's writes landed; the second never ran.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n).toBe(1);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_threads").get() as { n: number }).n).toBe(0);
-    expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // never marked applied
+    expect(publicationRow(db, "pub-1").phase).toBe("confirmed"); // note: never marked applied
   });
 
   test("a chunked apply stops when its own lease expires between chunks", async () => {
@@ -610,12 +610,12 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
     let reads = 0;
     const applied = await applyPublishedLifecycle(db, "pub-1", lease, 2000, () => {
       reads += 1;
-      return reads < 4 ? 2000 : lease.untilMs + 1; // the second lifecycle chunk finds it expired
+      return reads < 4 ? 2000 : lease.untilMs + 1; // note: the second lifecycle chunk finds it expired
     });
 
     expect(applied).toBe(false);
-    expect(reads).toBe(4); // entry, artifact chunk, first lifecycle chunk, aborted second
-    // The first lifecycle chunk landed; the artifact committed in its own chunk.
+    expect(reads).toBe(4); // note: entry, artifact chunk, first lifecycle chunk, aborted second
+    // note: The first lifecycle chunk landed; the artifact committed in its own chunk.
     expect((db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get() as { n: number }).n).toBe(25);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
     expect(publicationRow(db, "pub-1").phase).toBe("confirmed");
@@ -623,7 +623,7 @@ describe("applyPublishedLifecycle (spec §7.2 state machine + §7.7 step 9)", ()
 });
 
 /**
- * Wrap the D1 double so a lease mutation can land at every WRITE boundary:
+ * why: Wrap the D1 double so a lease mutation can land at every WRITE boundary:
  * `mutate` runs immediately before each `db.batch` and before the first
  * direct statement `run()` (the degraded marker), i.e. after every read probe
  * has already passed. A read-then-write fence cannot refuse this — only a
@@ -649,7 +649,7 @@ function leaseMutationAtWriteBoundary(db: TestD1, mutate: () => void): D1Like {
           return inner.all<T>();
         },
         run<T = Record<string, unknown>>() {
-          // Runs inside `batch` are covered by that batch's boundary hook.
+          // note: Runs inside `batch` are covered by that batch's boundary hook.
           if (!inBatch && !directRun) {
             directRun = true;
             mutate();
@@ -672,9 +672,9 @@ function leaseMutationAtWriteBoundary(db: TestD1, mutate: () => void): D1Like {
 }
 
 describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () => {
-  /** Row count of one lifecycle table after an apply. */
+  /** note: Row count of one lifecycle table after an apply. */
   const count = (db: TestD1, table: string): number => {
-    // bun:sqlite `get()` is untyped; a COUNT(*) aggregate is always one row.
+    // note: bun:sqlite `get()` is untyped; a COUNT(*) aggregate is always one row.
     const row = db.raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number };
     return row.n;
   };
@@ -686,11 +686,11 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
       lineIntents: [intent("assoc-1", "row-1", "pub-1", 1)],
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
-    // The review row already exists, so the apply's ONLY write is the guarded
+    // invariant: The review row already exists, so the apply's ONLY write is the guarded
     // lifecycle batch (store.put is skipped).
     await createArtifactStore(db).put(pay.artifact!);
 
-    // A rival invocation claims a NEWER epoch after the entry probe passed and
+    // invariant: A rival invocation claims a NEWER epoch after the entry probe passed and
     // immediately before the batch executes — the window a read probe misses.
     const raced = leaseMutationAtWriteBoundary(db, () => {
       db.raw
@@ -714,7 +714,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
     await createArtifactStore(db).put(pay.artifact!);
 
-    // Same holder and epoch — only the expiry predicate can refuse this, and
+    // invariant: Same holder and epoch — only the expiry predicate can refuse this, and
     // the applied marker alone carried no expiry predicate before the fix.
     const raced = leaseMutationAtWriteBoundary(db, () => {
       db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = 'pub-1'`).run(1999);
@@ -728,7 +728,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
 
   test("a replacement between chunks cannot write the remaining chunks", async () => {
     const db = createSeededTestD1();
-    // >25 statements ⇒ more than one chunk: the second chunk's writes land
+    // invariant: >25 statements ⇒ more than one chunk: the second chunk's writes land
     // after the first chunk committed and after ITS fence read passed.
     const seen = Array.from({ length: 30 }, (_, i) => seenEntry(`row-${i}`, `f-${i}`));
     const pay = payload({
@@ -741,7 +741,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     let writes = 0;
     const raced = leaseMutationAtWriteBoundary(db, () => {
       writes += 1;
-      // Batch order is the artifact's chunk, then the lifecycle chunks: the
+      // note: Batch order is the artifact's chunk, then the lifecycle chunks: the
       // rival claims before the SECOND lifecycle chunk.
       if (writes === 3) {
         db.raw
@@ -751,7 +751,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     });
 
     expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
-    // Only the first lifecycle chunk (25 seen upserts) committed; the second
+    // invariant: Only the first lifecycle chunk (25 seen upserts) committed; the second
     // chunk's statements are refused by their own predicate, not by a probe.
     expect(count(db, "review_findings")).toBe(25);
     expect(count(db, "review_threads")).toBe(0);
@@ -770,7 +770,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
     expect(await applyPublishedLifecycle(raced, "pub-1", lease, 2000)).toBe(false);
     expect(publicationRow(db, "pub-1")).toMatchObject({ phase: "confirmed", applied_ms: null });
 
-    // Control: the same apply lands once the lease really is live again.
+    // note: Control: the same apply lands once the lease really is live again.
     db.raw.prepare(`UPDATE review_publications SET lease_until_ms = ? WHERE id = 'pub-1'`).run(lease.untilMs);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
     expect(publicationRow(db, "pub-1").phase).toBe("applied");
@@ -780,7 +780,7 @@ describe("atomic live-lease fence at the mutation boundary (spec §7.11.1)", () 
 describe("recurrence reopen and identity drift (spec §7.2)", () => {
   test("recurrence reopens a closed concern, retains history, and never touches the old thread", async () => {
     const db = createSeededTestD1();
-    // Round 1: the concern is reported, assessed addressed, line comment
+    // note: Round 1: the concern is reported, assessed addressed, line comment
     // intent assoc-1 preallocated.
     const pay1 = payload({
       lifecycle: lifecycleRound({
@@ -796,11 +796,11 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     expect(await applyPublishedLifecycle(db, "pub-1", lease1, 2000)).toBe(true);
     expect((db.raw.prepare("SELECT state FROM review_findings WHERE id = 'row-1'").get() as { state: string }).state).toBe("addressed");
 
-    // T4 persisted a verified resolution snapshot on assoc-1 before the
+    // note: T4 persisted a verified resolution snapshot on assoc-1 before the
     // inline attempt (raw write — the T4 surface owns this transition).
     db.raw.prepare("UPDATE review_threads SET verified_json = '{\"snapshot\":1}' WHERE id = 'assoc-1'").run();
 
-    // Round 2 at a new SHA: the same fingerprint is reported again (no
+    // note: Round 2 at a new SHA: the same fingerprint is reported again (no
     // assessment selected — capped).
     const pay2 = payload({
       headSha: SHA2,
@@ -822,7 +822,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
       state: string; reopen_count: number; original_json: string; first_publication_id: string;
       first_seen_round: number; last_seen_round: number; last_publication_id: string; last_assessment_json: string | null;
     };
-    // Reopened at the new round; original and round-1 assessment history retained.
+    // note: Reopened at the new round; original and round-1 assessment history retained.
     expect(row.state).toBe("open");
     expect(row.reopen_count).toBe(1);
     expect(JSON.parse(row.original_json).title).toBe("Null deref risk");
@@ -832,7 +832,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     expect(row.last_publication_id).toBe("pub-2");
     expect(row.last_assessment_json !== null && JSON.parse(row.last_assessment_json).reason === "verified-fix").toBe(true);
 
-    // The old association: superseded marker ONLY — remote identity,
+    // invariant: The old association: superseded marker ONLY — remote identity,
     // resolution state, verified snapshot and attempts untouched.
     const oldThread = db.raw.prepare("SELECT * FROM review_threads WHERE id = 'assoc-1'").get() as {
       superseded_by_publication_id: string | null; resolution_state: string; verified_json: string | null;
@@ -845,14 +845,14 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     expect(oldThread.thread_id).toBeNull();
     expect(oldThread.attempts).toBe(0);
 
-    // The fresh association is the live one.
+    // note: The fresh association is the live one.
     const newThread = db.raw.prepare("SELECT superseded_by_publication_id, round FROM review_threads WHERE id = 'assoc-2'").get() as {
       superseded_by_publication_id: string | null; round: number;
     };
     expect(newThread.superseded_by_publication_id).toBeNull();
     expect(newThread.round).toBe(2);
 
-    // Resolution queue: the superseded row is out even though it still has
+    // invariant: Resolution queue: the superseded row is out even though it still has
     // a verified snapshot; the fresh association has none yet.
     expect(await listResolutionRecovery(db, 12_000, 10)).toEqual([]);
   });
@@ -871,7 +871,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     const lease1 = await stageClaimProve(db, "pub-1", pay1, 1000);
     expect(await applyPublishedLifecycle(db, "pub-1", lease1, 2000)).toBe(true);
 
-    // Round 2: changed fingerprint hint, contradictory concern — the
+    // note: Round 2: changed fingerprint hint, contradictory concern — the
     // assessment is keyed to the SAME row and conservatively unverifiable.
     const pay2 = payload({
       headSha: SHA2,
@@ -893,14 +893,14 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     const row = db.raw.prepare("SELECT * FROM review_findings WHERE id = 'row-1'").get() as {
       state: string; reopen_count: number; last_assessment_json: string | null; last_assessed_ms: number | null;
     };
-    // No auto-fail: the row-keyed identity survived; the drift is an
+    // invariant: No auto-fail: the row-keyed identity survived; the drift is an
     // annotation for display, not a ban.
     expect(row.state).toBe("open");
     expect(row.reopen_count).toBe(0);
     expect(row.last_assessment_json !== null && JSON.parse(row.last_assessment_json).reason).toBe("identity-drift");
     expect(row.last_assessed_ms).toBe(11_000);
 
-    // Both rounds' assessment history is retained.
+    // note: Both rounds' assessment history is retained.
     const rounds = db.raw.query("SELECT round FROM review_finding_rounds WHERE finding_row_id = 'row-1' ORDER BY round").all() as Array<{ round: number }>;
     expect(rounds.map((r) => r.round)).toEqual([1, 2]);
   });
@@ -919,7 +919,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     const lease1 = await stageClaimProve(db, "pub-1", pay1, 1000);
     await applyPublishedLifecycle(db, "pub-1", lease1, 2000);
 
-    // Round 2 reports the fingerprint again AND verifies the fix.
+    // note: Round 2 reports the fingerprint again AND verifies the fix.
     const pay2 = payload({
       headSha: SHA2,
       round: 2,
@@ -940,7 +940,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
     const row = db.raw.prepare("SELECT state, reopen_count FROM review_findings WHERE id = 'row-1'").get() as {
       state: string; reopen_count: number;
     };
-    // The recurrence happened (reopen counted), then this round's verified
+    // invariant: The recurrence happened (reopen counted), then this round's verified
     // assessment closed it again — recurrence never overrides re-verified evidence.
     expect(row.reopen_count).toBe(1);
     expect(row.state).toBe("addressed");
@@ -950,7 +950,7 @@ describe("recurrence reopen and identity drift (spec §7.2)", () => {
 describe("fair rotation (spec §7.2)", () => {
   test("open rows select oldest-waiting first, capped at 25; applying a confirmed publication advances past the cap", async () => {
     const db = createSeededTestD1();
-    // A staged publication provides the FK parent for 26 raw lifecycle rows.
+    // note: A staged publication provides the FK parent for 26 raw lifecycle rows.
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1000 });
     for (let i = 1; i <= 26; i++) {
       db.raw
@@ -966,14 +966,14 @@ describe("fair rotation (spec §7.2)", () => {
 
     expect(await countRecheckableFindings(db, SCOPE)).toBe(26);
 
-    // LIMIT caps at ASSESSMENT_TARGET_CAP even if a caller asks for more.
+    // invariant: LIMIT caps at ASSESSMENT_TARGET_CAP even if a caller asks for more.
     const selected = await selectAssessmentTargets(db, SCOPE, 500);
     expect(selected).toHaveLength(25);
     expect(selected.map((t) => t.rowId)).toEqual(Array.from({ length: 25 }, (_, i) => `row-${i + 1}`));
-    // Targets carry the ORIGINAL concern, not a title.
+    // note: Targets carry the ORIGINAL concern, not a title.
     expect(selected[0]!.original.body).toBe("Dereferencing possibly-null value.");
 
-    // The confirmed publication applies: the 25 selected targets advance
+    // note: The confirmed publication applies: the 25 selected targets advance
     // last_scheduled_ms; the unselected remainder keeps its place.
     const pay = payload({
       headSha: SHA2,
@@ -989,7 +989,7 @@ describe("fair rotation (spec §7.2)", () => {
     const lease = await stageClaimProve(db, "pub-2", pay, 100_000);
     expect(await applyPublishedLifecycle(db, "pub-2", lease, 100_000)).toBe(true);
 
-    // Still 26 open (omitted outputs stay open), but the queue rotated:
+    // note: Still 26 open (omitted outputs stay open), but the queue rotated:
     // the previously unselected row-26 is now first, and every later entry
     // is one of the previously selected rows now waiting behind it (the
     // cap still holds — one of the 25 rotated rows is truncated by LIMIT).
@@ -1016,11 +1016,11 @@ describe("fair rotation (spec §7.2)", () => {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pub-1', 'pub-1', ?, ?, 1, 1, ?, ?, ?)`,
         )
         .run(id, APP_ID, 123, "acme", "widgets", 42, findingId, JSON.stringify(originalFinding()), SHA, SHA, state, createdMs, createdMs);
-    insertFinding("row-old", "f-old", 1000, "open"); // waiting since 1000
-    insertFinding("row-closed", "f-closed", 2000, "addressed"); // closed earlier
+    insertFinding("row-old", "f-old", 1000, "open"); // note: waiting since 1000
+    insertFinding("row-closed", "f-closed", 2000, "addressed"); // note: closed earlier
     insertFinding("row-newer", "f-newer", 5000, "open");
 
-    // pub-2 re-reports row-closed (recurrence) — it must enter the queue at
+    // note: pub-2 re-reports row-closed (recurrence) — it must enter the queue at
     // nowMs, BEHIND row-old and row-newer... no: at current time (10_000),
     // which is after every existing waiter.
     const pay = payload({
@@ -1040,7 +1040,7 @@ describe("fair rotation (spec §7.2)", () => {
     expect(order.map((t) => t.rowId)).toEqual(["row-old", "row-newer", "row-closed"]);
   });
 
-  /** One lifecycle row (state is whatever the caller needs) against pub-1. */
+  /** note: One lifecycle row (state is whatever the caller needs) against pub-1. */
   const insertFinding = (db: TestD1, id: string, state: string, createdMs: number): void => {
     db.raw
       .prepare(
@@ -1053,7 +1053,7 @@ describe("fair rotation (spec §7.2)", () => {
       .run(id, APP_ID, 123, "acme", "widgets", 42, `f-${id}`, JSON.stringify(originalFinding()), SHA, SHA, state, createdMs, createdMs);
   };
 
-  /** One association of a lifecycle row, in the given resolution state. */
+  /** note: One association of a lifecycle row, in the given resolution state. */
   const insertThread = (
     db: TestD1,
     id: string,
@@ -1092,13 +1092,13 @@ describe("fair rotation (spec §7.2)", () => {
     insertThread(db, "t-abandoned", "row-abandoned", "abandoned");
     insertThread(db, "t-superseded", "row-superseded", "pending", "pub-x");
 
-    // An addressed row with no association, only terminal associations, or
+    // invariant: An addressed row with no association, only terminal associations, or
     // only a superseded one stays out of the rotation for good.
     const selected = await selectAssessmentTargets(db, SCOPE, 25);
     expect(selected.map((t) => t.rowId)).toEqual([
       "row-open", "row-pending", "row-retry", "row-needs-recheck", "row-local-error",
     ]);
-    // The coverage total binds the SAME predicate as the selector, so the
+    // invariant: The coverage total binds the SAME predicate as the selector, so the
     // invariant the published coverage line depends on (`capped` = the honest
     // remainder) holds with addressed rows in the selection.
     const totalOpen = await countRecheckableFindings(db, SCOPE);
@@ -1133,7 +1133,7 @@ describe("fair rotation (spec §7.2)", () => {
       last_scheduled_ms: number | null;
     };
     expect(clock.last_scheduled_ms).toBe(10_000);
-    // The row that was behind it is served next — unsolvable rows rotate out.
+    // note: The row that was behind it is served next — unsolvable rows rotate out.
     expect((await selectAssessmentTargets(db, SCOPE, 1)).map((t) => t.rowId)).toEqual(["row-b"]);
   });
 });
@@ -1144,7 +1144,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
     id: string,
     overrides: Partial<Record<string, unknown>> = {},
   ): Promise<void> {
-    // One shared FK parent publication; re-staging is an idempotent no-op.
+    // note: One shared FK parent publication; re-staging is an idempotent no-op.
     await stagePublication(db, { id: "pub-seed", payload: payload(), nowMs: 1000 });
     db.raw
       .prepare(
@@ -1195,7 +1195,7 @@ describe("resolution queue selection (spec §7.11.1)", () => {
 
   test("selects rows with no attempt yet; excludes superseded/unverified/leased/capped/non-queue rows", async () => {
     const db = createSeededTestD1();
-    await seedThread(db, "t-due", { created_ms: 1000 }); // pending, verified, no attempt → due
+    await seedThread(db, "t-due", { created_ms: 1000 }); // note: pending, verified, no attempt → due
     await seedThread(db, "t-superseded", { created_ms: 2000, superseded_by_publication_id: "pub-x" });
     await seedThread(db, "t-unverified", { created_ms: 3000, verified_json: null });
     await seedThread(db, "t-needs-recheck", { created_ms: 4000, resolution_state: "needs-recheck" });
@@ -1234,7 +1234,7 @@ describe("tenant/App isolation", () => {
       )
       .run(OTHER_APP_ID, 123, "acme", "widgets", 42, JSON.stringify(originalFinding()), SHA, SHA);
 
-    // Another row under the SAME app but a different repo.
+    // invariant: Another row under the SAME app but a different repo.
     db.raw
       .prepare(
         `INSERT INTO review_findings
@@ -1248,7 +1248,7 @@ describe("tenant/App isolation", () => {
     expect(await countRecheckableFindings(db, SCOPE)).toBe(0);
     expect(await selectAssessmentTargets(db, SCOPE, 25)).toEqual([]);
     expect(await readPublicationProof(db, { scope: { ...SCOPE, appId: OTHER_APP_ID }, headSha: SHA })).toBeNull();
-    expect(await readPublicationProof(db, { scope: SCOPE, headSha: SHA })).toBeNull(); // staged ≠ proven
+    expect(await readPublicationProof(db, { scope: SCOPE, headSha: SHA })).toBeNull(); // note: staged ≠ proven
   });
 
   test("operator retry with a mismatched scope is refused", async () => {
@@ -1273,10 +1273,10 @@ describe("retryLifecycleWork (spec §7.11.1 operator retry)", () => {
     const pay = payload({ lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }) });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
 
-    // Live lease → refused.
+    // invariant: Live lease → refused.
     expect(await retryLifecycleWork(db, { scope: SCOPE, publicationId: "pub-1", nowMs: 2000 })).toBe(false);
 
-    // After expiry: attempts/next_attempt/error reset; epoch retained;
+    // invariant: After expiry: attempts/next_attempt/error reset; epoch retained;
     // payload, proof and phase untouched.
     const before = publicationRow(db, "pub-1");
     expect(await retryLifecycleWork(db, { scope: SCOPE, publicationId: "pub-1", nowMs: lease.untilMs + 1 })).toBe(true);
@@ -1320,9 +1320,9 @@ describe("retryLifecycleWork (spec §7.11.1 operator retry)", () => {
     expect(retried.resolution_state).toBe("retry");
     expect(retried.attempts).toBe(0);
     expect(retried.last_error).toBeNull();
-    expect(retried.verified_json).not.toBeNull(); // verified snapshot retained
+    expect(retried.verified_json).not.toBeNull(); // note: verified snapshot retained
 
-    // needs-recheck must wait for the next real review — retry is refused.
+    // invariant: needs-recheck must wait for the next real review — retry is refused.
     expect(await retryLifecycleWork(db, { scope: SCOPE, associationId: "a-needs-recheck", nowMs: 2000 })).toBe(false);
     expect(
       (db.raw.prepare("SELECT resolution_state FROM review_threads WHERE id = 'a-needs-recheck'").get() as { resolution_state: string }).resolution_state,
@@ -1345,7 +1345,7 @@ describe("private journal visibility (spec §7.1, consumer-visible behavior)", (
       lineIntents: [intent("assoc-1", "row-1", "pub-1", 1)],
     });
 
-    // Pre-confirmation staging: the reviewer-visible result read (the public
+    // invariant: Pre-confirmation staging: the reviewer-visible result read (the public
     // reviews/findings surfaces a dashboard result API queries) shows nothing.
     await stagePublication(db, { id: "pub-1", payload: pay, nowMs: 1000 });
     const resultReadBefore = db.raw
@@ -1354,18 +1354,18 @@ describe("private journal visibility (spec §7.1, consumer-visible behavior)", (
     expect(resultReadBefore).toBeNull();
     expect((db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number }).n).toBe(0);
 
-    // Pre-confirmation staging never appears as a published result even via
+    // invariant: Pre-confirmation staging never appears as a published result even via
     // a fuzzy body search over the result surfaces.
     const fuzzy = db.raw
       .prepare("SELECT COUNT(*) AS n FROM reviews WHERE envelope LIKE '%' || ? || '%' OR summary_md LIKE '%' || ? || '%'")
       .get("pub-1", "pub-1") as { n: number };
     expect(fuzzy.n).toBe(0);
 
-    // Confirm + apply.
+    // note: Confirm + apply.
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
     await applyPublishedLifecycle(db, "pub-1", lease, 2000);
 
-    // The published result is now visible — and it is exactly the envelope-
+    // invariant: The published result is now visible — and it is exactly the envelope-
     // published review, NOT the journal: the private payload (publication
     // id, lifecycle coverage, line intents, private body) never surfaces
     // through the result read, even after apply.
@@ -1411,18 +1411,18 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
         phase: string; payload_json: string; proof_json: string | null; attempts: number;
         holder: string | null; lease_until_ms: number | null; recovery_state: string; last_error: string | null;
       };
-    // The truthful terminal state for a not-sent publication…
+    // note: The truthful terminal state for a not-sent publication…
     expect(row.phase).toBe("failed");
     expect(row.last_error).toContain("definitive rejection before send");
-    // …with the payload RETAINED for operator inspection and no proof claim.
+    // note: …with the payload RETAINED for operator inspection and no proof claim.
     expect(JSON.parse(row.payload_json).body).toBe("review body");
     expect(row.proof_json).toBeNull();
-    expect(row.attempts).toBe(1); // the claim that discovered the rejection
+    expect(row.attempts).toBe(1); // note: the claim that discovered the rejection
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
 
-    // Nothing re-sends it: the phase is skipped by the recovery selector's
+    // invariant: Nothing re-sends it: the phase is skipped by the recovery selector's
     // caller, and the failure is not erasable by a later pass.
     const selected = await listPublicationRecovery(db, 10_000, 10);
     expect(selected.map((r) => r.phase)).toEqual(["failed"]);
@@ -1433,7 +1433,7 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
     await stagePublication(db, { id: "pub-1", payload: payload(), nowMs: 1_000 });
     const lease = await claimPublication(db, "pub-1", "holder", 2_000);
     if (lease === null) throw new Error("setup: claim failed");
-    // already confirmed → not eligible for the failed transition
+    // invariant: already confirmed → not eligible for the failed transition
     const confirmed = await recordPublicationProof(db, "pub-1", lease, {
       publicationId: "pub-1",
       scope: SCOPE,
@@ -1455,24 +1455,24 @@ describe("definitive pre-send failure is a durable phase (spec §7.7, P67-QC-010
 describe("degraded-cleanup journal gate (spec §7.7 step 11, P67-QC-008)", () => {
   test("an unproven degraded publication blocks cleanup; proof or a terminal failure unblocks it", async () => {
     const db = createSeededTestD1();
-    // No degraded row at all → cleanup is safe.
+    // note: No degraded row at all → cleanup is safe.
     expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
 
     await stagePublication(db, { id: "deg-1", payload: payload({ kind: "degraded", artifact: null, lifecycle: null, body: "degraded body", bodySha256: "c".repeat(64) }), nowMs: 1_000 });
-    // Prepared, unproven: its body is the ONLY recovery evidence.
+    // invariant: Prepared, unproven: its body is the ONLY recovery evidence.
     expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
 
-    // Sending/unknown are equally protected (the send may have landed).
+    // invariant: Sending/unknown are equally protected (the send may have landed).
     db.raw.prepare(`UPDATE review_publications SET phase = 'sending' WHERE id = 'deg-1'`).run();
     expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
     db.raw.prepare(`UPDATE review_publications SET phase = 'unknown' WHERE id = 'deg-1'`).run();
     expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(true);
 
-    // A definitive not-sent failure has no remote evidence to preserve.
+    // invariant: A definitive not-sent failure has no remote evidence to preserve.
     db.raw.prepare(`UPDATE review_publications SET phase = 'failed' WHERE id = 'deg-1'`).run();
     expect(await hasUnprovenDegradedPublication(db, SCOPE)).toBe(false);
 
-    // Confirmed proof likewise unblocks the cleanup.
+    // invariant: Confirmed proof likewise unblocks the cleanup.
     db.raw
       .prepare(`UPDATE review_publications SET phase = 'confirmed', proof_json = '{}' WHERE id = 'deg-1'`)
       .run();
@@ -1521,11 +1521,11 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
     const reason = suspensionReasonOf("identity-mismatch", "live App identity does not match", fingerprint);
     expect(suspensionKindOf(reason)).toBe("identity-mismatch");
     expect(suspensionCredentialOf(reason)).toBe(fingerprint);
-    // No fingerprint recorded (missing mapping) stays null, not a fake value.
+    // note: No fingerprint recorded (missing mapping) stays null, not a fake value.
     const plain = suspensionReasonOf("missing", "mapping missing");
     expect(suspensionKindOf(plain)).toBe("missing");
     expect(suspensionCredentialOf(plain)).toBeNull();
-    // Legacy / free-text rows are `unknown` — never treated as status-driven.
+    // note: Legacy / free-text rows are `unknown` — never treated as status-driven.
     expect(suspensionKindOf("a legacy operator note")).toBe("unknown");
     expect(suspensionKindOf(null)).toBe("unknown");
   });
@@ -1549,7 +1549,7 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
       credentialFingerprint: fingerprint,
     });
 
-    // A DISABLED suspension is status-driven: no identity proof required.
+    // note: A DISABLED suspension is status-driven: no identity proof required.
     const db2 = createSeededTestD1();
     await stagePublication(db2, { id: "pub-2", payload: payload(), nowMs: 1_000 });
     await suspendPublicationRecovery(
@@ -1598,7 +1598,7 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
       { kind: "identity-mismatch", reason: "identity mismatch", credentialFingerprint: "d".repeat(64) },
       2_000,
     );
-    // A second row of the SAME pair carrying a DIFFERENT recorded fingerprint:
+    // invariant: A second row of the SAME pair carrying a DIFFERENT recorded fingerprint:
     // the pair's history disagrees, so no single digest may be trusted.
     db.raw
       .prepare(
@@ -1609,13 +1609,13 @@ describe("durable suspension kinds (spec §7.6, P67-QC-007)", () => {
     const pairs = await listSuspendedLifecycleApps(db, 1);
     expect(pairs).toHaveLength(1);
     expect(pairs[0]!.requiresIdentityProof).toBe(true);
-    // Withheld: the caller must re-prove identity rather than trust one digest.
+    // invariant: Withheld: the caller must re-prove identity rather than trust one digest.
     expect(pairs[0]!.credentialFingerprint).toBeNull();
   });
 });
 
 /**
- * Target attribution follows the REPOSITORY (migration 0067).
+ * why: Target attribution follows the REPOSITORY (migration 0067).
  *
  * A target IS a repository, so an apply resolves the live binding from the
  * delivery's own scope: `(bot_id, repo_owner, repo_name)`. `review_findings
@@ -1635,7 +1635,7 @@ describe("target attribution follows the repository", () => {
   const scopeB = { kind: "target", targetId: TARGET_B_ID, workspaceId: WORKSPACE_B } as const;
 
   /**
-   * Bot APP_ID with one target per repository — A reviews `acme/widgets`, B
+   * note: Bot APP_ID with one target per repository — A reviews `acme/widgets`, B
    * reviews `acme/gadgets` — plus each repository's own PR ledger row. A
    * delivery resolves its target by repository, so the two repositories are
    * two independent deliveries and never a rebind of one.
@@ -1672,13 +1672,13 @@ describe("target attribution follows the repository", () => {
     return db;
   }
 
-  /** A delivery names its repository — that repository resolves its target. */
+  /** note: A delivery names its repository — that repository resolves its target. */
   function repoScope(repo: string): Scope {
     return { ...SCOPE, repo };
   }
 
   /**
-   * One review publication for exactly ONE repository, composed and claimed as
+   * note: One review publication for exactly ONE repository, composed and claimed as
    * a delivery of its own. `hintTargetId` is the target frozen into the payload
    * when it was composed; the apply resolves the live binding from the scope's
    * repository and uses the hint only when no target is bound.
@@ -1722,7 +1722,7 @@ describe("target attribution follows the repository", () => {
 
   test("a repository keeps the target that first recorded it", async () => {
     const db = attributionFixture();
-    // Round 1: a delivery for acme/widgets.
+    // note: Round 1: a delivery for acme/widgets.
     const first = await stageClaimProve(
       db,
       "pub-1",
@@ -1731,7 +1731,7 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-1", first, 2000)).toBe(true);
 
-    // Round 2 re-sees the SAME fingerprint at a new SHA — still acme/widgets.
+    // note: Round 2 re-sees the SAME fingerprint at a new SHA — still acme/widgets.
     const second = await stageClaimProve(
       db,
       "pub-2",
@@ -1740,11 +1740,11 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-2", second, 11_000)).toBe(true);
 
-    // The row keeps the target that first recorded it: one row, still A.
+    // invariant: The row keeps the target that first recorded it: one row, still A.
     expect(
       db.raw.query("SELECT finding_id, target_id FROM review_findings").all(),
     ).toEqual([{ finding_id: "f-1", target_id: TARGET_ID }]);
-    // …and both of A's review history rows stay with it.
+    // invariant: …and both of A's review history rows stay with it.
     expect(
       db.raw.query("SELECT head_sha, target_id FROM reviews ORDER BY head_sha").all(),
     ).toEqual([
@@ -1752,7 +1752,7 @@ describe("target attribution follows the repository", () => {
       { head_sha: SHA2, target_id: TARGET_ID },
     ]);
 
-    // A's PR detail still resolves and still shows what it reviewed.
+    // note: A's PR detail still resolves and still shows what it reviewed.
     const store = createReviewBotsStore(db);
     expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
       findings: 1,
@@ -1764,17 +1764,17 @@ describe("target attribution follows the repository", () => {
       (await store.listPullRequestFindings(scopeA, "acme", "widgets", 42, PAGE))!.items.map((row) => row.finding_id),
     ).toEqual(["f-1"]);
 
-    // The other repository's ledger reads zero: nothing crossed into its side.
+    // invariant: The other repository's ledger reads zero: nothing crossed into its side.
     const fromB = await store.countPullRequestRecords(scopeB, "acme", "gadgets", 42);
     expect(fromB.findings).toBe(0);
     expect(fromB.reviews).toBe(0);
     const fromBFindings = (await store.listPullRequestFindings(scopeB, "acme", "gadgets", 42, PAGE))!;
     expect(fromBFindings.items).toEqual([]);
     expect(fromBFindings.total).toBe(0);
-    // A PR target A never received has no ledger at all — its detail is the
+    // invariant: A PR target A never received has no ledger at all — its detail is the
     // 404 the routes answer, not an empty fabricated one.
     expect(await store.listPullRequestFindings(scopeA, "acme", "widgets", 43, PAGE)).toBeNull();
-    // One row, one owner: the re-seen fingerprint was upserted, never duplicated.
+    // invariant: One row, one owner: the re-seen fingerprint was upserted, never duplicated.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 1 });
   });
 
@@ -1788,7 +1788,7 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-a", fromA, 2000)).toBe(true);
 
-    // An INDEPENDENT delivery for the other repository, at its own head.
+    // note: An INDEPENDENT delivery for the other repository, at its own head.
     const fromB = await stageClaimProve(
       db,
       "pub-b",
@@ -1797,7 +1797,7 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-b", fromB, 11_000)).toBe(true);
 
-    // Every NEW row takes its repository's own target…
+    // invariant: Every NEW row takes its repository's own target…
     expect(
       db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
     ).toEqual([
@@ -1809,7 +1809,7 @@ describe("target attribution follows the repository", () => {
       { repo: "widgets", target_id: TARGET_ID },
     ]);
 
-    // …and each repository reads its own ledger, with A's rows untouched.
+    // invariant: …and each repository reads its own ledger, with A's rows untouched.
     const store = createReviewBotsStore(db);
     expect(await store.countPullRequestRecords(scopeA, "acme", "widgets", 42)).toEqual({
       findings: 1,
@@ -1832,14 +1832,14 @@ describe("target attribution follows the repository", () => {
   });
 
   /**
-   * The artifact half is its OWN chunk(s), and it is composed on every attempt:
+   * why: The artifact half is its OWN chunk(s), and it is composed on every attempt:
    * a failed lifecycle chunk leaves a complete, idempotent artifact, and the
    * retry re-runs it as a no-op and finishes the lifecycle. Both attempts name
    * the SAME repository, so both must record on that repository's target.
    */
   test("a failed chunk for a repository is repaired on retry", async () => {
     const db = attributionFixture();
-    // 30 public findings ⇒ 31 artifact statements ⇒ TWO artifact chunks; the
+    // note: 30 public findings ⇒ 31 artifact statements ⇒ TWO artifact chunks; the
     // payload's frozen target still names the OTHER repository, so the live
     // repository binding must win.
     const manyFindings = Array.from({ length: 30 }, (_, i) => ({
@@ -1873,20 +1873,20 @@ describe("target attribution follows the repository", () => {
     );
     await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
 
-    // The artifact chunks committed (both of them); the lifecycle chunk did not.
+    // invariant: The artifact chunks committed (both of them); the lifecycle chunk did not.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT DISTINCT target_id FROM reviews").all()).toEqual([{ target_id: TARGET_ID }]);
 
-    // Retry after the failure: the artifact re-runs as a no-op, the lifecycle
+    // note: Retry after the failure: the artifact re-runs as a no-op, the lifecycle
     // half completes, and every row converges on the repository's target.
     db.raw.exec("DROP TRIGGER boom");
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
 
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
-    // Every public finding still belongs to the ONE review row, written once.
+    // invariant: Every public finding still belongs to the ONE review row, written once.
     expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
       { finding_id: "f-1", target_id: TARGET_ID },
@@ -1894,7 +1894,7 @@ describe("target attribution follows the repository", () => {
   });
 
   /**
-   * The artifact is re-composed and re-run on every attempt, keyed by the
+   * why: The artifact is re-composed and re-run on every attempt, keyed by the
    * review's natural key and a deterministic finding id — so an attempt that
    * dies between two artifact chunks is REPAIRED by the next one instead of
    * leaving the review perpetually short of findings.
@@ -1916,7 +1916,7 @@ describe("target attribution follows the repository", () => {
       lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
-    // The second artifact chunk (findings 24..29) fails: the first 24 landed.
+    // note: The second artifact chunk (findings 24..29) fails: the first 24 landed.
     db.raw.exec(
       "CREATE TRIGGER boom BEFORE INSERT ON findings WHEN (SELECT COUNT(*) FROM findings) >= 24 BEGIN SELECT RAISE(ABORT, 'boom'); END",
     );
@@ -1924,7 +1924,7 @@ describe("target attribution follows the repository", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 24 });
 
-    // The retry no-ops the 24 already-present rows and writes the missing six.
+    // note: The retry no-ops the 24 already-present rows and writes the missing six.
     db.raw.exec("DROP TRIGGER boom");
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
@@ -1933,7 +1933,7 @@ describe("target attribution follows the repository", () => {
   });
 
   /**
-   * The review id is derived from the apply key, and `0001_reviews.sql` admits
+   * why: The review id is derived from the apply key, and `0001_reviews.sql` admits
    * exactly ONE review per (installation, owner, repo, pr, head_sha) — a UNIQUE
    * that names the repository. A delivery for another repository at the same
    * head therefore cannot attach its findings to A's review row: it writes its
@@ -1952,7 +1952,7 @@ describe("target attribution follows the repository", () => {
       body: "body",
       fingerprint_hint: `fp-${i}`,
     }));
-    // A's review for its own head, with its two public findings.
+    // note: A's review for its own head, with its two public findings.
     const aArtifact = artifactDoc({ payload: enginePayload({ findings: twoFindings }) });
     await createArtifactStore(db).put(aArtifact);
     expect(db.raw.query("SELECT id, repo, target_id FROM reviews").all()).toEqual([
@@ -1962,7 +1962,7 @@ describe("target attribution follows the repository", () => {
       n: 2,
     });
 
-    // The other repository's delivery at the SAME head: its own key, hence its
+    // note: The other repository's delivery at the SAME head: its own key, hence its
     // own review row, its own findings, its own target.
     const pay = delivery("gadgets", {
       hintTargetId: TARGET_ID,
@@ -1973,21 +1973,21 @@ describe("target attribution follows the repository", () => {
     expect(await applyPublishedLifecycle(db, "pub-2", lease, 2000)).toBe(true);
 
     const bKey = pay.artifact!.key;
-    // Two reviews for the one head — one per repository, each on its own target.
+    // invariant: Two reviews for the one head — one per repository, each on its own target.
     expect(db.raw.query("SELECT id, repo, target_id FROM reviews ORDER BY repo").all()).toEqual([
       { id: bKey, repo: "gadgets", target_id: TARGET_B_ID },
       { id: aArtifact.key, repo: "widgets", target_id: TARGET_ID },
     ]);
-    // A's finding set is untouched; B's findings name B's own review row.
+    // invariant: A's finding set is untouched; B's findings name B's own review row.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(aArtifact.key)).toEqual({
       n: 2,
     });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings WHERE review_id = ?").get(bKey)).toEqual({ n: 2 });
-    // The lifecycle row is the other repository's own record.
+    // invariant: The lifecycle row is the other repository's own record.
     expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
       { finding_id: "f-2", target_id: TARGET_B_ID },
     ]);
-    // The natural key still admits exactly ONE review per repository + head, so
+    // invariant: The natural key still admits exactly ONE review per repository + head, so
     // a second row for the SAME repository stays impossible.
     expect(() =>
       db.raw
@@ -2000,7 +2000,7 @@ describe("target attribution follows the repository", () => {
   });
 
   /**
-   * The artifact's inserts carry the same inline lease guard as the lifecycle
+   * why: The artifact's inserts carry the same inline lease guard as the lifecycle
    * statements. A trigger supersedes the lease right after the review INSERT
    * commits inside its chunk, so the findings that follow in the SAME chunk
    * must be fenced out — the guard is evaluated by each statement, not by the
@@ -2027,7 +2027,7 @@ describe("target attribution follows the repository", () => {
     );
 
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(false);
-    // The review row's guard passed when it ran; the findings' did not.
+    // invariant: The review row's guard passed when it ran; the findings' did not.
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
@@ -2044,7 +2044,7 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-1", first, 2000)).toBe(true);
 
-    // A publication composed while A was the only target known: its frozen
+    // note: A publication composed while A was the only target known: its frozen
     // hint names A, its delivery names the other repository.
     const second = await stageClaimProve(
       db,
@@ -2058,7 +2058,7 @@ describe("target attribution follows the repository", () => {
     );
     expect(await applyPublishedLifecycle(db, "pub-2", second, 11_000)).toBe(true);
 
-    // The NEW row takes its repository's target id; the old row is untouched.
+    // invariant: The NEW row takes its repository's target id; the old row is untouched.
     expect(
       db.raw.query("SELECT finding_id, target_id FROM review_findings ORDER BY finding_id").all(),
     ).toEqual([
@@ -2077,7 +2077,7 @@ describe("target attribution follows the repository", () => {
 });
 
 /**
- * A public finding attaches to the review that ACTUALLY exists for its head.
+ * why: A public finding attaches to the review that ACTUALLY exists for its head.
  *
  * `reviews` accepts one row per (installation, owner, repo, pr, head_sha)
  * (`0001_reviews.sql`), so the natural-key lookup has at most one candidate:
@@ -2085,7 +2085,7 @@ describe("target attribution follows the repository", () => {
  * no review yet gets this attempt's derived id.
  */
 describe("public findings attach to the review that exists", () => {
-  /** One raw `reviews` row, as a pre-deterministic writer stored it. */
+  /** note: One raw `reviews` row, as a pre-deterministic writer stored it. */
   function seedHistoricalReview(db: TestD1, id: string): void {
     db.raw
       .prepare(
@@ -2104,7 +2104,7 @@ describe("public findings attach to the review that exists", () => {
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 2000)).toBe(true);
 
-    // One review row — the historical one — and every public finding on it.
+    // invariant: One review row — the historical one — and every public finding on it.
     expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: historicalId }]);
     expect(
       db.raw.query("SELECT COUNT(*) AS n, COUNT(DISTINCT review_id) AS reviews FROM findings").get(),
@@ -2112,7 +2112,7 @@ describe("public findings attach to the review that exists", () => {
     expect(db.raw.query("SELECT DISTINCT review_id FROM findings").all()).toEqual([
       { review_id: historicalId },
     ]);
-    // The lifecycle half still lands on the live binding's target.
+    // invariant: The lifecycle half still lands on the live binding's target.
     expect(db.raw.query("SELECT finding_id, target_id FROM review_findings").all()).toEqual([
       { finding_id: "f-1", target_id: TARGET_ID },
     ]);
