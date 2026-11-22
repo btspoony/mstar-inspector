@@ -1219,7 +1219,7 @@ describe("Runtime screen", () => {
     // It follows the classifier's order: settlement owed, then the Check, then
     // the missing result.
     expect(surface.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
-      "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, a frozen Check not proven closed, the queue stamp, the boundary order or the settlement record is missing.",
+      "An attempt whose paid step failed without a durable result has no execution end and is excluded before its duration is measured: while its settlement is still owed it counts as unsettled; once settled, a frozen Check not proven closed at settlement is counted before the missing result; otherwise the missing result reads as a missing boundary. A durable result does not by itself make an attempt measurable — a later failure still excludes it when the settlement, the queue stamp, the boundary order or the settlement record is missing, or when the attempt froze a Check that was not proven closed at settlement.",
     );
     expect(surface.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
       "A sample is measured because its settlement recorded the publication obligation as discharged; where the attempt has a frozen Check, that Check concluded no later than the settlement instant. Delivery idempotency is not part of the interval.",
@@ -1291,7 +1291,7 @@ describe("Runtime screen", () => {
     expect(chinese.text()).toContain("2 个结算时 Check 未被证明关闭");
     expect(chinese.text()).toContain("1 个没有结算记录");
     expect(chinese.container.querySelector('[data-duration="failure-tail"]')?.textContent).toBe(
-      "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它因缺结算时点、冻结的 Check 未被证明关闭、缺队列发送时间戳、边界乱序或没有结算记录而被排除。",
+      "付费步骤失败且没有产出持久结果的尝试没有执行终点，因此在测量时长之前就被排除：结算时点尚未写入的计入「未结算」；已结算的，先按冻结的 Check 在结算时未被证明关闭计数；两者都不成立时，缺结果才计入「没有可测量的边界」。已经产出结果也不会让尝试自动可测：后续失败仍可能让它在结算时点、队列发送时间戳、边界顺序或结算记录缺失时被排除，或在其冻结的 Check 于结算时未被证明关闭时被排除。",
     );
     expect(chinese.container.querySelector('[data-duration="settlement-basis"]')?.textContent).toBe(
       "样本之所以可测，是因为它的这次结算把发布义务记为已解除；尝试若有冻结的 Check，该 Check 不晚于结算时点得出结论。投递幂等性不属于该区间。",
