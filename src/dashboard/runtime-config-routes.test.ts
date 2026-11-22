@@ -14,6 +14,7 @@
  * audit row. The tenant read and write never compare against the system value —
  * that quota applies at admission and stays out of this face.
  */
+import { RECONCILE_DEFAULTS, RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "./session";
@@ -421,6 +422,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
       sweep: DEFAULT_SWEEP,
+      reconcile: { values: RECONCILE_DEFAULTS, limits: RECONCILE_LIMITS, degraded: false },
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
@@ -522,6 +524,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
       sweep: DEFAULT_SWEEP,
+      reconcile: { values: RECONCILE_DEFAULTS, limits: RECONCILE_LIMITS, degraded: false },
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
@@ -541,6 +544,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       checkBudgets: DEFAULT_CHECK_BUDGETS,
       commentClaim: DEFAULT_COMMENT_CLAIM,
       sweep: DEFAULT_SWEEP,
+      reconcile: { values: RECONCILE_DEFAULTS, limits: RECONCILE_LIMITS, degraded: false },
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
@@ -1262,6 +1266,95 @@ describe("workspace default review-gate floor", () => {
       );
     }
     expect(storedFloor(db)).toBeNull();
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime reconcile", () => {
+  test("accepts exact timeout minima and refuses lower values without changing saved settings", async () => {
+    const { db } = fixture();
+    const fields = ["lifecycleRunBudgetMs", "lifecyclePerRequestMs", "checkRunBudgetMs", "checkPerRequestMs"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    const save = (reconcile: typeof values) => runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile }) });
+    expect((await save(values)).status).toBe(200);
+    for (const field of fields) {
+      const response = await save({ ...values, [field]: values[field] - 1 });
+      expect(response.status).toBe(400);
+      expect((await response.json() as { error: string }).error).toContain(`reconcile.${field} must be an integer in ${RECONCILE_LIMITS[field].min}..`);
+    }
+    expect(auditRows(db)).toHaveLength(1);
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toHaveProperty("reconcile", {
+      values, limits: RECONCILE_LIMITS, degraded: false,
+    });
+  });
+
+  test("rejects request budgets that cannot admit a cold recovery row", async () => {
+    const { db } = fixture();
+    for (const budgets of [
+      { checkMaxRequests: 1, checkRowMaxRequests: 1 },
+      { lifecycleMaxRequests: 1, lifecyclePublicationLaneMaxRequests: 1, lifecycleThreadOperationRequests: 1 },
+    ]) {
+      const response = await runtimeApi(db, {
+        method: "PATCH",
+        body: JSON.stringify({ reconcile: { ...RECONCILE_DEFAULTS, ...budgets } }),
+      });
+      expect(response.status).toBe(400);
+    }
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("accepts request minima and refuses each smaller allowance without another audit", async () => {
+    const { db } = fixture();
+    const fields = ["checkMaxRequests", "checkRowMaxRequests", "lifecycleMaxRequests", "lifecyclePublicationLaneMaxRequests", "lifecycleThreadOperationRequests"] as const;
+    const values = { ...RECONCILE_DEFAULTS };
+    for (const field of fields) values[field] = RECONCILE_LIMITS[field].min;
+    const save = (reconcile: typeof values) => runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile }) });
+    expect((await save(values)).status).toBe(200);
+    for (const field of fields) {
+      const response = await save({ ...values, [field]: values[field] - 1 });
+      expect(response.status).toBe(400);
+      expect((await response.json() as { error: string }).error).toContain(`reconcile.${field}`);
+    }
+    expect(auditRows(db)).toHaveLength(1);
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toHaveProperty("reconcile", {
+      values, limits: RECONCILE_LIMITS, degraded: false,
+    });
+  });
+
+  test("saves overrides with an atomic before/after audit and reads them back", async () => {
+    const { db } = fixture();
+    const values = { ...RECONCILE_DEFAULTS, checkSelectLimit: 1, lifecycleMaxAttempts: 2 };
+    for (const input of [RECONCILE_DEFAULTS, values]) {
+      const response = await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile: input }) });
+      expect(response.status).toBe(200);
+    }
+    expect(await (await runtimeApi(db, { method: "GET" })).json()).toHaveProperty("reconcile", {
+      values, limits: RECONCILE_LIMITS, degraded: false,
+    });
+    const rows = db.raw.query("SELECT actor_login, detail_json FROM platform_audit_events WHERE action = 'platform.reconcile.set' ORDER BY rowid").all() as Array<{ actor_login: string; detail_json: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[1]!.actor_login).toBe(OPERATOR);
+    expect(JSON.parse(rows[1]!.detail_json)).toEqual({ before: RECONCILE_DEFAULTS, after: values });
+  });
+
+  test("refuses non-operators, every hard ceiling, non-integers and cross-field violations without writes", async () => {
+    const { db } = fixture();
+    const save = (values: unknown, login?: string) => runtimeApi(db, { method: "PATCH", body: JSON.stringify({ reconcile: values }), login });
+    expect((await save(RECONCILE_DEFAULTS, "dana")).status).toBe(404);
+    for (const [field, limit] of Object.entries(RECONCILE_LIMITS)) {
+      for (const invalid of [limit.max + 1, limit.min - 1, 1.5, "2"]) {
+        expect((await save({ ...RECONCILE_DEFAULTS, [field]: invalid })).status).toBe(400);
+      }
+    }
+    for (const fields of [
+      { lifecycleRunBudgetMs: 1 }, { checkRunBudgetMs: 1 },
+      { lifecycleMaxRequests: 1 }, { checkMaxRequests: 1 },
+      { lifecyclePublicationLaneMaxRequests: 81 }, { lifecycleThreadOperationRequests: 81 },
+      { lifecycleMaxRequests: 80, lifecyclePublicationLaneMaxRequests: 70, lifecycleThreadOperationRequests: 15 },
+    ]) expect((await save({ ...RECONCILE_DEFAULTS, ...fields })).status).toBe(400);
+    expect((await save({})).status).toBe(400);
+    expect(storedBudgets(db)).toEqual({});
     expect(auditRows(db)).toEqual([]);
   });
 });

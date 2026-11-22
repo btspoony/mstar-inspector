@@ -139,10 +139,6 @@ export const PUBLICATION_LEASE_MS = 120_000;
 /** `line_dispatch_ms` value for a row that predates the column: its intent is
  *  UNKNOWN (the batch may have been sent), so it is discovery-only forever. */
 export const LINE_DISPATCH_UNKNOWN = -1;
-/** Recovery attempt cap — rows at/after this count leave the selectors. The
- *  line batch's discovery bound reuses it: a readback that captured nothing is
- *  the same kind of attempt as any other lifecycle recovery. */
-export const LIFECYCLE_MAX_ATTEMPTS = 5;
 /** Staged payload cap (spec §7.7: size ≤1 MiB UTF-8; reject, never truncate). */
 export const PUBLICATION_MAX_BYTES = 1_048_576;
 /**
@@ -1118,7 +1114,7 @@ function lifecycleApplyBatch(
  * deliberately NOT filtered — the reconciler decides per phase (prepared →
  * send, sending/unknown → read-only discovery, confirmed → apply).
  */
-export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
+export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: number, maxAttempts: number): Promise<PublicationRow[]> {
   const rows = await db
     .prepare(
       `SELECT * FROM review_publications
@@ -1128,7 +1124,7 @@ export async function listPublicationRecovery(db: D1Like, nowMs: number, limit: 
        ORDER BY COALESCE(next_attempt_ms, created_ms), id
        LIMIT ?`,
     )
-    .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, limit)
     .all<ReviewPublicationRow>();
   return rows.results.map(publicationRowOf);
 }
@@ -1144,6 +1140,7 @@ export async function listResolutionRecovery(
   db: D1Like,
   nowMs: number,
   limit: number,
+  maxAttempts: number,
 ): Promise<{ associationId: string; scope: Scope }[]> {
   const rows = await db
     .prepare(
@@ -1155,7 +1152,7 @@ export async function listResolutionRecovery(
        ORDER BY COALESCE(next_attempt_ms, created_ms), id
        LIMIT ?`,
     )
-    .bind(LIFECYCLE_MAX_ATTEMPTS, nowMs, nowMs, limit)
+    .bind(maxAttempts, nowMs, nowMs, limit)
     .all<{ id: string; bot_id: string; installation_id: number; owner: string; repo: string; pr_number: number }>();
   return rows.results.map(threadScope);
 }
@@ -1527,7 +1524,7 @@ export async function recordLineDiscoveryFailure(
   reason: string,
   observedCaptures: number,
   nowMs: number,
-  bound: number = LIFECYCLE_MAX_ATTEMPTS,
+  bound: number,
 ): Promise<LineDiscoveryOutcome | null> {
   const result = await db
     .prepare(

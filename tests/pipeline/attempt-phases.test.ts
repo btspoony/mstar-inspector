@@ -9,6 +9,7 @@
  * stringify(handoff))` is therefore a faithful restart input, and every phase
  * re-derives the container, the adapter and the token from `deps`.
  */
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { beforeEach, describe, expect, test } from "bun:test";
 
 // note: Load shim FIRST: the execution module statically imports ./sandbox → the
@@ -716,7 +717,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     // now concludes from the proof — a proof-derived summary, not the
     // unconfirmed fallback.
     now = confirmedAt + 120_000;
-    const recoveryLease = await claimCheckRecovery(db as never, checkAttemptId, "recovery-test", now);
+    const recoveryLease = await claimCheckRecovery(db as never, checkAttemptId, "recovery-test", now, RECONCILE_DEFAULTS.checkMaxAttempts);
     if (recoveryLease === null) throw new Error("fixture: the recovery claim was refused");
     await lifecycle.terminalize({
       handle: { attemptId: checkAttemptId, scope: SCOPE, githubAppId: 424242, headSha: SHA, lease: recoveryLease },

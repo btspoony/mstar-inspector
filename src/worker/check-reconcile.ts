@@ -43,16 +43,15 @@
  *   recovery failure is logged and folded into `errors`, so nothing ever
  *   escapes into `scheduled`.
  */
-
+import { getReconcileSettings } from "../dashboard/runtime-config-store";
+import { RECONCILE_REQUEST_ESTIMATES, type ReconcileValues } from "../contracts/reconcile-settings";
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import { clearCheckOwed, clearConcludedCheckOwed, deferCheckWithOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
-  CHECK_MAX_ATTEMPTS,
   CHECK_NAME,
-  CHECK_RECONCILE_LIMIT,
   CHECK_BACKOFF_MS,
   checkSuspensionKindOf,
   checkSuspensionReason,
@@ -119,14 +118,6 @@ export type CheckReconcileSummary = {
   deferred: number;
 };
 
-/** Whole-run request budget (§7.11.2: "≤100 requests/60s/run"). */
-export const CHECK_RECONCILE_MAX_REQUESTS = 100;
-/** Whole-run wall-clock window in ms (§7.11.2). */
-export const CHECK_RECONCILE_RUN_BUDGET_MS = 60_000;
-/** Per-request cap (§7.11.2: "≤5s/request"). */
-export const CHECK_RECONCILE_PER_REQUEST_MS = 5_000;
-/** Per-row request cap (§7.11.2: "≤6 requests/row"). */
-export const CHECK_ROW_MAX_REQUESTS = 6;
 /**
  * Preflight estimate for the credential lane (spec §7.11.2 "the App is
  * enabled"): the §7.5 live App-identity proof (`GET /app`) plus the
@@ -135,14 +126,7 @@ export const CHECK_ROW_MAX_REQUESTS = 6;
  * built, and is never charged (charging an estimate on top of the metered
  * requests would double-count).
  */
-const CREDENTIAL_REQUESTS = 2;
-/**
- * Bound on the status-driven re-enable pass. The pairs are selected from the
- * rows that are ACTUALLY suspended — never a window over all Apps — and each
- * pass resumes after the last pair the previous pass scanned, so pairs the
- * resume filter rejects cannot pin the window over a repaired pair.
- */
-const REENABLE_PAIR_LIMIT = CHECK_RECONCILE_LIMIT;
+const CREDENTIAL_REQUESTS = RECONCILE_REQUEST_ESTIMATES.credentials;
 
 /** Lease holder label for Check recovery claims. */
 const HOLDER = "check-reconcile";
@@ -328,6 +312,7 @@ const UNAVAILABLE_REASON_TEXT: Record<CheckCredentialReason, string> = {
 // ---------------------------------------------------------------------------
 
 type RunBudget = {
+  settings: ReconcileValues;
   /** ACTUAL requests issued this run (mutated only at the transport). */
   spent: number;
   deadline: number;
@@ -373,9 +358,9 @@ type RunBudget = {
  * bound are unchanged.
  */
 function canSpend(budget: RunBudget, nowMs: number, cost: number, rowScoped: boolean): boolean {
-  if (budget.spent + cost > CHECK_RECONCILE_MAX_REQUESTS) return false;
+  if (budget.spent + cost > budget.settings.checkMaxRequests) return false;
   if (nowMs >= budget.deadline) return false;
-  if (rowScoped && budget.rowActive && budget.rowSpent + cost > CHECK_ROW_MAX_REQUESTS) return false;
+  if (rowScoped && budget.rowActive && budget.rowSpent + cost > budget.settings.checkRowMaxRequests) return false;
   return true;
 }
 
@@ -414,7 +399,7 @@ function reserve(budget: RunBudget, cost: number): void {
  * `attempts` and the spec forbids charging an attempt for work that never ran.
  */
 function buildTransport(budget: RunBudget, now: () => number, fetchImpl: typeof fetch = fetch): CheckTransport {
-  const boundMs = (): number => Math.max(1, Math.min(CHECK_RECONCILE_PER_REQUEST_MS, budget.deadline - now()));
+  const boundMs = (): number => Math.max(1, Math.min(budget.settings.checkPerRequestMs, budget.deadline - now()));
   return {
     boundMs,
     fetchImpl: (input, init) => {
@@ -422,7 +407,7 @@ function buildTransport(budget: RunBudget, now: () => number, fetchImpl: typeof 
         budget.refused = true;
         return Promise.reject(
           new CheckRequestNotDispatched(
-            `check recovery request budget exhausted (spent=${budget.spent}/${CHECK_RECONCILE_MAX_REQUESTS}, row=${budget.rowSpent}/${CHECK_ROW_MAX_REQUESTS}) — request not dispatched; work stays due`,
+            `check recovery request budget exhausted (spent=${budget.spent}/${budget.settings.checkMaxRequests}, row=${budget.rowSpent}/${budget.settings.checkRowMaxRequests}) — request not dispatched; work stays due`,
           ),
         );
       }
@@ -471,6 +456,8 @@ export async function reconcileReviewChecks(
       );
       return summary;
     }
+    const settings = await getReconcileSettings(db);
+    if (settings.issue) log.warn({ event: "ops_check_reconcile_settings_degraded", detail: JSON.stringify(settings.issue) }, "check reconcile settings unavailable — using defaults");
     const now = deps.now ?? (() => Date.now());
     // §7.10 Check budgets: ONE read per run (never per App, never per row), so
     // the lane's inherent 5 s request cap is tightened by whatever the operator
@@ -487,8 +474,9 @@ export async function reconcileReviewChecks(
       );
     }
     const budget: RunBudget = {
+      settings: settings.values,
       spent: 0,
-      deadline: now() + CHECK_RECONCILE_RUN_BUDGET_MS,
+      deadline: now() + settings.values.checkRunBudgetMs,
       rowSpent: 0,
       rowActive: false,
       refused: false,
@@ -512,7 +500,7 @@ export async function reconcileReviewChecks(
     // that concluded the Check itself, leaves a mark whose Check is terminal.
     // One idempotent statement per pass, so the obligation cannot stay set.
     await clearConcludedCheckOwed(db).catch(() => {});
-    const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
+    const rows = await listCheckReconcileBatch(db, now(), budget.settings.checkMaxAttempts, budget.settings.checkSelectLimit);
     for (const row of rows) {
       summary.examined += 1;
       budget.rowSpent = 0;
@@ -601,7 +589,7 @@ async function reenableHealthyAppChecks(
         ORDER BY wrapped, rc.installation_id, rc.bot_id
         LIMIT ?`,
     )
-    .bind(REENABLE_PAIR_LIMIT)
+    .bind(budget.settings.checkSelectLimit)
     .all<{ bot_id: string; installation_id: number }>();
   if (suspended.length === 0) return;
 
@@ -980,7 +968,7 @@ async function reconcileCheckAttempt(
       pending.kind === "unknown" ||
       (await readProof(db, row.identity, proofPublicationId)).kind !== "read";
     if (waiting) {
-      const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now());
+      const waitingLease = await claimCheckRecovery(db, attemptId, HOLDER, now(), budget.settings.checkMaxAttempts);
       if (waitingLease === null) return;
       // Spec §7.11.2 step 2 pins the claim's given-back due time to the FIRST
       // rung: the publication may prove itself at any moment, so a widened rung
@@ -1026,7 +1014,7 @@ async function reconcileCheckAttempt(
   //    that stopped being due after selection (a forward backoff, the attempt
   //    cap, an `in_progress` still inside its execution deadline) is refused
   //    here. Nothing is stamped or spent on refusal.
-  const claimed = await claimCheckRecovery(db, attemptId, HOLDER, now());
+  const claimed = await claimCheckRecovery(db, attemptId, HOLDER, now(), budget.settings.checkMaxAttempts);
   if (claimed === null) return;
   const lease: Lease = claimed;
 
@@ -1219,7 +1207,7 @@ async function reconcileCheckAttempt(
       const attached = await attachCheckRunId(db, attemptId, lease, adopted.remote.id, now());
       if (!attached) {
         await settleFailedAttempt(
-          db, now, attemptsBefore, row, lease,
+          db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
           `a matching run exists but the attempt's durable create state is '${intent.createState}' — attachment refused`,
           log, summary,
         );
@@ -1233,7 +1221,7 @@ async function reconcileCheckAttempt(
       // that case stays recoverable rather than creating again.
       if (intent.createState !== "not-sent") {
         await settleFailedAttempt(
-          db, now, attemptsBefore, row, lease,
+          db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
           "a create may already have been sent and no run is observable — read-only adoption only",
           log, summary,
         );
@@ -1306,7 +1294,7 @@ async function reconcileCheckAttempt(
         // `requests > 0` (or an older adapter that cannot say): a create may
         // have reached GitHub. RL-12 honesty applies — adopt-only recovery with
         // a spent attempt and backoff.
-        await settleFailedAttempt(db, now, attemptsBefore, row, lease, ready.reason, log, summary);
+        await settleFailedAttempt(db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease, ready.reason, log, summary);
         return;
       }
       // Attach immediately, before any further request: if a later step is
@@ -1314,7 +1302,7 @@ async function reconcileCheckAttempt(
       const attached = await attachCheckRunId(db, attemptId, lease, ready.remote.id, now());
       if (!attached) {
         await settleFailedAttempt(
-          db, now, attemptsBefore, row, lease,
+          db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
           "the created run could not be attached to this attempt's durable state",
           log, summary,
         );
@@ -1325,7 +1313,7 @@ async function reconcileCheckAttempt(
       // `incomplete`/`ambiguous`: the walk could not PROVE absence, so no
       // create is legal and the row stays due with its attempt deferred.
       await settleFailedAttempt(
-        db, now, attemptsBefore, row, lease,
+        db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
         `adoption is ${adopted.kind} — absence unproven, no create`,
         log, summary,
       );
@@ -1350,13 +1338,13 @@ async function reconcileCheckAttempt(
       await releaseUndispatchedClaim(db, attemptId, lease, now, log, "fetch", fetched.reason);
       return;
     }
-    await settleFailedAttempt(db, now, attemptsBefore, row, lease, fetched.reason, log, summary);
+    await settleFailedAttempt(db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease, fetched.reason, log, summary);
     return;
   }
   if (fetched.kind === "absent") {
     // The recorded remote id is RETAINED (never cleared to create a lookalike);
     // a vanished run is reported honestly and retried under the same identity.
-    await settleFailedAttempt(db, now, attemptsBefore, row, lease, "the recorded check run is absent remotely", log, summary);
+    await settleFailedAttempt(db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease, "the recorded check run is absent remotely", log, summary);
     return;
   }
   if (fetched.remote.status === "completed") {
@@ -1372,7 +1360,7 @@ async function reconcileCheckAttempt(
       // correction local, which is the same defect one layer later.
       if (!isCorrection) {
         await settleFailedAttempt(
-          db, now, attemptsBefore, row, lease,
+          db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
           `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
           log, summary,
         );
@@ -1390,7 +1378,7 @@ async function reconcileCheckAttempt(
       const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary, proof === null);
       if (recorded === "mismatch") {
         await settleFailedAttempt(
-          db, now, attemptsBefore, row, lease,
+          db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
           "the reread run is not the persisted terminal intent",
           log, summary,
         );
@@ -1421,7 +1409,7 @@ async function reconcileCheckAttempt(
     // ladder ends honestly (local-error with the remote id retained) instead of
     // re-reading forever.
     await settleFailedAttempt(
-      db, now, attemptsBefore, row, lease,
+      db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
       "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
       log, summary,
     );
@@ -1434,7 +1422,7 @@ async function reconcileCheckAttempt(
   // the honest end is the attempt ladder, never a send.
   if (supersededPositive) {
     await settleFailedAttempt(
-      db, now, attemptsBefore, row, lease,
+      db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
       `the persisted ${intent.desired} intent could not be replaced by ${conclusion.desired} — not sent`,
       log, summary,
     );
@@ -1461,13 +1449,13 @@ async function reconcileCheckAttempt(
     }
     // §7.11.2 step 4: preserve desired and actual observed, stay
     // `remote-unconfirmed`, back off, release the lease.
-    await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
+    await settleFailedAttempt(db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease, completed.reason, log, summary);
     return;
   }
   const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary, proof === null);
   if (recorded === "mismatch") {
     await settleFailedAttempt(
-      db, now, attemptsBefore, row, lease,
+      db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
       "the validated response did not match the persisted terminal intent",
       log, summary,
     );
@@ -1559,6 +1547,7 @@ async function releaseUndispatchedClaim(
 async function settleFailedAttempt(
   db: D1Like,
   now: () => number,
+  maxAttempts: number,
   attemptsBefore: number,
   row: CheckAttempt,
   lease: Lease,
@@ -1568,7 +1557,7 @@ async function settleFailedAttempt(
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
   const attemptsAfter = attemptsBefore + 1; // this recovery claimed exactly one
-  if (attemptsAfter >= CHECK_MAX_ATTEMPTS) {
+  if (attemptsAfter >= maxAttempts) {
     const line = giveUpLine(row.identity.scope, attemptId, attemptsAfter, reason);
     const marked = await markCheckLocalError(db, attemptId, lease, line, now());
     if (marked) {

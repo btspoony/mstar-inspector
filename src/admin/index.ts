@@ -10,6 +10,7 @@
  * Authorization: every handler re-checks `operatorLogin` itself
  * (`./gate.ts`) — no mounted middleware stands in for it.
  */
+import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
 import { isPlatformOperator } from "../dashboard/index";
 import { listBotScopes, setBotScope } from "../dashboard/apps-store";
@@ -41,6 +42,8 @@ import {
   getReviewAttemptCapSetting,
   getReviewRouteWorkflowGate,
   getSweepSettings,
+  getReconcileSettings,
+  setReconcileSettings,
   getSystemConcurrency,
   isConcurrencyValue,
   readDefaultReviewLevel,
@@ -229,6 +232,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     budgets,
     claim,
     sweep,
+    reconcile,
     level,
     recheck,
     attemptCap,
@@ -242,6 +246,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     getCheckBudgets(db),
     getCommentClaimSettings(db),
     getSweepSettings(db),
+    getReconcileSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
@@ -282,6 +287,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       outboxMax: COMMENT_CLAIM_OUTBOX_MAX,
       degraded: claim.degraded,
     },
+    reconcile: { values: reconcile.values, limits: RECONCILE_LIMITS, degraded: reconcile.issue !== null },
     sweep: { values: sweep.values, limits: SWEEP_LIMITS, degraded: sweep.issue !== null },
     // The inheritance default, with the vocabulary so the console needs no
     // second source for its options.
@@ -412,6 +418,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawBudgets: unknown;
   let rawClaim: unknown;
   let rawSweep: unknown;
+  let rawReconcile: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
@@ -423,6 +430,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       checkBudgets?: unknown;
       commentClaim?: unknown;
       sweep?: unknown;
+      reconcile?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
       attemptCap?: unknown;
@@ -433,6 +441,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawBudgets = body.checkBudgets;
     rawClaim = body.commentClaim;
     rawSweep = body.sweep;
+    rawReconcile = body.reconcile;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
@@ -449,6 +458,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawBudgets,
       rawClaim,
       rawSweep,
+      rawReconcile,
       rawLevel,
       rawRecheck,
       rawAttemptCap,
@@ -459,7 +469,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | routeWorkflow | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | routeWorkflow | maintenance",
       },
       400,
     );
@@ -485,6 +495,14 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       return c.json({ commentClaim: await setCommentClaimSettings(db, trio, login) });
     } catch (error) {
       // Out of range: the store owns the ranges and the message.
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawReconcile !== undefined) {
+    try {
+      return c.json({ reconcile: await setReconcileSettings(db, rawReconcile, login) });
+    } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
     }

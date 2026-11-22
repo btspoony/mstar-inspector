@@ -221,6 +221,13 @@ breakdown, so they describe the same read. Paging requires counted failures
 strictly greater than the platform's `platform.sweep.failure_threshold`, which
 defaults to `QUEUE_MAX_ATTEMPTS + 1`.
 
+Recovery reconciler budgets are platform-global settings in `review_runtime_settings`
+under `platform.reconcile.lifecycle.*` and `platform.reconcile.check.*`. Only
+platform operators may save them through Admin → Runtime. Each run reads one
+snapshot; unavailable or invalid settings use the documented defaults without
+stopping recovery. See [deployment operations](../../deploy.md) for defaults,
+ranges and recovery instructions.
+
 ## RP metering and the monthly ceiling
 
 Every started review records an integer RP cost on its `usage_events` row
