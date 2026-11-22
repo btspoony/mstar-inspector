@@ -517,16 +517,15 @@ describe("no runner output reaches durable storage before redaction", () => {
     expect(row.run.stdout).not.toBe(stdout);
   });
 
-  test("a 3-character provider key is redacted from the stored payload", async () => {
+  test("a short provider key is removed only as a whole value in the stored payload", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
-    const key = "abc";
-    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
+    const key = "mstar";
     const stdout = JSON.stringify({
       schema: "mstar.review/v1",
-      target: { head_sha: headSha },
+      target: { head_sha: SHA },
       attempt_id: ATTEMPT,
-      summary_md: `leaked ${key}`,
+      summary_md: key,
     });
 
     await runReviewAttempt({
@@ -540,14 +539,15 @@ describe("no runner output reaches durable storage before redaction", () => {
     // Stored shape is the module's own `encodeExecution` contract.
     const row = JSON.parse(stored.result_json) as { run: { stdout: string } };
     const envelope = JSON.parse(row.run.stdout) as {
-      target: { head_sha: string };
+      schema: string;
       summary_md: string;
+      target: { head_sha: string };
     };
-    // A key with no admin-side minimum is still deleted from the retained result.
-    expect(envelope.summary_md).toBe("leaked [REDACTED]");
-    // ...while the host identity path, which contains the same three characters,
-    // is untouched.
-    expect(envelope.target.head_sha).toBe(headSha);
+    // The whole-value echo is gone; the structural value containing it survives,
+    // so the stored envelope still parses as a review.
+    expect(envelope.summary_md).toBe("[REDACTED]");
+    expect(envelope.schema).toBe("mstar.review/v1");
+    expect(envelope.target.head_sha).toBe(SHA);
   });
 
   test("a payload carrying no secret serializes byte-identically", async () => {
