@@ -342,15 +342,19 @@ function fencedBlockSpans(text: string): FenceSpan[] {
     const rawLine = text.slice(offset, lineEnd);
     const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
     const indent = leadingSpaces(line);
-    const item = LIST_ITEM_LINE.exec(line);
-    if (item !== null) {
-      const itemIndent = item[1]!.length;
-      // A sibling at the same indent leaves the innermost frame; a deeper line
-      // starts a nested list whose content column is relative to its marker.
-      while (lists.length > 0 && itemIndent < lists[lists.length - 1]!.contentColumn) lists.pop();
-      lists.push({ contentColumn: itemIndent + item[2]!.length + 1 });
-    } else if (line.trim() !== "") {
-      while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
+    // Fence CONTENT is code, never markup: a `1. item` inside a fence must not
+    // push a list frame that a later suggestion would be measured against.
+    if (open === null) {
+      const item = LIST_ITEM_LINE.exec(line);
+      if (item !== null) {
+        const itemIndent = item[1]!.length;
+        // A sibling at the same indent leaves the innermost frame; a deeper line
+        // starts a nested list whose content column is relative to its marker.
+        while (lists.length > 0 && itemIndent < lists[lists.length - 1]!.contentColumn) lists.pop();
+        lists.push({ contentColumn: itemIndent + item[2]!.length + 1 });
+      } else if (line.trim() !== "") {
+        while (lists.length > 0 && indent < lists[lists.length - 1]!.contentColumn) lists.pop();
+      }
     }
     const frame = lists[lists.length - 1];
     const inList = frame !== undefined && indent >= frame.contentColumn;
