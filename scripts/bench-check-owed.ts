@@ -52,7 +52,7 @@ for (const attempts of [5_000, 20_000, 80_000]) {
     const times: number[] = [];
     for (let i = 0; i < runs; i++) {
       const start = performance.now();
-      ids = (await listCheckReconcileBatch(handle, now, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.id);
+      ids = (await listCheckReconcileBatch(handle, now, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).map((row) => row.identity.attemptId);
       await clearConcludedCheckOwed(handle);
       times.push(performance.now() - start);
     }
