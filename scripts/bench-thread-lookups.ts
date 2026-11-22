@@ -1,5 +1,6 @@
 import { createMigratedTestD1, execMigrationScript } from "../tests/store/helpers";
 import { readLineBatchState } from "../src/store/finding-lifecycle";
+import { BIND_UNBOUND_THREADS_MAX_ENTRIES } from "../src/pipeline/review-attempt-execution";
 
 // note: Run from the repository root: bun scripts/bench-thread-lookups.ts
 // Times one review round's review_threads reads for a PR with 25 live findings
@@ -56,14 +57,14 @@ for (const threads of [5_000, 20_000, 80_000]) {
 
   async function measure(): Promise<{ ms: number; seen: unknown[] }> {
     let seen: unknown[] = [];
-    const once = async () => {
+    const once = async (normalize = false) => {
       seen = [];
       for (const sql of statements) {
         const stmt = handle.prepare(sql);
-        const bound = sql.includes("LIMIT ?") ? stmt.bind(...ids, 50) : stmt.bind(...ids);
+        const bound = sql.includes("LIMIT ?") ? stmt.bind(...ids, BIND_UNBOUND_THREADS_MAX_ENTRIES) : stmt.bind(...ids);
         const results = (await bound.all<{ id: string }>()).results;
-        // note: Only the binding read orders its rows; the others are compared as sets.
-        if (!sql.includes("ORDER BY")) results.sort((a, b) => a.id.localeCompare(b.id));
+        // note: Only the binding read orders its rows; the untimed final pass sorts the others to compare them as sets.
+        if (normalize && !sql.includes("ORDER BY")) results.sort((a, b) => a.id.localeCompare(b.id));
         seen.push(...results);
       }
       db.exec("SAVEPOINT round");
@@ -79,6 +80,7 @@ for (const threads of [5_000, 20_000, 80_000]) {
       await once();
       times.push(performance.now() - start);
     }
+    await once(true);
     return { ms: median(times), seen };
   }
 
