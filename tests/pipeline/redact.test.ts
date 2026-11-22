@@ -135,8 +135,8 @@ describe("redactDocument", () => {
 
     const outcome = redactDocument(payload, [SECRET], "text");
 
-    expect(outcome.value.findings[0]?.body).toBe(Array(5).fill("[redacted]").join(" "));
-    expect([...outcome.value.rejected]).toEqual(injected.map((_, index) => `row${index}:[redacted]`));
+    expect(outcome.value.findings[0]?.body).toBe(Array(5).fill("[REDACTED]").join(" "));
+    expect([...outcome.value.rejected]).toEqual(injected.map((_, index) => `row${index}:[REDACTED]`));
     expect(outcome.value.passed).toBe(true);
     expect(outcome.value.score).toBe(0.5);
     expect(outcome.value.report).toBeNull();
@@ -162,8 +162,8 @@ describe("redactDocument", () => {
     // The host-written path is byte-identical.
     expect(redacted.target.head_sha).toBe(secret);
     // Forged text — in a string and inside an array — is redacted like any leaf.
-    expect(redacted.summary_md).toBe('{"head_sha":"[redacted]"}');
-    expect(redacted.findings[0]?.body).toBe("only [redacted]");
+    expect(redacted.summary_md).toBe('{"head_sha":"[REDACTED]"}');
+    expect(redacted.findings[0]?.body).toBe("only [REDACTED]");
   });
 
   test("the recheck document protects its identity paths and redacts everything else", () => {
@@ -194,23 +194,24 @@ describe("redactDocument", () => {
     expect(outcome.value.doc.results[0]?.evidence.sliceId).toBe(secret);
     expect(outcome.value.status.headSha).toBe(secret);
     // Everything off the table is model text.
-    expect(outcome.value.doc.results[0]?.evidence.quote).toBe("[redacted]");
-    expect([...outcome.value.rejected]).toEqual(["row:[redacted]"]);
+    expect(outcome.value.doc.results[0]?.evidence.quote).toBe("[REDACTED]");
+    expect([...outcome.value.rejected]).toEqual(["row:[REDACTED]"]);
   });
 
   test("a model-printed marker shields nothing and the marker survives", () => {
-    const outcome = redactDocument("x[redacted]abcdefgh", ["abcdefgh"], "text");
+    const outcome = redactDocument("x[REDACTED]abcdefgh", ["abcdefgh"], "text");
 
-    expect(outcome.value).toBe("x[redacted][redacted]");
+    expect(outcome.value).toBe("x[REDACTED][REDACTED]");
     expect(outcome.replaced).toBe(1);
   });
 
   test("a credential that is a substring of the marker cannot corrupt it", () => {
-    expect(redactDocument("[redacted]", ["redacted"], "text").value).toBe("[redacted]");
+    // The marker's own word, 8 chars, is a credential-shaped value here.
+    expect(redactDocument("[REDACTED]", ["REDACTED"], "text").value).toBe("[REDACTED]");
 
-    const once = redactDocument("key redacted", ["redacted"], "text");
-    expect(once.value).toBe("key [redacted]");
-    expect(redactDocument(once.value, ["redacted"], "text").value).toBe(once.value);
+    const once = redactDocument("key REDACTED", ["REDACTED"], "text");
+    expect(once.value).toBe("key [REDACTED]");
+    expect(redactDocument(once.value, ["REDACTED"], "text").value).toBe(once.value);
   });
 
   test("text shaped like a former placeholder is ordinary text", () => {
@@ -226,10 +227,10 @@ describe("redactDocument", () => {
     const slashEcho = '{"summary_md":"abc\\/defg"}';
 
     expect(redactDocument(unicodeEcho, ["abc/defg"], "run").value).toBe(
-      '{"summary_md":"[redacted]"}',
+      '{"summary_md":"[REDACTED]"}',
     );
     expect(redactDocument(slashEcho, ["abc/defg"], "run").value).toBe(
-      '{"summary_md":"[redacted]"}',
+      '{"summary_md":"[REDACTED]"}',
     );
   });
 
@@ -239,7 +240,7 @@ describe("redactDocument", () => {
     const outcome = redactDocument(envelope, ["abc/defg"], "run");
     expect(outcome.replaced).toBe(1);
     // Documented consequence: a re-serialized document loses that padding.
-    expect(outcome.value).toBe('{"summary_md":"[redacted]"}');
+    expect(outcome.value).toBe('{"summary_md":"[REDACTED]"}');
 
     expect(redactDocument(envelope, ["sk-unrelated-credential-0001"], "run").value).toBe(envelope);
   });
@@ -247,13 +248,13 @@ describe("redactDocument", () => {
   test("is idempotent for the sequences that failed before", () => {
     const secrets = ["x[redact", "abcdefgh"];
     const first = redactDocument({ text: "xabcdefgh" }, secrets, "text");
-    expect(first.value).toEqual({ text: "x[redacted]" });
+    expect(first.value).toEqual({ text: "x[REDACTED]" });
     const second = redactDocument(first.value, secrets, "text");
     expect(second.value).toEqual(first.value);
     expect(second.replaced).toBe(0);
 
-    // The marker is a fixed point too: parking it means nothing matches inside.
-    const marked = redactDocument({ text: "x[redacted]abcdefgh" }, secrets, "text");
+    // The marker is a fixed point too: it is a scan boundary, never scanned text.
+    const marked = redactDocument({ text: "x[REDACTED]abcdefgh" }, secrets, "text");
     const again = redactDocument(marked.value, secrets, "text");
     expect(again.value).toEqual(marked.value);
     expect(again.replaced).toBe(0);
