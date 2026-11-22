@@ -1,5 +1,5 @@
 /**
- * `t(locale, key, params?)` — server + client isomorphic lookup with
+ * why: `t(locale, key, params?)` — server + client isomorphic lookup with
  * `{placeholder}` interpolation.
  *
  * `DictionaryKey` is the dotted-path type derived from the en dictionary

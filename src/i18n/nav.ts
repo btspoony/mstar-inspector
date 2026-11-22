@@ -1,5 +1,5 @@
 /**
- * Shared navigation contract (the sidebar IA).
+ * why: Shared navigation contract (the sidebar IA).
  *
  * Order is LOCKED (spec § IA, dashboard nav): Repositories → Apps → Members →
  * Settings (the global insights entry is retired). `labelKey` is a dictionary

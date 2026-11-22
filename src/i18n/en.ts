@@ -23,42 +23,42 @@ export const en = {
     brand: "Morning Star Inspector",
     primary: "Primary navigation",
     apps: "Apps",
-    /** The repository overview (`/dashboard/<ref>/repos`, the dashboard default). */
+    /** note: The repository overview (`/dashboard/<ref>/repos`, the dashboard default). */
     targets: "Repositories",
     members: "Members",
     settings: "Settings",
-    /** Sidebar-footer entry to the platform console (operators on `saas`). */
+    /** note: Sidebar-footer entry to the platform console (operators on `saas`). */
     platformOperations: "Platform operations",
-    /** Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
+    /** note: Label of the OTHER locale — the toggle target (en shows 中文, zh_CN shows EN). */
     language: "中文",
-    /** First focusable control in the shell: skips the sidebar straight to `<main>`. */
+    /** note: First focusable control in the shell: skips the sidebar straight to `<main>`. */
     skipToContent: "Skip to content",
-    /** Theme toggle: icon-only button; state + action live in the aria copy. */
-    /** {mode} = current effective theme, {target} = the theme clicking switches to. */
+    /** note: Theme toggle: icon-only button; state + action live in the aria copy. */
+    /** note: {mode} = current effective theme, {target} = the theme clicking switches to. */
     themeToggleAria: "Display theme: {mode}. Activate to switch to {target}.",
     themeDark: "dark",
     themeLight: "light",
     logout: "Logout",
     signedInAs: "Signed in as {name}",
-    /** Label of the shell's workspace switcher (the select itself shows names). */
+    /** note: Label of the shell's workspace switcher (the select itself shows names). */
     workspaceSwitcher: "Workspace",
-    /** The switcher menu's last row — the workspace-creation entry. */
+    /** note: The switcher menu's last row — the workspace-creation entry. */
     newWorkspace: "New workspace",
     /**
-     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * why: Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
      * "free_slot"`): this login already holds its one free workspace.
      */
     newWorkspaceBlockedFreeSlot:
       "You already belong to a free workspace — one per login. Delete it, or ask its owner to remove you, then create another.",
     /**
-     * Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
+     * why: Why the new-workspace item is disabled (`createWorkspaceBlockedReason:
      * "flag"`): the operator closed workspace creation platform-wide.
      */
     newWorkspaceBlockedFlag: "Workspace creation is closed on this platform right now.",
   },
   common: {
     pageTitle: "{page} — {brand}",
-    /** The maintenance window (product spec J7): no ETA promise. */
+    /** note: The maintenance window (product spec J7): no ETA promise. */
     maintenance: {
       title: "Under maintenance",
       body: "A data upgrade is running; service resumes automatically when it finishes.",
@@ -73,7 +73,7 @@ export const en = {
       hoursAgo: "{count} hours ago",
       dayAgo: "{count} day ago",
       daysAgo: "{count} days ago",
-      /** Future tense (formatUntil) — the usage panel's reset stamps. */
+      /** note: Future tense (formatUntil) — the usage panel's reset stamps. */
       inMinute: "in {count} minute",
       inMinutes: "in {count} minutes",
       inHour: "in {count} hour",
@@ -101,13 +101,13 @@ export const en = {
       missingCode: "GitHub did not return an authorization code.",
       codeRejected: "GitHub rejected the authorization code.",
       profileFailed: "Could not read your GitHub profile.",
-      /** `signup_open` is off: an unknown login cannot create an account. */
+      /** note: `signup_open` is off: an unknown login cannot create an account. */
       signupClosed: "Sign-up is closed on this platform right now.",
     },
     loading: "Loading…",
     loadFailed: "Could not load this page.",
     saveFailed: "Could not save your changes.",
-    /** The in-flight face of a status-driving save button, announced by the card's live region. */
+    /** note: The in-flight face of a status-driving save button, announced by the card's live region. */
     saving: "Saving…",
     cancel: "Cancel",
     retry: "Retry",
@@ -116,7 +116,7 @@ export const en = {
     heading: "Sign in",
     description: "Use your GitHub account to access the console.",
     signIn: "Sign in with GitHub",
-    /** Sign-in is open — no access list stands between here and a workspace. */
+    /** note: Sign-in is open — no access list stands between here and a workspace. */
     openAccess: "Any GitHub account can sign in — create a workspace, or accept an invitation.",
   },
   notice: {
@@ -142,42 +142,42 @@ export const en = {
     },
   },
   /**
-   * App detail page: the tabbed shell. The review policy that used to be its
+   * why: App detail page: the tabbed shell. The review policy that used to be its
    * settings tab lives on the review-target surface (`targets.*`), so the
    * tabs here are the App's own faces only.
    */
   appDetail: {
-    /** The page's name in the document title (`common.pageTitle` slot). */
+    /** note: The page's name in the document title (`common.pageTitle` slot). */
     documentPage: "App",
     backToApps: "Back to Apps",
-    /** The link from the App detail and the target detail to the bot's own settings page. */
+    /** note: The link from the App detail and the target detail to the bot's own settings page. */
     botSettingsLink: "Bot settings",
-    /** The App detail's three faces: its own configuration, deliveries, then installs. */
+    /** note: The App detail's three faces: its own configuration, deliveries, then installs. */
     tabSettings: "App settings",
     tabDelivery: "Deliveries",
     tabInstallations: "Installed",
-    /** The App's zero-repository state: nothing under the App is reviewed yet. */
+    /** note: The App's zero-repository state: nothing under the App is reviewed yet. */
     noRepository: "This App has no repository yet, so it reviews nothing.",
-    /** The App's several-repository state: no single review policy is this page's to edit. */
+    /** note: The App's several-repository state: no single review policy is this page's to edit. */
     targetsMany:
       "This App reviews several repositories, so its review settings live on the Repositories page.",
     /**
-     * The delivery tab: the bot's webhook log, filtered and paged on the
+     * note: The delivery tab: the bot's webhook log, filtered and paged on the
      * server. One entry per column of the table, plus the filter and pager
      * copy the tab's own controls read.
      */
     delivery: {
       copy: "Every webhook delivery this bot received — what arrived, from which repository, and what happened to it.",
-      /** The Blocked face has no bot-owned data, so the tab states that instead. */
+      /** note: The Blocked face has no bot-owned data, so the tab states that instead. */
       unavailable: "This bot's deliveries belong to another workspace while its share is revoked.",
       columnRepo: "Repository",
       columnType: "Type",
       columnTime: "Time",
       columnOutcome: "Outcome",
       columnReason: "Reason",
-      /** A delivery whose payload carried no repository (install / bypass events). */
+      /** note: A delivery whose payload carried no repository (install / bypass events). */
       unknownRepo: "unknown repository",
-      /** A delivery whose request carried no x-github-event header. */
+      /** note: A delivery whose request carried no x-github-event header. */
       unknownType: "unknown type",
       filterRepo: "Repository",
       filterWindow: "Time window",

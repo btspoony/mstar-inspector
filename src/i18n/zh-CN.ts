@@ -13,35 +13,35 @@ export const zhCN: Dictionary = {
     brand: "Morning Star Inspector",
     primary: "主导航",
     apps: "应用",
-    /** 仓库总览页（`/dashboard/<ref>/repos`，仪表盘默认页）。 */
+    /** note: 仓库总览页（`/dashboard/<ref>/repos`，仪表盘默认页）。 */
     targets: "仓库",
     members: "成员",
     settings: "设置",
-    /** 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
+    /** note: 侧栏底部的平台运营入口（仅 saas 上的 operator 可见）。 */
     platformOperations: "平台运营",
-    /** 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
+    /** note: 目标语言的标签 — 切换按钮显示要切换到的语言（中文界面显示 EN）。 */
     language: "EN",
-    /** 外壳中第一个可聚焦控件：跳过侧栏直达 `<main>`。 */
+    /** note: 外壳中第一个可聚焦控件：跳过侧栏直达 `<main>`。 */
     skipToContent: "跳到主要内容",
-    /** 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */
-    /** {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
+    /** note: 主题切换：仅图标的按钮；状态与动作在 aria 文案中表达。 */
+    /** note: {mode} = 当前生效主题，{target} = 点击后切换到的主题。 */
     themeToggleAria: "当前显示模式：{mode}，点击切换为{target}",
     themeDark: "深色",
     themeLight: "浅色",
     logout: "退出登录",
     signedInAs: "已登录：{name}",
     workspaceSwitcher: "工作区",
-    /** 切换器菜单最后一行——创建工作区入口。 */
+    /** note: 切换器菜单最后一行——创建工作区入口。 */
     newWorkspace: "新建工作区",
-    /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
+    /** note: 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "free_slot"`）。 */
     newWorkspaceBlockedFreeSlot:
       "你已属于一个免费工作区 — 每个账号限一个。请删除它，或请其所有者移除你，然后再创建新的工作区。",
-    /** 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "flag"`）：平台已关闭工作区创建。 */
+    /** note: 新建工作区项不可用的原因（`createWorkspaceBlockedReason: "flag"`）：平台已关闭工作区创建。 */
     newWorkspaceBlockedFlag: "平台当前已关闭工作区创建。",
   },
   common: {
     pageTitle: "{page} — {brand}",
-    /** 维护窗口（产品规格 J7）：不承诺 ETA。 */
+    /** note: 维护窗口（产品规格 J7）：不承诺 ETA。 */
     maintenance: {
       title: "维护中",
       body: "正在执行数据升级，完成后自动恢复服务。",
@@ -56,7 +56,7 @@ export const zhCN: Dictionary = {
       hoursAgo: "{count} 小时前",
       dayAgo: "{count} 天前",
       daysAgo: "{count} 天前",
-      /** 将来时（formatUntil）— 用量面板的重置时间。 */
+      /** note: 将来时（formatUntil）— 用量面板的重置时间。 */
       inMinute: "{count} 分钟后",
       inMinutes: "{count} 分钟后",
       inHour: "{count} 小时后",
@@ -81,13 +81,13 @@ export const zhCN: Dictionary = {
       missingCode: "GitHub 未返回授权码。",
       codeRejected: "GitHub 拒绝了授权码。",
       profileFailed: "无法读取你的 GitHub 资料。",
-      /** `signup_open` 关闭：未知账号无法创建账户。 */
+      /** note: `signup_open` 关闭：未知账号无法创建账户。 */
       signupClosed: "平台当前已关闭注册。",
     },
     loading: "加载中…",
     loadFailed: "无法加载此页面。",
     saveFailed: "无法保存更改。",
-    /** 状态驱动保存按钮进行中态的文案，由卡片的 live region 播报。 */
+    /** note: 状态驱动保存按钮进行中态的文案，由卡片的 live region 播报。 */
     saving: "保存中…",
     cancel: "取消",
     retry: "重试",
@@ -96,7 +96,7 @@ export const zhCN: Dictionary = {
     heading: "登录",
     description: "使用你的 GitHub 账号访问控制台。",
     signIn: "使用 GitHub 登录",
-    /** 登录开放 —— 没有访问名单挡在工作区之前。 */
+    /** note: 登录开放 —— 没有访问名单挡在工作区之前。 */
     openAccess: "任意 GitHub 账号均可登录 —— 创建工作区，或接受邀请。",
   },
   notice: {
@@ -121,34 +121,34 @@ export const zhCN: Dictionary = {
       revokeFailed: "无法撤销给 {login} 的邀请 — 请重试。",
     },
   },
-  /** App 详情页：标签页外壳。评审策略属于仓库页（`targets.*`），这里的标签只保留 App 自身的面。 */
+  /** note: App 详情页：标签页外壳。评审策略属于仓库页（`targets.*`），这里的标签只保留 App 自身的面。 */
   appDetail: {
-    /** 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
+    /** note: 页面在文档标题中的名称（`common.pageTitle` 的 page 槽）。 */
     documentPage: "应用",
     backToApps: "返回应用",
-    /** 从 App 详情与目标详情指向机器人自身设置的链接。 */
+    /** note: 从 App 详情与目标详情指向机器人自身设置的链接。 */
     botSettingsLink: "机器人设置",
-    /** App 详情页的三个面：应用自身的配置、投递状态，然后安装块。 */
+    /** note: App 详情页的三个面：应用自身的配置、投递状态，然后安装块。 */
     tabSettings: "应用设置",
     tabDelivery: "投递状态",
     tabInstallations: "已安装",
-    /** App 尚无仓库：没有任何评审。 */
+    /** note: App 尚无仓库：没有任何评审。 */
     noRepository: "该应用还没有对应仓库，因此不会进行任何评审。",
-    /** App 有多个仓库：没有单独的评审策略可供本页编辑。 */
+    /** note: App 有多个仓库：没有单独的评审策略可供本页编辑。 */
     targetsMany: "该应用审查多个仓库，各仓库的评审配置在仓库页中编辑。",
-    /** 投递状态标签：机器人的 webhook 投递记录，筛选与分页都在服务端完成。 */
+    /** note: 投递状态标签：机器人的 webhook 投递记录，筛选与分页都在服务端完成。 */
     delivery: {
       copy: "该机器人收到的每一次 webhook 投递 —— 来自哪个仓库、何种类型，以及处理结果。",
-      /** 被阻断的面没有机器人数据，标签页只陈述这一点。 */
+      /** note: 被阻断的面没有机器人数据，标签页只陈述这一点。 */
       unavailable: "共享被撤销期间，该机器人的投递属于另一个工作区。",
       columnRepo: "仓库",
       columnType: "类型",
       columnTime: "时间",
       columnOutcome: "结果",
       columnReason: "原因",
-      /** 载荷没有仓库的投递（安装事件、旁路事件）。 */
+      /** note: 载荷没有仓库的投递（安装事件、旁路事件）。 */
       unknownRepo: "未知仓库",
-      /** 请求没有 x-github-event 头的投递。 */
+      /** note: 请求没有 x-github-event 头的投递。 */
       unknownType: "未知类型",
       filterRepo: "仓库",
       filterWindow: "时间范围",

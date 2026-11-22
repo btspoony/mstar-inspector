@@ -30,7 +30,7 @@ export function isLocale(value: unknown): value is Locale {
   return value === "en" || value === "zh_CN";
 }
 
-/** Minimal Cookie-header parser (name=value pairs, first `=` wins). */
+/** note: Minimal Cookie-header parser (name=value pairs, first `=` wins). */
 function parseCookieHeader(header: string | null): Record<string, string> {
   const out: Record<string, string> = {};
   if (!header) return out;
