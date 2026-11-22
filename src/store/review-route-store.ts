@@ -29,7 +29,7 @@ export type AttemptHandoff = {
   state: AttemptHandoffState;
   /**
    * The attempt's absolute hard stop, frozen when this row was first written:
-   * the delivery's Queue send stamp plus the operator's end-to-end cap. Every
+   * the claiming delivery's time plus the operator's end-to-end cap. Every
    * replay of the same attempt reads it instead of re-deriving it. `null` only
    * on a row written before the column existed — "not yet anchored"; the next
    * admission anchors it ONCE from `createdMs` (the only instant that attempt

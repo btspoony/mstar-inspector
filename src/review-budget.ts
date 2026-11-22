@@ -2,7 +2,7 @@
  * Review attempt budget — the ONE derivation owner.
  *
  * The hard stop is ONE absolute instant per attempt: `deadlineMs`, frozen when
- * the delivery is first admitted as the original Queue send stamp plus the
+ * the delivery is first admitted as that delivery's claim time plus the
  * operator's end-to-end cap, and carried on the attempt's durable records so a
  * resume reads it instead of re-deriving it. The cap is a system row in
  * `review_runtime_settings` (read here, absent-row default below); the Queue
