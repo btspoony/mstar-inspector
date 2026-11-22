@@ -205,6 +205,22 @@ describe("redactDocument", () => {
     expect(outcome.replaced).toBe(1);
   });
 
+  test("a credential that is a substring of the marker cannot corrupt it", () => {
+    expect(redactDocument("[redacted]", ["redacted"], "text").value).toBe("[redacted]");
+
+    const once = redactDocument("key redacted", ["redacted"], "text");
+    expect(once.value).toBe("key [redacted]");
+    expect(redactDocument(once.value, ["redacted"], "text").value).toBe(once.value);
+  });
+
+  test("text shaped like a former placeholder is ordinary text", () => {
+    const text = "\u0000id:0\u0000 and \u0000marker\u0000";
+    const outcome = redactDocument(text, [SECRET], "text");
+
+    expect(outcome.value).toBe(text);
+    expect(outcome.replaced).toBe(0);
+  });
+
   test("a mixed escape echo decodes before matching (`\\u002f`, `\\/`)", () => {
     const unicodeEcho = '{"summary_md":"abc\\u002fdefg"}';
     const slashEcho = '{"summary_md":"abc\\/defg"}';
