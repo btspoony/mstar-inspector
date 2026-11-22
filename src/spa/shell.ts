@@ -1,5 +1,5 @@
 /**
- * Pure shell models: sidebar carries page nav; navbar is slim
+ * note: Pure shell models: sidebar carries page nav; navbar is slim
  * (Lang + username + logout). Tested without a DOM runner.
  */
 import { NAV_ITEMS, t, type Locale } from "../i18n";
@@ -10,12 +10,12 @@ export type ShellNavItem = { href: string; label: string; current: boolean };
 
 export type SidebarModel = {
   brand: string;
-  /** Same target as the Apps entry: the root is a dead end under `strict`. */
+  /** note: Same target as the Apps entry: the root is a dead end under `strict`. */
   brandHref: string;
   navLabel: string;
   items: ShellNavItem[];
   /**
-   * Footer entry to the platform console. Present only for a `saas` boot whose
+   * invariant: Footer entry to the platform console. Present only for a `saas` boot whose
    * viewer is a platform operator — the Worker combines both conjuncts into
    * `SpaBoot.isOperator`, so this model never evaluates the allowlist.
    */
@@ -53,7 +53,7 @@ export function accountDisplay(boot: Pick<SpaBoot, "login" | "name">): string | 
  * entry current on its own detail pages too.
  */
 export function isNavCurrent(href: string, pathname: string): boolean {
-  // The repository overview is where the dashboard root now lands: the two
+  // note: The repository overview is where the dashboard root now lands: the two
   // root spellings are redirects, but a shell can still be served on one
   // (`/index.html`, a pre-redirect document), and there Repositories is the
   // page the click will open.
@@ -68,20 +68,20 @@ export function isNavCurrent(href: string, pathname: string): boolean {
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
-/** One nav entry's href under a resolved workspace ref (null = legacy). */
+/** note: One nav entry's href under a resolved workspace ref (null = legacy). */
 function navHref(baseHref: string, workspaceRef: string | null): string {
   return workspaceRef === null ? baseHref : `/dashboard/${workspaceRef}${baseHref.slice("/dashboard".length)}`;
 }
 
 export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel {
-  // The page's own prefix wins (it is the route the request was matched
+  // note: The page's own prefix wins (it is the route the request was matched
   // against); the boot ref covers the mode-independent pages, whose pathname
   // names no workspace. Both absent (a multi-workspace deployment has no sole
   // workspace to name) → the login's own first membership, the same target the
   // landing uses, so no entry points at the retired `/dashboard/apps` family.
   const workspaceRef =
     workspaceRefOf(pathname) ?? boot.workspaceRef ?? boot.memberships?.[0]?.id ?? null;
-  // No workspace yet → every nav target would 404; the shell keeps its
+  // why: No workspace yet → every nav target would 404; the shell keeps its
   // wordmark and drops the entries (creation surface). An operator under a
   // support grant gets the same treatment: its one page is the support view,
   // and every other entry would only 403 that page's reads. Otherwise every
@@ -90,7 +90,7 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
   const items = boot.needsWorkspace === true || boot.supportOnly === true ? [] : NAV_ITEMS;
   return {
     brand: t(boot.locale, "nav.brand"),
-    // The repository overview is the dashboard default, so the wordmark
+    // why: The repository overview is the dashboard default, so the wordmark
     // follows the same workspace target as the Repositories entry.
     brandHref: workspaceRef === null ? "/dashboard" : `/dashboard/${workspaceRef}/repos`,
     navLabel: t(boot.locale, "nav.primary"),
@@ -102,7 +102,7 @@ export function buildSidebarModel(boot: SpaBoot, pathname: string): SidebarModel
         current: isNavCurrent(href, pathname),
       };
     }),
-    // Footer entry, never a nav item: the console lives outside the SPA route
+    // invariant: Footer entry, never a nav item: the console lives outside the SPA route
     // table, and NAV_ITEMS order stays the workspace IA.
     ...(boot.isOperator === true
       ? { operatorLink: { href: "/_internal_admin", label: t(boot.locale, "nav.platformOperations") } }

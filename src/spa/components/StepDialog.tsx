@@ -1,5 +1,5 @@
 /**
- * Step dialog (DESIGN.md v0.5 ### step-dialog): the multi-step entry shell.
+ * note: Step dialog (DESIGN.md v0.5 ### step-dialog): the multi-step entry shell.
  * The panel surface, the title face and the description face are `ui/dialog`'s
  * `DialogContent` / `DialogTitle` / `DialogDescription` unchanged — container
  * radius through the bridge, `shadow-pop`, `sm:max-w-lg`, the spacing-6
@@ -40,14 +40,14 @@ export function StepDialog({
   onOpenChange: (open: boolean) => void;
   title: ReactNode;
   description?: ReactNode;
-  /** Step labels; the indicator appears only when there are two or more. */
+  /** invariant: Step labels; the indicator appears only when there are two or more. */
   steps?: readonly string[];
-  /** 0-based index of the current step; values outside the range clamp in. */
+  /** note: 0-based index of the current step; values outside the range clamp in. */
   currentStep?: number;
   footer: ReactNode;
   children: ReactNode;
 }) {
-  // The contract has no "no current step" state, so an out-of-range index
+  // why: The contract has no "no current step" state, so an out-of-range index
   // clamps into the label range: exactly one step is always current.
   const stepCount = steps?.length ?? 0;
   const active = stepCount > 0 ? Math.min(Math.max(currentStep, 0), stepCount - 1) : -1;
@@ -66,7 +66,7 @@ export function StepDialog({
           >
             {steps.map((step, index) => (
               <li
-                // Labels are user copy and may repeat; only the position is stable.
+                // invariant: Labels are user copy and may repeat; only the position is stable.
                 key={index}
                 data-slot="step-dialog-step"
                 aria-current={index === active ? "step" : undefined}

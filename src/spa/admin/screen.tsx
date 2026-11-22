@@ -1,5 +1,5 @@
 /**
- * The console's screen idioms.
+ * note: The console's screen idioms.
  *
  * `Screen` is the ONE spelling of the three non-populated states every screen
  * has: the table skeleton while reading, the inline error with its retry when
@@ -27,10 +27,10 @@ export function Screen<T>({
   children,
 }: {
   state: Loaded<T>;
-  /** What this screen's failed read means, e.g. "Could not load the user list." */
+  /** note: What this screen's failed read means, e.g. "Could not load the user list." */
   failed: string;
   onRetry: () => void;
-  /** The boot locale the admin entry read from `boot.locale`. */
+  /** note: The boot locale the admin entry read from `boot.locale`. */
   locale: Locale;
   children: (data: T) => ReactNode;
 }) {

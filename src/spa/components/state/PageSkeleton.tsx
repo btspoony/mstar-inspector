@@ -1,5 +1,5 @@
 /**
- * Page-level loading skeleton (AD-582): layout-shape-matched
+ * note: Page-level loading skeleton (AD-582): layout-shape-matched
  * placeholder composed from the `ui/skeleton.tsx` primitive. Kind selects
  * the block idiom — a bordered table (header row + N body rows), card
  * shells, or labeled input blocks — so the page keeps its final geometry
@@ -16,10 +16,10 @@ import { cn, Skeleton } from "@design-system";
 
 export type SkeletonKind = "table" | "cards" | "forms";
 
-/** Per-kind defaults match existing page densities (AD-582). */
+/** note: Per-kind defaults match existing page densities (AD-582). */
 const DEFAULT_ROWS: Record<SkeletonKind, number> = { table: 5, cards: 3, forms: 4 };
 
-/** Shared column rhythm for the table idiom (identity/status/health/action). */
+/** note: Shared column rhythm for the table idiom (identity/status/health/action). */
 const TABLE_COLS = "grid grid-cols-[2fr_1.5fr_1.5fr_1fr] gap-4";
 
 export function PageSkeleton({
@@ -31,7 +31,7 @@ export function PageSkeleton({
   kind: SkeletonKind;
   rows?: number;
 }) {
-  // Clamp at 0: negative rows would silently render an empty body shape and
+  // note: Clamp at 0: negative rows would silently render an empty body shape and
   // 0 must stay a legal explicit "no rows" value (QC round 1 F-007).
   const count = Math.max(0, rows ?? DEFAULT_ROWS[kind]);
   return (
@@ -42,7 +42,7 @@ export function PageSkeleton({
     >
       <span className="sr-only">{t(locale, "common.loading")}</span>
       <div aria-hidden="true" className="contents">
-        {/* Every dashboard page opens with the h1 heading — placeholder it. */}
+        {/* note: Every dashboard page opens with the h1 heading — placeholder it. */}
         <Skeleton data-slot="skeleton-heading" className="h-8 w-48" />
         {kind === "table" ? <TableShapes count={count} /> : null}
         {kind === "cards" ? <CardShapes count={count} /> : null}
@@ -52,7 +52,7 @@ export function PageSkeleton({
   );
 }
 
-// Hairline colours are named, never inherited: a bare `border` carries width
+// invariant: Hairline colours are named, never inherited: a bare `border` carries width
 // only and preflight leaves border-color at currentColor. Shell on the default
 // edge, rows on the subtle one — the DataTable face this skeleton mirrors.
 function TableShapes({ count }: { count: number }) {
@@ -104,7 +104,7 @@ function FormShapes({ count }: { count: number }) {
     <div data-slot="skeleton-forms" className="flex flex-col gap-5">
       {Array.from({ length: count }, (_, field) => (
         <div key={field} data-slot="skeleton-form-field" className="flex flex-col gap-2">
-          {/* Label bar above a control-height input bar (h-9 rounded-sm,
+          {/* note: Label bar above a control-height input bar (h-9 rounded-sm,
               matching the restyled ui/input primitive). */}
           <Skeleton className="h-3 w-24" />
           <Skeleton className="h-9 w-full rounded-sm" />

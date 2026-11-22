@@ -18,7 +18,7 @@ import { WorkspacesPage } from "./WorkspacesPage";
 import { ADMIN_PAGES, type AdminPageId } from "./pages";
 
 /**
- * The console's own document entry (`src/spa/admin.html`, a second Vite input).
+ * note: The console's own document entry (`src/spa/admin.html`, a second Vite input).
  *
  * Deliberately NOT the workspace shell (`../main.tsx`, `../Layout`): that shell
  * carries workspace chrome, workspace boot reads and the workspace router, and
@@ -72,7 +72,7 @@ export function App() {
         <div className="flex items-center gap-2">
           <a href="/dashboard">{t(locale, "admin.header.dashboardLink")}</a>
           {/*
-           * Zero-JS locale switch — same form as the workspace shell: POST
+           * note: Zero-JS locale switch — same form as the workspace shell: POST
            * /dashboard/locale sets the cookie and 302s back here; the
            * re-GETted document carries the new boot.locale.
            */}
@@ -102,7 +102,7 @@ export function App() {
   );
 }
 
-// Guarded so the module can be imported by tests before a DOM exists; in the
+// why: Guarded so the module can be imported by tests before a DOM exists; in the
 // real document #root is always present.
 const root = typeof document === "undefined" ? null : document.getElementById("root");
 if (root) {

@@ -1,5 +1,5 @@
 /**
- * The repository surface (`/dashboard/<ref>/repos`): the workspace's
+ * note: The repository surface (`/dashboard/<ref>/repos`): the workspace's
  * repositories, listed from `GET /:ref/api/targets`, with the fixed 所有仓库
  * entry first (product spec J1) and the add-repository dialog (J2). It is the
  * dashboard default, so its header carries the page's own explanation and the
@@ -170,7 +170,7 @@ export function targetStatusPill(
   return { tone: "success", label: t(locale, "targets.status.reviewing") };
 }
 
-/** The two identity columns both target faces carry. */
+/** note: The two identity columns both target faces carry. */
 type RepositoryIdentity = { repo_owner: string | null; repo_name: string | null };
 
 /** `owner/name`, or "" when the row names no repository at all. */
@@ -179,7 +179,7 @@ export function targetRepositoryName(target: RepositoryIdentity): string {
   return `${target.repo_owner}/${target.repo_name}`;
 }
 
-/** The rows a table shows: the workspace's fixed aggregate row, or one target. */
+/** note: The rows a table shows: the workspace's fixed aggregate row, or one target. */
 type RepositoryTableRow =
   | { kind: "all" }
   | { kind: "target"; target: TargetListRow };
@@ -209,12 +209,12 @@ export function TargetsView({
   const all = targets ?? [];
   const base = apiBase();
   const allHref = `${base}/repos/all`;
-  // 待安装 is a FILTER, not a metric: it counts the rows the same repo_id axis
+  // note: 待安装 is a FILTER, not a metric: it counts the rows the same repo_id axis
   // already decides, and narrows the list to them.
   const [uninstalledOnly, setUninstalledOnly] = useState(false);
   const uninstalledCount = all.filter((target) => target.repo_id === null).length;
   const rows = uninstalledOnly ? all.filter((target) => target.repo_id === null) : all;
-  // Payload arithmetic only: every figure is the row aggregates summed, so the
+  // invariant: Payload arithmetic only: every figure is the row aggregates summed, so the
   // band costs no extra query. A named-but-unbound row keeps its history, so it
   // still counts here.
   const reviewsTotal = all.reduce((sum, target) => sum + target.reviews_total, 0);
@@ -261,7 +261,7 @@ export function TargetsView({
           </a>
         );
       },
-      // The App a repository is bound to — the secondary line, as today.
+      // note: The App a repository is bound to — the secondary line, as today.
       meta: (row) =>
         row.kind === "all" ? t(locale, "targets.allRepositoriesMeta") : row.target.app_name,
     },
@@ -323,7 +323,7 @@ export function TargetsView({
                 size="sm"
                 value={uninstalledOnly ? "uninstalled" : "all"}
                 onValueChange={(next) => {
-                  // A second click on the active segment is a no-op, never a
+                  // invariant: A second click on the active segment is a no-op, never a
                   // cleared filter — the list always shows something.
                   if (next !== "") setUninstalledOnly(next === "uninstalled");
                 }}
@@ -406,9 +406,9 @@ export function AddRepositoryDialogBody({
   appId: string;
   installations: InstallationsState;
   repositories: RepositoryOptionsState;
-  /** This workspace's own repositories — added, so checked and tagged. */
+  /** why: This workspace's own repositories — added, so checked and tagged. */
   existingRepoIds: ReadonlySet<number>;
-  /** Repositories the operator has ticked; a claimed row is never selectable. */
+  /** invariant: Repositories the operator has ticked; a claimed row is never selectable. */
   selectedRepoIds: ReadonlySet<number>;
   notice: { kind: NoticeKind; message: string } | null;
   busy: boolean;
@@ -432,7 +432,7 @@ export function AddRepositoryDialogBody({
   const [query, setQuery] = useState("");
   const all = repositories.state === "ok" ? repositories.repositories : [];
   const needle = query.trim().toLowerCase();
-  // Query-first: nothing is offered before the operator types. An empty query
+  // note: Query-first: nothing is offered before the operator types. An empty query
   // is an empty answer, never a dump of everything the App can see.
   const matches =
     needle === "" ? [] : all.filter((repository) => `${repository.owner}/${repository.name}`.toLowerCase().includes(needle));
@@ -454,7 +454,7 @@ export function AddRepositoryDialogBody({
         </>
       ) : (
         <>
-          {/* Step 1 — the App is ALWAYS shown, even when there is only one:
+          {/* invariant: Step 1 — the App is ALWAYS shown, even when there is only one:
               binding is an explicit choice, never an implicit apps[0]. */}
           <section className="flex flex-col gap-1.5" data-slot="add-step-app">
             <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepApp")}</span>
@@ -473,7 +473,7 @@ export function AddRepositoryDialogBody({
             <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.sharedScopeComing")}</p>
           </section>
 
-          {/* Step 2 — the chosen App's live installations. */}
+          {/* note: Step 2 — the chosen App's live installations. */}
           <section className="@container flex flex-col gap-1.5" data-slot="add-step-installations">
             <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepInstall")}</span>
             <div className="flex flex-col gap-4 @md:flex-row @md:items-start @md:justify-between">
@@ -529,7 +529,7 @@ export function AddRepositoryDialogBody({
             </div>
           </section>
 
-          {/* Step 3 — query-first repository scan. */}
+          {/* note: Step 3 — query-first repository scan. */}
           <section className="flex flex-col gap-2" data-slot="add-step-repositories">
             <span className="text-sm font-medium">{t(locale, "targets.addDialog.stepRepos")}</span>
             {!installed ? (
@@ -594,7 +594,7 @@ export function AddRepositoryDialogBody({
                     </p>
                     <ul className="flex flex-col gap-1.5">
                       {visible.map((repository) => {
-                        // Two distinct reasons a row is not offerable, and only
+                        // invariant: Two distinct reasons a row is not offerable, and only
                         // the server can tell them apart:
                         // - `existingRepoIds` — this workspace already reviews it;
                         // - `claimed` — a live target of the same BOT holds it,
@@ -668,7 +668,7 @@ export function AddRepositoryDialog({
 }) {
   const base = apiBase();
   /**
-   * The operator's PICK, not the resolved App: `null` = nothing chosen yet, so
+   * why: The operator's PICK, not the resolved App: `null` = nothing chosen yet, so
    * the choice always reads off the list this render sees. The list arrives
    * AFTER the first `ok` paint (the page settles the repository list first and
    * reads the Apps independently), so a lazy `useState` initialiser would
@@ -686,7 +686,7 @@ export function AddRepositoryDialog({
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
   /**
-   * A closed dialog holds no work. Without this the selection outlives
+   * note: A closed dialog holds no work. Without this the selection outlives
    * `if (!open) return null`, so reopening after a successful add offered a
    * Confirm whose every row was disabled — and pressing it re-posted a
    * repository the operator never chose. The duplicates path resets it itself
@@ -696,7 +696,7 @@ export function AddRepositoryDialog({
     setSelected(new Set());
     setNotice(null);
   }, []);
-  // Every read is stamped. A response lands only while its stamp is still the
+  // invariant: Every read is stamped. A response lands only while its stamp is still the
   // newest one, so a slow walk for the App the user switched AWAY from can
   // never overwrite the state of the App now selected (a boolean reset by the
   // next effect body would always pass that check). One stamp per read family,
@@ -729,7 +729,7 @@ export function AddRepositoryDialog({
     [base],
   );
 
-  // The install check rides the EXISTING settings payload (its `installations[]`
+  // note: The install check rides the EXISTING settings payload (its `installations[]`
   // is the bot's live `bot_installations` rows) — no new endpoint.
   const loadInstallations = useCallback(
     async (targetAppId: string): Promise<void> => {
@@ -756,7 +756,7 @@ export function AddRepositoryDialog({
     if (!open) return;
     void loadRepositories(appId);
     void loadInstallations(appId);
-    // Closing (or another App) retires whatever is still in flight.
+    // note: Closing (or another App) retires whatever is still in flight.
     return () => {
       requestRef.current += 1;
       installationsRef.current += 1;
@@ -789,11 +789,11 @@ export function AddRepositoryDialog({
         setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
         return;
       }
-      // The rows that landed are no longer offerable; the refused ones stay
+      // note: The rows that landed are no longer offerable; the refused ones stay
       // selected so the user can see what already existed.
       setSelected(new Set(parsed.duplicates.map((repository) => repository.repo_id)));
       if (parsed.duplicates.length > 0) {
-        // The notice must be on screen BEFORE the list refetch, and that
+        // invariant: The notice must be on screen BEFORE the list refetch, and that
         // refetch must not tear the dialog (or its notice) down: `onAdded`
         // refreshes in the background, so this subtree stays mounted.
         setNotice({
@@ -805,7 +805,7 @@ export function AddRepositoryDialog({
         onAdded();
         return;
       }
-      // Everything selected landed: nothing is left to submit, so the next
+      // why: Everything selected landed: nothing is left to submit, so the next
       // open starts clean (the close itself also resets; this keeps the two
       // paths identical whether or not the caller honours it).
       resetDialog();
@@ -823,7 +823,7 @@ export function AddRepositoryDialog({
       open={open}
       onOpenChange={(next) => {
         if (next) return;
-        // Esc / overlay / the X button: the same reset the Cancel button runs.
+        // note: Esc / overlay / the X button: the same reset the Cancel button runs.
         resetDialog();
         onClose();
       }}
@@ -844,7 +844,7 @@ export function AddRepositoryDialog({
           notice={notice}
           busy={busy}
           onSelectApp={(next) => {
-            // The body hands back the App's address as a string; store the pick.
+            // note: The body hands back the App's address as a string; store the pick.
             setPickedAppId(Number(next));
             setSelected(new Set());
             setNotice(null);
@@ -870,7 +870,7 @@ export function AddRepositoryDialog({
   );
 }
 
-/** True when the caller may open the add dialog (owner/admin of the addressed workspace). */
+/** why: True when the caller may open the add dialog (owner/admin of the addressed workspace). */
 function canManageHere(boot: SpaBoot): boolean {
   const ref = boot.workspaceRef;
   const membership = (boot.memberships ?? []).find((row) => row.id === ref || row.slug === ref);
@@ -879,7 +879,7 @@ function canManageHere(boot: SpaBoot): boolean {
 
 export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
-  // Read per render (the AppsPage precedent): the switcher navigates with
+  // note: Read per render (the AppsPage precedent): the switcher navigates with
   // pushState + popstate, so the page base must track the URL it is on.
   const base = apiBase();
   const [targets, setTargets] = useState<TargetListRow[] | null>(null);
@@ -888,11 +888,11 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [dialogOpen, setDialogOpen] = useState(false);
 
-  // Every read bumps the stamp; a read whose stamp is no longer current is
+  // note: Every read bumps the stamp; a read whose stamp is no longer current is
   // stale (a newer read started) and must not write.
   const requestRef = useRef(0);
 
-  // The first load owns the skeleton; a reload (after an add) refreshes in the
+  // note: The first load owns the skeleton; a reload (after an add) refreshes in the
   // background so the list and the add dialog stay mounted — a skeleton flash
   // would unmount the dialog's notice. A failed background read keeps the rows
   // the page last read successfully rather than blanking them.
@@ -912,7 +912,7 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
       if (!background) setState("error");
       return;
     }
-    // The list is settled FIRST, and the secondary App read cannot take it
+    // invariant: The list is settled FIRST, and the secondary App read cannot take it
     // down: `apps` feeds only the add dialog, so a transient `/api/apps`
     // failure must not replace a successfully read list with the page error
     // face. An empty App list disables the dialog — the same face a workspace
@@ -923,7 +923,7 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
     try {
       const apps = await loadRepositoryApps(base);
       if (stamp !== requestRef.current) return;
-      // `null` is a shape failure and `[]` a real "no App": both block the
+      // note: `null` is a shape failure and `[]` a real "no App": both block the
       // dialog, but only the former is a read failure worth naming.
       setApps(apps ?? []);
       setAppsFailed(apps === null);
@@ -953,7 +953,7 @@ export function TargetsPage({ boot }: { boot: SpaBoot }) {
       targets={targets}
       onRetry={() => void load()}
       addControl={
-        // The trigger needs only the LIST: the page settles `/api/targets`
+        // invariant: The trigger needs only the LIST: the page settles `/api/targets`
         // first and reads `/api/apps` independently, so the control mounts while
         // the App list may still be in flight or failed. The dialog owns both
         // remaining faces — a read still pending, and the App list that came
@@ -998,12 +998,12 @@ export async function loadWorkspaceDefaults(base: string): Promise<WorkspaceDefa
   return parseWorkspaceDefaults(await fetchJson(`${base}/api/targets/all`));
 }
 
-/** The two detail variants' payloads — one target, or the workspace itself. */
+/** note: The two detail variants' payloads — one target, or the workspace itself. */
 type TargetDetailData =
   | { kind: "target"; payload: TargetPolicyPayload }
   | { kind: "all"; payload: WorkspaceDefaultsPayload };
 
-/** The fixed 所有仓库 entry's address segment (`routes.ts` names it). */
+/** note: The fixed 所有仓库 entry's address segment (`routes.ts` names it). */
 const ALL_TARGETS = "all";
 
 /**
@@ -1027,14 +1027,14 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
   const base = apiBase();
   const all = targetId === ALL_TARGETS;
   const [data, setData] = useState<TargetDetailData | null>(null);
-  // `missing` is the 404 face: the address names no target of this workspace,
+  // note: `missing` is the 404 face: the address names no target of this workspace,
   // which no retry can fix — the way out is the list, not a reload.
   const [state, setState] = useState<"loading" | "ok" | "missing" | "error">("loading");
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [tab, setTab] = useState<TargetDetailTab>(() =>
     parseTargetDetailTab(window.location.search),
   );
-  // The data tabs' filter state (window/repo/pr). In-page only: the repository
+  // invariant: The data tabs' filter state (window/repo/pr). In-page only: the repository
   // detail does not carry them in the address bar yet — the tab does.
   const [search, setSearch] = useState<AppDetailSearch>({
     tab: "settings",
@@ -1042,11 +1042,11 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     repo: "",
     pr: "",
   });
-  // Every read bumps the stamp; a read whose stamp is no longer the current one
+  // note: Every read bumps the stamp; a read whose stamp is no longer the current one
   // is stale (the address moved, or a newer read started) and must not write.
   const requestRef = useRef(0);
 
-  /** A reload: resolves whether a payload landed, so a save can tell a
+  /** why: A reload: resolves whether a payload landed, so a save can tell a
    *  completed refresh from a failed one. */
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}): Promise<boolean> => {
@@ -1083,9 +1083,9 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
 
   useEffect(() => {
     void load();
-    // A targetId or workspace push re-derives the URL state too.
+    // note: A targetId or workspace push re-derives the URL state too.
     setTab(parseTargetDetailTab(window.location.search));
-    // No cleanup: the next effect body's `load()` bumps the stamp, which is
+    // note: No cleanup: the next effect body's `load()` bumps the stamp, which is
     // what invalidates this run's continuation. Unmount needs none — React
     // drops a setState on an unmounted root.
   }, [load]);
@@ -1096,7 +1096,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  /** URL := state (replaceState — never fires popstate, loop-free). */
+  /** invariant: URL := state (replaceState — never fires popstate, loop-free). */
   function commitTab(next: string): void {
     const resolved = parseTargetDetailTab(`?tab=${next}`);
     window.history.replaceState(
@@ -1138,7 +1138,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
     description = repositoryCountLabel(locale, data.payload.target_count);
   } else {
     const { target } = data.payload;
-    // A row that names no repository at all states the 待安装 fact rather than
+    // note: A row that names no repository at all states the 待安装 fact rather than
     // printing an empty heading; one whose installation went away keeps the
     // `owner/name` it was reviewed under.
     const name = targetRepositoryName(target);
@@ -1157,7 +1157,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
       />
       {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
       <Tabs value={tab} onValueChange={commitTab}>
-        {/* Page-level tab face (DESIGN.md ### Tabs, line-tab idiom), the same bar
+        {/* note: Page-level tab face (DESIGN.md ### Tabs, line-tab idiom), the same bar
             the App detail mounts: full width over a bottom hairline, 16px
             triggers, so the two detail pages read as one family. */}
         <TabsList
@@ -1168,7 +1168,7 @@ export function TargetDetailPage({ boot, targetId }: { boot: SpaBoot; targetId: 
           <TabsTrigger value="insights">{t(locale, "targets.tabInsights")}</TabsTrigger>
           <TabsTrigger value="pull-requests">{t(locale, "targets.tabPullRequests")}</TabsTrigger>
         </TabsList>
-        {/* forceMount on every panel (mount-once tab switching, the App detail's
+        {/* note: forceMount on every panel (mount-once tab switching, the App detail's
             contract): the settings tab's typed gate draft and the two data tabs'
             loaded reads survive a switch — no unmount, no refetch. Radix does
             NOT hide forced-mounted inactive panels itself; the panel's

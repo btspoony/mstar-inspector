@@ -1,5 +1,5 @@
 /**
- * Page-level error state (AD-582): inline composed error —
+ * note: Page-level error state (AD-582): inline composed error —
  * alert icon, message line (defaulting to `common.loadFailed`), optional
  * retry button (`common.retry`) bound to the page's own reload. `role="
  * alert"` announces assertively (WCAG 4.1.3), matching the PageNotice
@@ -22,7 +22,7 @@ export function ErrorState({
   return (
     <div data-slot="error-state" role="alert" className="flex flex-wrap items-center gap-x-3 gap-y-2">
       <CircleAlert aria-hidden="true" className="size-4 shrink-0 text-destructive" />
-      {/* Falsy guard (QC round 1 F-008): an empty-string message must fall
+      {/* invariant: Falsy guard (QC round 1 F-008): an empty-string message must fall
           back too — `message ?? …` would render an empty <p> in the alert. */}
       <p className="text-sm text-foreground">{!message ? t(locale, "common.loadFailed") : message}</p>
       {onRetry ? (

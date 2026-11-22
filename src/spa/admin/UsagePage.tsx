@@ -1,5 +1,5 @@
 /**
- * Review usage — shared-bot vs own-bot reviews per live workspace for the
+ * note: Review usage — shared-bot vs own-bot reviews per live workspace for the
  * current UTC month (spec bot-scope-and-claiming § Review usage).
  *
  * Read-only and unpaged by decision: the route answers every live workspace in
@@ -24,7 +24,7 @@ import { TableSearch } from "./TableSearch";
 
 export function UsagePage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readUsage);
-  /** Client-side filter over the loaded rows — no URL state, no request. */
+  /** note: Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
 
   const columns: DataTableColumn<UsageRow>[] = [
@@ -53,7 +53,7 @@ export function UsagePage({ locale }: { locale: Locale }) {
     <section className="flex flex-col gap-6">
       <PageHeader
         title={t(locale, "admin.nav.usage")}
-        // The heading names the window, so it can only render once the read
+        // invariant: The heading names the window, so it can only render once the read
         // reports which month it answered for.
         description={state.status === "ready" ? t(locale, "admin.usage.window", { month: state.data.month }) : undefined}
         actions={<ConsolePath page="usage" />}
@@ -81,7 +81,7 @@ export function UsagePage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.workspaceId}
                 empty={
-                  // No-match copy is only true when there were rows to match.
+                  // invariant: No-match copy is only true when there were rows to match.
                   query && data.rows.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}

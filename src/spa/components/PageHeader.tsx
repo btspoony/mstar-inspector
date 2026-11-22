@@ -1,5 +1,5 @@
 /**
- * Page header band (DESIGN.md `composition primitives`; compass D4): the ONE
+ * note: Page header band (DESIGN.md `composition primitives`; compass D4): the ONE
  * spelling of the page title face — now on its own plane, the r3 band that
  * separates chrome from content (`surface-shell` + a `border-subtle` rule at
  * the foot), with the two slots pages vary on (a subtitle line and an action
@@ -21,11 +21,11 @@ export function PageHeader({
 }: {
   title: ReactNode;
   description?: ReactNode;
-  /** Beside the title, top-aligned with it. */
+  /** note: Beside the title, top-aligned with it. */
   actions?: ReactNode;
-  /** Above the title: the page's wayfinding link. */
+  /** note: Above the title: the page's wayfinding link. */
   backLink?: ReactNode;
-  /** The `MetricBand`, on this same plane. */
+  /** note: The `MetricBand`, on this same plane. */
   metrics?: ReactNode;
 }) {
   return (

@@ -28,7 +28,7 @@ import {
 } from "./data";
 
 /**
- * The 投递状态 tab of an App detail page: the bot's webhook deliveries — what
+ * note: The 投递状态 tab of an App detail page: the bot's webhook deliveries — what
  * arrived, from which repository, of which type, what happened, and why it was
  * refused.
  *
@@ -44,7 +44,7 @@ export const DELIVERY_WINDOWS = ["1", "7", "30", "90"] as const;
 
 const EMPTY_FILTERS: DeliveryFilters = { repo: "", since: "", type: "" };
 
-/** The "no filter" sentinel: the Select primitive refuses "" as an item value. */
+/** note: The "no filter" sentinel: the Select primitive refuses "" as an item value. */
 const ALL = "all";
 
 /** The last-verified line the credentials panel used to carry, now this tab's. */
@@ -90,7 +90,7 @@ export function AppDeliveryTab({
     };
   }, [appId, filters, offset, reloadNonce]);
 
-  /** A filter change resets to the first page: page 3 of the old filter addresses nothing. */
+  /** why: A filter change resets to the first page: page 3 of the old filter addresses nothing. */
   function applyFilter(next: Partial<DeliveryFilters>): void {
     setFilters((previous) => ({ ...previous, ...next }));
     setOffset(0);
@@ -160,7 +160,7 @@ export function DeliveryStatusView({
     },
     {
       header: t(locale, "appDetail.delivery.columnTime"),
-      // The raw SQLite UTC stamp stays reachable as the native tooltip.
+      // note: The raw SQLite UTC stamp stays reachable as the native tooltip.
       cell: (row) => (
         <span className="text-muted-foreground tabular-nums" title={row.created_at}>
           {formatRelativeTime(row.created_at, locale)}
@@ -179,7 +179,7 @@ export function DeliveryStatusView({
     },
     {
       header: t(locale, "appDetail.delivery.columnReason"),
-      // A refusal's reason is the one cell that explains a failure; every other
+      // why: A refusal's reason is the one cell that explains a failure; every other
       // outcome has none, so the cell stays empty rather than inventing copy.
       cell: (row) =>
         row.reason === null ? null : <span className="text-muted-foreground">{row.reason}</span>,
@@ -188,7 +188,7 @@ export function DeliveryStatusView({
 
   const repoOptions = page?.repos ?? [];
   const typeOptions = page?.types ?? [];
-  // I-000649: nothing is known until the first read RESOLVES. Reading a null
+  // note: I-000649: nothing is known until the first read RESOLVES. Reading a null
   // page as "zero rows" painted the empty state under the in-flight line, so
   // the operator was told the bot never received a webhook mid-request. The
   // table and its pager therefore render only once a page is in hand; the

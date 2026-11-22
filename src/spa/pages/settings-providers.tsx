@@ -20,19 +20,19 @@ import type { PendingAction } from "./SettingsPage";
 import { UsagePanel } from "./usage-panel";
 
 /**
- * AC-10: exactly one verification label per key row, from the four store
+ * invariant: AC-10: exactly one verification label per key row, from the four store
  * states. `reachable` is the weaker "the endpoint answered" claim and takes the
  * accent tone; `unverified` is the NULL column.
  */
 const KEY_STATUS = {
   ok: { tone: "success", label: "settings.providers.status.ok" },
-  // The probe could not reject the key: the accent tone, not success.
+  // note: The probe could not reject the key: the accent tone, not success.
   reachable: { tone: "accent", label: "settings.providers.status.reachable" },
   failed: { tone: "danger", label: "settings.providers.status.failed" },
   unverified: { tone: "neutral", label: "settings.providers.status.unverified" },
 } as const satisfies Record<string, { tone: StatusTone; label: string }>;
 
-/** Tier badge faces: the template tier is the one gold surface. */
+/** note: Tier badge faces: the template tier is the one gold surface. */
 const TIER_FACE = {
   builtin: { tone: "neutral", label: "settings.providers.tier.builtin" },
   template: { tone: "warn", label: "settings.providers.tier.template" },
@@ -99,22 +99,22 @@ export function LoadedProvidersSection({
   onVerify: (fields: Record<string, string>) => Promise<OpNotice>;
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
   onPending: (action: PendingAction) => void;
-  /** The add-flow (verify / template) outcomes — removes render group-locally (below). */
+  /** why: The add-flow (verify / template) outcomes — removes render group-locally (below). */
   notice: OpNotice | null;
-  /** (audit UI-45-05): the remove-key / remove-custom outcome, rendered beside the group the removed row belonged to. */
+  /** why: (audit UI-45-05): the remove-key / remove-custom outcome, rendered beside the group the removed row belonged to. */
   removeOutcome: { notice: OpNotice; slot: number } | null;
-  /** Where the dialogs' completed flow reports its outcome. */
+  /** note: Where the dialogs' completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
-  /** Re-reads the settings face after a model-list write (the sync flow's count). */
+  /** note: Re-reads the settings face after a model-list write (the sync flow's count). */
   onReload: () => Promise<unknown>;
 }) {
   const [addOpen, setAddOpen] = useState(false);
-  // The group whose Add key dialog is open; null = no add-key flow.
+  // note: The group whose Add key dialog is open; null = no add-key flow.
   const [addKeyTarget, setAddKeyTarget] = useState<{ provider: string; label: string; count: number } | null>(null);
   const catalogById: Record<string, CatalogProvider> = {};
   for (const provider of payload.provider_catalog) catalogById[provider.id] = provider;
   const groups = providerGroups(payload);
-  // (audit UI-45-05, regrouped): the captured slot indexes the PRE-POST
+  // note: (audit UI-45-05, regrouped): the captured slot indexes the PRE-POST
   // configured rows. A failure or the tolerant no-op leaves the row in place,
   // so its provider names the group that renders the notice. A success took the
   // row away and may have taken the whole group, so the notice renders under
@@ -136,7 +136,7 @@ export function LoadedProvidersSection({
       subtitle={t(locale, "settings.providersCopy")}
     >
       <div className="flex flex-col gap-3">
-        {/* A dialog trigger, not a disclosure: aria-haspopup names the
+        {/* note: A dialog trigger, not a disclosure: aria-haspopup names the
             overlay, and no region of this section is expanded by it. The
             flow section owns no action slot, so the trigger heads the body. */}
         <div className="flex flex-wrap items-center justify-end">
@@ -151,12 +151,12 @@ export function LoadedProvidersSection({
             {t(locale, "settings.addProvider")}
           </Button>
         </div>
-        {/* The section's region sits under the title: a completed flow's
+        {/* note: The section's region sits under the title: a completed flow's
             outcome survives the dialog's success-close (dialog-local state
             does not). A failed submit stays inside the dialog that produced
             it. */}
         <NoticeRegion notice={notice} />
-        {/* A removal whose group is gone has no row to sit beside; the notice
+        {/* note: A removal whose group is gone has no row to sit beside; the notice
             stays in the section so the outcome is never dropped. */}
         <NoticeRegion notice={orphanRemoveNotice} />
         {groups.length === 0 ? (
@@ -210,7 +210,7 @@ export function LoadedProvidersSection({
 }
 
 /**
- * The endpoint summary a template / custom group can state: the stored
+ * note: The endpoint summary a template / custom group can state: the stored
  * declaration first (it is what the pool is actually bound to), the catalog
  * entry as the prefill otherwise. A provider with no declaration and no
  * catalog endpoint (a key-only fallback id) has nothing to state.
@@ -231,7 +231,7 @@ function groupMeta(
   api: string;
   baseUrl: string;
   modelIds: readonly string[];
-  /** Whose list this is — the two are never presented as the same claim. */
+  /** invariant: Whose list this is — the two are never presented as the same claim. */
   source: "declaration" | "catalog";
 } | null {
   if (group.kind === "builtin") return null;
@@ -245,7 +245,7 @@ function groupMeta(
 }
 
 /**
- * One provider group: header identity (label + tier badge + aggregate counts +
+ * note: One provider group: header identity (label + tier badge + aggregate counts +
  * the add-key and declaration-remove actions), the key rows, the empty state of
  * a declaration with no key yet, and the endpoint meta-line with its model-id
  * disclosure (AC-20 / I-000208).
@@ -264,39 +264,39 @@ function ProviderGroupCard({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  /** The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
+  /** note: The numeric GitHub App id — the usage probe posts under `/api/apps/:appId`. */
   appId: number;
   group: ProviderGroup;
-  /** The catalog entry of this id, when the catalog knows it. */
+  /** why: The catalog entry of this id, when the catalog knows it. */
   catalog: CatalogProvider | undefined;
-  /** The vendor snapshot the catalog sizes came from. */
+  /** note: The vendor snapshot the catalog sizes came from. */
   limitsSnapshot: string;
-  /** The remove outcome this group owns, or null. */
+  /** note: The remove outcome this group owns, or null. */
   removeNotice: OpNotice | null;
   onPending: (action: PendingAction) => void;
-  /** Opens this group's add-key dialog — the second key no longer detours through the catalog. */
+  /** why: Opens this group's add-key dialog — the second key no longer detours through the catalog. */
   onAddKey: () => void;
-  /** The settings op submit (the model picker posts `update-provider-models` through it). */
+  /** why: The settings op submit (the model picker posts `update-provider-models` through it). */
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
-  /** Where the model picker's completed flow reports its outcome. */
+  /** note: Where the model picker's completed flow reports its outcome. */
   onOutcome: (notice: OpNotice) => void;
-  /** Re-reads the settings face after a write that changes the stored list. */
+  /** note: Re-reads the settings face after a write that changes the stored list. */
   onReload: () => Promise<unknown>;
 }) {
   const [modelsOpen, setModelsOpen] = useState(false);
-  // The model picker is a declaration-only flow: no declaration, no trigger.
+  // invariant: The model picker is a declaration-only flow: no declaration, no trigger.
   const [modelsEditOpen, setModelsEditOpen] = useState(false);
-  // I-000644: the sync flow is a declaration-only flow too — it replaces a
+  // invariant: I-000644: the sync flow is a declaration-only flow too — it replaces a
   // stored model list, so a provider with none has nothing to sync into.
   const [syncOpen, setSyncOpen] = useState(false);
-  // The key row whose usage panel is open, with its probe generation (the
+  // note: The key row whose usage panel is open, with its probe generation (the
   // re-click bumps the nonce, remounting the panel = re-probe). At most one
   // panel per group: another key's usage action closes this one. Every key
   // of the group shares the provider, so the group's catalog entry decides
   // whether the row's usage action exists at all.
   const [usageFor, setUsageFor] = useState<{ keyId: string; nonce: number } | null>(null);
   const meta = groupMeta(group, catalog);
-  // The disclosure region's id uses the provider id verbatim. Custom provider
+  // note: The disclosure region's id uses the provider id verbatim. Custom provider
   // ids are stored under the slug grammar (`[a-z0-9][a-z0-9-]{0,63}`), so no
   // character needs escaping; folding would only merge two distinct ids into
   // one DOM id.
@@ -344,7 +344,7 @@ function ProviderGroupCard({
               const usage = usageFor !== null && usageFor.keyId === key.keyId ? usageFor : null;
               const usagePanelId = `usage-panel-${key.keyId}`;
               return (
-                // The wrapper keeps the row + its panel one divide-y unit: the
+                // why: The wrapper keeps the row + its panel one divide-y unit: the
                 // divider lands on the wrapper, the panel sits under its row.
                 <div key={key.keyId}>
                   <ListRow
@@ -354,7 +354,7 @@ function ProviderGroupCard({
                         : t(locale, "settings.keyTooShort")
                     }
                     status={<StatusBadge tone={status.tone}>{t(locale, status.label)}</StatusBadge>}
-                    // AC-11: the timestamp is this secondary slot, never the label.
+                    // invariant: AC-11: the timestamp is this secondary slot, never the label.
                     meta={
                       key.verifiedStatus === "ok" && key.verifiedAt
                         ? t(locale, "settings.providers.verifiedAt", {
@@ -372,7 +372,7 @@ function ProviderGroupCard({
                             variant="outline"
                             size="sm"
                             aria-expanded={usage !== null}
-                            // The panel mounts only while open, so the control
+                            // invariant: The panel mounts only while open, so the control
                             // never names a missing element.
                             aria-controls={usage !== null ? usagePanelId : undefined}
                             onClick={() =>
@@ -407,7 +407,7 @@ function ProviderGroupCard({
                   {usage === null ? null : (
                     <div id={usagePanelId}>
                       <UsagePanel
-                        // The keyed remount IS the refresh: a re-click bumps
+                        // note: The keyed remount IS the refresh: a re-click bumps
                         // the nonce, a fresh panel re-posts the same probe.
                         key={`${key.keyId}:${usage.nonce}`}
                         locale={locale}
@@ -436,7 +436,7 @@ function ProviderGroupCard({
                 meta.modelIds.length === 1 ? "settings.providers.modelCountOne" : "settings.providers.modelCount",
                 { count: meta.modelIds.length },
               )}
-              {/* The vocabulary belongs to the App only when a declaration states
+              {/* invariant: The vocabulary belongs to the App only when a declaration states
                   it. A catalog prefill says so, in the same line, so the two
                   claims can never be read as one (I-000644). */}
               {meta.source === "catalog" ? ` (${t(locale, "settings.providers.catalogVocabulary")})` : null}
@@ -445,7 +445,7 @@ function ProviderGroupCard({
               type="button"
               className="text-(--tone-accent-fg)"
               aria-expanded={modelsOpen}
-              // The region mounts only while open, so the control never names
+              // invariant: The region mounts only while open, so the control never names
               // a missing element (the combobox precedent).
               aria-controls={modelsOpen ? modelsId : undefined}
               onClick={() => setModelsOpen(!modelsOpen)}
@@ -475,7 +475,7 @@ function ProviderGroupCard({
           </div>
         ) : null}
         {meta && modelsOpen ? (
-          // Light: `--surface-page` resolves to the same value as the card's own
+          // note: Light: `--surface-page` resolves to the same value as the card's own
           // surface, so this fill is dead there and the border carries the well.
           // The knowledge base's surface-tokens-can-collapse-across-themes.md
           // records the token arithmetic.
@@ -502,7 +502,7 @@ function ProviderGroupCard({
           storedModelIds={group.declaration.model_ids}
           storedModelsMeta={group.declaration.models_meta}
           catalogModelIds={modelsForProtocol(catalog, group.declaration.api)}
-          // The same id-only rule the Worker applies: the sizes belong to the
+          // invariant: The same id-only rule the Worker applies: the sizes belong to the
           // model, so the dialog pre-fills them whatever endpoint is declared.
           catalogLimits={catalog?.model_limits ?? {}}
           limitsSnapshot={limitsSnapshot}

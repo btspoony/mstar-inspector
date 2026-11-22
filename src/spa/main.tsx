@@ -10,7 +10,7 @@ import { DashboardPage } from "./pages";
 import { Router, matchRoute, usePathname } from "./router";
 
 /**
- * One-shot outcome carried over from the previous page (the delete flow).
+ * note: One-shot outcome carried over from the previous page (the delete flow).
  * Read and cleared once per page load, before React mounts — a render-time
  * read would be re-run by StrictMode's development double-invoke and lose it.
  */
@@ -21,7 +21,7 @@ function App() {
   const pathname = usePathname();
   const route = matchRoute(pathname);
 
-  // SPA router fallback guard — the server 302s first; this
+  // note: SPA router fallback guard — the server 302s first; this
   // catches any shell that renders without a session (defense in depth).
   // The login page itself is exempt (no self-loop).
   useEffect(() => {

@@ -33,24 +33,24 @@ import { AdminWriteError, readBots, setBotScope, useLoaded, type BotRow } from "
 import { ConsolePath, Screen } from "./screen";
 import { TableSearch } from "./TableSearch";
 
-/** The scope a committed write moves the bot to: the other of its two values. */
+/** note: The scope a committed write moves the bot to: the other of its two values. */
 function opposite(scope: BotRow["scope"]): BotRow["scope"] {
   return scope === "shared" ? "owned" : "shared";
 }
 
-/** The share's stamp as the table shows it: date and minute, UTC. */
+/** note: The share's stamp as the table shows it: date and minute, UTC. */
 function sharedStamp(value: string | null): string {
   return value === null ? "—" : value.slice(0, 16).replace("T", " ");
 }
 
 export function BotsPage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readBots);
-  /** The row awaiting confirmation — the dialog's only subject. */
+  /** invariant: The row awaiting confirmation — the dialog's only subject. */
   const [pending, setPending] = useState<BotRow | null>(null);
-  /** The row being written; only that row's action disables. */
+  /** invariant: The row being written; only that row's action disables. */
   const [busyId, setBusyId] = useState<string | null>(null);
   const [refusal, setRefusal] = useState<string | null>(null);
-  /** Client-side filter over the loaded rows — no URL state, no request. */
+  /** note: Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
 
   async function commit(row: BotRow): Promise<void> {
@@ -58,10 +58,10 @@ export function BotsPage({ locale }: { locale: Locale }) {
     setRefusal(null);
     try {
       await setBotScope(row.botId, opposite(row.scope));
-      // The accepted write re-reads: `sharedAt` is the server's stamp.
+      // note: The accepted write re-reads: `sharedAt` is the server's stamp.
       reload();
     } catch (error) {
-      // Generic message primary, the server's own refusal text as secondary detail.
+      // note: Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.bots.scopeChangeFailed", { name: row.name });
       setRefusal(
         error instanceof AdminWriteError
@@ -113,7 +113,7 @@ export function BotsPage({ locale }: { locale: Locale }) {
     {
       header: "",
       cell: (row) => {
-        // Sharing INTO the platform needs the official workspace; revoking a
+        // note: Sharing INTO the platform needs the official workspace; revoking a
         // share does not (the server allows it, so the stale share stays
         // revocable from here).
         if (row.scope === "owned" && !row.isOfficial) {
@@ -175,7 +175,7 @@ export function BotsPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.botId}
                 empty={
-                  // No-match copy is only true when there were rows to match.
+                  // invariant: No-match copy is only true when there were rows to match.
                   query && bots.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}
@@ -216,7 +216,7 @@ export function BotsPage({ locale }: { locale: Locale }) {
               </DialogDescription>
             </DialogHeader>
             <DialogFooter>
-              {/* Cancel first: Radix focuses the first focusable node, so Escape-or-cancel stays the default. */}
+              {/* why: Cancel first: Radix focuses the first focusable node, so Escape-or-cancel stays the default. */}
               <Button type="button" variant="outline" size="sm" onClick={() => setPending(null)}>
                 {t(locale, "admin.bots.cancelAction")}
               </Button>

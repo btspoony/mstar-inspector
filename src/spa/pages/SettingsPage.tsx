@@ -76,7 +76,7 @@ export type PendingAction =
   | { kind: "remove-custom"; providerId: string };
 
 /**
- * The 应用设置 tab body of the App detail page (App detail IA):
+ * note: The 应用设置 tab body of the App detail page (App detail IA):
  * a pure-ish presentational component — the data load, the page notice
  * channel, and the loading/error faces live on the AppDetailPage shell,
  * which threads the parsed payload, the model groups, the reload
@@ -92,13 +92,13 @@ function verifyReasonMessage(locale: SpaBoot["locale"], reason: string): string 
   return t(locale, "settings.verify.unexpected");
 }
 
-/** A value `t()` can interpolate; anything else would render `[object Object]` or leave `{name}` bare. */
+/** why: A value `t()` can interpolate; anything else would render `[object Object]` or leave `{name}` bare. */
 function isParamValue(value: unknown): value is string | number {
   return typeof value === "string" || typeof value === "number";
 }
 
 /**
- * True when `t()` can fill a refusal body's params in: absent, or a map whose
+ * why: True when `t()` can fill a refusal body's params in: absent, or a map whose
  * every value is a string or number. A malformed map (one object or array
  * value) refuses the keyed face, so the reader renders its generic copy
  * instead of `[object Object]` — the usage panel's `refusalOf` guard shape.
@@ -113,7 +113,7 @@ function paramsInterpolable(value: unknown): boolean {
   );
 }
 
-/** The refusal body's JSON object, or null when it is not one. */
+/** why: The refusal body's JSON object, or null when it is not one. */
 function refusalBody(body: string): Record<string, unknown> | null {
   try {
     const parsed: unknown = JSON.parse(body);
@@ -145,14 +145,14 @@ export function verifyRefusalMessage(locale: SpaBoot["locale"], status: number, 
   if (keyed !== undefined) return t(locale, keyed.key, keyed.params);
   switch (status) {
     case 400: {
-      // The provider's own rejections keep their per-reason face; only a body
+      // invariant: The provider's own rejections keep their per-reason face; only a body
       // that states no reason this page knows falls back to the family copy.
       const reason = parsed?.reason;
       return typeof reason === "string"
         ? verifyReasonMessage(locale, reason)
         : t(locale, "settings.providers.addKeyRefused");
     }
-    // A shared bot (the keyed body above) and a non-manager (the forbidden
+    // note: A shared bot (the keyed body above) and a non-manager (the forbidden
     // HTML page) are different causes with different remedies.
     case 403:
       return t(locale, "settings.providers.addKeyForbidden");
@@ -162,7 +162,7 @@ export function verifyRefusalMessage(locale: SpaBoot["locale"], status: number, 
       return t(locale, "settings.providers.addKeyConflict");
     case 429:
       return t(locale, "settings.providers.addKeyRateLimited");
-    // The Worker already splits these: a missing master key answers plain
+    // note: The Worker already splits these: a missing master key answers plain
     // text, a rejected write answers JSON. Both reuse its own wording.
     case 500:
       return t(
@@ -186,12 +186,12 @@ export function settingsErrorMessage(locale: SpaBoot["locale"], body: string): s
       message?: unknown;
       selector?: unknown;
     };
-    // Mapped 400s carry a machine-readable key plus the
+    // note: Mapped 400s carry a machine-readable key plus the
     // interpolation params — resolve it in the operator's locale. An unknown
     // key (newer server, stale client) falls through to the English face
     // below — fail-visible, never blank.
     if (typeof parsed.key === "string" && isDictionaryKey(parsed.key)) {
-      // A params map `t()` cannot fill in would print `[object Object]` or a
+      // invariant: A params map `t()` cannot fill in would print `[object Object]` or a
       // bare `{name}`: the localized generic face renders instead of the raw
       // JSON refusal body.
       if (!paramsInterpolable(parsed.params)) return t(locale, "common.loadFailed");
@@ -204,7 +204,7 @@ export function settingsErrorMessage(locale: SpaBoot["locale"], body: string): s
       return parsed.message.trim();
     }
   } catch {
-    /* plaintext 400 */
+    /* note: plaintext 400 */
   }
   return body.trim() || t(locale, "common.loadFailed");
 }
@@ -394,21 +394,21 @@ export function AppInfoSection({
   onReload,
 }: {
   locale: SpaBoot["locale"];
-  /** Every face — the identity, manage and Blocked app shapes share every field the card reads. */
+  /** why: Every face — the identity, manage and Blocked app shapes share every field the card reads. */
   app: SettingsIdentityAppMeta | SettingsAppMeta | AppIdentityCardApp | BotSettingsAppMeta;
   /**
-   * The App's stable workspace id from the payload — the delivery URL's first
+   * note: The App's stable workspace id from the payload — the delivery URL's first
    * segment. Deliberately NOT derived from the pathname: a route ref may be a
    * workspace slug, and the printed URL must carry the id GitHub is pointed at.
    */
   workspaceId: string;
-  /** Threaded from payload.can_manage at the call site — presentation only. */
+  /** invariant: Threaded from payload.can_manage at the call site — presentation only. */
   canManage: boolean;
-  /** The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
+  /** invariant: The manager face's background reload — present iff canManage; the refresh button renders only when both hold. */
   onReload?: () => Promise<unknown>;
 }) {
   const [refreshing, setRefreshing] = useState(false);
-  // Card-local op feedback (the NoticeRegion idiom): the refresh outcome
+  // note: Card-local op feedback (the NoticeRegion idiom): the refresh outcome
   // renders beside the button, never through a page-level channel.
   const [notice, setNotice] = useState<OpNotice | null>(null);
 
@@ -420,7 +420,7 @@ export function AppInfoSection({
         headers: { Accept: "application/json" },
       });
       const body = await res.text();
-      // Keyed 400 (settings.error.githubMetadataRefreshFailed) or any other
+      // note: Keyed 400 (settings.error.githubMetadataRefreshFailed) or any other
       // failure: the resolved message lands in this region and RETURNS before
       // any reload — the cached face stays on screen.
       if (!res.ok) {
@@ -428,14 +428,14 @@ export function AppInfoSection({
         setNotice(failure);
         return;
       }
-      // Success = the server re-cached the profile: a card-local notice plus a
+      // note: Success = the server re-cached the profile: a card-local notice plus a
       // background reload re-renders the card from the fresh payload without
       // a page banner.
       const outcome: OpNotice = { kind: "success", message: t(locale, "settings.appInfoRefreshDone") };
       setNotice(outcome);
       await onReload?.();
     } catch {
-      // Transport failure (offline, a restarting Worker, DNS): the fetch
+      // note: Transport failure (offline, a restarting Worker, DNS): the fetch
       // REJECTS, so there is no HTTP status to resolve a key from. Same
       // card-local error region, the shared save-failure copy, and no reload —
       // the cached face stays (the sibling op channels' `common.saveFailed`).
@@ -444,7 +444,7 @@ export function AppInfoSection({
       setRefreshing(false);
     }
   }
-  // Derived BEFORE the per-field JSX so the href and the aria-label key off
+  // why: Derived BEFORE the per-field JSX so the href and the aria-label key off
   // the same resolved destination; a member viewer or a non-derivable url
   // leaves settingsHref null and every face below is today's.
   const settingsHref =
@@ -485,7 +485,7 @@ export function AppInfoSection({
           <p className="text-sm text-muted-foreground">
             {t(locale, "settings.appInfoLocalId", { id: app.id })}
           </p>
-          {/* The delivery URL a webhook repoint needs (deploy doc § 3 sends
+          {/* note: The delivery URL a webhook repoint needs (deploy doc § 3 sends
               the operator here): manager-only, because the webhook URL is
               the App's delivery route and a member has no repoint duty.
               Both segments are internal ids, so the section shows them above.
@@ -543,24 +543,24 @@ export function AppInstallSection({
 }: {
   locale: SpaBoot["locale"];
   appId: string;
-  /** Every face: the three app shapes share the fields the block names. */
+  /** note: Every face: the three app shapes share the fields the block names. */
   app: AppInstallApp;
   installation: SettingsManagePayload["installation"];
-  /** The bot's live installations no target references — the bind source. */
+  /** note: The bot's live installations no target references — the bind source. */
   pendingInstallations: SettingsManagePayload["pending_installations"];
-  /** The server-derived Blocked state: no install action while true. */
+  /** note: The server-derived Blocked state: no install action while true. */
   blocked: boolean;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const slug = app.github_slug;
   const name = appDisplayName(app);
   const href = appInstallHref(slug);
-  /** The installation id being bound, so one row's action is not doubled. */
+  /** why: The installation id being bound, so one row's action is not doubled. */
   const [binding, setBinding] = useState<number | null>(null);
   const [bindFailed, setBindFailed] = useState(false);
 
   /**
-   * Bind one pending installation to this target. The route upserts
+   * note: Bind one pending installation to this target. The route upserts
    * `bot_installations` directly (the webhook's own upsert) after checking the
    * id answers the pending read, so a refusal (an unshared bot, an id the bot
    * never reported) is reported here instead of silently reloading.
@@ -722,7 +722,7 @@ export function RuntimeHarnessEditor({
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
 }) {
   const [selected, setSelected] = useState(payload.app.sandbox_image_id);
-  // The save outcome rides the button next to the trigger — the busy guard
+  // note: The save outcome rides the button next to the trigger — the busy guard
   // keeps the save button disabled while its POST is in flight, and the
   // success copy survives as assistive text, never as a notice box.
   const [notice, setNotice] = useState<OpNotice | null>(null);
@@ -737,7 +737,7 @@ export function RuntimeHarnessEditor({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
+    setNotice(null); // note: the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSettings({ op: "save-sandbox-image", sandbox_image_id: selected });
       if (outcome.kind === "success") {
@@ -755,7 +755,7 @@ export function RuntimeHarnessEditor({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center gap-2">
-        {/* Content-adaptive shell — no reserved min width, so the
+        {/* why: Content-adaptive shell — no reserved min width, so the
             trigger sits immediately next to the save button; flex-wrap keeps
             the button wrapping below cleanly on narrow screens. */}
         <div className="w-fit max-w-xs">
@@ -825,7 +825,7 @@ export function reviewDepthOptions(
 }
 
 /**
- * One danger-zone row: the control's title and what it does to deliveries on
+ * note: One danger-zone row: the control's title and what it does to deliveries on
  * the left, the control itself on the right. The row explains the action; the
  * confirm dialog (owned by the page) explains what happens if you proceed.
  */
@@ -858,16 +858,16 @@ export function OpsSection({
   locale: SpaBoot["locale"];
   payload: TargetReviewSlice;
   onPending: (action: PendingAction) => void;
-  /** The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
+  /** why: The confirmed ops outcome (pause/resume/disable/enable/delete — delete carries its own copy). */
   notice: OpNotice | null;
   /**
-   * Whether the bot's own lifecycle is this workspace's to drive. A Blocked
+   * note: Whether the bot's own lifecycle is this workspace's to drive. A Blocked
    * target keeps the pause (target-owned); the bot's disable/enable/delete
    * would be refused by the server, so they never render.
    */
   botWritable: boolean;
   /**
-   * Whether this surface speaks for the review TARGET. The App page does not:
+   * note: Whether this surface speaks for the review TARGET. The App page does not:
    * its pause belongs to the repository's own page, so the row never renders
    * there — a POST from the App address would edit policy the page does not own.
    */
@@ -875,7 +875,7 @@ export function OpsSection({
 }) {
   const { app } = payload;
   const paused = isPaused(app);
-  // A disconnected App has no review state to pause: the section summary
+  // note: A disconnected App has no review state to pause: the section summary
   // carries that state, and the first row drops out.
   return (
     <FlowSection
@@ -924,7 +924,7 @@ export function OpsSection({
   );
 }
 
-/** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
+/** note: Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
 
 /**
@@ -943,11 +943,11 @@ export async function submitWorkspaceName(
   try {
     ({ status, body } = await putJson(`${apiBase()}/api/settings/name`, { name }));
   } catch {
-    // Nothing landed, so nothing to patch: the list stays as it is.
+    // why: Nothing landed, so nothing to patch: the list stays as it is.
     return { kind: "error", message: t(locale, "workspace.nameFailed") };
   }
   const outcome = settingsOpOutcome(locale, status, body, t(locale, "workspace.nameSaved"));
-  // Only a landed write relabels the switcher; a refusal leaves the list alone.
+  // invariant: Only a landed write relabels the switcher; a refusal leaves the list alone.
   if (outcome.kind === "success") rename(workspaceRefOf(window.location.pathname), name);
   return outcome;
 }
@@ -959,14 +959,14 @@ export async function submitWorkspaceName(
  * cannot go stale. The control has no path to rewrite: the URL is the id.
  */
 export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["locale"]; storedName: string }) {
-  // Only what the operator has typed is local; the display falls back to the
+  // invariant: Only what the operator has typed is local; the display falls back to the
   // stored name, so an external change lands without a mount-time copy.
   const [draft, setDraft] = useState<string | null>(null);
   const name = draft ?? storedName;
-  // Section-local channel: an op outcome never rides the page-level notice.
+  // invariant: Section-local channel: an op outcome never rides the page-level notice.
   const [nameNotice, setNameNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
-  // The save rides the button: the signal drives its face, the success copy
+  // note: The save rides the button: the signal drives its face, the success copy
   // survives as assistive text beside it — never as a notice box.
   const signal = useSaveSignal();
   const [savedCopy, setSavedCopy] = useState<string | null>(null);
@@ -974,7 +974,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     const next = name.trim();
     if (next.length === 0) {
       setNameNotice({ kind: "error", message: t(locale, "workspace.nameRequired") });
@@ -986,7 +986,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
     }
     setBusy(true);
     signal.start();
-    setNameNotice(null); // the retry clears this cluster's own stale outcome first
+    setNameNotice(null); // note: the retry clears this cluster's own stale outcome first
     try {
       const outcome = await submitWorkspaceName(next, locale, renameMembership);
       if (outcome.kind === "success") {
@@ -1036,7 +1036,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
 }
 
 /**
- * One integer setting of the current workspace: fetch → draft → save → notice,
+ * why: One integer setting of the current workspace: fetch → draft → save → notice,
  * with the degraded-read repair path. The concurrency cap and the review-gate
  * default floor share this shell verbatim, so a fix to the degraded retry, the
  * empty-draft guard or the 2xx-with-a-non-JSON body lands once instead of
@@ -1077,15 +1077,15 @@ function NumberSettingCard({
   const [loaded, setLoaded] = useState<NumberSettingValue | null>(null);
   const [failed, setFailed] = useState(false);
   const [draft, setDraft] = useState<string | null>(null);
-  // Section-local channel, like the name card's: an op outcome never rides the
+  // invariant: Section-local channel, like the name card's: an op outcome never rides the
   // page-level notice.
   const [cardNotice, setCardNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
-  // The save rides the button: the signal drives its face, the success copy
+  // note: The save rides the button: the signal drives its face, the success copy
   // survives as assistive text beside it — never as a notice box.
   const signal = useSaveSignal();
   const [savedCopy, setSavedCopy] = useState<string | null>(null);
-  // A degraded read starts the field empty and offers two ways out: type a
+  // note: A degraded read starts the field empty and offers two ways out: type a
   // value (the repair write) or re-read.
   const [attempt, setAttempt] = useState(0);
 
@@ -1108,19 +1108,19 @@ function NumberSettingCard({
     return () => {
       live = false;
     };
-    // The parse pair is a per-card constant; only a retry re-reads.
+    // invariant: The parse pair is a per-card constant; only a retry re-reads.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy || loaded === null) return; // in-flight guard — no double submit
+    if (busy || loaded === null) return; // note: in-flight guard — no double submit
     if (concurrencySubmitBlocked(loaded.degraded, draft)) return;
-    // An untouched form must submit the STORED value, never a derived one: the
+    // invariant: An untouched form must submit the STORED value, never a derived one: the
     // stored number is what the tenant set.
     setBusy(true);
     signal.start();
-    setCardNotice(null); // the retry clears this cluster's own stale outcome first
+    setCardNotice(null); // note: the retry clears this cluster's own stale outcome first
     const submitted = Number((draft ?? String(loaded.value)).trim());
     try {
       const { status, body } = await putJson(`${apiBase()}${putPath}`, {
@@ -1128,12 +1128,12 @@ function NumberSettingCard({
       });
       const outcome = settingsOpOutcome(locale, status, body, t(locale, copy.saved));
       if (outcome.kind === "success") {
-        // The stored value is the server's answer, never the typed draft. A
+        // invariant: The stored value is the server's answer, never the typed draft. A
         // landed 2xx whose body is not JSON still stored a value — the write
         // succeeded, so the submitted number stands in for the unreadable one
         // instead of reporting the save as a failure.
         const stored = parseStored(body) ?? submitted;
-        // This write is the workspace's own level — the only level this
+        // invariant: This write is the workspace's own level — the only level this
         // payload's `degraded` reports — so the accepted value is now known
         // and trustworthy: show it and clear the flag.
         setLoaded((previous) => previous && { ...previous, value: stored, degraded: false });
@@ -1161,7 +1161,7 @@ function NumberSettingCard({
       ) : (
         <div className="flex flex-col gap-3">
           {loaded.degraded ? (
-            // The store could not trust the stored value, so the payload's
+            // safety: The store could not trust the stored value, so the payload's
             // number is a fallback the tenant never chose. The field starts
             // empty and never shows that fallback; a typed value OR the re-read
             // repairs the state.
@@ -1170,7 +1170,7 @@ function NumberSettingCard({
               message={t(locale, copy.unreadable, { min: loaded.min, max: loaded.max })}
             />
           ) : null}
-          {/* The range line sits outside the row: inside the stack, `items-end`
+          {/* note: The range line sits outside the row: inside the stack, `items-end`
               would align the button to the hint instead of the input. */}
           <div className="flex flex-col gap-1.5">
             <form className="flex flex-wrap items-end gap-2" onSubmit={(event) => void onSubmit(event)}>
@@ -1315,7 +1315,7 @@ export async function postPinnedOutcome(
 }
 
 /**
- * The draft tab's client-side id. A colon can never appear in a
+ * invariant: The draft tab's client-side id. A colon can never appear in a
  * stored chain name (MODEL_CHAIN_NAME_PATTERN allows only lowercase letters,
  * digits and hyphens), so the sentinel is collision-free with real tab ids.
  * It never reaches the server — the draft saves under the ENTERED name
@@ -1354,29 +1354,29 @@ export function ChainsSection({
   payload: BotConfigSections;
   groups: ModelOptionGroup[];
   onSettings: (fields: Record<string, string>) => Promise<OpNotice>;
-  /** Bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
+  /** why: Bugbot fix: the draft create — resolves an error when the awaited reload fails, so the panel keeps the draft open. */
   onCreateDraft: (fields: Record<string, string>) => Promise<OpNotice>;
   onRemoveChain: (name: string) => void;
-  /** The dialog-confirmed remove-chain outcome. */
+  /** note: The dialog-confirmed remove-chain outcome. */
   notice: OpNotice | null;
-  /** Where the draft panel reports its success (the draft closes, so its panel cannot render it). */
+  /** invariant: Where the draft panel reports its success (the draft closes, so its panel cannot render it). */
   onOutcome: (notice: OpNotice) => void;
 }) {
-  // Default and named chains are peer tabs. The selection coerces
+  // note: Default and named chains are peer tabs. The selection coerces
   // through activeChainTabId so a delete or a stale payload lands on the
   // non-removable Default tab instead of pointing at a removed chain.
   const [selectedTab, setSelectedTab] = useState<string>(DEFAULT_CHAIN_NAME);
-  // `+ 新建链` opens a DRAFT peer tab instead of a disclosure —
+  // note: `+ 新建链` opens a DRAFT peer tab instead of a disclosure —
   // the create flow is itself a tab, edited in place like every other chain.
   // One boolean of state, so a second draft can never exist while one lives.
   const [draftOpen, setDraftOpen] = useState(false);
-  // (AD-551): the draft name is owned HERE so the tab trigger can
+  // why: (AD-551): the draft name is owned HERE so the tab trigger can
   // mirror the name input live; the panel is controlled (name/onNameChange).
   // Lifting it retires the panel's unmount-clears-name reset — the two ways
   // a draft closes (discard + created) each reset it explicitly below.
   const [draftName, setDraftName] = useState("");
   const storedTabs = modelChainTabs(payload.model_chains);
-  // The draft is a client-side UI element composed AFTER the last named tab
+  // note: The draft is a client-side UI element composed AFTER the last named tab
   // (never before Default) — the payload model itself is never mutated.
   // Composing it into `tabs` makes the draft selectable while it exists and
   // lets activeChainTabId coerce the selection once it is gone: a discard
@@ -1384,11 +1384,11 @@ export function ChainsSection({
   // (draft state is component state, never payload-derived).
   const draft = draftOpen ? DRAFT_CHAIN_TAB : null;
   const tabs = draft ? [...storedTabs, draft] : storedTabs;
-  // Panels derive from the STORED tabs only — the draft panel renders
+  // invariant: Panels derive from the STORED tabs only — the draft panel renders
   // separately below, so the composed list must never leak into it.
   const namedTabs = storedTabs.filter((tab) => !tab.isDefault);
 
-  // + 新建链: open (or re-focus) the draft and auto-select it — the editor
+  // note: + 新建链: open (or re-focus) the draft and auto-select it — the editor
   // the click promises is the panel the user lands in.
   function openDraft(): void {
     setDraftOpen(true);
@@ -1402,7 +1402,7 @@ export function ChainsSection({
     >
       <div className="flex flex-col gap-6">
         <Tabs value={activeChainTabId(tabs, selectedTab)} onValueChange={setSelectedTab}>
-          {/* The add-chain entry keeps its strip placement: a TabsList
+          {/* why: The add-chain entry keeps its strip placement: a TabsList
               SIBLING (never inside the role=tablist) — outline control, plus
               glyph, localized label. The click no longer toggles a
               disclosure form between strip and Default panel; it opens the
@@ -1423,7 +1423,7 @@ export function ChainsSection({
               {t(locale, "settings.addChain")}
             </Button>
           </div>
-          {/* forceMount keeps every editor mounted (as the pre-tab list did),
+          {/* why: forceMount keeps every editor mounted (as the pre-tab list did),
               so switching tabs never silently drops in-progress edits. Radix
               itself hides nothing once forceMount pins every panel to
               present — inactive panels are hidden by the local TabsContent
@@ -1439,7 +1439,7 @@ export function ChainsSection({
           {namedTabs.map((tab) => (
             <TabsContent key={tab.id} forceMount value={tab.id}>
               <div className="mb-2 flex items-center justify-between gap-2">
-                {/* (review deferral): the panel title rides the SAME
+                {/* note: (review deferral): the panel title rides the SAME
                     SectionCardTitle face as every card title — no second
                     heading-16 spelling at this site. */}
                 <SectionCardTitle>{tab.id}</SectionCardTitle>
@@ -1465,14 +1465,14 @@ export function ChainsSection({
                 onCreate={onCreateDraft}
                 onOutcome={onOutcome}
                 onDiscard={() => {
-                  // (AD-551): the lifted name no longer dies with the
+                  // note: (AD-551): the lifted name no longer dies with the
                   // panel's unmount — discard resets it so a reopened draft
                   // starts blank (today's semantics, kept).
                   setDraftOpen(false);
                   setDraftName("");
                 }}
                 onCreated={(created) => {
-                  // Success: the create handler awaited the reload and it
+                  // note: Success: the create handler awaited the reload and it
                   // landed (createDraftChain resolves an error outcome
                   // otherwise), so the stored-name tab exists — the draft is
                   // removed and the real tab is selected. The draft lives in
@@ -1486,7 +1486,7 @@ export function ChainsSection({
             </TabsContent>
           ) : null}
         </Tabs>
-        {/* The section's region: the dialog-confirmed remove and the
+        {/* note: The section's region: the dialog-confirmed remove and the
             draft's forwarded save success render here, below every tabpanel —
             the editors themselves render their save outcomes in-panel. */}
         <NoticeRegion notice={notice} />
@@ -1496,7 +1496,7 @@ export function ChainsSection({
 }
 
 /**
- * Seats: the role → chain mapping is its own card below chain
+ * why: Seats: the role → chain mapping is its own card below chain
  * management, independent of the chain tabs. Every select offers Default
  * first, then the current named chains from the same tab model; a
  * stored name that no longer resolves (deleted chain, stale payload) renders
@@ -1518,14 +1518,14 @@ export function SeatsSection({
   const namedTabs = tabs.filter((tab) => !tab.isDefault);
   const roleHint = (role: string) =>
     role === "mstar-review-seat" ? t(locale, "settings.roleHintReviewSeat") : t(locale, "settings.roleHintDeep");
-  // Stable id-set key over the offered chain tabs: the re-derivation effect
+  // note: Stable id-set key over the offered chain tabs: the re-derivation effect
   // below keys on it so payload object identity churn alone never fires it.
   const tabIdSetKey = tabs.map((tab) => tab.id).join();
   const [seats, setSeats] = useState<Record<string, string>>(() =>
     seatRoleValues(payload.model_role_ids, payload.model_roles, tabs),
   );
 
-  // The seat state re-derives from the payload ONLY when the offered
+  // invariant: The seat state re-derives from the payload ONLY when the offered
   // chain-tab set changes (tabIdSetKey dep — a chain delete cascade or
   // create); unrelated-op background reloads keep unsaved seat picks. Stale
   // references the offered set no longer contains still coerce to the safe
@@ -1534,7 +1534,7 @@ export function SeatsSection({
     setSeats(seatRoleValues(payload.model_role_ids, payload.model_roles, tabs));
   }, [tabIdSetKey]);
 
-  // The seat save rides its button; a failure reports in this card, under
+  // note: The seat save rides its button; a failure reports in this card, under
   // its own trigger, and the success copy survives as assistive text.
   const [notice, setNotice] = useState<OpNotice | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1544,7 +1544,7 @@ export function SeatsSection({
   async function submit(): Promise<void> {
     setBusy(true);
     signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
+    setNotice(null); // note: the retry clears this cluster's own stale outcome first
     try {
       const fields: Record<string, string> = { op: "save-roles" };
       for (const role of payload.model_role_ids) {
@@ -1572,7 +1572,7 @@ export function SeatsSection({
           void submit();
         }}
       >
-        {/* (I-000648) One row per seat: the seat's identity and the chain it
+        {/* note: (I-000648) One row per seat: the seat's identity and the chain it
             runs on read together, so five seats are five scannable lines
             instead of five stacked blocks. The split is the ops-row idiom
             (identity left, control on the trailing edge) and it wraps as whole
@@ -1606,7 +1606,7 @@ export function SeatsSection({
             </label>
           ))}
         </div>
-        {/* The save is the section's, not the last seat's: its own trailing
+        {/* note: The save is the section's, not the last seat's: its own trailing
             row after the list, on the section's action edge. */}
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Button type="submit" disabled={busy} status={signal.status === "idle" ? undefined : signal.status}>
@@ -1658,21 +1658,21 @@ export function DraftChainPanel({
 }: {
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
-  /** (AD-551): the controlled draft name, owned by ChainsSection. */
+  /** note: (AD-551): the controlled draft name, owned by ChainsSection. */
   name: string;
   onNameChange: (name: string) => void;
-  /** The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
+  /** why: The draft create (op=add-chain); resolves an error when the awaited reload fails so the draft stays open. */
   onCreate: (fields: Record<string, string>) => Promise<OpNotice>;
-  /** Forwards the SUCCESS outcome to the chains card's region. */
+  /** note: Forwards the SUCCESS outcome to the chains card's region. */
   onOutcome: (notice: OpNotice) => void;
   onDiscard: () => void;
-  /** Fired after a successful create (the reload has landed) with the stored name. */
+  /** note: Fired after a successful create (the reload has landed) with the stored name. */
   onCreated: (name: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
   return (
     <div className="flex flex-col gap-3">
-      {/* (review deferral): the draft panel's own visible face —
+      {/* note: (review deferral): the draft panel's own visible face —
           the name field is the panel's identity header, so it renders as a
           compact header block (w-fit + w-64, the invite-input idiom) instead
           of a full-width stretch. The named panels open [identity title] +
@@ -1697,7 +1697,7 @@ export function DraftChainPanel({
           setBusy(true);
           return onCreate({ op: "add-chain", name, chain: value })
             .then((outcome) => {
-              // The trimmed name is what the server stored (it trims before
+              // note: The trimmed name is what the server stored (it trims before
               // validating), so that is the real tab's id. Success here
               // already implies the awaited reload landed (onCreate resolves
               // an error outcome otherwise); errors — including a POST that
@@ -1710,7 +1710,7 @@ export function DraftChainPanel({
               return outcome;
             })
             .finally(() => {
-              // Success closes the draft tab (onCreated) and unmounts this
+              // note: Success closes the draft tab (onCreated) and unmounts this
               // panel, so on success this reset is a deliberate React 19
               // setState-after-unmount no-op (QC fix round, F-001).
               setBusy(false);
@@ -1718,7 +1718,7 @@ export function DraftChainPanel({
         }}
         saveLabel={t(locale, "settings.saveChain")}
         actions={
-          // (AD-552): 放弃 joins the save row instead of the old
+          // note: (AD-552): 放弃 joins the save row instead of the old
           // hover-only ghost row below it — outline + small fixed width so it
           // is visible without hover, save stays primary on the left. Still
           // no confirmation, and disabled under the same busy window as the
@@ -1743,11 +1743,11 @@ function ChainEditor({
   locale: SpaBoot["locale"];
   groups: ModelOptionGroup[];
   stored: string | null;
-  /** Resolves the save outcome; rendered in this editor's region. */
+  /** note: Resolves the save outcome; rendered in this editor's region. */
   onSave: (chain: string) => Promise<OpNotice>;
   saveLabel?: string;
   /**
-   * (AD-552): caller actions rendered in the control row, right of the
+   * note: (AD-552): caller actions rendered in the control row, right of the
    * save button (pure render insertion — save semantics, the busy gate and
    * the outcome region are untouched). Absent, the row carries the picker,
    * the add button and the save button only (Default / named-chain editors).
@@ -1756,7 +1756,7 @@ function ChainEditor({
 }) {
   const [chain, setChain] = useState(() => splitModelChain(stored));
   const [pick, setPick] = useState<string | undefined>(undefined);
-  // Each editor instance owns its region — a failed chain save renders
+  // note: Each editor instance owns its region — a failed chain save renders
   // inside its own tabpanel (the user-reported 400 case), never on the page
   // top; the success rides the save button, its copy surviving as assistive
   // text. The next save replaces the content (replace-on-submit).
@@ -1773,7 +1773,7 @@ function ChainEditor({
   async function save(): Promise<void> {
     setBusy(true);
     signal.start();
-    setNotice(null); // the retry clears this cluster's own stale outcome first
+    setNotice(null); // note: the retry clears this cluster's own stale outcome first
     try {
       const outcome = await onSave(chain.join(", "));
       if (outcome.kind === "success") {
@@ -1826,7 +1826,7 @@ function ChainEditor({
             >
               <span className="font-mono text-sm">{selector}</span>
               <div className="flex items-center gap-1">
-                {/* I-000645: order IS the stored `chain` string, so a move is a
+                {/* why: I-000645: order IS the stored `chain` string, so a move is a
                     plain swap in this UNSAVED array — the existing
                     `chain.join(", ")` save then persists the new order with no
                     route or schema change. Moving is a local edit exactly like
@@ -1854,7 +1854,7 @@ function ChainEditor({
                 >
                   <ChevronDown aria-hidden="true" />
                 </Button>
-                {/* (review deferral): removing a selector edits
+                {/* note: (review deferral): removing a selector edits
                     the UNSAVED local list — recoverable by re-picking, no
                     dialog, no server op — so it rides the AD-552 local-edit
                     face (outline + sm, the discard idiom). The destructive red
@@ -1872,7 +1872,7 @@ function ChainEditor({
           ))}
         </ul>
       )}
-      {/* One control row (the RuntimeHarnessEditor shape): the picker keeps
+      {/* why: One control row (the RuntimeHarnessEditor shape): the picker keeps
           its content-adaptive shell — no reserved slot — and the add, save and
           caller actions sit beside it at their intrinsic widths. The row hangs
           off the panel's trailing edge (I-000647) so it can never run past the

@@ -48,14 +48,14 @@ import {
 } from "./data";
 import { PageNotice, type NoticeKind } from "./PageNotice";
 
-/** Row action awaiting manager confirmation in the shared dialog. */
+/** note: Row action awaiting manager confirmation in the shared dialog. */
 type PendingAction =
   | { kind: "role"; member: MemberRow; nextRole: "admin" | "member" }
   | { kind: "remove"; member: MemberRow }
   | { kind: "revoke"; invite: InviteRow };
 
 /**
- * Workspace members + pending invitations. Every read/write hangs off
+ * note: Workspace members + pending invitations. Every read/write hangs off
  * the page's workspace base (`apiBase`), so the same component serves
  * `/dashboard/<ref>/members` and its data never escapes the workspace.
  *
@@ -188,10 +188,10 @@ export function WorkspacePanel({
   memberCount: number;
   deploymentMode: SpaBoot["deploymentMode"];
 }) {
-  // A self-hosted deployment caps nothing, so its mode decides the reading —
+  // why: A self-hosted deployment caps nothing, so its mode decides the reading —
   // not a limit that the payload could only carry by breaking that contract.
   const memberLimit = deploymentMode === "self-hosted" ? null : workspace.memberLimit;
-  // A pending invite occupies a seat at the cap, so the seat state reads the
+  // why: A pending invite occupies a seat at the cap, so the seat state reads the
   // same count the invite gate enforces — never the member rows alone.
   const slots =
     memberLimit === null ? null : memberLimit - (memberCount + workspace.pendingInvites);
@@ -206,7 +206,7 @@ export function WorkspacePanel({
             hint={workspace.plan.id === "free" ? t(locale, "members.planFreeHint") : undefined}
           />
         )}
-        {/* The seats card carries two hint lines: the pending-invite line
+        {/* note: The seats card carries two hint lines: the pending-invite line
             when there is one, then the seat countdown or the no-limit note. */}
         <StatCard
           label={t(locale, "members.membersLabel")}
@@ -330,7 +330,7 @@ export function MembersList({
           {members.map((member) => {
             const isViewer =
               viewerLogin !== null && member.github_login.toLowerCase() === viewerLogin.toLowerCase();
-            // Client-side mirror of the server guards: the sole owner
+            // note: Client-side mirror of the server guards: the sole owner
             // cannot be demoted or removed; an `admin` may only remove
             // plain members and may not change any role.
             // The routes remain the SSOT (conditional UPDATE/DELETE
@@ -352,7 +352,7 @@ export function MembersList({
                   </>
                 }
                 status={<StatusBadge tone="neutral">{t(locale, `members.role.${member.role}`)}</StatusBadge>}
-                // Shared relative-time copy (F-07); the raw SQLite UTC stamp
+                // note: Shared relative-time copy (F-07); the raw SQLite UTC stamp
                 // stays reachable as the native tooltip.
                 meta={
                   <span className="tabular-nums" title={member.created_at}>
@@ -416,7 +416,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   const roleLabel = (role: WorkspaceRole): string => t(locale, `members.role.${role}`);
 
-  // Background reloads (op-triggered refreshes) keep the loaded page mounted:
+  // why: Background reloads (op-triggered refreshes) keep the loaded page mounted:
   // they must not flip state back to "loading" — that unmount would replace
   // the whole page (heading, invite form, tables and any visible op PageNotice)
   // with the skeleton for one API round trip (background-reload
@@ -456,7 +456,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   async function onInvite(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double-submit
+    if (busy) return; // note: in-flight guard — no double-submit
     const key = inviteLoginNoticeKey(inviteLogin);
     if (key) {
       setNotice({ kind: "error", message: t(locale, key, { login: inviteLogin }) });
@@ -468,14 +468,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     try {
       const { status, body } = await postMemberWrite(base, { kind: "invite", login: trimmed, role: inviteRole });
       if (status >= 400) {
-        // 409 `invite.pending_exists` is the one refusal with its own copy —
+        // note: 409 `invite.pending_exists` is the one refusal with its own copy —
         // the invite is already pending, which is not an error the actor must
         // retry.
         const failure = inviteFailureNotice(status, body, existed);
         setNotice({ kind: failure.kind, message: t(locale, failure.key, { login: trimmed }) });
         return;
       }
-      // Background reload: the page (and this op's notice) stays mounted —
+      // note: Background reload: the page (and this op's notice) stays mounted —
       // no skeleton flash while the lists refresh (F-58-1).
       await load({ background: true });
       setNotice({
@@ -484,7 +484,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
       });
       setInviteLogin("");
     } catch {
-      // Network failure — postForm throws on fetch rejection.
+      // note: Network failure — postForm throws on fetch rejection.
       setNotice({ kind: "error", message: t(locale, "notice.error.inviteFailed", { login: trimmed }) });
     } finally {
       setBusy(false);
@@ -528,11 +528,11 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
             : { kind: "success", message: t(locale, "notice.success.removedMember", { login: member.github_login }) },
         );
       }
-      // Background reload: the outcome notice above stays visible — no
+      // note: Background reload: the outcome notice above stays visible — no
       // skeleton flash while the lists refresh (F-58-1).
       await load({ background: true });
     } catch {
-      // Network failure — postForm throws on fetch rejection.
+      // note: Network failure — postForm throws on fetch rejection.
       setNotice({
         kind: "error",
         message: t(
@@ -552,11 +552,11 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
   }
 
   async function onConfirmDelete(): Promise<void> {
-    if (busy) return; // in-flight guard — no double-submit
+    if (busy) return; // note: in-flight guard — no double-submit
     setBusy(true);
     try {
       const status = await deleteWorkspace(base);
-      // A success navigates away; only a refusal returns here.
+      // invariant: A success navigates away; only a refusal returns here.
       if (status >= 400) {
         setDeleteOpen(false);
         const refusal = deleteRefusal(status);
@@ -564,14 +564,14 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
           leaveWorkspaceForDashboard();
           return;
         }
-        // 403: the refreshed `memberRole` removes the stale owner-only entry.
+        // invariant: 403: the refreshed `memberRole` removes the stale owner-only entry.
         // A reload that itself failed already published the load-failure
         // notice; that one outranks the refusal copy, so leave it standing.
         const refreshed = refusal.next === "reload" ? await load({ background: true }) : true;
         if (refreshed) setNotice({ kind: refusal.kind, message: t(locale, refusal.key) });
       }
     } catch {
-      // Network failure — postForm throws on fetch rejection.
+      // note: Network failure — postForm throws on fetch rejection.
       setDeleteOpen(false);
       setNotice({ kind: "error", message: t(locale, "members.deleteWorkspaceFailed") });
     } finally {
@@ -579,7 +579,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
     }
   }
 
-  // Loading rides the shared skeleton as the page's full loading face —
+  // note: Loading rides the shared skeleton as the page's full loading face —
   // the component's heading placeholder stands in for the real h1 (AD-582).
   // Foreground only: `load` flips to "loading" solely on the initial/retry
   // load, so op-triggered background reloads never reach this gate (F-58-1).
@@ -671,7 +671,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
             </form>
           ) : null}
           {members.length === 0 ? (
-            // Composed empty state (no-action variant): a member sees only this.
+            // invariant: Composed empty state (no-action variant): a member sees only this.
             <EmptyState
               title={t(locale, "members.emptyTitle")}
               description={t(locale, canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember")}

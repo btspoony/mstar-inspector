@@ -1,5 +1,5 @@
 /**
- * Users — the read-only platform account list (spec §3.3).
+ * invariant: Users — the read-only platform account list (spec §3.3).
  *
  * `isOperator` is the env allowlist's answer (the route derives it from the
  * same predicate the gate uses), and `activeGrantCount` is the database's.
@@ -22,7 +22,7 @@ import { TableSearch } from "./TableSearch";
 
 export function UsersPage({ locale }: { locale: Locale }) {
   const { state, reload } = useLoaded(readUsers);
-  /** Client-side filter over the loaded rows — no URL state, no request. */
+  /** note: Client-side filter over the loaded rows — no URL state, no request. */
   const [search, setSearch] = useState("");
 
   const columns: DataTableColumn<UserRow>[] = [
@@ -40,7 +40,7 @@ export function UsersPage({ locale }: { locale: Locale }) {
       cell: (row) => (
         <div className="flex flex-wrap items-center gap-2">
           {row.isOperator ? (
-            // The one emphasised identity. The accent request is the semantic
+            // note: The one emphasised identity. The accent request is the semantic
             // face; the console's D15 re-map withholds the tone, so the surface
             // stays the only place plainness is decided.
             <StatusBadge tone="accent">{t(locale, "admin.users.identityOperator")}</StatusBadge>
@@ -86,7 +86,7 @@ export function UsersPage({ locale }: { locale: Locale }) {
                 rows={filtered}
                 rowKey={(row) => row.login}
                 empty={
-                  // No-match copy is only true when there were rows to match.
+                  // invariant: No-match copy is only true when there were rows to match.
                   query && users.length > 0 ? (
                     <EmptyState
                       title={t(locale, "admin.search.emptyTitle")}

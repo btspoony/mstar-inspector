@@ -1,5 +1,5 @@
 /**
- * Workspace creation from the top-bar switcher. Before this
+ * note: Workspace creation from the top-bar switcher. Before this
  * surface, the menu item sent an existing member to `/dashboard`, which serves
  * the creation form only for a `needsWorkspace` boot — so the click landed on
  * their own workspace. The dialog posts the same route with the same name
@@ -32,7 +32,7 @@ import type { SpaBoot } from "../boot";
 import { parseCreatedWorkspace, createWorkspaceRefusalKey } from "../pages/data";
 import { PageNotice } from "../pages/PageNotice";
 
-/** Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
+/** note: Server-side cap (src/dashboard/index.ts WORKSPACE_NAME_MAX_LENGTH). */
 const NAME_MAX_LENGTH = 80;
 
 export function CreateWorkspaceDialog({
@@ -50,8 +50,8 @@ export function CreateWorkspaceDialog({
   const [busy, setBusy] = useState(false);
 
   function handleOpenChange(next: boolean): void {
-    if (busy) return; // a POST in flight cannot be dismissed under itself
-    // A reopened dialog starts clean: the previous attempt's name and refusal
+    if (busy) return; // invariant: a POST in flight cannot be dismissed under itself
+    // note: A reopened dialog starts clean: the previous attempt's name and refusal
     // belong to that attempt. Every close path (ESC, overlay, Cancel) routes
     // through here.
     setName("");
@@ -61,7 +61,7 @@ export function CreateWorkspaceDialog({
 
   async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     const trimmed = name.trim();
     if (trimmed.length === 0) {
       setError(t(locale, "workspace.nameRequired"));
@@ -80,7 +80,7 @@ export function CreateWorkspaceDialog({
         window.location.assign(homePath);
         return;
       }
-      // 409 is the server's free-slot / creation-closed refusal. Its two named
+      // note: 409 is the server's free-slot / creation-closed refusal. Its two named
       // bodies are English-only, so they read as the shell's own reason copy in
       // the dialog's locale. An unrecognised 409 body IS the copy the user must
       // read and renders verbatim — but only a 409 may: a 400 validation body,

@@ -1,5 +1,5 @@
 /**
- * One-shot flash across a full-page navigation (the delete flow's outcomes).
+ * note: One-shot flash across a full-page navigation (the delete flow's outcomes).
  *
  * sessionStorage — not the URL — so the message never lands in history or the
  * address bar, and the dashboard boot reads and clears it before React mounts.
@@ -11,14 +11,14 @@ export type FlashKind = "workspaceDeleted" | "workspaceUnavailable";
 /** The one documented key: written before `location.assign`, read + cleared once. */
 export const FLASH_STORAGE_KEY = "mstar.dashboard.flash";
 
-/** Every kind this module writes — anything else in storage is not ours. */
+/** why: Every kind this module writes — anything else in storage is not ours. */
 const FLASH_KINDS: readonly FlashKind[] = ["workspaceDeleted", "workspaceUnavailable"];
 
 export function setFlash(kind: FlashKind): void {
   try {
     sessionStorage.setItem(FLASH_STORAGE_KEY, kind);
   } catch {
-    // Unavailable storage (private mode): the navigation still happened, only
+    // invariant: Unavailable storage (private mode): the navigation still happened, only
     // the outcome message is lost.
   }
 }

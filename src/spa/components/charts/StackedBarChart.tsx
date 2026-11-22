@@ -1,5 +1,5 @@
 /**
- * (AD-652): daily stacked bar chart — one column per
+ * note: (AD-652): daily stacked bar chart — one column per
  * time bucket (day buckets for the 7/30-day windows, Monday-anchored week
  * buckets for 90d, from the additive `findings_distribution` API field),
  * each column stacked by the caller's closed `series` vocabulary (the
@@ -56,11 +56,11 @@ import { useContainerWidth } from "./useContainerWidth";
 
 /** One closed-vocabulary stacked series: the page-mapped label + chart slot. */
 export interface StackedSeries {
-  /** Distribution grid key (`by_severity`). */
+  /** note: Distribution grid key (`by_severity`). */
   key: string;
-  /** Legend + tooltip name — the raw engine slug. */
+  /** note: Legend + tooltip name — the raw engine slug. */
   label: string;
-  /** The D14 slot (1–6); the component derives the fill and mark class names. */
+  /** note: The D14 slot (1–6); the component derives the fill and mark class names. */
   slot: ChartSlot;
 }
 
@@ -94,7 +94,7 @@ export function StackedBarChart({
   series: readonly StackedSeries[];
   ariaLabel: string;
 }) {
-  // Measured container width (useContainerWidth): the default-560 static/SSR
+  // note: Measured container width (useContainerWidth): the default-560 static/SSR
   // face client-side becomes the real container width, so the viewBox never
   // upscales and the designed 10px ticks stay true-size. Called before the
   // empty-state return (Rules of Hooks).
@@ -102,7 +102,7 @@ export function StackedBarChart({
 
   if (buckets.length === 0 || series.length === 0) return null;
 
-  // Flat rows for recharts: one column per bucket, one numeric field per
+  // note: Flat rows for recharts: one column per bucket, one numeric field per
   // series key. `?? 0` keeps a missing grid cell at an honest zero (the
   // API zero-fills the merge-class keys, so only a drifted payload hits it).
   const data = buckets.map((bucket) => ({

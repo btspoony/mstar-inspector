@@ -1,5 +1,5 @@
 /**
- * Metric band (DESIGN.md `composition primitives`; compass D4): the r3 strip
+ * note: Metric band (DESIGN.md `composition primitives`; compass D4): the r3 strip
  * under a page title, inside the header plane. Each metric is a quiet key
  * over a tabular figure; the strip sits below one hairline and its metrics
  * are separated from each other by one apiece — hairlines are rendered
@@ -15,11 +15,11 @@ import { Fragment, type ReactNode } from "react";
 import { Separator } from "@design-system";
 
 export type Metric = {
-  /** The metric's name — rendered uppercase in the label step. */
+  /** note: The metric's name — rendered uppercase in the label step. */
   key: ReactNode;
-  /** The figure — tabular, so columns of numbers scan. */
+  /** why: The figure — tabular, so columns of numbers scan. */
   value: ReactNode;
-  /** Alert face for the value, on the baseline's `metric bad` rule. */
+  /** note: Alert face for the value, on the baseline's `metric bad` rule. */
   tone?: "danger";
 };
 

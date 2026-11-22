@@ -1,5 +1,5 @@
 /**
- * Group derivation for the providers settings area.
+ * note: Group derivation for the providers settings area.
  *
  * Pure by contract: no `t()`, no relative time, no clock read. Counts and the
  * stored ISO stamps leave here untouched; formatting is the view layer's.
@@ -11,7 +11,7 @@ import type { ProviderManagementPayload, CustomProviderModelsMeta, ProviderKeyRo
 
 export type ProviderGroup = {
   providerId: string;
-  /** The catalog row this group's label / vocabulary / sizes come from: the
+  /** note: The catalog row this group's label / vocabulary / sizes come from: the
    *  stored id itself, or the provider row a collapsed per-protocol id
    *  resolved to (payload `legacy_of`). */
   catalogId: string;
@@ -23,7 +23,7 @@ export type ProviderGroup = {
     api: string;
     model_ids: string[];
     models_meta?: CustomProviderModelsMeta;
-    /** The provider row this stored id resolves to (read-only compatibility). */
+    /** invariant: The provider row this stored id resolves to (read-only compatibility). */
     legacy_of?: string;
   } | null;
   summary: { total: number; ok: number; reachable: number; failed: number; unverified: number };
@@ -40,7 +40,7 @@ function summaryOf(keys: readonly ProviderKeyRow[]): ProviderGroup["summary"] {
   return summary;
 }
 
-/** The stamp a key contributes to its group's order: the verify time wins. */
+/** note: The stamp a key contributes to its group's order: the verify time wins. */
 function newestStamp(group: ProviderGroup): string | null {
   return group.keys.reduce<string | null>((max, key) => {
     const stamp = key.verifiedAt ?? key.updatedAt;
@@ -59,7 +59,7 @@ export function providerGroups(payload: ProviderManagementPayload): ProviderGrou
   const groups = [...providerIds].map((providerId): ProviderGroup => {
     const keys = payload.keys.filter((key) => key.provider === providerId);
     const declaration = declarations.get(providerId) ?? null;
-    // A declaration stored under a per-protocol id the catalog no longer emits
+    // note: A declaration stored under a per-protocol id the catalog no longer emits
     // reads through the row that absorbed it; the stored id stays the group key
     // every write and removal names.
     const catalogId = declaration?.legacy_of ?? providerId;
@@ -77,13 +77,13 @@ export function providerGroups(payload: ProviderManagementPayload): ProviderGrou
 
   const withKeys = groups.filter((group) => group.keys.length > 0);
   const withoutKeys = groups.filter((group) => group.keys.length === 0);
-  // Code-unit order — `localeCompare` would make the list order locale-dependent.
+  // note: Code-unit order — `localeCompare` would make the list order locale-dependent.
   const byId = (a: ProviderGroup, b: ProviderGroup) =>
     a.providerId < b.providerId ? -1 : a.providerId > b.providerId ? 1 : 0;
   withKeys.sort((a, b) => {
     const aNewest = newestStamp(a);
     const bNewest = newestStamp(b);
-    // Groups whose stamps are all null sort last; ties fall back to the id.
+    // note: Groups whose stamps are all null sort last; ties fall back to the id.
     if (aNewest !== bNewest) {
       if (aNewest === null) return 1;
       if (bNewest === null) return -1;

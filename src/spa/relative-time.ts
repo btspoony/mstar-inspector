@@ -1,5 +1,5 @@
 /**
- * i18n relative time for the two UTC stamp formats the dashboard stores
+ * note: i18n relative time for the two UTC stamp formats the dashboard stores
  * write, bucketed identically:
  * - SQLite `YYYY-MM-DD HH:MM:SS[.SSS]` — review-store faces: AppsPage
  *   latest-delivery, SettingsPage webhook/seen/delivery/updated. The suffix
@@ -15,7 +15,7 @@ export function formatRelativeTime(value: string | null, locale: Locale, nowMs =
   if (value === null) return t(locale, "common.time.never");
   const m =
     /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d{3})?$/.exec(value) ??
-    // users store stamps come from `toISOString()` — UTC, milliseconds, `Z`.
+    // note: users store stamps come from `toISOString()` — UTC, milliseconds, `Z`.
     /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.\d{3}Z$/.exec(value);
   if (!m) return t(locale, "common.time.unknown");
   const then = Date.UTC(

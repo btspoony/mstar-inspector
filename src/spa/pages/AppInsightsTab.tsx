@@ -73,12 +73,12 @@ export function AppInsightsTab({
   locale: SpaBoot["locale"];
   scope: ReadScope;
   search: AppDetailSearch;
-  /** Shell-owned commit: replaceState + state update (never popstate). */
+  /** invariant: Shell-owned commit: replaceState + state update (never popstate). */
   onSearch: (next: AppDetailSearch) => void;
 }) {
   const [data, setData] = useState<InsightsSummary | null>(null);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  // ErrorState retry: bumping the nonce re-runs the load effect below
+  // note: ErrorState retry: bumping the nonce re-runs the load effect below
   // for the current filter — the fetch body is unchanged.
   const [reloadNonce, setReloadNonce] = useState(0);
   const scopeKey = readScopeKey(scope);
@@ -86,7 +86,7 @@ export function AppInsightsTab({
   useEffect(() => {
     let cancelled = false;
     setState("loading");
-    // include=repos: the records Select needs the window-scoped distinct
+    // note: include=repos: the records Select needs the window-scoped distinct
     // repo set (QC F-001); default summary reads stay cheap.
     fetchJson(scopedInsightsSummaryUrl(apiBase(), scope, search.window, search.repo))
       .then((raw) => {
@@ -105,13 +105,13 @@ export function AppInsightsTab({
     return () => {
       cancelled = true;
     };
-    // The scope's KEY, not the object: a caller rebuilding `{kind, targetId}`
+    // note: The scope's KEY, not the object: a caller rebuilding `{kind, targetId}`
     // on every render must not re-run the read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeKey, search.window, search.repo, reloadNonce]);
 
   function onWindowChange(next: string): void {
-    // Radix fires "" when the active segment is re-clicked — keep the window.
+    // why: Radix fires "" when the active segment is re-clicked — keep the window.
     if (!(INSIGHTS_WINDOWS as readonly string[]).includes(next)) return;
     onSearch({ ...search, window: next as AppDetailSearch["window"] });
   }
@@ -160,7 +160,7 @@ export function AppInsightsTab({
         </Select>
       </div>
       {state === "loading" && data === null ? (
-        // Initial load (deep link or first fetch): no retained data yet,
+        // note: Initial load (deep link or first fetch): no retained data yet,
         // so the records face below is still unmounted — render a polite
         // loading face (same role="status" pattern as the retained-data
         // hint) instead of a bare filter toolbar (bugbot fix).
@@ -169,7 +169,7 @@ export function AppInsightsTab({
         </p>
       ) : null}
       {state === "loading" && data !== null ? (
-        // Filter refetch over retained data (background reload): a
+        // note: Filter refetch over retained data (background reload): a
         // one-line polite hint; the toolbar above and the previous
         // sections below stay mounted — the refetch never blanks the
         // stat cards (the no-flash contract, honored literally: content
@@ -178,7 +178,7 @@ export function AppInsightsTab({
           {t(locale, "common.loading")}
         </p>
       ) : null}
-      {/* ErrorState is the INITIAL-load face only (no retained data). A
+      {/* invariant: ErrorState is the INITIAL-load face only (no retained data). A
           refetch failure over retained data keeps the previous sections
           and reports the failure in a slim alert line instead of blanking
           the tab. */}
@@ -212,7 +212,7 @@ export const SEVERITY_SLOTS: Record<FindingSeverity, ChartSlot> = {
   nit: 5,
 };
 
-/** The fixed severity stack, bottom → top: must-fix, should-fix, may-fix, nit. */
+/** invariant: The fixed severity stack, bottom → top: must-fix, should-fix, may-fix, nit. */
 const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([key, slot]) => ({
   key,
   label: key,
@@ -220,7 +220,7 @@ const SEVERITY_SERIES: StackedSeries[] = Object.entries(SEVERITY_SLOTS).map(([ke
 }));
 
 /**
- * QC fix-1 (QC F-004 ×3 seats): legend entries only for series
+ * invariant: QC fix-1 (QC F-004 ×3 seats): legend entries only for series
  * with findings in the window — a series whose window total is 0 drops
  * from the legend instead of rendering a zero-count swatch. Legend-only
  * filtering: every bucket stays on the axis/stack (time continuity) and
@@ -246,7 +246,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
   });
   const repoLabel = data.repo ? ` · ${t(locale, "insights.repo", { repo: data.repo })}` : "";
   const empty = data.reviews_total === 0;
-  // Trend buckets at the window's granularity (day windows: `daily_trend`;
+  // note: Trend buckets at the window's granularity (day windows: `daily_trend`;
   // week windows: `weekly_trend` zero-filled over the distribution grid) —
   // the summary line, the empty-state check and the chart all evaluate the
   // SAME derivation, so the text counts always coexist with the rendered
@@ -264,12 +264,12 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
       count: trendTotals.findings,
     }),
   });
-  // The distribution grid the severity chart consumes; the zero-count
+  // note: The distribution grid the severity chart consumes; the zero-count
   // legend filter reads the same grid the chart renders.
   const distribution = data.findings_distribution;
 
   if (empty) {
-    // The composed zero-review empty state — no-action variant (reviews
+    // note: The composed zero-review empty state — no-action variant (reviews
     // arrive via installed Apps). No axis, no empty chart frame.
     return (
       <EmptyState
@@ -302,7 +302,7 @@ export function InsightsRecordsView({ locale, data }: { locale: SpaBoot["locale"
         )}
       </FlowSection>
       <FlowSection title={t(locale, "insights.trend")}>
-        {/* Defensive: reviews_total > 0 implies a non-empty grid on both
+        {/* note: Defensive: reviews_total > 0 implies a non-empty grid on both
             windows (zero-filled), so this face is reachable only on a
             drifted payload — the readable empty state stays. */}
         {trendPoints.length === 0 ? (

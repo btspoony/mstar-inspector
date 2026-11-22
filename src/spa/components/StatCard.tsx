@@ -1,5 +1,5 @@
 /**
- * Stat idiom: a muted uppercase label (DESIGN.md label-12 step) over a
+ * note: Stat idiom: a muted uppercase label (DESIGN.md label-12 step) over a
  * one-step-larger tabular figure, with an optional hint line and an optional
  * 0–1 progress bar. `StatCard` renders one definition-list group, so it is
  * written for the `StatGrid` wrapper — the semantic `<dl>` — and not for
@@ -36,7 +36,7 @@ export function StatCard({
   label: ReactNode;
   value: ReactNode;
   hint?: ReactNode;
-  /** 0–1 filled ratio; values outside the range clamp. */
+  /** note: 0–1 filled ratio; values outside the range clamp. */
   progress?: number;
 }) {
   const step =

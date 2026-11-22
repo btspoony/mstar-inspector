@@ -8,7 +8,7 @@ import { ErrorState } from "./state/ErrorState";
 import { PageNotice } from "../pages/PageNotice";
 
 /**
- * The tenant's always-on support notice (platform-operator support, 2026-10).
+ * invariant: The tenant's always-on support notice (platform-operator support, 2026-10).
  *
  * Every member of the workspace sees who holds a live support grant, why, and
  * when it ends. It is deliberately UNDISMISSABLE and carries no control — the
@@ -26,7 +26,7 @@ import { PageNotice } from "../pages/PageNotice";
  */
 
 /**
- * One read per workspace base (the workspace, not the page), shared by every
+ * note: One read per workspace base (the workspace, not the page), shared by every
  * mount that lands on it. A rejection is evicted so retry reads again.
  */
 const reads = new Map<string, Promise<SupportGrantRow[] | null>>();
@@ -51,7 +51,7 @@ export function SupportNotice({ boot, pathname }: { boot: SpaBoot; pathname: str
 
   useEffect(() => {
     if (skip) return;
-    // Clear first: a workspace switch must not leave another workspace's
+    // invariant: Clear first: a workspace switch must not leave another workspace's
     // notice on screen.
     setGrants([]);
     setFailed(false);

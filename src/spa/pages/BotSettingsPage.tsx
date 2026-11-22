@@ -38,7 +38,7 @@ import {
 import { ProvidersSection } from "./settings-providers";
 
 /**
- * The share route's refusals: its two recoverable causes have their own copy
+ * note: The share route's refusals: its two recoverable causes have their own copy
  * (a stale page offering a share the designation no longer allows, and a
  * caller whose role changed under it); everything else reuses the settings
  * family's keyed resolver.
@@ -78,7 +78,7 @@ export function BotSettingsView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
-  // Every write below is the settings family's: the ops ride
+  // note: Every write below is the settings family's: the ops ride
   // `POST /apps/:appId/settings` (and its key/delete sibling), so this page
   // adds no second save path and the server's `can_manage` rule is the gate.
   // The ONE exception is the share transition: it is a JSON route of the App
@@ -112,7 +112,7 @@ export function BotSettingsView({
   }
 
   /**
-   * The draft create's completion check: POST success alone is not done — the
+   * note: The draft create's completion check: POST success alone is not done — the
    * chain is usable only once the awaited reload lands it in the payload, so a
    * failed reload keeps the draft open instead of claiming success.
    */
@@ -124,7 +124,7 @@ export function BotSettingsView({
     return outcome;
   }
 
-  /** Verify-then-store: the refresh keeps a failed verify's typed key on screen. */
+  /** why: Verify-then-store: the refresh keeps a failed verify's typed key on screen. */
   async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
     let status: number;
     let body: string;
@@ -134,7 +134,7 @@ export function BotSettingsView({
         fields,
       ));
     } catch {
-      // A fetch that never reached the server: the dialog's own face for it,
+      // invariant: A fetch that never reached the server: the dialog's own face for it,
       // which also says nothing was stored.
       return { kind: "error", message: t(locale, "settings.providers.submitFailed") };
     }
@@ -149,7 +149,7 @@ export function BotSettingsView({
   }
 
   /**
-   * The share transition: the server owns the guards and both audit rows, so
+   * why: The share transition: the server owns the guards and both audit rows, so
    * this only posts the target scope (a revoke always confirms) and turns the
    * refusal's named cause into the page's own copy.
    */
@@ -186,7 +186,7 @@ export function BotSettingsView({
       } else if (action.kind === "remove-chain") {
         setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }));
       } else if (action.kind === "remove-custom") {
-        // The remove outcome renders row-locally with the pre-POST row slot:
+        // note: The remove outcome renders row-locally with the pre-POST row slot:
         // the awaited reload drops the row before the outcome resolves.
         const slot = payload.configured_providers.findIndex(
           (row) => row.kind === "custom" && row.provider_id === action.providerId,
@@ -233,7 +233,7 @@ export function BotSettingsView({
         </div>
       )}
       <div className="flex flex-col">
-        {/* The share switch exists for exactly one caller: the official
+        {/* invariant: The share switch exists for exactly one caller: the official
             workspace's manager. Every other caller sees no section, no title
             and no copy — a non-official workspace has no share concept, and a
             consuming workspace's read-only face never mentions it. */}

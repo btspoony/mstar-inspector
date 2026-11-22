@@ -1,5 +1,5 @@
 /**
- * The workspace settings usage card: the month's credit spend against the
+ * note: The workspace settings usage card: the month's credit spend against the
  * ceiling, then the shared-bot vs own-bot published-review counts for the same
  * UTC month (spec bot-scope-and-claiming § Review usage).
  *
@@ -26,14 +26,14 @@ import { apiBase } from "../workspace-base";
 import { parseReviewUsage, type ReviewUsage } from "./data";
 import { LoadFailedNotice, LoadingNotice, PageNotice } from "./PageNotice";
 
-/** The shared-bot row's value and hint per state (the two states differ). */
+/** note: The shared-bot row's value and hint per state (the two states differ). */
 const SHARED_BOT_COPY: Record<ReviewUsage["sharedBot"], { value: DictionaryKey; hint?: DictionaryKey }> = {
   available: { value: "workspace.usageAvailable" },
   "not-in-plan": { value: "workspace.usageNotInPlan", hint: "workspace.usageNotInPlanHint" },
   "not-designated": { value: "workspace.usageNotDesignated", hint: "workspace.usageNotDesignatedHint" },
 };
 
-/** RP as credits, two decimals — the only place the division happens. */
+/** invariant: RP as credits, two decimals — the only place the division happens. */
 function credits(rp: number, rpPerCredit: number): string {
   return (rp / rpPerCredit).toFixed(2);
 }
@@ -91,7 +91,7 @@ export function ReviewUsageCard({
         <div className="flex flex-col gap-3">
           {quota === null ? null : (
             <>
-              {/* The consequence, not just the figure: the pair below is kept so
+              {/* why: The consequence, not just the figure: the pair below is kept so
                   the reader sees by how much, and this states what happens next. */}
               {quotaSpent(quota.usedRp, quota.limitRp) ? (
                 <PageNotice
@@ -152,12 +152,12 @@ export function ReviewUsageCard({
               </div>
             )}
           </dl>
-          {/* The surface statement: which counter each figure reads, so the
+          {/* why: The surface statement: which counter each figure reads, so the
               credits and the review counts are never read as the same number. */}
           {quota === null ? null : (
             <p className="text-xs text-muted-foreground">{t(locale, "workspace.quotaBasis")}</p>
           )}
-          {/* The hint explains the status row directly above it and is absent
+          {/* note: The hint explains the status row directly above it and is absent
               for `available`. */}
           {deploymentMode === "self-hosted" || status.hint === undefined ? null : (
             <p className="text-xs text-muted-foreground">{t(locale, status.hint)}</p>

@@ -1,5 +1,5 @@
 /**
- * List rows (DESIGN.md ### list-row): isomorphic rows inside a group card.
+ * note: List rows (DESIGN.md ### list-row): isomorphic rows inside a group card.
  * The container is an in-card inset on the `border-default` hairline with the
  * micro-corner exception `radius-control`; rows sit on `surface-inset` at the
  * `row-h-compact` height, separated by a 1px `border-subtle` hairline. Slot
@@ -34,7 +34,7 @@ export function ListRow({
   actions,
 }: {
   identity: ReactNode;
-  /** The caller's StatusBadge — this shell owns no status face of its own. */
+  /** note: The caller's StatusBadge — this shell owns no status face of its own. */
   status?: ReactNode;
   meta?: ReactNode;
   actions?: ReactNode;

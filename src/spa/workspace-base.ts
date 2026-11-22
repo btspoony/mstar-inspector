@@ -17,9 +17,9 @@ export function apiBase(pathname: string = currentPathname()): string {
   return ref === null ? "/dashboard" : `/dashboard/${ref}`;
 }
 
-/** No `location` outside a document (static render, tests) → the legacy base. */
+/** why: No `location` outside a document (static render, tests) → the legacy base. */
 function currentPathname(): string {
-  // The bundle runs in a document, where `location` exists; this narrow read
+  // note: The bundle runs in a document, where `location` exists; this narrow read
   // keeps the module type-safe for the DOM-less programs that import it too.
   const scope = globalThis as { location?: { pathname?: string } };
   return scope.location?.pathname ?? "/dashboard";

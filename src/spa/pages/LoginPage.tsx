@@ -5,7 +5,7 @@ import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } fro
 import { Logo } from "../components/AppSidebar";
 import type { SpaBoot } from "../boot";
 
-// lucide-react ships no GitHub brand mark — inline the octocat silhouette.
+// note: lucide-react ships no GitHub brand mark — inline the octocat silhouette.
 // Exported for the settings page's avatar placeholder (same mark,
 // sized at the usage site via `className`).
 export function GitHubMark({ className }: { className?: string }) {

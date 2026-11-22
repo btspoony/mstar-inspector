@@ -1,5 +1,5 @@
 /**
- * Runtime parameters — the non-secret values an operator changes without a
+ * safety: Runtime parameters — the non-secret values an operator changes without a
  * redeploy (iteration spec §1.1, §2.4): the system review-concurrency cap,
  * the §7.10 Check budgets and the recheck seat's assignment budget (UTF-8
  * bytes of ask the prior-findings seat may receive).
@@ -44,7 +44,7 @@ import {
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
-/** The admission-drop card's fixed reason order and its label per reason. */
+/** why: The admission-drop card's fixed reason order and its label per reason. */
 const ADMISSION_DROP_FIELDS = [
   { reason: "pr-held", label: "admin.runtime.admissionDropsPrHeld" },
   { reason: "system-cap", label: "admin.runtime.admissionDropsSystemCap" },
@@ -53,7 +53,7 @@ const ADMISSION_DROP_FIELDS = [
 ] as const satisfies ReadonlyArray<{ reason: keyof AdmissionDropCounts; label: DictionaryKey }>;
 
 /**
- * How long the oldest queued message has waited. An unreadable gauge and an
+ * note: How long the oldest queued message has waited. An unreadable gauge and an
  * empty queue are different states, so neither renders as a bare absence.
  */
 function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
@@ -63,7 +63,7 @@ function oldestWait(locale: Locale, queue: QueueBacklog | null): string {
 }
 
 /**
- * A runtime card's outcome face: errors keep the persistent notice box; a
+ * why: A runtime card's outcome face: errors keep the persistent notice box; a
  * success rides the save button (spinner → check) and its copy survives as
  * assistive text in a live region — never as a notice box.
  */
@@ -91,7 +91,7 @@ function CardOutcome({
 
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
-  /** Only what the operator typed is local; the display falls back to the stored value. */
+  /** invariant: Only what the operator typed is local; the display falls back to the stored value. */
   const [draft, setDraft] = useState<string | null>(null);
   const [terminalizeDraft, setTerminalizeDraft] = useState<string | null>(null);
   const [updateDraft, setUpdateDraft] = useState<string | null>(null);
@@ -100,11 +100,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
-  /** The window's pending state: `null` = untouched, so the stored one shows. */
+  /** why: The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  // Every card's save rides its own button: the signal drives the spinner →
+  // why: Every card's save rides its own button: the signal drives the spinner →
   // check → alert face; the shared notice state carries the copy (the
   // success copy as assistive text, the failure as the persistent box).
   const concurrencySignal = useSaveSignal();
@@ -113,7 +113,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
-  // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
+  // why: A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
   // instead of a page-wide banner.
   const [notice, setNotice] = useState<{
@@ -134,9 +134,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     degraded: boolean,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     if (concurrencySubmitBlocked(degraded, draft)) return;
-    // `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
+    // note: `Number("")` is 0 and `Number("8abc")` is NaN — both fail the server's
     // accepted-range gate, so the browser's own parsing needs no second validator.
     const next = Number((draft ?? String(stored)).trim());
     setBusy(true);
@@ -144,7 +144,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     concurrencySignal.start();
     try {
       const saved = await setSystemConcurrency(next);
-      // A 2xx rewrote exactly the level this page reports, so the row is
+      // invariant: A 2xx rewrote exactly the level this page reports, so the row is
       // readable again: the server's answer replaces the value and clears the
       // flag that made the field start empty.
       update((data) => ({ ...data, concurrency: saved, degraded: false }));
@@ -156,7 +156,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       });
       concurrencySignal.succeed();
     } catch (error) {
-      // Generic message primary, the server's own refusal text as secondary detail.
+      // note: Generic message primary, the server's own refusal text as secondary detail.
       const generic = t(locale, "admin.runtime.concurrencyFailed");
       setNotice({
         kind: "error",
@@ -177,14 +177,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: CheckBudgetConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     if (
       concurrencySubmitBlocked(stored.degraded, terminalizeDraft) ||
       concurrencySubmitBlocked(stored.degraded, updateDraft)
     ) {
       return;
     }
-    // Same browser-side parsing as the concurrency field: the server's range
+    // note: Same browser-side parsing as the concurrency field: the server's range
     // gate is the only validator.
     const terminalizeMs = Number((terminalizeDraft ?? String(stored.terminalizeMs)).trim());
     const updateMs = Number((updateDraft ?? String(stored.updateMs)).trim());
@@ -193,7 +193,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     checkBudgetsSignal.start();
     try {
       const saved = await setCheckBudgets({ terminalizeMs, updateMs }, stored);
-      // A 2xx rewrote both rows, so the card reads as trusted again.
+      // safety: A 2xx rewrote both rows, so the card reads as trusted again.
       update((data) => ({ ...data, checkBudgets: saved }));
       setTerminalizeDraft(null);
       setUpdateDraft(null);
@@ -224,7 +224,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: CommentClaimConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     if (
       concurrencySubmitBlocked(stored.degraded, retryDraft) ||
       concurrencySubmitBlocked(stored.degraded, attemptsDraft) ||
@@ -232,7 +232,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     ) {
       return;
     }
-    // Same browser-side parsing as the sibling cards: the server's range gate
+    // note: Same browser-side parsing as the sibling cards: the server's range gate
     // is the only validator.
     const retryMs = Number((retryDraft ?? String(stored.retryMs)).trim());
     const maxAttempts = Number((attemptsDraft ?? String(stored.maxAttempts)).trim());
@@ -242,7 +242,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     commentClaimSignal.start();
     try {
       const saved = await setCommentClaimSettings({ retryMs, maxAttempts, outboxCap }, stored);
-      // A 2xx rewrote all three rows, so the card reads as trusted again.
+      // safety: A 2xx rewrote all three rows, so the card reads as trusted again.
       update((data) => ({ ...data, commentClaim: saved }));
       setRetryDraft(null);
       setAttemptsDraft(null);
@@ -307,9 +307,9 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     stored: RecheckAssignmentConfig,
   ): Promise<void> {
     event.preventDefault();
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     if (concurrencySubmitBlocked(stored.degraded, recheckDraft)) return;
-    // Same browser-side parsing as the concurrency field: the server's range
+    // note: Same browser-side parsing as the concurrency field: the server's range
     // gate is the only validator.
     const maxBytes = Number((recheckDraft ?? String(stored.maxBytes)).trim());
     setBusy(true);
@@ -317,7 +317,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     recheckAssignmentSignal.start();
     try {
       const saved = await setRecheckAssignmentMaxBytes(maxBytes, stored);
-      // A 2xx rewrote the row, so it reads as trusted again.
+      // safety: A 2xx rewrote the row, so it reads as trusted again.
       update((data) => ({ ...data, recheckAssignment: saved }));
       setRecheckDraft(null);
       setNotice({
@@ -343,12 +343,12 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   /**
-   * Close or reopen the platform. `enabled` is the state the operator asked
+   * note: Close or reopen the platform. `enabled` is the state the operator asked
    * for; the reason rides only a close (the store drops it on reopen, so
    * sending it then would be dead input).
    */
   async function onSaveMaintenance(stored: MaintenanceConfig, enabled: boolean): Promise<void> {
-    if (busy) return; // in-flight guard — no double submit
+    if (busy) return; // note: in-flight guard — no double submit
     setBusy(true);
     setNotice(null);
     maintenanceSignal.start();
@@ -396,24 +396,24 @@ export function RuntimePage({ locale }: { locale: Locale }) {
         locale={locale}
       >
         {(data) => {
-          // `null` = the server does not report the Check budgets (an older
+          // note: `null` = the server does not report the Check budgets (an older
           // Worker behind a newer SPA bundle): the budget card is absent, the
           // concurrency card is exactly as before, and nothing renders a bare
           // `undefined`.
           const budgets = data.checkBudgets;
-          // Same absence rule for the migration-0048 card: an older Worker
+          // note: Same absence rule for the migration-0048 card: an older Worker
           // behind this bundle reports no group, so the card is hidden.
           const claim = data.commentClaim;
           const sweep = data.sweep;
-          // And for the recheck seat's ask budget.
+          // note: And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
-          // And for the admission-drop counts.
+          // note: And for the admission-drop counts.
           const drops = data.admissionDrops24h;
-          // The live queue gauge; `null` is "not readable", never an empty queue.
+          // invariant: The live queue gauge; `null` is "not readable", never an empty queue.
           const queue = data.queue;
-          // And for the maintenance window (older Worker → no card).
+          // why: And for the maintenance window (older Worker → no card).
           const maintenance = data.maintenance;
-          // The state the toggle shows: what the operator picked, else stored.
+          // why: The state the toggle shows: what the operator picked, else stored.
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
           return (
           <div className="flex flex-col gap-4">
@@ -429,7 +429,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {notice?.source === "maintenance" ? (
                   <CardOutcome notice={notice} status={maintenanceSignal.status} />
                 ) : null}
-                {/* The stored window as the gates read it: state, the operator's
+                {/* note: The stored window as the gates read it: state, the operator's
                     own reason and when it opened — never the pending target. */}
                 <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
                   <div className="flex flex-col gap-1">
@@ -481,7 +481,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       id="maintenance-reason"
                       className="w-64"
                       autoComplete="off"
-                      // A reopen writes no reason (the store deletes it), so the
+                      // why: A reopen writes no reason (the store deletes it), so the
                       // field is inert until the operator is closing again.
                       disabled={busy || !maintenanceOn}
                       value={reasonDraft ?? ""}
@@ -531,7 +531,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={concurrencySignal.status} />
                 ) : null}
                 {data.degraded ? (
-                  // The stored cap could not be trusted, so `data.concurrency` is
+                  // safety: The stored cap could not be trusted, so `data.concurrency` is
                   // the conservative fallback: showing it as the current value
                   // would invite saving a number nobody stored. The form starts
                   // empty and withholds the "effective" line; a typed value or
@@ -594,7 +594,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={checkBudgetsSignal.status} />
                 ) : null}
                 {budgets.degraded ? (
-                  // Both numbers are the documented defaults, not the stored
+                  // note: Both numbers are the documented defaults, not the stored
                   // setting: the form starts empty so a save cannot pin them.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.checkUnreadable")} />
@@ -680,7 +680,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={commentClaimSignal.status} />
                 ) : null}
                 {claim.degraded ? (
-                  // Every number is the documented default, not the stored
+                  // note: Every number is the documented default, not the stored
                   // setting: the form starts empty so a save cannot pin them.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.claimUnreadable")} />
@@ -835,7 +835,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   <CardOutcome notice={notice} status={recheckAssignmentSignal.status} />
                 ) : null}
                 {recheck.degraded ? (
-                  // The number shown is the documented default, not the stored
+                  // note: The number shown is the documented default, not the stored
                   // setting: the form starts empty so a save cannot pin it.
                   <div className="mt-4">
                     <PageNotice kind="warn" message={t(locale, "admin.runtime.recheckUnreadable")} />
@@ -947,7 +947,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           );
         }}
       </Screen>
-      {/* The deployment's release, from the generated src/version.ts surface:
+      {/* note: The deployment's release, from the generated src/version.ts surface:
           the same `vX.Y.Z` form as /healthz and the release tags. Build-time
           constant, so it renders in every read state. */}
       <p className="text-xs text-muted-foreground">

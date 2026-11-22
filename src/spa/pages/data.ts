@@ -1,5 +1,5 @@
 /**
- * Pure parsers/guards for resident SPA pages.
+ * note: Pure parsers/guards for resident SPA pages.
  * Tested without a DOM runner.
  */
 
@@ -22,10 +22,10 @@ export type MemberRow = {
 /** The workspace's plan, seat limit, meter and waiting invites. */
 export type WorkspaceSummary = {
   plan: { id: string; name: string };
-  /** `null` = no seat cap (the unlimited tier), never `0`. */
+  /** invariant: `null` = no seat cap (the unlimited tier), never `0`. */
   memberLimit: number | null;
   reviewAttemptsThisMonth: number;
-  /** Live (unexpired) pending invites — each one already occupies a seat. */
+  /** note: Live (unexpired) pending invites — each one already occupies a seat. */
   pendingInvites: number;
 };
 
@@ -59,9 +59,9 @@ export type InsightsSearch = { window: string; repo: string };
  * window.
  */
 export type FindingsDistributionBucket = {
-  /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
+  /** note: UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
   bucket_start: string;
-  /** "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
+  /** note: "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
   granularity: "day" | "week";
   by_severity: Record<string, number>;
 };
@@ -74,7 +74,7 @@ export type InsightsSummary = {
   verdict_distribution: Array<{ verdict: string; count: number }>;
   weekly_trend: Array<{ week_start: string; reviews: number; findings: number }>;
   /**
-   * Day-bucketed trend (additive `daily_trend`, window-bucketing contract
+   * note: Day-bucketed trend (additive `daily_trend`, window-bucketing contract
    * 2026-09-20): `weekly_trend`'s count semantics at day granularity,
    * zero-filled over the day grid. Produced only for day windows (clamped
    * `window_days <= 30`); week windows carry exactly [] — the week-window
@@ -84,7 +84,7 @@ export type InsightsSummary = {
    */
   daily_trend: Array<{ day_start: string; reviews: number; findings: number }>;
   /**
-   * Per-bucket findings distribution (AD-652 — additive): the
+   * note: Per-bucket findings distribution (AD-652 — additive): the
    * severity card's stacked time-series grid. REQUIRED like the
    * other aggregations — a payload missing it (or carrying malformed rows)
    * takes the same null fallback as any other shape drift; it is never
@@ -92,7 +92,7 @@ export type InsightsSummary = {
    */
   findings_distribution: FindingsDistributionBucket[];
   /**
-   * Window-scoped distinct owner/repo values. Independent of
+   * note: Window-scoped distinct owner/repo values. Independent of
    * `repo`. Absent on payloads that did not request `include=repos`
    * (QC F-001) — consumers default to [].
    */
@@ -137,7 +137,7 @@ export type AppsPayload = {
     };
   }>;
   /**
-   * The `shared` bots the creation chooser may offer (official mode). The
+   * note: The `shared` bots the creation chooser may offer (official mode). The
    * server always sends the key; `parseApps` normalizes it so a stale or
    * malformed payload reads as none instead of reaching the chooser raw.
    */
@@ -149,7 +149,7 @@ export type SharedBotRow = {
   id: string;
   github_slug: string | null;
   name: string;
-  /** The workspace's live targets on this bot — the chooser shows it. */
+  /** note: The workspace's live targets on this bot — the chooser shows it. */
   target_count: number;
 };
 
@@ -192,7 +192,7 @@ export type CatalogModelLimit = { contextWindow: number; maxTokens: number };
 /** One selectable protocol of a mixed-protocol catalog row (server `protocols`). */
 export type CatalogProtocolOption = {
   api: string;
-  /** The endpoint this protocol serves on — the size gate matches THIS url. */
+  /** note: The endpoint this protocol serves on — the size gate matches THIS url. */
   base_url: string | null;
   models: string[];
 };
@@ -205,25 +205,25 @@ export type CatalogProvider = {
   api: string | null;
   models: string[];
   /**
-   * Per-model sizes from the vendor directory, keyed by model id (server
+   * note: Per-model sizes from the vendor directory, keyed by model id (server
    * `model_limits`). The model dialog pre-fills a blank size from here and
    * posts no override for a value the operator leaves untouched.
    */
   model_limits?: Record<string, CatalogModelLimit>;
   verifiable: boolean;
-  /** The provider answers a per-key usage probe (`/keys/usage`). */
+  /** note: The provider answers a per-key usage probe (`/keys/usage`). */
   usage_probe: boolean;
-  /** Usability vs the App's selected runtime image. */
+  /** note: Usability vs the App's selected runtime image. */
   eligibility: ProviderEligibility;
   /**
-   * Display-only picker group (AD-547): `common` = the 5-entry
+   * invariant: Display-only picker group (AD-547): `common` = the 5-entry
    * 常用提供方 tier shown first, `catalog` = the 目录模板 group. Form and
    * config branching NEVER reads this — the key-only vs template flow stays
    * keyed to `tier` / `eligibility`.
    */
   display_group: "common" | "catalog";
   /**
-   * Mixed-protocol rows only: every selectable protocol, the default FIRST.
+   * invariant: Mixed-protocol rows only: every selectable protocol, the default FIRST.
    * Absent = the row's own api/base_url/models are its one protocol.
    */
   protocols?: CatalogProtocolOption[];
@@ -261,7 +261,7 @@ export type KeyVerifiedStatus = "ok" | "reachable" | "failed" | null;
  */
 export type ProviderKeyRow = {
   provider: string;
-  /** First 16 hex characters of the key's SHA-256 — the handle a delete takes. */
+  /** note: First 16 hex characters of the key's SHA-256 — the handle a delete takes. */
   keyId: string;
   last4: string;
   updatedAt: string | null;
@@ -337,7 +337,7 @@ export type ConfiguredProvider =
   | {
       kind: "key";
       provider: string;
-      /** The pool row's identity — the handle a per-key delete takes. */
+      /** note: The pool row's identity — the handle a per-key delete takes. */
       key_id: string;
       last4: string;
       updated_at: string | null;
@@ -366,11 +366,11 @@ export const DEFAULT_CHAIN_NAME = "default";
  * chain sit at the same hierarchy.
  */
 export type ChainTab = {
-  /** Stable tab id — the stored chain name; {@link DEFAULT_CHAIN_NAME} for the Default tab. */
+  /** why: Stable tab id — the stored chain name; {@link DEFAULT_CHAIN_NAME} for the Default tab. */
   id: string;
-  /** The Default tab is non-removable; only named tabs offer remove. */
+  /** invariant: The Default tab is non-removable; only named tabs offer remove. */
   isDefault: boolean;
-  /** Stored chain value (named rows); null on the Default tab, whose editor consumes `model_chain`. */
+  /** why: Stored chain value (named rows); null on the Default tab, whose editor consumes `model_chain`. */
   chain: string | null;
 };
 
@@ -472,12 +472,12 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
 export type SettingsIdentityAppMeta = {
   github_app_id: number;
   status: string;
-  /** The target's pause state; ABSENT when the workspace holds no repository. */
+  /** why: The target's pause state; ABSENT when the workspace holds no repository. */
   review_enabled?: boolean;
   created_by: string;
-  /** `datetime('now')` UTC string — joins the required identity keys. */
+  /** invariant: `datetime('now')` UTC string — joins the required identity keys. */
   created_at: string;
-  /** The local App UID — the webhook URL's app segment (never a GitHub fact). */
+  /** invariant: The local App UID — the webhook URL's app segment (never a GitHub fact). */
   id: string;
   github_name: string | null;
   github_slug: string | null;
@@ -485,7 +485,7 @@ export type SettingsIdentityAppMeta = {
   github_html_url: string | null;
   github_avatar_url: string | null;
   /**
-   * The bot's own metadata sync stamp. A Blocked face omits it (the stamp is
+   * note: The bot's own metadata sync stamp. A Blocked face omits it (the stamp is
    * the owning workspace's), so presence is parser-enforced per face.
    */
   github_metadata_synced_at?: string | null;
@@ -580,7 +580,7 @@ export function isBlockedReason(value: unknown): value is BlockedReason {
 }
 
 /**
- * The review configuration a TARGET owns — the sections a Blocked face still
+ * note: The review configuration a TARGET owns — the sections a Blocked face still
  * carries. Shared by both manager faces, so the review controls accept either.
  */
 type TargetOwnedSections = {
@@ -613,7 +613,7 @@ export type BlockedAppIdentityBase = {
   github_html_url: string | null;
   github_avatar_url: string | null;
   github_visibility: GithubVisibility | null;
-  /** Absent on the wire: the bot's metadata stamp is the owner's. */
+  /** note: Absent on the wire: the bot's metadata stamp is the owner's. */
   github_metadata_synced_at?: string | null;
 };
 
@@ -637,7 +637,7 @@ export type TargetReviewSlice = {
 };
 
 /**
- * The pending rows, all-or-nothing: a row without a usable installation id
+ * note: The pending rows, all-or-nothing: a row without a usable installation id
  * would render an action the bind route cannot address.
  */
 function isPendingInstallationList(value: unknown): value is PendingInstallation[] {
@@ -664,21 +664,21 @@ function isPendingInstallationList(value: unknown): value is PendingInstallation
 export type SettingsAppMeta = BotSettingsAppMeta & {
   created_by: string;
   /**
-   * Cached GitHub App visibility (migration 0045) — an App fact, so it rides
+   * why: Cached GitHub App visibility (migration 0045) — an App fact, so it rides
    * every manager face. Null = the row could not be read.
    */
   github_visibility: GithubVisibility | null;
-  /** The App's review trigger mode (spec §2) — the control's current value. */
+  /** note: The App's review trigger mode (spec §2) — the control's current value. */
   review_trigger_mode: ReviewTriggerMode;
   /**
-   * The App's stored review depth (migration 0047); `null` = follow the
+   * note: The App's stored review depth (migration 0047); `null` = follow the
    * operator default. The server parses an off-vocabulary stored value to
    * null, so a dead selection never renders.
    */
   review_level: ReviewLevel | null;
-  /** The operator level a `null` review_level currently resolves to. */
+  /** note: The operator level a `null` review_level currently resolves to. */
   default_review_level: ReviewLevel;
-  /** Pause state (`review_enabled` on the wire): the target's switch. */
+  /** note: Pause state (`review_enabled` on the wire): the target's switch. */
   review_enabled: boolean;
 };
 
@@ -719,11 +719,11 @@ export type DeliveryStatusPage = {
 
 /** The delivery-status filters, one vocabulary for the URL and the read. */
 export type DeliveryFilters = {
-  /** `owner/name`, or "" for every repository. */
+  /** note: `owner/name`, or "" for every repository. */
   repo: string;
-  /** A window segment in whole days, "" for the whole retained history. */
+  /** note: A window segment in whole days, "" for the whole retained history. */
   since: string;
-  /** The delivery type (the `x-github-event` name), "" for every type. */
+  /** note: The delivery type (the `x-github-event` name), "" for every type. */
   type: string;
 };
 
@@ -737,14 +737,14 @@ export const DELIVERY_PAGE_SIZE = 20;
  */
 export type BotSettingsAppMeta = {
   github_app_id: number;
-  /** The local App UID — the webhook URL's app segment (never a GitHub fact). */
+  /** invariant: The local App UID — the webhook URL's app segment (never a GitHub fact). */
   id: string;
   status: string;
-  /** `owned` serves its workspace only; `shared` is offered platform-wide. */
+  /** invariant: `owned` serves its workspace only; `shared` is offered platform-wide. */
   scope: BotScope;
-  /** The bot's selected sandbox runtime image (registry id). */
+  /** note: The bot's selected sandbox runtime image (registry id). */
   sandbox_image_id: string;
-  /** Last verified (2xx) webhook delivery; NULL = never. */
+  /** invariant: Last verified (2xx) webhook delivery; NULL = never. */
   last_webhook_at: string | null;
   github_name: string | null;
   github_slug: string | null;
@@ -771,18 +771,18 @@ export type BotConfigSections = {
     base_url: string;
     api: string;
     model_ids: string[];
-    /** Absent when the owner stated nothing about any model (legacy rows). */
+    /** why: Absent when the owner stated nothing about any model (legacy rows). */
     models_meta?: CustomProviderModelsMeta;
-    /** The provider row a collapsed per-protocol id resolves to (read-only). */
+    /** invariant: The provider row a collapsed per-protocol id resolves to (read-only). */
     legacy_of?: string;
   }>;
-  /** The App's persisted provider state ONLY — empty is the valid unconfigured case. */
+  /** invariant: The App's persisted provider state ONLY — empty is the valid unconfigured case. */
   configured_providers: ConfiguredProvider[];
   provider_catalog_version: string;
   provider_eligibility: Record<string, ProviderEligibility>;
   model_role_ids: readonly string[];
   custom_provider_api_ids: readonly string[];
-  /** The selector's choices — enabled registry entries only (never yaml/secrets). */
+  /** invariant: The selector's choices — enabled registry entries only (never yaml/secrets). */
   sandbox_images: Array<{ id: string; enabled: boolean }>;
 } & SettingsHealth;
 
@@ -794,37 +794,37 @@ export type BotConfigSections = {
  */
 export type BotSettingsPayload = {
   can_manage: boolean;
-  /** Present only for a caller that may see the bot's own configuration. */
+  /** invariant: Present only for a caller that may see the bot's own configuration. */
   official_workspace?: boolean;
 } & BotConfigSections;
 
 /** Provider-management data after the static catalog has loaded. */
 export type ProviderManagementPayload = BotConfigSections & {
   provider_catalog: CatalogProvider[];
-  /** The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
+  /** why: The vendor snapshot the catalog sizes came from — named beside a pre-filled size. */
   model_limits_snapshot: string;
 };
 
 /** (spec §2): a non-manager gets the identity-only face (no ops stores). */
 export type SettingsReadOnlyPayload = {
   can_manage: false;
-  /** The App's stable workspace id — server-resolved, never a path segment. */
+  /** invariant: The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   /**
-   * Why this target reviews nothing, if it does (derived per read, never
+   * invariant: Why this target reviews nothing, if it does (derived per read, never
    * stored). Both faces carry it: a member must know why the App is silent,
    * not only the manager.
    */
   blocked: boolean;
   blocked_reason: BlockedReason | null;
   /**
-   * The review configuration's id in this workspace, ABSENT until the
+   * note: The review configuration's id in this workspace, ABSENT until the
    * workspace adds a repository under this App: the repository surface owns
    * target creation, so an App with none is a real state and it has no target
    * to name.
    */
   target_id?: string;
-  /** Manager fact (see {@link SettingsManageBase.targets_many}); absent here. */
+  /** note: Manager fact (see {@link SettingsManageBase.targets_many}); absent here. */
   targets_many?: boolean;
   app: SettingsIdentityAppMeta;
 };
@@ -842,19 +842,19 @@ export function appDisplayName(app: {
   return app.github_name ?? app.github_slug ?? String(app.github_app_id);
 }
 
-/** Creator-or-admin adds the settings zones: keys, chains, providers. */
+/** note: Creator-or-admin adds the settings zones: keys, chains, providers. */
 type SettingsManageBase = {
   can_manage: true;
-  /** The App's stable workspace id — server-resolved, never a path segment. */
+  /** invariant: The App's stable workspace id — server-resolved, never a path segment. */
   workspace_id: string;
   /**
-   * The target's bound installation, or `null` when it has none. The install
+   * why: The target's bound installation, or `null` when it has none. The install
    * block names the account it reviews as and, when `removed`, that reviews
    * stopped — the binding itself survives an uninstall.
    */
   installation: BoundInstallation | null;
   /**
-   * The bot's live installations that no live target references — the install
+   * note: The bot's live installations that no live target references — the install
    * block's bind source. Always present; `[]` when there is nothing to bind
    * (or when this workspace may not use the bot).
    */
@@ -862,14 +862,14 @@ type SettingsManageBase = {
   blocked: false;
   blocked_reason: null;
   /**
-   * The App holds two or more live repositories in this workspace, so no
+   * why: The App holds two or more live repositories in this workspace, so no
    * single one's review policy is an App-page subject (`target_id` is then
    * absent). The server always sends it on the manager face; absent reads as
    * "not many".
    */
   targets_many?: boolean;
   /**
-   * The share switch's two facts, derived per read: the bot's workspace IS the
+   * note: The share switch's two facts, derived per read: the bot's workspace IS the
    * platform's designated official workspace today, and THIS caller's workspace
    * OWNS the bot. Both are render gates only — the server re-checks the
    * designation inside the transition's batch — and both are absent on the
@@ -884,11 +884,11 @@ type SettingsManageBase = {
  * App's own facts, the bot's sections and the target-owned review policy.
  */
 export type SettingsManagePayload = SettingsManageBase & {
-  /** The review configuration's id every review-policy key below is read from. */
+  /** note: The review configuration's id every review-policy key below is read from. */
   target_id: string;
   app: SettingsAppMeta;
   /**
-   * The review gate (migration 0045) — the Check's pass condition. `null` =
+   * note: The review gate (migration 0045) — the Check's pass condition. `null` =
    * the stored verdict list is unreadable: the section renders a read-only
    * notice, since a gate that cannot be read cannot be edited.
    */
@@ -922,9 +922,9 @@ export type SettingsBlockedPayload = {
   workspace_id: string;
   target_id: string;
   app: BlockedAppIdentity;
-  /** False here: the single target's policy is the payload's subject. */
+  /** note: False here: the single target's policy is the payload's subject. */
   targets_many?: false;
-  /** The target's own binding (`null` = unbound) — target-owned state. */
+  /** note: The target's own binding (`null` = unbound) — target-owned state. */
   installation: BoundInstallation | null;
 } & TargetOwnedSections;
 
@@ -1042,7 +1042,7 @@ function isNumberRecord(value: unknown): value is Record<string, number> {
 }
 
 /**
- * Row-level guard for the distribution grid: every bucket must
+ * invariant: Row-level guard for the distribution grid: every bucket must
  * carry the bucket start, the day|week granularity, and the zero-filled
  * count grid — the stacked chart reads this shape directly, so a
  * drifted row fails the parse into the page's error face instead of
@@ -1064,7 +1064,7 @@ function isDistributionList(value: unknown): value is FindingsDistributionBucket
 }
 
 /**
- * Row-level guard for the daily trend grid (mirror of
+ * note: Row-level guard for the daily trend grid (mirror of
  * {@link isDistributionList}): every row must carry the day start and
  * both counts — the trend chart reads these shapes directly, so a drifted
  * row fails the parse into the page's error face instead of rendering
@@ -1094,15 +1094,15 @@ export function parseInsights(data: unknown): InsightsSummary | null {
   ) {
     return null;
   }
-  // (AD-652): required — a rolled-back Worker's payload (no field)
+  // invariant: (AD-652): required — a rolled-back Worker's payload (no field)
   // or any drifted row takes the same null fallback as the fields above.
   // Not tolerate-absent: that face is the opt-in `repos` field only.
   if (!isDistributionList(data.findings_distribution)) return null;
-  // (window-bucketing contract 2026-09-20): required along the same
+  // invariant: (window-bucketing contract 2026-09-20): required along the same
   // AD-652 precedent — a rolled-back Worker's payload (no field) or any
   // drifted row takes the same null fallback; never tolerate-absent.
   if (!isDailyTrendList(data.daily_trend)) return null;
-  // `repos` is opt-in (QC F-001): absent on payloads that did not
+  // note: `repos` is opt-in (QC F-001): absent on payloads that did not
   // request include=repos (and on rolled-back Workers) — tolerate missing,
   // reject malformed.
   if (data.repos !== undefined && !isStringArray(data.repos)) return null;
@@ -1199,7 +1199,7 @@ export function readScopeKey(scope: ReadScope): string {
   return scope.kind === "target" ? `target:${scope.targetId}` : "workspace";
 }
 
-/** The API prefix a scope's read family lives under. */
+/** note: The API prefix a scope's read family lives under. */
 function scopePath(scope: ReadScope): string {
   return scope.kind === "target" ? `/api/targets/${encodeURIComponent(scope.targetId)}` : "/api";
 }
@@ -1269,11 +1269,11 @@ export type PullRequestReview = {
   provider: string;
   reviewed_at: string;
   head_sha: string;
-  /** Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
+  /** why: Ordinal of this round in the PR's oldest-first review history; `null` when the payload carries none. */
   round: number | null;
-  /** Wall clock of the round in ms; `null` for rows written before the measurement. */
+  /** note: Wall clock of the round in ms; `null` for rows written before the measurement. */
   duration_ms: number | null;
-  /** The round's findings tallied per severity class (wire JSON text, parsed). */
+  /** note: The round's findings tallied per severity class (wire JSON text, parsed). */
   severity_counts: Record<string, number>;
 };
 
@@ -1299,10 +1299,10 @@ export type PullRequestFinding = {
   severity: string;
   title: string;
   file_path: string;
-  /** `null` on file-level findings with no line anchor. */
+  /** note: `null` on file-level findings with no line anchor. */
   line: number | null;
   body: string;
-  /** The stored round that first reported it; `null` only when the payload is not a positive integer. */
+  /** invariant: The stored round that first reported it; `null` only when the payload is not a positive integer. */
   review_round: number | null;
 };
 
@@ -1356,7 +1356,7 @@ export type RecordPageItems = {
 export type PullRequestRef = { owner: string; repo: string; number: number };
 
 /**
- * The head fields both faces read (QC: one nullable row must not blank the
+ * invariant: The head fields both faces read (QC: one nullable row must not blank the
  * list). The nullable DISPLAY fields coerce to "" and an unknown state clamps
  * to "open"; only the address and timestamp fields stay required — a row
  * without them cannot be listed or fetched, so it is dropped individually.
@@ -1380,7 +1380,7 @@ function parsePullRequestHead(value: unknown): PullRequestHead | null {
 }
 
 /**
- * The reviewing-now projection. A payload that does not carry a well-formed
+ * note: The reviewing-now projection. A payload that does not carry a well-formed
  * three-state value reads `unknown`: an older server or a truncated read must
  * never let the client claim the PR is idle, and it must not claim it is
  * reviewing either. `live` without its two anchors is not a live lock, so it
@@ -1400,7 +1400,7 @@ function parsePullRequestReviewing(value: unknown): PullRequestReviewing {
 }
 
 /**
- * One LIST row: the head plus the two aggregates the list face renders. A row
+ * note: One LIST row: the head plus the two aggregates the list face renders. A row
  * without a numeric `failure_count` cannot report the count it exists for, so
  * it is dropped individually and the rest of the list still renders.
  */
@@ -1415,7 +1415,7 @@ function parsePullRequestRow(value: unknown): PullRequestRow | null {
   };
 }
 
-/** The LIST row's latest-review slot: coerced to null unless it is a real review. */
+/** why: The LIST row's latest-review slot: coerced to null unless it is a real review. */
 function parseRowLatestReview(value: unknown): { verdict: string; reviewed_at: string } | null {
   if (!isRecord(value) || typeof value.reviewed_at !== "string") return null;
   return {
@@ -1425,7 +1425,7 @@ function parseRowLatestReview(value: unknown): { verdict: string; reviewed_at: s
 }
 
 /**
- * A round ordinal: the PR's history numbers rounds from 1 (oldest first), so a
+ * why: A round ordinal: the PR's history numbers rounds from 1 (oldest first), so a
  * zero or negative ordinal never exists and reads as "no value" (`null`).
  */
 function positiveInteger(value: unknown): number | null {
@@ -1433,7 +1433,7 @@ function positiveInteger(value: unknown): number | null {
 }
 
 /**
- * A wall clock: a finite non-negative integer passes, and anything else is
+ * why: A wall clock: a finite non-negative integer passes, and anything else is
  * "no value" (`null`) rather than a coerced zero — 0 is a real duration, an
  * absent one is not.
  */
@@ -1442,7 +1442,7 @@ function nonNegativeInteger(value: unknown): number | null {
 }
 
 /**
- * One review entry (QC: the pipeline persists `provider: null`, and
+ * note: One review entry (QC: the pipeline persists `provider: null`, and
  * model/verdict can be absent too). The nullable text fields
  * coerce to "" at this boundary so the view never renders null; the round
  * ordinal and clock coerce to `null`. The per-class tally degrades to `{}`
@@ -1467,7 +1467,7 @@ function parsePullRequestReview(value: unknown): PullRequestReview | null {
 }
 
 /**
- * The per-severity tally rides the wire as JSON text; the producer emits an
+ * note: The per-severity tally rides the wire as JSON text; the producer emits an
  * empty JSON object (`{}`) for a round that reported nothing. Anything
  * unreadable or malformed — including the tolerated legacy/mocked empty
  * string — still degrades to `{}` via the parse catch: the row renders, it
@@ -1496,7 +1496,7 @@ function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
 }
 
 /**
- * One finding entry (QC: repo-wide findings persist `file_path: null`).
+ * note: One finding entry (QC: repo-wide findings persist `file_path: null`).
  * title/file_path/body coerce to ""; the entry is dropped without its id
  * (the detail list keys by finding_id) or a malformed line anchor.
  */
@@ -1537,7 +1537,7 @@ export function parsePullRequestList(
 }
 
 /**
- * The detail head's newest review: the five attribution columns alone. The
+ * note: The detail head's newest review: the five attribution columns alone. The
  * head read never carries a round ordinal, run clock or tally, so this parser
  * neither expects nor invents them.
  */
@@ -1568,12 +1568,12 @@ export function parsePullRequestDetail(data: unknown): PullRequestDetail | null 
   if (pull_request === null) return null;
   const counts = parsePullRequestCounts(data.counts);
   if (counts === null) return null;
-  // Absent/drifted → null (no headline verdict); the envelope itself still parses.
+  // why: Absent/drifted → null (no headline verdict); the envelope itself still parses.
   return { pull_request, counts, latest_review: parseLatestReview(data.latest_review) };
 }
 
 /**
- * A tab count is required and finite; anything else fails the payload —
+ * invariant: A tab count is required and finite; anything else fails the payload —
  * a silent zero there would disable a tab that has rows.
  */
 function finiteCount(value: unknown): number | null {
@@ -1586,14 +1586,14 @@ function parsePullRequestCounts(value: unknown): PullRequestCounts | null {
   const reviews = finiteCount(value.reviews);
   const failures = finiteCount(value.failures);
   if (findings === null || reviews === null || failures === null) return null;
-  // Absent → 0 (a pre-`must_fix` payload: no dot, no note); present-but-malformed
+  // why: Absent → 0 (a pre-`must_fix` payload: no dot, no note); present-but-malformed
   // → fail, like every other count.
   const must_fix = value.must_fix === undefined ? 0 : finiteCount(value.must_fix);
   if (must_fix === null) return null;
   return { findings, reviews, failures, must_fix };
 }
 
-/** One row parser per section — the page parse below is keyed by it. */
+/** note: One row parser per section — the page parse below is keyed by it. */
 const RECORD_PARSERS = {
   findings: parsePullRequestFinding,
   reviews: parsePullRequestReview,
@@ -1627,7 +1627,7 @@ export function parseRecordPage<S extends RecordSection>(
 
 export function scopedPullRequestsUrl(base: string, scope: ReadScope, repo?: string): string {
   const path = `${base}${scopePath(scope)}/pull-requests`;
-  // A selected repository filters on the server, BEFORE the row cap — no
+  // note: A selected repository filters on the server, BEFORE the row cap — no
   // selection is exactly the unfiltered URL.
   return repo ? `${path}?repo=${encodeURIComponent(repo)}` : path;
 }
@@ -1673,7 +1673,7 @@ export function parseDeliveryPage(data: unknown): DeliveryStatusPage | null {
   };
 }
 
-/** One delivery row; a row without an outcome or a stamp cannot be shown. */
+/** invariant: One delivery row; a row without an outcome or a stamp cannot be shown. */
 function parseDeliveryRow(value: unknown): DeliveryStatusRow | null {
   if (!isRecord(value)) return null;
   if (typeof value.outcome !== "string" || typeof value.created_at !== "string") return null;
@@ -1866,13 +1866,13 @@ export function targetDetailTabQuery(tab: TargetDetailTab): string {
   return tab === "settings" ? "" : `?tab=${tab}`;
 }
 
-/** The role vocabulary of `workspace_members.role` (migration 0026 CHECK). */
+/** note: The role vocabulary of `workspace_members.role` (migration 0026 CHECK). */
 function isWorkspaceRole(value: unknown): value is WorkspaceRole {
   return value === "owner" || value === "admin" || value === "member";
 }
 
 /**
- * The `workspace` block of the member payload — every field is required, so a
+ * invariant: The `workspace` block of the member payload — every field is required, so a
  * rolled-back Worker (no summary) fails the parse instead of rendering a page
  * with invented limits. `memberLimit` is present in both modes and is `null`
  * for the unlimited tier (no cap), which is a real value, not a missing one.
@@ -2039,7 +2039,7 @@ export function parseApps(data: unknown): AppsPayload | null {
 /** One repository target row of `GET /:ref/api/targets` (product spec J1). */
 export type TargetListRow = {
   target_id: string;
-  /** NULL = 待安装: a target migrated before its first delivery names no repository. */
+  /** note: NULL = 待安装: a target migrated before its first delivery names no repository. */
   repo_id: number | null;
   repo_owner: string | null;
   repo_name: string | null;
@@ -2048,20 +2048,20 @@ export type TargetListRow = {
   review_enabled: number;
   follow_workspace_defaults: number;
   last_reviewed_at: string | null;
-  /** Every review this repository ran. */
+  /** note: Every review this repository ran. */
   reviews_total: number;
-  /** The reviews of the last 7 days — the band's planning figure. */
+  /** note: The reviews of the last 7 days — the band's planning figure. */
   reviews_7d: number;
 };
 
 /** The add-repository dialog's application option (one row of `GET /api/apps`). */
 export type RepositoryAppOption = {
-  /** The App's GitHub id — the address the repositories face takes. */
+  /** note: The App's GitHub id — the address the repositories face takes. */
   app_id: number;
-  /** The local bot UID the create POST names as `bot_id`. */
+  /** note: The local bot UID the create POST names as `bot_id`. */
   bot_id: string;
   name: string;
-  /** The GitHub slug, for the install-page link; null = never synced. */
+  /** invariant: The GitHub slug, for the install-page link; null = never synced. */
   slug: string | null;
 };
 
@@ -2090,7 +2090,7 @@ function parseTargetListRow(value: unknown): TargetListRow | null {
   if (reviewed !== null && typeof reviewed !== "string") return null;
   if (typeof value.review_enabled !== "number") return null;
   if (typeof value.follow_workspace_defaults !== "number") return null;
-  // The two review aggregates: the band sums them, so a row without them is
+  // why: The two review aggregates: the band sums them, so a row without them is
   // no row (the all-or-nothing rule the rest of this file follows).
   if (typeof value.reviews_total !== "number" || typeof value.reviews_7d !== "number") return null;
   return {
@@ -2221,7 +2221,7 @@ export function parseCreatedWorkspace(data: string): { id: string; homePath: str
 }
 
 /**
- * Row-level guard for the configured list: every row must carry the
+ * invariant: Row-level guard for the configured list: every row must carry the
  * `kind` discriminator, so a catalog-shaped entry (no `kind`) can never be
  * parsed as configured state. A key row also carries its pool identity plus
  * the per-key verification columns — without the identity the row could be
@@ -2255,13 +2255,13 @@ function isConfiguredProviderList(value: unknown): value is ConfiguredProvider[]
   );
 }
 
-/** The verification vocabulary is closed — an off-vocabulary value fails the parse. */
+/** note: The verification vocabulary is closed — an off-vocabulary value fails the parse. */
 function isKeyVerifiedStatus(value: unknown): value is KeyVerifiedStatus {
   return value === null || value === "ok" || value === "reachable" || value === "failed";
 }
 
 /**
- * Row-level guard for the `keys` face the add flow renders per provider:
+ * note: Row-level guard for the `keys` face the add flow renders per provider:
  * a drifted row (no pool identity, no masked tail, an off-vocabulary status)
  * fails the parse instead of rendering a row nothing can address.
  */
@@ -2281,7 +2281,7 @@ function isProviderKeyRowList(value: unknown): value is ProviderKeyRow[] {
   );
 }
 
-/** One catalog size pair: two positive whole token counts, never a guess. */
+/** safety: One catalog size pair: two positive whole token counts, never a guess. */
 function isCatalogModelLimit(value: unknown): value is CatalogModelLimit {
   return (
     isRecord(value) &&
@@ -2294,12 +2294,12 @@ function isCatalogModelLimit(value: unknown): value is CatalogModelLimit {
   );
 }
 
-/** The provider's per-model size table (an absent model id = the catalog says nothing). */
+/** why: The provider's per-model size table (an absent model id = the catalog says nothing). */
 function isCatalogModelLimits(value: unknown): value is Record<string, CatalogModelLimit> {
   return isRecord(value) && Object.values(value).every(isCatalogModelLimit);
 }
 
-/** One protocol option: a named api, its endpoint and its vocabulary. */
+/** note: One protocol option: a named api, its endpoint and its vocabulary. */
 function isCatalogProtocolOptions(value: unknown): value is CatalogProtocolOption[] {
   return (
     Array.isArray(value) &&
@@ -2315,7 +2315,7 @@ function isCatalogProtocolOptions(value: unknown): value is CatalogProtocolOptio
 }
 
 /**
- * Row-level guard for the catalog: tier + eligibility are the
+ * note: Row-level guard for the catalog: tier + eligibility are the
  * load-bearing discriminators, and the Add Provider UI renders/branches on
  * `models` / `verifiable` / `base_url` / `api`, so a drifted row missing any
  * of them fails the parse instead of breaking the page. Review handoff S2:
@@ -2397,17 +2397,17 @@ export function providerFormKind(provider: CatalogProvider): ProviderFormKind {
 export type UsageLimit = {
   id: string;
   kind: "window" | "balance";
-  /** Window only, 0..1 — the share of the window already used. */
+  /** invariant: Window only, 0..1 — the share of the window already used. */
   usedFraction?: number;
-  /** Balance amount; a window states it only when the vendor does. */
+  /** invariant: Balance amount; a window states it only when the vendor does. */
   remaining?: number;
-  /** On-demand amount shown beside `remaining` in the same cell. */
+  /** note: On-demand amount shown beside `remaining` in the same cell. */
   extraRemaining?: number;
   limit?: number;
   unit: "percent" | "requests" | "credits" | "usd" | "tokens";
-  /** Epoch ms, always a future stamp. */
+  /** invariant: Epoch ms, always a future stamp. */
   resetsAt?: number;
-  /** One account-wide pool behind several keys — the UI says "account-wide". */
+  /** note: One account-wide pool behind several keys — the UI says "account-wide". */
   shared?: boolean;
 };
 
@@ -2415,7 +2415,7 @@ export type UsageSnapshot = {
   status: "ok" | "absent" | "unauthorized" | "error";
   fetchedAt: number;
   limits: UsageLimit[];
-  /** Diagnostic only — the dialog never renders it verbatim. */
+  /** invariant: Diagnostic only — the dialog never renders it verbatim. */
   reason?: string;
   absentCause?: "no-probe" | "reported-nothing";
 };
@@ -2446,7 +2446,7 @@ function parseUsageLimit(raw: unknown): UsageLimit | null {
   if (!isUsageLimitKind(raw.kind)) return null;
   if (!isUsageUnit(raw.unit)) return null;
   const limit: UsageLimit = { id: raw.id, kind: raw.kind, unit: raw.unit };
-  // Every optional field is validated before it is trusted: an off-shape
+  // safety: Every optional field is validated before it is trusted: an off-shape
   // snapshot fails the parse instead of rendering a fabricated 0 %.
   // Number.isFinite — typeof NaN/Infinity is "number" and would render as
   // "NaN%" / "NaN credits".
@@ -2501,7 +2501,7 @@ export function parseUsageSnapshot(raw: unknown): UsageSnapshot | null {
   return snapshot;
 }
 
-/** `string | null` presence check — the cached GitHub profile columns are nullable (NULL = never synced). */
+/** invariant: `string | null` presence check — the cached GitHub profile columns are nullable (NULL = never synced). */
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
@@ -2510,25 +2510,25 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
-  // The delivery URL's workspace segment: the server-resolved id, required on
+  // invariant: The delivery URL's workspace segment: the server-resolved id, required on
   // both faces (a path ref may be a slug and must never be printed).
   if (typeof data.workspace_id !== "string" || data.workspace_id.length === 0) return null;
   if (typeof data.app.status !== "string") return null;
   if (typeof data.app.created_by !== "string" || typeof data.app.github_app_id !== "number") return null;
-  // The local App UID rides BOTH faces; the cached GitHub slug is a nullable
+  // note: The local App UID rides BOTH faces; the cached GitHub slug is a nullable
   // GitHub fact (NULL = never synced).
   if (typeof data.app.id !== "string") return null;
   if (!isNullableString(data.app.github_slug)) return null;
-  // The derived Blocked state rides BOTH faces, and the flag and its reason
+  // why: The derived Blocked state rides BOTH faces, and the flag and its reason
   // are one invariant: blocked ⇔ a named reason. An off-vocabulary reason
   // fails the read instead of rendering a copy nobody wrote.
   if (typeof data.blocked !== "boolean") return null;
   if (data.blocked_reason !== null && !isBlockedReason(data.blocked_reason)) return null;
   if (data.blocked !== (data.blocked_reason !== null)) return null;
-  // The several-repository state is a plain flag (absent = not many); a
+  // note: The several-repository state is a plain flag (absent = not many); a
   // non-boolean value fails the read rather than rendering an invented state.
   if (data.targets_many !== undefined && typeof data.targets_many !== "boolean") return null;
-  // A Blocked face omits the bot's own metadata stamp; the identity face
+  // note: A Blocked face omits the bot's own metadata stamp; the identity face
   // still requires it (nullable — NULL = never synced), exactly as before.
   if (data.blocked) {
     if (
@@ -2538,7 +2538,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
       return null;
     }
   }
-  // The target-owned review policy is ALL-OR-NOTHING, and `target_id` names
+  // note: The target-owned review policy is ALL-OR-NOTHING, and `target_id` names
   // it: the workspace's repository under this App. An App with none carries no
   // review-policy key at all — absent, never defaulted — so a payload carrying
   // part of the slice is not a settings read. The pause state rides BOTH faces
@@ -2546,7 +2546,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   // `review_level`, `default_review_level`) are validated in the manager
   // branch below, where they are the whole contract.
   const hasTarget = data.target_id !== undefined;
-  // The one face that names NO target without omitting the key: a Blocked
+  // note: The one face that names NO target without omitting the key: a Blocked
   // manager read with several repositories says `target_id: null`, so the SPA
   // can tell "several" from "none" on the wire. Every other face keeps the
   // presence-only rule, and a non-Blocked `null` still fails below.
@@ -2554,7 +2554,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (hasTarget && !blockedMany && (typeof data.target_id !== "string" || data.target_id.length === 0)) return null;
   if (!blockedMany && (data.app.review_enabled !== undefined) !== hasTarget) return null;
   if (!data.can_manage) {
-    // Identity-only non-manager face (App detail IA): the D4
+    // invariant: Identity-only non-manager face (App detail IA): the D4
     // identity set — created_at joins the required keys; everything from
     // the ops stores (installations / delivery log / sandbox image / trigger mode)
     // is NOT part of this face and is not required. The cached GitHub
@@ -2570,13 +2570,13 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     ) {
       return null;
     }
-    // The bot's metadata stamp is required on a readable identity face and
+    // invariant: The bot's metadata stamp is required on a readable identity face and
     // absent on a Blocked one (its presence rule is the shared check above).
     if (!data.blocked && !isNullableString(data.app.github_metadata_synced_at)) return null;
     return data as SettingsPayload;
   }
   if (data.blocked) {
-    // The Blocked manager face: the target's own review configuration and the
+    // note: The Blocked manager face: the target's own review configuration and the
     // identity the page needs. The bot-owned sections are ABSENT by contract,
     // so nothing here requires — or tolerates a guess for — them. A Blocked
     // read is a TARGET's (the resolver only reaches a foreign `owned` bot
@@ -2596,7 +2596,7 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     if (!isBotScope(data.app.scope)) return null;
     if (blockedMany !== (data.targets_many === true)) return null;
     if (blockedMany) {
-      // No target, so no policy and no pause state: their presence would be a
+      // why: No target, so no policy and no pause state: their presence would be a
       // fabricated answer.
       if (data.app.review_enabled !== undefined) return null;
       if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
@@ -2610,16 +2610,16 @@ export function parseSettings(data: unknown): SettingsPayload | null {
     if (data.installation !== null && !isBoundInstallation(data.installation)) return null;
     return data as SettingsPayload;
   }
-  // The share switch's facts ride this face and this face only: the caller can
+  // invariant: The share switch's facts ride this face and this face only: the caller can
   // see the bot's own configuration here, so the page must be able to decide
   // whether to offer the share at all. Absent/non-boolean fails the read —
   // rendering the switch on a guess would offer a write the server refuses.
   if (typeof data.official_workspace !== "boolean") return null;
   if (typeof data.can_configure_bot !== "boolean") return null;
-  // The selected runtime-image id rides the MANAGER face (registry id
+  // note: The selected runtime-image id rides the MANAGER face (registry id
   // only — never image-local configuration or secrets).
   if (typeof data.app.sandbox_image_id !== "string") return null;
-  // The bot's scope and the target's bound installation (migration 0059): an
+  // note: The bot's scope and the target's bound installation (migration 0059): an
   // off-vocabulary scope or a malformed installation fails the whole read, so
   // the install block never renders an action the server would refuse.
   if (!isBotScope(data.app.scope)) return null;
@@ -2632,24 +2632,24 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!Array.isArray(data.model_chains)) return null;
   if (!isConfiguredProviderList(data.configured_providers)) return null;
   if (!parseCatalogReference(data)) return null;
-  // The manage face: the selector choices — { id, enabled } rows only.
+  // invariant: The manage face: the selector choices — { id, enabled } rows only.
   if (!isSandboxImageList(data.sandbox_images)) return null;
-  // Cached visibility is nullable (null = the row read failed); any other
+  // note: Cached visibility is nullable (null = the row read failed); any other
   // value must be on the probe's own vocabulary. It is an APP fact, so it
   // rides the target-less face too.
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
-  // The App has no repository yet: the bot's sections are the whole face.
+  // note: The App has no repository yet: the bot's sections are the whole face.
   if (!hasTarget) return data as SettingsPayload;
-  // The trigger mode — the mode control's current value; an off-vocabulary
+  // note: The trigger mode — the mode control's current value; an off-vocabulary
   // value (DB CHECK makes it impossible from a correct worker) fails the parse
   // instead of rendering a dead selection.
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
-  // The review depth and the operator default it inherits (migration 0047):
+  // note: The review depth and the operator default it inherits (migration 0047):
   // null = the inherit face. An off-vocabulary level fails the parse instead
   // of rendering a dead selection.
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;
   if (!isReviewLevel(data.app.default_review_level)) return null;
-  // The review gate rides the MANAGER face (migration 0045): the Check's
+  // note: The review gate rides the MANAGER face (migration 0045): the Check's
   // pass condition. A gate whose stored verdict list is unreadable arrives as
   // explicit `null` (the server's honest degradation), which the section
   // renders as a read-only notice; any other malformed shape fails the parse
@@ -2703,12 +2703,12 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   return data as BotSettingsPayload;
 }
 
-/** One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */
+/** note: One entry of the verdict vocabulary — an off-vocabulary string fails the parse. */
 function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {
   return (PR_VERDICTS as readonly string[]).includes(value as string);
 }
 
-/** The review gate (migration 0045): an integer floor in the DDL's domain + a verdict list on the engine vocabulary. */
+/** why: The review gate (migration 0045): an integer floor in the DDL's domain + a verdict list on the engine vocabulary. */
 function isCheckGateSettings(value: unknown): value is CheckGateSettings {
   return (
     isRecord(value) &&
@@ -2721,13 +2721,13 @@ function isCheckGateSettings(value: unknown): value is CheckGateSettings {
   );
 }
 
-/** `null` (row unreadable) or a probe vocabulary value; anything else is drift. */
+/** why: `null` (row unreadable) or a probe vocabulary value; anything else is drift. */
 function isNullableGithubVisibility(value: unknown): value is GithubVisibility | null {
   return value === null || value === "public" || value === "private" || value === "unknown";
 }
 
 /**
- * The bound installation's row: the numeric installation id, an account the
+ * note: The bound installation's row: the numeric installation id, an account the
  * webhook may not have reported yet, and the removal stamp as a boolean.
  */
 function isBoundInstallation(value: unknown): value is BoundInstallation {
@@ -2757,7 +2757,7 @@ export type ConcurrencySettings = {
   concurrency: number;
   min: number;
   max: number;
-  /** The stored cap could not be read: the numbers above are the conservative fallback. */
+  /** why: The stored cap could not be read: the numbers above are the conservative fallback. */
   degraded: boolean;
 };
 
@@ -2767,7 +2767,7 @@ export type ConcurrencySettings = {
  * repair. A typed value IS the repair, so the form stays usable.
  */
 export function concurrencySubmitBlocked(degraded: boolean, draft: string | null): boolean {
-  // Two different no-value states share one outcome (nothing to write): an
+  // note: Two different no-value states share one outcome (nothing to write): an
   // untouched degraded form (the payload is the conservative fallback) and a
   // cleared field (`Number("")` is 0). The `required` inputs catch the second
   // in the browser; this guard also covers a submit event that bypasses them.
@@ -2837,15 +2837,15 @@ export function parseStoredCheckMinScore(body: string): number | null {
  */
 export type ReviewUsageQuota = {
   usedRp: number;
-  /** NULL = no monthly limit on this plan. */
+  /** note: NULL = no monthly limit on this plan. */
   limitRp: number | null;
   sharedRp: number;
   byokRp: number;
   rpPerCredit: number;
   profileVersion: number;
-  /** The judging profile's own start, `YYYY-MM-DD`. */
+  /** note: The judging profile's own start, `YYYY-MM-DD`. */
   profileFrom: string;
-  /** The next UTC month's first instant, `YYYY-MM-DD`. */
+  /** note: The next UTC month's first instant, `YYYY-MM-DD`. */
   resetOn: string;
 };
 
@@ -2887,7 +2887,7 @@ export function parseReviewUsage(data: unknown): ReviewUsage | null {
   if (typeof month !== "string") return null;
   if (typeof sharedReviews !== "number" || typeof ownReviews !== "number") return null;
   if (sharedBot !== "available" && sharedBot !== "not-in-plan" && sharedBot !== "not-designated") return null;
-  // Absent or `null` is the server saying "no quota block" (self-hosted, or a
+  // note: Absent or `null` is the server saying "no quota block" (self-hosted, or a
   // Worker that predates the field); a present object must parse whole.
   const parsedQuota = quota === undefined || quota === null ? null : parseReviewUsageQuota(quota);
   if (quota !== undefined && quota !== null && parsedQuota === null) return null;

@@ -66,7 +66,7 @@ export const RESERVED_WORKSPACE_SLUGS: ReadonlySet<string> = new Set([
 export const WORKSPACE_FAMILY_SEGMENTS = ["repos", "apps", "members", "settings", "api"] as const;
 
 /**
- * The non-reserved workspace ref (an id or a slug) a `/dashboard/<ref>/<family
+ * note: The non-reserved workspace ref (an id or a slug) a `/dashboard/<ref>/<family
  * segment>…` path is scoped to, otherwise null — the request-path ordering
  * contract's step 1 grammar, mirrored by the Worker's
  * `classifyDashboardPath`. The ONE workspace-path grammar: the route matcher,
@@ -91,7 +91,7 @@ export function workspaceRefOf(pathname: string): string | null {
  * segment (a deployment-level page has nothing to rewrite).
  */
 export function replaceWorkspaceRef(pathname: string, nextRef: string): string | null {
-  // A bookmark on the retired family moves onto the live page it names, so the
+  // why: A bookmark on the retired family moves onto the live page it names, so the
   // switch lands somewhere real instead of the unknown-path stub.
   const live = targetsFamilyRedirect(pathname) ?? pathname;
   const match = /^\/dashboard\/([^/]+)(\/.*)?$/.exec(live);
@@ -125,7 +125,7 @@ export function reposHomePath(ref: string): string {
   return `/dashboard/${ref}/repos`;
 }
 
-/** The retired `targets` family's list and detail spellings. */
+/** note: The retired `targets` family's list and detail spellings. */
 const RETIRED_TARGETS_LIST_PATH = /^\/dashboard\/([^/]+)\/targets$/;
 const RETIRED_TARGETS_DETAIL_PATH = /^\/dashboard\/([^/]+)\/targets\/([^/]+)$/;
 

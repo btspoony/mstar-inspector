@@ -1,5 +1,5 @@
 /**
- * (AD-621): trend chart on recharts — grouped
+ * note: (AD-621): trend chart on recharts — grouped
  * vertical bars (reviews + findings) per time bucket. The `week` field of
  * TrendPoint carries the bucket start — a day or a Monday depending on the
  * window's granularity (the name predates the per-window buckets and
@@ -73,7 +73,7 @@ const AXIS_H = 20;
 const Y_AXIS_W = 28;
 const X_LABEL_MAX_VISIBLE = 8;
 
-/** D14 slots: reviews ride the blue family (5), findings the amber one (3). */
+/** note: D14 slots: reviews ride the blue family (5), findings the amber one (3). */
 const REVIEWS = chartClasses(5);
 const FINDINGS = chartClasses(3);
 
@@ -86,7 +86,7 @@ export function TrendChart({
   seriesLabels: { reviews: string; findings: string };
   ariaLabel: string;
 }) {
-  // Measured container width — before the empty-state return (Rules of
+  // note: Measured container width — before the empty-state return (Rules of
   // Hooks); the static/SSR face keeps the designed 560 default.
   const [containerRef, width] = useContainerWidth();
 

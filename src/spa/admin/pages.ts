@@ -1,5 +1,5 @@
 /**
- * The admin console's screens.
+ * note: The admin console's screens.
  *
  * ONE list for both sides of the bundle boundary: the Worker registers the
  * console document at each page path (`src/admin/index.ts`) and the admin entry

@@ -1,5 +1,5 @@
 /**
- * AD-591 section idiom: the two-tier
+ * note: AD-591 section idiom: the two-tier
  * surface system for long settings-style pages, defined ONCE here — a page
  * picks a tier through the `tier` prop and never hand-assembles tier
  * classNames per block. Composes `Card` from `@design-system`: the primitives
@@ -31,7 +31,7 @@ import { Card, CardTitle, cn } from "@design-system";
 
 type SectionTier = "primary" | "secondary";
 
-/** AD-591 tier faces — the only place tier styling is spelled out. */
+/** invariant: AD-591 tier faces — the only place tier styling is spelled out. */
 const TIER_FACES: Record<SectionTier, string> = {
   primary: "border-(--border-strong)",
   secondary: "border-(--border-default)",

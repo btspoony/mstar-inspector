@@ -22,7 +22,7 @@ export function useSaveSignal(): {
 } {
   const [status, setStatus] = useState<SaveStatus>("idle");
   const revertTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Effect-managed lifetime: StrictMode's setup/cleanup/setup re-arms it,
+  // note: Effect-managed lifetime: StrictMode's setup/cleanup/setup re-arms it,
   // and a real unmount flips it off for good — an async completion that
   // resolves after teardown retains its callbacks but can neither transition
   // state nor arm a new timer.
@@ -35,7 +35,7 @@ export function useSaveSignal(): {
     }
   }, []);
 
-  // Unmount is the last word: the pending revert is disarmed and every
+  // note: Unmount is the last word: the pending revert is disarmed and every
   // retained callback becomes a no-op.
   useEffect(() => {
     mounted.current = true;

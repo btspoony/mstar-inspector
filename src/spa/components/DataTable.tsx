@@ -1,5 +1,5 @@
 /**
- * Table idiom (DESIGN.md Table): ONE shell and ONE header face for every
+ * note: Table idiom (DESIGN.md Table): ONE shell and ONE header face for every
  * dashboard table — container radius + `border-default` hairline on the shell,
  * the `surface-raised` header band at `label-12`, rows on the two named row
  * heights (`row-h-compact` header, `row-h-comfort` body) with a
@@ -19,11 +19,11 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow, cn } fro
 
 export type DataTableColumn<T> = {
   header: ReactNode;
-  /** The primary line — the whole cell when `meta` is absent. */
+  /** why: The primary line — the whole cell when `meta` is absent. */
   cell: (row: T) => ReactNode;
-  /** Second line under the primary content (`label-12` in `text-muted`). */
+  /** note: Second line under the primary content (`label-12` in `text-muted`). */
   meta?: (row: T) => ReactNode;
-  /** Figure column: header and cells right-align (DESIGN.md Table). */
+  /** note: Figure column: header and cells right-align (DESIGN.md Table). */
   align?: "right";
 };
 
@@ -38,13 +38,13 @@ export function DataTable<T>({
   rows: readonly T[];
   rowKey: (row: T) => string;
   empty?: ReactNode;
-  /** Per-row passthrough: the page's own row class / click handler. */
+  /** note: Per-row passthrough: the page's own row class / click handler. */
   rowProps?: (row: T) => ComponentProps<"tr">;
 }) {
   if (rows.length === 0 && empty !== undefined) return <>{empty}</>;
 
   return (
-    // The shell hairline is explicit: a bare `border` carries width only and
+    // invariant: The shell hairline is explicit: a bare `border` carries width only and
     // preflight leaves border-color at currentColor, so the face supplies the
     // `border-default` hairline itself. Row hairlines are the Table primitive's
     // own (`border-subtle`, DESIGN.md Table) — one owner, not two. The row
@@ -70,7 +70,7 @@ export function DataTable<T>({
           {rows.map((row) => {
             const props = rowProps?.(row) ?? {};
             return (
-              // The page's class merges into the row face instead of replacing
+              // why: The page's class merges into the row face instead of replacing
               // it, so a `cursor-pointer` row keeps the comfort height.
               <TableRow key={rowKey(row)} {...props} className={cn("h-(--row-h-comfort)", props.className)}>
                 {columns.map((column, index) => (

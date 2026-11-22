@@ -1,5 +1,5 @@
 /**
- * Measured container width for the token-chart pin path (v0.3.4 round,
+ * safety: Measured container width for the token-chart pin path (v0.3.4 round,
  * 2026-09-16): charts render at the width they actually occupy so the
  * designed 10px tick text stays true-size — the old fixed-560 svg stretched
  * by the `style={{ width: "100%", height: "auto" }}` wrapper upscaled the

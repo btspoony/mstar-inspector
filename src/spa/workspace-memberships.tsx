@@ -1,5 +1,5 @@
 /**
- * The login's workspace memberships as client state shared across the shell.
+ * note: The login's workspace memberships as client state shared across the shell.
  *
  * A context rather than a callback prop: `main.tsx` renders the page as
  * `Layout`'s already-built `children` — `<Layout><Router>{DashboardPage}</Router></Layout>`
@@ -24,7 +24,7 @@ export function WorkspaceMembershipsProvider({ boot, children }: { boot: SpaBoot
   const value = useMemo(
     () => ({
       memberships,
-      // The path segment may name the row by `id` or by a legacy `slug`; `id`
+      // note: The path segment may name the row by `id` or by a legacy `slug`; `id`
       // is the one that never changes.
       rename: (ref: string | null, name: string) =>
         setMemberships((prev) => prev?.map((m) => (ref === m.id || ref === m.slug ? { ...m, name } : m))),

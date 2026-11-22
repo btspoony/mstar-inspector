@@ -1,5 +1,5 @@
 /**
- * The App's brand mark on both dashboard surfaces (Apps list row, App
+ * note: The App's brand mark on both dashboard surfaces (Apps list row, App
  * identity card).
  *
  * `src` is the cached `github_avatar_url` column, which can be NULL (never
@@ -23,15 +23,15 @@ export function AppAvatar({
   appId,
   className,
 }: {
-  /** The cached avatar column; NULL = never synced, derived from `appId`. */
+  /** invariant: The cached avatar column; NULL = never synced, derived from `appId`. */
   src: string | null;
-  /** The numeric GitHub App id — the read-time derivation when `src` is NULL. */
+  /** why: The numeric GitHub App id — the read-time derivation when `src` is NULL. */
   appId?: number;
   className: string;
 }) {
   const [failed, setFailed] = useState(false);
   const url = src ?? (appId === undefined ? null : appAvatarUrl(appId));
-  // A different url is a different image: clear the failure so it is tried.
+  // why: A different url is a different image: clear the failure so it is tried.
   useEffect(() => setFailed(false), [url]);
   if (url !== null && !failed) {
     return <img src={url} alt="" className={className} onError={() => setFailed(true)} />;

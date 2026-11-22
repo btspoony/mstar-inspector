@@ -1,5 +1,5 @@
 /**
- * The document title for one SPA page, shared by the Worker (which writes it
+ * note: The document title for one SPA page, shared by the Worker (which writes it
  * into the shell document) and the router effect (which writes it on a
  * client-side navigation) — one mapping, so the two faces can never disagree
  * about what a page is called.

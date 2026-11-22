@@ -1,5 +1,5 @@
 /**
- * The 所有仓库 detail's 评审配置 tab: the workspace's OWN defaults, which is what
+ * note: The 所有仓库 detail's 评审配置 tab: the workspace's OWN defaults, which is what
  * every inheriting repository runs with. Two differences from the per-target
  * tab decide this face:
  * - this page IS the default, so there is no inheritance switch — and no
