@@ -1,4 +1,5 @@
-/** note: The publication-journal proof WAIT (spec §7.9/§7.11.2).
+/**
+ * note: The publication-journal proof WAIT (spec §7.9/§7.11.2).
  *
  * A Check handed over by the consumer's journal hand-off must not be
  * terminalized while its publication is still in flight — the lane gives the
@@ -45,7 +46,8 @@ import {
 /** note: The attempt's own execution deadline (the wait's hard stop). */
 const DEADLINE = T0 + 900_000;
 
-/** note: The state the consumer's journal hand-off leaves behind: the unconfirmed
+/**
+ * note: The state the consumer's journal hand-off leaves behind: the unconfirmed
  * fallback frozen, the claim released at the first backoff rung, no proof yet.
  */
 async function handedOverAttempt(db: TestD1) {
@@ -66,7 +68,7 @@ async function handedOverAttempt(db: TestD1) {
   return { attempt, id };
 }
 
-/** invariant: Counts adapter operations — a waiting pass must issue none of them. */
+/** note: Counts adapter operations — a waiting pass must issue none of them. */
 type AdapterCalls = { adopt: number; begin: number; complete: number };
 
 function countingScript(calls: AdapterCalls): AdapterScript {
@@ -85,7 +87,7 @@ function countingScript(calls: AdapterCalls): AdapterScript {
     }),
     complete: async (identity: CheckIdentity, _runId: number, conclusion: CheckConclusion) => {
       calls.complete += 1;
-      return { kind: "completed" as const, remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+      return { kind: "completed" as const, remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
     },
   };
 }
@@ -126,7 +128,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
         firstStub.restore();
       }
 
-      // safety: The credential factory never ran — the readable `unknown` PHASE
+      // note: The credential factory never ran — the readable `unknown` PHASE
       // included, which is a real journal state, not a failed read — and no
       // remote operation happened at all. A stray adopt/begin/create would leave
       // the create mark no longer `not-sent`.
@@ -169,7 +171,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
             ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
             complete: async (identity, _runId, conclusion) => {
               sent.desired = conclusion.desired;
-              return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+              return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
             },
           }),
         });
@@ -211,14 +213,14 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
             return scriptedCredentials(db)(input);
           },
         });
-        // invariant: The lifecycle gate WINS over the wait: suspended, never deferred.
+        // note: The lifecycle gate WINS over the wait: suspended, never deferred.
         expect(summary.suspended).toBe(1);
         expect(summary.deferred).toBe(0);
       } finally {
         stub.restore();
       }
 
-      // safety: No credential was minted and no Check work was produced.
+      // note: No credential was minted and no Check work was produced.
       expect(factoryCalls).toBe(0);
       const row = await rawRow(db, id);
       expect(row.recovery_state).toBe("suspended");
@@ -323,7 +325,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -376,7 +378,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(row.observed).toBe("unknown");
     expect(row.desired_summary).toBe(UNCONFIRMED);
 
-    // invariant: The NEWEST row now proves itself: the conclusion must come from THAT row
+    // note: The NEWEST row now proves itself: the conclusion must come from THAT row
     // (its publication id and round), not from the older degraded one.
     const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
     db.raw
@@ -392,7 +394,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             settled.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -409,7 +411,8 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     expect(closed.observed).toBe("success");
   });
 
-  /** note: The state `abandonUnterminalized` leaves behind: the lease released at the
+  /**
+   * note: The state `abandonUnterminalized` leaves behind: the lease released at the
    * first backoff rung, NO frozen intent and `publication_id` still NULL —
    * abandonment is not a conclusion, so the reconciler owes the row one.
    */
@@ -435,7 +438,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an abandoned attempt concludes from the newest journal row's proof, with that id", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedRow(db);
-    // invariant: The consumer abandoned this attempt before it linked anything, then the
+    // note: The consumer abandoned this attempt before it linked anything, then the
     // SAME message published: the journal row for this head — staged after this
     // attempt was admitted — holds the proof, and the row carries no
     // `publication_id` of its own. Its exact id is what the Check must conclude
@@ -454,7 +457,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
             sent.summary = conclusion.summary;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -545,7 +548,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("a previous generation's proof with no journal row of this attempt's ends the WAIT, not the deadline", async () => {
     const db = seededDb();
     const { attempt, id } = await abandonedRow(db);
-    // invariant: Nothing this attempt staged exists: the only publication for the head was
+    // note: Nothing this attempt staged exists: the only publication for the head was
     // staged before it was admitted, so it cannot answer for this attempt. The
     // abandoned row has no link of its own, so the wait is terminal for this
     // pass — and it still takes the claim-and-give-back wait (spec §7.11.2 step
@@ -601,7 +604,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       expect(first.deferred).toBe(1);
       expect(first.completed).toBe(0);
 
-      // invariant: The publication is staged and proves itself before that pushed due time.
+      // note: The publication is staged and proves itself before that pushed due time.
       const journalId = seedJournal(db, SCOPE, SHA, "confirmed", T0 + 130_000);
       const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
       db.raw
@@ -616,7 +619,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -637,7 +640,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
     const { attempt, id } = await handedOverAttempt(db);
     const journalId = seedJournal(db, SCOPE, SHA, "prepared");
     linkPublication(db, id, journalId);
-    // why: The proof is readable on the waiting row itself, so the conclusion can be
+    // note: The proof is readable on the waiting row itself, so the conclusion can be
     // decided now — the phase alone does not keep the wait alive.
     const proof = { ...proofFor(attempt.identity, "review"), publicationId: journalId };
     db.raw
@@ -654,7 +657,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -705,11 +708,14 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an unreadable journal probe defers inside the window instead of terminalizing", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
-    // invariant: The journal probe's OWN read fails (it is the only journal query the
-    // probe makes now). "Unknown" is NOT "nothing pending": the publication may
-    // still be in flight, and this attempt is inside its window, so the lane
-    // must wait exactly as it does for a readable journal.
-    const unreadable = withFailingReads(db, /FROM review_publications/);
+    // note: The journal probe's OWN read fails: every statement that FETCHES journal
+    // rows (`FROM review_publications WHERE ...`). The selector's proven-first
+    // probe is an id existence test (`FROM review_publications pub WHERE
+    // pub.id = ...`) and is deliberately left working — it orders the batch, it
+    // never answers the wait. "Unknown" is NOT "nothing pending": the
+    // publication may still be in flight, and this attempt is inside its
+    // window, so the lane must wait exactly as it does for a readable journal.
+    const unreadable = withFailingReads(db, /FROM review_publications\s+WHERE/);
     const stub = stubFetch();
     const calls = { adopt: 0, begin: 0, complete: 0 };
     const events: Array<Record<string, unknown>> = [];
@@ -726,7 +732,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
       stub.restore();
     }
 
-    // why: The probe's answer is `unknown`; the phase is absent because no journal
+    // note: The probe's answer is `unknown`; the phase is absent because no journal
     // was read — never the literal phase 'unknown'.
     const deferredLines = events.filter(
       (fields) => fields.event === "check_recovery_deferred_pending_publication",
@@ -745,10 +751,11 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   test("an unreadable journal probe at the deadline still fails closed", async () => {
     const db = seededDb();
     const { id } = await handedOverAttempt(db);
-    // note: The same unreadable probe as the case above, but the wait is over: the
-    // `now() < execution_deadline_ms` guard, not the probe's answer, is what
-    // decides here — past the deadline the lane must conclude.
-    const unreadable = withFailingReads(db, /FROM review_publications/);
+    // note: The same unreadable probe read as the case above (a journal-row FETCH,
+    // never the selector's id probe), but the wait is over: the `now() <
+    // execution_deadline_ms` guard, not the probe's answer, is what decides
+    // here — past the deadline the lane must conclude.
+    const unreadable = withFailingReads(db, /FROM review_publications\s+WHERE/);
     const stub = stubFetch();
     const sent: { desired: string | null } = { desired: null };
     let deferred = -1;
@@ -759,7 +766,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -790,7 +797,7 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => {
             sent.desired = conclusion.desired;
-            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired }) };
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
           },
         }),
       });
@@ -807,7 +814,8 @@ describe("publication-journal proof wait (spec §7.9/§7.11.2)", () => {
   });
 });
 
-/** note: Counts every D1 statement a pass prepares, so the wait's per-pass cost is
+/**
+ * note: Counts every D1 statement a pass prepares, so the wait's per-pass cost is
  * MEASURED. A pass with nothing due is the baseline (the selector alone).
  */
 function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
@@ -829,7 +837,7 @@ function countingDb(db: TestD1): { db: TestD1; statements: () => number } {
 }
 
 describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
-  test("an attempt with no journal row pays the same five statements as any wait", async () => {
+  test("an attempt with no journal row pays the same six statements as any wait", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
@@ -839,15 +847,15 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     const before = dead.statements();
     const summary = await run(dead.db, { now: () => T0 + 120_000 });
 
-    // note: FIVE statements, the SAME cost as a journal-present wait: the D1 pair gate
+    // note: SIX statements, the SAME cost as a journal-present wait: the D1 pair gate
     // that LEADS the wait (spec §7.11.2 step 2), the journal probe, the claim
-    // UPDATE, the claim read and the fenced defer that gives the claim straight
-    // back on the first rung. A terminal-for-this-pass shape is NOT exempt from
-    // the claim — that claim is what moves the row's due time off the head of
-    // the due batch.
+    // UPDATE, the claim read, the fenced defer that gives the claim straight
+    // back on the first rung, and the owed-obligation bump that moves with that
+    // defer. A terminal-for-this-pass shape is NOT exempt from the claim — that
+    // claim is what moves the row's due time off the head of the due batch.
     expect(summary.examined).toBe(1);
     expect(summary.deferred).toBe(1);
-    expect(dead.statements() - before - selectorOnly).toBe(5);
+    expect(dead.statements() - before - selectorOnly).toBe(6);
     const row = await rawRow(dead.db, id);
     expect(row.next_attempt_ms).toBe(T0 + 120_000 + CHECK_BACKOFF_MS[0]!);
     expect(row.holder).toBeNull();
@@ -873,7 +881,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     );
   });
 
-  test("a journal-present wait costs the probe, the pair gate, the claim and the defer", async () => {
+  test("a journal-present wait costs the probe, the pair gate, the claim, the defer and the bump", async () => {
     const baseline = countingDb(seededDb());
     await run(baseline.db, { now: () => T0 + 120_000 });
     const selectorOnly = baseline.statements();
@@ -884,17 +892,19 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
     const before = counted.statements();
     const summary = await run(counted.db, { now: () => T0 + 120_000 });
 
-    // note: FIVE statements for the claim-taking wait — the journal probe, the D1
-    // pair gate that leads it, the claim UPDATE, the claim read and the
-    // re-leasing defer that gives the claim straight back on the first rung.
+    // note: SIX statements for the claim-taking wait — the journal probe, the D1
+    // pair gate that leads it, the claim UPDATE, the claim read, the re-leasing
+    // defer that gives the claim straight back on the first rung, and the
+    // owed-obligation bump that the defer owns (one statement even when no mark
+    // exists: the WHERE matches nothing).
     expect(summary.deferred).toBe(1);
-    expect(counted.statements() - before - selectorOnly).toBe(5);
+    expect(counted.statements() - before - selectorOnly).toBe(6);
     expect((await rawRow(counted.db, id)).holder).toBeNull();
   });
 
   test("more wait-terminal rows than the batch bound cannot starve a publishable attempt", async () => {
     const db = seededDb();
-    // invariant: CHECK_RECONCILE_LIMIT + 1 rows that can never progress, every one due
+    // note: CHECK_RECONCILE_LIMIT + 1 rows that can never progress, every one due
     // BEFORE the one attempt that can publish. The selector orders by
     // `COALESCE(next_attempt_ms, created_ms), id LIMIT 25`, so a row whose due
     // time never moved would occupy a slot on EVERY pass: the same 25 would be
@@ -951,7 +961,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
         now: () => T0 + 120_000,
         credentials: scriptedCredentials(db, countingScript({ adopt: 0, begin: 0, complete: 0 })),
       });
-      // invariant: The bound still applies: one pass reads exactly `CHECK_RECONCILE_LIMIT`
+      // note: The bound still applies: one pass reads exactly `CHECK_RECONCILE_LIMIT`
       // rows and the publishable attempt is the 27th…
       expect(first.examined).toBe(CHECK_RECONCILE_LIMIT);
       expect(first.completed).toBe(0);
@@ -962,7 +972,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
       expect(nextIds).toHaveLength(2);
       expect(nextIds).toContain(publishableId);
 
-      // invariant: The reorder spent nothing: the dead row keeps its attempt count, holds
+      // note: The reorder spent nothing: the dead row keeps its attempt count, holds
       // no lease, and is due again one rung later — not at the deadline.
       const reorderedId = deadIds.find((id) => !nextIds.includes(id))!;
       const reordered = await rawRow(db, reorderedId);
@@ -976,7 +986,7 @@ describe("the proof wait's per-pass cost (spec §7.9/§7.11.2)", () => {
           ...countingScript({ adopt: 0, begin: 0, complete: 0 }),
           complete: async (identity, _runId, conclusion) => ({
             kind: "completed" as const,
-            remote: remoteFor(identity, { conclusion: conclusion.desired }),
+            remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }),
           }),
         }),
       });

@@ -1,5 +1,5 @@
 /**
- * why: Per-App credential resolution tests (architect lock L4).
+ * note: Per-App credential resolution tests (architect lock L4).
  *
  * The consumer resolves the commenter from `payload.botRef` BEFORE the
  * in-flight guard / sandbox (fail fast, zero side effects on failure):
@@ -30,6 +30,7 @@ import { idemKey } from "../../src/contracts/idem";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { APP_CREDENTIAL_RESOLUTION_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
+import { inlineWorkflowStarter } from "../helpers/workflow-route";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -82,7 +83,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
     )
     .run(id, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
   await mapAppToDefaultWorkspace(db, id);
-  // why: The job names a target: review level, Check gate and business pause all
+  // note: The job names a target: review level, Check gate and business pause all
   // come from that row, so every seeded App gets its one (DDL defaults).
   const targetId = `target-${id}`;
   db.raw
@@ -117,10 +118,19 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
+  claimMarker: mock(async () => "written" as const),
+  runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
+    kind: "ran" as const,
+    ...(await fakeSandbox.runCommand(cmd, opts)),
+  })),
+  destroyMarked: mock(async () => {
+    await fakeSandbox.destroy();
+    return "destroyed" as const;
+  }),
   destroy: mock(async () => {}),
 };
 
-// why: Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// note: Load-shim only: consumer.ts statically imports ./sandbox → the workerd
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
 // injects the fake via createReviewConsumer overrides — this mock is never
 // called.
@@ -179,6 +189,9 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
     }),
+    recoverLineComments: mock(async () => {
+      throw new Error("unexpected: no dispatched line batch → no discovery");
+    }),
     // note: Discussion capture + resolution: no open lifecycle
     // rows in these fixtures → never triggered.
     listDiscussion: mock(async () => {
@@ -196,6 +209,7 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
 const testOverrides = {
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
+  startAttempt: inlineWorkflowStarter([]),
 };
 
 // note: --- consumer under test (dynamic import: mocks must be registered first) ---
@@ -301,12 +315,12 @@ describe("consumer bot/target resolution (lock L4)", () => {
     expect(runnerCall).toBeDefined();
     const runnerOptions = runnerCall!.opts as { env: Record<string, string>; stdin?: string };
     expect(runnerOptions.env.ARK_API_KEY).toBeUndefined();
-    // invariant: Both of the App's keys ride the credential payload — and no pool name
+    // note: Both of the App's keys ride the credential payload — and no pool name
     // reaches the process environment (the retired channel).
     const { pools } = JSON.parse(runnerOptions.stdin!) as { pools: Record<string, string[]> };
     expect(pools.ark).toHaveLength(2);
     expect(Object.keys(runnerOptions.env).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
-    // invariant: Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
+    // note: Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     // note: Token mint + postReview both on that same instance.
@@ -315,11 +329,11 @@ describe("consumer bot/target resolution (lock L4)", () => {
     expect(appCalls[1]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[0]!.call.installationId).toBe(123);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
-    // safety: Every structured log line carries the appId reference (never a credential).
+    // note: Every structured log line carries the appId reference (never a credential).
     const errOrInfo = logLines.filter((l) => l.fields.app_id !== undefined);
     expect(errOrInfo.length).toBeGreaterThan(0);
     expect(errOrInfo.every((l) => l.fields.app_id === appX.id)).toBe(true);
-    // invariant: The persisted review row carries the App identity (QC F-001: the
+    // note: The persisted review row carries the App identity (QC F-001: the
     // resolved botRef's appId rides the put into reviews.bot_id).
     const row = db.raw.query("SELECT bot_id FROM reviews").get() as { bot_id: string | null };
     expect(row.bot_id).toBe(appX.id);
@@ -329,7 +343,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    // invariant: The review depth is the TARGET's setting (the bot row no longer has one).
+    // note: The review depth is the TARGET's setting (the bot row no longer has one).
     db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appX.targetId);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -354,7 +368,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
       consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appY.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: target .* belongs to bot/);
 
-    // invariant: Zero side effects: no commenter built, no sandbox, no GitHub call.
+    // note: Zero side effects: no commenter built, no sandbox, no GitHub call.
     expect(factoryCreds).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
@@ -468,7 +482,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // invariant: One factory invocation per message (cache hit would skip it), and the
+    // note: One factory invocation per message (cache hit would skip it), and the
     // message's token + plan + post all hit the instance the factory returned.
     expect(factoryCreds).toHaveLength(1);
     const instance = factoryCreds[0]!.instance;
@@ -490,7 +504,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // invariant: One factory invocation total; BOTH messages were served by that one
+    // note: One factory invocation total; BOTH messages were served by that one
     // instance (identity via the factory's instance numbers).
     expect(factoryCreds).toHaveLength(1);
     expect(appCalls.map((c) => c.instance)).toEqual([
@@ -523,7 +537,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_Y });
-    // invariant: Message 2 was served by the NEW instance only — the old one is replaced.
+    // note: Message 2 was served by the NEW instance only — the old one is replaced.
     expect(appCalls.map((c) => c.instance)).toEqual([1, 1, 1, 2, 2, 2]);
   });
 
@@ -565,7 +579,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     ).rejects.toThrow(/per-App credential resolution failed: app .* is disabled/);
     expect(factoryCreds).toHaveLength(1); // note: no rebuild on the failure path
 
-    // invariant: Re-enable (a real operator path): the envelope is UNCHANGED, so a
+    // note: Re-enable (a real operator path): the envelope is UNCHANGED, so a
     // fingerprint hit would reuse instance 1 — a second factory call proves
     // the disabled gate evicted the entry.
     await store.setAppStatus(appX.id, "active");
@@ -588,7 +602,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
       consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is soft-deleted/);
 
-    // why: Production never un-deletes; the probe restores the rows via direct SQL
+    // note: Production never un-deletes; the probe restores the rows via direct SQL
     // purely to make the eviction OBSERVABLE: the envelope is unchanged, so a
     // surviving entry would fingerprint-hit and reuse instance 1. The delete
     // stamps the bot AND its targets in one batch, so both are restored here.
@@ -612,10 +626,10 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
 
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
     expect(warn).toBeDefined();
-    // safety: The warn carries the id + app_id and NEVER key material.
+    // note: The warn carries the id + app_id and NEVER key material.
     expect(warn!.fields.app_id).toBe(appX.id);
     expect(JSON.stringify(warn)).not.toContain(sk("rogue-SECRET"));
-    // invariant: The skip continues: the review ran to completion (posted + persisted).
+    // note: The skip continues: the review ran to completion (posted + persisted).
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
   });
@@ -652,11 +666,11 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // invariant: Acked DIRECTLY by the queue handler — never retried, never DLQed (a
+    // note: Acked DIRECTLY by the queue handler — never retried, never DLQed (a
     // pause is intentional; a throw would be the wrong semantics).
     expect(ackIds).toEqual(["m0"]);
     expect(retryIds).toEqual([]);
-    // invariant: No review side effects: no per-App instance built, no token mint, no
+    // note: No review side effects: no per-App instance built, no token mint, no
     // post, no sandbox step, no guard acquisition, no done-state. The single
     // KV write is the claim stamp — `paused` proves no review happened, so a
     // redelivery must enqueue again.
@@ -697,10 +711,10 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       /per-App credential resolution failed: app .* is disabled/,
     );
 
-    // invariant: The throw path: neither ack nor retry fired (the queue retries it).
+    // note: The throw path: neither ack nor retry fired (the queue retries it).
     expect(ackIds).toEqual([]);
     expect(retryIds).toEqual([]);
-    // invariant: No paused log — the gate order pinned disabled before paused.
+    // note: No paused log — the gate order pinned disabled before paused.
     expect(logLines.some((l) => l.fields.event === "review_paused")).toBe(false);
     expect(sandboxCalls).toHaveLength(0);
   });
@@ -718,7 +732,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // note: Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
     await store.setReviewEnabled(appX.id, false);
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    expect(ackIds).toEqual(["m0"]); // note: batch-local message ids restart at m0
+    // note: Two acks: PR 42 handed off to its Workflow instance and PR 43 was the
+    // paused skip (batch-local message ids restart at m0).
+    expect(ackIds).toEqual(["m0", "m0"]);
     expect(factoryCreds).toHaveLength(1);
 
     // note: Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served
@@ -755,7 +771,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       created_at: string;
       updated_at: string;
     };
-    // why: The seeded per-App config rows share the FK (0006: NO ACTION) — clear
+    // note: The seeded per-App config rows share the FK (0006: NO ACTION) — clear
     // them first so the hard DELETE can proceed; re-seed them on re-insert.
     db.raw.prepare("DELETE FROM reviews WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_model_config WHERE bot_id = ?").run(appX.id);
@@ -783,7 +799,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
     expect(factoryCreds).toHaveLength(1); // note: no rebuild on the failure path
 
-    // invariant: Re-insert the IDENTICAL row (same envelope bytes, L1): a
+    // note: Re-insert the IDENTICAL row (same envelope bytes, L1): a
     // surviving cache entry would fingerprint-hit and reuse instance 1 — a
     // second factory call proves the not-found gate evicted the entry.
     db.raw

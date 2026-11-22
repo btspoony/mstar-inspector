@@ -24,6 +24,7 @@
  */
 
 import { describe, expect, mock, test, type Mock } from "bun:test";
+import { withFrozenClock } from "../helpers/clock";
 import type { ExecOutput } from "@cloudflare/workers-types";
 
 /** note: The fake container the DO drives (the `this.ctx.container` surface). */
@@ -203,6 +204,7 @@ import "../helpers/cloudflare-workers-mock";
 const {
   SandboxV1,
   getSandbox,
+  EXEC_DEADLINE_WRAPPER,
   DEFAULT_EXEC_TIMEOUT_MS,
   MAX_EXEC_COMMAND_BYTES,
   MAX_EXEC_ENV_VALUE_BYTES,
@@ -218,7 +220,13 @@ function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
   const container = makeContainer();
   // note: ctx double: the real DurableObjectState's blockConcurrencyWhile runs the
   // callback behind the concurrency gate and resolves with its result.
-  const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+  const ctx = {
+    container,
+    // note: Migration 0089: the DO loads its durable revocation flag before any
+    // request, so every ctx double carries storage.
+    storage: { get: async () => undefined, put: async () => {} },
+    blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+  };
   const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
   return { sandbox, container };
 }
@@ -326,7 +334,13 @@ describe("SandboxV1 Durable Object", () => {
   test("a missing container image key fails loud (wrangler/DO drift, not a silent no-op)", async () => {
     reset();
     const container = { ...makeContainer(), images: {} };
-    const ctx = { container, blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn() };
+    const ctx = {
+    container,
+    // note: Migration 0089: the DO loads its durable revocation flag before any
+    // request, so every ctx double carries storage.
+    storage: { get: async () => undefined, put: async () => {} },
+    blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+  };
     const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
@@ -410,7 +424,13 @@ describe("SandboxV1 Durable Object", () => {
 
   test("a missing container binding fails loud (misconfigured wrangler, not a silent no-op)", async () => {
     reset();
-    const sandbox = new SandboxV1({} as never, {}) as unknown as ReviewSandbox;
+    const sandbox = new SandboxV1(
+      {
+        storage: { get: async () => undefined, put: async () => {} },
+        blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
+      } as never,
+      {},
+    ) as unknown as ReviewSandbox;
 
     await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
       "container binding is not configured",
@@ -424,6 +444,9 @@ describe("getSandbox", () => {
     const names: string[] = [];
     const stub: ReviewSandbox = {
       runCommand: async () => ({ stdout: "out", stderr: "", exitCode: 0 }),
+      claimMarker: async () => "written",
+      runMarked: async () => ({ kind: "ran", stdout: "out", stderr: "", exitCode: 0 }),
+      destroyMarked: async () => "destroyed",
       destroy: async () => {},
     };
     const binding = { getByName(name: string): ReviewSandbox { names.push(name); return stub; } };
@@ -673,5 +696,81 @@ describe("SandboxV1 exec argv/env bounds", () => {
     reset();
     await sandbox.runCommand(shellCommand("echo hi"), { env: { BIG: "e".repeat(MAX_EXEC_ENV_VALUE_BYTES) } });
     expect(execCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * note: The absolute deadline the paid exec carries: the DO reads what is left of it
+ * AFTER its own queue and the marker proof, immediately before the process
+ * starts, and reserves the SIGKILL grace out of that remainder.
+ */
+describe("SandboxV1 absolute exec deadline", () => {
+  const MARKER = "mstar.review-attempt/v1:abc\n";
+
+  /** note: A container whose marker proof spends `proofSpentMs` of the frozen clock. */
+  function proofSpendingContainer(proofSpentMs: number, clock: { now: number }) {
+    const { sandbox, container } = makeDo();
+    const realExec = container.exec;
+    container.exec = mock(async (cmd: string[], opts?: unknown) => {
+      if (cmd[5]?.includes("cat --")) {
+        clock.now += proofSpentMs;
+        execCalls.push({ cmd, opts });
+        return {
+          stdin: null,
+          output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+        };
+      }
+      return realExec(cmd, opts);
+    });
+    return { sandbox, container };
+  }
+
+  test("a proof that consumed the window starts nothing", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox } = proofSpendingContainer(10_000, clock);
+      const result = await sandbox.runMarked(MARKER, shellCommand("bun run x"), {
+        deadlineEpochMs: clock.now + 10_000,
+      });
+      expect(result).toEqual({ kind: "deadline-spent", remainingMs: 0 });
+    });
+    // note: The marker read ran; no `timeout` child was ever started.
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0]!.cmd[5]).toContain("cat --");
+  });
+
+  test("the argv carries the container-side computation, not a frozen duration", async () => {
+    reset();
+    running = true;
+    let deadline = 0;
+    await withFrozenClock(async (clock) => {
+      const { sandbox } = proofSpendingContainer(4_000, clock);
+      deadline = clock.now + 10_000;
+      const result = await sandbox.runMarked(MARKER, shellCommand("bun run x"), {
+        deadlineEpochMs: deadline,
+      });
+      expect(result.kind).toBe("ran");
+    });
+    const child = execCalls.find((call) => call.cmd[0] === "/bin/sh")!;
+    // note: The container's own shell derives `timeout` from the epoch it is handed:
+    // queueing between this request and the process start cannot move the
+    // bound, because no duration was frozen host-side.
+    expect(child.cmd.slice(0, 3)).toEqual(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER]);
+    expect(child.cmd[2]).toContain("$(date +%s)");
+    expect(child.cmd[2]).toContain("exec timeout --kill-after=$grace_s");
+    expect(child.cmd[4]).toBe(String(Math.floor(deadline / 1000)));
+    expect(child.cmd[6]).toBe("bun run x");
+    expect(child.cmd).not.toContain("timeout");
+  });
+
+  test("a container clock past the deadline exits 124 without running the runner", () => {
+    // note: Execute the EXACT wrapper the container runs, on the test host's shell.
+    // A deadline a minute in the past must reach the `exit 124` branch before
+    // `timeout` (and the command) is ever started.
+    const past = Math.floor(Date.now() / 1000) - 60;
+    const result = Bun.spawnSync(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER, "mstar-deadline", String(past), "5000", "echo ran"]);
+    expect(result.exitCode).toBe(124);
+    expect(result.stdout.toString()).toBe("");
   });
 });

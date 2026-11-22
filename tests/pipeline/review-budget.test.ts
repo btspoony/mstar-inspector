@@ -1,5 +1,5 @@
 /**
- * why: The one review-budget derivation: the platform cap plus the named
+ * note: The one review-budget derivation: the platform cap plus the named
  * post-runner ledger into a runner ceiling, and the single allocation clamp.
  *
  * These cases pin the TABLE contract (every tier maximum provably inside the
@@ -23,30 +23,34 @@ import {
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
-import { CHECK_TERMINALIZE_MAX, CHECK_TERMINALIZE_MIN } from "../../src/dashboard/runtime-config-store";
+import {
+  CHECK_TERMINALIZE_MAX,
+  CHECK_TERMINALIZE_MIN,
+  REVIEW_ATTEMPT_CAP_DEFAULT_MS,
+} from "../../src/dashboard/runtime-config-store";
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
 const ROUND_START = 1_700_000_000_000;
 
-/** note: A round started at `ROUND_START` with the live terminalize budget. */
+/** note: An attempt admitted at `ROUND_START` under the absent-row operator cap. */
 function budgetFor(level: ReviewLevel, terminalizeMs: number) {
   return deriveReviewBudget({
     roundStartMs: ROUND_START,
-    capMs: ROUND_BUDGET_MS,
+    deadlineMs: ROUND_START + REVIEW_ATTEMPT_CAP_DEFAULT_MS,
     terminalizeMs,
     level,
   });
 }
 
 describe("tier table inside the derived ceiling", () => {
-  // invariant: The shipped maxima are only honest if every one of them fits the cutoff
+  // note: The shipped maxima are only honest if every one of them fits the cutoff
   // the SMALLEST supported reserve leaves; testing the endpoints as a table is
   // the whole point of the contract.
   for (const terminalizeMs of [CHECK_TERMINALIZE_MIN, 10_000, CHECK_TERMINALIZE_MAX]) {
-    test(`terminalize ${terminalizeMs}ms: quick < default < deep <= cap - reserve`, () => {
-      const cutoff = ROUND_BUDGET_MS - postRunnerReserveMs(terminalizeMs);
+    test(`terminalize ${terminalizeMs}ms: quick < default < deep <= deadline - reserve`, () => {
+      const cutoff = REVIEW_ATTEMPT_CAP_DEFAULT_MS - postRunnerReserveMs(terminalizeMs);
       expect(RUNNER_MAX_BUDGET_MS.quick).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
       expect(RUNNER_MAX_BUDGET_MS.default).toBeLessThan(RUNNER_MAX_BUDGET_MS.deep);
       expect(RUNNER_MAX_BUDGET_MS.deep).toBeLessThanOrEqual(cutoff);
@@ -56,11 +60,11 @@ describe("tier table inside the derived ceiling", () => {
     });
   }
 
-  test("the cutoff is the platform cap less the live reserve at each endpoint", () => {
-    expect(budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs - ROUND_START).toBe(675_000);
-    expect(budgetFor("deep", 10_000).runnerCutoffMs - ROUND_START).toBe(666_000);
-    expect(budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs - ROUND_START).toBe(646_000);
-    // invariant: The reserve is charged 1:1, never rounded: the cutoff moves by exactly
+  test("the cutoff is the frozen deadline less the live reserve at each endpoint", () => {
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MIN).runnerCutoffMs - ROUND_START).toBe(975_000);
+    expect(budgetFor("deep", 10_000).runnerCutoffMs - ROUND_START).toBe(966_000);
+    expect(budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs - ROUND_START).toBe(946_000);
+    // note: The reserve is charged 1:1, never rounded: the cutoff moves by exactly
     // the terminalize delta.
     expect(
       budgetFor("deep", CHECK_TERMINALIZE_MAX).runnerCutoffMs -
@@ -69,18 +73,18 @@ describe("tier table inside the derived ceiling", () => {
   });
 
   test("the deep ceiling holds at the store's own maximum — raising it breaks this proof", () => {
-    // invariant: The range endpoints are the store's declarations, never a test-local
+    // note: The range endpoints are the store's declarations, never a test-local
     // copy: one millisecond of drift in CHECK_TERMINALIZE_MAX shrinks the
     // cutoff below the shipped deep maximum and this assertion catches it.
     expect(RUNNER_MAX_BUDGET_MS.deep).toBeLessThanOrEqual(
-      ROUND_BUDGET_MS - postRunnerReserveMs(CHECK_TERMINALIZE_MAX),
+      REVIEW_ATTEMPT_CAP_DEFAULT_MS - postRunnerReserveMs(CHECK_TERMINALIZE_MAX),
     );
   });
 
   test("preparation budget is what the round may spend before the cutoff", () => {
     const budget = budgetFor("deep", 10_000);
     expect(budget.preparationBudgetMs).toBe(budget.runnerCutoffMs - ROUND_START);
-    expect(budget.roundEndMs).toBe(ROUND_START + ROUND_BUDGET_MS);
+    expect(budget.roundEndMs).toBe(ROUND_START + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
   });
 
   test("the guard TTL and Check windows share the level's tier maximum", () => {
@@ -105,19 +109,19 @@ describe("allocation: one min(), one absolute deadline", () => {
       expect(anchor.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
       expect(anchor.effectiveBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
       expect(anchor.execDeadlineMs).toBe(ROUND_START + RUNNER_MAX_BUDGET_MS[level]);
-      // invariant: The reserve still covers everything after the exec.
+      // note: The reserve still covers everything after the exec.
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
     }
   });
 
-  test("a delayed start spends the cutoff, not the table (45s of setup at the default reserve)", () => {
+  test("a delayed start spends the cutoff, not the table (350s of setup at the default reserve)", () => {
     const budget = budgetFor("deep", 10_000);
-    const anchor = anchorRunnerBudget(budget, ROUND_START + 45_000);
+    const anchor = anchorRunnerBudget(budget, ROUND_START + 350_000);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    // note: min(646_000, 666_000 - 45_000) = 621_000 — the example the contract names.
-    expect(anchor.effectiveBudgetMs).toBe(621_000);
-    expect(anchor.execDeadlineMs).toBe(ROUND_START + 45_000 + 621_000);
+    // note: min(646_000, 966_000 - 350_000) = 616_000 — the cutoff binds.
+    expect(anchor.effectiveBudgetMs).toBe(616_000);
+    expect(anchor.execDeadlineMs).toBe(ROUND_START + 350_000 + 616_000);
     expect(anchor.execDeadlineMs + budget.reserveMs).toBe(budget.roundEndMs);
   });
 
@@ -127,7 +131,7 @@ describe("allocation: one min(), one absolute deadline", () => {
     const anchor = anchorRunnerBudget(budget, cutoff - 10_000);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    // invariant: The floor bounds the REQUEST, never the available wall clock.
+    // note: The floor bounds the REQUEST, never the available wall clock.
     expect(anchor.effectiveBudgetMs).toBe(10_000);
     expect(anchor.execDeadlineMs).toBe(cutoff);
   });
@@ -153,7 +157,7 @@ describe("allocation: one min(), one absolute deadline", () => {
       expect(atMax.requestedBudgetMs).toBe(tierMax);
     }
 
-    // invariant: One ms over is a typed refusal inside the ONE derivation — the
+    // note: One ms over is a typed refusal inside the ONE derivation — the
     // requestedMs <= tierMaxMs invariant is enforced here, never by a
     // second silent clamp, and no caller can out-request the table.
     const over = anchorRunnerBudget(budget, ROUND_START, tierMax + 1);
@@ -162,7 +166,7 @@ describe("allocation: one min(), one absolute deadline", () => {
       expect(over.requestedBudgetMs).toBe(tierMax + 1);
       expect(over.tierMaxMs).toBe(tierMax);
     }
-    // invariant: The refusal carries nothing a caller could mistake for a budget.
+    // note: The refusal carries nothing a caller could mistake for a budget.
     expect("effectiveBudgetMs" in over).toBe(false);
     expect("execDeadlineMs" in over).toBe(false);
   });
@@ -174,13 +178,13 @@ describe("allocation: one min(), one absolute deadline", () => {
       expect(refused.kind).toBe("invalid");
       if (refused.kind !== "invalid") return;
       expect(refused.requestedBudgetMs).toBe(requestMs);
-      // invariant: The refusal carries nothing a caller could mistake for a budget or a
+      // note: The refusal carries nothing a caller could mistake for a budget or a
       // clock report — `exhausted` stays reserved for a spent cutoff.
       expect("effectiveBudgetMs" in refused).toBe(false);
       expect("execDeadlineMs" in refused).toBe(false);
       expect("remainingMs" in refused).toBe(false);
     }
-    // invariant: A spent cutoff with a VALID request is still exhaustion — the new kind
+    // note: A spent cutoff with a VALID request is still exhaustion — the new kind
     // sits on the request, not on the remaining clock.
     expect(anchorRunnerBudget(budget, budget.runnerCutoffMs).kind).toBe("exhausted");
   });
@@ -206,14 +210,14 @@ describe("allocation: one min(), one absolute deadline", () => {
     const exact = anchorRunnerBudget(budget, budget.runnerCutoffMs);
     expect(exact.kind).toBe("exhausted");
 
-    // invariant: A refusal never carries a budget a caller could mistake for time left.
+    // note: A refusal never carries a budget a caller could mistake for time left.
     expect("effectiveBudgetMs" in refused).toBe(false);
   });
 
-  test("a smaller test cap moves the whole round, not the table", () => {
+  test("a smaller test cap moves the whole attempt, not the table", () => {
     const budget = deriveReviewBudget({
       roundStartMs: ROUND_START,
-      capMs: 400_000,
+      deadlineMs: ROUND_START + 400_000,
       terminalizeMs: 10_000,
       level: "default",
     });
@@ -277,14 +281,14 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
-    // invariant: The parser owns the per-file minimum: each `-\t-` binary row reports 0
+    // note: The parser owns the per-file minimum: each `-\t-` binary row reports 0
     // textual lines and still costs one work unit.
     const size = parseNumstatSize("5\t0\ta.ts\n-\t-\tb.bin\n-\t-\tc.bin\n", false);
     expect(size).toEqual({ changedLines: 5, workUnits: 7 });
     const request = requestRunnerBudget("default", size);
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
-    // invariant: Σ max(1, linesInFile) = 5 + 1 + 1 = 7, not 5 — binary files cost a unit
+    // note: Σ max(1, linesInFile) = 5 + 1 + 1 = 7, not 5 — binary files cost a unit
     // even when a sibling file carries the lines.
     expect(request.workUnits).toBe(7);
   });
@@ -349,7 +353,7 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
         const refused = requestRunnerBudget(level, size(changedLines, workUnits));
         expect(refused.kind).toBe("invalid");
         if (refused.kind !== "invalid") return;
-        // invariant: The refusal carries nothing a caller could mistake for a request.
+        // note: The refusal carries nothing a caller could mistake for a request.
         expect("effectiveBudgetMs" in refused).toBe(false);
         expect("workUnits" in refused).toBe(false);
       }
@@ -373,13 +377,12 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
 });
 
 describe("admission windows cover the whole allocation range", () => {
-  // invariant: The invariant `execDeadline + reserve <= roundEnd <= min(guardExpiry,
-  // checkLeaseExpiry)` must hold for EVERY allocation the tier can produce —
-  // not only the tier maximum — so the two allocation extremes run under the
-  // tightest reserve (the supported 30s terminalize ceiling). The windows are
-  // ceiling-derived, so the earliest an acquisition may stamp them is the
-  // round's own start: `roundStart + guardTtl` / `roundStart + checkLease` is
-  // the lowest each expiry can ever be, and any later origin only widens it.
+  // note: The invariant `execDeadline + reserve <= roundEnd <= guardExpiry` must hold
+  // for EVERY allocation the tier can produce — not only the tier maximum — so
+  // the two allocation extremes run under the tightest reserve (the supported
+  // 30s terminalize ceiling). The guard is ceiling-derived, so the earliest an
+  // acquisition may stamp it is the attempt's own start; the Check row instead
+  // carries `roundEnd` itself as its lease, so no second window is re-derived.
   const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
   test("floor request: the smallest allocation still ends inside the earliest-acquired windows", () => {
@@ -397,7 +400,6 @@ describe("admission windows cover the whole allocation range", () => {
       expect(anchor.effectiveBudgetMs).toBe(request.requestedBudgetMs);
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 
@@ -415,7 +417,6 @@ describe("admission windows cover the whole allocation range", () => {
       // the invariant runs; quick/default end earlier by the same windows.
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 
@@ -435,12 +436,11 @@ describe("admission windows cover the whole allocation range", () => {
       if (anchor.kind !== "allocated") return;
       expect(anchor.execDeadlineMs + budget.reserveMs).toBeLessThanOrEqual(budget.roundEndMs);
       expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.guardTtlSeconds * 1000);
-      expect(budget.roundEndMs).toBeLessThanOrEqual(ROUND_START + budget.checkLeaseMs);
     }
   });
 
   test("a small request never shortens either window — both read the ceiling, not the allocation", () => {
-    // invariant: Two INDEPENDENT derivations — one exercised under a floor request, one
+    // note: Two INDEPENDENT derivations — one exercised under a floor request, one
     // under the tier maximum — must carry identical windows. Comparing the
     // window triple of two separately-driven rounds (never one budget's
     // fields against themselves) is what fails if a future change routes the
@@ -463,7 +463,7 @@ describe("admission windows cover the whole allocation range", () => {
       };
       const floor = anchoredWindows(size(0, 1));
       const ceiling = anchoredWindows(null);
-      // invariant: Where the seat-priced floor sits below the ceiling the two inputs
+      // note: Where the seat-priced floor sits below the ceiling the two inputs
       // take different allocation paths, so the pair cannot pass by both
       // runs landing on the same value; `deep` clamps its floor to the
       // ceiling and legitimately has no such difference to prove.
@@ -475,7 +475,7 @@ describe("admission windows cover the whole allocation range", () => {
       expect(floor.guardTtlSeconds).toBe(ceiling.guardTtlSeconds);
       expect(floor.checkWindowMs).toBe(ceiling.checkWindowMs);
       expect(floor.checkLeaseMs).toBe(ceiling.checkLeaseMs);
-      // invariant: The windows are the level's own derivation, never the allocation's.
+      // note: The windows are the level's own derivation, never the allocation's.
       expect(floor.guardTtlSeconds).toBe(reviewGuardTtlSeconds(level));
       expect(floor.checkWindowMs).toBe(CHECK_WINDOW_MS);
       expect(floor.checkLeaseMs).toBe(CHECK_WINDOW_MS);
@@ -485,11 +485,11 @@ describe("admission windows cover the whole allocation range", () => {
 
 describe("numstat size parse: complete vs truncated vs unknown", () => {
   test("a truncated tail row is unknown size — never an undersized complete set", () => {
-    // invariant: Every complete row the parser accepts ends in a newline; a stdout that
+    // note: Every complete row the parser accepts ends in a newline; a stdout that
     // stops mid-row cannot be told apart from a complete set whose counts
     // happen to be self-consistent — so it must not size the diff at all.
     expect(parseNumstatSize("10\t2\tsrc/auth.ts\n5\t0\tsrc/docs.md", false)).toBeNull();
-    // invariant: A row that lost its path field is truncated the same way even when the
+    // note: A row that lost its path field is truncated the same way even when the
     // newline happened to survive.
     expect(parseNumstatSize("10\t2\n", false)).toBeNull();
     // note: The same text with a valid terminator parses normally.
@@ -519,22 +519,22 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
   });
 
   test("an empty diff is a known zero only when the diff file proved empty", () => {
-    // invariant: The same empty stdout means two different things: the same round's
+    // note: The same empty stdout means two different things: the same round's
     // diff-file evidence decides which — the parser never guesses.
     expect(parseNumstatSize("", true)).toEqual({ changedLines: 0, workUnits: 0 });
     expect(parseNumstatSize("", false)).toBeNull();
-    // invariant: No stdout at all is unproven empty under any file state.
+    // note: No stdout at all is unproven empty under any file state.
     expect(parseNumstatSize(undefined, true)).toBeNull();
   });
 
   test("a negative or non-numeric count row is unknown size, never a count", () => {
     expect(parseNumstatSize("-3\t1\tsrc/auth.ts\n", false)).toBeNull();
     expect(parseNumstatSize("abc\t1\tsrc/auth.ts\n", false)).toBeNull();
-    // invariant: `abc` on one side is not the `-\t-` binary pair.
+    // note: `abc` on one side is not the `-\t-` binary pair.
     expect(parseNumstatSize("-\t1\tsrc/auth.ts\n", false)).toBeNull();
-    // invariant: A non-integer count is malformed the same way.
+    // note: A non-integer count is malformed the same way.
     expect(parseNumstatSize("1.5\t0\tsrc/auth.ts\n", false)).toBeNull();
-    // invariant: An unproven-empty read still yields the tier maximum, not the floor.
+    // note: An unproven-empty read still yields the tier maximum, not the floor.
     const request = requestRunnerBudget("default", parseNumstatSize("abc\t1\tx.ts\n", false));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
@@ -542,32 +542,32 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
   });
 
   test("a blank count or an empty path row is unknown size, never a count", () => {
-    // invariant: Number("") and Number(" ") are 0, so a missing or whitespace count
+    // note: Number("") and Number(" ") are 0, so a missing or whitespace count
     // would parse as a real zero without a shape check.
     expect(parseNumstatSize("\t1\tfile\n", false)).toBeNull();
     expect(parseNumstatSize(" \t1\tfile\n", false)).toBeNull();
     expect(parseNumstatSize("1\t\tfile\n", false)).toBeNull();
-    // invariant: A present-but-empty path field is the same malformed row.
+    // note: A present-but-empty path field is the same malformed row.
     expect(parseNumstatSize("1\t0\t\n", false)).toBeNull();
     expect(parseNumstatSize("1\t0\t \n", false)).toBeNull();
-    // invariant: A whitespace-only line is a malformed row, not a blank to skip.
+    // note: A whitespace-only line is a malformed row, not a blank to skip.
     expect(parseNumstatSize("1\t0\ta.ts\n \n2\t0\tb.ts\n", false)).toBeNull();
   });
 
   test("a row with extra fields or an inexact count is unknown size — never a small allocation", () => {
-    // invariant: More than the three expected fields means the parse cannot trust what
+    // note: More than the three expected fields means the parse cannot trust what
     // it read: this row would otherwise look like ONE work unit (360_048 ms
     // at the default tier instead of the 600_000 ms tier maximum).
     expect(parseNumstatSize("1\t0\tfile\textra\n", false)).toBeNull();
     // note: 9007199254740993 = 2^53 + 1: Number() silently rounds it to
     // 9007199254740992, an exact-looking integer that never was the count.
     expect(parseNumstatSize("9007199254740993\t0\tfile\n", false)).toBeNull();
-    // invariant: Two finite counts whose sum cannot be represented exactly are the same
+    // note: Two finite counts whose sum cannot be represented exactly are the same
     // unknown — the totals must not overflow into a fabricated value.
     expect(
       parseNumstatSize("9007199254740991\t1\ta.ts\n9007199254740991\t1\tb.ts\n", false),
     ).toBeNull();
-    // invariant: Unknown size keeps the tier-maximum request, never an exec-time refusal.
+    // note: Unknown size keeps the tier-maximum request, never an exec-time refusal.
     const request = requestRunnerBudget(
       "default",
       parseNumstatSize("9007199254740993\t0\tfile\n", false),
@@ -578,15 +578,15 @@ describe("numstat size parse: complete vs truncated vs unknown", () => {
     expect(request.workUnits).toBeNull();
   });
   test("a trailing binary row after a near-maximum total is unknown size — the unit must not overflow", () => {
-    // invariant: workUnits hits 2^53-1 on the first row; the binary row's per-file unit
+    // note: workUnits hits 2^53-1 on the first row; the binary row's per-file unit
     // pushes it to 2^53, past Number.MAX_SAFE_INTEGER. Without the same
     // post-row check the binary branch would skip, the total escapes as an
     // inexact "known" size, and allocation refuses at exec time instead of
     // requesting the tier maximum.
     expect(parseNumstatSize("9007199254740991\t0\ta.ts\n-\t-\tb.bin\n", false)).toBeNull();
-    // invariant: The same boundary in reverse: binary row first, overflowing count last.
+    // note: The same boundary in reverse: binary row first, overflowing count last.
     expect(parseNumstatSize("-\t-\tb.bin\n9007199254740991\t0\ta.ts\n", false)).toBeNull();
-    // invariant: Unknown size still requests the tier maximum — never a refusal and
+    // note: Unknown size still requests the tier maximum — never a refusal and
     // never a capped value laundered from an inexact total.
     const request = requestRunnerBudget(
       "default",

@@ -150,6 +150,15 @@ async function seedApp(
       );
     return targetId;
   });
+  // note: The review route's operating switch, ON for this suite: the acceptance gate
+  // is OFF by default (spec § Deployment gate) and these cases exercise
+  // routing, not the switch. The gate-off case deletes this row.
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+       VALUES ('review.route.workflow', 'on', datetime('now'))`,
+    )
+    .run();
   return { id, slug: opts.slug, targetId: targetIds[0]!, targetIds };
 }
 
@@ -530,6 +539,52 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(rows[0]!.holder).toBeNull();
     expect(rows[0]!.lease_until_ms).toBeNull();
     expect(rows[0]!.check_run_id).toBeNull();
+  });
+
+  test("a closed route gate refuses at acceptance — no Check, no enqueue, one line with the PR identity", async () => {
+    const db = createMigratedTestD1();
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // note: The operator has not enabled the route: the gate row is ABSENT.
+    db.raw.prepare(`DELETE FROM review_runtime_settings WHERE key = 'review.route.workflow'`).run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const lines: string[] = [];
+    const origLog = console.log;
+    console.log = (msg: unknown) => {
+      lines.push(String(msg));
+    };
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+        env,
+      );
+    } finally {
+      console.log = origLog;
+    }
+
+    // note: A closed gate is NOT a failure: the delivery is refused cleanly.
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const checks = db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get() as { n: number };
+    expect(checks.n).toBe(0);
+    const failures = db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
+    expect(failures.n).toBe(0);
+
+    // note: ONE line, naming the gate and the PR an operator needs to recognise it.
+    expect(lines).toHaveLength(1);
+    const line = JSON.parse(lines[0]!) as Record<string, unknown>;
+    expect(line.event).toBe("review_route_gate_closed");
+    expect(line.review_route_workflow).toBe("off");
+    expect(line.pr_number).toBe(42);
+    expect(line.owner).toBe("test-owner");
+    expect(line.repo).toBe("test-repo");
+    expect(line.installation_id).toBe(123);
   });
 
   test("wrong-App secret signature → 401, zero enqueue (sibling-App isolation, AC-B5-isolation)", async () => {

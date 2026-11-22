@@ -1,8 +1,8 @@
-# Review budget — one derivation from the platform cap
+# Review budget — one derivation from the attempt's frozen deadline
 
 ## Scope
 
-The runner's per-round wall-clock allocation and its exhaustion outcome: the round clock, the tier
+The attempt's one absolute deadline, the runner's wall-clock allocation inside it, the tier
 ceilings, the per-tier size curve, and the typed `budget-exhausted` stop. The review lifecycle that
 consumes these windows lives in [`review-lifecycle.md`](../feature/review-lifecycle.md).
 
@@ -10,27 +10,71 @@ consumes these windows lives in [`review-lifecycle.md`](../feature/review-lifecy
 
 Owner module: `src/review-budget.ts`; status: implemented.
 
-### One round clock
+### One absolute deadline
 
-A Cloudflare Queue consumer invocation is capped at 900 000 ms (platform limit, not configurable).
-One review runs inside one message (`max_batch_size: 1`), so that cap is the round clock.
-
-The runner budget is derived, never typed per tier:
+An attempt's hard stop is ONE absolute instant, frozen when its delivery is first
+admitted:
 
 ```
-reserveMs      = 90 000 (bounded output reads)
-               + 12 000 (inline resolution)
-               +  2 000 (Check begin)
-               + 120 000 (Worker tail slack)
-               + terminalizeMs            (live Check terminalize window, 1 000–30 000)
-runnerCeilingMs = 900 000 − reserveMs
+deadlineMs = enqueued_ms + capMs
 ```
 
-`reserveMs` is 234 000 ms at the 10 000 ms default, so the ceiling is 666 000 ms; at the supported
-30 000 ms maximum it is 254 000 ms and the ceiling is 646 000 ms.
+`enqueued_ms` is the original Queue send stamp (the queue wait counts against
+the cap) and `capMs` is the operator's end-to-end cap: the system row
+`review.attempt.duration_cap_ms` in `review_runtime_settings`, whose absent-row
+default is `1 200 000 ms` (20 minutes — see
+[`docs/runtime-configuration.md`](../../runtime-configuration.md)). The instant
+is recorded on the delivery's handoff row and written as the Check attempt row's
+`execution_deadline_ms`, so a redelivery, a recovery replay and the independent
+Check reconciler all read the same value. No step re-derives it, and a
+present-but-untrusted cap leaves admission retryable instead of inventing one.
 
-| Tier | `tierMaxMs` | Guard TTL |
-|------|-------------|-----------|
+The Queue consumer's 900 000 ms invocation cap remains an **admission**
+invariant — the guard TTL's FLOOR and the Check attach window derive from it —
+and no longer bounds execution; the guard row itself is widened to the frozen
+deadline below.
+
+The runner budget is derived from that instant, never typed per tier:
+
+```
+reserveMs       = 90 000 (bounded output reads)
+                + 12 000 (inline resolution)
+                +  2 000 (Check begin)
+                + 120 000 (Worker tail slack)
+                + terminalizeMs            (live Check terminalize window, 1 000–30 000)
+runnerCutoffMs  = deadlineMs − reserveMs
+```
+
+At the 20-minute default and the 10 000 ms terminalize default the reserve is
+234 000 ms and the cutoff is 966 000 ms; at the supported 30 000 ms maximum it is
+254 000 ms and the cutoff is 946 000 ms. The tier table below is unchanged: every
+tier maximum fits inside the cutoff at each supported terminalize value.
+
+The paid exec is started with the remaining time to its anchored instant
+(`min(tier request, cutoff − anchor)`) and the sandbox's own timeout kills a hung
+child there. That bound is taken at the LAST possible instant — after the
+one-way launch claim succeeds, because the claim is a D1 round trip inside the
+attempt's clock — and a window the claim spent refuses the exec instead of
+issuing a zero-length one. The guarded request carries that instant as an
+absolute epoch, never a duration: the container's OWN SHELL computes the bound
+immediately before it starts the command (`remaining = deadline − date +%s`) and
+reserves the 5 s SIGKILL grace — SIGTERM at `deadline − 5 s`, SIGKILL at the
+deadline. A remainder at or below the grace exits 124 without starting
+anything, which is the same confirmed cap stop. A relative `timeout` restarts
+when the process starts, so no host-side number can be absolute; the DO's early
+`deadline-spent` answer is only a fast path. A returned status (`124` included) is a confirmed stop and is recorded
+as one; a lost reply is `unknown` — no Check conclusion, no destruction, no
+capacity release.
+
+A handoff row written before the deadline column existed carries
+`deadline_ms = NULL`. It means "not yet anchored": the next admission anchors
+it ONCE from that row's own `created_ms` (the only instant the attempt actually
+had) and the store's conditional write makes the first writer win, so every
+delivery of that attempt reads the same instant. A row that is still unanchored
+after that write refuses to run.
+
+| Tier | `tierMaxMs` | Guard TTL floor |
+|------|-------------|-------------------|
 | `quick` | 480 000 | 2 292 s |
 | `default` | 600 000 | 2 412 s |
 | `deep` | 646 000 | 2 458 s |
@@ -105,9 +149,9 @@ The runner reports, the Worker publishes:
 
 ## Invariants
 
-- Every tier maximum satisfies `tierMaxMs <= runnerCeilingMs` for the whole supported
-  `terminalizeMs` range. A test asserts it, so a table that advertises a budget the consumer cannot
-  finish fails CI instead of shipping.
+- Every tier maximum satisfies `tierMaxMs <= deadlineMs − reserveMs` at the documented absent-row
+  cap for the whole supported `terminalizeMs` range. A test asserts it, so a table that advertises a
+  budget the attempt cannot finish fails CI instead of shipping.
 - A round's allocation is clamped by exactly one `min()`, inside `anchorRunnerBudget`; the tier
   table's own `deep` floor clamp (see Current state) is fixed derivation, not a per-round clamp. A
   second clamp at a call site is a defect: it makes an unreachable tier value look shipped.
@@ -115,22 +159,131 @@ The runner reports, the Worker publishes:
   imports none of it, names the bounds in a comment, and the table test exercises both store
   endpoints. Widening the store's range past the shipped deep ceiling fails the proof, never drifts
   silently.
-- The guard TTL is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from the same
-  budget. Admission retry rungs stay below their TTL with a cumulative sum above it.
-- The allocation never reaches the admission windows: guard TTL and the Check lease derive from the
-  ceiling, so a small PR cannot shorten the window a retry or recovery needs.
+- The guard TTL's FLOOR is `ceil((tierMax + 14 × 120 000 + 12 000 + 120 000) / 1000)`, derived from
+  the tier ceiling. The row taken for one attempt is
+  `max(floor, ceil((deadline − now) / 1000) + 60)`, so an operator cap above the level ceiling can
+  never let the row that serialises the PR expire before the attempt's own stop.
+- The allocation never reaches the admission windows: the guard TTL is widened to the attempt's
+  frozen deadline (never shortened by a small PR), and the Check row's lease IS that same deadline.
+- The deadline is written once: the admission handoff freezes it, a redelivery or a recovery
+  re-enqueue replays it, and the Check row carries the same instant for the independent reconciler.
+  A step that re-derives it, or a redelivery that refreshes it, is a defect.
+
+## Deployment gate — the review route
+
+The Workflow route (`src/workflow/review.ts`, handed off by the queue consumer) is
+wired as the production queue path, and this page is where an operator reads what
+must hold before it carries real deliveries. **Do not enable the route for real
+traffic until every claim below holds with its test.** Each claim is proven by an
+interruption test that simulates what it names. Where the proof is narrower than
+the claim, the table says so; a narrower proof is never labelled a full one.
+
+| # | Recovery claim | Test | What the test demonstrates |
+|---|---|---|---|
+| 1 | A comment delivery whose claim was already consumed is still recoverable: a redelivery that finds an `owed`/`ambiguous`/`failed` handoff reaches create, and an interruption between consuming the claim and writing the handoff leaves a row the reconciler hands back. | `tests/pipeline/route-recovery-handoff.test.ts` — all four cases | The pre-handoff case is **exercised**: a normal queued claim is consumed by the real consumer, its handoff insert is made to hang (the host dies there), the test observes the state the code produced, then recovers through the reconciler and replays admission. Reverting the consumer to clearing the payload at consumption fails it. |
+| 2 | The settle-once mark proves **completion**, not entry: an interruption after the mark but before the failure row / Check terminal leaves the settlement replayable; the step survives one transient error. | `tests/pipeline/route-recovery-settlement.test.ts` — all ten cases | The mark records **which effects landed** (`settled_effects`) and completes only when the union of every execution's effects covers the settlement's obligation; two racing executions accumulate instead of overwriting. A lost claim stamp is recorded, not swallowed, and a **recovery pass finishes it** (see below). Two cases prove the pass's refusals — an unknown paid state and a skipped delivery are never written — and one proves the ordering directly: an open Check keeps the mark incomplete until the Check row is terminal. The retry is a model of the platform's policy, not the platform. |
+| 3 | The successor outbox row exists **before** the moved-head settlement that terminalizes the old Check. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-3 cases | The outbox is read **inside** the `terminalize` call; moving the record after terminalization fails the test. The second case kills the host before the successor step and recovers the owed row. |
+| 4 | The successor dedupe key fences sends and identifies its owner; the stored winning payload is what gets sent; a replay of one intent admits once. | `tests/pipeline/route-recovery-successor.test.ts` — both claim-4 cases | The first case drives the real workflow `recordSuccessor` against a competing stored winner: sending the locally built payload instead fails the test. The second covers a replay (one admission) and two independent origins on one head (separate keys, serialized by the guard). |
+| 5 | Error classification carries proof: a `TypeError` is not evidence a create did not land, and "already exists" is not evidence the same instance exists — this attempt's own instance id is read back, or the outcome is unknown. | `tests/pipeline/route-recovery-handoff.test.ts` — all three claim-5 cases | Lying errors are injected and the handoff state distinguishes ambiguous from confirmed. The platform's own `status()` semantics remain a gate item below. |
+| 6 | The paid call cannot start or end past the frozen instant **when the request queues, the marker proof takes time, or the container's request is delayed** — the remaining window is re-derived inside the container, kill grace subtracted. | `tests/pipeline/route-recovery-deadline.test.ts` — both claim-6 cases | The exact wrapper is executed with a controlled clock: the duration handed to `timeout` is `deadline − now − 1 − grace` from the CONTAINER's clock, and a window at or below the grace starts nothing. This bounds queueing and hand-off. It does **not** bound a platform suspension of the container between its final clock sample and the process start — that is claim 9, and no shell can bound it. |
+| 7 | The guard window and the attempt's instant come from **one** settled value, including a legacy row anchored concurrently by two callers. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-7 case | A competing first-writer anchor is injected during this delivery's cap read; the actual admission lease and the attempt's instant are compared afterwards. |
+| 8 | A widened guard never ack-and-forgets a queued retry, and while a paid exec's state is unknown the PR and its capacity are not reassigned. | `tests/pipeline/route-recovery-guard.test.ts` — all seven cases | The obligation is written and the comment claim handed back **before** the ack; a failing obligation write produces no ack; a delivered row is re-armed by a later drop; a re-arm during a send is **not buried** by that send's delivered mark (the outbox row carries a generation, the sender carries it, and a stale generation neither sends nor delivers); an expired lease over an unaccounted paid exec holds both the PR and its capacity. **What is not proved:** that a permanently held guard eventually delivers — each re-arm costs one full ladder plus the recovery quiet window, so delivery depends on the guard releasing within that cadence; the tests show the obligation survives, not that capacity ever frees. |
+| 9 | A clock sample taken before a container suspension cannot start the paid command after the deadline. | `tests/pipeline/route-recovery-deadline.test.ts` — the claim-9 case | The controlled `date` returns a pre-deadline stamp, blocks past the deadline, and the paid command is shown never to start; the wrapper's second sample is what refuses it. **Not** proven: a suspension strictly between the *final* clock sample and `exec timeout` — that window still hands the child a duration computed before the freeze, and whether it ever matters is platform-dependent (the scheduler must not suspend the container there). See the residual below. |
+
+**What replays an incomplete settlement.** A partial settlement is recorded, not
+assumed away, and three owners cover it in order — each named, none implied:
+
+1. the Workflow **step retry** (`retries: { limit: 1 }`) covers one transient
+   fault *inside* the step;
+2. a **resumed instance** re-executes a step whose result was lost, while the
+   instance is still alive;
+3. the route's **recovery pass** (`reconcileReviewRoute`, run from the scheduled
+   sweep) owns the settlement that outlived both — a persistent fault, or an
+   instance the platform failed. It selects handoffs whose `settling_ms` is set
+   and `settled_ms` is still NULL (quiet for `HANDOFF_RECOVERY_AFTER_MS` = 5
+   minutes, at most `ROUTE_RECOVERY_LIMIT` = 25 rows per pass), and it acts only
+   on evidence it can see:
+   - **a durable outcome on the launch row** — `failed` or `persisted`. A
+     `launched` row with no outcome is the unknown paid state (the container may
+     still be running) and nothing is written for it; a delivery that never
+     provisioned is not a failure either, and a settlement marked `skip` (a moved
+     head) is left to the successor outbox. All three are refused before any
+     write.
+   - **a concluded Check**. The one effect this pass cannot produce is the Check
+     conclusion, so it records `check` only when the attempt's Check row is
+     terminal (`terminal_ms` set) and otherwise leaves the mark incomplete. The
+     check reconciler (`reconcileReviewChecks`) closes that row at its lease, and
+     the next pass records the conclusion — **no mark completes over an open
+     Check**.
+   It lands the effects that need no dead host's memory — the failure row, marked
+   `settlement replay: …`, and the commit's failed-claim stamp — and completes
+   the mark only when the UNION of every execution's effects covers the
+   settlement's obligation (row, the Check when the attempt had one, the stamp
+   when the delivery names a commit).
+   The cadence is the sweep's, so an abandoned settlement is finished within one
+   sweep interval plus the 5-minute quiet window, and one Check lease for the
+   conclusion — not instantly, and not never.
+
+**What these tests cannot prove, and must be observed on the platform before
+enabling.** The tests own the database, the clock and the command line; they do
+not own Cloudflare's behaviour. Before the route carries real deliveries:
+
+- a Workflow **step** that was interrupted mid-callback re-executes its callback
+  on resume (claims 2 and 3 assume this, and that a completed step's result is
+  not re-run);
+- `step.do` **retries** honour the declared `retries.limit` (claim 2's transient
+  case is a model of that policy, not the platform's implementation);
+- `Workflow.get(id).status()` **rejects** for an id that has no instance
+  (claim 5's proof reads that answer; if it synthesizes a status, the probe
+  confirms nothing);
+- a queue **redelivery** preserves the message body (the delivery key depends on
+  it) and a re-enqueue is at-least-once;
+- the container's shell and GNU `timeout` behave as the image pins them.
+
+**Accepted residual (claim 9).** A suspension strictly between the *final* clock
+sample and `exec timeout` still hands the child a duration computed before the
+freeze — if that happens, the paid process can run past the frozen instant by
+that duration. No shell can close it (it needs a kernel-side watchdog the
+sandbox SDK does not expose), and the second sample narrows the window to a few
+syscalls instead of the whole request. The claim-9 test proves only the
+observable half: a **stale sample** cannot start the paid command after the
+deadline. The absolute guarantee therefore depends on the platform's scheduler
+not suspending a container in that narrow window; if the platform later exposes
+a kernel-side deadline, the wrapper's second sample is what it replaces.
 
 ## Where it lives
 
-- `src/review-budget.ts` — the derivation, constants and types above.
+- `src/review-budget.ts` — the cap's read and structured warn, the derivation, constants and types
+  above.
+- `src/dashboard/runtime-config-store.ts` — the `review.attempt.duration_cap_ms` row's parse, the
+  absent-row default and the degraded answer.
+- `src/pipeline/consumer.ts` — freezes `deadlineMs` on the delivery's handoff row at admission, extends
+  the lease to that settled value, and records a terminal guard drop as an owed retry.
+- `src/store/review-route-store.ts` — the handoff, settle-once (completion) mark, successor outbox and
+  the comment-claim payload lifecycle the recovery pass replays.
+- `src/pipeline/route-reconcile.ts` — the pass that delivers what an interrupted host left owed:
+  successors, unconfirmed handoffs and orphaned comment claims.
+- `src/workflow/review.ts` — the five durable phases, the settlement step and the successor step.
+- `src/store/inflight-store.ts` — the guard row; an expired row whose paid state is unknown holds the
+  PR and its capacity until a fact says the paid process stopped.
+- `src/pipeline/review-attempt-execution.ts` — derives each phase's windows from that instant and
+  writes it as the Check row's `execution_deadline_ms`; writes the moved-head successor intent before
+  it terminalizes the old Check; marks a settlement complete only at its own end.
+- `src/pipeline/review-attempt.ts` — takes the exec bound after the launch claim, at the last instant
+  before the send, and carries it into the container as an absolute epoch.
+- `src/pipeline/sandbox.ts` — hands the epoch to the container's shell, which re-derives the bound
+  from a fresh clock sample and reserves the kill grace out of it.
 - `tests/pipeline/review-budget.test.ts` — the tier-table and allocation cases.
+- `tests/pipeline/hard-stop.test.ts` — the container stop, the lost reply, the resume and the cap's
+  read path.
+- `tests/pipeline/route-recovery-*.test.ts` — the nine recovery claims above, one file per claim group.
 - `docs/specs/architecture/review-budget.md` — this page.
 
 ## Change obligations
 
-A change to the platform cap, the reserve ledger, the tier table, the per-tier floors, the
-saturation point or the refusal vocabulary updates this page and
-`tests/pipeline/review-budget.test.ts` in the same change.
+A change to the cap's read or absent-row default, the reserve ledger, the tier table, the per-tier
+floors, the saturation point or the refusal vocabulary updates this page,
+`docs/runtime-configuration.md` and `tests/pipeline/review-budget.test.ts` in the same change.
 
 ## Known limits
 
@@ -139,5 +292,12 @@ saturation point or the refusal vocabulary updates this page and
   follow-up, not part of this implementation.
 - A truncation exactly at a line boundary cannot be detected: the platform supplies no truncation
   flag.
-- A review that cannot finish even at the ceiling needs a Workflow or Durable Object handoff; the
-  budget derivation deliberately stops at the honest ceiling instead of advertising more.
+- The cap's own terminal Check category (`cap stop`) and its customer wording are owned by the
+  operator duration plan. Until that lands, an attempt that cannot start or finish inside the frozen
+  deadline reports the existing `budget-exhausted` outcome, whose Check summary names the budget
+  window rather than the cap.
+- A delivery the guard refuses is retried on the level's ladder, which is sized against the level's
+  TTL floor. With an operator cap above that floor the live row can outlast the ladder, so the last
+  retry is ack-recorded as held rather than reclaiming the row — never a second execution. That drop
+  is not the end of the obligation: it is recorded once per delivery in the successor outbox, and the
+  route's recovery pass re-enqueues it after the guard has had time to release (claim 8).

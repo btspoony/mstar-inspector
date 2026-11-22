@@ -126,7 +126,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
     lineIntents: [intent],
   };
   await stagePublication(db, { id: PUB_ID, payload, nowMs: 1000 });
-  const lease = await claimPublication(db, PUB_ID, "fixture", 2000);
+  const lease = await claimPublication(db, PUB_ID, "fixture", 2000, "prepared");
   if (lease === null) throw new Error("fixture: publication claim failed");
   const proven = await recordPublicationProof(db, PUB_ID, lease, {
     publicationId: PUB_ID,

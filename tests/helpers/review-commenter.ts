@@ -156,6 +156,10 @@ export function createFakeCommenter(state: FakeCommenterState, calls: CommenterC
       }
       return state.lineCommentsResult;
     }),
+    recoverLineComments: mock(async (input: { intents: LineIntent[] }) => {
+      calls.push({ op: "recover-line-comments", args: input });
+      return state.lineCommentsResult;
+    }),
     listDiscussion: mock(async (input: unknown) => {
       calls.push({ op: "list-discussion", args: input });
       if (state.discussionError) throw state.discussionError;

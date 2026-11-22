@@ -1,23 +1,27 @@
 /**
- * Review round budget — the ONE derivation owner.
+ * Review attempt budget — the ONE derivation owner.
  *
- * Everything a queue-delivery review can spend is derived here from the
- * platform's Queue-consumer wall-clock cap and a named ledger of post-runner
- * step costs; the consumer (`src/pipeline/consumer.ts`) and the Check store
- * (`src/store/review-checks.ts`) import this module and NEVER import one
- * another for budget answers. Every value below is internal platform policy —
- * the cap is a platform hard limit, the ledger terms bill steps the pipeline
- * already owns — so nothing here is a configuration surface (AGENTS.md §
- * Configuration surfaces: a source constant is allowed for platform invariants
- * only, which is exactly what these are; the live terminalize setting the
- * reserve charges is read per message by the consumer and passed IN).
+ * The hard stop is ONE absolute instant per attempt: `deadlineMs`, frozen when
+ * the delivery is first admitted as the original Queue send stamp plus the
+ * operator's end-to-end cap, and carried on the attempt's durable records so a
+ * resume reads it instead of re-deriving it. The cap is a system row in
+ * `review_runtime_settings` (read here, absent-row default below); the Queue
+ * consumer's 900 000 ms wall clock no longer bounds execution — it bounds
+ * admission (`reviewGuardTtlSeconds`, the Check window), which is why
+ * `ROUND_BUDGET_MS` survives as that platform invariant only.
  *
- * The arithmetic (knowledge: best-practices/cf-queue-consumer-wall-clock):
- * a Queue consumer invocation is killed at 15 minutes, so one round's
- * `roundEnd = roundStartMs + capMs` (900_000ms in production) is the hard
- * stop, and the paid runner's PRE-RUNNER CUTOFF is `roundEnd - reserveMs`,
- * where `reserveMs = 224_000 + terminalizeMs` bills the whole post-runner
- * tail:
+ * Everything a review can spend is derived here from that instant and a named
+ * ledger of post-runner step costs; the consumer (`src/pipeline/consumer.ts`)
+ * and the Check store (`src/store/review-checks.ts`) import this module and
+ * NEVER import one another for budget answers. Every constant below is
+ * internal platform policy — the ledger terms bill steps the pipeline already
+ * owns — so none is a configuration surface (AGENTS.md § Configuration
+ * surfaces; the live terminalize setting the reserve charges is read per
+ * message by the consumer and passed IN).
+ *
+ * The arithmetic: the paid runner's PRE-RUNNER CUTOFF is
+ * `deadlineMs - reserveMs`, where `reserveMs = 224_000 + terminalizeMs` bills
+ * the whole post-runner tail:
  *
  *   post-runner bounded reads  POST_RUNNER_READ_BUDGET_MS     90_000
  *   inline resolution          INLINE_RESOLVE_BUDGET_MS       12_000
@@ -49,7 +53,43 @@
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 
+import { getReviewAttemptCap, type DegradedReason } from "./dashboard/runtime-config-store";
+import type { DashboardD1 } from "./dashboard/users";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../packages/shared/src/runtime";
+
+/**
+ * The one warn a degraded cap read owes. Its fields are this module's payload,
+ * so the consumer's log channel relays them without this module importing the
+ * pipeline's field type.
+ */
+export type ReviewAttemptCapLogFields = {
+  event: "review_attempt_cap_degraded";
+  /** Why the read degraded — the store's cause, never a re-derivation. */
+  degraded_reason?: DegradedReason;
+};
+
+export type ReviewAttemptCapLog = {
+  warn: (fields: ReviewAttemptCapLogFields, msg?: string) => void;
+};
+
+/**
+ * The operator's end-to-end attempt cap, read ONCE when the attempt is created.
+ * An absent row answers the documented default; a present-but-untrusted row or
+ * a read failure THROWS after one structured warn, because admission must stay
+ * retryable rather than invent a cap — an invented number would silently
+ * shorten or extend every review that delivery owns.
+ */
+export async function readReviewAttemptCapMs(db: DashboardD1, log: ReviewAttemptCapLog): Promise<number> {
+  const cap = await getReviewAttemptCap(db);
+  if (cap.degraded) {
+    log.warn(
+      { event: "review_attempt_cap_degraded", degraded_reason: cap.reason },
+      "review attempt cap read degraded — admission retries instead of inventing a cap",
+    );
+    throw new Error("review attempt cap is not readable — the delivery must be retried, not capped");
+  }
+  return cap.capMs;
+}
 
 /** Per-call bound for the bounded reads issued AFTER the paid runner (ms):
  * the recheck document, the recheck status, the report document and the
@@ -115,12 +155,12 @@ export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
 ];
 
 /**
- * Wall-clock budget of ONE round, measured from the top of `processMessage`
- * (ms). Cloudflare caps a Queue consumer invocation at 15 minutes
- * (knowledge: best-practices/cf-queue-consumer-wall-clock), and that cap —
- * not the admission TTL, which only bounds how long the row may be held —
- * is the clock a best-effort step must fit inside. A platform invariant,
- * not a tuning knob.
+ * The Queue consumer's wall clock (ms), measured from the top of
+ * `processMessage`. Cloudflare caps a Queue consumer invocation at 15 minutes
+ * (knowledge: best-practices/cf-queue-consumer-wall-clock). Execution runs on
+ * the Workflow route against the attempt's frozen deadline; this constant
+ * bounds the ADMISSION path — the guard TTL and the Check window — and is a
+ * platform invariant, not a tuning knob and no longer the review ceiling.
  */
 export const ROUND_BUDGET_MS = 900_000;
 
@@ -214,6 +254,26 @@ export function reviewGuardTtlSeconds(level: ReviewLevel): number {
   );
 }
 
+/**
+ * Margin after the attempt's hard stop before its guard row may expire
+ * (seconds): the handoff → instance-create hop that happens while the row is
+ * already held. A guard that expires before the attempt's own stop would let a
+ * second delivery start the same PR, so the two numbers are never independent.
+ */
+const GUARD_RELEASE_MARGIN_S = 60;
+
+/**
+ * Admission row TTL (seconds) for ONE attempt: the level's own ceiling, or what
+ * the attempt's frozen deadline still needs — whichever is longer. The operator
+ * cap may exceed the level's ceiling-derived TTL, so the row that serialises
+ * the PR is widened to the attempt's actual hard stop instead of drifting
+ * below it.
+ */
+export function reviewGuardTtlForDeadline(deadlineMs: number, nowMs: number, level: ReviewLevel): number {
+  const attemptTtl = Math.ceil(Math.max(0, deadlineMs - nowMs) / 1000) + GUARD_RELEASE_MARGIN_S;
+  return Math.max(reviewGuardTtlSeconds(level), attemptTtl);
+}
+
 /** What every round still owes AFTER the paid runner (ms); see the header table. */
 export function postRunnerReserveMs(terminalizeMs: number): number {
   return (
@@ -226,22 +286,24 @@ export function postRunnerReserveMs(terminalizeMs: number): number {
 }
 
 /**
- * The single runner-budget derivation for one round. `roundStartMs` is the
- * instant `processMessage` entered; `capMs` is the round's cap (the platform
- * 900_000ms in production, smaller under test); `terminalizeMs` is the live
- * Check terminalize budget; `level` selects the tier maximum. Pure — the
+ * The single runner-budget derivation for one attempt. `deadlineMs` is the
+ * attempt's FROZEN absolute deadline (queue send stamp + the operator cap,
+ * read once at admission and stored on the attempt — never re-derived here);
+ * `roundStartMs` is the instant this preparation entry began, so the windows
+ * other owners bill can still say what is left of it; `terminalizeMs` is the
+ * live Check terminalize budget; `level` selects the tier maximum. Pure — the
  * caller supplies every instant.
  */
 export type ReviewBudgetInputs = {
   roundStartMs: number;
-  capMs: number;
+  deadlineMs: number;
   terminalizeMs: number;
   level: ReviewLevel;
 };
 
 /** The derived round clock and the windows other owners bill from it. */
 export type ReviewBudget = {
-  /** `roundStartMs + capMs`: the hard stop of this invocation. */
+  /** The attempt's frozen absolute deadline — the hard stop of every step. */
   roundEndMs: number;
   /** The live post-runner reserve (`224_000 + terminalizeMs` at the ledger above). */
   reserveMs: number;
@@ -439,7 +501,7 @@ export type RunnerBudgetRequestOutcome = RunnerBudgetRequest | RunnerBudgetInval
  */
 export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
   const reserveMs = postRunnerReserveMs(inputs.terminalizeMs);
-  const roundEndMs = inputs.roundStartMs + inputs.capMs;
+  const roundEndMs = inputs.deadlineMs;
   const runnerCutoffMs = roundEndMs - reserveMs;
   return {
     roundEndMs,

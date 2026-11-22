@@ -27,4 +27,15 @@ mock.module("cloudflare:workers", () => ({
       this.env = env;
     }
   },
+  // note: The Workflow base only stores (ctx, env) too. Tests drive the step
+  // composition through a step double, never the platform runtime, so a class
+  // with the same construction surface is all the module graph needs.
+  WorkflowEntrypoint: class {
+    ctx: unknown;
+    env: unknown;
+    constructor(ctx: unknown, env: unknown) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+  },
 }));

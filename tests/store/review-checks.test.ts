@@ -1,5 +1,5 @@
 /**
- * why: Review Check attempt registry tests (spec review-lifecycle
+ * note: Review Check attempt registry tests (spec review-lifecycle
  * §7.1 second block + §7.9) — `src/store/review-checks.ts` against the
  * bun:sqlite double running the REAL migration SQL (0001 → 0021 through
  * `createMigratedTestD1`, DDL single sources).
@@ -75,6 +75,7 @@ import {
   releaseExpiredCheckClaim,
   rollbackCheckCreateDispatch,
   retryCheckRecovery,
+  type ClaimAttemptResult,
   type Scope,
   setCheckCreateState,
   setCheckDesired,
@@ -112,7 +113,7 @@ function seededDb(): TestD1 {
 }
 
 /**
- * why: Seed the journal row a publication link targets: `review_checks.publication_id`
+ * note: Seed the journal row a publication link targets: `review_checks.publication_id`
  * carries an FK to `review_publications`, so a link can only name a real row.
  */
 function seedPublicationRow(db: TestD1, id: string): void {
@@ -142,6 +143,12 @@ function claimInput(overrides: Partial<ClaimInput> = {}): ClaimInput {
   };
 }
 
+/** note: A claim answer that must name a row (every kind but `absent` does). */
+function attemptOfClaim(result: ClaimAttemptResult): CheckAttempt {
+  if (result.kind === "absent") throw new Error("fixture: the claim found no row for the key");
+  return result.attempt;
+}
+
 /** note: Claim, failing loudly if the result is anything but `claimed`. */
 async function claim(
   db: TestD1,
@@ -149,13 +156,13 @@ async function claim(
 ): Promise<{ attempt: CheckAttempt; lease: Lease }> {
   const result = await claimAttempt(db, claimInput(overrides));
   if (result.kind !== "claimed") {
-    throw new Error(`expected a claimed attempt, got ${result.kind} (generation ${result.attempt.identity.generation})`);
+    throw new Error(`expected a claimed attempt, got ${result.kind}`);
   }
   return result;
 }
 
 /**
- * why: Attach a proven run id through the LEGAL transition path: an id may only be
+ * note: Attach a proven run id through the LEGAL transition path: an id may only be
  * recorded for a send that was actually attempted, so the store requires
  * `sending`/`unknown` first (RL-12: a `not-sent` attempt has no run).
  */
@@ -188,6 +195,7 @@ function remoteFor(
     app?: { id: number } | null;
     status?: string;
     conclusion?: string | null;
+    summary?: string | null;
   } = {},
   intent: CheckConclusion["desired"] = "success",
 ): CheckRemote {
@@ -196,12 +204,13 @@ function remoteFor(
     id: overrides.id ?? 4242,
     name: overrides.name ?? CHECK_NAME,
     head_sha: overrides.head_sha ?? identity.headSha,
-    // invariant: `??` would treat an explicit `null` as absent and silently substitute the
+    // note: `??` would treat an explicit `null` as absent and silently substitute the
     // real id — the "no correlation at all" rejection case must stay null.
     external_id: "external_id" in overrides ? (overrides.external_id ?? null) : identity.externalId,
     app: overrides.app === undefined ? { id: identity.githubAppId } : overrides.app,
     status: overrides.status ?? "completed",
     conclusion: overrides.conclusion === undefined ? intent : overrides.conclusion,
+    summary: overrides.summary === undefined ? null : overrides.summary,
   };
 }
 
@@ -292,7 +301,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     expect(attempt.identity.headSha).toBe(SHA);
     expect(lease).toEqual({ holder: "run-a", epoch: 1, untilMs: DEADLINE });
     expect(attempt.executionDeadlineMs).toBe(DEADLINE);
-    // invariant: Born in_progress/unknown/not-sent, and never unowned.
+    // note: Born in_progress/unknown/not-sent, and never unowned.
     expect(attempt.desired).toBe("in_progress");
     expect(attempt.observed).toBe("unknown");
     expect(attempt.createState).toBe("not-sent");
@@ -320,7 +329,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
 
     expect(second.kind).toBe("busy");
     if (second.kind === "busy") {
-      // invariant: The reread returns the live row — not the loser's own MAX+1 guess.
+      // note: The reread returns the live row — not the loser's own MAX+1 guess.
       expect(second.attempt.identity.attemptId).toBe(first.attempt.identity.attemptId);
       expect(second.attempt.identity.generation).toBe(1);
       expect(second.attempt.identity.externalId).toBe(first.attempt.identity.externalId);
@@ -343,7 +352,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
   test("generation uniqueness survives a simulated race: exactly one claimer wins", async () => {
     const db = seededDb();
     const first = await claim(db);
-    // why: Simulate the exact interleaving the partial unique index exists for: a
+    // note: Simulate the exact interleaving the partial unique index exists for: a
     // concurrent claimer committed its row between this claimer's eligibility
     // read and its INSERT, so this INSERT loses to the index. The loser must
     // REREAD the active row — never assume its own MAX+1.
@@ -359,7 +368,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
       expect(lost.attempt.identity.attemptId).toBe(first.attempt.identity.attemptId);
       expect(lost.attempt.identity.generation).toBe(1);
     }
-    // invariant: The loser wrote nothing: the winner's row is still the only one.
+    // note: The loser wrote nothing: the winner's row is still the only one.
     expect(await rowCount(db)).toBe(1);
     const open = db.raw
       .prepare(`SELECT generation, COUNT(*) AS n FROM review_checks WHERE terminal_ms IS NULL GROUP BY generation`)
@@ -382,18 +391,18 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
         .run(id, APP_ID, APP_NUMERIC_ID, SCOPE.installationId, SCOPE.owner, SCOPE.repo, 42, SHA, generation, `e${generation}`, T0, terminalMs, T0, T0);
 
     seed("a", 1);
-    // invariant: A second NONTERMINAL generation for the same key is refused by the index
+    // note: A second NONTERMINAL generation for the same key is refused by the index
     // even though (attempt_key, generation) alone would have allowed it.
     expect(() => seed("b", 2)).toThrow(/UNIQUE constraint failed: review_checks.attempt_key/);
     // note: Terminalize the first, and the next generation is legitimate.
     db.raw.prepare(`UPDATE review_checks SET terminal_ms = ? WHERE id = 'a'`).run(T0 + 1);
     expect(() => seed("c", 2)).not.toThrow();
-    // invariant: A duplicate generation number is refused by the table constraint.
+    // note: A duplicate generation number is refused by the table constraint.
     // Both the partial index and the table constraint are violated here and
     // SQLite names the partial index first; the table constraint is proven by
     // a TERMINAL duplicate below, where the partial index cannot apply.
     expect(() => seed("d", 2)).toThrow(/UNIQUE constraint failed: review_checks.attempt_key/);
-    // invariant: Terminalize everything open, then only the TABLE constraint can apply —
+    // note: Terminalize everything open, then only the TABLE constraint can apply —
     // and it names both columns, proving (attempt_key, generation) is also
     // unique independent of the open-row index.
     db.raw.prepare(`UPDATE review_checks SET terminal_ms = ? WHERE terminal_ms IS NULL`).run(T0 + 2);
@@ -408,14 +417,14 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
 
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.attemptId).toBe(id);
-    expect(again.attempt.identity.externalId).toBe(attempt.identity.externalId);
-    expect(again.attempt.checkRunId).toBe(4242);
-    expect(again.attempt.terminalMs).toBe(T0);
+    expect(attemptOfClaim(again).identity.attemptId).toBe(id);
+    expect(attemptOfClaim(again).identity.externalId).toBe(attempt.identity.externalId);
+    expect(attemptOfClaim(again).checkRunId).toBe(4242);
+    expect(attemptOfClaim(again).terminalMs).toBe(T0);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -424,7 +433,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
     const proof = await stageProof(db, crypto.randomUUID(), "review");
-    // why: The intent is linked to a real journal proof; the Check side effect then
+    // note: The intent is linked to a real journal proof; the Check side effect then
     // fails locally, so `observed` stays `unknown` while publication is PROVEN.
     expect(await setCheckDesired(db, id, lease, CONCLUSION, proof.publicationId, T0)).toBe(true);
     expect(await markCheckLocalError(db, id, lease, "gave up", T0)).toBe(true);
@@ -432,11 +441,11 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     expect(before.observed).toBe("unknown");
     expect(before.publication_id).toBe(proof.publicationId);
 
-    // invariant: Dedup reads PROOF, not the Check observation (§7.9): a second claim must
+    // note: Dedup reads PROOF, not the Check observation (§7.9): a second claim must
     // return terminal and must NOT mint generation N+1 for a published head.
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
     expect(again.kind).toBe("terminal");
-    expect(again.attempt.identity.generation).toBe(1);
+    expect(attemptOfClaim(again).identity.generation).toBe(1);
     expect(await rowCount(db)).toBe(1);
   });
 
@@ -456,7 +465,7 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     expect(second.attempt.identity.attemptId).not.toBe(id);
     expect(second.attempt.identity.externalId).toBe(externalIdFor(second.attempt.identity.attemptId, 2));
 
-    // invariant: History retained: the failed generation keeps its ids and terminal mark.
+    // note: History retained: the failed generation keeps its ids and terminal mark.
     const old = await getCheckAttempt(db, id);
     expect(old?.identity.generation).toBe(1);
     expect(old?.identity.externalId).toBe(first.attempt.identity.externalId);
@@ -487,7 +496,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(await setCheckDesired(db, id, stale, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckDesired(db, id, foreign, CONCLUSION, null, T0)).toBe(false);
     expect(await setCheckCreateState(db, id, foreign, "sending", undefined, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, shifted, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     expect(await getCheckOwnership(db, id, stale, T0)).toBeNull();
 
     const row = await getCheckAttempt(db, id);
@@ -523,13 +532,13 @@ describe("fenced mutations (spec §7.9)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await getCheckAttempt(db, id))?.terminalMs).not.toBeNull();
 
-    // invariant: The lease is still the caller's; the row's terminality is the fence.
+    // note: The lease is still the caller's; the row's terminality is the fence.
     expect(await setCheckDesired(db, id, lease, FAILURE, null, T0)).toBe(false);
     expect(await attachCheckRunId(db, id, lease, 9999, T0)).toBe(false);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(false);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(false);
     const after = await getCheckAttempt(db, id);
     expect(after?.desired).toBe("success");
     expect(after?.observed).toBe("success");
@@ -542,12 +551,12 @@ describe("fenced mutations (spec §7.9)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     expect((await getCheckAttempt(db, id))?.createState).toBe("known");
-    // invariant: A DIFFERENT id is refused outright: the row keeps the run it recorded,
+    // note: A DIFFERENT id is refused outright: the row keeps the run it recorded,
     // so a caller cannot re-point the attempt at a lookalike (spec §7.9 "A
     // known terminal remote ID is retained, never cleared").
     expect(await attachCheckRunId(db, id, lease, 9999, T0)).toBe(false);
     expect((await getCheckAttempt(db, id))?.checkRunId).toBe(4242);
-    // invariant: Re-attaching the SAME id is the idempotent success case.
+    // note: Re-attaching the SAME id is the idempotent success case.
     expect(await attachCheckRunId(db, id, lease, 4242, T0)).toBe(true);
     expect((await getCheckAttempt(db, id))?.checkRunId).toBe(4242);
   });
@@ -570,7 +579,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect((await getCheckAttempt(db, id))?.createState).toBe("unknown");
     expect((await rawRow(db, id)).last_error).toBe("socket closed");
     await attachRun(db, id, lease);
-    // invariant: A known run means the create demonstrably happened, so the row can never
+    // note: A known run means the create demonstrably happened, so the row can never
     // be walked back to `not-sent`: that would be a false durable claim AND
     // would make the attempt createable again. The id and the state both stay.
     expect(await setCheckCreateState(db, id, lease, "not-sent", undefined, T0)).toBe(false);
@@ -601,7 +610,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.last_error).toBe("403 checks:write missing");
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
-    // why: The release clears the lease and records its own due time. A row still
+    // note: The release clears the lease and records its own due time. A row still
     // wanting `in_progress` is therefore a candidate on that backoff — the proof
     // it was released for may already be persisted — not merely at the deadline.
     expect(await listCheckReconcileBatch(db, T0 + CHECK_BACKOFF_MS[0]!)).toHaveLength(1);
@@ -617,7 +626,7 @@ describe("fenced mutations (spec §7.9)", () => {
 
     expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(true);
 
-    // invariant: Link-only: the intent, the lease and every other durable field stay
+    // note: Link-only: the intent, the lease and every other durable field stay
     // exactly as the claim left them, so the attempt is still this
     // invocation's to release and nothing is concluded.
     expect(await rawRow(db, id)).toEqual({ ...before, publication_id: "publication-a" });
@@ -632,14 +641,14 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(await linkCheckPublication(db, id, { ...lease, holder: "intruder" }, "publication-a", T0)).toBe(false);
     expect(await linkCheckPublication(db, id, { ...lease, epoch: lease.epoch + 1 }, "publication-a", T0)).toBe(false);
     expect(await linkCheckPublication(db, id, { ...lease, untilMs: lease.untilMs + 1 }, "publication-a", T0)).toBe(false);
-    // invariant: An expired lease writes nothing even though nobody has reclaimed it.
+    // note: An expired lease writes nothing even though nobody has reclaimed it.
     expect(await linkCheckPublication(db, id, lease, "publication-a", lease.untilMs)).toBe(false);
     expect((await rawRow(db, id)).publication_id).toBeNull();
 
-    // invariant: Terminal history is never rewritten (runFenced's NONTERMINAL_WHERE).
+    // note: Terminal history is never rewritten (runFenced's NONTERMINAL_WHERE).
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     expect((await rawRow(db, id)).terminal_ms).not.toBeNull();
     expect(await linkCheckPublication(db, id, lease, "publication-a", T0)).toBe(false);
     expect((await rawRow(db, id)).publication_id).toBeNull();
@@ -655,7 +664,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(typeof row.desired_summary).toBe("string");
     expect((row.desired_summary as string).length).toBe(2_000);
-    // invariant: Intent is not observation: nothing terminal happened remotely.
+    // note: Intent is not observation: nothing terminal happened remotely.
     expect(row.terminal_ms).toBeNull();
     expect(row.observed).toBe("unknown");
   });
@@ -678,7 +687,7 @@ describe("fenced mutations (spec §7.9)", () => {
     const id = attempt.identity.attemptId;
     expect(await setCheckDesired(db, id, lease, FAILURE, null, T0)).toBe(true);
 
-    // invariant: A downgrade or lateral rewrite is refused and writes nothing.
+    // note: A downgrade or lateral rewrite is refused and writes nothing.
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(false);
     expect((await getCheckAttempt(db, id))?.desired).toBe("failure");
     expect(
@@ -686,7 +695,7 @@ describe("fenced mutations (spec §7.9)", () => {
     ).toBe(false);
     expect((await getCheckAttempt(db, id))?.desired).toBe("failure");
 
-    // invariant: The correction needs the proof link that authorizes it.
+    // note: The correction needs the proof link that authorizes it.
     const proof = await stageProof(db, crypto.randomUUID(), "review");
     expect(
       await setCheckDesired(db, id, lease, { desired: "neutral", title: CHECK_NAME, summary: "s" }, proof.publicationId, T0),
@@ -695,7 +704,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(corrected.desired).toBe("neutral");
     expect(corrected.publication_id).toBe(proof.publicationId);
     expect(corrected.observed).toBe("unknown");
-    // invariant: From success/neutral nothing further may rewrite the intent at all.
+    // note: From success/neutral nothing further may rewrite the intent at all.
     expect(await setCheckDesired(db, id, lease, FAILURE, proof.publicationId, T0)).toBe(false);
   });
 
@@ -719,11 +728,11 @@ describe("fenced mutations (spec §7.9)", () => {
       expect(await recordCheckObservation(db, id, lease, remote, T0)).toBe(false);
       expect((await getCheckAttempt(db, id))?.observed).toBe("unknown");
     }
-    // invariant: Once a run is attached, a different id is not the same run.
+    // note: Once a run is attached, a different id is not the same run.
     await attachRun(db, id, lease);
     expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { id: 777 }, "success"), T0)).toBe(false);
-    // invariant: The intended terminal state on our own run is what advances observation.
-    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0)).toBe(true);
+    // note: The intended terminal state on our own run is what advances observation.
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
     const row = await rawRow(db, id);
     expect(row.observed).toBe("success");
     expect(row.recovery_state).toBe("done");
@@ -731,6 +740,28 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.check_run_id).toBe(4242);
     expect(row.next_attempt_ms).toBeNull();
     expect(row.last_error).toBeNull();
+  });
+
+  test("a completed reply is a delivery only when it carries the frozen text", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+
+    // note: The conclusion matches, the wording does not (absent, or an earlier
+    // writer's): the user never read what this attempt froze.
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: null }, "success"), T0)).toBe(false);
+    expect((await getCheckAttempt(db, id))?.observed).toBe("unknown");
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: "Review failed." }, "success"), T0)).toBe(false);
+    const unread = await getCheckAttempt(db, id);
+    expect(unread?.observed).toBe("unknown");
+    expect(unread?.terminalMs).toBeNull();
+
+    expect(await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0)).toBe(true);
+    const delivered = await getCheckAttempt(db, id);
+    expect(delivered?.observed).toBe("success");
+    expect(delivered?.terminalMs).toBe(T0);
   });
 
   test("an in-progress observation attaches the id but never terminalizes", async () => {
@@ -746,7 +777,7 @@ describe("fenced mutations (spec §7.9)", () => {
     expect(row.create_state).toBe("known");
     expect(row.terminal_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
-    // invariant: A repeat running observation writes nothing further.
+    // note: A repeat running observation writes nothing further.
     expect(
       await recordCheckObservation(db, id, lease, remoteFor(attempt, { status: "in_progress", conclusion: null }), T0),
     ).toBe(false);
@@ -755,7 +786,7 @@ describe("fenced mutations (spec §7.9)", () => {
 
 describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => {
   /**
-   * why: The give-up fallback must never replace a frozen terminal intent. The two
+   * note: The give-up fallback must never replace a frozen terminal intent. The two
    * intent writers are exercised in BOTH orders: the guard lives inside the
    * fallback's UPDATE, so there is no read-then-write window a concurrent
    * terminalize could slip through.
@@ -766,10 +797,12 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
     summary: `Review gate missed for ${SHA.slice(0, 7)}: verdict "needs fixes", score 40 (floor 80; allowed: ship it).`,
   };
 
-  test("the frozen intent wins in either write order", async () => {
-    // note: (1) The fallback lands while the row still wants `in_progress`, then the
-    // terminalize freezes its precise gate failure — same `desired`, so the
-    // real decision replaces the fallback text.
+  test("the first frozen intent is immutable in either write order", async () => {
+    // note: (1) The fallback lands while the row still wants `in_progress`; a later
+    // write with the SAME `desired` is a no-op on the frozen fields — the text
+    // and the category are what a user may already have seen. In production the
+    // real terminalize freezes BEFORE its send, so it is the first writer; the
+    // only later change that can still land is a DIFFERENT desired with proof.
     {
       const db = seededDb();
       const { attempt, lease } = await claim(db);
@@ -778,7 +811,7 @@ describe("setCheckFallbackDesired (give-up fallback, spec §7.9/§7.10)", () => 
       expect(await setCheckDesired(db, id, lease, GATE_FAILURE, null, T0)).toBe(true);
       const row = await rawRow(db, id);
       expect(row.desired).toBe("failure");
-      expect(row.desired_summary).toBe(GATE_FAILURE.summary);
+      expect(row.desired_summary).toBe(FAILURE.summary);
     }
     // note: (2) The terminalize freezes first: the fallback's own predicate refuses,
     // so the exact text and the recovery state stay untouched.
@@ -802,7 +835,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     const beforeDeadline = DEADLINE - 1;
 
-    // invariant: A free lease alone is not enough: nothing released this row (it carries no
+    // note: A free lease alone is not enough: nothing released this row (it carries no
     // due time) and its execution deadline has not arrived, so it is NOT due.
     db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(id);
     expect(await claimCheckRecovery(db, id, "reconciler", beforeDeadline)).toBeNull();
@@ -848,7 +881,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const after = await rawRow(db, id);
     expect(after.holder).toBeNull();
     expect(after.lease_until_ms).toBeNull();
-    // invariant: Everything a budget deferral must preserve is untouched.
+    // note: Everything a budget deferral must preserve is untouched.
     expect(after.attempts).toBe(before.attempts);
     expect(after.next_attempt_ms).toBe(before.next_attempt_ms);
     expect(after.desired).toBe(before.desired);
@@ -892,7 +925,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const row = await getCheckAttempt(db, id);
     expect(row?.executionDeadlineMs).toBe(DEADLINE);
     expect(row?.attempts).toBe(0); // note: selection alone spends nothing
-    // invariant: The previous holder is fenced out; the recovery holder writes.
+    // note: The previous holder is fenced out; the recovery holder writes.
     const staleLease: Lease = { holder: "run-a", epoch: 1, untilMs: DEADLINE };
     expect(await setCheckCreateState(db, id, staleLease, "unknown", "lost", later)).toBe(false);
     expect(
@@ -905,7 +938,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // invariant: A release records the row's own due time; the terminal intent it may
+    // note: A release records the row's own due time; the terminal intent it may
     // carry is what recovery sends once it owns the row.
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     expect(await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0)).toBe(true);
@@ -920,7 +953,7 @@ describe("claimCheckRecovery (spec §7.9/§7.11.2)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
-    await recordCheckObservation(db, id, lease, remoteFor(attempt, {}, "success"), T0);
+    await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0);
     expect(await claimCheckRecovery(db, id, "reconciler", DEADLINE * 2)).toBeNull();
   });
 });
@@ -965,7 +998,7 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // invariant: The dangerous shape the guard exists for: a `sending` row that ALREADY
+    // note: The dangerous shape the guard exists for: a `sending` row that ALREADY
     // has a remote id attached. Rolling it back to `not-sent` would declare a
     // run that demonstrably exists createable again — the blind-recreate
     // RL-12 forbids. Reachable if an attach lands between the mark and a
@@ -1008,11 +1041,11 @@ describe("zero-dispatch rollback and the no-request claim release (integrated se
     expect(recovery).not.toBeNull();
     const afterExpiry = recovery!.untilMs + 1;
 
-    // invariant: The liveness-fenced release writes NOTHING here.
+    // note: The liveness-fenced release writes NOTHING here.
     expect(await releaseCheckClaim(db, id, recovery!, afterExpiry)).toBe(false);
     expect((await rawRow(db, id)).holder).toBe("reconciler");
 
-    // invariant: The identity-fenced release does, preserving everything else. The
+    // note: The identity-fenced release does, preserving everything else. The
     // attempt count is the one the fixture's own release already spent — the
     // point is that THIS release adds nothing to it.
     const before = await rawRow(db, id);
@@ -1050,7 +1083,7 @@ describe("attach grace (spec §7.9)", () => {
     const grace = T0 + CHECK_ATTACH_GRACE_MS;
     expect(await releaseAttachedCheck(db, id, lease, grace, T0)).toBe(true);
 
-    // invariant: The row keeps everything it needs to be adopted; only the due time is new.
+    // note: The row keeps everything it needs to be adopted; only the due time is new.
     const row = (await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first()) as Record<
       string,
       string | number | null
@@ -1076,7 +1109,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
     const first = await claim(db);
     const firstId = first.attempt.identity.attemptId;
     await attachRun(db, firstId, first.lease, 4242);
-    // invariant: What a skip settlement leaves: a neutral intent AND observation with NO
+    // note: What a skip settlement leaves: a neutral intent AND observation with NO
     // publication link — nothing was published for this head.
     expect(
       await setCheckDesired(
@@ -1101,6 +1134,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
           app: { id: APP_NUMERIC_ID },
           status: "completed",
           conclusion: "neutral",
+          summary: "review paused",
         },
         T0,
       ),
@@ -1113,7 +1147,7 @@ describe("a settled neutral row does not retire the head (spec §7.9)", () => {
     expect(settled.terminal_ms).not.toBeNull();
     expect(settled.publication_id).toBeNull();
 
-    // invariant: The same head is claimable again: a neutral settlement proves nothing was
+    // note: The same head is claimable again: a neutral settlement proves nothing was
     // published, so a retried (or resumed) delivery must still be able to run
     // its own review. The new generation gets a fresh row and run id.
     const second = await claimAttempt(db, claimInput({ holder: "run-b", nowMs: T0 + 60_000 }));
@@ -1147,7 +1181,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     });
     await attachRun(db, attempt.identity.attemptId, lease);
 
-    // invariant: Fresh — the identity, not the age, is what makes the row ours: the
+    // note: Fresh — the identity, not the age, is what makes the row ours: the
     // delivery already created the run and only needs to finish releasing.
     const taken = await settleAs(db, "mine");
     expect(taken).not.toBeNull();
@@ -1165,16 +1199,16 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
 
-    // invariant: Fresh: another delivery's attach is still working on this row.
+    // note: Fresh: another delivery's attach is still working on this row.
     expect(await settleAs(db, "mine")).toBeNull();
-    // invariant: Stale: still not ours. Only the owner (or the grace/deadline lane) may
+    // note: Stale: still not ours. Only the owner (or the grace/deadline lane) may
     // close it — settling here would close a live review's Check neutral.
     db.raw.prepare("UPDATE review_checks SET updated_ms = ? WHERE id = ?").run(T0 - 60_000, id);
     expect(await settleAs(db, "mine")).toBeNull();
     const held = await getCheckAttempt(db, id);
     expect(held?.lease?.holder).toBe("delivery:other");
     expect(held?.lease?.epoch).toBe(1);
-    // invariant: The OWNER settles it, fresh or stale alike.
+    // note: The OWNER settles it, fresh or stale alike.
     expect(await settleAs(db, "other")).not.toBeNull();
   });
 
@@ -1200,7 +1234,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
 
   test("a delivery whose attach found the key owned settles nothing", async () => {
     const db = seededDb();
-    // invariant: This delivery's attach answered `busy`: it created no row, so nothing on
+    // note: This delivery's attach answered `busy`: it created no row, so nothing on
     // this key records its id.
     const { attempt, lease } = await claim(db, {
       holder: "delivery:other",
@@ -1223,7 +1257,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     await attachRun(db, id, lease);
     expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
 
-    // invariant: Released, but created by ANOTHER delivery: a skip must not close it.
+    // note: Released, but created by ANOTHER delivery: a skip must not close it.
     expect(await settleAs(db, "mine")).toBeNull();
     // note: Its own delivery can.
     expect(await settleAs(db, "other")).not.toBeNull();
@@ -1239,7 +1273,7 @@ describe("the settlement claim follows the delivery identity (spec §7.9)", () =
     await attachRun(db, id, lease);
     expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
 
-    // invariant: A delivery whose attach found the key owned created no row: it must not
+    // note: A delivery whose attach found the key owned created no row: it must not
     // take this one, which belongs to the delivery that did.
     expect(await settleAs(db, undefined)).toBeNull();
     const released = await getCheckAttempt(db, id);
@@ -1271,11 +1305,11 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
 
-    expect(await queuedAs(db, "mine")).toBe(4242);
+    expect(await queuedAs(db, "mine")).toEqual({ id, checkRunId: 4242 });
     const row = await rawRow(db, id);
     expect(row.desired_title).toBe(CHECK_NAME);
     expect(row.desired_summary).toBe("Queued behind the review in flight for this pull request.");
-    // invariant: Only the TEXT moves: the run still wants in_progress, has observed
+    // note: Only the TEXT moves: the run still wants in_progress, has observed
     // nothing, and is not terminal — a relabel can never answer for a review.
     expect(row.desired).toBe("in_progress");
     expect(row.observed).toBe("unknown");
@@ -1307,7 +1341,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     const id = attempt.identity.attemptId;
     await attachRun(db, id, lease);
     expect(await releaseAttachedCheck(db, id, lease, T0 + CHECK_ATTACH_GRACE_MS, T0)).toBe(true);
-    // invariant: A second delivery for the SAME head adopted the released row and is
+    // note: A second delivery for the SAME head adopted the released row and is
     // running the review — adoption never clears the creator column, so the
     // creator alone would still match.
     expect(
@@ -1324,7 +1358,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     const row = await rawRow(db, id);
     expect(row.desired_title).toBeNull();
     expect(row.desired_summary).toBeNull();
-    // invariant: The live holder's lease and intent are untouched.
+    // note: The live holder's lease and intent are untouched.
     expect(row.holder).toBe("consumer:other");
     expect(row.desired).toBe("in_progress");
   });
@@ -1365,7 +1399,7 @@ describe("markCheckQueuedBehindInflight (spec §7.9 held-Check text)", () => {
     await attachRun(db, id, lease);
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
     expect(
-      await recordCheckObservation(db, id, lease, remoteFor(attempt), T0),
+      await recordCheckObservation(db, id, lease, remoteFor(attempt, { summary: CONCLUSION.summary }), T0),
     ).toBe(true);
 
     expect(await queuedAs(db, "mine")).toBeNull();
@@ -1380,9 +1414,9 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // invariant: A fresh claim wants in_progress and owns a live lease: not a candidate.
+    // note: A fresh claim wants in_progress and owns a live lease: not a candidate.
     expect(await listCheckReconcileBatch(db, T0 + 1)).toEqual([]);
-    // invariant: A persisted terminal intent does not make it due while the lease is live.
+    // note: A persisted terminal intent does not make it due while the lease is live.
     expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
     expect(await listCheckReconcileBatch(db, T0 + 1)).toEqual([]);
     expect(
@@ -1404,12 +1438,12 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     expect(await listCheckReconcileBatch(db, backoff - 1)).toEqual([]);
     expect(await listCheckReconcileBatch(db, backoff)).toHaveLength(1);
 
-    // invariant: A live recovery lease hides the row even at its due time.
+    // note: A live recovery lease hides the row even at its due time.
     const holding = await claimCheckRecovery(db, id, "reconciler", backoff);
     expect(holding).not.toBeNull();
     expect(await listCheckReconcileBatch(db, backoff)).toEqual([]);
 
-    // invariant: Every failed recovery action spends exactly one attempt.
+    // note: Every failed recovery action spends exactly one attempt.
     for (let i = 1; i < CHECK_MAX_ATTEMPTS; i += 1) {
       // note: Each reacquire must wait out the PREVIOUS recovery lease (120s).
       const at = backoff + i * CHECK_RECOVERY_LEASE_MS + 1_000;
@@ -1434,14 +1468,14 @@ describe("listCheckReconcileBatch (spec §7.11.2 predicate)", () => {
     ).toBe(true);
     expect(await listCheckReconcileBatch(db, T0 + 999)).toEqual([]);
     expect((await listCheckReconcileBatch(db, T0 + 1_000)).map((r) => r.identity.attemptId)).toEqual([id]);
-    // invariant: …and that is long before the deadline the old rule waited for.
+    // note: …and that is long before the deadline the old rule waited for.
     expect(T0 + 1_000).toBeLessThan(attempt.executionDeadlineMs);
   });
 
   test("an in_progress attempt nobody released is due only at its EXECUTION deadline", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    // invariant: A dead lease is not a release: no due time was ever recorded.
+    // note: A dead lease is not a release: no due time was ever recorded.
     db.raw.prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?`).run(attempt.identity.attemptId);
     expect(await listCheckReconcileBatch(db, attempt.executionDeadlineMs - 1)).toEqual([]);
     expect((await listCheckReconcileBatch(db, attempt.executionDeadlineMs)).map((r) => r.identity.attemptId)).toEqual([
@@ -1522,7 +1556,7 @@ describe("tenant and App isolation (spec §7.0)", () => {
     expect(otherApp.attempt.identity.attemptId).not.toBe(mine.attempt.identity.attemptId);
     expect(otherInstallation.attempt.identity.attemptId).not.toBe(mine.attempt.identity.attemptId);
     expect(await rowCount(db)).toBe(3);
-    // invariant: Each key keeps its own generation 1 — the partial index is per key.
+    // note: Each key keeps its own generation 1 — the partial index is per key.
     expect((await rawRow(db, otherApp.attempt.identity.attemptId)).generation).toBe(1);
 
     expect(
@@ -1550,7 +1584,7 @@ describe("tenant and App isolation (spec §7.0)", () => {
 
   test("suspend/reenable bind the exact (bot_id, installation_id) pair", async () => {
     const db = seededDb();
-    // invariant: Suspension is fenced to FREE rows, so both rows must be released (and
+    // note: Suspension is fenced to FREE rows, so both rows must be released (and
     // carry a terminal intent) before they are suspendable at all.
     for (const [index, input] of [
       {},
@@ -1634,7 +1668,8 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
     const { id } = await localErrorAttempt(db);
     linkPublication(db, id, crypto.randomUUID(), { owner: "someone-else", headSha: `f${SHA.slice(1)}` });
     const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
-    expect(again.kind).toBe("claimed"); // note: unproven for THIS scope/SHA → retryable
+    // note: Unproven for THIS scope/SHA → retryable.
+    if (again.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${again.kind}`);
     expect(again.attempt.identity.generation).toBe(2);
   });
 
@@ -1653,7 +1688,7 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
   });
 
   test("a PREPARED (unproven) publication does not suppress a new claim", async () => {
-    // invariant: The real shape of a staged-but-unconfirmed row: no proof yet. Prepending
+    // note: The real shape of a staged-but-unconfirmed row: no proof yet. Prepending
     // a phase name to a row that still holds a proof would be beside the point —
     // the presence of a VALID proof is what proves publication.
     const db = seededDb();
@@ -1663,7 +1698,7 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
   });
 
   test("a publication that has moved on to `applied` still dedups", async () => {
-    // invariant: A normally-completed publication advances past `confirmed`; its proof is
+    // note: A normally-completed publication advances past `confirmed`; its proof is
     // still the proof that this head was published, so the gate must not key on
     // a phase the row merely passes through.
     for (const phase of ["applied", "superseded"]) {
@@ -1704,7 +1739,7 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
   });
 
   test("an INCOMPLETE or TYPE-WRONG proof never suppresses a claim", async () => {
-    // invariant: Syntactically valid JSON is not a proof: the closed PublicationProof
+    // note: Syntactically valid JSON is not a proof: the closed PublicationProof
     // shape requires every field to be present with its own JSON type. A
     // coerced-equality read (e.g. "42" == 42) is exactly what these reject.
     const base = { publicationId: "ID", scope: SCOPE, headSha: SHA, kind: "review", round: 1, commentId: 9001, bodySha256: "a".repeat(64), confirmedMs: T0 };
@@ -1747,7 +1782,7 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
       const publicationId = crypto.randomUUID();
       linkPublication(db, id, publicationId, {
         kind,
-        // invariant: A complete, self-consistent proof: every required field present with
+        // note: A complete, self-consistent proof: every required field present with
         // its JSON type and the embedded identity equal to its own row.
         proofJson: JSON.stringify({
           publicationId, scope: SCOPE, headSha: SHA, kind, round: 1, commentId: 9001,
@@ -1755,10 +1790,52 @@ describe("publication-proof dedup is EXACT (spec §7.9)", () => {
         }),
       });
       const again = await claimAttempt(db, claimInput({ holder: "run-b" }));
+      if (again.kind !== "terminal") throw new Error(`fixture: expected terminal, got ${again.kind}`);
       expect(again.kind, `kind=${kind} should dedup`).toBe("terminal");
       expect(again.attempt.identity.generation).toBe(1);
       expect(await rowCount(db)).toBe(1);
     }
+  });
+});
+
+describe("a frozen-pair claim never mints", () => {
+  /** note: The generation this key froze, read off the row that owns it. */
+  async function frozenPair(db: TestD1, id: string) {
+    const row = await rawRow(db, id);
+    return { key: row.attempt_key as string, generation: row.generation as number };
+  }
+
+  test("an OPEN frozen generation answers busy with that row, never a fresh claim", async () => {
+    const db = seededDb();
+    const { attempt } = await claim(db);
+    const frozen = await frozenPair(db, attempt.identity.attemptId);
+
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    // note: Never `claimed`: the only row this caller may take is the frozen one, and
+    // taking it is the fenced adoption UPDATE that follows, not a mint.
+    expect(again.kind).toBe("busy");
+    expect(attemptOfClaim(again).identity.generation).toBe(frozen.generation);
+    expect(await rowCount(db)).toBe(1);
+  });
+
+  test("a frozen generation that ENDED answers absent and inserts nothing", async () => {
+    const db = seededDb();
+    const { attempt, lease } = await claim(db);
+    const id = attempt.identity.attemptId;
+    const frozen = await frozenPair(db, id);
+    await attachRun(db, id, lease);
+    expect(await setCheckDesired(db, id, lease, CONCLUSION, null, T0)).toBe(true);
+    // note: Ends without a proven publication: the unrestricted path would happily
+    // mint generation 2 for this key, which is exactly what must not happen.
+    expect(await markCheckLocalError(db, id, lease, "gave up", T0)).toBe(true);
+    expect((await rawRow(db, id)).terminal_ms).toBe(T0);
+
+    const before = await rowCount(db);
+    const again = await claimAttempt(db, claimInput({ holder: "run-b", expect: frozen }));
+
+    expect(again.kind).toBe("absent");
+    expect(await rowCount(db)).toBe(before);
   });
 });
 
@@ -1770,13 +1847,13 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
 
-    // invariant: Suspension is a CLAIM fence, not just a selector filter (§7.6): a stale
+    // note: Suspension is a CLAIM fence, not just a selector filter (§7.6): a stale
     // selector result or a direct caller must not lease a disabled App's row.
     expect(await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId }, "app disabled", T0)).toBe(1);
     expect(await claimCheckRecovery(db, id, "stale-reconciler", T0 + 1)).toBeNull();
     expect((await getCheckAttempt(db, id))?.lease).toBeNull();
 
-    // invariant: An operator retry must NOT resurrect it either: only the explicit
+    // note: An operator retry must NOT resurrect it either: only the explicit
     // re-enable may resume a suspended identity (spec §7.6).
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 1 })).toBe(false);
     expect((await rawRow(db, id)).recovery_state).toBe("suspended");
@@ -1796,13 +1873,13 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     await setCheckDesired(db, id, lease, CONCLUSION, null, T0);
     await deferCheckRecovery(db, id, lease, { state: "pending", nextAttemptMs: T0, reason: "release" }, T0);
 
-    // invariant: Another worker terminalizes (observed success) AFTER the operator's
+    // note: Another worker terminalizes (observed success) AFTER the operator's
     // decision to retry. The reopen is ONE conditional statement, so every
     // precondition is re-checked inside the write and the terminal row is not
     // resurrected.
     const recovery = await claimCheckRecovery(db, id, "reconciler", T0 + 1);
     expect(recovery).not.toBeNull();
-    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, {}, "success"), T0 + 1)).toBe(true);
+    expect(await recordCheckObservation(db, id, recovery!, remoteFor(attempt, { summary: CONCLUSION.summary }, "success"), T0 + 1)).toBe(true);
 
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 + 2 })).toBe(false);
     const row = await rawRow(db, id);
@@ -1815,9 +1892,9 @@ describe("recovery claim fences (spec §7.6 / §7.9)", () => {
     const db = seededDb();
     const { attempt, lease } = await claim(db);
     const id = attempt.identity.attemptId;
-    // invariant: Live lease: refused while the claim lease is unexpired.
+    // note: Live lease: refused while the claim lease is unexpired.
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: id, nowMs: T0 })).toBe(false);
-    // invariant: Scope mismatch is refused (the retry binds the full scope).
+    // note: Scope mismatch is refused (the retry binds the full scope).
     expect(await retryCheckRecovery(db, { scope: { ...SCOPE, repo: "elsewhere" }, attemptId: id, nowMs: DEADLINE + 1 })).toBe(false);
     // note: A local give-up IS retryable (it reopens the same historical identity).
     await setCheckDesired(db, id, lease, FAILURE, null, T0);
@@ -1845,7 +1922,7 @@ describe("retryCheckRecovery (spec §7.11.2 step 6 store face)", () => {
     expect(row.next_attempt_ms).toBeNull();
     expect(row.recovery_state).toBe("pending");
     expect(row.last_error).toBeNull();
-    // invariant: Identity and evidence retained: no new generation, no cleared ids.
+    // note: Identity and evidence retained: no new generation, no cleared ids.
     expect(row.external_id).toBe(attempt.identity.externalId);
     expect(row.generation).toBe(1);
     expect(row.check_run_id).toBeNull();
@@ -1863,7 +1940,7 @@ describe("retryCheckRecovery (spec §7.11.2 step 6 store face)", () => {
       nowMs: DEADLINE + 1,
       executionDeadlineMs: DEADLINE + 1 + CHECK_LEASE_MS,
     });
-    // invariant: The old row is terminal, so retry refuses it; the active row is the
+    // note: The old row is terminal, so retry refuses it; the active row is the
     // registry's live subject and the old identity is untouched.
     expect(await retryCheckRecovery(db, { scope: SCOPE, attemptId: oldId, nowMs: DEADLINE + 2 })).toBe(false);
     expect((await rawRow(db, oldId)).generation).toBe(1);
@@ -1881,9 +1958,9 @@ describe("readPublicationProof integration (spec §7.7/§7.9)", () => {
     expect(
       (await readPublicationProof(db, { scope: SCOPE, headSha: SHA, publicationId: degraded.publicationId }))?.publicationId,
     ).toBe(degraded.publicationId);
-    // invariant: A different SHA proves nothing about this head.
+    // note: A different SHA proves nothing about this head.
     expect(await readPublicationProof(db, { scope: SCOPE, headSha: `f${SHA.slice(1)}` })).toBeNull();
-    // invariant: A prepared-but-unconfirmed row is unproven, never a proof.
+    // note: A prepared-but-unconfirmed row is unproven, never a proof.
     const preparedOnly = crypto.randomUUID();
     await stagePublication(db, { id: preparedOnly, payload: payloadFor(preparedOnly, "review", 77), nowMs: T0 });
     expect(await readPublicationProof(db, { scope: { ...SCOPE, prNumber: 77 }, headSha: SHA })).toBeNull();
@@ -1932,7 +2009,7 @@ async function stageProof(
   headSha = SHA,
 ): Promise<PublicationProof> {
   await stagePublication(db, { id: publicationId, payload: payloadFor(publicationId, kind, prNumber, headSha), nowMs: T0 });
-  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0);
+  const lease = await claimPublication(db, publicationId, `pub-${publicationId}`, T0, "prepared");
   if (lease === null) throw new Error("fixture: publication claim failed");
   const proof: PublicationProof = {
     publicationId,
@@ -1984,10 +2061,10 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     for (const kind of ["disabled", "identity-mismatch", "missing", "deleted", "decrypt-failed", "paused"] as const) {
       expect(checkSuspensionKindOf(checkSuspensionReason(kind, "why", DIGEST))).toBe(kind);
     }
-    // invariant: The fingerprint is read back through the SHARED M8 reader, so the token
+    // note: The fingerprint is read back through the SHARED M8 reader, so the token
     // cannot drift between the two lanes.
     expect(suspensionCredentialOf(checkSuspensionReason("identity-mismatch", "why", DIGEST))).toBe(DIGEST);
-    // invariant: Legacy prose, an unknown kind and null all fail closed to `unknown`, which
+    // note: Legacy prose, an unknown kind and null all fail closed to `unknown`, which
     // the re-enable scan treats as proof-required rather than status-resumable.
     expect(checkSuspensionKindOf("app disabled — no Check mutation")).toBe("unknown");
     expect(checkSuspensionKindOf("suspend:something-new: why")).toBe("unknown");
@@ -2010,14 +2087,14 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: "c".repeat(64) },
       ]),
     ).toEqual([{ appId: APP_ID, installationId: SCOPE.installationId }]);
-    // invariant: Resuming returns the SAME historical identity to the batch.
+    // note: Resuming returns the SAME historical identity to the batch.
     await reenableChecksForApps(db, [{ appId: APP_ID, installationId: SCOPE.installationId }], T0 + 1);
     expect((await listCheckReconcileBatch(db, T0 + 1)).map((r) => r.identity.attemptId)).toEqual([id]);
   });
 
   test("the store read: a mixed-kind pair is resumable only when EVERY suspended row is releasable", async () => {
     const db = seededDb();
-    // invariant: Two attempts under one pair: one credential-suspended, one held by the
+    // note: Two attempts under one pair: one credential-suspended, one held by the
     // kill switch. The resume write flips both, so neither may speak for the
     // other.
     const first = await claim(db, { headSha: "a".repeat(40) });
@@ -2047,7 +2124,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
       .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
       .run(checkSuspensionReason("paused", "kill switch"), second.attempt.identity.attemptId);
     const pair = { appId: APP_ID, installationId: SCOPE.installationId };
-    // invariant: The credential envelope is unchanged: the paused row alone must not lift
+    // note: The credential envelope is unchanged: the paused row alone must not lift
     // the pair.
     expect(
       await listReenableableCheckPairs(db, [{ ...pair, currentFingerprint: DIGEST }]),
@@ -2062,7 +2139,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
   test("a live holder is never resumed", async () => {
     const db = seededDb();
     const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
-    // invariant: A live holder on the suspended row blocks any resume, even with a changed
+    // note: A live holder on the suspended row blocks any resume, even with a changed
     // digest that would otherwise earn a proof.
     db.raw.prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = 5 WHERE id = ?`).run(id);
     expect(
@@ -2075,7 +2152,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
   test("an UNREADABLE current digest proves nothing, so the pair stays suspended (F-005)", async () => {
     const db = seededDb();
     await suspendedRow(db, "identity-mismatch", DIGEST);
-    // invariant: No current digest can be read (routing row gone). Nothing about the
+    // note: No current digest can be read (routing row gone). Nothing about the
     // credentials is established, so no resume — not by comparison, and not by
     // proof, which this path never supplies.
     expect(
@@ -2100,7 +2177,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     ).toBe(1);
     expect(suspensionCredentialOf((await rawRow(db, id)).last_error as string)).toBeNull();
 
-    // invariant: Repaired routing: a current digest is now readable. M8's comparison treats
+    // note: Repaired routing: a current digest is now readable. M8's comparison treats
     // a stored null as unequal, so the pair earns its one bounded proof.
     expect(
       await listReenableableCheckPairs(db, [
@@ -2113,7 +2190,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     const db = seededDb();
     const { id } = await suspendedRow(db, "identity-mismatch", DIGEST);
     const NEW = "d".repeat(64);
-    // invariant: The corrected envelope still fails: the pass must be able to overwrite the
+    // note: The corrected envelope still fails: the pass must be able to overwrite the
     // recorded digest, which is what stops the "changed every pass" churn.
     expect(
       await suspendCheckRecovery(db, { appId: APP_ID, installationId: SCOPE.installationId },
@@ -2121,7 +2198,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     ).toBe(1);
     const row = await rawRow(db, id);
     expect(suspensionCredentialOf(row.last_error as string)).toBe(NEW);
-    // invariant: Now an unchanged re-read is filtered out — no churn.
+    // note: Now an unchanged re-read is filtered out — no churn.
     expect(
       await listReenableableCheckPairs(db, [
         { appId: APP_ID, installationId: SCOPE.installationId, currentFingerprint: NEW },
@@ -2182,7 +2259,7 @@ describe("suspension encoding and no-churn re-enable (P68-QC-003)", () => {
     for (const key of ["attempts", "desired", "observed", "external_id", "generation", "check_run_id", "publication_id", "terminal_ms"]) {
       expect([key, after[key]]).toEqual([key, before[key]]);
     }
-    // invariant: A stale lease writes nothing.
+    // note: A stale lease writes nothing.
     const stale: Lease = { holder: lease.holder, epoch: lease.epoch + 1, untilMs: lease.untilMs };
     expect(await suspendCheckForPause(db, id, stale, "paused", T0)).toBe(false);
   });

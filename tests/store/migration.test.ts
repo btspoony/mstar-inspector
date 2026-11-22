@@ -2488,7 +2488,7 @@ describe("migrations/0050_reviews_round.sql", () => {
 /**
  * why: Ordinal hygiene. This table IS the keep-and-order decision — not a
  * convenience list: applied state is not determinable from the repo, so the
- * four pairs were kept, nothing was renamed, and their apply order is the
+ * five pairs were kept, nothing was renamed, and their apply order is the
  * filename byte order the total comparator in `./helpers` produces.
  *
  * | Ordinal | Files, in apply order                                                      |
@@ -2497,6 +2497,7 @@ describe("migrations/0050_reviews_round.sql", () => {
  * | `0047`  | `0047_review_level_per_app.sql` → `0047_thread_pr_scope.sql`                |
  * | `0048`  | `0048_comment_trigger_claims.sql` → `0048_review_failures_pipeline_window.sql` |
  * | `0049`  | `0049_reviews_duration_ms.sql` → `0049_workspace_check_min_score.sql`       |
+ * | `0087`  | `0087_review_attempt_queue_wait.sql` → `0087_terminal_failure_status.sql`   |
  *
  * When a pair stops colliding, delete its entry — the tests below fail until
  * you do.
@@ -2506,6 +2507,7 @@ const KEPT_DUPLICATE_ORDINALS: ReadonlyMap<number, readonly string[]> = new Map(
   [47, ["0047_review_level_per_app.sql", "0047_thread_pr_scope.sql"]],
   [48, ["0048_comment_trigger_claims.sql", "0048_review_failures_pipeline_window.sql"]],
   [49, ["0049_reviews_duration_ms.sql", "0049_workspace_check_min_score.sql"]],
+  [87, ["0087_review_attempt_queue_wait.sql", "0087_terminal_failure_status.sql"]],
 ]);
 
 /** note: Group migration filenames by numeric prefix; a group of 2+ is a repeated ordinal. */
@@ -2541,7 +2543,7 @@ describe("migrations/ ordinals", () => {
     .filter((name) => name.endsWith(".sql"))
     .sort();
 
-  test("only the four recorded ordinals repeat, each as its recorded pair", () => {
+  test("only the five recorded ordinals repeat, each as its recorded pair", () => {
     assertOnlyRecordedDuplicates(names);
   });
 

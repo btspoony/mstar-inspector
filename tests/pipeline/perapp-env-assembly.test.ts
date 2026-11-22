@@ -1,5 +1,5 @@
 /**
- * why: Per-App runner-env assembly tests (spec § Per-App BYOK).
+ * note: Per-App runner-env assembly tests (spec § Per-App BYOK).
  *
  * The consumer resolves the App's AI config (`getAppConfig` decrypt face, ONE
  * read per message) off the SAME bot resolution as the commenter and feeds
@@ -52,6 +52,7 @@ import { MODEL_LIMITS } from "../../src/contracts/provider-model-limits.generate
 import { PROVIDER_CATALOG } from "../../src/contracts/provider-catalog.generated";
 import { sk, fakePem } from "../helpers/fake-secrets";
 import { withFrozenClock } from "../helpers/clock";
+import { inlineWorkflowStarter } from "../helpers/workflow-route";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 import { runnerTimeoutMs } from "../../src/review-budget";
@@ -76,7 +77,7 @@ const VALID_OUTPUT: ReviewOutput = {
 let githubAppIdSeq = 100000;
 
 /**
- * why: Raw-insert an active, non-deleted review_bots row (the commenter face).
+ * note: Raw-insert an active, non-deleted review_bots row (the commenter face).
  * `configured: false` skips the AI-config health baseline (a chain + the ark
  * BYOK key) — the input for the AL-24-5 fail-closed tests.
  */
@@ -181,7 +182,7 @@ const sandboxCalls: Array<{ cmd: string; opts?: unknown; startedAt: number }> = 
 let numstatStdout = "";
 
 /**
- * why: The runner's applied-model document this test's container "wrote":
+ * note: The runner's applied-model document this test's container "wrote":
  * `undefined` = the runner wrote none (no model served), a string = the
  * document's JSON text. The double answers the SAME bounded-read contract the
  * real file read produces (`<content>\n0\n`, or the proven-absence flag line).
@@ -207,10 +208,19 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
+  claimMarker: mock(async () => "written" as const),
+  runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
+    kind: "ran" as const,
+    ...(await fakeSandbox.runCommand(cmd, opts)),
+  })),
+  destroyMarked: mock(async () => {
+    await fakeSandbox.destroy();
+    return "destroyed" as const;
+  }),
   destroy: mock(async () => {}),
 };
 
-// why: Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// note: Load-shim only: consumer.ts statically imports ./sandbox → the workerd
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
 // injects the fake via createReviewConsumer overrides — this mock is never
 // called.
@@ -259,6 +269,9 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
   postLineComments: mock(async () => {
     throw new Error("unexpected: no qualifying findings → no line comments");
   }),
+  recoverLineComments: mock(async () => {
+    throw new Error("unexpected: no dispatched line batch → no discovery");
+  }),
   // note: §7.8 discussion capture + §7.5 resolution: no open lifecycle
   // rows in these fixtures → never triggered.
   listDiscussion: mock(async () => {
@@ -275,6 +288,7 @@ const appCommenterFactory = mock((_cred: CommenterEnv): ReviewCommenter => ({
 const testOverrides = {
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
+  startAttempt: inlineWorkflowStarter([]),
 };
 
 // note: --- consumer under test (dynamic import: mocks must be registered first) ---
@@ -354,26 +368,27 @@ function reset(): void {
 }
 
 /**
- * why: The runner input's declared instant is a RUN FACT, not configuration: the
- * instant the exec is killed at = its own start + the timeout it runs under.
- * The start is read off the SAME call record, never a last-written scalar, so
- * round N's input can never borrow another round's start.
+ * note: The runner input's declared instant is a RUN FACT, not configuration, and it
+ * is the exec's OWN bound: the paid request carries that absolute instant (the
+ * container reads it and reserves its kill grace out of it), so the input and
+ * the request cannot disagree. The instant is read off the SAME call record,
+ * never a last-written scalar, so round N's input can never borrow round N-1's.
  */
 function expectOuterDeadline(input: Record<string, unknown>): void {
   const runner = sandboxCalls.find((c) => c.cmd.includes("--input"));
   if (runner === undefined) throw new Error("no runner exec was issued");
   const opts = runner.opts;
-  const execTimeout =
-    opts !== null && typeof opts === "object" && "timeout" in opts ? opts.timeout : undefined;
-  if (typeof execTimeout !== "number") throw new Error("runner exec carried no numeric timeout");
-  expect(input.outerDeadlineEpochMs).toBe(runner.startedAt + execTimeout);
+  const execDeadline =
+    opts !== null && typeof opts === "object" && "deadlineEpochMs" in opts ? opts.deadlineEpochMs : undefined;
+  if (typeof execDeadline !== "number") throw new Error("runner exec carried no numeric deadlineEpochMs");
+  expect(input.outerDeadlineEpochMs).toBe(execDeadline);
 }
 
 /** note: The fields every runner input declares, whatever the run adds. */
 const RUNNER_INPUT_BASE_FIELDS = ["capabilityHosts", "outerDeadlineEpochMs", "reconFacts", "worktreePath"];
 
 /**
- * why: The runner input's exact key set — serialization order is not a contract, the
+ * note: The runner input's exact key set — serialization order is not a contract, the
  * SET is: the base fields every run declares, plus the optional ones this run
  * added. The document is deliberately keyless, so any field nobody declared
  * here is the regression — a credential spread lands as an unexpected key,
@@ -391,7 +406,7 @@ function runnerEnvs(): Array<Record<string, string>> {
 }
 
 /**
- * why: The credential POOLS one runner exec transported over STDIN, in message order
+ * note: The credential POOLS one runner exec transported over STDIN, in message order
  * — the only credential channel. `undefined` = no pool transported (keyless).
  */
 function runnerPools(): Array<Record<string, string[]> | undefined> {
@@ -448,11 +463,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.ARK_API_KEY).toBeUndefined();
     expect(env.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
-    // safety: The retired env channel: no provider pool name may reach the exec env.
+    // note: The retired env channel: no provider pool name may reach the exec env.
     expect(env.MSTAR_POOL_ARK_01).toBeUndefined();
     expect(env.MSTAR_POOL_ANTHROPIC_COUNT).toBeUndefined();
     expect(pools.mistral).toBeUndefined();
-    // invariant: key_source: app for every injected key; config_source: the only source left.
+    // note: key_source: app for every injected key; config_source: the only source left.
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
     expect(sources).toEqual({ anthropic: "app", openai: "app", ark: "app" });
     const cfgLine = logLines.find((l) => l.fields.config_source !== undefined);
@@ -468,7 +483,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    // invariant: The chain's FIRST selector (`openai/gpt-app`) is missing its key in
+    // note: The chain's FIRST selector (`openai/gpt-app`) is missing its key in
     // the App's config — the gate throws on the first key-less provider.
     await expect(
       consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
@@ -502,7 +517,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const env = runnerEnvs()[0]!;
-    // invariant: Store order IS transport order: the payload array is exactly the order
+    // note: Store order IS transport order: the payload array is exactly the order
     // the session's credential rows are written in.
     expect(runnerPools()[0]!.openai).toEqual(expected);
     expect(env.OPENAI_API_KEY).toBeUndefined();
@@ -597,7 +612,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     // the raw direct-DB chain writes below must be the ONLY config rows.
     const appX = await seedApp(db, "app-x", { configured: false });
     const appY = await seedApp(db, "app-y", { configured: false });
-    // safety: Bypass the store (the threat model: a direct DB write can hold a
+    // note: Bypass the store (the threat model: a direct DB write can hold a
     // blank chain the routes would have normalized away) — the raw rows pin
     // the fail-closed + verbatim guards independent of store semantics.
     db.raw
@@ -632,7 +647,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     ).rejects.toThrow(/per-App config incomplete: app .*missing model chain/);
 
     const yEnv = runnerEnvs()[0]!;
-    // invariant: A padded chain WITH content is configuration — forwarded exactly as
+    // note: A padded chain WITH content is configuration — forwarded exactly as
     // stored (the guard only decides unset-vs-set; it never mutates the value;
     // the runner-side selector parse trims segments).
     expect(yEnv.OMP_REVIEW_MODEL).toBe(padded);
@@ -670,7 +685,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
       .query("SELECT pr_number, model, provider FROM reviews ORDER BY pr_number")
       .all() as Array<{ pr_number: number; model: string | null; provider: string | null }>;
     expect(rows).toEqual([
-      // invariant: The App's own chain wins — its HEAD selector is recorded (AL-2).
+      // note: The App's own chain wins — its HEAD selector is recorded (AL-2).
       { pr_number: 42, model: "openai/gpt-app", provider: null },
       { pr_number: 43, model: "ark/deepseek-v4-flash", provider: null },
     ]);
@@ -695,10 +710,10 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     const appY = await seedApp(db, "app-y");
     await configureApp(db, appX.id, "openai/gpt-app", { openai: sk("x-openai-SECRET") });
     await configureApp(db, appY.id, "anthropic/claude-app", { anthropic: sk("y-anthropic-SECRET") });
-    // safety: NO global provider keys: any key in the env must come from the App row.
+    // note: NO global provider keys: any key in the env must come from the App row.
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    // invariant: X → Y → X: identical X envs prove the assembly is a fresh object per
+    // note: X → Y → X: identical X envs prove the assembly is a fresh object per
     // review with no shared mutable state between messages.
     await consumer(
       makeBatch(
@@ -723,7 +738,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     });
     expect(yPools).toEqual({ ark: [ARK_KEY], anthropic: [sk("y-anthropic-SECRET")] });
     expect(xPoolsAgain).toEqual(xPools);
-    // safety: Belt and braces: neither App's transport carries the other App's key —
+    // note: Belt and braces: neither App's transport carries the other App's key —
     // neither in the exec env nor in the credential payload.
     expect(Object.values(xEnv)).not.toContain(sk("y-anthropic-SECRET"));
     expect(Object.values(yEnv)).not.toContain(sk("x-openai-SECRET"));
@@ -741,11 +756,11 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // why: The assembly lines EXIST (the assertion is not vacuous)…
+    // note: The assembly lines EXIST (the assertion is not vacuous)…
     const sources = Object.fromEntries(keySourceLines().map((l) => [l.fields.provider, l.fields.key_source]));
     expect(sources).toEqual({ openai: "app", ark: "app" });
     expect(logLines.some((l) => l.fields.config_source !== undefined)).toBe(true);
-    // safety: …and NO log line — assembly, runner, post, anything — carries key material.
+    // note: …and NO log line — assembly, runner, post, anything — carries key material.
     for (const line of logLines) {
       const serialized = JSON.stringify(line);
       for (const secret of secrets) {
@@ -786,7 +801,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
       testOverrides,
     );
 
-    // safety: The ONE master key gates BOTH decrypt faces of an app-path message —
+    // note: The ONE master key gates BOTH decrypt faces of an app-path message —
     // the App's PEM (resolveCommenter, which runs first) and its provider
     // keys (resolveAppConfig). Either way the review fails closed with zero
     // side effects. (The config-face decrypt failure alone is pinned by the
@@ -822,7 +837,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // safety: The store itself does not validate provider ids (routes do) — seed a
+    // note: The store itself does not validate provider ids (routes do) — seed a
     // rogue row directly to pin the consumer's allowlist discipline.
     await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -835,7 +850,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
       OMP_REVIEW_MODEL: "ark/deepseek-v4-flash",
     });
     expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
-    // safety: log hygiene (硬化项 3): the rogue row's skip is a structured
+    // note: log hygiene (硬化项 3): the rogue row's skip is a structured
     // warn carrying the provider id + app_id — never key material.
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
     expect(warn).toBeDefined();
@@ -851,7 +866,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "anthropic", "   ");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    // invariant: A whitespace-only key = not configured — and there is NO global key to
+    // note: A whitespace-only key = not configured — and there is NO global key to
     // fall back to, so the chain provider's missing key fails the review.
     await expect(
       consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
@@ -873,7 +888,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     await configureApp(db, missingKey.id, "openai/gpt-app,anthropic/claude-app", { openai: sk("mk-openai") });
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    // invariant: Same consumer, fresh env per message: healthy first, then the
+    // note: Same consumer, fresh env per message: healthy first, then the
     // misconfigured sibling — the batch resolves the healthy review, then
     // the sibling's failure throws through the structured channel (rethrow
     // stops the batch at the first throwing message — F-001 design).
@@ -886,7 +901,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
       ),
     ).rejects.toThrow(/per-App config incomplete/);
 
-    // invariant: The healthy sibling completed with ITS OWN keys + chain.
+    // note: The healthy sibling completed with ITS OWN keys + chain.
     const env = runnerEnvs()[0]!;
     const pools = runnerPools()[0]!;
     expect(pools.openai).toEqual([sk("healthy-openai-SECRET")]);
@@ -895,7 +910,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(env.OMP_REVIEW_MODEL).toBe("openai/gpt-app,anthropic/claude-app");
     expect(appCalls).toEqual(["token", "plan", "post"]);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(1);
-    // invariant: The misconfigured sibling failed structurally: stage=pipeline row +
+    // note: The misconfigured sibling failed structurally: stage=pipeline row +
     // rethrow; zero sandbox/guard/GitHub side effects for it.
     const failRows = db.raw
       .query("SELECT error, head_sha FROM review_failures ORDER BY rowid")
@@ -903,7 +918,7 @@ describe("per-App runner env assembly (spec § Per-App BYOK)", () => {
     expect(failRows).toHaveLength(1);
     expect(failRows[0]!.error).toContain("provider anthropic has no configured key");
     expect(failRows[0]!.head_sha).toBe(SHA); // note: payload sha (pre-checkout)
-    // safety: No cross-App key material anywhere: the healthy env and every log line
+    // note: No cross-App key material anywhere: the healthy env and every log line
     // carry only each App's own values (fresh env per call, no leakage).
     expect(JSON.stringify(env)).not.toContain(sk("mk-openai"));
     expect(JSON.stringify(logLines)).not.toContain(sk("mk-openai"));
@@ -918,7 +933,7 @@ describe("runner input modelOverrides threading", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // why: The override chains reference openai/anthropic (allowed-list providers)
+    // note: The override chains reference openai/anthropic (allowed-list providers)
     // — the Bugbot-7aaf18f4 gate requires a key for every override provider,
     // so configure them alongside the ark baseline.
     await configureApp(db, appX.id, "ark/deepseek-v4-flash", {
@@ -940,7 +955,7 @@ describe("runner input modelOverrides threading", () => {
       "mstar-review-seat": "ark/deepseek-v4-flash:high",
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // invariant: The declared instant is a RUN FACT, not a re-derivation: it is the
+    // note: The declared instant is a RUN FACT, not a re-derivation: it is the
     // instant this very exec is killed at (the mock's recorded start plus the
     // timeout that exec ran under). The frozen round clock adds the one claim
     // the deleted formula pin made — the declared instant cannot outrun the
@@ -952,7 +967,7 @@ describe("runner input modelOverrides threading", () => {
 
   test("app message with NO role map: input JSON omits the field entirely (no-map run)", async () => {
     reset();
-    // invariant: Non-ASCII numstat path: the runner input rides stdin base64, so the test
+    // note: Non-ASCII numstat path: the runner input rides stdin base64, so the test
     // helper's decode must be UTF-8 (atob would mangle it to latin1).
     numstatStdout = "1\t1\tdocs/中文.md\n";
     const appDb = createMigratedTestD1();
@@ -962,7 +977,7 @@ describe("runner input modelOverrides threading", () => {
       appConsumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     );
     const [appInput] = runnerInputs();
-    // invariant: No role map → the role field is omitted entirely; the rest is the shape
+    // note: No role map → the role field is omitted entirely; the rest is the shape
     // every run declares.
     expectOuterDeadline(appInput!);
     expect(appInput!.modelOverrides).toBeUndefined();
@@ -1011,7 +1026,7 @@ describe("runner input modelOverrides threading", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // invariant: Fail ONLY the model-roles read (the resolveModelOverrides face) — the
+    // note: Fail ONLY the model-roles read (the resolveModelOverrides face) — the
     // PEM/config reads stay healthy, so the wrapper's prefix is observable.
     const failingDb = new Proxy(db, {
       get(target, prop, receiver) {
@@ -1030,7 +1045,7 @@ describe("runner input modelOverrides threading", () => {
       consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(`per-App model-role resolution failed: app ${appX.id}: roles read boom`);
 
-    // invariant: Zero side effects: no sandbox, no input write, no guard acquisition
+    // note: Zero side effects: no sandbox, no input write, no guard acquisition
     // (the read hangs off the bot gate, before the in-flight guard).
     expect(sandboxCalls).toHaveLength(0);
     expect(runnerInputs()).toHaveLength(0);
@@ -1051,7 +1066,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
     // note: Healthy sibling: valid base chain + its own keys.
     const healthy = await seedApp(db, "healthy");
     await configureApp(db, healthy.id, "openai/gpt-app", { openai: sk("healthy-openai") });
-    // invariant: The misconfigured App: a VALID base chain (openai key present), but its
+    // note: The misconfigured App: a VALID base chain (openai key present), but its
     // per-role override chain references anthropic — a provider with NO key
     // in THIS App's config. Only the override gate catches this: pre-fix the
     // message passed assertAppConfigComplete, cloned, and failed at the
@@ -1074,10 +1089,10 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
       /per-App config incomplete: app .*role override `code-reviewer` provider anthropic has no configured key/,
     );
 
-    // invariant: The healthy sibling completed with ITS OWN keys + chain.
+    // note: The healthy sibling completed with ITS OWN keys + chain.
     expect(runnerPools()[0]!.openai).toEqual([sk("healthy-openai")]);
     expect(appCalls).toEqual(["token", "plan", "post"]); // note: only the healthy sibling reviewed
-    // invariant: The misconfigured sibling failed structurally through the F-001
+    // note: The misconfigured sibling failed structurally through the F-001
     // channel: one review_failures row at stage=pipeline (payload sha) plus
     // the structured error log — zero sandbox/guard/GitHub side effects.
     const rows = db.raw
@@ -1104,7 +1119,7 @@ describe("per-role override provider key gate (Bugbot 7aaf18f4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // invariant: The override passed the gate and reaches the runner input verbatim;
+    // note: The override passed the gate and reaches the runner input verbatim;
     // the App key rides the credential payload under its provider id.
     const input = runnerInputs()[0]!;
     expect(input.modelOverrides).toEqual({ "code-reviewer": "openai/gpt-5:thinking, openai/gpt-5-mini" });
@@ -1151,7 +1166,7 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // invariant: The chain's head is the first selector; the round actually ran the second.
+    // note: The chain's head is the first selector; the round actually ran the second.
     await configureApp(db, appX.id, "openai/gpt-app,anthropic/claude-app", {
       anthropic: sk("app-x-SECRET"),
       openai: sk("app-x-openai-SECRET"),
@@ -1161,9 +1176,9 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // invariant: The ONE projection: the runner's observation reaches the row verbatim.
+    // note: The ONE projection: the runner's observation reaches the row verbatim.
     expect(await storedProvider(db)).toBe("anthropic/claude-app");
-    // invariant: …and the configured head is still recorded where it belongs.
+    // note: …and the configured head is still recorded where it belongs.
     const model = db.raw.query("SELECT model FROM reviews WHERE pr_number = 42").get() as {
       model: string | null;
     };
@@ -1172,17 +1187,17 @@ describe("applied-provider attribution (runner observation → reviews.provider)
 
   test("a malformed or oversized applied-model document is refused, not persisted", async () => {
     for (const doc of [
-      // invariant: No provider/model pair at all.
+      // note: No provider/model pair at all.
       JSON.stringify({ appliedModel: "anthropic" }),
-      // invariant: No provider segment, or whitespace where none belongs. (A model id may
+      // note: No provider segment, or whitespace where none belongs. (A model id may
       // itself contain slashes — the reported chain's does — so only the
       // provider segment is slash-free.)
       JSON.stringify({ appliedModel: "/claude-app" }),
       JSON.stringify({ appliedModel: "anthropic/claude app" }),
-      // safety: The shape is right but the value is unbounded — a document may not
+      // note: The shape is right but the value is unbounded — a document may not
       // smuggle an arbitrary string into a short provider/model column.
       JSON.stringify({ appliedModel: `a/${"b".repeat(300)}` }),
-      // invariant: Not even a string.
+      // note: Not even a string.
       JSON.stringify({ appliedModel: 42 }),
       JSON.stringify({ appliedModel: "" }),
     ]) {
@@ -1217,7 +1232,7 @@ describe("applied-provider attribution (runner observation → reviews.provider)
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     expect(await storedProvider(db)).toBeNull();
-    // invariant: The absence is visible as the ordinary shape, never as a fault.
+    // note: The absence is visible as the ordinary shape, never as a fault.
     expect(logLines.some((line) => line.fields.applied_model === "absent")).toBe(false);
   });
 });
@@ -1257,10 +1272,10 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const pools = runnerPools()[0]!;
     expect(pools["my-provider"]).toEqual([sk("custom-fixture-AAA")]);
     expect(pools["second-one"]).toEqual([sk("custom-fixture-BBB")]);
-    // invariant: The App key assembly is untouched (custom injection is additive).
+    // note: The App key assembly is untouched (custom injection is additive).
     expect(pools.ark).toEqual([ARK_KEY]);
     expect(env.PI_CODING_AGENT_DIR).toBe("/opt/omp-agent");
-    // safety: Runner input JSON: keyless declarations only (zero key material).
+    // note: Runner input JSON: keyless declarations only (zero key material).
     const input = runnerInputs()[0]!;
     expect(input.customProviders).toEqual([
       {
@@ -1276,7 +1291,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
         model_ids: ["b-model"],
       },
     ]);
-    // invariant: The declarations ride as the one optional field beyond the shape every
+    // note: The declarations ride as the one optional field beyond the shape every
     // run carries (plus the always-declared deadline).
     expectOuterDeadline(input);
     expectRunnerInputFields(input, ["customProviders"]);
@@ -1310,7 +1325,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       },
       sk("custom-fixture-AAA"),
     );
-    // invariant: A second declaration states NOTHING about its models: the sizes are
+    // note: A second declaration states NOTHING about its models: the sizes are
     // unstated (the runtime's own default applies), and the input must not
     // claim it stated an empty set.
     await store.upsertCustomProvider(
@@ -1345,7 +1360,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
       },
     ]);
     expect("models_meta" in (input.customProviders as Array<Record<string, unknown>>)[0]!).toBe(false);
-    // safety: Still keyless: the overlay is declaration data, never credentials.
+    // note: Still keyless: the overlay is declaration data, never credentials.
     expect(JSON.stringify(input)).not.toContain(sk("custom-fixture"));
   });
 
@@ -1353,7 +1368,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // invariant: The chain references the custom provider id directly — the gate's
+    // note: The chain references the custom provider id directly — the gate's
     // custom branch matches a declaration with a non-blank key pool and the
     // credential payload pools it under that same provider id.
     await configureApp(db, appX.id, "my-provider/model-1");
@@ -1370,7 +1385,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
-    // invariant: The gate passes (the custom declaration supplies the key) and the review
+    // note: The gate passes (the custom declaration supplies the key) and the review
     // completes — the key reaches the runner under the SAME provider id the
     // synthesized models.yml declares (AL-23-1 loop).
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
@@ -1409,7 +1424,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     expect(customLines).toHaveLength(1);
     expect(customLines[0]!.fields.provider).toBe("my-provider");
     expect(customLines[0]!.msg).toContain("my-provider");
-    // safety: Zero key material in ANY log line (the key_source discipline).
+    // note: Zero key material in ANY log line (the key_source discipline).
     for (const line of logLines) {
       expect(JSON.stringify(line.fields)).not.toContain(sk("custom-fixture"));
       expect(line.msg).not.toContain(sk("custom-fixture"));
@@ -1438,13 +1453,13 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     );
     const [appInput] = runnerInputs();
     const [appEnv] = runnerEnvs();
-    // invariant: No declarations → the custom-provider field is omitted entirely and no
+    // note: No declarations → the custom-provider field is omitted entirely and no
     // custom-provider pool is transported (byte-compat pin). The capability
     // hosts and the declared deadline ride ALWAYS.
     expectOuterDeadline(appInput!);
     expect(appInput!.customProviders).toBeUndefined();
     expectRunnerInputFields(appInput!);
-    // invariant: The seeded App's own ark key still pools; nothing else does — and the
+    // note: The seeded App's own ark key still pools; nothing else does — and the
     // exec env carries no pool name at all (the retired channel).
     expect(runnerPools()[0]).toEqual({ ark: [ARK_KEY] });
     expect(Object.keys(appEnv!).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
@@ -1463,7 +1478,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    // invariant: The endpoint may only move while the pool is EMPTY (A1), so the edit is
+    // note: The endpoint may only move while the pool is EMPTY (A1), so the edit is
     // the same remove-then-re-declare an operator performs — the declaration
     // this consumer must re-read is wholesale new.
     await store.removeCustomProvider(appX.id, "my-provider");
@@ -1495,7 +1510,7 @@ describe("custom provider credential transport + runner input threading (AL-23-1
          VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`,
       )
       .run(appX.id, "my-provider", "https://my-provider.example.com/v1", "openai-completions", JSON.stringify(["m1"]));
-    // safety: Tamper the stored envelope so the decrypt face must throw.
+    // note: Tamper the stored envelope so the decrypt face must throw.
     const enc = await createSecretbox(TEST_KEY).encryptSecret(
       sk("custom-fixture-AAA"),
       `app_custom_provider_keys.key_enc:${appX.id}:my-provider:deadbeefdeadbeef:wrong`,
@@ -1534,10 +1549,10 @@ describe("sandbox image resolution at review execution", () => {
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
     const input = runnerInputs()[0]!;
-    // invariant: The image declares no provider: the per-review models.yml is the App's
+    // note: The image declares no provider: the per-review models.yml is the App's
     // own declarations, and a built-in provider resolves from the SDK catalog.
     expect(input.capabilityHosts).toEqual([]);
-    // safety: The review completes (the App's chain passed the gate) and the input
+    // note: The review completes (the App's chain passed the gate) and the input
     // stays keyless — zero secret material.
     expect(appCalls).toEqual(["token", "plan", "post"]);
     expect(JSON.stringify(input)).not.toContain(ARK_KEY);
@@ -1547,7 +1562,7 @@ describe("sandbox image resolution at review execution", () => {
     reset();
     const db = createMigratedTestD1();
     const appX = await seedApp(db, "app-x");
-    // safety: Bypass the store (the threat model: a direct DB write or a
+    // note: Bypass the store (the threat model: a direct DB write or a
     // registry contraction can hold an id the current registry rejects).
     db.raw
       .prepare(`UPDATE review_bots SET sandbox_image_id = 'retired-image' WHERE id = ?`)
@@ -1560,7 +1575,7 @@ describe("sandbox image resolution at review execution", () => {
       `per-App sandbox image resolution failed: app ${appX.id}: unknown sandbox image id "retired-image"`,
     );
 
-    // invariant: Zero side effects: no container, no guard, no token, no GitHub write.
+    // note: Zero side effects: no container, no guard, no token, no GitHub write.
     expect(sandboxCalls).toHaveLength(0);
     expect(kvGuardPuts).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
@@ -1594,7 +1609,7 @@ describe("sandbox image resolution at review execution", () => {
       .prepare(`UPDATE review_bots SET sandbox_image_id = 'omp' WHERE id = ?`)
       .run(appX.id);
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    // invariant: The valid-id message started exactly one sandbox and completed.
+    // note: The valid-id message started exactly one sandbox and completed.
     expect(sandboxCalls.length).toBeGreaterThan(0);
     expect(runnerInputs()).toHaveLength(1);
     expect(appCalls).toEqual(["token", "plan", "post"]);
@@ -1624,7 +1639,7 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
       await store.upsertCustomProvider(
         appX.id,
         {
-          // invariant: An endpoint of the operator's own under the catalog's id: the
+          // note: An endpoint of the operator's own under the catalog's id: the
           // endpoint is not a size key, the model id is.
           provider_id: covered.providerId,
           base_url: "https://private.example.com/v1",
@@ -1638,7 +1653,7 @@ describe("custom provider sizes resolve from the catalog at the runner boundary"
 
       await withFrozenClock(() => consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId }))));
 
-      // invariant: The operator stated nothing, so nothing is STORED — but the runner has
+      // note: The operator stated nothing, so nothing is STORED — but the runner has
       // no catalog of its own, so the projection resolves the blank from it.
       const input = runnerInputs()[0]!;
       const decl = (input.customProviders as Array<{

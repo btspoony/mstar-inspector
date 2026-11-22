@@ -51,6 +51,7 @@ import {
   planReviewUpsertWithOctokit,
   postPreparedDegradedWithOctokit,
   postPreparedReviewWithOctokit,
+  PublicationDeadlineSpent,
   deleteDegradedCommentWithOctokit,
   REVIEW_BODY_LIMIT,
   SUMMARY_MD_LIMIT,
@@ -1675,13 +1676,14 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
 
   type MockComment = { id: number; body?: string | null; user?: { type?: string } | null };
 
-  function mockOctok(comments: MockComment[], updateError?: unknown) {
+  function mockOctok(comments: MockComment[], updateError?: unknown, scanDelayMs = 0) {
     const calls: Calls = {};
     const octokit: PostOctokit = {
       paginate: mock(
         async (route: unknown, params: Record<string, unknown>): Promise<MockComment[]> => {
           calls.listRoute = route;
           calls.listParams = params;
+          if (scanDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, scanDelayMs));
           return comments;
         },
       ),
@@ -1755,6 +1757,55 @@ describe("prepared publication wiring (mock octokit, SG-001 — spec §7.7)", ()
     expect(result).toEqual({ commentId: 7 });
     expect(calls.updateParams).toBeUndefined();
     expect(calls.createParams).toBeUndefined();
+  });
+
+  test("send: the frozen instant is checked AFTER the scan, at the mutation itself", async () => {
+    // note: The caller can only check before this call; the marker scan is the
+    // unbounded await inside it. A check taken before the send would pass —
+    // this deadline is still ~20ms away — and the scan spends it, so only a
+    // check carried INTO the mutation can refuse, and the refusal is the last
+    // line before the first write.
+    const { calls, octokit } = mockOctok(
+      [{ id: 7, body: "<!-- mstar-inspector:review:v1 round=2 -->\nRound 2", user: { type: "Bot" } }],
+      undefined,
+      40,
+    );
+    await expect(
+      postPreparedReviewWithOctokit(octokit, { ...sendInput, notAfterMs: Date.now() + 20 }),
+    ).rejects.toBeInstanceOf(PublicationDeadlineSpent);
+
+    // note: Nothing was sent: neither verb ran, at any stage of the send.
+    expect(calls.updateParams).toBeUndefined();
+    expect(calls.createParams).toBeUndefined();
+  });
+
+  test("send: a spent instant refuses the create fallback too — nothing is created", async () => {
+    const { calls, octokit } = mockOctok([]);
+    await expect(
+      postPreparedReviewWithOctokit(octokit, { ...sendInput, targetCommentId: null, notAfterMs: Date.now() - 1 }),
+    ).rejects.toBeInstanceOf(PublicationDeadlineSpent);
+    expect(calls.createParams).toBeUndefined();
+  });
+
+  test("send (degraded): the same instant refuses its mutation", async () => {
+    const { calls, octokit } = mockOctok([]);
+    await expect(
+      postPreparedDegradedWithOctokit(octokit, {
+        appId: "11111111-2222-3333-4444-555555555555",
+        installationId: 123,
+        owner: "acme",
+        repo: "widgets",
+        prNumber: 42,
+        headSha: "a".repeat(40),
+        round: 1,
+        targetCommentId: null,
+        body: "<!-- mstar-inspector:review-degraded:v1 round=1 -->\nDegraded",
+        publicationId: "pub-degraded",
+        notAfterMs: Date.now() - 1,
+      }),
+    ).rejects.toBeInstanceOf(PublicationDeadlineSpent);
+    expect(calls.createParams).toBeUndefined();
+    expect(calls.updateParams).toBeUndefined();
   });
 
   test("send: a changed target (newer round / replaced body) is a definitive rejection — never overwritten", async () => {
@@ -2030,6 +2081,7 @@ describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () =
   });
   const sendInput = {
     ...degradeTarget,
+    appId: "11111111-2222-3333-4444-555555555555",
     headSha: "0123456789abcdef0123456789abcdef01234567",
     round: 3,
     targetCommentId: 7 as number | null,
@@ -2117,6 +2169,7 @@ describe("prepared degraded publication wiring (mock octokit, spec §7.7)", () =
 
 describe("deleteDegradedComment wiring (mock octokit, Bugbot lifecycle)", () => {
   const degradeInput = {
+    appId: "11111111-2222-3333-4444-555555555555",
     installationId: 1,
     owner: "acme",
     repo: "widgets",
@@ -2276,6 +2329,7 @@ describe("missing octokit surface → per-chain error noun (review feedback fix)
     ).rejects.toThrow(/cannot publish the prepared review/);
     await expect(
       postPreparedDegradedWithOctokit(bare, {
+        appId: "11111111-2222-3333-4444-555555555555",
         installationId: 1,
         owner: "acme",
         repo: "widgets",

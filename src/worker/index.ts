@@ -21,15 +21,18 @@
  * - /dashboard/* → GitHub OAuth login + signed-cookie session shell (08 B0)
  */
 import { Hono } from "hono";
-import type { D1Database, ExecutionContext, MessageBatch, ScheduledController } from "@cloudflare/workers-types";
+import type { D1Database, ExecutionContext, MessageBatch, ScheduledController, Workflow } from "@cloudflare/workers-types";
 import { deploymentModeOf, type DeploymentMode, type Env, type ScheduledEnv } from "./env";
 import { defaultSweepLog, runSweep } from "./sweep";
 import { reconcileReviewLifecycle } from "./lifecycle-reconcile";
 import { reconcileReviewChecks } from "./check-reconcile";
+import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
+import type * as ConsumerModule from "../pipeline/consumer";
+import type { AttemptRef } from "../pipeline/review-attempt-execution";
 import {
   classifyWebhook,
   MENTION_MISS_REASON,
@@ -57,6 +60,7 @@ import {
 } from "../dashboard/targets-store";
 import {
   getMaintenanceMode,
+  getReviewRouteWorkflowGate,
   maintenanceClosed,
   readDefaultReviewLevel,
 } from "../dashboard/runtime-config-store";
@@ -832,6 +836,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // not run, and the failure row says which read could not answer. Fail-closed
   // — a verdict the platform could not compute never admits a delivery — and
   // never silent: the row and one structured warn both name the cause.
+  if (outcome.kind === "job") {
+    // THE ROUTE GATE, AT ACCEPTANCE (spec § Deployment gate). A closed route
+    // must be honoured HERE — before the Check is attached and before anything
+    // is enqueued. Attaching first would leave an eligible head with an
+    // `in_progress` Check that nothing adopts, and the reconciler would later
+    // report an unconfirmed failure for work the gate declined. A closed gate
+    // is NOT a failure: no Check, no terminal outcome, no reconciler work.
+    const routeGate = await getReviewRouteWorkflowGate(db);
+    if (routeGate.mode !== "on") {
+      const line = JSON.stringify({
+        event: "review_route_gate_closed",
+        review_route_workflow: "off",
+        gate_saved: routeGate.saved,
+        gate_degraded: routeGate.degraded,
+        gate_reason: routeGate.reason ?? null,
+        gate_rejected: routeGate.rejected ?? null,
+        installation_id: outcome.payload.installation_id,
+        owner: outcome.payload.owner,
+        repo: outcome.payload.repo,
+        pr_number: outcome.payload.pr_number,
+        head_sha: outcome.payload.head_sha,
+        msg: "review route is off (review.route.workflow) — delivery refused at acceptance: no Check attached, nothing enqueued",
+      });
+      if (routeGate.degraded) console.warn(line);
+      else console.log(line);
+      return c.text("ignored", 200);
+    }
+  }
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
@@ -1152,6 +1184,82 @@ async function runCheckReconcileStage(env: ScheduledEnv): Promise<void> {
   }
 }
 
+/**
+ * The queue face's env: the shared Worker env plus the review execution route's
+ * platform binding. Kept out of `Env` so the fetch path (and the SPA program
+ * that loads src/worker/env.ts) never pulls in the execution module's types.
+ */
+type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRef> };
+
+/** The consumer surface the queue face needs, loadable at call time. */
+type ReviewQueueConsumerModule = Pick<
+  typeof ConsumerModule,
+  "createReviewConsumer" | "createWorkflowInstance"
+>;
+
+/**
+ * ONE queue batch, end to end: the deployment gate, then the consumer through
+ * the Workflow starter.
+ *
+ * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
+ * test can drive this wiring with a fake module instead of stubbing
+ * `src/pipeline/consumer` process-wide — `mock.module` cannot be undone in Bun
+ * (measured: neither `mock.restore()` nor re-mocking restores the real one), so
+ * a stub here would leak into every later file that imports the consumer.
+ */
+export async function runReviewQueueBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  env: ReviewQueueEnv,
+  ctx: ExecutionContext,
+  loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
+): Promise<void> {
+  // THE DEPLOYMENT GATE (spec § Deployment gate). Merging this code does not
+  // enable the review route: the operator flips `review.route.workflow` only
+  // after the nine claims hold and I-000666 closes. Until then a delivery is
+  // REFUSED here — acknowledged, one structured line — never silently
+  // re-routed to a path that no longer exists. Absent and unreadable rows are
+  // OFF (see `getReviewRouteWorkflowGate`).
+  const gate = await getReviewRouteWorkflowGate(env.DB);
+  if (gate.mode !== "on") {
+    const line = JSON.stringify({
+      event: "review_route_gate_closed",
+      review_route_workflow: "off",
+      gate_saved: gate.saved,
+      gate_degraded: gate.degraded,
+      gate_reason: gate.reason ?? null,
+      gate_rejected: gate.rejected ?? null,
+      batch_messages: batch.messages.length,
+      msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
+    });
+    // A stored `off` is the operator's intended state; an unreadable row is a
+    // fault worth surfacing, and both refuse the same way.
+    if (gate.degraded) console.warn(line);
+    else console.log(line);
+    return;
+  }
+  // ONE execution route: the consumer admits, dedupes and settles skips, and
+  // its hand-off calls THIS starter, which creates exactly one Workflow
+  // instance per admitted attempt — instance id = attempt id. The handler
+  // itself never touches a container, a sandbox credential or the model.
+  const workflow = env.REVIEW_WORKFLOW;
+  if (workflow === undefined) {
+    // A deploy without the binding could only drop every review it admits:
+    // fail loud into the queue's retry/DLQ path instead.
+    throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+  }
+  const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
+  // The invocation context owns the detached Check terminalization: the
+  // consumer hands it the promise, so an overrun still finishes after the
+  // handler returns instead of being reclaimed with the isolate.
+  await createReviewConsumer(
+    env,
+    undefined,
+    {},
+    { waitUntil: (promise) => ctx.waitUntil(promise) },
+    (_deps, ref) => createWorkflowInstance(workflow, ref),
+  )(batch);
+}
+
 export default {
   fetch: (request: Request, env: Env, ctx?: ExecutionContext): Response | Promise<Response> =>
     (env.DEPLOYMENT_MODE === "saas" ? saasApp : app).fetch(request, env, ctx),
@@ -1161,12 +1269,8 @@ export default {
   // cannot resolve it, so a
   // static import would break the fetch-path tests (platform-specific
   // module exception to the static-import rule).
-  async queue(batch: MessageBatch<ReviewJobPayload>, env: Env & PipelineEnv, ctx: ExecutionContext): Promise<void> {
-    const { createReviewConsumer } = await import("../pipeline/consumer");
-    // The invocation context owns the detached Check terminalization: the
-    // consumer hands it the promise, so an overrun still finishes after the
-    // handler returns instead of being reclaimed with the isolate.
-    await createReviewConsumer(env, undefined, {}, { waitUntil: (promise) => ctx.waitUntil(promise) })(batch);
+  async queue(batch: MessageBatch<ReviewJobPayload>, env: ReviewQueueEnv, ctx: ExecutionContext): Promise<void> {
+    await runReviewQueueBatch(batch, env, ctx);
   },
   // Cron wiring (AL-6): TWO expressions, routed by `controller.cron`.
   //
@@ -1207,15 +1311,19 @@ export default {
       await runCheckReconcileStage(env);
       return;
     }
+    // The database is the composition's prerequisite: captured ONCE after the
+    // guard (a reconciler call may widen `env`, and every stage needs the same
+    // bound handle).
+    const db = env.DB;
+    if (db === undefined) {
+      defaultSweepLog.warn(
+        { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
+        "ops sweep skipped",
+      );
+      return;
+    }
     try {
-      if (!env.DB) {
-        defaultSweepLog.warn(
-          { event: "ops_sweep_db_unbound", detail: "DB binding missing — sweep skipped" },
-          "ops sweep skipped",
-        );
-        return;
-      }
-      await runSweep(env.DB, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
+      await runSweep(db, { alertUrl: env.ALERT_WEBHOOK_URL, queue: env.REVIEW_QUEUE });
     } catch (error) {
       // SEC-03: the sweep-failure detail is redacted before the warn line —
       // an infra error can interpolate a secret-shaped value
@@ -1241,6 +1349,29 @@ export default {
           detail: redactSecrets(error instanceof Error ? error.message : String(error)),
         },
         "lifecycle reconcile failed",
+      );
+    }
+    // Durable route handoffs (migration 0083) — OWN try/catch, LAST stage: an
+    // unconfirmed Workflow create and a moved head's undelivered successor are
+    // re-sent to the queue here, so neither can vanish with an interrupted
+    // host.
+    try {
+      // The scheduled lane's env type narrows the bindings it reads; the
+      // route's recovery pass also writes the commit claim, which this worker
+      // has bound at runtime (the scheduled handler receives the full Env).
+      const routeKv = (env as Env).IDEMPOTENCY_KV;
+      await reconcileReviewRoute({
+        DB: db,
+        REVIEW_QUEUE: env.REVIEW_QUEUE,
+        IDEMPOTENCY_KV: routeKv,
+      });
+    } catch (error) {
+      defaultSweepLog.warn(
+        {
+          event: "ops_route_reconcile_failed",
+          detail: redactSecrets(error instanceof Error ? error.message : String(error)),
+        },
+        "route handoff reconcile failed",
       );
     }
   },

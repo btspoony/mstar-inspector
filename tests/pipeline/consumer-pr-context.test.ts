@@ -1,5 +1,5 @@
 /**
- * why: The PR-context capture is best-effort, but its failures are named: an
+ * note: The PR-context capture is best-effort, but its failures are named: an
  * unattributed `none` section is indistinguishable from a PR with nothing to
  * say, and the report seat simply never runs.
  */
@@ -75,20 +75,20 @@ describe("PR-context capture", () => {
   test("near the derived-deadline boundary (capture + post-runner reads) the capture is skipped", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     h.sandbox.diffStdout = VALID_DIFF;
-    // why: gh WOULD answer; the round's clock is what forbids the read.
+    // note: gh WOULD answer; the round's clock is what forbids the read.
     h.sandbox.prBodyExitCode = 0;
     h.sandbox.prBodyContent = "Closes #7";
     const db = await createSeededTestD1();
     const reserveMs = postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT);
-    // invariant: The gate bills the DERIVED deadline (round − the post-runner reserve)
+    // note: The gate bills the DERIVED deadline (round − the post-runner reserve)
     // and needs the capture plus the post-runner reads: 234s + 120s + 90s.
     // 60s BELOW that boundary leaves 150s before the derived deadline — above
     // the capture's own 120s worst case, so the capture alone would fit and
     // the post-runner reads are what the round refuses.
-    const roundBudgetMs = reserveMs + PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS - 60_000;
+    const attemptCapMs = reserveMs + PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS - 60_000;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
-      roundBudgetMs,
+      attemptCapMs,
     });
 
     // note: Frozen clock: the round spends no wall time, so the remainder the gate
@@ -97,7 +97,7 @@ describe("PR-context capture", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    // invariant: Not one gh read started: the skip precedes the first exec, so a slow
+    // note: Not one gh read started: the skip precedes the first exec, so a slow
     // sandbox cannot spend the window the paid run and its post need.
     expect(h.sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER))).toBe(false);
     const warns = h.logLines.filter((l) => l.level === "warn" && l.fields.report_context !== undefined);
@@ -109,11 +109,11 @@ describe("PR-context capture", () => {
     // post-reads cost the gate bills.
     const leftMs = Number(/(\d+)ms left before the derived runner deadline/.exec(warns[0]!.msg)?.[1]);
     expect(leftMs).toBeLessThan(PR_CONTEXT_WORST_CASE_MS + POST_RUNNER_READ_BUDGET_MS);
-    expect(roundBudgetMs - leftMs).toBe(reserveMs);
-    // invariant: And it names both costs the gate compared, not just its verdict.
+    expect(attemptCapMs - leftMs).toBe(reserveMs);
+    // note: And it names both costs the gate compared, not just its verdict.
     expect(warns[0]!.msg).toContain(`the capture costs up to ${PR_CONTEXT_WORST_CASE_MS}ms`);
     expect(warns[0]!.msg).toContain(`the post-runner reads ${POST_RUNNER_READ_BUDGET_MS}ms`);
-    // invariant: Never a failed review: the report degrades to `none` and the body lands.
+    // note: Never a failed review: the report degrades to `none` and the body lands.
     expect(preparedBody()).toContain("### Linked-issue AC\n\nnone");
     expect(h.sandbox.calls.some((c) => c.cmd.includes("--report-out"))).toBe(false);
   });
@@ -128,7 +128,7 @@ describe("PR-context capture", () => {
       h.sandbox.issueBodies.set(number, { title: `issue ${number}`, body: "none" });
     }
     const db = await createSeededTestD1();
-    // invariant: The gate bills the DERIVED deadline, and the LEVEL never enters that
+    // note: The gate bills the DERIVED deadline, and the LEVEL never enters that
     // bound — each capture exec is capped at min(deadline, tier), so any level
     // with the capture's 210s left admits it. The per-level table itself is
     // pinned in consumer.test.ts (runnerTimeoutMs quick/default/deep).
@@ -139,7 +139,7 @@ describe("PR-context capture", () => {
     expect(
       h.sandbox.calls.some((c) => c.cmd === prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER)),
     ).toBe(true);
-    // invariant: The capture runs under its own tighter bound, not the git steps' 120s.
+    // note: The capture runs under its own tighter bound, not the git steps' 120s.
     // Scoped to the capture's own commands: the post-runner reads share the
     // same 30s value, so timing alone cannot tell them apart.
     const captureCalls = h.sandbox.calls.filter(
