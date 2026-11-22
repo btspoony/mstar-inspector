@@ -1,5 +1,5 @@
 /**
- * Test D1 double — bun:sqlite in-memory
+ * why: Test D1 double — bun:sqlite in-memory
  * database executing the REAL migration SQL (DDL single sources, applied in
  * filename order exactly like `wrangler d1 migrations apply`), exposing only
  * the narrow D1 face the store depends on
@@ -29,9 +29,9 @@ import type { D1BatchResult, D1Like, D1StatementLike } from "../../src/store/typ
 import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
-/** Earliest review-store schema (production before the github_apps work). */
+/** note: Earliest review-store schema (production before the github_apps work). */
 const BASE_MIGRATIONS = ["0001_reviews.sql", "0002_mstar_review_v1.sql"];
-/** A migration filename's numeric prefix — the only part wrangler orders on. */
+/** note: A migration filename's numeric prefix — the only part wrangler orders on. */
 const MIGRATION_PREFIX = /^(\d+)_/;
 
 /**
@@ -77,11 +77,11 @@ export function migrationsAfter(
     .filter((name) => migrationNumber(name) > from);
 }
 
-/** Full migration list, in wrangler's apply order (numeric, not lexical). */
+/** note: Full migration list, in wrangler's apply order (numeric, not lexical). */
 const ALL_MIGRATIONS = migrationsAfter(0);
 
 /**
- * Execute the migration DDL on a fresh in-memory database.
+ * note: Execute the migration DDL on a fresh in-memory database.
  *
  * Stays local instead of `applyMigrations` (`../helpers/migration-shapes`):
  * this is the raw `Database` layer that module itself imports `migrationsAfter`
@@ -89,7 +89,7 @@ const ALL_MIGRATIONS = migrationsAfter(0);
  * the D1 wrapper (and its `PRAGMA foreign_keys`) exists.
  */
 function applyMigration(db: Database, migrations: readonly string[]): void {
-  // SQLite enforces foreign keys per-connection; D1 has them on by default.
+  // why: SQLite enforces foreign keys per-connection; D1 has them on by default.
   db.exec("PRAGMA foreign_keys = ON;");
   for (const name of migrations) {
     execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
@@ -113,7 +113,7 @@ export function splitSqlStatements(script: string): string[] {
     if (quote !== null) {
       current += char;
       if (char === quote) {
-        // A doubled quote is an escape, not the end of the literal.
+        // note: A doubled quote is an escape, not the end of the literal.
         if (script[index + 1] === quote) {
           current += quote;
           index += 1;
@@ -170,14 +170,14 @@ export function execMigrationScript(db: Database, script: string): void {
   for (const statement of splitSqlStatements(script)) db.exec(statement);
 }
 
-/** Read one INTEGER scalar on the connection (SQLite change counters). */
+/** note: Read one INTEGER scalar on the connection (SQLite change counters). */
 function counter(db: Database, sql: string): number {
   const row = db.prepare(sql).values()[0];
   return Number(row?.[0] ?? 0);
 }
 
 /**
- * Wrap a bun:sqlite statement in the narrow D1 statement face. bun:sqlite
+ * why: Wrap a bun:sqlite statement in the narrow D1 statement face. bun:sqlite
  * takes bound parameters directly on get/all/run (no separate bind step), so
  * the wrapper buffers values from `bind()` and forwards them on execution.
  */
@@ -204,7 +204,7 @@ function wrapStatement(
       results: T[];
       meta: { changes: number; last_row_id: number };
     }> {
-      // D1 returns a statement's ROWS in its `D1Result` (`batch()` position for
+      // note: D1 returns a statement's ROWS in its `D1Result` (`batch()` position for
       // position), so a SELECT placed in a batch is readable there. bun:sqlite
       // `run()` discards them, so a row-returning statement goes through
       // `all()` — the shape callers rely on when a batch classifies a refusal.
@@ -232,9 +232,9 @@ function wrapStatement(
   };
 }
 
-/** Wrap a bun:sqlite handle in the narrow D1 face (shared by both shapes). */
+/** note: Wrap a bun:sqlite handle in the narrow D1 face (shared by both shapes). */
 function wrapDb(db: Database): TestD1 {
-  // Every `bind()`'s value count, in call order. bun:sqlite enforces no
+  // why: Every `bind()`'s value count, in call order. bun:sqlite enforces no
   // bound-parameter ceiling (D1's is 100), so a case that must fail when a
   // statement starts binding one value per row asserts this history instead of
   // waiting for a rejection the local engine will never produce.
@@ -248,7 +248,7 @@ function wrapDb(db: Database): TestD1 {
       });
     },
     /**
-     * D1 `batch()` runs the statements sequentially as ONE transaction —
+     * note: D1 `batch()` runs the statements sequentially as ONE transaction —
      * "if any statement fails, the entire sequence is aborted or rolled
      * back" (developers.cloudflare.com/d1/worker-api/d1-database). The
      * bun:sqlite equivalent is an explicit BEGIN/COMMIT/ROLLBACK around the
@@ -368,7 +368,7 @@ export function seedTarget(
     repoOwner?: string;
     repoName?: string;
     /**
-     * The row's `created_at` / `updated_at`. Defaults to one shared stamp, so a
+     * note: The row's `created_at` / `updated_at`. Defaults to one shared stamp, so a
      * suite that asserts on ordering must pass distinct values — otherwise a
      * creation-order read resolves its ties by UUID and the assertion cannot
      * discriminate the ordering it names.
@@ -378,7 +378,7 @@ export function seedTarget(
 ): string {
   const id = opts.id ?? crypto.randomUUID();
   const now = opts.createdAt ?? "2026-01-01T00:00:00.000Z";
-  // A stable 31-bit id from the row id: the workspace/repository UNIQUE index
+  // note: A stable 31-bit id from the row id: the workspace/repository UNIQUE index
   // needs a distinct integer per live row, and fixtures never care which.
   let hash = 0x811c9dc5;
   for (const char of id) hash = Math.imul(hash ^ char.codePointAt(0)!, 0x01000193) >>> 0;
@@ -397,7 +397,7 @@ export function seedTarget(
       opts.repoId ?? (hash % 2_000_000_000) + 1,
       opts.repoOwner ?? "acme",
       opts.repoName ?? (opts.name ?? botId),
-      // The retired create path's resolved floor: a fixture row carries its own
+      // note: The retired create path's resolved floor: a fixture row carries its own
       // configuration rather than inheriting, so a route read is deterministic.
       DEFAULT_CHECK_MIN_SCORE,
       now,

@@ -1,5 +1,5 @@
 /**
- * Unit tests for the AgentRuntime port + deterministic seat logic). Pure functions only — no SDK boundary involved:
+ * why: Unit tests for the AgentRuntime port + deterministic seat logic). Pure functions only — no SDK boundary involved:
  *   - port constants (REVIEW_SEATS) and the level guard;
  *   - partitionSeats: quick full-diff seat, default cluster balance,
  *     degenerate half-split, single-file overlap, empty universe;
@@ -28,7 +28,7 @@ describe("REVIEW_SEATS (harness tier table)", () => {
     expect(isReviewLevel("deep")).toBe(true);
     expect(isReviewLevel(2)).toBe(false);
     expect(isReviewLevel(undefined)).toBe(false);
-    // qc3 F-302: Object.prototype keys must NOT pass (`in` would accept them).
+    // why: qc3 F-302: Object.prototype keys must NOT pass (`in` would accept them).
     expect(isReviewLevel("toString")).toBe(false);
     expect(isReviewLevel("constructor")).toBe(false);
     expect(isReviewLevel("hasOwnProperty")).toBe(false);
@@ -51,9 +51,9 @@ describe("partitionSeats", () => {
 
   test("default: clusters by top-level dir, balanced greedily into two groups", () => {
     const facts = [
-      numstat(10, 2, "src/a.ts"), // src cluster: 12 lines
+      numstat(10, 2, "src/a.ts"), // note: src cluster: 12 lines
       numstat(5, 0, "src/b.ts"),
-      numstat(8, 1, "lib/c.ts"), // lib cluster: 9 lines
+      numstat(8, 1, "lib/c.ts"), // note: lib cluster: 9 lines
     ];
     const plans = partitionSeats(facts, "default");
 
@@ -65,15 +65,15 @@ describe("partitionSeats", () => {
     expect(plans[1]!.seat).toBe("lib");
     expect(plans[1]!.scope).toEqual(["lib/c.ts"]);
 
-    // Combined coverage is exhaustive over the changed files.
+    // invariant: Combined coverage is exhaustive over the changed files.
     const covered = [...plans[0]!.scope, ...plans[1]!.scope];
     expect(covered.sort()).toEqual(["lib/c.ts", "src/a.ts", "src/b.ts"]);
   });
 
   test("default: greedy balance assigns the heavier cluster first regardless of order", () => {
     const facts = [
-      numstat(1, 0, "lib/small.ts"), // lib: 1 line
-      numstat(40, 0, "src/big.ts"), // src: 40 lines
+      numstat(1, 0, "lib/small.ts"), // note: lib: 1 line
+      numstat(40, 0, "src/big.ts"), // note: src: 40 lines
     ];
     const [first, second] = partitionSeats(facts, "default");
 
@@ -83,7 +83,7 @@ describe("partitionSeats", () => {
   });
 
   test("default: equal-weight clusters — the greedy tie goes to group 0", () => {
-    // Equal lines → the cluster sort falls back to localeCompare (lib before
+    // why: Equal lines → the cluster sort falls back to localeCompare (lib before
     // src), then `groups[1] < groups[0]` is false on the tie, so the first
     // cluster lands in changeset-1 (group 0) and the second in changeset-2.
     const facts = [numstat(3, 0, "src/a.ts"), numstat(3, 0, "lib/b.ts")];
@@ -100,7 +100,7 @@ describe("partitionSeats", () => {
     const plans = partitionSeats(facts, "default");
 
     expect(plans).toHaveLength(2);
-    // Single "(root)" cluster → degenerate sorted-path half split.
+    // note: Single "(root)" cluster → degenerate sorted-path half split.
     expect(plans[0]!.seat).toBe("part-1");
     expect(plans[0]!.scope).toEqual(["README.md"]);
     expect(plans[1]!.seat).toBe("part-2");
@@ -153,7 +153,7 @@ describe("mergeSeatOutputs", () => {
       },
       {
         findings: [
-          // Same fingerprint → dropped; no hint → file:line:title composite.
+          // note: Same fingerprint → dropped; no hint → file:line:title composite.
           { mergeClass: "nit", title: "SQL injection", body: "duplicate", fingerprint_hint: "fp-1" },
           { mergeClass: "nit", title: "Typo", body: "duplicate-composite" },
         ],

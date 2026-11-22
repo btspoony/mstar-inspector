@@ -1,5 +1,5 @@
 /**
- * Per-App credential resolution tests (architect lock L4).
+ * note: Per-App credential resolution tests (architect lock L4).
  *
  * The consumer resolves the commenter from `payload.botRef` BEFORE the
  * in-flight guard / sandbox (fail fast, zero side effects on failure):
@@ -38,9 +38,9 @@ import { sk, fakePem } from "../helpers/fake-secrets";
 import type { CommenterEnv, InstallationTokenGrant, ReviewCommenter, TokenInput } from "../../src/pipeline/comment";
 import type { ConsumerLog, ConsumerLogFields, PipelineEnv } from "../../src/pipeline/consumer";
 
-/** base64 of exactly 32 bytes (the secretbox master-key requirement). */
+/** note: base64 of exactly 32 bytes (the secretbox master-key requirement). */
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** Distinct fake App PEMs — isolation asserts the factory receives the right one. */
+/** note: Distinct fake App PEMs — isolation asserts the factory receives the right one. */
 const PEM_X = fakePem("FAKE-APP-X-PEM");
 const PEM_Y = fakePem("FAKE-APP-Y-PEM");
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -61,13 +61,13 @@ function createMigratedD1(): ReturnType<typeof createTestD1> {
 type SeedOptions = {
   slug: string;
   githubAppId: number;
-  /** Plaintext PEM to encrypt into the row (with the row-id AAD). */
+  /** note: Plaintext PEM to encrypt into the row (with the row-id AAD). */
   pem: string;
-  /** Tamper anchor: encrypt the PEM under a WRONG row AAD. */
+  /** note: Tamper anchor: encrypt the PEM under a WRONG row AAD. */
   wrongAad?: boolean;
 };
 
-/** Raw-insert an active, non-deleted review_bots row with a real PEM envelope. */
+/** note: Raw-insert an active, non-deleted review_bots row with a real PEM envelope. */
 async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): Promise<{ id: string; targetId: string }> {
   const id = crypto.randomUUID();
   const box = createSecretbox(TEST_KEY);
@@ -83,7 +83,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
     )
     .run(id, opts.githubAppId, opts.slug, privateKeyEnc, webhookSecretEnc);
   await mapAppToDefaultWorkspace(db, id);
-  // The job names a target: review level, Check gate and business pause all
+  // note: The job names a target: review level, Check gate and business pause all
   // come from that row, so every seeded App gets its one (DDL defaults).
   const targetId = `target-${id}`;
   db.raw
@@ -93,7 +93,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
        VALUES (?, 'default', ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
     .run(targetId, id, opts.slug);
-  // AL-24-5: every seeded App gets its AI-config health
+  // note: AL-24-5: every seeded App gets its AI-config health
   // baseline — a model chain + the `ark` BYOK key its chain needs — so the
   // fail-closed gate in the consumer passes on the success-path tests (this
   // file pins credential resolution, not config completeness).
@@ -103,7 +103,7 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
   return { id, targetId };
 }
 
-// --- sandbox fake (injected via createReviewConsumer overrides) -------------
+// note: --- sandbox fake (injected via createReviewConsumer overrides) -------------
 
 const sandboxCalls: Array<{ cmd: string; opts?: unknown }> = [];
 
@@ -130,26 +130,26 @@ const fakeSandbox = {
   destroy: mock(async () => {}),
 };
 
-// Load-shim only: consumer.ts statically imports ./sandbox → the workerd
+// note: Load-shim only: consumer.ts statically imports ./sandbox → the workerd
 // builtin `cloudflare:workers` (unresolvable in Bun's test runner). Every test
 // injects the fake via createReviewConsumer overrides — this mock is never
 // called.
 import "../helpers/cloudflare-workers-mock";
 
-// --- commenter fakes --------------------------------------------------------
+// note: --- commenter fakes --------------------------------------------------------
 
 type CommenterCall = { op: "token" | "plan" | "post" | "degrade"; installationId?: number };
-/** Calls grouped by instance — same-instance assertions key off this. */
+/** note: Calls grouped by instance — same-instance assertions key off this. */
 const appCalls: Array<{ instance: number; call: CommenterCall }> = [];
-/** Credential each factory invocation built an instance from. */
+/** note: Credential each factory invocation built an instance from. */
 const factoryCreds: Array<{ instance: number; cred: CommenterEnv }> = [];
 let factoryInstanceSeq = 0;
 
-/** The test seam: records the EXACT credentials each App instance gets. */
+/** note: The test seam: records the EXACT credentials each App instance gets. */
 const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
   const instance = ++factoryInstanceSeq;
   factoryCreds.push({ instance, cred });
-  // the consumer's sandbox path asserts the RETURNED grant
+  // note: the consumer's sandbox path asserts the RETURNED grant
   // (assertSandboxGrant) — the double returns a minimal compliant
   // sandbox-read grant scoped to the requested repository.
   const sandboxGrant = (token: string, input: TokenInput): InstallationTokenGrant => ({
@@ -163,7 +163,7 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
       appCalls.push({ instance, call: { op: "token", installationId: input.scope.installationId } });
       return sandboxGrant(`app-${instance}-token`, input);
     }),
-    // the pre-staging plan read, then the prepared send —
+    // note: the pre-staging plan read, then the prepared send —
     // the recorded "post" op is the send of the EXACT staged body.
     planReviewUpsert: mock(async () => {
       appCalls.push({ instance, call: { op: "plan" } });
@@ -181,18 +181,18 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
       appCalls.push({ instance, call: { op: "degrade" } });
       return { posted: true, commentId: 202 };
     }),
-    // Bugbot degraded-comment lifecycle: the success path runs the delete
+    // note: Bugbot degraded-comment lifecycle: the success path runs the delete
     // scan (no stale comment → the real implementation finds nothing); the
     // double is a no-op outcome so the flow exercises the real call.
     deleteDegradedComment: mock(async () => ({ deleted: 0, skipped: 0, errors: [], rateLimited: { primary: 0, secondary: 0 } })),
-    // line comments: VALID_OUTPUT has no findings → never called.
+    // note: line comments: VALID_OUTPUT has no findings → never called.
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
     }),
     recoverLineComments: mock(async () => {
       throw new Error("unexpected: no dispatched line batch → no discovery");
     }),
-    // Discussion capture + resolution: no open lifecycle
+    // note: Discussion capture + resolution: no open lifecycle
     // rows in these fixtures → never triggered.
     listDiscussion: mock(async () => {
       throw new Error("unexpected: listDiscussion requires open lifecycle rows");
@@ -212,11 +212,11 @@ const testOverrides = {
   startAttempt: inlineWorkflowStarter([]),
 };
 
-// --- consumer under test (dynamic import: mocks must be registered first) ---
+// note: --- consumer under test (dynamic import: mocks must be registered first) ---
 
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 
-// --- test log sink ----------------------------------------------------------
+// note: --- test log sink ----------------------------------------------------------
 
 const logLines: Array<{ level: "info" | "warn" | "error"; fields: ConsumerLogFields; msg: string }> = [];
 const testLog: ConsumerLog = {
@@ -225,7 +225,7 @@ const testLog: ConsumerLog = {
   error: (fields, msg) => logLines.push({ level: "error", fields, msg: msg ?? "" }),
 };
 
-// --- helpers ----------------------------------------------------------------
+// note: --- helpers ----------------------------------------------------------------
 
 const kvPuts: Array<{ key: string; value: string }> = [];
 const kvGuardPuts: string[] = [];
@@ -257,7 +257,7 @@ function makePayload(overrides: Partial<ReviewJobPayload> = {}): ReviewJobPayloa
     head_sha: SHA,
     action: "opened",
     triggered_by: "pull_request",
-    // Required pair — every test overrides it with a seeded App + its target;
+    // note: Required pair — every test overrides it with a seeded App + its target;
     // the default is type-only (never resolved).
     botRef: { appId: "00000000-0000-0000-0000-000000000000" },
     targetId: "00000000-0000-0000-0000-000000000001",
@@ -283,7 +283,7 @@ function makeBatch(...bodies: ReviewJobPayload[]): MessageBatch<ReviewJobPayload
   } as unknown as MessageBatch<ReviewJobPayload>;
 }
 
-/** Queue-handler outcomes per message id. */
+/** note: Queue-handler outcomes per message id. */
 const ackIds: string[] = [];
 const retryIds: string[] = [];
 
@@ -304,7 +304,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    await seedApp(db, { slug: "app-y", githubAppId: 333444, pem: PEM_Y }); // sibling, never used
+    await seedApp(db, { slug: "app-y", githubAppId: 333444, pem: PEM_Y }); // note: sibling, never used
     const configStore = createAppConfigStore(db, TEST_KEY);
     await configStore.addProviderKey(appX.id, "ark", "second-ark-key");
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -315,25 +315,25 @@ describe("consumer bot/target resolution (lock L4)", () => {
     expect(runnerCall).toBeDefined();
     const runnerOptions = runnerCall!.opts as { env: Record<string, string>; stdin?: string };
     expect(runnerOptions.env.ARK_API_KEY).toBeUndefined();
-    // Both of the App's keys ride the credential payload — and no pool name
+    // note: Both of the App's keys ride the credential payload — and no pool name
     // reaches the process environment (the retired channel).
     const { pools } = JSON.parse(runnerOptions.stdin!) as { pools: Record<string, string[]> };
     expect(pools.ark).toHaveLength(2);
     expect(Object.keys(runnerOptions.env).filter((name) => name.startsWith("MSTAR_POOL_"))).toEqual([]);
-    // Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
+    // note: Exactly one App instance, built from X's DECRYPTED PEM + X's github_app_id.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
-    // Token mint + postReview both on that same instance.
+    // note: Token mint + postReview both on that same instance.
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(appCalls[0]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[1]!.instance).toBe(factoryCreds[0]!.instance);
     expect(appCalls[0]!.call.installationId).toBe(123);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
-    // Every structured log line carries the appId reference (never a credential).
+    // note: Every structured log line carries the appId reference (never a credential).
     const errOrInfo = logLines.filter((l) => l.fields.app_id !== undefined);
     expect(errOrInfo.length).toBeGreaterThan(0);
     expect(errOrInfo.every((l) => l.fields.app_id === appX.id)).toBe(true);
-    // The persisted review row carries the App identity (QC F-001: the
+    // note: The persisted review row carries the App identity (QC F-001: the
     // resolved botRef's appId rides the put into reviews.bot_id).
     const row = db.raw.query("SELECT bot_id FROM reviews").get() as { bot_id: string | null };
     expect(row.bot_id).toBe(appX.id);
@@ -343,7 +343,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    // The review depth is the TARGET's setting (the bot row no longer has one).
+    // note: The review depth is the TARGET's setting (the bot row no longer has one).
     db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appX.targetId);
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
@@ -352,7 +352,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
     const runnerCall = sandboxCalls.find((call) => call.cmd.includes("--input"));
     expect(runnerCall).toBeDefined();
     expect(runnerCall!.cmd).toContain("--level 'deep'");
-    // …and the credential is still the bot's own.
+    // note: …and the credential is still the bot's own.
     expect(factoryCreds).toHaveLength(1);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
   });
@@ -368,7 +368,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
       consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appY.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: target .* belongs to bot/);
 
-    // Zero side effects: no commenter built, no sandbox, no GitHub call.
+    // note: Zero side effects: no commenter built, no sandbox, no GitHub call.
     expect(factoryCreds).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
@@ -387,8 +387,8 @@ describe("consumer bot/target resolution (lock L4)", () => {
       ),
     );
 
-    expect(factoryCreds).toHaveLength(1); // cache hit on the second message
-    expect(appCalls).toHaveLength(6); // token+plan+post × 2 messages, same instance
+    expect(factoryCreds).toHaveLength(1); // note: cache hit on the second message
+    expect(appCalls).toHaveLength(6); // note: token+plan+post × 2 messages, same instance
     expect(new Set(appCalls.map((c) => c.instance))).toEqual(new Set([factoryCreds[0]!.instance]));
   });
 
@@ -405,8 +405,8 @@ describe("consumer bot/target resolution (lock L4)", () => {
 
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
-    expect(sandboxCalls).toHaveLength(0); // fails before any sandbox step
-    expect(kvGuardPuts).toHaveLength(0); // the in-flight guard is never taken
+    expect(sandboxCalls).toHaveLength(0); // note: fails before any sandbox step
+    expect(kvGuardPuts).toHaveLength(0); // note: the in-flight guard is never taken
     const errLine = logLines.find((l) => l.level === "error");
     expect(errLine).toBeDefined();
     expect(errLine!.msg).toContain("per-App credential resolution failed");
@@ -482,7 +482,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // One factory invocation per message (cache hit would skip it), and the
+    // note: One factory invocation per message (cache hit would skip it), and the
     // message's token + plan + post all hit the instance the factory returned.
     expect(factoryCreds).toHaveLength(1);
     const instance = factoryCreds[0]!.instance;
@@ -492,7 +492,7 @@ describe("consumer bot/target resolution (lock L4)", () => {
 });
 
 describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)", () => {
-  /** The row-id AAD the consumer decrypts `private_key_enc` under. */
+  /** note: The row-id AAD the consumer decrypts `private_key_enc` under. */
   const keyAad = (id: string) => `github_apps.private_key_enc:${id}`;
 
   test("unchanged credentials across batches → fingerprint match reuses the SAME instance", async () => {
@@ -504,7 +504,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // One factory invocation total; BOTH messages were served by that one
+    // note: One factory invocation total; BOTH messages were served by that one
     // instance (identity via the factory's instance numbers).
     expect(factoryCreds).toHaveLength(1);
     expect(appCalls.map((c) => c.instance)).toEqual([
@@ -525,7 +525,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
 
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // Rotation: a NEW envelope for a NEW PEM on the SAME row — the dashboard
+    // note: Rotation: a NEW envelope for a NEW PEM on the SAME row — the dashboard
     // re-save path (AES-GCM random IV → a fresh envelope string).
     const box = createSecretbox(TEST_KEY);
     db.raw
@@ -537,7 +537,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[0]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_Y });
-    // Message 2 was served by the NEW instance only — the old one is replaced.
+    // note: Message 2 was served by the NEW instance only — the old one is replaced.
     expect(appCalls.map((c) => c.instance)).toEqual([1, 1, 1, 2, 2, 2]);
   });
 
@@ -555,10 +555,10 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
       .run(await box.encryptSecret(PEM_X, keyAad(appX.id)), appX.id);
 
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    expect(factoryCreds).toHaveLength(2); // rebuilt — envelope string changed
-    expect(factoryCreds[1]!.cred).toEqual(factoryCreds[0]!.cred); // same PEM, no rotation
+    expect(factoryCreds).toHaveLength(2); // note: rebuilt — envelope string changed
+    expect(factoryCreds[1]!.cred).toEqual(factoryCreds[0]!.cred); // note: same PEM, no rotation
 
-    // The rebuilt entry is cached again: a third message does not rebuild.
+    // note: The rebuilt entry is cached again: a third message does not rebuild.
     await consumer(makeBatch(makePayload({ pr_number: 44, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(2);
   });
@@ -571,15 +571,15 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(1);
 
-    // Disable → the unchanged throw path (retry/DLQ) AND the eviction.
+    // note: Disable → the unchanged throw path (retry/DLQ) AND the eviction.
     const store = createReviewBotsStore(db);
     await store.setAppStatus(appX.id, "disabled");
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is disabled/);
-    expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
+    expect(factoryCreds).toHaveLength(1); // note: no rebuild on the failure path
 
-    // Re-enable (a real operator path): the envelope is UNCHANGED, so a
+    // note: Re-enable (a real operator path): the envelope is UNCHANGED, so a
     // fingerprint hit would reuse instance 1 — a second factory call proves
     // the disabled gate evicted the entry.
     await store.setAppStatus(appX.id, "active");
@@ -602,7 +602,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
       consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* is soft-deleted/);
 
-    // Production never un-deletes; the probe restores the rows via direct SQL
+    // note: Production never un-deletes; the probe restores the rows via direct SQL
     // purely to make the eviction OBSERVABLE: the envelope is unchanged, so a
     // surviving entry would fingerprint-hit and reuse instance 1. The delete
     // stamps the bot AND its targets in one batch, so both are restored here.
@@ -617,7 +617,7 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    // The store itself does not validate provider ids (routes do) — seed a
+    // note: The store itself does not validate provider ids (routes do) — seed a
     // rogue row the way a direct-DB write would.
     await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
@@ -626,10 +626,10 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
 
     const warn = logLines.find((l) => l.level === "warn" && l.fields.provider === "not-a-provider");
     expect(warn).toBeDefined();
-    // The warn carries the id + app_id and NEVER key material.
+    // note: The warn carries the id + app_id and NEVER key material.
     expect(warn!.fields.app_id).toBe(appX.id);
     expect(JSON.stringify(warn)).not.toContain(sk("rogue-SECRET"));
-    // The skip continues: the review ran to completion (posted + persisted).
+    // note: The skip continues: the review ran to completion (posted + persisted).
     expect(appCalls.map((c) => c.call.op)).toEqual(["token", "plan", "post"]);
     expect(kvPuts).toEqual([{ key: `idem:123:acme/widgets:42:${SHA}`, value: "done" }]);
   });
@@ -645,12 +645,12 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    expect(ackIds).toEqual(["m0"]); // a pause is an intentional skip, never a retry
+    expect(ackIds).toEqual(["m0"]); // note: a pause is an intentional skip, never a retry
     expect(retryIds).toEqual([]);
     expect(factoryCreds).toHaveLength(0);
     expect(appCalls).toHaveLength(0);
     expect(sandboxCalls).toHaveLength(0);
-    // The bot's own operational pause is a separate flag and stays clear.
+    // note: The bot's own operational pause is a separate flag and stays clear.
     const bot = db.raw.query("SELECT review_enabled FROM review_bots WHERE id = ?").get(appX.id) as {
       review_enabled: number;
     };
@@ -666,11 +666,11 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
 
-    // Acked DIRECTLY by the queue handler — never retried, never DLQed (a
+    // note: Acked DIRECTLY by the queue handler — never retried, never DLQed (a
     // pause is intentional; a throw would be the wrong semantics).
     expect(ackIds).toEqual(["m0"]);
     expect(retryIds).toEqual([]);
-    // No review side effects: no per-App instance built, no token mint, no
+    // note: No review side effects: no per-App instance built, no token mint, no
     // post, no sandbox step, no guard acquisition, no done-state. The single
     // KV write is the claim stamp — `paused` proves no review happened, so a
     // redelivery must enqueue again.
@@ -685,7 +685,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       },
     ]);
     expect((db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number }).n).toBe(0);
-    // The structured log rides the existing channel: event "review_paused"
+    // note: The structured log rides the existing channel: event "review_paused"
     // (union widened additively) + app_id + the baseFields PR identity.
     expect(logLines).toHaveLength(1);
     expect(logLines[0]!.level).toBe("info");
@@ -703,18 +703,18 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     const store = createReviewBotsStore(db);
-    await store.setReviewEnabled(appX.id, false); // paused too…
-    await store.setAppStatus(appX.id, "disabled"); // …but disabled wins
+    await store.setReviewEnabled(appX.id, false); // note: paused too…
+    await store.setAppStatus(appX.id, "disabled"); // note: …but disabled wins
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await expect(consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })))).rejects.toThrow(
       /per-App credential resolution failed: app .* is disabled/,
     );
 
-    // The throw path: neither ack nor retry fired (the queue retries it).
+    // note: The throw path: neither ack nor retry fired (the queue retries it).
     expect(ackIds).toEqual([]);
     expect(retryIds).toEqual([]);
-    // No paused log — the gate order pinned disabled before paused.
+    // note: No paused log — the gate order pinned disabled before paused.
     expect(logLines.some((l) => l.fields.event === "review_paused")).toBe(false);
     expect(sandboxCalls).toHaveLength(0);
   });
@@ -729,21 +729,21 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(1);
 
-    // Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
+    // note: Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
     await store.setReviewEnabled(appX.id, false);
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    // Two acks: PR 42 handed off to its Workflow instance and PR 43 was the
+    // note: Two acks: PR 42 handed off to its Workflow instance and PR 43 was the
     // paused skip (batch-local message ids restart at m0).
     expect(ackIds).toEqual(["m0", "m0"]);
     expect(factoryCreds).toHaveLength(1);
 
-    // Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served
+    // note: Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served
     // by the SAME warm instance (the fingerprint ignores
     // review_enabled writes).
     await store.setReviewEnabled(appX.id, true);
     await consumer(makeBatch(makePayload({ pr_number: 44, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(1);
-    expect(appCalls.filter((c) => c.call.op === "post")).toHaveLength(2); // PRs 42 + 44
+    expect(appCalls.filter((c) => c.call.op === "post")).toHaveLength(2); // note: PRs 42 + 44
     expect(appCalls.at(-1)!.instance).toBe(factoryCreds[0]!.instance);
   });
 
@@ -755,7 +755,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     await consumer(makeBatch(makePayload({ pr_number: 42, botRef: { appId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(1);
 
-    // Capture the row, then hard-delete it (the not-found gate also guards
+    // note: Capture the row, then hard-delete it (the not-found gate also guards
     // a row that vanished outside the soft-delete path). The completed
     // review row references the App (reviews.bot_id FK, 0005) — clear it
     // first so the DELETE can proceed.
@@ -771,14 +771,14 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       created_at: string;
       updated_at: string;
     };
-    // The seeded per-App config rows share the FK (0006: NO ACTION) — clear
+    // note: The seeded per-App config rows share the FK (0006: NO ACTION) — clear
     // them first so the hard DELETE can proceed; re-seed them on re-insert.
     db.raw.prepare("DELETE FROM reviews WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_model_config WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_model_chain_seats WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_model_chains WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_provider_keys WHERE bot_id = ?").run(appX.id);
-    // 0020/0021 add the same NO ACTION bot_id FK to the
+    // note: 0020/0021 add the same NO ACTION bot_id FK to the
     // finding-lifecycle tables. The completed review above staged one
     // publication journal row; clear that family child-first (rounds →
     // threads → checks → findings → publications) so the hard DELETE can
@@ -789,7 +789,7 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     db.raw.prepare("DELETE FROM review_findings WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM review_publications WHERE bot_id = ?").run(appX.id);
     db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(appX.id);
-    // The target is a child of the bot (NO ACTION FK): it goes first. 0060
+    // note: The target is a child of the bot (NO ACTION FK): it goes first. 0060
     // attributes the execution ledgers to it, so their rows go first too.
     db.raw.prepare("DELETE FROM review_failures WHERE target_id = ?").run(appX.targetId);
     db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run(appX.id);
@@ -797,9 +797,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     await expect(
       consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId }))),
     ).rejects.toThrow(/per-App credential resolution failed: app .* not found/);
-    expect(factoryCreds).toHaveLength(1); // no rebuild on the failure path
+    expect(factoryCreds).toHaveLength(1); // note: no rebuild on the failure path
 
-    // Re-insert the IDENTICAL row (same envelope bytes, L1): a
+    // note: Re-insert the IDENTICAL row (same envelope bytes, L1): a
     // surviving cache entry would fingerprint-hit and reuse instance 1 — a
     // second factory call proves the not-found gate evicted the entry.
     db.raw
@@ -810,14 +810,14 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       )
       .run(row.id, row.github_app_id, row.name, row.private_key_enc, row.webhook_secret_enc, row.created_by, row.status, row.deleted_at, row.created_at, row.updated_at);
     await mapAppToDefaultWorkspace(db, row.id);
-    // …and its target, which the hard delete removed with the bot.
+    // note: …and its target, which the hard delete removed with the bot.
     db.raw
       .prepare(
         `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
          VALUES (?, 'default', ?, ?, 'tester', datetime('now'), datetime('now'))`,
       )
       .run(appX.targetId, row.id, row.name);
-    // Re-seed the per-App AI config so the fail-closed gate passes again.
+    // note: Re-seed the per-App AI config so the fail-closed gate passes again.
     const configStore = createAppConfigStore(db, TEST_KEY);
     await configStore.setModelChain(row.id, "ark/deepseek-v4-flash");
     await configStore.addProviderKey(row.id, "ark", "ark-key");

@@ -3,8 +3,7 @@ import worker from "../../src/worker/index";
 import { APP_VERSION } from "../../src/version";
 import type { Env } from "../../src/worker/env";
 
-/**
- * Worker entry smoke tests — the non-webhook entry surface. The per-App
+/** note: Worker entry smoke tests — the non-webhook entry surface. The per-App
  * webhook route's end-to-end coverage (valid signature / 401 / 500 / 413)
  * lives in tests/worker/webhook-routing.test.ts.
  */
@@ -23,7 +22,7 @@ describe("worker fetch entry", () => {
   test("GET /healthz returns 200 ok with the version field", async () => {
     const res = await worker.fetch(new Request("https://worker.local/healthz"), makeEnv());
     expect(res.status).toBe(200);
-    // Field-set assertion: `ok:true` contract unchanged, `version`
+    // invariant: Field-set assertion: `ok:true` contract unchanged, `version`
     // is additive and rides the generated single source with the tag-shaped
     // `v` prefix — future additive fields do not break this pin.
     const body = (await res.json()) as { ok: boolean; version: string };

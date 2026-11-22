@@ -1,5 +1,5 @@
 /**
- * Production queue wiring (spec §7.10): the Worker's `queue` handler must hand
+ * note: Production queue wiring (spec §7.10): the Worker's `queue` handler must hand
  * the batch to the consumer AND forward the consumer's detached-terminalize
  * promise to `ctx.waitUntil`, so an overrun still finishes after the handler
  * returns instead of being reclaimed with the isolate.
@@ -23,13 +23,13 @@ const consumerRuns: Array<{
   startAttempt: ((deps: unknown, ref: unknown) => Promise<void>) | undefined;
 }> = [];
 
-/** The promise the fake consumer hands to the invocation context. */
+/** note: The promise the fake consumer hands to the invocation context. */
 const handedByConsumer = Promise.withResolvers<void>();
 
 type QueueEnv = Parameters<typeof runReviewQueueBatch>[1];
 
 /**
- * The gate's D1 face. This suite exercises the queue WIRING, so the operating
+ * note: The gate's D1 face. This suite exercises the queue WIRING, so the operating
  * switch reads `on`; the absent/unreadable refusals are covered by
  * `queue-route-gate.test.ts`.
  */
@@ -42,7 +42,7 @@ function envWithGate(extra: Record<string, unknown>): QueueEnv {
   return { DB: db, ...extra } as unknown as QueueEnv;
 }
 
-/** The fake consumer module: records the batch, the sink and the starter. */
+/** note: The fake consumer module: records the batch, the sink and the starter. */
 function fakeConsumerModule() {
   return {
     createReviewConsumer: (
@@ -58,7 +58,7 @@ function fakeConsumerModule() {
         return { errors: 0 };
       };
     },
-    // The entry's starter closes over the platform binding; this stands in for
+    // note: The entry's starter closes over the platform binding; this stands in for
     // the real classifier so the closure can be invoked without the module graph.
     createWorkflowInstance: async (
       workflow: { create(options: { id: string; params: unknown }): Promise<unknown> },
@@ -79,7 +79,7 @@ describe("worker queue wiring (spec §7.10)", () => {
       },
       passThroughOnException: () => {},
     } as unknown as ExecutionContext;
-    // The queue handler owns the platform binding: it refuses to run without it
+    // note: The queue handler owns the platform binding: it refuses to run without it
     // (a deploy that cannot create an instance must not admit reviews), so the
     // fake env carries one. The consumer arrives through the loader below.
     const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) } });
@@ -112,7 +112,7 @@ describe("worker queue wiring (spec §7.10)", () => {
     const attempt = { attemptId: "attempt-route-1" };
     await consumerRuns.at(-1)!.startAttempt!({}, attempt);
 
-    // One instance, keyed by the attempt identity — the platform's own id
+    // note: One instance, keyed by the attempt identity — the platform's own id
     // uniqueness is a second fence under the consumer's D1 claim.
     expect(creates).toEqual([{ id: "attempt-route-1", params: attempt }]);
   });

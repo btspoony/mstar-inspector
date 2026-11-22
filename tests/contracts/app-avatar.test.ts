@@ -1,5 +1,5 @@
 /**
- * The App icon URL contract (src/contracts/app-avatar.ts).
+ * why: The App icon URL contract (src/contracts/app-avatar.ts).
  *
  * Both consumers — the dashboard's metadata sync and the SPA's read-time
  * fallback — assert through the shared function, which pins the WIRING but
@@ -13,7 +13,7 @@ import { APP_AVATAR_BASE_URL, appAvatarUrl } from "../../src/contracts/app-avata
 describe("appAvatarUrl", () => {
   test("builds GitHub's CDN URL for the numeric App id", () => {
     expect(appAvatarUrl(1234)).toBe("https://avatars.githubusercontent.com/in/1234?s=120&v=4");
-    // The real-world shape the derivation was verified against.
+    // why: The real-world shape the derivation was verified against.
     expect(appAvatarUrl(4803300)).toBe("https://avatars.githubusercontent.com/in/4803300?s=120&v=4");
   });
 

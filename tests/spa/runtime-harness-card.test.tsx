@@ -1,5 +1,4 @@
-/**
- * The sandbox-image section — the bot page's runtime-harness face — asserted on
+/** note: The sandbox-image section — the bot page's runtime-harness face — asserted on
  * the static markup in both locales: the section names the runtime harness
  * (never the image), and a manager gets the registry selector the save uses.
  * The review trigger control is TARGET-scoped and stayed on the target detail,
@@ -12,7 +11,7 @@ import { t } from "../../src/i18n";
 import type { BotConfigSections } from "../../src/spa/pages/data";
 import { SandboxSection } from "../../src/spa/pages/BotSettingsPage";
 
-// The section reads only these payload fields; the rest of the bot payload
+// invariant: The section reads only these payload fields; the rest of the bot payload
 // belongs to the sibling sections.
 const payload = (
   sandboxImageId: string,
@@ -39,10 +38,10 @@ describe("sandbox image section (SSR)", () => {
     const html = render("en", "omp");
     expect(html).toContain(t("en", "settings.runtimeHarness"));
     expect(html).not.toContain("Runtime image");
-    // The copy keeps the owner: the bot's reviews all run under this harness.
+    // note: The copy keeps the owner: the bot's reviews all run under this harness.
     expect(html).toContain(t("en", "botSettings.sandboxCopy"));
     expect(html).toContain(t("en", "settings.saveRuntimeHarness"));
-    // The selector shows the persisted registry id as its value (the closed
+    // note: The selector shows the persisted registry id as its value (the closed
     // Radix listbox renders its items only on open, client-side).
     expect(html).toContain("omp");
   });

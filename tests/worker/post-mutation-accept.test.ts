@@ -1,5 +1,4 @@
-/**
- * QC W-2: dashboard POST mutations honor Accept + SPA postForm marker.
+/** note: QC W-2: dashboard POST mutations honor Accept + SPA postForm marker.
  */
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -15,7 +14,7 @@ import { createTestD1, execMigrationScript } from "../store/helpers";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
-/** The App's immutable GitHub App id — the only App address form (D0). */
+/** invariant: The App's immutable GitHub App id — the only App address form (D0). */
 const DEMO_APP_ID = 42;
 
 function createD1(): ReturnType<typeof createTestD1> {
@@ -28,25 +27,25 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0009_app_model_roles.sql",
     "0012_custom_providers_and_key_updated_at.sql",
     "0023_removed_logins.sql",
-    // 0026: createApp also writes the App's workspace mapping.
+    // note: 0026: createApp also writes the App's workspace mapping.
     "0026_workspaces.sql",
-    // 0040: every /dashboard request reads the maintenance window through the
+    // note: 0040: every /dashboard request reads the maintenance window through the
     // gate, so the settings table must exist (an unreadable window fails closed).
     "0040_runtime_config.sql",
-    // 0028: the SPA boot reads pending invites.
+    // note: 0028: the SPA boot reads pending invites.
     "0028_workspace_invites.sql",
-    // 0036: github_apps.slug → webhook_path plus the cached github_slug.
+    // note: 0036: github_apps.slug → webhook_path plus the cached github_slug.
     "0036_app_identity.sql",
-    // 0038 rebuilds github_apps, so the fixture must carry every column the
+    // why: 0038 rebuilds github_apps, so the fixture must carry every column the
     // rebuild copies.
     "0018_app_sandbox_images.sql",
     "0019_github_apps_metadata.sql",
     "0022_app_trigger_mode.sql",
     "0037_github_metadata_attempt.sql",
     "0038_webhook_path_drop.sql",
-    // 0045: createApp writes the review-gate floor explicitly.
+    // note: 0045: createApp writes the review-gate floor explicitly.
     "0045_review_gate_and_owner_allowlist.sql",
-    // This fixture drives the routes through the current store, so its world
+    // note: This fixture drives the routes through the current store, so its world
     // ends at the rename: 0056 needs every table it alters, plus the two
     // indexes it drops and recreates.
     "0005_reviews_app_id.sql",
@@ -60,7 +59,7 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0017_app_model_chains.sql",
     "0024_provider_multi_key.sql",
     "0025_provider_model_evidence.sql",
-    // The review configuration lives on `review_targets`, so the fixture needs
+    // why: The review configuration lives on `review_targets`, so the fixture needs
     // the installation stamp (0055), the review depth column (0047) and the
     // claim table (0048) that 0057 rewrites.
     "0055_app_installations_removed_at.sql",
@@ -68,7 +67,7 @@ function createD1(): ReturnType<typeof createTestD1> {
     "0048_comment_trigger_claims.sql",
     "0056_review_bots_rename.sql",
     "0057_review_targets.sql",
-    // 0058: bot-scope authorization reads `review_bots.scope`, so the fixture
+    // why: 0058: bot-scope authorization reads `review_bots.scope`, so the fixture
     // must carry the column or every bot-scoped write reads it as absent.
     "0058_review_bot_scope.sql",
   ]) {
@@ -156,7 +155,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
       env,
     );
     expect(res.status).toBe(302);
-    // The seeded App owns no review target, so the landing is the overview. The
+    // why: The seeded App owns no review target, so the landing is the overview. The
     // App id is NOT a target id — pinning it here is what let a dead detail
     // page through.
     expect(res.headers.get("Location")).toBe("/dashboard/default/repos");

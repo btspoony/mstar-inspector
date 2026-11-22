@@ -1,5 +1,4 @@
-/**
- * Workspace (tenant) routing + authorization (migration 0026 data plane).
+/** note: Workspace (tenant) routing + authorization (migration 0026 data plane).
  *
  * There is exactly one route family: the workspace named by the first path
  * segment. The retired pre-workspace App family answers 404, and authorization
@@ -38,18 +37,17 @@ import { RESERVED_WORKSPACE_SLUGS, WORKSPACE_FAMILY_SEGMENTS, matchSpaRoute } fr
 import { t } from "../../src/i18n";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** The boot the served shell injected (the client's only identity channel). */
+/** invariant: The boot the served shell injected (the client's only identity channel). */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no injected SPA boot");
   return JSON.parse(json) as SpaBoot;
 }
 
-/**
- * Renders the REAL Members page (chrome included) at `<pathname>` from one boot
+/** note: Renders the REAL Members page (chrome included) at `<pathname>` from one boot
  * and returns every href it emits. Members is workspace-scoped,
  * so the pathname names the workspace ref. The SPA tree is imported through a
  * computed specifier: the root tsconfig keeps `src/spa` out of this program
@@ -57,7 +55,7 @@ function bootOf(html: string): SpaBoot {
  * browser sources into a typecheck that has no `document`.
  */
 async function renderMembersHrefs(boot: SpaBoot, pathname = "/dashboard/default/members"): Promise<string[]> {
-  // Specifiers stay relative to THIS file so Bun resolves them exactly as a
+  // invariant: Specifiers stay relative to THIS file so Bun resolves them exactly as a
   // static import would; `tsc` never sees them.
   const spa = "../../src/spa";
   const { createElement } = await import("react");
@@ -98,7 +96,7 @@ async function authedRequest(
     method?: string;
     body?: string;
     accept?: string;
-    /** Extra cookies beside the session (manifest state / hold). */
+    /** note: Extra cookies beside the session (manifest state / hold). */
     extraCookies?: Record<string, string>;
   } = {},
 ): Promise<Request> {
@@ -132,7 +130,7 @@ function seedUser(db: TestD1, login: string, role: "admin" | "member"): string {
   return id;
 }
 
-/** The `users.id` of an already-seeded login (membership fixtures). */
+/** note: The `users.id` of an already-seeded login (membership fixtures). */
 function seedUserId(db: TestD1, login: string): string {
   const row = db.raw.prepare("SELECT id FROM users WHERE github_login = ?").get(login) as
     | { id: string }
@@ -168,15 +166,14 @@ function seedMembership(
   );
 }
 
-/**
- * Deterministic per-workspace GitHub App ids: the App routes' only address form
+/** note: Deterministic per-workspace GitHub App ids: the App routes' only address form
  * (D0), and the label the seeded rows carry.
  */
 const ACME_APP_ID = 1000;
 const OTHER_APP_ID = 1001;
 const APP_IDS: Record<string, number> = { "ws-acme": ACME_APP_ID, "ws-other": OTHER_APP_ID };
 
-/** A stable GitHub App id for a fixture row, so a test can build its path. */
+/** note: A stable GitHub App id for a fixture row, so a test can build its path. */
 function githubAppIdOf(rowId: string): number {
   let hash = 7;
   for (const char of rowId) hash = (hash * 31 + char.charCodeAt(0)) % 100_000;
@@ -199,7 +196,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
-  // Every bot owns exactly one target: the review configuration the App
+  // invariant: Every bot owns exactly one target: the review configuration the App
   // settings face reads lives there.
   seed(
     db,
@@ -215,8 +212,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   );
 }
 
-/**
- * The fixture bot row id for one seeded App — the id `review_targets.bot_id`
+/** note: The fixture bot row id for one seeded App — the id `review_targets.bot_id`
  * carries, which is what a live-target read binds.
  */
 function botRowIdOf(db: TestD1, id: string): string {
@@ -225,8 +221,7 @@ function botRowIdOf(db: TestD1, id: string): string {
   ).id;
 }
 
-/**
- * The one live target a seeded App owns. A target id is a UUID minted by the
+/** note: The one live target a seeded App owns. A target id is a UUID minted by the
  * targets store — NEVER the GitHub App id the App routes are addressed by — so
  * any assertion about a repository detail address must read this row.
  */
@@ -238,7 +233,7 @@ function liveTargetIdOf(db: TestD1, botId: string): string {
   return row.id;
 }
 
-/** The numeric GitHub App id a fixture App was seeded with (the App's identity). */
+/** note: The numeric GitHub App id a fixture App was seeded with (the App's identity). */
 function appAcmeId(db: TestD1): number {
   return (
     db.raw.prepare("SELECT github_app_id FROM review_bots WHERE id = ?").get("app-acme") as {
@@ -247,8 +242,7 @@ function appAcmeId(db: TestD1): number {
   ).github_app_id;
 }
 
-/**
- * Two real workspaces with a role matrix that separates the two authorization
+/** note: Two real workspaces with a role matrix that separates the two authorization
  * worlds: `octocat` is a DEPLOYMENT admin but only a workspace MEMBER, so the
  * legacy rule and the workspace rule disagree for every route they share.
  */
@@ -273,8 +267,7 @@ function tenancyFixture() {
   return { db, users };
 }
 
-/**
- * A workspace per reserved word, each with a real App and a member. The DB has
+/** note: A workspace per reserved word, each with a real App and a member. The DB has
  * no CHECK on `workspaces.slug`, so the routing guard is the ONLY thing keeping
  * `:workspaceRef` off these names — a capture regression would serve the App.
  */
@@ -315,7 +308,7 @@ describe("the pre-workspace App face is retired", () => {
   });
 
   test("the workspace settings page serves the shell scoped to its workspace", async () => {
-    // `/dashboard/<ref>/settings` is an enumerated SPA page, not a worker
+    // note: `/dashboard/<ref>/settings` is an enumerated SPA page, not a worker
     // route, so the only thing that serves it is `spaDispatch`'s workspace
     // grammar. The status is the discriminating assertion: drop `settings`
     // from `WORKSPACE_FAMILY_SEGMENTS` and the path matches no SPA route and
@@ -334,7 +327,7 @@ describe("the pre-workspace App face is retired", () => {
   test("an anonymous request cannot tell an existing workspace from a missing one (no pre-auth oracle)", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
-    // `acme` exists, `ghost` does not. Both must answer the same 302 to login:
+    // invariant: `acme` exists, `ghost` does not. Both must answer the same 302 to login:
     // the gate classifies the ref without a D1 read, and the workspace row is
     // only resolved after the session + user read.
     const answers: Array<{ status: number; location: string | null; body: string }> = [];
@@ -380,7 +373,7 @@ describe("workspace paths serve", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { viewer: { login: string }; apps: Array<{ github_app_id: number }> };
     expect(body.viewer.login).toBe("mallory");
-    // The list payload's GitHub-identity fields are the App-ID payload task's;
+    // note: The list payload's GitHub-identity fields are the App-ID payload task's;
     // this fixture only needs the App to be addressable, by its numeric id.
     expect(body.apps.map((app) => app.github_app_id)).toEqual([appAcmeId(db)]);
   });
@@ -414,7 +407,7 @@ describe("workspace paths serve", () => {
   test("a signed-in non-member sees 404, not the workspace", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
-    // bob owns `other`; he has no membership in `acme`.
+    // note: bob owns `other`; he has no membership in `acme`.
     const res = await worker.fetch(await authedRequest("/dashboard/acme/api/apps", "bob"), env);
     expect(res.status).toBe(404);
   });
@@ -429,7 +422,7 @@ describe("workspace paths serve", () => {
   });
 
   test("the workspace id resolves exactly like its slug", async () => {
-    // The workspace-identifier work (2026-10): the segment is a ref —
+    // note: The workspace-identifier work (2026-10): the segment is a ref —
     // `ws-acme` is the row id, `acme` its slug; both name the same workspace,
     // for the same member.
     const { db } = tenancyFixture();
@@ -445,7 +438,7 @@ describe("workspace paths serve", () => {
   });
 
   test("a ref that names two workspaces answers 404 and warns (never picks one)", async () => {
-    // A slug equal to ANOTHER workspace's id is the only way the single read
+    // invariant: A slug equal to ANOTHER workspace's id is the only way the single read
     // can return two rows. Here `ws-acme`'s slug becomes `dup` while a second
     // workspace IS `dup`; `dana` owns `ws-acme`, so picking that row would
     // answer 200 — the 404 is the exactly-one-row rule, the cross-tenant backstop.
@@ -469,7 +462,7 @@ describe("workspace paths serve", () => {
   test("the workspace 404 is the styled page on HTML navigation and a bare status on fetch", async () => {
     const { db } = tenancyFixture();
     const env = envFor(db);
-    // HTML navigation renders the console's own 404 surface (the same page the
+    // note: HTML navigation renders the console's own 404 surface (the same page the
     // pinned-POST 404 uses) instead of Hono's bare text.
     const page = await worker.fetch(
       await authedRequest("/dashboard/ghost/api/apps", "octocat", { accept: "text/html" }),
@@ -478,7 +471,7 @@ describe("workspace paths serve", () => {
     expect(page.status).toBe(404);
     expect(page.headers.get("Content-Type")).toContain("text/html");
     expect(await page.text()).toContain(t("en", "common.error.notFoundTitle"));
-    // A fetch gets no HTML page: the SPA's API reads parse the status only, so
+    // invariant: A fetch gets no HTML page: the SPA's API reads parse the status only, so
     // the contract is a plain response — the status and its content type, not
     // Hono's exact body text (which is not ours to pin).
     const api = await worker.fetch(
@@ -491,7 +484,7 @@ describe("workspace paths serve", () => {
   });
 
   test("the ROUTING gate's 404s carry the same styled page (N2)", async () => {
-    // The gate answers a retired route family before any session or membership
+    // invariant: The gate answers a retired route family before any session or membership
     // read. HTML navigation must render the member gate's page, not bare text.
     // `/dashboard/apps` itself is a dashboard root (it redirects); the retired
     // App family is the sub-path.
@@ -507,7 +500,7 @@ describe("workspace paths serve", () => {
     expect(await page.text(), path).toContain(t("en", "common.error.notFoundTitle"));
     const api = await worker.fetch(await authedRequest(path, "octocat"), env);
     expect(api.status, path).toBe(404);
-    // The fetch contract is the status and its content type — never Hono's
+    // invariant: The fetch contract is the status and its content type — never Hono's
     // exact default body text (I-000087: that pin is not ours to keep).
     expect(api.headers.get("Content-Type"), path).toStartWith("text/plain");
     expect(await api.text(), path).not.toContain(t("en", "common.error.notFoundTitle"));
@@ -518,7 +511,7 @@ describe("workspace paths serve", () => {
     const env = envFor(db);
     const locale = await worker.fetch(await authedRequest("/dashboard/login", "octocat"), env);
     expect(locale.status).toBe(302);
-    // The deployment-level member face is retired: it answers 404 on both
+    // note: The deployment-level member face is retired: it answers 404 on both
     // faces (the workspace one below is the only member surface left).
     for (const path of ["/dashboard/api/members", "/dashboard/members/invite"]) {
       const gone = await worker.fetch(await authedRequest(path, "octocat"), env);
@@ -541,11 +534,11 @@ describe("manage is the workspace role", () => {
         body: SETTINGS_BODY,
       });
 
-    // Deployment admin, workspace member: the workspace role decides → 403.
+    // note: Deployment admin, workspace member: the workspace role decides → 403.
     expect((await worker.fetch(await post("octocat"), env)).status).toBe(403);
     expect((await worker.fetch(await post("mallory"), env)).status).toBe(403);
-    expect((await worker.fetch(await post("carol"), env)).status).toBe(200); // workspace admin
-    expect((await worker.fetch(await post("dana"), env)).status).toBe(200); // workspace owner
+    expect((await worker.fetch(await post("carol"), env)).status).toBe(200); // note: workspace admin
+    expect((await worker.fetch(await post("dana"), env)).status).toBe(200); // note: workspace owner
   });
 
   test("the deployment-level settings path is retired (404, not a second authz rule)", async () => {
@@ -576,7 +569,7 @@ describe("success redirects stay in the workspace route family", () => {
       env,
     );
     expect(res.status).toBe(302);
-    // The address must be the target's OWN id: the App id this route is
+    // invariant: The address must be the target's OWN id: the App id this route is
     // addressed by resolves to no target row, so pinning it here is what let a
     // dead detail page through. Resolve it and follow it.
     const location = res.headers.get("Location") ?? "";
@@ -610,7 +603,7 @@ describe("success redirects stay in the workspace route family", () => {
   });
 
   test("an App with no repository lands on the repository overview, which always resolves", async () => {
-    // Zero live targets under the App: there is no detail page to name, so the
+    // invariant: Zero live targets under the App: there is no detail page to name, so the
     // honest landing is the overview.
     const { db } = tenancyFixture();
     db.raw.prepare("DELETE FROM review_targets WHERE bot_id = ?").run("app-acme");
@@ -638,7 +631,7 @@ describe("success redirects stay in the workspace route family", () => {
     const res = await worker.fetch(request, env);
     expect(res.status).toBe(200);
     expect(res.headers.get("Location")).toBeNull();
-    // D6: the notice names the App by its GitHub facts — this fixture never
+    // invariant: D6: the notice names the App by its GitHub facts — this fixture never
     // synced them, so the immutable App id is the honest fallback.
     expect(await res.text()).toContain(`Saved the omp runtime harness for ${ACME_APP_ID}.`);
   });
@@ -743,7 +736,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   test("retired App HTML GET and HEAD answer 404, not the SPA shell", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db));
-    // The bare `/dashboard/apps` is the dashboard root (a redirect); the
+    // note: The bare `/dashboard/apps` is the dashboard root (a redirect); the
     // retired family is every path below it.
     for (const path of [`/dashboard/apps/${ACME_APP_ID}/settings`, `/dashboard/apps/${ACME_APP_ID}/onboarding`]) {
       const get = await worker.fetch(
@@ -786,14 +779,14 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
       );
       expect(res.status, path).toBe(200);
       expect(await res.text(), path).toContain("window.__BOOT__");
-      // The shell derives its API base from THIS pathname: every read and link
+      // note: The shell derives its API base from THIS pathname: every read and link
       // on the page hangs off /dashboard/acme (the legacy App family 404s here).
       expect(apiBase(path), path).toBe("/dashboard/acme");
     }
   });
 
   test("the workspace Members shell serves and keeps its nav inside the workspace", async () => {
-    // Members is workspace-routed: the pathname names the
+    // note: Members is workspace-routed: the pathname names the
     // workspace, so every nav target stays inside it.
     // 0026 seeds `default`; this fixture adds the membership on top of it.
     const db = createMigratedTestD1();
@@ -822,7 +815,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 
   test("the workspace Apps boot keeps its workspace after a client-side navigation to Members", async () => {
-    // spaClick → pushState changes the pathname but NOT `window.__BOOT__`, so a
+    // note: spaClick → pushState changes the pathname but NOT `window.__BOOT__`, so a
     // boot that omitted the slug on workspace pages would strand Members on the
     // legacy targets the moment the admin clicked through (I-000072).
     // A deployment ADMIN carries the Members entry; 0026 seeds `default` as
@@ -836,7 +829,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.workspaceRef).toBe("default");
-    // The Members PAGE the click lands on, rendered from THAT boot: the
+    // note: The Members PAGE the click lands on, rendered from THAT boot: the
     // sidebar hrefs are read off the markup, not off the model behind it.
     const hrefs = await renderMembersHrefs(boot);
     expect(hrefs).toContain("/dashboard/default/apps");
@@ -845,7 +838,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
   });
 
   test("the direct /index.html shell names the sole workspace too (N1)", async () => {
-    // `/index.html` is the same shell document addressed directly — the SPA
+    // note: `/index.html` is the same shell document addressed directly — the SPA
     // router then reads the real pathname — so it must carry the same boot or
     // its sidebar keeps the legacy dead end.
     const db = createMigratedTestD1();
@@ -883,7 +876,7 @@ describe("tenant gate runs before SPA dispatch (ASSETS bound)", () => {
 
 describe("the repository surface is a page family, not a Worker route family", () => {
   test("repos joins the SPA family and the bare spelling is no page", () => {
-    // ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
+    // note: ONE edit (the family) makes `workspaceRefOf`, the SPA matcher, `apiBase`
     // and the sidebar follow the segment. Tenant ownership is proven through
     // the real requests below, not by pinning the gate's internal set.
     expect(WORKSPACE_FAMILY_SEGMENTS).toContain("repos");
@@ -893,7 +886,7 @@ describe("the repository surface is a page family, not a Worker route family", (
   test("both repository paths serve the shell scoped to their workspace", async () => {
     const { db } = tenancyFixture();
     const env = withSpaAssets(envFor(db));
-    // The detail address carries a REAL target id (a UUID), never the App id.
+    // invariant: The detail address carries a REAL target id (a UUID), never the App id.
     const detailPath = `/dashboard/acme/repos/${liveTargetIdOf(db, botRowIdOf(db, "app-acme"))}`;
     for (const path of ["/dashboard/acme/repos", detailPath]) {
       const res = await worker.fetch(await authedRequest(path, "dana", { accept: "text/html" }), env);
@@ -905,7 +898,7 @@ describe("the repository surface is a page family, not a Worker route family", (
 });
 
 describe("the post-authentication landing is the workspace repository overview", () => {
-  /** ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
+  /** note: ONE live workspace — the M1 shape `getSoleWorkspace` resolves. */
   function soleWorkspaceFixture() {
     const db = createMigratedTestD1();
     const userId = seedUser(db, "octocat", "admin");
@@ -922,12 +915,12 @@ describe("the post-authentication landing is the workspace repository overview",
     );
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/default/repos");
-    // The dead-end shell is never served on this path.
+    // invariant: The dead-end shell is never served on this path.
     expect(await res.text()).not.toContain("window.__BOOT__");
   });
 
   test("the retired /dashboard/apps spelling answers the same redirect as the root", async () => {
-    // Both spellings are dashboard roots: one landing rule, one target. The
+    // note: Both spellings are dashboard roots: one landing rule, one target. The
     // ref is the same workspace the root resolves, never a bare path.
     const { db } = soleWorkspaceFixture();
     for (const root of ["/dashboard", "/dashboard/apps"]) {
@@ -961,7 +954,7 @@ describe("the post-authentication landing is the workspace repository overview",
   });
 
   test("several live workspaces → the login's own first membership, never the retired /dashboard/apps", async () => {
-    // `octocat` belongs to `ws-acme` only, so the deployment's non-sole shape
+    // why: `octocat` belongs to `ws-acme` only, so the deployment's non-sole shape
     // no longer strands them: the landing names their membership (ordered by
     // name, then id — stable), which is a real route.
     const { db } = tenancyFixture();
@@ -970,14 +963,14 @@ describe("the post-authentication landing is the workspace repository overview",
       withSpaAssets(envFor(db)),
     );
     expect(res.status).toBe(302);
-    // The emitted ref is the workspace ID, never the mutable slug.
+    // invariant: The emitted ref is the workspace ID, never the mutable slug.
     expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
     expect(res.headers.get("Location")).not.toBe("/dashboard/apps");
   });
 
   test("a login with TWO memberships lands on the first one and keeps the switcher", async () => {
     const { db, users } = tenancyFixture();
-    // `dana` owns `ws-acme`; give them `ws-other` too (membership order is
+    // note: `dana` owns `ws-acme`; give them `ws-other` too (membership order is
     // name, then id → `acme` still sorts first).
     seedMembership(db, "ws-other", users.wsOwner, "admin");
     const res = await worker.fetch(
@@ -987,7 +980,7 @@ describe("the post-authentication landing is the workspace repository overview",
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/ws-acme/repos");
 
-    // The shell that redirect lands on still offers both workspaces.
+    // note: The shell that redirect lands on still offers both workspaces.
     const shell = await worker.fetch(
       await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
       withSpaAssets(envFor(db)),
@@ -1001,7 +994,7 @@ describe("the post-authentication landing is the workspace repository overview",
 
 describe("a workspace URL never carries a mutable value", () => {
   test("a ref-less shell boot names the sole workspace by id", async () => {
-    // `/index.html` carries no workspace segment, so the boot's ref comes from
+    // why: `/index.html` carries no workspace segment, so the boot's ref comes from
     // the server-resolved sole workspace — and that value is the id, never the
     // readable slug a platform operator can rewrite.
     const db = createMigratedTestD1();
@@ -1015,14 +1008,14 @@ describe("a workspace URL never carries a mutable value", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.workspaceRef).toBe("ws-acme");
-    // The sidebar follows that ref, so no nav target carries the slug.
+    // note: The sidebar follows that ref, so no nav target carries the slug.
     const hrefs = await renderMembersHrefs(boot, "/index.html");
     expect(hrefs).toContain("/dashboard/ws-acme/apps");
     expect(hrefs).not.toContain("/dashboard/acme/apps");
   });
 
   test("a rewritten slug stops addressing the workspace, while the id keeps working", async () => {
-    // A platform operator rewrites `ws-acme`'s slug from `acme` to `acme-labs`
+    // note: A platform operator rewrites `ws-acme`'s slug from `acme` to `acme-labs`
     // after the links went out. The resolver matches only the CURRENT slug or
     // the id — there is no alias history — so a link built from the retired
     // slug must answer the tenant 404. That is why every emitted URL names the
@@ -1032,12 +1025,12 @@ describe("a workspace URL never carries a mutable value", () => {
     const members = async (ref: string) =>
       worker.fetch(await authedRequest(`/dashboard/${ref}/api/members`, "dana"), env);
 
-    // Before the rewrite the readable slug addresses this workspace.
+    // invariant: Before the rewrite the readable slug addresses this workspace.
     expect((await members("acme")).status).toBe(200);
 
     seed(db, "UPDATE workspaces SET slug = 'acme-labs' WHERE id = 'ws-acme'");
 
-    // Both live identifiers reach the INTENDED tenant (its own member list,
+    // note: Both live identifiers reach the INTENDED tenant (its own member list,
     // not merely some live workspace).
     for (const ref of ["acme-labs", "ws-acme"]) {
       const res = await members(ref);
@@ -1055,10 +1048,10 @@ describe("a workspace URL never carries a mutable value", () => {
       ]);
     }
 
-    // The retired slug is not an alias: it names no workspace at all.
+    // note: The retired slug is not an alias: it names no workspace at all.
     expect((await members("acme")).status).toBe(404);
 
-    // What the shell EMITS names the id, which the rewrite never touched.
+    // invariant: What the shell EMITS names the id, which the rewrite never touched.
     const shell = await worker.fetch(
       await authedRequest("/dashboard/ws-acme/apps", "dana", { accept: "text/html" }),
       env,
@@ -1069,7 +1062,7 @@ describe("a workspace URL never carries a mutable value", () => {
         (option) => option.ref,
       ),
     ).toEqual(["ws-acme"]);
-    // The landing redirect is id-based too, so nothing emits the rewritten slug.
+    // why: The landing redirect is id-based too, so nothing emits the rewritten slug.
     const landing = await worker.fetch(
       await authedRequest("/dashboard", "dana", { accept: "text/html" }),
       env,
@@ -1080,7 +1073,7 @@ describe("a workspace URL never carries a mutable value", () => {
 });
 
 describe("a login with no workspace gets the creation surface", () => {
-  /** A signed-in users row with no membership anywhere. */
+  /** note: A signed-in users row with no membership anywhere. */
   function newcomer() {
     const db = createMigratedTestD1();
     seedUser(db, "newcomer", "member");
@@ -1096,7 +1089,7 @@ describe("a login with no workspace gets the creation surface", () => {
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
     expect(boot.needsWorkspace).toBe(true);
-    // No workspace to name: no nav target may point at a workspace path.
+    // note: No workspace to name: no nav target may point at a workspace path.
     expect(boot.workspaceRef).toBeUndefined();
     expect(boot.canCreateApp).toBe(false);
   });
@@ -1109,7 +1102,7 @@ describe("a login with no workspace gets the creation surface", () => {
     );
     const boot = bootOf(await res.text());
     const hrefs = await renderMembersHrefs(boot, "/dashboard");
-    // The sidebar drops Apps/Members — both would 404 for this login — and the
+    // why: The sidebar drops Apps/Members — both would 404 for this login — and the
     // page offers the one action that changes that.
     expect(hrefs).not.toContain("/dashboard/apps");
     expect(hrefs).not.toContain("/dashboard/default/apps");
@@ -1138,7 +1131,7 @@ describe("a login with no workspace gets the creation surface", () => {
       envFor(db),
     );
     expect(res.status).toBe(201);
-    // The 201 names the landing: with 0026's `default` workspace already
+    // note: The 201 names the landing: with 0026's `default` workspace already
     // present, sole-workspace resolution cannot pick the new one out, so
     // `/dashboard` would strand the creator on a workspace-less shell. The
     // landing is the new workspace's ID — the same ref every other emission
@@ -1146,7 +1139,7 @@ describe("a login with no workspace gets the creation surface", () => {
     const created = (await res.json()) as { id: string; homePath: string };
     expect(created.homePath).toBe(`/dashboard/${created.id}/repos`);
 
-    // The new membership is real: the login now reaches that workspace's own
+    // note: The new membership is real: the login now reaches that workspace's own
     // pages (the outsider 404 is gone) and the boot no longer offers creation.
     const shell = await worker.fetch(
       await authedRequest(`/dashboard/${created.id}/repos`, "newcomer", {
@@ -1188,13 +1181,13 @@ describe("the onboarding CTA stays inside the workspace", () => {
     );
     expect(res.status).toBe(200);
     const body = await res.text();
-    // GitHub's slug is NULL in this fixture (never synced), so the page shows
+    // why: GitHub's slug is NULL in this fixture (never synced), so the page shows
     // the App id. The CTA names the App's ONE live target by its OWN id — the
     // App id resolves to no target row, so it must not appear in the address.
     const targetId = liveTargetIdOf(db, botRowIdOf(db, "app-acme"));
     expect(body).toContain(`href="/dashboard/acme/repos/${targetId}"`);
     expect(body).not.toContain(`href="/dashboard/acme/repos/${ACME_APP_ID}"`);
-    // The retired App-settings spelling stays absent (a template literal, so
+    // invariant: The retired App-settings spelling stays absent (a template literal, so
     // the guard can actually match rendered markup).
     expect(body).not.toContain(`href="/dashboard/apps/${ACME_APP_ID}/settings"`);
   });
@@ -1220,19 +1213,18 @@ describe("the onboarding CTA stays inside the workspace", () => {
   });
 });
 
-/** Every href the SSR page emits (the same extraction the Members render uses). */
+/** note: Every href the SSR page emits (the same extraction the Members render uses). */
 function hrefsOf(html: string): string[] {
   return [...html.matchAll(/href="([^"]+)"/g)].map((match) => match[1] ?? "");
 }
 
-/**
- * The manifest pages are reached through a workspace, so their own navigation
+/** note: The manifest pages are reached through a workspace, so their own navigation
  * must stay there: the pre-workspace target (`/dashboard`) sends the operator
  * back out of the workspace on every chrome link.
  */
 describe("the manifest chrome stays inside the workspace", () => {
   test("the start page's brand, Apps and cancel links name the addressed workspace", async () => {
-    // Two workspaces and one owner of both: only the address decides where the
+    // invariant: Two workspaces and one owner of both: only the address decides where the
     // App lands, so the chrome must follow the same ref.
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");
@@ -1247,7 +1239,7 @@ describe("the manifest chrome stays inside the workspace", () => {
     );
     expect(res.status).toBe(200);
     const hrefs = hrefsOf(await res.text());
-    // Brand, Apps and Cancel are the page's in-app navigation; Logout is
+    // note: Brand, Apps and Cancel are the page's in-app navigation; Logout is
     // session-level and stays at the mount.
     expect([...new Set(hrefs.filter((href) => href !== "/dashboard/logout"))]).toEqual([
       "/dashboard/ws-other/apps",
@@ -1304,8 +1296,7 @@ describe("the manifest chrome stays inside the workspace", () => {
 });
 
 describe("App creation is owner/admin", () => {
-  /**
-   * ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges
+  /** note: ONE live workspace (`default`, 0026's seed) — the M1 shape the gate judges
    * against — with a role matrix where `octocat` is a deployment ADMIN but only
    * a workspace MEMBER, so the legacy rule and the workspace rule disagree.
    */
@@ -1322,7 +1313,7 @@ describe("App creation is owner/admin", () => {
     return authedRequest(path, login, { method: "POST" }).then((request) => worker.fetch(request, env));
   }
 
-  /** POST /dashboard/manifest/commit carrying a parked hold cookie. */
+  /** note: POST /dashboard/manifest/commit carrying a parked hold cookie. */
   function postWithHold(login: string, hold: string, env: Env): Promise<Response> {
     return authedRequest("/dashboard/manifest/commit", login, {
       method: "POST",
@@ -1353,7 +1344,7 @@ describe("App creation is owner/admin", () => {
     const { db } = soleWorkspaceRoles();
     const env = envFor(db);
     for (const login of ["mallory", "octocat"]) {
-      // octocat is a DEPLOYMENT admin but a workspace member: the workspace
+      // note: octocat is a DEPLOYMENT admin but a workspace member: the workspace
       // role decides, exactly as the scoped canManageApp does.
       const res = await post(login, "/dashboard/manifest/start", env);
       expect(res.status, login).toBe(403);
@@ -1365,20 +1356,20 @@ describe("App creation is owner/admin", () => {
   test("the commit recovery route applies the same gate once a hold names its workspace", async () => {
     const { db } = soleWorkspaceRoles();
     const env = envFor(db);
-    // With no hold there is no flow and no target workspace: the route's
+    // note: With no hold there is no flow and no target workspace: the route's
     // long-standing "flow expired" bounce (302 to the shell, zero writes)
     // answers before any permission read.
     const noHold = await post("mallory", "/dashboard/manifest/commit", env);
     expect(noHold.status).toBe(302);
     expect(noHold.headers.get("Location")).toBe("/dashboard");
-    // With a hold naming the sole workspace, the member is refused (403) and
+    // note: With a hold naming the sole workspace, the member is refused (403) and
     // the hold survives, so restoring the role makes the resubmit work.
     const hold = await createHoldValue(CONVERSION, "mallory", SESSION_SECRET, SLUG, "default");
     const member = await postWithHold("mallory", hold, env);
     expect(member.status).toBe(403);
     expect(await member.text()).toContain(t("en", "common.error.forbiddenTitle"));
     expect(member.headers.getSetCookie().some((c) => c.includes("Max-Age=0"))).toBe(false);
-    // The owner clears the gate and commits into the workspace the hold names.
+    // note: The owner clears the gate and commits into the workspace the hold names.
     const owner = await postWithHold("dana", await createHoldValue(CONVERSION, "dana", SESSION_SECRET, SLUG, "default"), env);
     expect(owner.status).toBe(302);
     expect(owner.headers.get("Location")).toBe(
@@ -1387,7 +1378,7 @@ describe("App creation is owner/admin", () => {
   });
 
   test("a no-ref manifest start on a multi-workspace deployment answers a readable 409 workspace_required", async () => {
-    // `tenancyFixture` carries several live workspaces and the deployment-level
+    // note: `tenancyFixture` carries several live workspaces and the deployment-level
     // start route names none, so no attribution exists. That is missing input,
     // not a permission answer: 409 + a JSON code for a fetch, the styled error
     // page for navigation — never the bare 403 that hid the Create action.
@@ -1410,7 +1401,7 @@ describe("App creation is owner/admin", () => {
   });
 
   test("the creation right is judged in the ADDRESSED workspace, not the deployment", async () => {
-    // Two live workspaces. `dana` owns `other` and is a plain member of `acme`;
+    // note: Two live workspaces. `dana` owns `other` and is a plain member of `acme`;
     // `carol` is an admin of `acme` and nothing in `other`. The deployment's
     // sole-workspace rule cannot answer at all here, which is the regression:
     // each request must be judged against the ref it names.
@@ -1423,15 +1414,15 @@ describe("App creation is owner/admin", () => {
     seedMembership(db, "ws-acme", seedUser(db, "carol", "member"), "admin");
 
     const env = envFor(db);
-    // Owner of W2 creates in W2.
+    // note: Owner of W2 creates in W2.
     const owner = await post("dana", "/dashboard/other/manifest/start", env);
     expect(owner.status).toBe(200);
     expect(await owner.text()).toContain("https://github.com/settings/apps/new");
-    // …and is refused in W1, where they are only a member.
+    // invariant: …and is refused in W1, where they are only a member.
     const memberElsewhere = await post("dana", "/dashboard/acme/manifest/start", env);
     expect(memberElsewhere.status).toBe(403);
     expect(await memberElsewhere.text()).toContain(t("en", "common.error.forbiddenTitle"));
-    // The admin of W2 may create there; the same login is a non-member of W1.
+    // note: The admin of W2 may create there; the same login is a non-member of W1.
     expect((await post("carol", "/dashboard/acme/manifest/start", env)).status).toBe(200);
     expect((await post("carol", "/dashboard/other/manifest/start", env)).status).toBe(403);
   });
@@ -1440,7 +1431,7 @@ describe("App creation is owner/admin", () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "ws-acme", "acme");
     seedWorkspace(db, "ws-other", "other");
-    // `dana` owns BOTH, so only the REF can decide where the App lands.
+    // invariant: `dana` owns BOTH, so only the REF can decide where the App lands.
     const dana = seedUser(db, "dana", "member");
     seedMembership(db, "ws-acme", dana, "owner");
     seedMembership(db, "ws-other", dana, "owner");
@@ -1462,20 +1453,20 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      // The landing names the App by its immutable GitHub id.
+      // note: The landing names the App by its immutable GitHub id.
       expect(callback.headers.get("Location")).toBe(
         `/dashboard/ws-other/apps/${CONVERSION.id}/onboarding`,
       );
     } finally {
       globalThis.fetch = realFetch;
     }
-    // The App is mapped into the workspace the flow named — not into `acme`,
+    // note: The App is mapped into the workspace the flow named — not into `acme`,
     // and not into some "sole" workspace.
     const mapping = db.raw
       .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
     expect(mapping?.ws).toBe("ws-other");
-    // The READ is tenant-scoped too, for the very row this flow created: the
+    // note: The READ is tenant-scoped too, for the very row this flow created: the
     // owning workspace serves it, and the sibling — same session, same slug —
     // answers the settings-family 404 (invisible, not merely forbidden).
     // The App is addressed by its immutable GitHub App id (D0) — the path this
@@ -1499,7 +1490,7 @@ describe("App creation is owner/admin", () => {
   });
 
   test("a workspace whose slug changes mid-flow still receives the App (the flow binds the stable id)", async () => {
-    // F-001: the state/hold must not carry a mutable identity. Start in `acme`,
+    // invariant: F-001: the state/hold must not carry a mutable identity. Start in `acme`,
     // have a platform operator rewrite its slug to `acme-renamed` before GitHub
     // redirects back, and — the worse half of the same bug — let a NEW
     // workspace take the freed `acme` slug. A slug-bound flow would attribute
@@ -1519,7 +1510,7 @@ describe("App creation is owner/admin", () => {
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
     expect((await readManifestStateValue(state, state, SESSION_SECRET))?.workspaceId).toBe("ws-acme");
 
-    // The slug rewrite, plus a squatter on the freed slug.
+    // note: The slug rewrite, plus a squatter on the freed slug.
     seed(db, "UPDATE workspaces SET slug = 'acme-renamed' WHERE id = 'ws-acme'");
     seedWorkspace(db, "ws-squatter", "acme");
     seedMembership(db, "ws-squatter", seedUser(db, "mallory", "member"), "owner");
@@ -1533,7 +1524,7 @@ describe("App creation is owner/admin", () => {
         { accept: "text/html", extraCookies: { [MANIFEST_STATE_COOKIE]: state } },
       ).then((request) => worker.fetch(request, env));
       expect(callback.status).toBe(302);
-      // The redirect names the workspace's stable ID — not the slug the flow
+      // note: The redirect names the workspace's stable ID — not the slug the flow
       // started with, and not the one a squatter has since taken.
       expect(callback.headers.get("Location")).toBe(
         `/dashboard/ws-acme/apps/${CONVERSION.id}/onboarding`,
@@ -1544,13 +1535,13 @@ describe("App creation is owner/admin", () => {
     const mapping = db.raw
       .prepare("SELECT bot_workspaces.workspace_id AS ws FROM bot_workspaces JOIN review_bots ON review_bots.id = bot_workspaces.bot_id WHERE review_bots.github_app_id = ?")
       .get(CONVERSION.id) as { ws: string } | null;
-    // The App belongs to the ORIGINAL workspace — the one that owns the id —
+    // note: The App belongs to the ORIGINAL workspace — the one that owns the id —
     // and emphatically not to `ws-squatter`, which merely holds the old slug.
     expect(mapping?.ws).toBe("ws-acme");
   });
 
   test("a workspace DELETED mid-flow answers the named workspaceGone error, not a bare shell redirect", async () => {
-    // The concurrent delete: the callback's creation check and the commit both
+    // note: The concurrent delete: the callback's creation check and the commit both
     // pass on a live workspace, and the retirement lands before the
     // post-commit slug read that names the landing page. The flow must say so,
     // not quietly drop the operator on `/dashboard`.
@@ -1564,7 +1555,7 @@ describe("App creation is owner/admin", () => {
       start.headers.getSetCookie().find((c) => c.startsWith(`${MANIFEST_STATE_COOKIE}=`)) ?? "";
     const state = (stateCookie.split(";")[0] ?? "").slice(MANIFEST_STATE_COOKIE.length + 1);
 
-    // `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
+    // note: `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
     // so retiring the row here is exactly the mid-flow deletion.
     const deletingDb: TestD1 = {
       prepare(query: string) {
@@ -1595,7 +1586,7 @@ describe("App creation is owner/admin", () => {
     } finally {
       globalThis.fetch = realFetch;
     }
-    // The App row was written before the workspace vanished: the named failure
+    // invariant: The App row was written before the workspace vanished: the named failure
     // is about the missing landing page, not about a lost write.
     const row = db.raw
       .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
@@ -1604,7 +1595,7 @@ describe("App creation is owner/admin", () => {
   });
 
   test("the commit recovery route answers the same named workspaceGone error, not a shell redirect", async () => {
-    // The callback's concurrent delete, replayed on POST /manifest/commit: the
+    // note: The callback's concurrent delete, replayed on POST /manifest/commit: the
     // hold names a live workspace, the commit writes the App row, and the
     // retirement lands before the post-commit landing read. The recovery route
     // is the operator's native resubmit after a retryable callback failure, so
@@ -1613,7 +1604,7 @@ describe("App creation is owner/admin", () => {
     const { db } = soleWorkspaceRoles();
     const hold = await createHoldValue(CONVERSION, "dana", SESSION_SECRET, SLUG, "default");
 
-    // `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
+    // note: `getWorkspaceByRef`'s SELECT is unique to the post-commit landing read,
     // so retiring the row here is exactly the mid-flow deletion.
     const deletingDb: TestD1 = {
       prepare(query: string) {
@@ -1634,7 +1625,7 @@ describe("App creation is owner/admin", () => {
     expect(res.status).toBe(409);
     expect(res.headers.get("Location")).toBeNull();
     expect(await res.text()).toContain(t("en", "manifest.error.workspaceGone"));
-    // The App row was written before the workspace vanished: the named failure
+    // invariant: The App row was written before the workspace vanished: the named failure
     // is about the missing landing page, not about a lost write.
     const row = db.raw
       .prepare("SELECT COUNT(*) AS n FROM review_bots WHERE github_app_id = ?")
@@ -1663,7 +1654,7 @@ describe("App creation is owner/admin", () => {
   });
 
   test("a deployment with an unbound store refuses creation (configuration, not permission)", async () => {
-    // Without D1 nothing can attribute the App: the dashboard face already
+    // invariant: Without D1 nothing can attribute the App: the dashboard face already
     // fails closed on the missing binding before the route runs, so the flow
     // never starts and no slug/state cookie is minted.
     const env = { ...envFor(createMigratedTestD1()), DB: undefined } as unknown as Env;
@@ -1678,16 +1669,16 @@ describe("App creation is owner/admin", () => {
     const env = withSpaAssets(envFor(db));
     const bootOfLogin = async (login: string): Promise<SpaBoot> =>
       bootOf(await (await worker.fetch(await authedRequest("/dashboard/default/members", login, { accept: "text/html" }), env)).text());
-    // Owner/admin → true (the key is present, not merely defaulted).
+    // note: Owner/admin → true (the key is present, not merely defaulted).
     expect((await bootOfLogin("dana")).canCreateApp).toBe(true);
     expect((await bootOfLogin("carol")).canCreateApp).toBe(true);
-    // Plain member → explicitly false.
+    // note: Plain member → explicitly false.
     expect((await bootOfLogin("mallory")).canCreateApp).toBe(false);
     expect((await bootOfLogin("octocat")).canCreateApp).toBe(false);
   });
 
   test("a deployment that cannot name one workspace advertises no create capability", async () => {
-    // Several live workspaces ⇒ no sole workspace to attribute a new App to.
+    // note: Several live workspaces ⇒ no sole workspace to attribute a new App to.
     // `/index.html` is the shell document with no workspace-scoped pathname, so
     // the boot's only workspace source is the server-resolved sole workspace.
     const { db } = tenancyFixture();
@@ -1702,14 +1693,14 @@ describe("App creation is owner/admin", () => {
     );
     expect(boot.canCreateApp).toBe(false);
     expect(boot.workspaceRef).toBeUndefined();
-    // The shell names the missing input, so the disabled Create control can
+    // why: The shell names the missing input, so the disabled Create control can
     // explain itself instead of vanishing.
     expect(boot.workspaceRequired).toBe(true);
   });
 });
 
 describe("the route-local member gate", () => {
-  /** Every statement the request prepares, in order. */
+  /** note: Every statement the request prepares, in order. */
   function recordingDb(db: TestD1): { observed: TestD1; statements: string[] } {
     const statements: string[] = [];
     const observed = {
@@ -1742,14 +1733,14 @@ describe("the route-local member gate", () => {
   });
 
   test("a mount without the session guard still resolves the user", async () => {
-    // The fallback half: no guard ran, so `authUser` is absent from the
+    // note: The fallback half: no guard ran, so `authUser` is absent from the
     // context and the gate reads the row for itself. A mount that skipped
     // that read would answer `undefined` instead of the caller.
     const db = createMigratedTestD1();
     seedUser(db, "mallory", "member");
     const { observed, statements } = recordingDb(db);
     const bare = new Hono<{ Bindings: Env; Variables: DashboardVariables }>();
-    // The workspace-scope verdict without the guard that usually precedes it.
+    // note: The workspace-scope verdict without the guard that usually precedes it.
     bare.use("*", async (c, next) => {
       c.set("tenant", { ref: "default", workspaceId: "default", role: "owner", principal: "member" });
       c.set("workspaceScope", { workspaceId: "default", role: "owner" });
@@ -1783,7 +1774,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
     webhook_secret: "not-a-real-webhook-secret",
   };
 
-  /** ONE live workspace where the caller starts as owner. */
+  /** note: ONE live workspace where the caller starts as owner. */
   function ownerThenDemote() {
     const db = createMigratedTestD1();
     const userId = seedUser(db, "mallory", "member");
@@ -1791,14 +1782,14 @@ describe("a mid-flight demotion cannot finish the flow", () => {
     return { db, userId };
   }
 
-  /** The role change a concurrent admin performs while the flow is open. */
+  /** note: The role change a concurrent admin performs while the flow is open. */
   function demote(db: TestD1, userId: string): void {
     db.raw
       .prepare("UPDATE workspace_members SET role = 'member' WHERE workspace_id = 'default' AND user_id = ?")
       .run(userId);
   }
 
-  /** GET /manifest/callback with a valid single-use state for `mallory`. */
+  /** note: GET /manifest/callback with a valid single-use state for `mallory`. */
   async function callback(env: Env, state: string): Promise<Response> {
     return worker.fetch(
       await authedRequest("/dashboard/manifest/callback?code=manifest-code&state=" + state, "mallory", {
@@ -1813,9 +1804,9 @@ describe("a mid-flight demotion cannot finish the flow", () => {
     const { db, userId } = ownerThenDemote();
     const env = envFor(db);
     const state = await createManifestStateValue(SESSION_SECRET, SLUG, "default");
-    // The operator really did start: the gate admitted it.
+    // note: The operator really did start: the gate admitted it.
     expect((await worker.fetch(await authedRequest("/dashboard/manifest/start", "mallory", { method: "POST" }), env)).status).toBe(200);
-    // A concurrent admin demotes them before GitHub redirects back.
+    // invariant: A concurrent admin demotes them before GitHub redirects back.
     demote(db, userId);
     let networkCalls = 0;
     const realFetch = globalThis.fetch;
@@ -1827,7 +1818,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
       const res = await callback(env, state);
       expect(res.status).toBe(403);
       expect(await res.text()).toContain(t("en", "common.error.forbiddenTitle"));
-      expect(networkCalls).toBe(0); // no code exchange behind the denial
+      expect(networkCalls).toBe(0); // note: no code exchange behind the denial
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -1854,7 +1845,7 @@ describe("a mid-flight demotion cannot finish the flow", () => {
     const body = await res.text();
     expect(body).toContain(t("en", "common.error.forbiddenTitle"));
     expect(body).not.toContain('action="/dashboard/manifest/commit"');
-    // The hold is burned: a demoted operator keeps no resumable credential.
+    // safety: The hold is burned: a demoted operator keeps no resumable credential.
     expect(
       res.headers.getSetCookie().some((c) => c.startsWith(`${MANIFEST_HOLD_COOKIE}=;`) && c.includes("Max-Age=0")),
     ).toBe(true);

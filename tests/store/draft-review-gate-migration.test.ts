@@ -1,5 +1,5 @@
 /**
- * Migration 0070: a repository chooses whether a DRAFT pull request is
+ * why: Migration 0070: a repository chooses whether a DRAFT pull request is
  * reviewed.
  *
  * The column is target-owned, like the business pause: it has a DDL default of
@@ -22,12 +22,12 @@ import {
 const MIGRATION = "0070_draft_review_gate.sql";
 const PREVIOUS = "0069_operator_data_upgrades.sql";
 
-/** Every migration up to and including 0069 — the shape the file applies over. */
+/** note: Every migration up to and including 0069 — the shape the file applies over. */
 const BEFORE = migrationsAfter(2).filter((name) => migrationNumber(name) <= migrationNumber(PREVIOUS));
 
 const WS = "default";
 
-/** A 0069-shaped database holding one live target in the shape that file leaves. */
+/** note: A 0069-shaped database holding one live target in the shape that file leaves. */
 function dbAt0069(): TestD1 {
   const db = createTestD1();
   applyMigrations(db, BEFORE);
@@ -65,13 +65,13 @@ describe("migration 0070: the draft review gate", () => {
     const db = dbAt0069();
     applyMigrations(db, [MIGRATION]);
 
-    // The contract's shape: INTEGER NOT NULL DEFAULT 1, and no backfill — the
+    // invariant: The contract's shape: INTEGER NOT NULL DEFAULT 1, and no backfill — the
     // default is the column's, not a value the migration wrote.
     expect(reviewDraftsColumn(db)).toEqual({ type: "INTEGER", notnull: 1, dflt_value: "1" });
     expect(db.raw.query("SELECT review_drafts FROM review_targets WHERE id = 'target-1'").get()).toEqual({
       review_drafts: 1,
     });
-    // No workspace column answers it: there is nothing to inherit from.
+    // why: No workspace column answers it: there is nothing to inherit from.
     const workspaceColumns = (db.raw.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>).map(
       (column) => column.name,
     );
@@ -103,7 +103,7 @@ describe("migration 0070: the draft review gate", () => {
   });
 });
 
-/** One live target of the workspace, in the shape the store reads. */
+/** note: One live target of the workspace, in the shape the store reads. */
 function seedStoreTarget(db: TestD1, id: string, repoId: number, follow: 0 | 1): void {
   db.raw
     .prepare(
@@ -131,7 +131,7 @@ describe("the store exposes the target-owned draft switch", () => {
     const store = createTargetsStore(d);
 
     expect(await store.setReviewConfig(WS, "t-follow", { reviewDrafts: false })).toBe(true);
-    // A repository that follows the workspace defaults still owns this switch:
+    // why: A repository that follows the workspace defaults still owns this switch:
     // the save changes it without flipping `follow` or snapshotting anything.
     expect(
       d.raw
@@ -150,7 +150,7 @@ describe("the store exposes the target-owned draft switch", () => {
       check_pass_verdicts: '["ship it"]',
     });
 
-    // Effective settings answer the row's value in BOTH branches.
+    // invariant: Effective settings answer the row's value in BOTH branches.
     expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-follow"))!)).reviewDrafts).toBe(
       false,
     );
@@ -166,7 +166,7 @@ describe("the store exposes the target-owned draft switch", () => {
     const store = createTargetsStore(d);
     expect(await store.setReviewConfig(WS, "t-keep", { reviewDrafts: false })).toBe(true);
 
-    // Toggle off (snapshots the policy answers) and back on.
+    // note: Toggle off (snapshots the policy answers) and back on.
     await setInheritance(d, WS, "t-keep", 0);
     expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
       review_drafts: 0,
@@ -176,7 +176,7 @@ describe("the store exposes the target-owned draft switch", () => {
       review_drafts: 0,
     });
 
-    // A policy save in the same row leaves it off.
+    // note: A policy save in the same row leaves it off.
     expect(await store.setReviewConfig(WS, "t-keep", { triggerMode: "open", follow: 0 })).toBe(true);
     expect(
       effectiveTargetSettings((await store.getInWorkspace(WS, "t-keep"))!, await getWorkspaceReviewDefaults(d, WS))

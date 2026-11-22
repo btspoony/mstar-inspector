@@ -20,7 +20,7 @@ import type { Env } from "../../src/worker/env";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "bot", "write", "scope", "secret", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 const OFFICIAL = "default";
 const OTHER = "ws-other";
@@ -62,7 +62,7 @@ function seedOwnedBot(botId: string, githubAppId: number, workspaceId: string): 
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
 }
 
-/** `default` is the official workspace and owns the SHARED `bot-home`. */
+/** note: `default` is the official workspace and owns the SHARED `bot-home`. */
 function world(): void {
   db = createMigratedTestD1();
   insertUser("dana");
@@ -81,7 +81,7 @@ function world(): void {
     .run(OFFICIAL);
   seedOwnedBot("bot-home", HOME_BOT, OFFICIAL);
   seedOwnedBot("bot-other", OTHER_BOT, OTHER);
-  // The share itself, plus the consuming workspace's one live target on it.
+  // note: The share itself, plus the consuming workspace's one live target on it.
   db.raw
     .prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-01-05T00:00:00.000Z' WHERE id = 'bot-home'")
     .run();
@@ -115,7 +115,7 @@ async function getSettings(ref: string, login: string, githubAppId: number): Pro
   );
 }
 
-/** The five seams that call `canWriteBotScope`, each with a body its own route accepts. */
+/** note: The five seams that call `canWriteBotScope`, each with a body its own route accepts. */
 const SEAMS: ReadonlyArray<{ name: string; path: string; form?: Record<string, string> }> = [
   { name: "lifecycle", path: "/apps/" + HOME_BOT + "/disable" },
   { name: "metadata refresh", path: "/api/apps/" + HOME_BOT + "/refresh-metadata" },
@@ -152,7 +152,7 @@ describe("the bot-scope write predicate: owning workspace in, consumer out", () 
     } finally {
       fetchSpy.mockRestore();
     }
-    // The settings seam's write landed: the sandbox image is the bot's.
+    // note: The settings seam's write landed: the sandbox image is the bot's.
     expect(
       (db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = 'bot-home'").get() as {
         sandbox_image_id: string;
@@ -183,7 +183,7 @@ describe("the bot-scope write predicate: owning workspace in, consumer out", () 
 });
 
 describe("the bot settings payload's share facts", () => {
-  /** Every settings read here fails its lazy GitHub refresh on purpose. */
+  /** note: Every settings read here fails its lazy GitHub refresh on purpose. */
   async function readFacts(ref: string, login: string, githubAppId: number): Promise<Record<string, unknown>> {
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
       throw new Error("no external call in this test");
@@ -209,7 +209,7 @@ describe("the bot settings payload's share facts", () => {
   test("a consumer sees the same bot as usable but not configurable", async () => {
     world();
     const body = await readFacts(OTHER, "erin", HOME_BOT);
-    // The bot's workspace IS the official one — but it is not THIS workspace,
+    // note: The bot's workspace IS the official one — but it is not THIS workspace,
     // so its own fact stays true while the caller's authority does not.
     expect(body.official_workspace).toBe(true);
     expect(body.can_configure_bot).toBe(false);

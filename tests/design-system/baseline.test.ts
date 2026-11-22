@@ -1,5 +1,5 @@
 /**
- * The committed baseline reference (design-system rebuild, 2026-10-31).
+ * why: The committed baseline reference (design-system rebuild, 2026-10-31).
  *
  * A baseline that lives only in gitignored `.mstar/` cannot be converged onto:
  * a clean checkout has no reference, and any comparator that reads it either
@@ -26,7 +26,7 @@ describe("baseline reference", () => {
     expect(statSync(BASELINE).isFile()).toBe(true);
     const html = readFileSync(BASELINE, "utf8");
     expect(html.length).toBeGreaterThan(0);
-    // A truncated copy still "exists"; the closing tag is what says the whole
+    // why: A truncated copy still "exists"; the closing tag is what says the whole
     // document survived the copy.
     expect(html.trimEnd().endsWith("</html>")).toBe(true);
   });
@@ -39,9 +39,9 @@ describe("baseline reference", () => {
   });
 
   test("is tracked by git", () => {
-    // `--error-unmatch` makes an untracked-but-present file exit non-zero, so a
+    // why: `--error-unmatch` makes an untracked-but-present file exit non-zero, so a
     // copy that was never staged cannot pass as committed.
-    // Runs from the test process's checkout, which is the one under test.
+    // note: Runs from the test process's checkout, which is the one under test.
     const proc = Bun.spawnSync(["git", "ls-files", "--error-unmatch", REL], {
       cwd: REPO,
       stdout: "pipe",

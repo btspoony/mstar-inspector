@@ -1,5 +1,5 @@
 /**
- * ArtifactStore adapter tests — `src/store/artifact-store.ts`
+ * why: ArtifactStore adapter tests — `src/store/artifact-store.ts`
  * against the bun:sqlite test double running the real migration SQL
  * (0001 → 0005 via createMigratedTestD1 — the put INSERT binds
  * `reviews.bot_id`, so the full production-shaped schema is required; DDL
@@ -44,9 +44,9 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const KEY_TUPLE = { installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA };
 const KEY = idemKey(KEY_TUPLE);
 
-/** Default attribution for the shared doc factory — every new-contract put carries an appId. */
+/** note: Default attribution for the shared doc factory — every new-contract put carries an appId. */
 const TEST_APP_ID = "11111111-2222-3333-4444-555555555555";
-/** The target the review rows belong to (the tenant read faces bind it). */
+/** note: The target the review rows belong to (the tenant read faces bind it). */
 const TEST_TARGET_ID = "11111111-2222-3333-4444-666666666666";
 
 function payload(overrides: Partial<MstarReviewV1> = {}): MstarReviewV1 {
@@ -82,7 +82,7 @@ function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDo
   };
 }
 
-/** Raw-insert the FK parent the per-App attribution tests need. */
+/** note: Raw-insert the FK parent the per-App attribution tests need. */
 function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): void {
   db.raw
     .prepare(
@@ -94,7 +94,7 @@ function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): vo
     .run(id);
 }
 
-/** Fully-migrated D1 with the default attribution's FK parents seeded. */
+/** note: Fully-migrated D1 with the default attribution's FK parents seeded. */
 function createSeededTestD1(): TestD1 {
   const db = createMigratedTestD1();
   seedAppRow(db, TEST_APP_ID);
@@ -118,13 +118,13 @@ describe("createArtifactStore().put", () => {
     expect(row.verdict).toBe("needs fixes");
     expect(row.summary_md).toBe("No blocking issues.");
     expect(row.skill_version).toBe(REVIEW_SKILL_VERSION);
-    // The envelope is the authoritative, losslessly restorable document;
+    // invariant: The envelope is the authoritative, losslessly restorable document;
     // raw_output is never written on the v1 path.
     expect(row.envelope).not.toBeNull();
     expect(JSON.parse(row.envelope!)).toEqual(payload());
     expect(row.raw_output).toBeNull();
 
-    // Version records: omitted put-input fields persist
+    // invariant: Version records: omitted put-input fields persist
     // NULL — byte-compat for pre-per-App callers.
     expect(row.model).toBeNull();
     expect(row.provider).toBeNull();
@@ -140,7 +140,7 @@ describe("createArtifactStore().put", () => {
       fingerprint: string;
       status: string;
     };
-    // mergeClass → severity column: THE vocab-switch mapping point.
+    // note: mergeClass → severity column: THE vocab-switch mapping point.
     expect(finding.severity).toBe("should-fix");
     expect(finding).toMatchObject({
       category: "logic",
@@ -150,7 +150,7 @@ describe("createArtifactStore().put", () => {
       title: "Null deref risk",
       body: "body",
       fingerprint: "fp-1",
-      status: "open", // column default
+      status: "open", // note: column default
     });
   });
 
@@ -167,7 +167,7 @@ describe("createArtifactStore().put", () => {
         title: "Null deref risk",
         body: "b1",
       },
-      // no path / no line → repo-level "noline" dimension (still a fingerprint)
+      // note: no path / no line → repo-level "noline" dimension (still a fingerprint)
       { mergeClass: "nit", title: "Docs typo", body: "b2" },
     ];
 
@@ -179,7 +179,7 @@ describe("createArtifactStore().put", () => {
     }>;
     expect(rows).toHaveLength(2);
     for (const [i, finding] of findings.entries()) {
-      // Same input reproduces the function's value — every v1 put row is
+      // invariant: Same input reproduces the function's value — every v1 put row is
       // non-NULL and deterministically derived (AC-21b).
       expect(rows[i]!.fingerprint).not.toBeNull();
       expect(rows[i]!.fingerprint).toBe(computeFindingFingerprint(finding));
@@ -197,7 +197,7 @@ describe("createArtifactStore().put", () => {
 
     const row = db.raw.query("SELECT fingerprint FROM findings").get() as { fingerprint: string | null };
     expect(row.fingerprint).toBe("legacy-hint-42");
-    // passthrough pin: dropping the hint would compute a DIFFERENT value, so
+    // why: passthrough pin: dropping the hint would compute a DIFFERENT value, so
     // a literal match alone could hide a recompute regression.
     expect(row.fingerprint).not.toBe(
       computeFindingFingerprint({ mergeClass: "should-fix", title: "Titled" }),
@@ -207,7 +207,7 @@ describe("createArtifactStore().put", () => {
   test("era semantics: put never backfills historical NULL fingerprints", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    // Simulate a pre-fingerprint era review row (envelope NULL = M1-era) with
+    // note: Simulate a pre-fingerprint era review row (envelope NULL = M1-era) with
     // a NULL-fingerprint finding — the shape put() wrote before the era gate.
     const oldReviewId = crypto.randomUUID();
     db.raw
@@ -223,7 +223,7 @@ describe("createArtifactStore().put", () => {
       )
       .run(crypto.randomUUID(), oldReviewId);
 
-    // A NEW v1 put for a different sha must not touch the era row. The new
+    // invariant: A NEW v1 put for a different sha must not touch the era row. The new
     // finding is HINT-LESS so the row's fingerprint must equal the computed
     // normalized value (S-5 — not merely non-NULL, which the old hint-verbatim
     // bind would also satisfy).
@@ -277,12 +277,12 @@ describe("createArtifactStore().put", () => {
       bot_id: string | null;
       target_id: string | null;
     };
-    // BOTH attribution ids: the tenant read faces bind target_id, so a row
+    // invariant: BOTH attribution ids: the tenant read faces bind target_id, so a row
     // without it would be invisible to every workspace that could have paid
     // for the review.
     expect(perApp.bot_id).toBe(TEST_APP_ID);
     expect(perApp.target_id).toBe(TEST_TARGET_ID);
-    // Historical NULL semantics (pre-per-App rows) are preserved at the
+    // invariant: Historical NULL semantics (pre-per-App rows) are preserved at the
     // column level: an unattributed put is now impossible at the type layer,
     // so the NULL row is asserted via a direct SQL insert (the column stays
     // nullable — zero DDL, AL-24-4).
@@ -306,7 +306,7 @@ describe("createArtifactStore().put", () => {
     await store.put(
       reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "f".repeat(40) }), model: null }),
     );
-    // Positive provider pin (M1 / qc1 S2): the `?? null` bind must not be a
+    // invariant: Positive provider pin (M1 / qc1 S2): the `?? null` bind must not be a
     // hardcoded null — a non-null provider round-trips verbatim.
     await store.put(
       reviewDoc({
@@ -350,7 +350,7 @@ describe("createArtifactStore().put", () => {
       .query("SELECT context_incomplete FROM reviews WHERE head_sha = ?")
       .get("c".repeat(40)) as { context_incomplete: number };
     expect(failed.context_incomplete).toBe(1);
-    // The row's own publishable facts are untouched by the flag.
+    // invariant: The row's own publishable facts are untouched by the flag.
     const envelope = db.raw
       .query("SELECT envelope FROM reviews WHERE head_sha = ?")
       .get("c".repeat(40)) as { envelope: string };
@@ -362,10 +362,10 @@ describe("createArtifactStore().put", () => {
     const store = createArtifactStore(db);
 
     await store.put(reviewDoc({ durationMs: 42_000 }));
-    // A caller that measures nothing (historical / aborted round) omits the
+    // why: A caller that measures nothing (historical / aborted round) omits the
     // field: the 15th bind must land NULL rather than a fabricated 0.
     await store.put(reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "d".repeat(40) }) }));
-    // A zero clock is a measurement too: it persists as 0, so 0 / N / absent
+    // invariant: A zero clock is a measurement too: it persists as 0, so 0 / N / absent
     // are three distinct rows.
     await store.put(
       reviewDoc({ key: idemKey({ ...KEY_TUPLE, head_sha: "e".repeat(40) }), durationMs: 0 }),
@@ -389,10 +389,10 @@ describe("createArtifactStore().put", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    // The bot_id FK (migration 0005) makes an unknown appId a loud batch
+    // invariant: The bot_id FK (migration 0005) makes an unknown appId a loud batch
     // failure — never a silently mis-attributed row (the batch rolls back).
     await expect(store.put(reviewDoc({ appId: "no-such-app" }))).rejects.toThrow(/FOREIGN KEY/);
-    // The target_id FK does the same for the tenant half.
+    // invariant: The target_id FK does the same for the tenant half.
     await expect(store.put(reviewDoc({ targetId: "no-such-target" }))).rejects.toThrow(/FOREIGN KEY/);
 
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 0 });
@@ -412,7 +412,7 @@ describe("createArtifactStore().put", () => {
     expect(reviews.n).toBe(1);
     const findings = db.raw.query("SELECT COUNT(*) AS n FROM findings").get() as { n: number };
     expect(findings.n).toBe(1);
-    // The retry's payload must NOT overwrite the first-written row.
+    // invariant: The retry's payload must NOT overwrite the first-written row.
     const row = db.raw.query("SELECT verdict, summary_md FROM reviews").get() as {
       verdict: string;
       summary_md: string;
@@ -503,7 +503,7 @@ describe("createArtifactStore().put", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    // "status" / "snapshot" / "residuals" were retired from the engine
+    // note: "status" / "snapshot" / "residuals" were retired from the engine
     // ArtifactKind union in 4.0.0; the cast keeps this fail-closed guard
     // tested for untyped callers that can still reach the adapter.
     const retiredKinds = ["status", "snapshot", "residuals"] as unknown as ArtifactKind[];
@@ -518,7 +518,7 @@ describe("createArtifactStore().put", () => {
 
   test("a findings failure mid-batch rolls back the review row (atomic put)", async () => {
     const db = createSeededTestD1();
-    // Inject a failure on the SECOND findings insert (title 'boom') to prove
+    // why: Inject a failure on the SECOND findings insert (title 'boom') to prove
     // the review row written earlier in the same batch is rolled back too —
     // a partial review must never survive (review I1, absorbed).
     db.raw.exec(
@@ -557,7 +557,7 @@ describe("createArtifactStore().put — optional summary", () => {
   test("a review whose envelope carries no summary persists, with summary_md NULL", async () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
-    // Engine 4.1.6 no longer fabricates a summary, so the key is absent on a
+    // why: Engine 4.1.6 no longer fabricates a summary, so the key is absent on a
     // seat that wrote none. D1 rejects `undefined` in a bind list, which would
     // lose the whole row rather than just the column.
     const { summary_md: _omitted, ...noSummary } = payload();
@@ -579,7 +579,7 @@ describe("createArtifactStore().put — publication round", () => {
     const rows = db.raw
       .query("SELECT head_sha, round FROM reviews ORDER BY round")
       .all() as Array<{ head_sha: string; round: number | null }>;
-    // Rows written before migration 0050 keep the column NULL; the detail
+    // note: Rows written before migration 0050 keep the column NULL; the detail
     // read falls back to the reviewed_at ordinal for them.
     expect(rows).toEqual([
       { head_sha: "a".repeat(40), round: null },
@@ -617,16 +617,16 @@ describe("createArtifactStore().put — publication round", () => {
     });
     const doc = reviewDoc({ payload: twoFindings });
 
-    // The unguarded `put` path is the one no other test drives at the
+    // why: The unguarded `put` path is the one no other test drives at the
     // statement level: both finding INSERTs share ONE batch with the review.
     await store.put(doc);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 2 });
     expect(db.raw.query("SELECT COUNT(DISTINCT review_id) AS n FROM findings").get()).toEqual({ n: 1 });
-    // The envelope is readable back through the stored row.
+    // note: The envelope is readable back through the stored row.
     expect(await store.get({ kind: "review", key: KEY })).toEqual(twoFindings);
 
-    // A repeat write is a no-op at both levels (review id, finding ids).
+    // invariant: A repeat write is a no-op at both levels (review id, finding ids).
     await store.put(doc);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 2 });
@@ -662,7 +662,7 @@ describe("createArtifactStore().get", () => {
       .run(SHA);
 
     expect(await store.get<MstarReviewV1>({ kind: "review", key: KEY })).toBeUndefined();
-    // The M1 row is still visible to the consumer pre-check (dedup covers it).
+    // invariant: The M1 row is still visible to the consumer pre-check (dedup covers it).
     expect(await store.findByIdempotencyKey(KEY_TUPLE)).not.toBeNull();
   });
 
@@ -670,7 +670,7 @@ describe("createArtifactStore().get", () => {
     const db = createSeededTestD1();
     const store = createArtifactStore(db);
 
-    // "status" is retired from the engine ArtifactKind union in 4.0.0; the
+    // note: "status" is retired from the engine ArtifactKind union in 4.0.0; the
     // cast keeps this fail-closed guard tested for untyped callers.
     const retiredKind = "status" as unknown as ArtifactKind;
     await expect(store.get({ kind: retiredKind, key: "root" })).rejects.toThrow(/"status" is not served/);

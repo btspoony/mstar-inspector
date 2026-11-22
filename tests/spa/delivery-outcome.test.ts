@@ -1,5 +1,4 @@
-/**
- * F-05: the delivery `outcome` vocabulary is localized on both
+/** note: F-05: the delivery `outcome` vocabulary is localized on both
  * health surfaces. Pins the shared label map (known values →
  * apps.health.outcome.*, unknown → raw fail-visible), the both-locale
  * dictionary copy, and the source contract on each surface (no raw outcome
@@ -12,7 +11,7 @@ import { join } from "node:path";
 import { deliveryOutcomeLabel } from "../../src/spa/delivery-outcome";
 
 const appsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx"), "utf8");
-// The delivery log moved off the bot settings page into the App detail's
+// note: The delivery log moved off the bot settings page into the App detail's
 // 投递状态 tab, so the tab is the second reader that must label through the map.
 const deliveryTab = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDeliveryTab.tsx"), "utf8");
 
@@ -39,7 +38,7 @@ describe("deliveryOutcomeLabel", () => {
 describe("outcome surfaces (F-05)", () => {
   test("AppsPage labels the latest delivery outcome through the shared map", () => {
     expect(appsPage).toContain("deliveryOutcomeLabel(latest.outcome, locale)");
-    // The raw interpolation this task replaced must not come back.
+    // invariant: The raw interpolation this task replaced must not come back.
     expect(appsPage).not.toContain("${latest.outcome}");
     expect(appsPage).toContain('../delivery-outcome');
   });

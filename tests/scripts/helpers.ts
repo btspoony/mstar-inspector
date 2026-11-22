@@ -1,5 +1,5 @@
 /**
- * Shared fixtures for release-script unit tests (D11).
+ * why: Shared fixtures for release-script unit tests (D11).
  *
  * The scripts take an explicit `root` so tests run against throwaway temp
  * dirs — no chdir, no touching the real checkout's `.changes/`, changelogs,

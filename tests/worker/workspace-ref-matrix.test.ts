@@ -1,5 +1,4 @@
-/**
- * The workspace ref matrix (workspace URL identifiers, 2026-10 — I-000059).
+/** note: The workspace ref matrix (workspace URL identifiers, 2026-10 — I-000059).
  *
  * Six ref shapes × the two request surfaces that RESOLVE a workspace
  * server-side: an HTML navigation to a dashboard-rendered page (which answers a
@@ -32,7 +31,7 @@ import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
 
 const SESSION_SECRET = ["test", "ref", "matrix", "session", "32-bytes!"].join("-");
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
 function envFor(db: TestD1): Env {
@@ -98,8 +97,7 @@ function seedMembership(db: TestD1, workspaceId: string, userId: string): void {
   );
 }
 
-/**
- * The App's immutable GitHub App id (D0) — the detail routes address the App by
+/** note: The App's immutable GitHub App id (D0) — the detail routes address the App by
  * this, never by its local webhook path. Deterministic per workspace so the
  * path builder can name it without threading a read through the case table.
  */
@@ -115,7 +113,7 @@ function githubAppIdOf(workspaceId: string): number {
   return id;
 }
 
-/** An App plus its workspace mapping; the label is derived from the workspace id. */
+/** note: An App plus its workspace mapping; the label is derived from the workspace id. */
 function seedApp(db: TestD1, workspaceId: string): void {
   const slug = `${workspaceId}-app`;
   const now = new Date().toISOString();
@@ -136,8 +134,7 @@ function seedApp(db: TestD1, workspaceId: string): void {
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", `app-${workspaceId}`, workspaceId);
 }
 
-/**
- * One login (`dana`) owns EVERY workspace seeded here and every one carries a
+/** note: One login (`dana`) owns EVERY workspace seeded here and every one carries a
  * mapped App, so a 404 in the hidden cells can only come from the ref
  * resolution — never from a missing membership or App. The ambiguous pair is
  * `dup`: workspace `ws_dup` carries the slug `dup`, workspace `dup` carries the
@@ -161,12 +158,12 @@ function refFixture(): TestD1 {
   return db;
 }
 
-/** The two surfaces that resolve a workspace server-side. */
+/** note: The two surfaces that resolve a workspace server-side. */
 function surfaces() {
   return [
     {
       surface: "HTML dashboard read",
-      // A dashboard-rendered page: the tenant gate resolves the ref, then the
+      // note: A dashboard-rendered page: the tenant gate resolves the ref, then the
       // member gate answers the page or the styled 404.
       path: (ref: string, workspaceId: string) =>
         `/dashboard/${ref}/apps/${githubAppIdOf(workspaceId)}/onboarding`,
@@ -174,7 +171,7 @@ function surfaces() {
     },
     {
       surface: "API read",
-      // Same signature as the HTML surface so one call site drives both; the
+      // note: Same signature as the HTML surface so one call site drives both; the
       // API read names no resource, only the workspace.
       path: (ref: string, _workspaceId: string) => `/dashboard/${ref}/api/apps`,
       accept: "application/json",
@@ -184,12 +181,12 @@ function surfaces() {
 
 type RefCase = {
   shape: string;
-  /** Every ref that names this shape; a shape may have more than one form. */
+  /** note: Every ref that names this shape; a shape may have more than one form. */
   refs: readonly string[];
-  /** The workspace whose App the HTML detail path names — never a missing App. */
+  /** invariant: The workspace whose App the HTML detail path names — never a missing App. */
   workspaceId: string;
   status: 200 | 404;
-  /** Structured `workspace_ref_ambiguous` lines expected per request. */
+  /** note: Structured `workspace_ref_ambiguous` lines expected per request. */
   ambiguousWarns: 0 | 1;
 };
 
@@ -218,7 +215,7 @@ describe("workspace ref matrix — six ref shapes × two resolving surfaces", ()
   for (const { surface, path, accept } of surfaces()) {
     test(`${surface}: serves id, slug and slug=id; unknown, soft-deleted and two-row are the same 404`, async () => {
       const db = refFixture();
-      // Premise of the two-row cell: BOTH rows exist and BOTH grant `dana`
+      // note: Premise of the two-row cell: BOTH rows exist and BOTH grant `dana`
       // access, so picking one would have answered 200.
       const ambiguousRows = db.raw
         .query("SELECT COUNT(*) AS n FROM workspaces WHERE id = 'dup' OR slug = 'dup'")
@@ -258,7 +255,7 @@ describe("workspace ref matrix — six ref shapes × two resolving surfaces", ()
           }
         }
       }
-      // One body for every hidden shape and every hidden ref form: the 404
+      // note: One body for every hidden shape and every hidden ref form: the 404
       // cannot tell an id-addressed from a slug-addressed miss.
       expect(new Set(hiddenBodies).size, surface).toBe(1);
     });
@@ -276,7 +273,7 @@ describe("workspace ref matrix — six ref shapes × two resolving surfaces", ()
     };
     const byId = await read("ws-acme");
     const bySlug = await read("acme");
-    // The list row carries GitHub's slug and the immutable App id — never the
+    // invariant: The list row carries GitHub's slug and the immutable App id — never the
     // local webhook path (D6).
     expect(byId.apps.map((app) => app.github_slug)).toEqual(["ws-acme-app"]);
     expect(byId.apps.map((app) => app.github_app_id)).toEqual([githubAppIdOf("ws-acme")]);

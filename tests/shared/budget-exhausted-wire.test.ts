@@ -1,5 +1,5 @@
 /**
- * mstar.review-budget-exhausted/v1 signal guard — the fail-closed gate the
+ * why: mstar.review-budget-exhausted/v1 signal guard — the fail-closed gate the
  * Worker parses runner stdout with before it may classify a run as a
  * terminal budget stop.
  *
@@ -28,7 +28,7 @@ describe("isReviewBudgetExhaustedSignal", () => {
 
   test("rejects a document whose schema tag is missing", () => {
     const { schema: _schema, ...noTag } = SIGNAL;
-    // Counts alone prove nothing: without the literal the document is
+    // why: Counts alone prove nothing: without the literal the document is
     // unrelated stdout that happens to carry two numbers.
     expect(isReviewBudgetExhaustedSignal(noTag)).toBe(false);
   });
@@ -47,7 +47,7 @@ describe("isReviewBudgetExhaustedSignal", () => {
   });
 
   test("rejects an inherited-name key parsed from stdout JSON", () => {
-    // `constructor` is a name the `in` operator resolves through Object's
+    // why: `constructor` is a name the `in` operator resolves through Object's
     // prototype: an own-key check must see it as an EXTRA document key, not a
     // member of the allowed set.
     const forged = JSON.parse(
@@ -57,7 +57,7 @@ describe("isReviewBudgetExhaustedSignal", () => {
   });
 
   test("rejects a required field that exists only on the prototype", () => {
-    // Own keys alone prove nothing: `Object.keys` sees no extra keys on a
+    // why: Own keys alone prove nothing: `Object.keys` sees no extra keys on a
     // document whose fields ride the prototype, and property reads traverse
     // it — so each required field must be demanded as an OWN property.
     for (const field of ["schema", "seatsDispatched", "seatsStopped"] as const) {

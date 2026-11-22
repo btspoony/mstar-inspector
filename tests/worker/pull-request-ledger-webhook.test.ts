@@ -1,5 +1,4 @@
-/**
- * PR ledger on the per-App webhook face (migration 0039).
+/** note: PR ledger on the per-App webhook face (migration 0039).
  *
  * Every VERIFIED, non-reject `pull_request` delivery records its PR — including
  * an `ignore` (an action that does not auto-trigger in the App's mode), which is
@@ -36,7 +35,7 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
       await box.encryptSecret(SECRET, `github_apps.webhook_secret_enc:${id}`),
     );
   db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
-  // The trigger mode the delivery is classified under lives on the target.
+  // note: The trigger mode the delivery is classified under lives on the target.
   db.raw
     .prepare(
       `INSERT INTO review_targets
@@ -45,7 +44,7 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
        VALUES (?, 'default', ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
     .run(`target-${id}`, id, id, 5000, "btspoony", "mstar-inspector", mode);
-  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // note: The route's operating switch: ON here (the acceptance gate is OFF by
   // default per spec § Deployment gate; this suite exercises the ledger).
   db.raw
     .prepare(
@@ -62,7 +61,7 @@ function makeEnv(db: unknown): Env {
     REVIEW_QUEUE: { send: mock(async () => {}) } as never,
     DB: db as never,
     DASHBOARD_ENCRYPTION_KEY: TEST_KEY,
-    // Self-hosted: the shared-bot capability is unconditional in this mode, so
+    // note: Self-hosted: the shared-bot capability is unconditional in this mode, so
     // these ledger cases carry no plan fixture of their own.
     DEPLOYMENT_MODE: "self-hosted",
   };
@@ -80,7 +79,7 @@ const PR_PAYLOAD = {
     head: { sha: "abc123" },
     user: { login: "btspoony" },
   },
-  // The fixture target's repository identity (migration 0067).
+  // note: The fixture target's repository identity (migration 0067).
   repository: { id: 5000, name: "mstar-inspector", owner: { login: "btspoony" } },
 };
 
@@ -120,7 +119,7 @@ describe("pull_request delivery → PR ledger", () => {
 
   test("an `ignore` delivery still records the PR (mode blocks the auto face)", async () => {
     const db = createMigratedTestD1();
-    // `manual` mode never auto-triggers a pull_request → classifier ignores.
+    // invariant: `manual` mode never auto-triggers a pull_request → classifier ignores.
     const appId = await seedApp(db, "manual");
     const res = await deliver(appId, PR_PAYLOAD, makeEnv(db));
     expect(res.status).toBe(200);
@@ -151,7 +150,7 @@ describe("pull_request delivery → PR ledger", () => {
       },
       makeEnv(db),
     );
-    // A replayed / out-of-order `opened` for the same PR.
+    // note: A replayed / out-of-order `opened` for the same PR.
     await deliver(
       appId,
       { ...PR_PAYLOAD, action: "opened", pull_request: { ...PR_PAYLOAD.pull_request, updated_at: "2026-02-01T00:00:00Z" } },
@@ -163,7 +162,7 @@ describe("pull_request delivery → PR ledger", () => {
   test("an unparsable updated_at is dropped by the caller, not swallowed by datetime()", async () => {
     const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
-    // `datetime('not-a-timestamp')` yields NULL, which used to be hidden by a
+    // note: `datetime('not-a-timestamp')` yields NULL, which used to be hidden by a
     // COALESCE inside the SQL. The caller now filters it, so the store takes
     // its OWN explicit "no usable stamp" branch and `last_seen_at` is never
     // NULL.
@@ -177,13 +176,13 @@ describe("pull_request delivery → PR ledger", () => {
     );
     const row = ledger(db, appId)[0]!;
     expect(row.last_seen_at).not.toBeNull();
-    // The leg the consumer's fail-open rule rides on: a junk stamp must NOT
+    // invariant: The leg the consumer's fail-open rule rides on: a junk stamp must NOT
     // become a readable watermark, or the skip could accept it and ack the
     // PR's only review. `head_sha` is present on this delivery, so a non-NULL
     // `head_at` could only come from a fallback that invented a clock.
     expect(row.head_sha).toBe("abc123");
     expect(row.head_at).toBeNull();
-    // Same field on the queued job: omitted, never degraded to a clock.
+    // invariant: Same field on the queued job: omitted, never degraded to a clock.
     expect(sent).toHaveLength(1);
     expect("head_at" in sent[0]!).toBe(false);
   });
@@ -209,7 +208,7 @@ describe("pull_request delivery → PR ledger", () => {
   test("a rejected payload records nothing", async () => {
     const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
-    // 401 — the signature does not verify, so the classifier rejects before
+    // why: 401 — the signature does not verify, so the classifier rejects before
     // any ledger write.
     const body = JSON.stringify(PR_PAYLOAD);
     const res = await worker.fetch(
@@ -233,7 +232,7 @@ describe("pull_request delivery → PR ledger", () => {
       warns.push(typeof line === "string" ? line : JSON.stringify(line));
     };
     try {
-      // A delivery with NO repository cannot name a target (migration 0067: a
+      // note: A delivery with NO repository cannot name a target (migration 0067: a
       // target IS a repository), so nothing can be attributed: the delivery is
       // ignored and the ledger stays empty for it.
       const res = await deliver(
@@ -252,7 +251,7 @@ describe("pull_request delivery → PR ledger", () => {
   test("a store failure logs a warn and leaves the HTTP status untouched", async () => {
     const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
-    // Drop the ledger table under the route: the upsert throws, the response
+    // note: Drop the ledger table under the route: the upsert throws, the response
     // must not change — and the failure must still be visible in the log,
     // because "the ledger recorded nothing" and "the ledger could not record"
     // are different diagnoses and the caller only sees the response.

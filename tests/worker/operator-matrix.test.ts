@@ -1,5 +1,4 @@
-/**
- * The platform-operator support work (2026-10) — the operator matrix.
+/** note: The platform-operator support work (2026-10) — the operator matrix.
  *
  * One executable table of (actor × surface) cells. The actors are the gate's
  * four workspace principals — `member`, `operator-granted`, `operator-denied`,
@@ -26,8 +25,7 @@ import { insertSupportGrant } from "../../src/dashboard/operator-store";
 const SESSION_SECRET = ["test", "operator", "matrix", "secret", "32-bytes!"].join("-");
 const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/**
- * The mixed-case login of the operator's users row and session. The allowlist
+/** note: The mixed-case login of the operator's users row and session. The allowlist
  * names it lowercase and the grant row stores it lowercase too, so the NOCASE
  * compare is load-bearing on both sides: a case-sensitive gate would classify
  * this caller as an outsider.
@@ -36,9 +34,9 @@ const OPERATOR = "Support-Bot";
 const OPERATOR_KEY = OPERATOR.toLowerCase();
 const DAY = 24 * 60 * 60 * 1000;
 const WORKSPACE = "ws-acme";
-/** The workspace's slug — the ref every surface below is addressed by. */
+/** note: The workspace's slug — the ref every surface below is addressed by. */
 const REF = "acme";
-/** The fixture App's immutable GitHub App id — the App surfaces' own ref (D0). */
+/** note: The fixture App's immutable GitHub App id — the App surfaces' own ref (D0). */
 const APP_ID = 7001;
 
 function envFor(db: TestD1): Env {
@@ -119,14 +117,14 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
              'dana', 'active', ?, ?)`,
     id,
     slug,
-    // A fixed, unique github_app_id — the fixture is read-only on this column.
+    // invariant: A fixed, unique github_app_id — the fixture is read-only on this column.
     7001,
     slug,
     now,
     now,
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
-  // Every bot owns one target — the settings surface's review configuration.
+  // note: Every bot owns one target — the settings surface's review configuration.
   seed(
     db,
     `INSERT INTO review_targets
@@ -141,8 +139,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   );
 }
 
-/**
- * Grant `operatorLogin` on `ws-acme` for one day from now. The caller's own
+/** note: Grant `operatorLogin` on `ws-acme` for one day from now. The caller's own
  * grant is written in the LOWERCASE form the allowlist uses, so the NOCASE
  * compare in `hasValidGrant` and in the support-view projection is exercised.
  */
@@ -158,8 +155,7 @@ function grant(db: TestD1, operatorLogin = OPERATOR_KEY): Promise<unknown> {
   });
 }
 
-/**
- * Two workspaces, one App, one plain member (`mallory`), its owner (`dana`),
+/** note: Two workspaces, one App, one plain member (`mallory`), its owner (`dana`),
  * a signed-in login with no membership and no allowlist entry (`stranger`),
  * and the listed operator with no membership anywhere.
  */
@@ -181,8 +177,7 @@ function fixture() {
 const auditCount = (db: TestD1): number =>
   (db.raw.query("SELECT COUNT(*) AS n FROM audit_events").get() as { n: number }).n;
 
-/**
- * Every audit action in WRITE order. `created_at` is a same-millisecond ISO
+/** note: Every audit action in WRITE order. `created_at` is a same-millisecond ISO
  * string for requests inside one test, so it ties constantly; `rowid` is the
  * insertion order and the only deterministic tiebreak (ordering by the random
  * UUID `id` was sampling luck, not order).
@@ -192,25 +187,24 @@ const auditActions = (db: TestD1): string[] =>
     action: string;
   }>).map((row) => row.action);
 
-/** The four principals the workspace gate classifies, and the login each uses. */
+/** note: The four principals the workspace gate classifies, and the login each uses. */
 type Actor = "member" | "granted" | "denied" | "outsider";
 const ACTORS: readonly Actor[] = ["member", "granted", "denied", "outsider"];
 
-/** One workspace face, with the status and audit row each actor gets. */
+/** note: One workspace face, with the status and audit row each actor gets. */
 type Surface = {
   name: string;
   method?: "GET" | "POST";
   path: string;
-  /** The form a write needs to reach its authorization check, not its parse error. */
+  /** note: The form a write needs to reach its authorization check, not its parse error. */
   body?: (memberId: string) => string;
-  /** Status the gate + handler answer for each actor. */
+  /** note: Status the gate + handler answer for each actor. */
   status: Record<Actor, number>;
-  /** The one audit row each operator actor's request must add; members/outsiders add none. */
+  /** invariant: The one audit row each operator actor's request must add; members/outsiders add none. */
   action: Partial<Record<Actor, string>>;
 };
 
-/**
- * The matrix. `metadata` is the operator's support view, which refuses a
+/** note: The matrix. `metadata` is the operator's support view, which refuses a
  * member (they read the same facts through the members face) — that 403 is a
  * route rule, not the operator ceiling.
  *
@@ -303,7 +297,7 @@ describe("operator matrix (actor × surface)", () => {
         expect(auditCount(db) - before, `${actor} × ${surface.name} audit rows`).toBe(
           expected === undefined ? 0 : 1,
         );
-        // Every cell names its own audit action: the gate writes before
+        // invariant: Every cell names its own audit action: the gate writes before
         // dispatch, so the row is the attempt, not the handler's outcome.
         expect(auditActions(db).slice(before), `${actor} × ${surface.name} audit action`).toEqual(
           expected === undefined ? [] : [expected],

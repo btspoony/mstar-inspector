@@ -1,5 +1,4 @@
-/**
- * The console's locale plumbing: `main.tsx` reads
+/** note: The console's locale plumbing: `main.tsx` reads
  * `boot.locale`, renders the header/nav shell through `t(locale, …)`, and
  * threads the locale into every screen.
  *
@@ -24,10 +23,10 @@ type Mounted = {
   cleanup: () => void;
 };
 
-/** Boot the console document with `boot`, stub the flags read, render App. */
+/** note: Boot the console document with `boot`, stub the flags read, render App. */
 async function mountApp(boot: SpaBoot): Promise<Mounted> {
   const { win, cleanup } = installDom("http://localhost/_internal_admin/flags");
-  // installDom makes the happy-dom window the global `window`; readBoot() reads
+  // note: installDom makes the happy-dom window the global `window`; readBoot() reads
   // `window.__BOOT__`, so this is the same channel the Worker's injection uses.
   const bootHost = globalThis as { window?: { __BOOT__?: SpaBoot } };
   bootHost.window!.__BOOT__ = boot;
@@ -61,7 +60,7 @@ function switchForm(container: HTMLElement): HTMLFormElement {
   return form;
 }
 
-/** The hidden `locale` input of the switch form. */
+/** note: The hidden `locale` input of the switch form. */
 function localeInput(form: HTMLFormElement): HTMLInputElement {
   const input = form.querySelector('input[name="locale"]');
   if (!(input instanceof HTMLInputElement)) throw new Error("locale input missing");
@@ -81,7 +80,7 @@ describe("admin App locale plumbing", () => {
     expect(text).toContain("工作区");
     expect(text).toContain("用户");
     expect(text).toContain("支持访问");
-    // The switch offers the OTHER locale.
+    // note: The switch offers the OTHER locale.
     const form = switchForm(container);
     expect(form.method).toBe("post");
     expect(localeInput(form).value).toBe("en");

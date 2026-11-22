@@ -1,5 +1,5 @@
 /**
- * Migration 0067: a review target is keyed by repository, not by installation.
+ * why: Migration 0067: a review target is keyed by repository, not by installation.
  *
  * The interesting halves are what the file must ADD and what it must REMOVE.
  * Added: the repository identity columns, the workspace defaults a target can
@@ -19,7 +19,7 @@ import { applyMigrations } from "../helpers/migration-shapes";
 const MIGRATION = "0067_repo_target_identity.sql";
 const PREVIOUS = "0066_usage_events_month_rp_index.sql";
 
-/** Every migration up to and including 0066 — the shape the file applies over. */
+/** note: Every migration up to and including 0066 — the shape the file applies over. */
 const BEFORE = migrationsAfter(2).filter((name) => migrationNumber(name) <= migrationNumber(PREVIOUS));
 
 function columns(db: TestD1, table: string): Array<{ name: string; notnull: number; dflt_value: string | null }> {
@@ -47,7 +47,7 @@ function indexNames(db: TestD1): Set<string> {
 }
 
 /**
- * A 0066-shaped database carrying one target in the OLD shape (installation
+ * note: A 0066-shaped database carrying one target in the OLD shape (installation
  * bound, allowlist enabled, one allowlisted owner) and one in-flight claim.
  * The ids are stable so the assertions can name them.
  */
@@ -90,7 +90,7 @@ describe("migration 0067: repository-keyed review targets", () => {
     expect(names).toEqual(expect.arrayContaining(["repo_id", "repo_owner", "repo_name", "follow_workspace_defaults"]));
     expect(names).not.toEqual(expect.arrayContaining(["installation_id", "account_login", "allowlist_enabled"]));
 
-    // The migrated row is unclaimed and keeps its own configuration: no
+    // invariant: The migrated row is unclaimed and keeps its own configuration: no
     // backfill, and no live review changes behaviour (J4).
     const row = db.raw
       .query("SELECT repo_id, repo_owner, repo_name, follow_workspace_defaults FROM review_targets WHERE id = 'target-1'")
@@ -102,11 +102,11 @@ describe("migration 0067: repository-keyed review targets", () => {
       follow_workspace_defaults: 0,
     });
 
-    // The installation-keyed machinery and the allowlist rows are gone.
+    // invariant: The installation-keyed machinery and the allowlist rows are gone.
     expect(tableNames(db).has("target_owner_allowlist")).toBe(false);
     const indexes = indexNames(db);
     expect(indexes.has("review_targets_bot_installation")).toBe(false);
-    // 0062's index is renamed (drop + create), never duplicated.
+    // note: 0062's index is renamed (drop + create), never duplicated.
     expect(indexes.has("idx_review_targets_workspace_id")).toBe(false);
     for (const name of [
       "review_targets_workspace_repo",
@@ -119,7 +119,7 @@ describe("migration 0067: repository-keyed review targets", () => {
       expect(indexes.has(name), name).toBe(true);
     }
 
-    // ONE collation: the name index is built NOCASE, so every owner/name
+    // why: ONE collation: the name index is built NOCASE, so every owner/name
     // comparison (resolution, attribution, both gate reads) is a seek.
     const nameIndex = db.raw
       .query("PRAGMA index_xinfo(idx_review_targets_bot_owner_name)")
@@ -145,9 +145,9 @@ describe("migration 0067: repository-keyed review targets", () => {
 
     insert("t-live", 501, null);
     expect(() => insert("t-duplicate", 501, null)).toThrow();
-    // A soft-deleted row may be re-added under the same repository.
+    // note: A soft-deleted row may be re-added under the same repository.
     insert("t-deleted", 501, "2026-02-01T00:00:00.000Z");
-    // An unclaimed row is not a claim on the repository.
+    // note: An unclaimed row is not a claim on the repository.
     insert("t-unclaimed", null, null);
     insert("t-unclaimed-2", null, null);
 
@@ -165,7 +165,7 @@ describe("migration 0067: repository-keyed review targets", () => {
          FROM workspaces WHERE id = 'default'`,
       )
       .get() as Record<string, unknown>;
-    // The gate floor is the pre-existing `check_min_score`, not a fourth column.
+    // invariant: The gate floor is the pre-existing `check_min_score`, not a fourth column.
     expect(defaults).toEqual({
       default_review_trigger_mode: "every_push",
       default_review_level: null,
@@ -219,13 +219,13 @@ describe("migration 0068: one repository, one workspace per bot", () => {
         .run(id, workspaceId, botId, `acme/repo-${id}`, repoId, deletedAt);
 
     insert("t-here", "default", "bot-1", 501);
-    // One repository belongs to one workspace PER BOT: a sibling workspace's
+    // invariant: One repository belongs to one workspace PER BOT: a sibling workspace's
     // row is the same claim.
     expect(() => insert("t-sibling", "other", "bot-1", 501)).toThrow();
-    // Another bot is a separate claim, and a soft-deleted row releases its own.
+    // note: Another bot is a separate claim, and a soft-deleted row releases its own.
     insert("t-other-bot", "other", "bot-2", 501);
     insert("t-released", "other", "bot-1", 501, "2026-02-01T00:00:00.000Z");
-    // An unclaimed row (repo_id NULL) is outside the repository claim.
+    // note: An unclaimed row (repo_id NULL) is outside the repository claim.
     insert("t-unclaimed", "other", "bot-1", null);
     insert("t-unclaimed-2", "default", "bot-3", null);
 
@@ -251,22 +251,22 @@ describe("migration 0068: one repository, one workspace per bot", () => {
         )
         .run(id, workspaceId, botId, `acme/repo-${id}`, repoId, deletedAt);
 
-    // dbAt0066 seeds bot-1's migrated leftover row: the counts below are
+    // note: dbAt0066 seeds bot-1's migrated leftover row: the counts below are
     // that row plus the ones this test inserts.
     // A soft-deleted predecessor releases the repository, so the live row of a
     // SIBLING workspace is the only claim on it.
     insert("t-retired", "default", "bot-1", 501, "2026-02-01T00:00:00.000Z");
     insert("t-live", "other", "bot-1", 501);
-    // The refusal names the claimed columns: bot and repository, no workspace.
+    // note: The refusal names the claimed columns: bot and repository, no workspace.
     expect(() => insert("t-second", "default", "bot-1", 501)).toThrow(
       "UNIQUE constraint failed: review_targets.bot_id, review_targets.repo_id",
     );
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(3);
-    // Unclaimed rows (repo_id NULL) are outside the claim and stack freely.
+    // invariant: Unclaimed rows (repo_id NULL) are outside the claim and stack freely.
     insert("t-unclaimed", "default", "bot-2", null);
     insert("t-unclaimed-2", "other", "bot-2", null);
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(5);
-    // The claim IS the index's `WHERE repo_id IS NOT NULL AND deleted_at IS
+    // invariant: The claim IS the index's `WHERE repo_id IS NOT NULL AND deleted_at IS
     // NULL`: with 0068's index dropped the same duplicate is accepted — this
     // test fails if the index is dropped or narrowed.
     db.raw.exec("DROP INDEX review_targets_bot_repo_unique");

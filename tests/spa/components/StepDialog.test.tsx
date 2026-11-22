@@ -1,5 +1,4 @@
-/**
- * StepDialog — DESIGN.md v0.5 `step-dialog`: the multi-step entry shell on
+/** note: StepDialog — DESIGN.md v0.5 `step-dialog`: the multi-step entry shell on
  * ui/dialog's DialogContent (radius, `shadow-pop` elevation, `sm:max-w-lg`,
  * the spacing-6 padding and the heading-16 / label-12 title and description
  * faces are the primitive's), a label-12 step indicator rendered only past
@@ -61,7 +60,7 @@ describe("StepDialog", () => {
       expect(panel?.textContent).toContain("Connect provider");
       expect(panel?.textContent).toContain("Two steps: endpoint, then key.");
       expect(panel?.textContent).toContain("Endpoint form");
-      // The shell composes the primitive's faces instead of re-spelling them.
+      // note: The shell composes the primitive's faces instead of re-spelling them.
       expect(view.slot("dialog-title")?.textContent).toBe("Connect provider");
       expect(view.slot("dialog-description")?.textContent).toBe(
         "Two steps: endpoint, then key.",
@@ -120,7 +119,7 @@ describe("StepDialog", () => {
     try {
       const footer = view.slot("dialog-footer");
       expect(footer?.textContent).toBe("CancelSave");
-      // The shell states the alignment; the spacing rhythm is the primitive's.
+      // note: The shell states the alignment; the spacing rhythm is the primitive's.
       expect(footer?.className).toContain("justify-end");
     } finally {
       await view.cleanup();

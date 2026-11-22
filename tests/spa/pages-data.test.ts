@@ -1,5 +1,4 @@
-/**
- * Pure page-data parsers and client guards (no DOM runner).
+/** note: Pure page-data parsers and client guards (no DOM runner).
  */
 import { describe, expect, test } from "bun:test";
 import { t } from "../../src/i18n";
@@ -50,11 +49,11 @@ describe("workspace role guard", () => {
   });
 
   test("paused is active + reviews disabled (both wire forms: integer and boolean)", () => {
-    // Integer form: the apps list face (raw store column, dashboard/index.ts).
+    // note: Integer form: the apps list face (raw store column, dashboard/index.ts).
     expect(isPaused({ status: "active", review_enabled: 0 })).toBe(true);
     expect(isPaused({ status: "active", review_enabled: 1 })).toBe(false);
     expect(isPaused({ status: "disabled", review_enabled: 0 })).toBe(false);
-    // Boolean form: the settings face (`review_enabled !== 0` coercion).
+    // note: Boolean form: the settings face (`review_enabled !== 0` coercion).
     expect(isPaused({ status: "active", review_enabled: false })).toBe(true);
     expect(isPaused({ status: "active", review_enabled: true })).toBe(false);
     expect(isPaused({ status: "disabled", review_enabled: false })).toBe(false);
@@ -73,7 +72,7 @@ describe("insights search wiring", () => {
   });
 
   test("the App-addressed read builders are retired with their routes", async () => {
-    // Both read faces moved to target and workspace scopes; only the
+    // invariant: Both read faces moved to target and workspace scopes; only the
     // scoped builders remain, so no module can emit a removed path.
     const data = await import("../../src/spa/pages/data");
     for (const retired of [
@@ -114,11 +113,11 @@ describe("insights search wiring", () => {
       findings_by_severity: [],
       verdict_distribution: [],
       weekly_trend: [],
-      // (window-bucketing contract 2026-09-20): the day-bucket trend grid
+      // note: (window-bucketing contract 2026-09-20): the day-bucket trend grid
       // is REQUIRED like the other aggregations — week-window payloads
       // carry exactly [] (this fixture's shape, window 30 = day window).
       daily_trend: [],
-      // (AD-652): the distribution grid is REQUIRED like the other
+      // note: (AD-652): the distribution grid is REQUIRED like the other
       // aggregations — one realistic day bucket (the store shape: the fixed
       // severity key set zero-filled per bucket).
       findings_distribution: [
@@ -131,7 +130,7 @@ describe("insights search wiring", () => {
       repos: [],
     };
     expect(parseInsights(body)?.reviews_total).toBe(0);
-    // The bucket rows parse verbatim — the stacked charts read these grids
+    // note: The bucket rows parse verbatim — the stacked charts read these grids
     // directly (row-strict guard).
     expect(parseInsights(body)?.findings_distribution).toEqual([
       {
@@ -142,12 +141,12 @@ describe("insights search wiring", () => {
     ]);
     expect(parseInsights({ ...body, repos: ["acme/web"] })?.repos).toEqual(["acme/web"]);
     expect(parseInsights({ reviews_total: 0 })).toBeNull();
-    // repos is opt-in (QC F-001): missing is tolerated (defaults
+    // note: repos is opt-in (QC F-001): missing is tolerated (defaults
     // to undefined on the parsed shape), malformed is rejected.
     expect(parseInsights({ ...body, repos: undefined })?.repos).toBeUndefined();
     expect(parseInsights({ ...body, repos: "acme/web" })).toBeNull();
     expect(parseInsights({ ...body, repos: [1, 2] })).toBeNull();
-    // findings_distribution is NOT opt-in: a missing field (rolled-back
+    // note: findings_distribution is NOT opt-in: a missing field (rolled-back
     // Worker) or any drifted row takes the same null fallback as the other
     // aggregations.
     expect(parseInsights({ ...body, findings_distribution: undefined })).toBeNull();
@@ -170,7 +169,7 @@ describe("insights search wiring", () => {
         ],
       }),
     ).toBeNull();
-    // daily_trend is NOT opt-in either (same AD-652 precedent): a missing
+    // note: daily_trend is NOT opt-in either (same AD-652 precedent): a missing
     // field (rolled-back Worker) or a drifted row takes the null fallback.
     expect(parseInsights({ ...body, daily_trend: undefined })).toBeNull();
     expect(parseInsights({ ...body, daily_trend: [{ day_start: 3, reviews: 0, findings: 0 }] })).toBeNull();
@@ -192,17 +191,17 @@ describe("members/apps/settings parsers", () => {
       workspace,
       members: [row],
     });
-    // An off-vocabulary role fails the parse instead of rendering it.
+    // note: An off-vocabulary role fails the parse instead of rendering it.
     expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [{ ...row, role: "adminx" }] })).toBeNull();
     expect(parseMembers({ viewer: { role: "owner" }, workspace, members: [{ github_login: "octocat" }] })).toBeNull();
-    // No viewer role = not a members payload (a non-member cannot get here).
+    // note: No viewer role = not a members payload (a non-member cannot get here).
     expect(parseMembers({ members: [row] })).toBeNull();
-    // A rolled-back Worker without the summary fails instead of inventing limits.
+    // note: A rolled-back Worker without the summary fails instead of inventing limits.
     expect(parseMembers({ viewer: { role: "owner" }, members: [row] })).toBeNull();
     expect(
       parseMembers({ viewer: { role: "owner" }, workspace: { plan: { id: "free" }, memberLimit: 5 }, members: [row] }),
     ).toBeNull();
-    // The pending count is required too: a partial summary never renders.
+    // invariant: The pending count is required too: a partial summary never renders.
     expect(
       parseMembers({
         viewer: { role: "owner" },
@@ -220,14 +219,14 @@ describe("members/apps/settings parsers", () => {
       reviewAttemptsThisMonth: 0,
       pendingInvites: 0,
     };
-    // `null` is the unlimited tier's real value: the summary must parse, not be
+    // invariant: `null` is the unlimited tier's real value: the summary must parse, not be
     // discarded over a field that is present and meaningful.
     expect(parseMembers({ viewer: { role: "owner" }, workspace: unlimited, members: [row] })).toEqual({
       viewer: { role: "owner" },
       workspace: unlimited,
       members: [row],
     });
-    // Absent is still drift, so the field stays required.
+    // why: Absent is still drift, so the field stays required.
     const { memberLimit: _omitted, ...absent } = unlimited;
     expect(parseMembers({ viewer: { role: "owner" }, workspace: absent, members: [row] })).toBeNull();
   });
@@ -241,7 +240,7 @@ describe("members/apps/settings parsers", () => {
       expires_at: "2026-01-08 00:00:00",
     };
     expect(parseInvites({ invites: [row] })).toEqual([row]);
-    // `owner` is never invitable (migration 0028 CHECK domain).
+    // invariant: `owner` is never invitable (migration 0028 CHECK domain).
     expect(parseInvites({ invites: [{ ...row, role: "owner" }] })).toBeNull();
     expect(parseInvites({ invites: [{ ...row, expires_at: undefined }] })).toBeNull();
     expect(parseInvites({})).toBeNull();
@@ -256,7 +255,7 @@ describe("members/apps/settings parsers", () => {
   test("parseSharedBots is all-or-nothing, and a missing block is the empty list", () => {
     const row = { id: "bot-1", github_slug: "platform-app", name: "Platform", target_count: 2 };
     expect(parseSharedBots([row])).toEqual([row]);
-    // One unusable row invalidates the list: a partially parsed block would
+    // note: One unusable row invalidates the list: a partially parsed block would
     // offer a bot the create route answers 404 for.
     expect(parseSharedBots([row, { id: "", github_slug: null, name: "x", target_count: 0 }])).toEqual([]);
     expect(parseSharedBots([{ ...row, target_count: "2" }])).toEqual([]);
@@ -399,17 +398,17 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
     };
-    // Missing sandbox_image_id (either face) is a contract breach.
+    // note: Missing sandbox_image_id (either face) is a contract breach.
     const { sandbox_image_id: _dropped, ...appWithoutImage } = manageBase.app;
     expect(parseSettings({ ...manageBase, app: appWithoutImage })).toBeNull();
-    // The manage face needs the enabled-entries selector list.
+    // note: The manage face needs the enabled-entries selector list.
     const { sandbox_images: _omitted, ...withoutImages } = manageBase;
     expect(parseSettings(withoutImages)).toBeNull();
-    // Malformed rows (non-string id / non-boolean enabled) are rejected.
+    // note: Malformed rows (non-string id / non-boolean enabled) are rejected.
     expect(parseSettings({ ...manageBase, sandbox_images: [{ id: 7, enabled: true }] })).toBeNull();
     expect(parseSettings({ ...manageBase, sandbox_images: [{ id: "omp", enabled: "yes" }] })).toBeNull();
     expect(parseSettings({ ...manageBase, sandbox_images: "omp" })).toBeNull();
-    // A well-formed list parses and keeps the rows verbatim.
+    // note: A well-formed list parses and keeps the rows verbatim.
     const ok = parseSettings(manageBase);
     expect(ok && ok.can_manage && !ok.blocked && ok.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
   });
@@ -454,23 +453,23 @@ describe("members/apps/settings parsers", () => {
       sandbox_images: [{ id: "omp", enabled: true }],
       installations: [],
     };
-    // Missing mode is a contract breach on the MANAGE face — the control
+    // note: Missing mode is a contract breach on the MANAGE face — the control
     // would render without a current value, so the whole payload fails the
     // parse (sandbox_image_id precedent).
     const { review_trigger_mode: _dropped, ...withoutMode } = base.app;
     expect(parseSettings({ ...base, app: withoutMode })).toBeNull();
-    // An off-vocabulary value (impossible from the DB CHECK, but a drifted
+    // note: An off-vocabulary value (impossible from the DB CHECK, but a drifted
     // worker could serve it) fails the parse instead of rendering a dead
     // selection — never silently coerced to the default.
     expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "whenever" } })).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, review_trigger_mode: "EVERY_PUSH" } })).toBeNull();
-    // Every vocabulary value parses verbatim — the manage face keeps
+    // note: Every vocabulary value parses verbatim — the manage face keeps
     // today's required-field contract.
     for (const mode of REVIEW_TRIGGER_MODES) {
       const manage = parseSettings({ ...base, app: { ...base.app, review_trigger_mode: mode } });
       expect(manage !== null && hasTargetFacts(manage) && manage.app.review_trigger_mode).toBe(mode);
     }
-    // The review depth and the operator default it inherits (migration 0047)
+    // note: The review depth and the operator default it inherits (migration 0047)
     // are the same class of required manager fields; `null` is the inherit
     // face and `default_review_level` is never null.
     const { review_level: _noLevel, ...withoutLevel } = base.app;
@@ -529,42 +528,41 @@ describe("members/apps/settings parsers", () => {
     const ok = parseSettings(base);
     expect(ok && ok.can_manage && !ok.blocked && ok.check_gate).toEqual({ min_score: 90, pass_verdicts: ["ship it", "needs fixes"] });
     expect(ok && ok.can_manage && !ok.blocked && ok.app.github_visibility).toBe("public");
-    // Each new field is REQUIRED on the manage face.
+    // note: Each new field is REQUIRED on the manage face.
     const { check_gate: _noGate, ...withoutGate } = base;
     expect(parseSettings(withoutGate)).toBeNull();
     const { github_visibility: _noVisibility, ...withoutVisibility } = base.app;
     expect(parseSettings({ ...base, app: withoutVisibility })).toBeNull();
-    // Malformed values never reach a control.
+    // invariant: Malformed values never reach a control.
     for (const minScore of [101, -1, 8.5, "80"]) {
       expect(parseSettings({ ...base, check_gate: { ...base.check_gate, min_score: minScore } })).toBeNull();
     }
     expect(parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: "ship it" } })).toBeNull();
-    // Every entry is checked, not just the array shape: one drifted verdict
+    // note: Every entry is checked, not just the array shape: one drifted verdict
     // fails the parse, so the control never offers a value the store rejects.
     expect(
       parseSettings({ ...base, check_gate: { ...base.check_gate, pass_verdicts: ["ship it", "looks fine"] } }),
     ).toBeNull();
-    // An empty set is a legal stored configuration (nothing passes).
+    // invariant: An empty set is a legal stored configuration (nothing passes).
     expect(parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [] } })).not.toBeNull();
-    // An unreadable stored verdict list arrives as explicit `null` — the
+    // note: An unreadable stored verdict list arrives as explicit `null` — the
     // server's honest degradation — and still parses, so the section can
     // render its read-only notice instead of failing the whole face.
     const unreadable = parseSettings({ ...base, check_gate: null });
     expect(unreadable && unreadable.can_manage && !unreadable.blocked && unreadable.check_gate).toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "hidden" } })).toBeNull();
-    // Every verdict the SPA renders round-trips through this parse: the
+    // note: Every verdict the SPA renders round-trips through this parse: the
     // settings control submits exactly these strings back on save.
     for (const verdict of SPA_PR_VERDICTS) {
       const parsed = parseSettings({ ...base, check_gate: { min_score: 80, pass_verdicts: [verdict] } });
       expect(parsed && parsed.can_manage && !parsed.blocked && parsed.check_gate?.pass_verdicts).toEqual([verdict]);
     }
-    // A never-probed App reads as 'unknown' and a failed read as null — both parse.
+    // invariant: A never-probed App reads as 'unknown' and a failed read as null — both parse.
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: "unknown" } })).not.toBeNull();
     expect(parseSettings({ ...base, app: { ...base.app, github_visibility: null } })).not.toBeNull();
   });
 
-  /**
-   * The manager, non-Blocked face as the worker sends it (2026-11-18 shape):
+  /** note: The manager, non-Blocked face as the worker sends it (2026-11-18 shape):
    * the owner allowlist and its overlap flag left with the repository surface,
    * so the wire carries neither and the parse must not require what the server
    * retired.
@@ -618,16 +616,16 @@ describe("members/apps/settings parsers", () => {
   test("parseSettings accepts the manager payloads the worker sends: no allowlist, no owner_overlap", () => {
     const manager = MANAGER_PAYLOAD;
     expect(parseSettings(manager)).toMatchObject({ target_id: "rt-501", check_gate: { min_score: 80 } });
-    // The Blocked branch reads the same target-owned slice and had the same
+    // note: The Blocked branch reads the same target-owned slice and had the same
     // two retired requirements.
     const blocked = { ...manager, blocked: true, blocked_reason: "bot_not_shared" };
     expect(parseSettings(blocked)).toMatchObject({ blocked: true, target_id: "rt-501" });
-    // Genuine drift still fails: the flag and its reason are one invariant.
+    // note: Genuine drift still fails: the flag and its reason are one invariant.
     expect(parseSettings({ ...blocked, blocked_reason: null })).toBeNull();
   });
 
   test("parseSettings requires the share facts on the bot-readable manager face", () => {
-    // The bot page renders its share switch from these two, so a payload that
+    // note: The bot page renders its share switch from these two, so a payload that
     // cannot answer them is not a settings read: absent (the Bot/Blocked faces
     // carry neither) and off-type values both fail instead of rendering a
     // control the server would refuse.
@@ -640,7 +638,7 @@ describe("members/apps/settings parsers", () => {
   });
 
   test("parseReviewUsage accepts the quota block the worker sends: no month inside quota", () => {
-    // Live staging shape (2026-11-18): the quota block carries the RP figures,
+    // note: Live staging shape (2026-11-18): the quota block carries the RP figures,
     // the judging profile and the reset instant; the window label is the
     // payload's top-level `month` and never repeats inside `quota`.
     const usage = {
@@ -660,9 +658,9 @@ describe("members/apps/settings parsers", () => {
       },
     };
     expect(parseReviewUsage(usage)?.quota).toEqual(usage.quota);
-    // The no-limit face: a null ceiling is a real answer, not drift.
+    // note: The no-limit face: a null ceiling is a real answer, not drift.
     expect(parseReviewUsage({ ...usage, quota: { ...usage.quota, limitRp: null } })?.quota?.limitRp).toBeNull();
-    // Genuine drift still fails on a field the card renders.
+    // note: Genuine drift still fails on a field the card renders.
     expect(parseReviewUsage({ ...usage, quota: { ...usage.quota, resetOn: undefined } })).toBeNull();
   });
 
@@ -691,13 +689,13 @@ describe("members/apps/settings parsers", () => {
     const ok = parseSettings(identityBase);
     expect(ok?.can_manage).toBe(false);
     expect(ok && !ok.can_manage && ok.app.created_at).toBe("2026-01-01 00:00:00");
-    // created_at is REQUIRED on the identity face.
+    // note: created_at is REQUIRED on the identity face.
     const { created_at: _dropped, ...withoutCreatedAt } = identityBase.app;
     expect(parseSettings({ ...identityBase, app: withoutCreatedAt })).toBeNull();
-    // GitHub profile fields are nullable but never absent.
+    // invariant: GitHub profile fields are nullable but never absent.
     const { github_name: _droppedName, ...withoutGithubName } = identityBase.app;
     expect(parseSettings({ ...identityBase, app: withoutGithubName })).toBeNull();
-    // The manage-face extras are NOT part of this face: a payload without
+    // note: The manage-face extras are NOT part of this face: a payload without
     // sandbox_image_id / review_trigger_mode / installations / deliveries
     // still parses — the identity set is the whole contract.
     expect(parseSettings(identityBase)).not.toBeNull();
@@ -768,9 +766,9 @@ describe("members/apps/settings parsers", () => {
     expect(parseSettings(withoutEligibility)).toBeNull();
     expect(parseSettings({ ...manageBase, provider_eligibility: { anthropic: "maybe" } })).toBeNull();
     expect(parseSettings({ ...manageBase, provider_catalog_version: "" })).toBeNull();
-    // A configured row without the `kind` discriminator (catalog-shaped) is rejected.
+    // note: A configured row without the `kind` discriminator (catalog-shaped) is rejected.
     expect(parseSettings({ ...manageBase, configured_providers: [{ ...catalogRow }] })).toBeNull();
-    // Key rows need their identity, the masked tail (never plaintext) and the
+    // invariant: Key rows need their identity, the masked tail (never plaintext) and the
     // nullable bookkeeping columns.
     expect(
       parseSettings({
@@ -791,7 +789,7 @@ describe("members/apps/settings parsers", () => {
     expect(
       parseSettings({ ...manageBase, configured_providers: [{ kind: "key", provider: "anthropic" }] }),
     ).toBeNull();
-    // A key row without its identity (the pre-multi-key shape) is rejected —
+    // note: A key row without its identity (the pre-multi-key shape) is rejected —
     // the row could not be deleted or re-verified without it.
     expect(
       parseSettings({
@@ -799,7 +797,7 @@ describe("members/apps/settings parsers", () => {
         configured_providers: [{ kind: "key", provider: "anthropic", last4: "9988", updated_at: null }],
       }),
     ).toBeNull();
-    // Custom declaration rows need base_url/api and a string model list.
+    // note: Custom declaration rows need base_url/api and a string model list.
     expect(
       parseSettings({
         ...manageBase,
@@ -816,14 +814,14 @@ describe("members/apps/settings parsers", () => {
         ],
       }),
     ).toBeNull();
-    // Unknown kinds are rejected — the union is closed.
+    // note: Unknown kinds are rejected — the union is closed.
     expect(
       parseSettings({ ...manageBase, configured_providers: [{ kind: "template", provider_id: "workers-ai" }] }),
     ).toBeNull();
   });
 
   test("parseSettings accepts the identity-only non-manager face (no ops stores, no settings zones)", () => {
-    // SUPERSEDE (App detail IA): can_manage=false now carries ONLY the D4
+    // invariant: SUPERSEDE (App detail IA): can_manage=false now carries ONLY the D4
     // identity set — created_at + the cached public GitHub profile; no
     // installations/deliveries, no sandbox image, no trigger mode.
     const identityApp = {
@@ -853,7 +851,7 @@ describe("members/apps/settings parsers", () => {
     expect(readOnly && "keys" in readOnly).toBe(false);
     expect(readOnly && "sandbox_images" in readOnly).toBe(false);
     expect(readOnly && "installations" in readOnly).toBe(false);
-    // A missing identity field is a contract breach.
+    // note: A missing identity field is a contract breach.
     const { created_at: _dropped, ...withoutCreated } = identityApp;
     expect(parseSettings({
       workspace_id: "ws_0123456789abcdefghijkl",
@@ -863,7 +861,7 @@ describe("members/apps/settings parsers", () => {
       can_manage: false,
       app: withoutCreated,
     })).toBeNull();
-    // can_manage=true without the settings zones is also a breach.
+    // note: can_manage=true without the settings zones is also a breach.
     expect(
       parseSettings({
         can_manage: true,
@@ -905,9 +903,9 @@ describe("model chain tab model", () => {
   });
 
   test("Default is always the first tab — even for an empty or default-less payload", () => {
-    // The empty list still yields the non-removable Default tab.
+    // note: The empty list still yields the non-removable Default tab.
     expect(modelChainTabs([])).toEqual([{ id: "default", isDefault: true, chain: null }]);
-    // Malformed/legacy ordering: named rows only — Default is synthesized first.
+    // invariant: Malformed/legacy ordering: named rows only — Default is synthesized first.
     const tabs = modelChainTabs([entry("alpha", "a/one"), entry("beta", "b/one")]);
     expect(tabs.map((tab) => tab.id)).toEqual(["default", "alpha", "beta"]);
     expect(tabs[0]).toEqual({ id: "default", isDefault: true, chain: null });
@@ -917,7 +915,7 @@ describe("model chain tab model", () => {
   test("a payload row named 'default' collapses into the Default tab and never becomes a named tab", () => {
     const tabs = modelChainTabs([entry("alpha", "a/one"), entry("default", "provider/model")]);
     expect(tabs.map((tab) => tab.id)).toEqual(["default", "alpha"]);
-    // The Default tab's editor consumes the dedicated model_chain field, not the row.
+    // note: The Default tab's editor consumes the dedicated model_chain field, not the row.
     expect(tabs[0]?.chain).toBeNull();
     expect(tabs.some((tab) => tab.id === "default" && !tab.isDefault)).toBe(false);
   });
@@ -933,17 +931,17 @@ describe("model chain tab model", () => {
   test("activeChainTabId coerces a stale or unknown selection to the Default tab", () => {
     const tabs = modelChainTabs([entry("alpha", "a/one")]);
     expect(activeChainTabId(tabs, "alpha")).toBe("alpha");
-    // A deleted chain name (or a blank selection) falls back to Default.
+    // note: A deleted chain name (or a blank selection) falls back to Default.
     expect(activeChainTabId(tabs, "removed-chain")).toBe("default");
     expect(activeChainTabId(tabs, undefined)).toBe("default");
     expect(activeChainTabId(tabs, null)).toBe("default");
     expect(activeChainTabId(tabs, "")).toBe("default");
-    // Even with no named chains the Default tab is a valid selection.
+    // note: Even with no named chains the Default tab is a valid selection.
     expect(activeChainTabId(modelChainTabs([]), "default")).toBe("default");
   });
 
   test("DEFAULT_CHAIN_NAME equals the store's reserved name (duplication lock)", () => {
-    // src/spa/pages/data.ts mirrors src/dashboard/app-config-store.ts across
+    // note: src/spa/pages/data.ts mirrors src/dashboard/app-config-store.ts across
     // the bundle boundary (documented, deliberately not imported): the store
     // rejects the reserved name as a named chain, so a one-sided rename here
     // would silently break tab ids and seat coercion. Same duplication-lock
@@ -1010,30 +1008,30 @@ describe("provider catalog rows + add selection", () => {
   };
 
   test("catalog rows are row-validated on models/verifiable/base_url/api (guards)", () => {
-    // A well-formed row (nullable url/api for builtins) parses.
+    // note: A well-formed row (nullable url/api for builtins) parses.
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
-    // A drifted payload missing `models` must fail the parse — the Add
+    // invariant: A drifted payload missing `models` must fail the parse — the Add
     // Provider UI branches on it, so a partial row can never render.
     const { models: _droppedModels, ...withoutModels } = catalogRow;
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [withoutModels] })).toBeNull();
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, models: "claude-fable-5" }] })).toBeNull();
-    // verifiable decides the form kind — non-boolean is a contract breach.
+    // note: verifiable decides the form kind — non-boolean is a contract breach.
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: "yes" }] })).toBeNull();
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, verifiable: null }] })).toBeNull();
-    // `usage_probe` decides whether the row renders the usage action — a
+    // note: `usage_probe` decides whether the row renders the usage action — a
     // non-boolean stamp is a contract breach, not a silent `false`.
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, usage_probe: "yes" }] })).toBeNull();
-    // base_url / api are string-or-null.
+    // note: base_url / api are string-or-null.
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, base_url: 5 }] })).toBeNull();
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, api: [] }] })).toBeNull();
-    // Review handoff S2: the display-group stamp is word-checked —
+    // note: Review handoff S2: the display-group stamp is word-checked —
     // a row missing `display_group` (the pre-54 route shape) or carrying a
     // stray value fails the parse instead of silently falling out of both
     // picker groups.
     const { display_group: _droppedDisplayGroup, ...withoutDisplayGroup } = catalogRow;
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [withoutDisplayGroup] })).toBeNull();
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...catalogRow, display_group: "builtin" }] })).toBeNull();
-    // The per-model size table (payload `model_limits`) and the snapshot it
+    // note: The per-model size table (payload `model_limits`) and the snapshot it
     // came from are required: the model dialog pre-fills from them, so a row
     // without the table — or with a non-positive/non-integer size — fails.
     const { model_limits: _droppedLimits, ...withoutLimits } = catalogRow;
@@ -1061,9 +1059,9 @@ describe("provider catalog rows + add selection", () => {
       ],
     };
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [merged] })).not.toBeNull();
-    // Absent is the single-protocol shape — the pre-merge rows keep parsing.
+    // note: Absent is the single-protocol shape — the pre-merge rows keep parsing.
     expect(parseProviderCatalog({ ...manageBase, provider_catalog: [catalogRow] })).not.toBeNull();
-    // The add form renders a control per option, so a drifted option fails the
+    // note: The add form renders a control per option, so a drifted option fails the
     // parse instead of reaching a select that cannot materialize it.
     expect(
       parseProviderCatalog({ ...manageBase, provider_catalog: [{ ...merged, protocols: [{ api: "anthropic-messages", base_url: 5, models: ["b"] }] }] }),
@@ -1089,7 +1087,7 @@ describe("provider catalog rows + add selection", () => {
         { api: "anthropic-messages", base_url: "https://api.merged.test/anthropic", models: ["b"] },
       ],
     };
-    // The matching option's list, the row's own as the fallback.
+    // note: The matching option's list, the row's own as the fallback.
     expect(modelsForProtocol(merged, "anthropic-messages")).toEqual(["b"]);
     expect(modelsForProtocol(merged, "openai-completions")).toEqual(["a"]);
     expect(modelsForProtocol(merged, "typesafe")).toEqual(["a"]);
@@ -1108,13 +1106,13 @@ describe("provider catalog rows + add selection", () => {
     };
     const consoleRow: CatalogProvider = { ...catalogRow, id: "azure-openai", verifiable: false };
     const catalog: CatalogProvider[] = [builtinRow, templateRow, consoleRow];
-    // The selection resolves against the catalog; unknown/absent picks → null.
+    // note: The selection resolves against the catalog; unknown/absent picks → null.
     expect(selectedCatalogProvider(catalog, "workers-ai")?.id).toBe("workers-ai");
     expect(selectedCatalogProvider(catalog, "not-in-catalog")).toBeNull();
     expect(selectedCatalogProvider(catalog, undefined)).toBeNull();
     expect(selectedCatalogProvider(catalog, null)).toBeNull();
     expect(selectedCatalogProvider(catalog, "")).toBeNull();
-    // Template entries materialize, verifiable builtins use verify-first,
+    // note: Template entries materialize, verifiable builtins use verify-first,
     // console-only builtins have no in-app form.
     expect(providerFormKind(builtinRow)).toBe("key");
     expect(providerFormKind(templateRow)).toBe("template");
@@ -1159,7 +1157,7 @@ describe("provider catalog rows + add selection", () => {
     const [keyRow, customRow] = rows;
     expect(keyRow).toMatchObject({ kind: "key", provider: "anthropic", last4: "9988" });
     expect(customRow && customRow.kind === "custom" && customRow.provider_id).toBe("workers-ai");
-    // Catalog vocabulary is loaded separately from configured state.
+    // note: Catalog vocabulary is loaded separately from configured state.
     expect(saved).not.toHaveProperty("provider_catalog");
   });
 
@@ -1174,7 +1172,7 @@ describe("provider catalog rows + add selection", () => {
     };
     const second: ProviderKeyRow = { ...first, keyId: "b".repeat(16), last4: "2222" };
     const other: ProviderKeyRow = { ...first, provider: "openai", keyId: "c".repeat(16), last4: "3333" };
-    // The provider's rows come back whole, in payload order — the client map
+    // note: The provider's rows come back whole, in payload order — the client map
     // that used to fold them by provider id dropped the second row.
     expect(providerKeyRows([first, second, other], "anthropic").map((row) => row.keyId)).toEqual([
       first.keyId,
@@ -1194,24 +1192,24 @@ describe("provider catalog rows + add selection", () => {
       verifiedStatus: null,
     };
     expect(parseSettings({ ...manageBase, keys: [keyRow] })).not.toBeNull();
-    // A drifted row (no key identity, no mask) fails the parse instead of
+    // note: A drifted row (no key identity, no mask) fails the parse instead of
     // rendering a row nothing can address.
     const { keyId: _droppedId, ...withoutId } = keyRow;
     expect(parseSettings({ ...manageBase, keys: [withoutId] })).toBeNull();
     expect(parseSettings({ ...manageBase, keys: [{ provider: "anthropic", last4: "1111" }] })).toBeNull();
-    // The verification vocabulary is closed (store-enforced ok|reachable|failed)
+    // note: The verification vocabulary is closed (store-enforced ok|reachable|failed)
     // — an off-vocabulary status fails the parse instead of rendering a state
     // the row can never hold.
     expect(
       parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "maybe" }] }),
     ).toBeNull();
     expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "failed" }] })).not.toBeNull();
-    // `reachable` = the probe only proved the endpoint answered.
+    // invariant: `reachable` = the probe only proved the endpoint answered.
     expect(parseSettings({ ...manageBase, keys: [{ ...keyRow, verifiedStatus: "reachable" }] })).not.toBeNull();
   });
 
   test("a custom pool's key row parses through the same configured key-row guard", () => {
-    // Built-in and custom pools share one row contract: provider + key
+    // note: Built-in and custom pools share one row contract: provider + key
     // identity + mask + per-key verification state (the providers card
     // renders both through ConfiguredKeyRow).
     const customKeyRow = {
@@ -1228,7 +1226,7 @@ describe("provider catalog rows + add selection", () => {
   });
 
   test("removal feedback locates the row by the full (provider, key_id) identity, not the id alone", () => {
-    // Key ids are derived from the plaintext only, so ONE key stored under two
+    // invariant: Key ids are derived from the plaintext only, so ONE key stored under two
     // providers legitimately shares its id. The delete POST carries both, so
     // the feedback slot must match both — an id-only match resolves the FIRST
     // provider's row and renders the outcome beside a row that is still there.
@@ -1262,26 +1260,26 @@ describe("provider catalog rows + add selection", () => {
     ];
     const slot = configuredKeySlot(rows, "openai", shared);
     expect(slot).toBe(1);
-    // …and the row at that slot is the one the POST names.
+    // note: …and the row at that slot is the one the POST names.
     expect(rows[slot]).toMatchObject({ kind: "key", provider: "openai", key_id: shared });
-    // The earlier provider's row keeps its own slot.
+    // note: The earlier provider's row keeps its own slot.
     expect(configuredKeySlot(rows, "anthropic", shared)).toBe(0);
-    // A row the payload no longer holds (or a provider-less id) is not found.
+    // note: A row the payload no longer holds (or a provider-less id) is not found.
     expect(configuredKeySlot(rows, "openai", "b".repeat(16))).toBe(-1);
     expect(configuredKeySlot(rows, "google", shared)).toBe(-1);
-    // The custom declaration's provider_id is never a key handle.
+    // invariant: The custom declaration's provider_id is never a key handle.
     expect(configuredKeySlot(rows, "workers-ai", shared)).toBe(-1);
   });
 
   test("removeChanged reads the remove routes' outcome flag — a no-op never resolves as a change", () => {
-    // The tolerant ops (key delete / custom provider remove) answer the
+    // note: The tolerant ops (key delete / custom provider remove) answer the
     // no-change case as `changed: false`, which the SPA renders as its
     // localized no-change notice instead of the generic "Changes saved.".
     expect(
       removeChanged(JSON.stringify({ changed: false, message: "No stored anthropic key — nothing changed." })),
     ).toBe(false);
     expect(removeChanged(JSON.stringify({ changed: true, message: "Removed the stored anthropic key." }))).toBe(true);
-    // Everything without the flag keeps the caller's default outcome: the
+    // note: Everything without the flag keeps the caller's default outcome: the
     // plain-text 2xx faces (pause/resume/…) and a drifted body included.
     expect(removeChanged("ok")).toBeNull();
     expect(removeChanged("")).toBeNull();
@@ -1319,7 +1317,7 @@ describe("invite grammar + page copy", () => {
 });
 
 describe("review gate verdict mirror", () => {
-  // The browser bundle cannot import the Node-only engine, so the SPA restates
+  // why: The browser bundle cannot import the Node-only engine, so the SPA restates
   // the vocabulary; this pins the copy to the engine tuple, in order.
   //
   // DELIBERATE, not incidental: this pin and the `parseSettings` round-trip

@@ -1,5 +1,5 @@
 /**
- * Secret redaction tests (Phase 5 B2 / SEC-02) — the redaction is applied by
+ * why: Secret redaction tests (Phase 5 B2 / SEC-02) — the redaction is applied by
  * the consumer choke point before any model-produced text can reach the
  * public PR review body or D1 raw_output. Every secret-shaped pattern is
  * replaced with [REDACTED]; plain text passes through untouched.
@@ -322,7 +322,7 @@ describe("redactDocument", () => {
 });
 
 describe("redactReviewOutput", () => {
-  // F-001: EVERY model-controlled string that reaches the public comment or
+  // safety: F-001: EVERY model-controlled string that reaches the public comment or
   // the D1 envelope passes through redactSecrets — including finding
   // title/category/file_path/fingerprint_hint and tally.chatHeader, not
   // just summary_md/finding bodies.
@@ -373,7 +373,7 @@ describe("redactReviewOutput", () => {
     expect(redacted.verdict).toBe("blocked");
   });
 
-  // F-001: the `incomplete` fact is model-controlled text — buildReviewBody
+  // safety: F-001: the `incomplete` fact is model-controlled text — buildReviewBody
   // interpolates `reason` and `unscanned` into the public comment and the
   // consumer stores the same object in D1, so both fields pass this choke
   // point (envelope fact AND its tally echo).
@@ -397,11 +397,11 @@ describe("redactReviewOutput", () => {
 
     const redacted = redactReviewOutput(stopped);
     expect(redacted.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
-    // No entry is trimmed, dropped or reordered: only the secret span goes.
+    // invariant: No entry is trimmed, dropped or reordered: only the secret span goes.
     expect(redacted.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
     expect(redacted.tally!.incomplete!.reason).toBe(`provider key ${REDACTED} expired`);
     expect(redacted.tally!.incomplete!.unscanned).toEqual([`src/auth.ts`, `tools/${REDACTED}/x.ts`]);
-    // The rendered public comment carries the redacted strings only.
+    // invariant: The rendered public comment carries the redacted strings only.
     expect(buildReviewBody(redacted)).not.toContain(token);
   });
 
@@ -462,7 +462,7 @@ describe("redactReviewOutputExact", () => {
     expect(redacted.findings[0]!.title).toBe(clean.findings[0]!.title);
   });
 
-  // F-001: a credential that evades every shape pattern in reason/unscanned
+  // safety: F-001: a credential that evades every shape pattern in reason/unscanned
   // is still removed verbatim, at the envelope fact and its tally echo.
   test("removes the session's actual secret values from the incomplete fact and its tally echo", () => {
     const uuid = "3f2a1b4c-9d8e-4f6a-b7c2-1e0d9a8b7c6d";

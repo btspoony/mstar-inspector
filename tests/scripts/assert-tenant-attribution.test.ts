@@ -1,5 +1,5 @@
 /**
- * The deploy gate's parsing seam (`scripts/assert-tenant-attribution.ts`), one
+ * why: The deploy gate's parsing seam (`scripts/assert-tenant-attribution.ts`), one
  * describe per question it asks.
  *
  * The wrangler invocation is exercised by the workflow, not here: what must
@@ -20,25 +20,25 @@ import {
 } from "../../scripts/assert-tenant-attribution";
 import { createMigratedTestD1, mapAppToDefaultWorkspace, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 
-/** The file both deploy workflows replay: the repair this gate's pointer names. */
+/** note: The file both deploy workflows replay: the repair this gate's pointer names. */
 const REPAIR_SQL = readFileSync(join(import.meta.dir, "../../scripts/workspace-backfill.sql"), "utf8");
 
-/** The wrangler 4.x `--json` shape: one entry per statement. */
+/** note: The wrangler 4.x `--json` shape: one entry per statement. */
 function wranglerJson(n: unknown, success = true): string {
   return JSON.stringify([{ results: [{ n }], success, meta: { changes: 0, last_row_id: 0 } }]);
 }
 
-/** Run the gate's SQL on the migrated schema and feed the answer to the parser. */
+/** note: Run the gate's SQL on the migrated schema and feed the answer to the parser. */
 function verdictFor(sql: string, db: TestD1) {
   return attributionVerdict(wranglerJson(countOf(sql, db)));
 }
 
-/** The second question, executed and parsed the same way. */
+/** note: The second question, executed and parsed the same way. */
 function targetlessFor(db: TestD1) {
   return targetlessVerdict(wranglerJson(countOf(TARGETLESS_BOT_SQL, db)));
 }
 
-/** Read the single `COUNT(*) AS n` row, refusing a shape the query did not produce. */
+/** note: Read the single `COUNT(*) AS n` row, refusing a shape the query did not produce. */
 function countOf(sql: string, db: TestD1): number {
   const row: unknown = db.raw.prepare(sql).get();
   if (typeof row !== "object" || row === null || !("n" in row) || typeof row.n !== "number") {
@@ -96,18 +96,18 @@ describe("attributionVerdict", () => {
   });
 
   test("the query is the column mapping the replay file backfills — executed, not restated", () => {
-    // The independent literal: what the replay file guarantees, expressed in
+    // why: The independent literal: what the replay file guarantees, expressed in
     // the current names (it inserts a `bot_workspaces` row per `review_bots`
     // row that has none). A renamed/aliased/inverted column in ZERO_ORPHAN_SQL
     // breaks the execution below even when the test's expectation is untouched.
     const independent = "SELECT COUNT(*) AS n FROM review_bots WHERE id NOT IN (SELECT bot_id FROM bot_workspaces)";
     const db = createMigratedTestD1();
     try {
-      // no Apps at all: both queries agree on zero
+      // note: no Apps at all: both queries agree on zero
       expect(verdictFor(ZERO_ORPHAN_SQL, db).ok).toBe(true);
       expect(countOf(independent, db)).toBe(0);
 
-      // one mapped App, one App whose workspace row is missing
+      // note: one mapped App, one App whose workspace row is missing
       seedBot(db, "app-mapped", 1);
       seedBot(db, "app-orphan", 2);
       db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-mapped', 'default')").run();
@@ -118,7 +118,7 @@ describe("attributionVerdict", () => {
       expect(orphaned.count).toBe(countOf(independent, db));
       expect(orphaned.message).toContain("workspace-backfill.sql");
 
-      // The shipped replay file, verbatim: the gate goes green and the two
+      // why: The shipped replay file, verbatim: the gate goes green and the two
       // queries still agree.
       db.raw.exec(REPAIR_SQL);
       expect(verdictFor(ZERO_ORPHAN_SQL, db)).toEqual({
@@ -127,7 +127,7 @@ describe("attributionVerdict", () => {
         message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)",
       });
       expect(countOf(independent, db)).toBe(0);
-      // a soft-deleted App still needs its mapping: ownership is not liveness
+      // why: a soft-deleted App still needs its mapping: ownership is not liveness
       db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'app-mapped'").run();
       db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = 'app-mapped'").run();
       expect(verdictFor(ZERO_ORPHAN_SQL, db).count).toBe(1);
@@ -191,7 +191,7 @@ describe("targetlessVerdict", () => {
   });
 
   test("the target-less query runs against the migrated schema — liveness on both sides", () => {
-    // The independent literal: a live bot with no live target. A renamed,
+    // why: The independent literal: a live bot with no live target. A renamed,
     // aliased or de-livened column in TARGETLESS_BOT_SQL breaks the agreement
     // below even when the expectation here is untouched.
     const independent =
@@ -202,7 +202,7 @@ describe("targetlessVerdict", () => {
       expect(targetlessFor(db).ok).toBe(true);
       expect(countOf(independent, db)).toBe(0);
 
-      // A soft-deleted bot owes no target: the question is about live bots.
+      // note: A soft-deleted bot owes no target: the question is about live bots.
       seedBot(db, "bot-live", 1);
       seedBot(db, "bot-gone", 2);
       db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-gone'").run();
@@ -213,7 +213,7 @@ describe("targetlessVerdict", () => {
       expect(targetlessFor(db).ok).toBe(true);
       expect(countOf(independent, db)).toBe(0);
 
-      // A soft-deleted target does not excuse the bot: it is still target-less.
+      // note: A soft-deleted target does not excuse the bot: it is still target-less.
       db.raw.prepare("UPDATE review_targets SET deleted_at = datetime('now') WHERE id = ?").run(targetId);
       expect(targetlessFor(db).count).toBe(1);
       expect(targetlessFor(db).count).toBe(countOf(independent, db));

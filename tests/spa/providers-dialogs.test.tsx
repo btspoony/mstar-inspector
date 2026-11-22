@@ -1,5 +1,4 @@
-/**
- * The three provider dialogs: the two-step Add provider flow,
+/** note: The three provider dialogs: the two-step Add provider flow,
  * the add-key flow of an existing group, and the custom declaration.
  *
  * Mounted, because the panels live in Radix portals and the flows are stateful:
@@ -35,9 +34,9 @@ const catalogEntry = (id: string, overrides: Partial<CatalogProvider> = {}): Cat
 
 const CATALOG: CatalogProvider[] = [
   catalogEntry("anthropic", { label: "Anthropic", display_group: "common" }),
-  // AC-16: a builtin that takes a key only — the console dead end is gone.
+  // invariant: AC-16: a builtin that takes a key only — the console dead end is gone.
   catalogEntry("zai", { label: "Z.AI", display_group: "common" }),
-  // AC-18: the SHIPPED console-only builtins, verbatim from the settings
+  // invariant: AC-18: the SHIPPED console-only builtins, verbatim from the settings
   // payload — builtin tier, not verifiable, and carrying the declaration
   // prefill (protocol + URL shape) the generator emits for them.
   catalogEntry("azure-openai", {
@@ -110,14 +109,13 @@ function managePayload(overrides: Partial<SettingsManagePayload & ProviderManage
   };
 }
 
-/** A promise the test settles by hand, so an in-flight submit is observable. */
+/** note: A promise the test settles by hand, so an in-flight submit is observable. */
 function deferred<T>(): { promise: Promise<T>; settle: (value: T) => void } {
   const { promise, resolve } = Promise.withResolvers<T>();
   return { promise, settle: resolve };
 }
 
-/**
- * The dialog's open state lives with its caller (the providers card), so the
+/** note: The dialog's open state lives with its caller (the providers card), so the
  * harness is the minimal controlled parent — a dialog that closes itself would
  * never be observed through a fixed `open` prop.
  */
@@ -130,7 +128,7 @@ function Opener({
   return factory(open, setOpen);
 }
 
-/** Mount a controlled dialog and hand back the queries the cases drive it with. */
+/** note: Mount a controlled dialog and hand back the queries the cases drive it with. */
 async function mount(factory: (open: boolean, onOpenChange: (open: boolean) => void) => ReactElement) {
   const { win, cleanup: cleanupDom } = installDom("http://localhost/dashboard/acme/apps");
   const container = win.document.createElement("div");
@@ -160,7 +158,7 @@ async function mount(factory: (open: boolean, onOpenChange: (open: boolean) => v
     });
   };
 
-  /** Submit the dialog's form — twice in one flush when `times` is 2. */
+  /** note: Submit the dialog's form — twice in one flush when `times` is 2. */
   const submit = async (times = 1) => {
     const form = dialog()?.querySelector("form");
     await act(async () => {
@@ -170,7 +168,7 @@ async function mount(factory: (open: boolean, onOpenChange: (open: boolean) => v
     });
   };
 
-  /** Open the catalog picker and click the entry whose row names `label`. */
+  /** note: Open the catalog picker and click the entry whose row names `label`. */
   const pick = async (label: string) => {
     await click(dialog()?.querySelector('[role="combobox"]') ?? null);
     const row = [...win.document.querySelectorAll('[role="option"]')].find((option) =>
@@ -232,7 +230,7 @@ describe("AddProviderDialog — step 1 picks from the grouped catalog", () => {
       const rows = view.options().map((option) => option.textContent ?? "");
       expect(rows.some((row) => row.includes("Anthropic"))).toBe(true);
       expect(rows.some((row) => row.includes("Azure OpenAI"))).toBe(true);
-      // The unavailable entry stays listed, marked, and selectable — its
+      // invariant: The unavailable entry stays listed, marked, and selectable — its
       // suffix is the marker, not a disabled row.
       const unavailable = view.options().find((option) => option.textContent?.includes("Mistral"));
       expect(unavailable?.textContent).toContain("unavailable under omp");
@@ -251,7 +249,7 @@ describe("AddProviderDialog — step 1 picks from the grouped catalog", () => {
       );
       expect(view.dialog()?.querySelector("form")).toBeNull();
       expect(view.submitButton()).toBeNull();
-      // The step indicator moved to the configuration step.
+      // note: The step indicator moved to the configuration step.
       const current = view.win.document.querySelector('[data-slot="step-dialog-step"][aria-current="step"]');
       expect(current?.textContent).toBe(t(locale, "settings.providers.stepConfigure"));
     } finally {
@@ -290,7 +288,7 @@ describe("AddProviderDialog — step 1 picks from the grouped catalog", () => {
 });
 
 describe("AddProviderDialog — the console-only builtins expose an endpoint path (AC-18)", () => {
-  // The SHIPPED rows: builtin tier, verifiable false. Their own id is reserved
+  // note: The SHIPPED rows: builtin tier, verifiable false. Their own id is reserved
   // by the store, so the endpoint lives on a declaration with a user id.
   const CONSOLE_ROWS = [
     ["azure-openai", "Azure OpenAI", "https://{resource}.openai.azure.com/openai/deployments/{deployment}"],
@@ -302,16 +300,16 @@ describe("AddProviderDialog — the console-only builtins expose an endpoint pat
       const view = await mount(addProvider({}));
       try {
         await view.pick(label);
-        // The row itself stays console-only: no endpoint input, no submit.
+        // invariant: The row itself stays console-only: no endpoint input, no submit.
         expect(view.submitButton(), id).toBeNull();
         expect(view.dialog()?.querySelector("input"), id).toBeNull();
         expect(view.dialog()?.textContent).toContain(t(locale, "settings.consoleOnly"));
-        // The way out is an explicit action — copy alone was the finding.
+        // note: The way out is an explicit action — copy alone was the finding.
         const action = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
           (button) => button.textContent === t(locale, "settings.providers.customEndpoint"),
         );
         expect(action, `${id} custom-endpoint action`).toBeDefined();
-        // The copy explains the reservation rather than claiming the console
+        // note: The copy explains the reservation rather than claiming the console
         // is the only path.
         expect(view.dialog()?.textContent).toContain(
           t(locale, "settings.providers.customEndpointCopy", { provider: label }),
@@ -325,7 +323,7 @@ describe("AddProviderDialog — the console-only builtins expose an endpoint pat
   test("the action opens the declaration form prefilled with the entry's protocol and URL shape", async () => {
     for (const [id, label, shape] of CONSOLE_ROWS) {
       const calls: Array<Record<string, string>> = [];
-      // The seeded default protocol differs from the entry's own, so a
+      // note: The seeded default protocol differs from the entry's own, so a
       // dropped prefill cannot pass by landing on the first option.
       const view = await mount(
         addProvider({
@@ -346,7 +344,7 @@ describe("AddProviderDialog — the console-only builtins expose an endpoint pat
 
         const fields = view.dialog()?.querySelectorAll('input:not([type="password"])');
         const idField = fields?.item(0) as HTMLInputElement | undefined;
-        // The id is the user's and clearly required — never the built-in one.
+        // invariant: The id is the user's and clearly required — never the built-in one.
         expect(idField?.value, id).toBe("");
         expect(idField?.required, id).toBe(true);
         expect(view.dialog()?.textContent).toContain(
@@ -440,7 +438,7 @@ describe("AddProviderDialog — a merged provider's protocol is a choice on add"
         onOutcome: () => {},
       });
 
-  /** Open the protocol control and choose the option whose text is `label`. */
+  /** note: Open the protocol control and choose the option whose text is `label`. */
   async function chooseProtocol(view: Awaited<ReturnType<typeof mount>>, label: string): Promise<void> {
     const trigger = view.dialog()?.querySelector('[role="combobox"]') ?? null;
     await act(async () => {
@@ -480,7 +478,7 @@ describe("AddProviderDialog — a merged provider's protocol is a choice on add"
     );
     try {
       await view.pick("Merged Vendor");
-      // The default protocol's endpoint is what the field starts on.
+      // note: The default protocol's endpoint is what the field starts on.
       expect(endpoint(view)).toBe("https://api.merged.test/v1");
       await chooseProtocol(view, "anthropic-messages");
       expect(endpoint(view)).toBe("https://api.merged.test/anthropic");
@@ -564,7 +562,7 @@ describe("AddProviderDialog — a merged provider's protocol is a choice on add"
     );
     try {
       await view.pick("Merged Vendor");
-      // Showing a chooser the save would ignore is the one thing to avoid.
+      // why: Showing a chooser the save would ignore is the one thing to avoid.
       expect(view.dialog()?.querySelector('[role="combobox"]')).toBeNull();
       expect(endpoint(view)).toBe("https://api.merged.test/anthropic");
     } finally {
@@ -733,7 +731,7 @@ describe("CustomProviderDialog (AC-8, AC-19)", () => {
         onOutcome,
       });
 
-  /** The declaration's four typed fields, in render order (the API is a Select). */
+  /** note: The declaration's four typed fields, in render order (the API is a Select). */
   const textFields = (element: HTMLElement | null): NodeListOf<Element> | undefined =>
     element === null ? undefined : element.querySelectorAll('input:not([type="password"])');
 

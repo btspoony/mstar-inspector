@@ -1,5 +1,4 @@
-/**
- * The per-key usage action and its inline panel:
+/** note: The per-key usage action and its inline panel:
  *
  * - a key row whose catalog entry lacks `usage_probe` renders no usage
  *   control (DoD 1);
@@ -114,7 +113,7 @@ function managePayload(overrides: Partial<SettingsManagePayload & ProviderManage
   };
 }
 
-/** A snapshot body the usage route would answer. */
+/** why: A snapshot body the usage route would answer. */
 function snapshotBody(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({ ok: true, status: "ok", fetchedAt: 1_700_000_000_000, limits: [], ...overrides });
 }
@@ -123,7 +122,7 @@ type FetchCall = { url: string; body: string };
 
 const realFetch = globalThis.fetch;
 let calls: FetchCall[] = [];
-/** Responses returned in call order; a factory so each call gets a fresh Response (a promise arms the loading gate). */
+/** note: Responses returned in call order; a factory so each call gets a fresh Response (a promise arms the loading gate). */
 let queue: Array<() => Response | Promise<Response>> = [];
 
 beforeEach(() => {
@@ -184,7 +183,7 @@ async function mount(payload: SettingsManagePayload & ProviderManagementPayload,
     [...(win.document.querySelectorAll("button") as unknown as HTMLButtonElement[])].find(
       (button) => button.textContent === t(loc, "settings.providers.usage.action"),
     ) ?? null;
-  /** The usage button of the key row whose identity names `last4`. */
+  /** note: The usage button of the key row whose identity names `last4`. */
   const rowUsageButton = (last4: string): HTMLButtonElement | null => {
     const row = [...(win.document.querySelectorAll('[data-slot="list-row"]') as unknown as HTMLElement[])].find(
       (candidate) => candidate.textContent?.includes(last4),
@@ -210,7 +209,7 @@ async function mount(payload: SettingsManagePayload & ProviderManagementPayload,
 
 const probedProvider = "commandcode";
 
-/** Payload with one probed key row and its catalog entry. */
+/** note: Payload with one probed key row and its catalog entry. */
 function probedPayload(
   catalogOverrides: Partial<CatalogProvider> = {},
   keys: ProviderKeyRow[] = [keyRow(probedProvider)],
@@ -282,7 +281,7 @@ describe("the key-row usage action", () => {
     try {
       const button = view.usageButton();
       expect(button).not.toBeNull();
-      // A disclosure, not a dialog trigger: it names its expanded state.
+      // note: A disclosure, not a dialog trigger: it names its expanded state.
       expect(button?.getAttribute("aria-haspopup")).toBeNull();
       expect(button?.getAttribute("aria-expanded")).toBe("false");
       const row = button?.closest('[data-slot="list-row"]') as HTMLElement | null;
@@ -291,7 +290,7 @@ describe("the key-row usage action", () => {
         t(locale, "settings.providers.usage.action"),
         t(locale, "settings.remove"),
       ]);
-      // Opening the settings page issues no provider quota request — the
+      // note: Opening the settings page issues no provider quota request — the
       // row's action is the only trigger.
       expect(view.calls).toHaveLength(0);
       expect(view.panel()).toBeNull();
@@ -303,28 +302,28 @@ describe("the key-row usage action", () => {
 
 describe("UsagePanel — inline probe under the owning row", () => {
   test("clicking posts once and renders the panel under that row, passing loading first", async () => {
-    // The first answer is hand-settled so the loading face is observable
+    // why: The first answer is hand-settled so the loading face is observable
     // before the snapshot replaces it.
     const gate = Promise.withResolvers<Response>();
     queue.push(() => gate.promise);
     const view = await mount(probedPayload());
     try {
       await view.click(view.usageButton());
-      // The panel renders under the owning row and starts on the loading face.
+      // note: The panel renders under the owning row and starts on the loading face.
       const loadingPanel = view.panel();
       expect(loadingPanel).not.toBeNull();
       expect(loadingPanel?.textContent).toContain(t(locale, "common.loading"));
       const row = view.usageButton()?.closest('[data-slot="list-row"]') as HTMLElement | null;
-      // The panel renders inside the same wrapper as its row, directly under it.
+      // note: The panel renders inside the same wrapper as its row, directly under it.
       expect(loadingPanel?.parentElement?.previousElementSibling).toBe(row);
-      // No dialog overlays the page.
+      // note: No dialog overlays the page.
       expect(view.win.document.querySelector('[role="dialog"]')).toBeNull();
 
       await act(async () => {
         gate.resolve(
           new Response(snapshotBody({
             limits: [
-              // A minute of margin so a slow flush can't floor the bucket
+              // note: A minute of margin so a slow flush can't floor the bucket
               // below the asserted "3 hours".
               { id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent", resetsAt: Date.now() + 3 * 3_600_000 + 60_000 },
             ],
@@ -338,7 +337,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect(body.get("provider")).toBe(probedProvider);
       expect(body.get("keyId")).toBe("deadbeefcafe1234");
 
-      // The window face: remaining share, hairline bar, future reset time.
+      // note: The window face: remaining share, hairline bar, future reset time.
       const text = view.panel()?.textContent ?? "";
       expect(text).toContain(t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }));
       expect(text).toContain("resets in 3 hours");
@@ -364,7 +363,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
         t(locale, "settings.providers.usage.windowRemaining", { percent: 70 }),
       );
 
-      // The re-click IS the refresh: it re-probes, never a cached bar.
+      // invariant: The re-click IS the refresh: it re-probes, never a cached bar.
       await view.click(view.usageButton());
       await view.flush();
 
@@ -394,7 +393,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       await view.flush();
       const cells = [...(view.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])] as HTMLElement[];
       expect(cells).toHaveLength(3);
-      // The wire order is month/session/week; the cells render in the fixed
+      // note: The wire order is month/session/week; the cells render in the fixed
       // session → week → month order with each window's own remaining share.
       const labels = cells.map((cell) => (cell.querySelector("p") as HTMLElement | null)?.textContent ?? "");
       expect(labels).toEqual([
@@ -431,14 +430,14 @@ describe("UsagePanel — inline probe under the owning row", () => {
       expect((month.querySelector("p") as HTMLElement | null)?.textContent).toBe(
         t(locale, "settings.providers.usage.window.month"),
       );
-      // No stated cap → the cell states the amount it has and draws no bar.
+      // note: No stated cap → the cell states the amount it has and draws no bar.
       expect(month.textContent).toContain(
         t(locale, "settings.providers.usage.balanceRemaining", {
           amount: 15.09,
           unit: t(locale, "settings.providers.usage.unit.credits"),
         }),
       );
-      // On-demand credits are a second amount in the SAME cell, never a second
+      // invariant: On-demand credits are a second amount in the SAME cell, never a second
       // row, and the cell still draws no bar.
       expect(month.textContent).toContain(
         t(locale, "settings.providers.usage.extraRemaining", {
@@ -448,11 +447,11 @@ describe("UsagePanel — inline probe under the owning row", () => {
       );
       expect(month.querySelector('[data-slot="usage-bar"]')).toBeNull();
       expect(view.panel()?.querySelectorAll('[data-slot="usage-bar"]')).toHaveLength(2);
-      // One row, three columns — the amount cell shares the same row as the bars.
+      // note: One row, three columns — the amount cell shares the same row as the bars.
       expect((cells[0]?.parentElement as HTMLElement | null)?.style.gridTemplateColumns).toBe(
         "repeat(3, minmax(0, 1fr))",
       );
-      // Nothing is repeated below the row: the panel holds exactly these cells.
+      // invariant: Nothing is repeated below the row: the panel holds exactly these cells.
       expect(view.panel()?.querySelectorAll("li")).toHaveLength(3);
       expect((view.panel()?.textContent?.match(/15\.09/g) ?? [])).toHaveLength(1);
       expect((view.panel()?.textContent?.match(/25/g) ?? [])).toHaveLength(1);
@@ -475,7 +474,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       const panel = view.panel();
       expect(panel?.querySelector('[data-slot="usage-bar"]')).toBeNull();
       const text = panel?.textContent ?? "";
-      // One distinguishable line per window: numbered generic labels, each
+      // note: One distinguishable line per window: numbered generic labels, each
       // with its own remaining share; the vendor id text never renders.
       expect(text).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 1 }));
       expect(text).toContain(t(locale, "settings.providers.usage.limit.generic", { index: 2 }));
@@ -502,7 +501,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       const text = view.panel()?.textContent ?? "";
       expect(text).toContain("12.5 credits remaining");
       expect(text).toContain(t(locale, "settings.providers.usage.shared"));
-      // A balance is a line, never a bar.
+      // invariant: A balance is a line, never a bar.
       expect(view.panel()?.querySelectorAll('[data-slot="usage-bar"]')).toHaveLength(1);
     } finally {
       await view.cleanup();
@@ -655,7 +654,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       await view.flush();
       const cells = [...(view.panel()?.querySelectorAll('[data-slot="usage-cell"]') ?? [])];
       expect(cells).toHaveLength(1);
-      // The grid tracks the surviving cells, so the lone bar spans the row.
+      // why: The grid tracks the surviving cells, so the lone bar spans the row.
       expect((cells[0]?.parentElement as HTMLElement | null)?.style.gridTemplateColumns).toBe(
         "repeat(1, minmax(0, 1fr))",
       );
@@ -663,7 +662,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       await view.cleanup();
     }
 
-    // Two windows share the row: the second bar sits beside the first, never
+    // invariant: Two windows share the row: the second bar sits beside the first, never
     // stranded in the middle column of a three-track grid.
     queue.push(() => new Response(snapshotBody({
       limits: [
@@ -708,7 +707,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       const open = () => [...(view.win.document.querySelectorAll('[data-slot="usage-panel"]') as unknown as HTMLElement[])];
       expect(open()).toHaveLength(2);
 
-      // The first card's panel is untouched by an Escape aimed at the last one.
+      // invariant: The first card's panel is untouched by an Escape aimed at the last one.
       await view.pressEscape();
       expect(open()).toHaveLength(1);
       expect(open()[0]?.textContent).toContain(
@@ -744,11 +743,11 @@ describe("UsagePanel — inline probe under the owning row", () => {
       );
       expect(view.win.document.querySelector('[role="dialog"]')).not.toBeNull();
 
-      // The modal layer owns Escape: the panel behind it stays.
+      // invariant: The modal layer owns Escape: the panel behind it stays.
       await view.pressEscape();
       expect(view.panel()).not.toBeNull();
 
-      // With the modal gone the next Escape reaches the panel again.
+      // note: With the modal gone the next Escape reaches the panel again.
       await view.click(buttons().find((button) => button.textContent === t(locale, "common.cancel")) ?? null);
       expect(view.win.document.querySelector('[role="dialog"]')).toBeNull();
       await view.pressEscape();
@@ -759,7 +758,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
   });
 
   test("a re-render handing the panel a new onClose leaves Escape with the panel opened last", async () => {
-    // Both panels mount in the same commit — the first ahead of the second, so
+    // note: Both panels mount in the same commit — the first ahead of the second, so
     // the second owns Escape. The second commit renews only the FIRST panel's
     // callback: that asymmetry is what proves the ownership fix, because a
     // fresh arrow on the second would re-register its listener under the old
@@ -822,13 +821,13 @@ describe("UsagePanel — inline probe under the owning row", () => {
     try {
       await act(async () => root.render(tree(() => closed.push("first:v1"), secondV1)));
       await act(async () => {});
-      // A re-render that renews only the first panel's callback.
+      // invariant: A re-render that renews only the first panel's callback.
       await act(async () => root.render(tree(firstV2, secondV1)));
       await act(async () => {});
       await pressEscape();
       expect(closed).toEqual(["second:v1"]);
 
-      // Renew only the winning panel's callback: it still owns the key, and the
+      // invariant: Renew only the winning panel's callback: it still owns the key, and the
       // closure Escape invokes is the new one.
       await act(async () => root.render(tree(firstV2, secondV2)));
       await act(async () => {});
@@ -852,13 +851,13 @@ describe("UsagePanel — inline probe under the owning row", () => {
     const view = await mount(probedPayload({}, keys));
     const remainingOf = (percent: number) => t(locale, "settings.providers.usage.windowRemaining", { percent });
     try {
-      // Key A's probe stays in flight; opening key B closes A's panel.
+      // invariant: Key A's probe stays in flight; opening key B closes A's panel.
       await view.click(view.rowUsageButton("9f2c"));
       expect(view.panel()?.textContent).toContain(t(locale, "common.loading"));
       await view.click(view.rowUsageButton("1234"));
       expect(view.panel()?.textContent).toContain(t(locale, "common.loading"));
 
-      // B answers first under its own key: 30% remaining sticks.
+      // note: B answers first under its own key: 30% remaining sticks.
       await act(async () => {
         gateB.resolve(new Response(snapshotBody({
           limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.7, unit: "percent" }],
@@ -867,7 +866,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       await view.flush();
       expect(view.panel()?.textContent).toContain(remainingOf(30));
 
-      // A's late answer must not replace B's snapshot (no 70% from key A).
+      // invariant: A's late answer must not replace B's snapshot (no 70% from key A).
       await act(async () => {
         gateA.resolve(new Response(snapshotBody({
           limits: [{ id: "commandcode:session", kind: "window", usedFraction: 0.3, unit: "percent" }],

@@ -25,7 +25,7 @@ describe("declared-provider vocabulary fetch (I-000644)", () => {
     };
     const result = await fetchDeclaredProviderModels(deps, { baseUrl: "https://api.example.test/v1", api: "openai-completions" }, null);
     expect(url).toBe("https://api.example.test/v1/models");
-    // No credential was presented, so no authorization header was invented.
+    // safety: No credential was presented, so no authorization header was invented.
     expect((seen?.headers as Record<string, string>).authorization).toBeUndefined();
     expect(result).toEqual({
       ok: true,
@@ -45,7 +45,7 @@ describe("declared-provider vocabulary fetch (I-000644)", () => {
     expect(modelIdsForProtocol(entries, "openai-completions")).toEqual(["deepseek/deepseek-v4-pro", "unstated-model"]);
     expect(modelIdsForProtocol(entries, "anthropic-messages")).toEqual(["claude-sonnet-5-5", "unstated-model"]);
     expect(modelIdsForProtocol(entries, "openai-responses")).toEqual(["unstated-model"]);
-    // typesafe declares no inference path, so an endpoint claim never refuses an id.
+    // invariant: typesafe declares no inference path, so an endpoint claim never refuses an id.
     expect(protocolInferencePath("typesafe")).toBeNull();
     expect(modelIdsForProtocol(entries, "typesafe")).toEqual([
       "deepseek/deepseek-v4-pro",

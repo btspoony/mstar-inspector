@@ -1,5 +1,4 @@
-/**
- * Test preload: settle DOM availability before any test module loads.
+/** note: Test preload: settle DOM availability before any test module loads.
  *
  * `react-dom/client` and `@radix-ui/primitive` each record `canUseDOM` once,
  * when they are first evaluated; React's event plugins never register and

@@ -1,5 +1,4 @@
-/**
- * Tenant isolation after the target split: ONE bot, TWO targets in two
+/** note: Tenant isolation after the target split: ONE bot, TWO targets in two
  * workspaces. The bot keeps its single owning workspace (`bot_workspaces`),
  * so the dashboard's numeric App address resolves in that workspace only —
  * and every read face must bind the target AND its owning workspace in SQL,
@@ -24,12 +23,12 @@ import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers"
 const SESSION_SECRET = ["test", "target", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 
-/** The single bot both targets configure. */
+/** note: The single bot both targets configure. */
 const BOT_ID = "app-shared";
 const GITHUB_APP_ID = 7001;
-/** The bot's owning workspace ('default' is seeded by the migration chain). */
+/** note: The bot's owning workspace ('default' is seeded by the migration chain). */
 const WORKSPACE_A = "default";
-/** The second workspace, which owns the second target only. */
+/** invariant: The second workspace, which owns the second target only. */
 const WORKSPACE_B = "ws-b";
 
 function envFor(db: TestD1, mode: "saas" | "self-hosted" = "self-hosted"): Env {
@@ -57,7 +56,7 @@ const seed = (db: TestD1, sql: string, ...params: Array<string | number | null>)
   db.raw.prepare(sql).run(...params);
 };
 
-/** One v1 review row (the era gate needs the envelope). */
+/** note: One v1 review row (the era gate needs the envelope). */
 function seedReview(
   db: TestD1,
   input: { id: string; owner: string; repo: string; prNumber: number; headSha: string; targetId: string | null },
@@ -77,8 +76,7 @@ function seedReview(
   );
 }
 
-/**
- * One lifecycle finding on the target's PR. The row carries its target, which
+/** note: One lifecycle finding on the target's PR. The row carries its target, which
  * is the ONLY attribution the tenant faces bind: a finding without one stays
  * invisible, exactly like a legacy unattributed review.
  */
@@ -128,7 +126,7 @@ function seedFinding(
   );
 }
 
-/** One append-only review-failure row on the target's PR. */
+/** invariant: One append-only review-failure row on the target's PR. */
 function seedFailure(
   db: TestD1,
   input: { id: string; targetId: string | null; owner: string; repo: string; prNumber: number },
@@ -146,8 +144,7 @@ function seedFailure(
   );
 }
 
-/**
- * Two workspaces, one bot, two targets, and one of each tenant row per target.
+/** note: Two workspaces, one bot, two targets, and one of each tenant row per target.
  * `octocat` manages BOTH workspaces, so a 404 in `ws-b` is SCOPING, never
  * membership: she could read the row if the workspace were the only gate.
  */
@@ -181,7 +178,7 @@ function isolationFixture() {
   );
   seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", BOT_ID, WORKSPACE_A);
 
-  // Target A is the workspace's live configuration; target B is PAUSED, so a
+  // note: Target A is the workspace's live configuration; target B is PAUSED, so a
   // settings read that served B's row would answer review_enabled: false.
   // Each carries the repository its own PR belongs to (0067): `repo_id` is the
   // identity, distinct per repository, and the owner/name pair is the display
@@ -205,7 +202,7 @@ function isolationFixture() {
 
   seedReview(db, { id: "review-a", owner: "acme", repo: "widgets", prNumber: 101, headSha: "sha-a", targetId: targetA });
   seedReview(db, { id: "review-b", owner: "other", repo: "lib", prNumber: 202, headSha: "sha-b", targetId: targetB });
-  // Legacy unattributed row: invisible to every tenant read, filtered by
+  // note: Legacy unattributed row: invisible to every tenant read, filtered by
   // `target_id = ?` exactly as a NULL bot attribution was before the split.
   seedReview(db, { id: "review-legacy", owner: "legacy", repo: "old", prNumber: 303, headSha: "sha-l", targetId: null });
 
@@ -226,7 +223,7 @@ function isolationFixture() {
     );
   }
 
-  // Execution ledgers: one open must-fix finding and one ordinary failure per
+  // invariant: Execution ledgers: one open must-fix finding and one ordinary failure per
   // target, plus one unattributed pair that belongs to no workspace.
   seedFinding(db, { id: "finding-a", targetId: targetA, owner: "acme", repo: "widgets", prNumber: 101, mergeClass: "must-fix" });
   seedFinding(db, { id: "finding-a2", targetId: targetA, owner: "acme", repo: "widgets", prNumber: 101, mergeClass: "nit", state: "addressed" });
@@ -240,7 +237,7 @@ function isolationFixture() {
 
 const SCOPE_A = { kind: "target", targetId: "target-a", workspaceId: WORKSPACE_A } as const;
 const SCOPE_B = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_B } as const;
-/** A foreign pair: target B's id presented under target A's workspace. */
+/** note: A foreign pair: target B's id presented under target A's workspace. */
 const SCOPE_CROSSED = { kind: "target", targetId: "target-b", workspaceId: WORKSPACE_A } as const;
 
 describe("insights aggregation is tenant-scoped", () => {
@@ -279,7 +276,7 @@ describe("the pull-request ledger is tenant-scoped", () => {
   test("the record counts bind the tenant pair too", async () => {
     const { db } = isolationFixture();
     const store = createReviewBotsStore(db);
-    // The owning scope counts the target's one review, one open finding and
+    // note: The owning scope counts the target's one review, one open finding and
     // one failure…
     expect(await store.countPullRequestRecords(SCOPE_B, "other", "lib", 202)).toEqual({
       findings: 1,
@@ -287,7 +284,7 @@ describe("the pull-request ledger is tenant-scoped", () => {
       failures: 1,
       must_fix: 0,
     });
-    // …and the crossed pair counts nothing at all: every count binds
+    // invariant: …and the crossed pair counts nothing at all: every count binds
     // `target_id` and the workspace that owns it.
     expect(await store.countPullRequestRecords(SCOPE_CROSSED, "other", "lib", 202)).toEqual({
       findings: 0,
@@ -304,7 +301,7 @@ describe("the pull-request ledger is tenant-scoped", () => {
     expect(await store.listPullRequestReviews(SCOPE_CROSSED, "other", "lib", 202, { offset: 0, limit: 10 })).toBeNull();
     expect(await store.listPullRequestFindings(SCOPE_CROSSED, "other", "lib", 202, { offset: 0, limit: 10 })).toBeNull();
     expect(await store.listPullRequestFailures(SCOPE_CROSSED, "other", "lib", 202, { offset: 0, limit: 10 })).toBeNull();
-    // ...and its own workspace still reads it.
+    // note: ...and its own workspace still reads it.
     const own = await store.getPullRequestHead(SCOPE_B, "other", "lib", 202);
     expect(own?.pr_number).toBe(202);
   });
@@ -325,7 +322,7 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
     const { db } = isolationFixture();
     const store = createReviewBotsStore(db);
 
-    // The bot holds rows on both targets; target A's face still reads only
+    // invariant: The bot holds rows on both targets; target A's face still reads only
     // target A's, including the per-state and per-severity counts.
     expect(await store.countPullRequestRecords(SCOPE_A, "acme", "widgets", 101)).toEqual({
       findings: 1,
@@ -367,7 +364,7 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
   test("an unattributed row is written, held, and never counted by a tenant read", async () => {
     const { db } = isolationFixture();
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 3 });
-    // Nothing a workspace reads includes the NULL-target row: A's and B's
+    // invariant: Nothing a workspace reads includes the NULL-target row: A's and B's
     // counts sum to the two attributed rows only.
     const store = createReviewBotsStore(db);
     const a = await store.countPullRequestRecords(SCOPE_A, "acme", "widgets", 101);
@@ -377,7 +374,7 @@ describe("the execution ledgers are tenant-scoped by their own target", () => {
 });
 
 describe("the dashboard routes resolve the target inside the session workspace", () => {
-  // Insights and the ledger are target-addressed; settings stays
+  // invariant: Insights and the ledger are target-addressed; settings stays
   // App-addressed (a bot is still the configuration subject).
   const INSIGHTS = `/dashboard/${WORKSPACE_A}/api/targets/target-a/insights/summary?include=repos`;
   const LEDGER = `/dashboard/${WORKSPACE_A}/api/targets/target-a/pull-requests`;
@@ -416,14 +413,14 @@ describe("the dashboard routes resolve the target inside the session workspace",
     };
     expect(body.workspace_id).toBe(WORKSPACE_A);
     expect(body.target_id).toBe("target-a");
-    // Target A's values — target B is paused and on `every_push`.
+    // note: Target A's values — target B is paused and on `every_push`.
     expect(body.app.review_enabled).toBe(true);
     expect(body.app.review_trigger_mode).toBe("manual");
   });
 
   test("a target is invisible from a workspace that does not own it: 404 on both faces", async () => {
     const { db } = isolationFixture();
-    // A third workspace, no target on this bot: the resolution's own verdict,
+    // note: A third workspace, no target on this bot: the resolution's own verdict,
     // not a membership failure — octocat owns this workspace too.
     seed(
       db,
@@ -436,7 +433,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
        VALUES ('ws-c', 'user-octocat', 'owner', datetime('now'))`,
     );
     const env = envFor(db);
-    // Target A belongs to ws-a: presenting it under ws-c is a foreign id, and
+    // note: Target A belongs to ws-a: presenting it under ws-c is a foreign id, and
     // the App-addressed settings face has no target there to resolve.
     for (const path of [
       `/dashboard/ws-c/api/targets/target-a/insights/summary`,
@@ -451,7 +448,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
   test("a workspace holding a target on the bot reads that target, even when the bot is owned elsewhere", async () => {
     const { db } = isolationFixture();
     const env = envFor(db);
-    // `ws-b` holds target-b on the bot owned by `ws-a`: its own target is
+    // note: `ws-b` holds target-b on the bot owned by `ws-a`: its own target is
     // readable (the revoked-share state — Blocked — must name itself instead
     // of silently reviewing nothing), and its numbers are target-b's.
     for (const path of [
@@ -465,8 +462,7 @@ describe("the dashboard routes resolve the target inside the session workspace",
   });
 });
 
-/**
- * The derived Blocked state: a target whose bot is `owned` by ANOTHER
+/** note: The derived Blocked state: a target whose bot is `owned` by ANOTHER
  * workspace reviews nothing (the resolver's guard), so its detail face says
  * so. Nothing is stored — the flag is read off the bot's scope and the two
  * workspaces' ids on every read.
@@ -487,23 +483,23 @@ describe("a target whose bot is no longer shared reads Blocked", () => {
       };
     };
 
-    // The fixture's bot is `owned` (the column default) and mapped to ws-a;
+    // note: The fixture's bot is `owned` (the column default) and mapped to ws-a;
     // target-b lives in ws-b, so ws-b is the revoked-share reader.
     const fromB = await read(WORKSPACE_B);
     expect(fromB.app.scope).toBe("owned");
     expect(fromB.workspace_id).toBe(WORKSPACE_B);
     expect(fromB.blocked).toBe(true);
     expect(fromB.blocked_reason).toBe("bot_not_shared");
-    // Review configuration stays readable: Blocked hides the install action,
+    // invariant: Review configuration stays readable: Blocked hides the install action,
     // not the settings a manager can still inspect.
     expect(fromB.check_gate).not.toBeNull();
 
-    // The bot's own workspace is not blocked.
+    // note: The bot's own workspace is not blocked.
     const fromA = await read(WORKSPACE_A);
     expect(fromA.blocked).toBe(false);
     expect(fromA.blocked_reason).toBeNull();
 
-    // A re-share clears it with no stored status to migrate.
+    // note: A re-share clears it with no stored status to migrate.
     seed(db, "UPDATE review_bots SET scope = 'shared' WHERE id = ?", BOT_ID);
     const reshared = await read(WORKSPACE_B);
     expect(reshared.blocked).toBe(false);

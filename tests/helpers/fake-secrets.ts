@@ -1,5 +1,5 @@
 /**
- * Credential-SHAPED test dummies, assembled at runtime: no contiguous
+ * safety: Credential-SHAPED test dummies, assembled at runtime: no contiguous
  * credential literal exists in test source (Mimosa gate: hardcoded-credential
  * findings), while runtime values stay byte-identical so redaction/allowlist
  * fixtures still exercise the real secret shapes. Every value is fake — this

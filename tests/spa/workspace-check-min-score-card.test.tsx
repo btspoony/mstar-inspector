@@ -1,5 +1,4 @@
-/**
- * The workspace default review-gate floor card.
+/** note: The workspace default review-gate floor card.
  *
  * Mounted on its own (the card fetches its own payload), so the contract under
  * test is exactly the card's: `GET`/`PUT …/api/settings/check-min-score`, the
@@ -36,7 +35,7 @@ describe("workspace default review-gate floor card", () => {
   test("shows the stored floor and settles on the server's answer after a save", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws_acme/settings");
     const realFetch = globalThis.fetch;
-    // The PUT answers a normalized 40 for a typed 45, so the field can only
+    // why: The PUT answers a normalized 40 for a typed 45, so the field can only
     // settle on 40 by reading the server's body — echoing the draft cannot.
     // A non-zero payload floor: a copy string carrying its own lower bound
     // cannot match the rendered sentence.
@@ -68,7 +67,7 @@ describe("workspace default review-gate floor card", () => {
         { url: "/dashboard/ws_acme/api/settings/check-min-score", method: "PUT", body: JSON.stringify({ min_score: 45 }) },
       ]);
       expect(container.textContent).toContain(t("en", "workspace.checkMinScoreSaved"));
-      // The server's stored answer, not the typed draft (45).
+      // note: The server's stored answer, not the typed draft (45).
       expect((win.document.querySelector("#workspace-check-min-score") as unknown as HTMLInputElement).value).toBe("40");
 
       await act(async () => root.unmount());

@@ -1,5 +1,4 @@
-/**
- * SPA JSON faces for members / apps / settings.
+/** note: SPA JSON faces for members / apps / settings.
  * Same gates as the HTML pages; payloads never include encrypted columns.
  */
 import { describe, expect, spyOn, test } from "bun:test";
@@ -39,12 +38,12 @@ async function seededWorld(): Promise<ReturnType<typeof createTestD1>> {
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
-  // Every user joins the migration-seeded `default` workspace: manage is the
+  // note: Every user joins the migration-seeded `default` workspace: manage is the
   // workspace role, so one owner plus plain members is the interesting shape.
   seedMembership(db, "default", "octocat", "owner");
   seedMembership(db, "default", "mallory", "member");
   seedMembership(db, "default", "hubot", "member");
-  // A stable local App UID so the payload assertion can name it.
+  // why: A stable local App UID so the payload assertion can name it.
   const id = "app-mallory";
   const enc = await encryptedColumns(id);
   await createReviewBotsStore(db).createApp({
@@ -166,7 +165,7 @@ test("concurrent settings reads log the first section's error even when a later 
 
 describe("the retired deployment-level members face", () => {
   test("GET /dashboard/api/members is gone; the workspace face serves", async () => {
-    // Authority is workspace-scoped, so a deployment-level member list has no
+    // note: Authority is workspace-scoped, so a deployment-level member list has no
     // meaning: the root path is a 404 and the workspace face is the only one.
     const env = makeEnv(await seededWorld());
     const root = await worker.fetch(
@@ -202,7 +201,7 @@ describe("GET /dashboard/default/api/apps", () => {
     expect(body.apps[0]?.github_name).toBeNull();
     expect(body.apps[0]?.github_slug).toBe("mstar-inspector-mallory");
     expect(body.apps[0]?.github_avatar_url).toBeNull();
-    // The local webhook path is not an App address any more (D0/D6).
+    // note: The local webhook path is not an App address any more (D0/D6).
     expect(body.apps[0]?.slug).toBeUndefined();
     expect(body.apps[0]?.health.rejected24h).toBe(0);
     const raw = JSON.stringify(body);
@@ -216,7 +215,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     const db = await seededWorld();
     const env = makeEnv(db);
 
-    // Manage is the workspace role, not App creation: 0027 maps the seeded
+    // note: Manage is the workspace role, not App creation: 0027 maps the seeded
     // deployment admin to `owner` and every other user to `member`.
     const owner = await get("/dashboard/default/api/apps/1001/settings", "octocat", env);
     expect(owner.status).toBe(200);
@@ -245,7 +244,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.app.github_slug).toBe("mstar-inspector-mallory");
     expect(body.app.id).toBe("app-mallory");
     expect(body.workspace_id).toBe("default");
-    // Creation writes the App and its workspace mapping only (D13), so this
+    // why: Creation writes the App and its workspace mapping only (D13), so this
     // workspace holds no repository under it: the target-owned policy is
     // absent rather than invented, and `targets_many: false` is what separates
     // "none" from "several". The App stays fully readable either way.
@@ -253,10 +252,10 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.target_id).toBeUndefined();
     expect(body.app.review_enabled).toBeUndefined();
     expect(body.can_manage).toBe(true);
-    // clean cutover: the old `providers` catalog dump is gone; the
+    // note: clean cutover: the old `providers` catalog dump is gone; the
     // manage face splits persisted state from the discovery catalog.
     expect(body.providers).toBeUndefined();
-    // Fresh world = the unconfigured-App case: persisted state is EMPTY while
+    // note: Fresh world = the unconfigured-App case: persisted state is EMPTY while
     // the catalog is fully populated.
     expect(body.configured_providers).toEqual([]);
     expect(body.provider_catalog).toBeUndefined();
@@ -264,10 +263,10 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.provider_catalog_version).toMatch(/^[0-9a-f]{64}$/);
     expect(body.provider_eligibility["azure-openai"]).toBe("builtin");
     expect(body.provider_eligibility["workers-ai"]).toBe("template");
-    // omp is the selected runtime image: zero rows are unavailable this
+    // invariant: omp is the selected runtime image: zero rows are unavailable this
     // iteration, and omp itself is NOT a catalog entry.
     expect(Object.values(body.provider_eligibility)).not.toContain("unavailable");
-    // the selected image id defaults to omp, and the manage face
+    // note: the selected image id defaults to omp, and the manage face
     // carries the enabled-registry selector choices (ids only — never
     // image-local yaml or secrets).
     expect(body.app.sandbox_image_id).toBe("omp");
@@ -275,11 +274,11 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(body.provider_eligibility["omp"]).toBeUndefined();
     expect(owner.headers.get("cache-control")).toBe("private, no-store");
 
-    // The App's creator is a plain workspace member here, so creation no
+    // note: The App's creator is a plain workspace member here, so creation no
     // longer grants the manage face.
     const other = await get("/dashboard/default/api/apps/1001/settings", "mallory", env);
     expect(other.status).toBe(200);
-    // identity-only non-manager face: the D4 identity set + the cached
+    // invariant: identity-only non-manager face: the D4 identity set + the cached
     // public GitHub profile + can_manage false — NO health or ops data.
     const otherBody = (await other.json()) as {
       can_manage: boolean;
@@ -299,7 +298,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     expect(otherBody.can_manage).toBe(false);
     expect(otherBody.app.github_app_id).toBe(1001);
     expect(otherBody.app.github_slug).toBe("mstar-inspector-mallory");
-    // The derived Blocked pair rides both faces. No repository target exists
+    // note: The derived Blocked pair rides both faces. No repository target exists
     // here, so neither `target_id` nor its pause state is named: the identity
     // set is exactly the App's own fields.
     expect(Object.keys(otherBody).sort()).toEqual([
@@ -323,7 +322,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
       "status",
     ]);
     expect(typeof otherBody.app.created_at).toBe("string");
-    // health/ops fields moved behind the manager branch; the settings
+    // note: health/ops fields moved behind the manager branch; the settings
     // zones never ride this face.
     expect(otherBody.installations).toBeUndefined();
     expect(otherBody.deliveries).toBeUndefined();
@@ -342,7 +341,7 @@ describe("GET /dashboard/default/api/apps/:appId/settings", () => {
     const missing = await get("/dashboard/default/api/apps/9999/settings", "octocat", env);
     expect(missing.status).toBe(404);
 
-    // The App segment is decimal digits only: `0x3e9` / `1.001e3` parse to the
+    // invariant: The App segment is decimal digits only: `0x3e9` / `1.001e3` parse to the
     // seeded 1001 under `Number()`, so a lax segment check would answer the
     // App's settings under a second URL.
     for (const alias of ["0x3e9", "1.001e3", "1e3", "+1001"]) {
@@ -378,7 +377,7 @@ describe("membership stays enforcing outside locale", () => {
   });
 
   test("the members-family 403 follows mstar_locale (workspace-scoped face)", async () => {
-    // Members + invites are workspace routes now, so the 403 surface is the
+    // why: Members + invites are workspace routes now, so the 403 surface is the
     // workspace one: a plain member asking for the pending list.
     const db = await seededWorld();
     db.raw.exec(
@@ -405,7 +404,7 @@ describe("membership stays enforcing outside locale", () => {
   });
 });
 
-/** The boot the served shell injected (the client's only identity channel). */
+/** invariant: The boot the served shell injected (the client's only identity channel). */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no injected SPA boot");
@@ -430,7 +429,7 @@ function seedMembership(db: ReturnType<typeof createTestD1>, workspaceId: string
 describe("SPA boot payload — workspace memberships (2026-10)", () => {
   test("lists every live membership as {id, slug, name, role} — both identifiers, not one ref", async () => {
     const db = await seededWorld();
-    // A login outside the seeded `default` workspace, so the list is exactly
+    // why: A login outside the seeded `default` workspace, so the list is exactly
     // the three rows below.
     await createUser(db, { login: "switcher", role: "member" });
     seedWorkspace(db, "ws-acme", "acme", "Acme");
@@ -446,7 +445,7 @@ describe("SPA boot payload — workspace memberships (2026-10)", () => {
     );
     expect(res.status).toBe(200);
     const boot = bootOf(await res.text());
-    // Ordering is by name; the soft-deleted workspace never becomes a switch
+    // invariant: Ordering is by name; the soft-deleted workspace never becomes a switch
     // target. Both identifiers ride the row: `ws-acme` was renamed to `acme`,
     // so a path addressing either form must resolve to this same membership.
     // `plan` rides each row in both modes (D16), `self-hosted` resolving the

@@ -1,5 +1,5 @@
 /**
- * Line-comments tests (architect AL-3, layered delivery):
+ * why: Line-comments tests (architect AL-3, layered delivery):
  *   - parseDiffHunkRanges: multi-file diffs, renames (b-side path), binary /
  *     deleted files, omitted hunk counts, context ranges, and hunk-body
  *     content lines that masquerade as `+++ ` file headers
@@ -35,7 +35,7 @@ import { FINDING_BODY_MAX, type ReviewFinding } from "../../src/review/schema";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-/** Two-hunk src/auth.ts diff: right ranges [10,13] and [33,37]. */
+/** note: Two-hunk src/auth.ts diff: right ranges [10,13] and [33,37]. */
 const AUTH_DIFF = [
   "diff --git a/src/auth.ts b/src/auth.ts",
   "index 1111111..2222222 100644",
@@ -55,7 +55,7 @@ const AUTH_DIFF = [
   " const d = 4;",
 ].join("\n");
 
-/** Rename (b-side new path) + deleted + binary + a second text file. */
+/** note: Rename (b-side new path) + deleted + binary + a second text file. */
 const MIXED_DIFF = [
   "diff --git a/src/old-name.ts b/src/new-name.ts",
   "similarity index 90%",
@@ -111,10 +111,10 @@ describe("parseDiffHunkRanges", () => {
   test("rename binds the b-side (new) path; deleted and binary files carry no right ranges", () => {
     const ranges = parseDiffHunkRanges(MIXED_DIFF);
     expect(ranges.get("src/new-name.ts")).toEqual([[1, 3]]);
-    expect(ranges.has("src/old-name.ts")).toBe(false); // a-side path never binds
-    expect(ranges.has("src/dead.ts")).toBe(false); // +++ /dev/null → no right side
-    expect(ranges.has("assets/logo.png")).toBe(false); // binary: no hunks
-    // Omitted old-side count (`@@ -5 +5,2 @@`) defaults to 1.
+    expect(ranges.has("src/old-name.ts")).toBe(false); // note: a-side path never binds
+    expect(ranges.has("src/dead.ts")).toBe(false); // note: +++ /dev/null → no right side
+    expect(ranges.has("assets/logo.png")).toBe(false); // note: binary: no hunks
+    // note: Omitted old-side count (`@@ -5 +5,2 @@`) defaults to 1.
     expect(ranges.get("docs/guide.md")).toEqual([[5, 6]]);
   });
 
@@ -146,7 +146,7 @@ describe("parseDiffHunkRanges", () => {
   });
 
   test("space-bearing b-side paths ride the UNQUOTED b/ strip and bind (git does not quote plain spaces) (T3-M2 / qc3 F-103)", () => {
-    // Real git output for a path with spaces is UNQUOTED
+    // note: Real git output for a path with spaces is UNQUOTED
     // (`+++ b/space dir/has spaces.ts`) — the b/ strip binds the raw path
     // and a finding whose file_path carries the space matches.
     const spaces = [
@@ -164,7 +164,7 @@ describe("parseDiffHunkRanges", () => {
   });
 
   test("C-quoted b-side path whose JSON.parse succeeds unquotes via the best-effort branch (T3-M2 / qc3 F-103)", () => {
-    // Real git quotes only escape-requiring paths (`+++ "b/with\"quote.ts"`).
+    // note: Real git quotes only escape-requiring paths (`+++ "b/with\"quote.ts"`).
     // The b/ strip runs BEFORE the unquote, so the JSON-parsed value keeps
     // the prefix and exact-matches no finding's file_path — the safe
     // direction (excluded). Pin the branch's parse result verbatim against
@@ -182,7 +182,7 @@ describe("parseDiffHunkRanges", () => {
   });
 
   test("unquotable quoted b-side path (octal escapes) keeps the raw quoted path → matches nothing (excluded)", () => {
-    // Real git form for non-ASCII paths (`+++ "b/h\303\251.go"`): JSON.parse
+    // note: Real git form for non-ASCII paths (`+++ "b/h\303\251.go"`): JSON.parse
     // throws on the octal escapes, the raw quoted target stays as the key,
     // and the exact-match layer excludes the finding — no 422.
     const unquotable = [
@@ -209,14 +209,14 @@ describe("filterLineCommentFindings", () => {
       findingAt("src/auth.ts", 11, "ok"),
     ];
     expect(filterLineCommentFindings(findings).map(({ finding }) => finding.title)).toEqual(["ok"]);
-    // diff undefined (prefetch failed) → base layer alone, no hunk check.
+    // note: diff undefined (prefetch failed) → base layer alone, no hunk check.
     expect(filterLineCommentFindings(findings, undefined).map(({ finding }) => finding.title)).toEqual(["ok"]);
   });
 
   test("hunk layer: b-side exact path match + line_end inside a right-side hunk range (boundaries inclusive)", () => {
     const findings = [
-      findingAt("src/auth.ts", 10, "hunk-start"), // boundary
-      findingAt("src/auth.ts", 13, "hunk-end"), // boundary
+      findingAt("src/auth.ts", 10, "hunk-start"), // note: boundary
+      findingAt("src/auth.ts", 13, "hunk-end"), // note: boundary
       findingAt("src/auth.ts", 14, "between-hunks"),
       findingAt("src/auth.ts", 35, "second-hunk"),
       findingAt("src/auth.ts", 100, "outside"),
@@ -250,12 +250,12 @@ describe("filterLineCommentFindings", () => {
       line_end: end,
     });
     const findings = [
-      ranged(11, 13), // inside hunk [10,13]
-      ranged(10, 13), // hunk-start boundary is a valid start
-      ranged(13, 13), // start == end: no range (end inside the hunk)
-      ranged(9, 13), // start outside the hunk
-      ranged(12, 35), // spans hunks: end in [33,37], start not
-      ranged(null, 13), // absent range stays absent
+      ranged(11, 13), // note: inside hunk [10,13]
+      ranged(10, 13), // note: hunk-start boundary is a valid start
+      ranged(13, 13), // note: start == end: no range (end inside the hunk)
+      ranged(9, 13), // note: start outside the hunk
+      ranged(12, 35), // note: spans hunks: end in [33,37], start not
+      ranged(null, 13), // note: absent range stays absent
     ];
     expect(filterLineCommentFindings(findings, AUTH_DIFF).map(({ finding, lineStart }) => [finding.title, lineStart])).toEqual([
       ["range-11-13", 11],
@@ -306,7 +306,7 @@ describe("renderLineCommentText (the LineIntent.body payload — marker appended
   test("a fence straddling FINDING_BODY_MAX is dropped whole and the prose kept", () => {
     const head = `**Straddle** · ${REVIEW_EMOJI["must-fix"]} must-fix\n\n`;
     const fence = "```suggestion\nconst x = 1;\n```";
-    // The fence opens at budget-25 and closes past the budget.
+    // note: The fence opens at budget-25 and closes past the budget.
     const pad = FINDING_BODY_MAX - 25 - head.length - 2;
     const finding = findingAt("src/auth.ts", 21, "Straddle");
     finding.body = `${"A".repeat(pad)}\n\n${fence}\n\nafter`;
@@ -360,14 +360,14 @@ describe("renderLineCommentText (the LineIntent.body payload — marker appended
       publicationId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
       associationId: "11111111-2222-4333-8444-555555555555",
     });
-    expect(body.split("mstar-inspector:thread:v1").length - 1).toBe(1); // only the trusted marker survives
+    expect(body.split("mstar-inspector:thread:v1").length - 1).toBe(1); // note: only the trusted marker survives
     expect(body.trimEnd().endsWith(
       "<!-- mstar-inspector:thread:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee association=11111111-2222-4333-8444-555555555555 -->",
     )).toBe(true);
   });
 });
 
-// --- mock octokit (pulls surface only — the line-comments path must never
+// note: --- mock octokit (pulls surface only — the line-comments path must never
 // touch the Issues comments surface) ----------------------------------------
 
 type PullsCalls = {
@@ -464,7 +464,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
     publicationId: PUBLICATION,
     intents,
   };
-  // Real createReview echoes the created comments back — the §7.7 capture
+  // note: Real createReview echoes the created comments back — the §7.7 capture
   // maps them onto the intents.
   const echoResponse = {
     data: {
@@ -486,7 +486,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
       pull_number: 42,
       commit_id: SHA,
       event: "COMMENT",
-      // REQUIRED top-level body for COMMENT events — a marker short line
+      // note: REQUIRED top-level body for COMMENT events — a marker short line
       // CARRYING the trusted line-batch marker (§7.5), never a copy of the
       // overall review body.
       body: "mstar-inspector line comments · round 2 · 0123456\n<!-- mstar-inspector:line-batch:v1 publication=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee -->",
@@ -505,7 +505,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
         },
       ],
     });
-    // Capture: returned comment ids mapped back to the association ids.
+    // note: Capture: returned comment ids mapped back to the association ids.
     expect(result).toEqual({
       posted: [
         { associationId: "11111111-2222-4333-8444-555555555555", commentId: 301, path: "src/auth.ts", line: 21 },
@@ -515,7 +515,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
       captured: true,
       reviewId: 55,
     });
-    // An echoed comments array is the whole answer — no second request.
+    // invariant: An echoed comments array is the whole answer — no second request.
     expect(calls.listCommentsForReviewParams).toBeUndefined();
   });
 
@@ -550,7 +550,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
   });
 
   test("the review's comments connection reports null line/original_line — the marker maps every intent", async () => {
-    // Real shape: \`GET /pulls/{n}/reviews/{id}/comments\` answers with
+    // note: Real shape: \`GET /pulls/{n}/reviews/{id}/comments\` answers with
     // \`line: null, original_line: null, side: null\` for comments the PR-wide
     // list anchors, so only the trusted thread marker identifies them.
     const marked = (intent: (typeof intents)[number], id: number) => ({
@@ -699,7 +699,7 @@ describe("postLineCommentsWithOctokit (intent-prepared request-body pin, §7.7 s
     const { calls, octokit } = mockPullsOctok({ createReviewResponse: echoResponse });
     await postLineCommentsWithOctokit(octokit, input);
     const comments = calls.createReviewParams!.comments as Record<string, unknown>[];
-    // Contract, not key insertion order: exactly path/side/line/body, no start_* keys.
+    // invariant: Contract, not key insertion order: exactly path/side/line/body, no start_* keys.
     expect(comments.map((comment) => Object.keys(comment).sort())).toEqual([
       ["body", "line", "path", "side"],
       ["body", "line", "path", "side"],

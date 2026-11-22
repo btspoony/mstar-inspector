@@ -1,5 +1,5 @@
 /**
- * Production deploy workflow guards.
+ * invariant: Production deploy workflow guards.
  *
  * YAML-parses `.github/workflows/deploy-prod.yml` and pins the release-gated
  * prod deploy surface:
@@ -81,7 +81,7 @@ const REPO_ROOT = join(import.meta.dir, "..", "..");
 
 const PY_DUMP = "import json,sys,yaml; print(json.dumps(yaml.safe_load(open(sys.argv[1]))))";
 
-/** Parse a workflow YAML into a plain JS structure (throws loudly on failure). */
+/** note: Parse a workflow YAML into a plain JS structure (throws loudly on failure). */
 function parseWorkflow(rel: string): Record<string, any> {
   const path = join(REPO_ROOT, ".github", "workflows", rel);
   const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], {
@@ -96,7 +96,7 @@ function parseWorkflow(rel: string): Record<string, any> {
   return JSON.parse(proc.stdout.toString());
 }
 
-/** PyYAML parses the bare `on:` key as boolean true → JSON key "true". */
+/** note: PyYAML parses the bare `on:` key as boolean true → JSON key "true". */
 function triggers(wf: Record<string, any>): Record<string, any> {
   const on = wf["true"];
   if (!on) throw new Error("workflow has no `on:` trigger block");
@@ -124,14 +124,14 @@ const runsText = stepRuns.join("\n---step---\n");
 describe("deploy-prod.yml guards", () => {
   test("workflow name + exactly two jobs: the secrets-free guard, then deploy", () => {
     expect(wf.name).toBe("Deploy prod");
-    // ORDER matters: the guard job is declared first, and the secret-holding
+    // why: ORDER matters: the guard job is declared first, and the secret-holding
     // deploy job declares `needs: guard-tag-ref` (pinned below).
     expect(Object.keys(wf.jobs)).toEqual(["guard-tag-ref", "deploy"]);
   });
 
   test("guard-tag-ref: secrets-free (no environment/env), checkout-free, asserts the run is on a tag", () => {
     const guard = wf.jobs["guard-tag-ref"];
-    // LOAD-BEARING: no `environment:` means GitHub attaches no production
+    // why: LOAD-BEARING: no `environment:` means GitHub attaches no production
     // secret to this job, and no checkout means no ref's code runs here.
     expect(guard.environment).toBeUndefined();
     expect(guard.env).toBeUndefined();
@@ -140,7 +140,7 @@ describe("deploy-prod.yml guards", () => {
     expect(guard["timeout-minutes"]).toBe(5);
     const gsteps = guard.steps as Step[];
     expect(gsteps.length).toBe(1);
-    // no step pulls the ref's tree or uses an action at all
+    // why: no step pulls the ref's tree or uses an action at all
     expect(gsteps.every((s) => s.uses === undefined && typeof s.run === "string")).toBe(true);
     const g = gsteps[0]!;
     expect(g.env?.REF_TYPE).toBe("${{ github.ref_type }}");
@@ -148,12 +148,12 @@ describe("deploy-prod.yml guards", () => {
     expect(g.run).toContain('if [ "$REF_TYPE" != "tag" ]; then');
     expect(g.run).toContain("::error::");
     expect(g.run).toContain("exit 1");
-    // `${{ }}` must not be interpolated straight into the guard's run script
+    // why: `${{ }}` must not be interpolated straight into the guard's run script
     expect(g.run).not.toContain("${{");
   });
 
   test("guard-tag-ref: `continue-on-error` is absent at job and step level (the tag gate is load-bearing)", () => {
-    // `needs: guard-tag-ref` is the only thing stopping a non-tag ref's code
+    // why: `needs: guard-tag-ref` is the only thing stopping a non-tag ref's code
     // from reaching the secret-bearing job. `continue-on-error: true` at either
     // level keeps every other assertion green while un-gating that path, so its
     // ABSENCE is pinned here — the same field the sibling release guard test
@@ -167,7 +167,7 @@ describe("deploy-prod.yml guards", () => {
 
   test("guard-tag-ref script: tag ref exits 0, branch ref exits non-zero with the ::error:: text", () => {
     const g = (wf.jobs["guard-tag-ref"].steps as Step[])[0]!;
-    // GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
+    // note: GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
     const runOnce = (refType: string, refName: string) =>
       Bun.spawnSync(["bash", "-e", "-c", g.run!], {
         env: { ...process.env, REF_TYPE: refType, REF_NAME: refName },
@@ -180,7 +180,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: `continue-on-error: true` on the guard step must fail the absence pin", () => {
-    // The pin above asserts the field is ABSENT. Show that adding it (the one
+    // why: The pin above asserts the field is ABSENT. Show that adding it (the one
     // edit that silently un-gates a branch ref) is what the pin catches.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
     const mutated = src.replace(
@@ -207,7 +207,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: removing `needs` from deploy must fail the suite (the gate is load-bearing)", () => {
-    // Demonstrate the guard's job-boundary gate rather than merely asserting its
+    // why: Demonstrate the guard's job-boundary gate rather than merely asserting its
     // presence: strip `needs` from a copy of the workflow and show the same
     // check the pin above uses now fails. Guards against a refactor that drops
     // `needs` while the guard job itself survives.
@@ -222,7 +222,7 @@ describe("deploy-prod.yml guards", () => {
       expect(proc.exitCode).toBe(0);
       const mwf = JSON.parse(proc.stdout.toString());
       expect(mwf.jobs.deploy.needs).toBeUndefined();
-      // i.e. the pin in the test above would now fail — gate is load-bearing.
+      // why: i.e. the pin in the test above would now fail — gate is load-bearing.
       expect(mwf.jobs.deploy.needs).not.toEqual("guard-tag-ref");
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -232,22 +232,22 @@ describe("deploy-prod.yml guards", () => {
   test("triggers: release published + workflow_dispatch whose only input is the digest audit", () => {
     expect(triggers(wf).release).toEqual({ types: ["published"] });
     const dispatch = triggers(wf).workflow_dispatch;
-    // T3-3: still no `ref` input — a run can never deploy a tag other than the
+    // why: T3-3: still no `ref` input — a run can never deploy a tag other than the
     // one it runs on. The tenant read mode is gone end to end, so the only
     // input left is the optional digest audit value: one artifact, one deploy.
     expect(Object.keys(dispatch)).toEqual(["inputs"]);
     expect(Object.keys(dispatch.inputs).sort()).toEqual(["expected_container_digest"]);
     expect(dispatch.inputs.expected_container_digest).toMatchObject({ required: false, default: "" });
-    // a `push:` trigger would deploy production on every main push — this
+    // why: a `push:` trigger would deploy production on every main push — this
     // workflow is release/dispatch only.
     expect(triggers(wf).push).toBeUndefined();
-    // BOTH triggers must stay: dropping `release` closes the human/UI-release
+    // why: BOTH triggers must stay: dropping `release` closes the human/UI-release
     // belt, dropping `workflow_dispatch` closes the explicit-dispatch door.
     expect(Object.keys(triggers(wf)).sort()).toEqual(["release", "workflow_dispatch"]);
   });
 
   test("job guard: dispatch arm FIRST, release only for a non-prerelease flag AND a tag without `-` (exact condition)", () => {
-    // Exact-normalized pin: swapping the release `&&` for `||`, dropping either
+    // why: Exact-normalized pin: swapping the release `&&` for `||`, dropping either
     // half of it, or inverting the flag comparison must fail. The dispatch arm
     // is evaluated FIRST because `github.event.release` is absent on a dispatch
     // event.
@@ -257,7 +257,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: `&&`→`||`, dropping either half, or inverting the flag comparison must fail the pin above", () => {
-    // The pin above is what stops a Release flagged prerelease under a dashless
+    // why: The pin above is what stops a Release flagged prerelease under a dashless
     // tag from reaching production. Show the pin catches each edit that reopens
     // that hole — or its mirror.
     const PINNED =
@@ -265,14 +265,14 @@ describe("deploy-prod.yml guards", () => {
     const RELEASE_ARM =
       "github.event.release.prerelease == false && !contains(github.event.release.tag_name, '-')";
     const mutations: [string, string][] = [
-      // `&&` → `||`: a prerelease-flagged Release under a dashless tag satisfies
+      // why: `&&` → `||`: a prerelease-flagged Release under a dashless tag satisfies
       // the release arm again (the exact P1 this guard closes).
       [RELEASE_ARM, "github.event.release.prerelease == false || !contains(github.event.release.tag_name, '-')"],
-      // dropping the flag half: the tag shape alone admits it.
+      // why: dropping the flag half: the tag shape alone admits it.
       [RELEASE_ARM, "!contains(github.event.release.tag_name, '-')"],
-      // dropping the tag half: a prerelease-flagged `-` tag is admitted.
+      // why: dropping the tag half: a prerelease-flagged `-` tag is admitted.
       [RELEASE_ARM, "github.event.release.prerelease == false"],
-      // inverting the flag comparison: every prerelease Release is admitted and
+      // why: inverting the flag comparison: every prerelease Release is admitted and
       // no ordinary release is.
       ["github.event.release.prerelease == false", "github.event.release.prerelease != false"],
     ];
@@ -287,7 +287,7 @@ describe("deploy-prod.yml guards", () => {
         const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
         expect(proc.exitCode).toBe(0);
         const mwf = JSON.parse(proc.stdout.toString());
-        // i.e. the exact-normalized pin in the test above would now fail.
+        // why: i.e. the exact-normalized pin in the test above would now fail.
         expect(String(mwf.jobs.deploy.if).replace(/\s+/g, " ")).not.toBe(PINNED);
       }
     } finally {
@@ -297,7 +297,7 @@ describe("deploy-prod.yml guards", () => {
 
   test("environment: production, concurrency group with `queue: max`, permissions, timeout", () => {
     expect(wf.jobs.deploy.environment).toBe("production");
-    // LOAD-BEARING: all THREE concurrency keys. `group` serialises production,
+    // why: LOAD-BEARING: all THREE concurrency keys. `group` serialises production,
     // `cancel-in-progress: false` keeps the RUNNING deploy alive, and
     // `queue: max` is what stops GitHub replacing the single pending run — a
     // release waiting on approval would otherwise be displaced by a newer
@@ -312,7 +312,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: dropping `queue: max` must fail the concurrency pin (pending deploys are preserved)", () => {
-    // The pin above asserts all three keys. Show that removing `queue: max` —
+    // why: The pin above asserts all three keys. Show that removing `queue: max` —
     // the one edit that silently returns the group to GitHub's default of a
     // single replaceable pending run — is what the pin catches.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
@@ -325,7 +325,7 @@ describe("deploy-prod.yml guards", () => {
       const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
       expect(proc.exitCode).toBe(0);
       const mwf = JSON.parse(proc.stdout.toString());
-      // i.e. the pin above would now fail — the displacement guard is load-bearing.
+      // why: i.e. the pin above would now fail — the displacement guard is load-bearing.
       expect(mwf.concurrency.queue).toBeUndefined();
       expect(mwf.concurrency).not.toEqual({
         group: "deploy-prod-mstar-inspector",
@@ -338,7 +338,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("job env: NON-SECRET only — no `secrets.` at job level; credentials are step-scoped", () => {
-    // LOAD-BEARING: a job-level secret lands in the environment of EVERY step,
+    // why: LOAD-BEARING: a job-level secret lands in the environment of EVERY step,
     // including the SHA-pinned third-party actions. Only the two public
     // identifiers stay job-level.
     expect(wf.jobs.deploy.env).toEqual({
@@ -360,16 +360,16 @@ describe("deploy-prod.yml guards", () => {
     const expectSecrets = (name: string, keys: string[]) =>
       expect([name, secretsOf(byName(name))]).toEqual([name, [...keys].sort()]);
 
-    // the preflight reads the three credentials it asserts (pure shell, no `uses:`)
+    // note: the preflight reads the three credentials it asserts (pure shell, no `uses:`)
     expectSecrets("Assert required secrets are set", [
       "OAUTH_CLIENT_SECRET",
       "DASHBOARD_SESSION_SECRET",
       "DASHBOARD_ENCRYPTION_KEY",
     ]);
-    // the key gate reads the one secret it proves usable — nothing else, and no
+    // why: the key gate reads the one secret it proves usable — nothing else, and no
     // token: it touches no cloud API.
     expectSecrets("Assert usable encryption key (pre-deploy gate)", ["DASHBOARD_ENCRYPTION_KEY"]);
-    // the secret-bulk writes read the values they upload + the token that authenticates
+    // note: the secret-bulk writes read the values they upload + the token that authenticates
     expectSecrets("Write required secrets", [
       TOKEN,
       "OAUTH_CLIENT_SECRET",
@@ -380,7 +380,7 @@ describe("deploy-prod.yml guards", () => {
       TOKEN,
       "ALERT_WEBHOOK_URL",
     ]);
-    // every wrangler-authenticating step declares the token itself
+    // why: every wrangler-authenticating step declares the token itself
     for (const n of [
       "Verify Cloudflare account",
       "Apply prod D1 migrations (remote)",
@@ -394,13 +394,13 @@ describe("deploy-prod.yml guards", () => {
       expectSecrets(n, [TOKEN]);
     }
 
-    // LOAD-BEARING: a step that runs THIRD-PARTY action code must be
+    // why: LOAD-BEARING: a step that runs THIRD-PARTY action code must be
     // secret-free — a compromised action revision can only read what its step
     // was given, so the tag guard / approval cannot be the last line of defense.
     const actionSteps = steps.filter((s) => s.uses !== undefined);
     for (const s of actionSteps) expect([s.uses, secretsOf(s)]).toEqual([s.uses, []]);
 
-    // and no OTHER step smuggles one in: the twelve above are the full carrier set
+    // why: and no OTHER step smuggles one in: the twelve above are the full carrier set
     expect(
       steps
         .filter((s) => secretsOf(s).length > 0)
@@ -426,10 +426,10 @@ describe("deploy-prod.yml guards", () => {
 
   test("third-party actions are pinned to commit SHAs with the mutable tag only in a trailing comment", () => {
     const uses = steps.map((s) => s.uses).filter((u): u is string => !!u);
-    // a mutable tag here would let a later publish of that tag decide which code
+    // why: a mutable tag here would let a later publish of that tag decide which code
     // runs on the approved production deploy
     for (const u of uses) expect(u).toMatch(/^[\w.-]+\/[\w.-]+@[0-9a-f]{40}$/);
-    // Which SHA is a bump's business: locking a literal here would fail every
+    // why: Which SHA is a bump's business: locking a literal here would fail every
     // dependabot update to the action. The shape above is the invariant.
     // the human-readable tag survives as a trailing comment only
     const text = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
@@ -441,11 +441,11 @@ describe("deploy-prod.yml guards", () => {
 
   test("checkout pins the run's immutable SHA (github.sha) with full history", () => {
     const checkout = steps.find((s) => s.uses?.startsWith("actions/checkout"));
-    // A ref NAME is resolved at fetch time — a tag moved during the approval
+    // why: A ref NAME is resolved at fetch time — a tag moved during the approval
     // wait would change the deployed tree. The SHA cannot move.
     expect(checkout?.with?.ref).toBe("${{ github.sha }}");
     expect(checkout?.with?.["fetch-depth"]).toBe(0);
-    // T3-3: the deployed checkout IS the run — never an independent input.
+    // why: T3-3: the deployed checkout IS the run — never an independent input.
     expect(String(checkout?.with?.ref)).not.toContain("inputs.");
   });
 
@@ -458,7 +458,7 @@ describe("deploy-prod.yml guards", () => {
     expect(assertStep.run).toContain("::error::");
     expect(assertStep.run).toContain("exit 1");
     expect(assertStep.run).not.toContain("${{");
-    // MUST precede every step that executes repository code or mutates.
+    // why: MUST precede every step that executes repository code or mutates.
     const idx = (needle: string) => steps.findIndex((s) => (s.name ?? "").includes(needle));
     const assertIdx = steps.findIndex((s) => s.name?.includes("matches the run SHA"));
     for (const later of [
@@ -474,7 +474,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: a checkout that does NOT pin the run SHA fails the pin (immutability is load-bearing)", () => {
-    // Revert the must-fix in the parsed copy and show the pin above now fails:
+    // why: Revert the must-fix in the parsed copy and show the pin above now fails:
     // `ref: github.ref_name` (fetch-time name resolution) must not pass.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
     const mutated = src.replace("ref: ${{ github.sha }}", "ref: ${{ github.ref_name }}");
@@ -502,7 +502,7 @@ describe("deploy-prod.yml guards", () => {
     expect(marker.run).toContain('if [ "$PROD_ENV_MARKER" != "production" ]; then');
     expect(marker.run).toContain("::error::");
     expect(marker.run).toContain("exit 1");
-    // the marker is NOT a job-level env passthrough — it is read in-step only,
+    // why: the marker is NOT a job-level env passthrough — it is read in-step only,
     // so the job env pin below stays at the credential set.
     expect(wf.jobs.deploy.env.PROD_ENV_MARKER).toBeUndefined();
     const markerIdx = steps.findIndex((s) => s.name?.includes("production environment marker"));
@@ -526,12 +526,12 @@ describe("deploy-prod.yml guards", () => {
     expect(idx("Resolve deploy tag")).toBeGreaterThan(idx("Verify Cloudflare account"));
     expect(idx("Apply prod D1 migrations")).toBeGreaterThan(idx("Resolve deploy tag"));
     expect(idx("Deploy Worker")).toBeGreaterThan(idx("Apply prod D1 migrations"));
-    // Bring-up order: the Worker is created WITH its real bindings first, then
+    // why: Bring-up order: the Worker is created WITH its real bindings first, then
     // the secrets land. The reverse order used to materialise a bound-less
     // draft Worker holding production secrets.
     expect(idx("Write required secrets")).toBeGreaterThan(idx("Deploy Worker"));
     expect(idx("Write ALERT_WEBHOOK_URL secret")).toBeGreaterThan(idx("Write required secrets"));
-    // the serving version is created AFTER the last bulk: the bulk version is
+    // why: the serving version is created AFTER the last bulk: the bulk version is
     // built from the config, so only this deploy binds the deployment shape.
     expect(idx("Deploy serving version")).toBeGreaterThan(idx("Write ALERT_WEBHOOK_URL secret"));
     expect(idx("Re-capture live Worker version")).toBeGreaterThan(idx("Deploy serving version"));
@@ -542,15 +542,15 @@ describe("deploy-prod.yml guards", () => {
   test("the serving deploy binds the deployment shape, and the summary no longer reports a tenant mode", () => {
     const serving = steps.find((s) => s.name === "Deploy serving version (prod)")!;
     expect(serving).toBeDefined();
-    // The whole command, allowlist `--var` included: this step decides the
+    // why: The whole command, allowlist `--var` included: this step decides the
     // final live version, so a dropped PLATFORM_OPERATORS suffix would ship a
     // Worker whose console 404s for every configured operator.
     expect(serving.run?.trim()).toBe(
       'bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}"',
     );
-    expect(serving.if).toBeUndefined();   // a skip leaves a bulk version serving
+    expect(serving.if).toBeUndefined();   // note: a skip leaves a bulk version serving
 
-    // The tenant-mode evidence line died with the mode: the run summary has no
+    // why: The tenant-mode evidence line died with the mode: the run summary has no
     // mode to report, and no dispatch input to feed one.
     const summary = steps.find((s) => s.name === "Record prod deploy evidence")!;
     expect(summary.run).not.toContain("Tenant mode");
@@ -561,16 +561,16 @@ describe("deploy-prod.yml guards", () => {
       (s) => s.name === "Validate the tag against the checked-out version surfaces",
     )!;
     expect(validate).toBeDefined();
-    // the repository's own release gate, against the run's tag — a `v*` tag can
+    // why: the repository's own release gate, against the run's tag — a `v*` tag can
     // point at a commit whose version surfaces differ, and forward-only
     // migrations would already have been applied by the time healthz noticed.
     expect(validate.env?.TAG).toBe("${{ github.ref_name }}");
     expect(validate.run).toBe('bun run release:validate -- "$TAG"');
-    expect(validate.if).toBeUndefined();   // never skipped — a skip re-opens the hole
+    expect(validate.if).toBeUndefined();   // note: never skipped — a skip re-opens the hole
     expect(validate.run).not.toContain("${{");
     const idx = (needle: string) => steps.findIndex((s) => (s.name ?? "").includes(needle));
     expect(idx("Validate the tag")).toBeGreaterThan(idx("Resolve deploy tag"));
-    // strictly before EVERY mutating wrangler step (the D1 migration is first)
+    // why: strictly before EVERY mutating wrangler step (the D1 migration is first)
     const validateIdx = steps.indexOf(validate);
     const mutatingIdx = steps
       .map((s, i) => (/bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(s.run ?? "") ? i : -1))
@@ -580,7 +580,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("validation script EXECUTES: a mismatched tag exits non-zero, an aligned tag exits 0", () => {
-    // Substring pins cannot see a wrong invocation. Run the step's own body in a
+    // why: Substring pins cannot see a wrong invocation. Run the step's own body in a
     // synthetic repo whose HEAD carries a real tag, so both directions are
     // observable: the aligned tag passes (the gate's own self-heal case) and a
     // tag naming any other version fails loudly — the hole a hand-cut/re-pointed
@@ -595,7 +595,7 @@ describe("deploy-prod.yml guards", () => {
     const version = pkg.version;
     const dir = mkdtempSync(join(tmpdir(), "validate-tag-run-"));
     try {
-      // the gate reads package.json + src/version.ts and resolves the tag via
+      // note: the gate reads package.json + src/version.ts and resolves the tag via
       // git — copy those four files, then tag HEAD.
       for (const rel of [
         "package.json",
@@ -622,11 +622,11 @@ describe("deploy-prod.yml guards", () => {
           cwd: dir,
           env: { ...process.env, TAG: tag },
         });
-      // the tag that names this tree's version surfaces: validated
+      // note: the tag that names this tree's version surfaces: validated
       const aligned = runOnce(`v${version}`);
       expect(aligned.stdout.toString()).toContain("all surfaces aligned");
       expect(aligned.exitCode).toBe(0);
-      // a tag whose version surface differs: loud, non-zero
+      // note: a tag whose version surface differs: loud, non-zero
       const mismatch = runOnce("v9.9.9");
       expect(mismatch.exitCode).not.toBe(0);
       const log = mismatch.stdout.toString() + mismatch.stderr.toString();
@@ -638,7 +638,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: dropping the validation step (or moving it after the migration) must fail the pin above", () => {
-    // Show both edits that reopen it — removal, and relocation past the D1
+    // why: Show both edits that reopen it — removal, and relocation past the D1
     // migration — make the pinned assertions fail.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
     const dir = mkdtempSync(join(tmpdir(), "validate-tag-"));
@@ -658,12 +658,12 @@ describe("deploy-prod.yml guards", () => {
       );
       const stepBlock = block.slice(block.indexOf("      - name: Validate the tag"));
       expect(stepBlock).toContain("release:validate");
-      // 1. removed entirely
+      // note: 1. removed entirely
       const removed = parse(src.replace(block, ""));
       expect(
         removed.find((s) => s.name === "Validate the tag against the checked-out version surfaces"),
       ).toBeUndefined();
-      // 2. relocated to AFTER the D1 migration (position pin now fails)
+      // note: 2. relocated to AFTER the D1 migration (position pin now fails)
       const relocated = parse(
         src.replace(block, "").replace(
           "      - name: Deploy Worker (prod)",
@@ -692,19 +692,19 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("required-secret preflight is PURE and precedes every mutating wrangler step", () => {
-    // The assertion must live in its own step next to the environment-marker
+    // why: The assertion must live in its own step next to the environment-marker
     // assertion, not inside the `secret bulk` writer: inside the writer it runs
     // only AFTER the D1 migration and the Worker deploy, so a missing
     // credential would red a run that has already mutated production.
     const preflight = steps.find((s) => s.name === "Assert required secrets are set")!;
     expect(preflight).toBeDefined();
-    // pure: no wrangler invocation, no mutation of any kind
+    // why: pure: no wrangler invocation, no mutation of any kind
     expect(preflight.run).not.toMatch(/bunx wrangler/);
     expect(preflight.if).toBeUndefined();
     const markerIdx = steps.findIndex((s) => s.name?.includes("production environment marker"));
     const preflightIdx = steps.indexOf(preflight);
     expect(preflightIdx).toBeGreaterThan(markerIdx);
-    // every mutating invocation — the required-secret write, the ALERT
+    // why: every mutating invocation — the required-secret write, the ALERT
     // write/delete arm, the D1 migration and the deploy — comes strictly after
     // the preflight.
     const mutatingIdx = steps
@@ -712,13 +712,13 @@ describe("deploy-prod.yml guards", () => {
       .filter((i) => i >= 0);
     expect(mutatingIdx.length).toBe(5);
     for (const i of mutatingIdx) expect(preflightIdx).toBeLessThan(i);
-    // and the writer no longer carries the assertion itself.
+    // why: and the writer no longer carries the assertion itself.
     const writer = steps.find((s) => s.name === "Write required secrets")!;
     expect(writer.run).not.toContain(":?required");
   });
 
   test("mutation: folding the `:?required` assertion back into the writer fails the preflight pin", () => {
-    // Re-create the reviewed bug — the assertion only inside the post-deploy
+    // why: Re-create the reviewed bug — the assertion only inside the post-deploy
     // `secret bulk` step — and show the pin above now fails: there is no pure
     // preflight step, and the first mutation precedes the (relocated) assertion.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
@@ -740,10 +740,10 @@ describe("deploy-prod.yml guards", () => {
       const proc = Bun.spawnSync(["python3", "-c", PY_DUMP, path], { stdout: "pipe", stderr: "pipe" });
       expect(proc.exitCode).toBe(0);
       const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
-      // the pin's `name === "Assert required secrets are set"` lookup now finds
+      // note: the pin's `name === "Assert required secrets are set"` lookup now finds
       // nothing — i.e. the pin above would fail.
       expect(msteps.find((s) => s.name === "Assert required secrets are set")).toBeUndefined();
-      // and the assertion is back after the first mutation (the D1 migration
+      // note: and the assertion is back after the first mutation (the D1 migration
       // and the deploy precede it), which is the hole the pin closes.
       const writerIdx = msteps.findIndex((s) => s.name === "Write required secrets");
       const deployIdx = msteps.findIndex((s) => (s.name ?? "").includes("Deploy Worker"));
@@ -758,9 +758,9 @@ describe("deploy-prod.yml guards", () => {
     const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
     expect(recap).toBeDefined();
     const run = recap.run!;
-    // read of the live deployment, prod-scoped and JSON
+    // note: read of the live deployment, prod-scoped and JSON
     expect(run).toContain("bunx wrangler deployments list --env production --json");
-    // the extraction selects the NEWEST deployment by `created_on` — the CLI
+    // why: the extraction selects the NEWEST deployment by `created_on` — the CLI
     // lists deployments ASCENDING, so `.[0]` is the oldest of the returned page
     // and would report a stale version as live.
     const filter = run.replace(/[ \t]+/g, " ");
@@ -769,14 +769,14 @@ describe("deploy-prod.yml guards", () => {
     );
     expect(run).not.toContain(".[0].version_id");
     expect(run).not.toContain("((.[0].versions");
-    // the deploy-log predecessor is never written back as if it were live
+    // why: the deploy-log predecessor is never written back as if it were live
     expect(run).toContain('"unavailable (post-secret lookup failed)"');
     expect(run).toContain("> version_id.txt");
-    // the fallback is explicitly noticed and the step has no failure path
+    // why: the fallback is explicitly noticed and the step has no failure path
     expect(run).toContain("::notice::");
     expect(run).not.toContain("exit 1");
     expect(run).not.toContain("::error");
-    // placement: after the LAST mutating step, still before the smoke
+    // why: placement: after the LAST mutating step, still before the smoke
     const recapIdx = steps.indexOf(recap);
     const lastMutation = Math.max(
       ...steps.map((s, i) =>
@@ -793,7 +793,7 @@ describe("deploy-prod.yml guards", () => {
     const dir = mkdtempSync(join(tmpdir(), "recap-"));
     try {
       writeFileSync(join(dir, "version_id.txt"), "deadbeef\n");
-      // stub `bunx` only — the real `jq` does the extraction, so the pinned
+      // why: stub `bunx` only — the real `jq` does the extraction, so the pinned
       // filter expression is what is under test.
       const bunx = (out: string, code = 0) => {
         writeFileSync(
@@ -814,7 +814,7 @@ describe("deploy-prod.yml guards", () => {
           log: proc.stdout.toString() + proc.stderr.toString(),
         };
       };
-      // path 1 — resolved: the live CLI shape — an ASCENDING multi-entry page
+      // note: path 1 — resolved: the live CLI shape — an ASCENDING multi-entry page
       // where the newest is NOT first (index 0 is the oldest, exactly as the
       // CLI returns it). The newest must win, so a `.[0]` read is caught here.
       bunx(
@@ -825,12 +825,12 @@ describe("deploy-prod.yml guards", () => {
       const resolved = runOnce("deadbeef");
       expect(resolved.code).toBe(0);
       expect(resolved.out).toBe("40a71ea8-1111-2222-3333-444455556666");
-      // the deployed predecessor is gone from the file, not merely overridden
+      // note: the deployed predecessor is gone from the file, not merely overridden
       expect(resolved.out).not.toContain("deadbeef");
-      // and NOT the oldest entry (the `.[0]` read the CLI's ascending order
+      // note: and NOT the oldest entry (the `.[0]` read the CLI's ascending order
       // used to make look correct)
       expect(resolved.out).not.toBe("451dc81c-0a75-4c1e-8e7d-eb5a4d88aedd");
-      // path 2 — empty deployment list: the unavailable marker, NOT the
+      // note: path 2 — empty deployment list: the unavailable marker, NOT the
       // predecessor
       bunx("[]");
       const empty = runOnce("deadbeef");
@@ -838,7 +838,7 @@ describe("deploy-prod.yml guards", () => {
       expect(empty.out).toBe("unavailable (post-secret lookup failed)");
       expect(empty.out).not.toContain("deadbeef");
       expect(empty.log).toContain("::notice::");
-      // path 3 — the CLI itself fails (non-zero, no JSON): same marker, still
+      // note: path 3 — the CLI itself fails (non-zero, no JSON): same marker, still
       // exit 0
       bunx("", 1);
       const failed = runOnce("deadbeef");
@@ -846,7 +846,7 @@ describe("deploy-prod.yml guards", () => {
       expect(failed.out).toBe("unavailable (post-secret lookup failed)");
       expect(failed.out).not.toContain("deadbeef");
       expect(failed.log).toContain("::notice::");
-      // path 3b — a payload of the wrong shape (flat, the form that does not
+      // note: path 3b — a payload of the wrong shape (flat, the form that does not
       // exist) is not read as a live version either.
       bunx('[{"version_id":"beef4567"}]');
       const flat = runOnce("deadbeef");
@@ -859,7 +859,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: reverting the extraction to `.[0]` fails the pin (ascending order makes index 0 stale)", () => {
-    // The reviewed bug's third form: `.[0]` is the OLDEST of the page the CLI
+    // why: The reviewed bug's third form: `.[0]` is the OLDEST of the page the CLI
     // returns, so a run would record a stale deployment's version as live.
     // Show the pinned filter expression no longer matches, and that the same
     // payload really does resolve differently under it.
@@ -877,9 +877,9 @@ describe("deploy-prod.yml guards", () => {
       expect(proc.exitCode).toBe(0);
       const msteps = JSON.parse(proc.stdout.toString()).jobs.deploy.steps as Step[];
       const mrecap = msteps.find((s) => s.name === "Re-capture live Worker version")!;
-      // i.e. the pin above (`toContain("'max_by(.created_on) | …'")`) now fails.
+      // note: i.e. the pin above (`toContain("'max_by(.created_on) | …'")`) now fails.
       expect(mrecap.run).not.toContain("max_by(.created_on) | ((.versions // [])[0].version_id)");
-      // and the mutated expression genuinely picks the stale first entry.
+      // note: and the mutated expression genuinely picks the stale first entry.
       const payload = JSON.stringify([
         { created_on: "2026-09-22T04:46:18Z", versions: [{ version_id: "451dc81c" }] },
         { created_on: "2026-10-14T05:28:48Z", versions: [{ version_id: "40a71ea8" }] },
@@ -898,7 +898,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: a predecessor fallback in the re-capture must fail the pin", () => {
-    // The reviewed bug in its second form: the step exists but leaves the
+    // why: The reviewed bug in its second form: the step exists but leaves the
     // deploy-log value in place when the lookup fails — evidence then names a
     // predecessor as if it were live. Show the pin above now fails.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
@@ -922,7 +922,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   test("mutation: dropping the live re-capture leaves the deploy-log value as the only version source", () => {
-    // Deleting the re-capture step is the reviewed bug (evidence names a
+    // why: Deleting the re-capture step is the reviewed bug (evidence names a
     // predecessor). Show the pin above now fails: no step reads the live
     // deployment after the secret uploads.
     const src = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
@@ -951,16 +951,16 @@ describe("deploy-prod.yml guards", () => {
     const secretStep = steps.find((s) => s.name === "Write required secrets");
     expect(secretStep).toBeDefined();
     const run = secretStep!.run!;
-    // the prod Worker's binding names — the collector renames OAUTH_CLIENT_ID
+    // why: the prod Worker's binding names — the collector renames OAUTH_CLIENT_ID
     // to the GITHUB_OAUTH_CLIENT_ID the dashboard reads.
     expect(run).toContain("GITHUB_OAUTH_CLIENT_ID: env.OAUTH_CLIENT_ID");
     expect(run).toContain("GITHUB_OAUTH_CLIENT_SECRET: env.OAUTH_CLIENT_SECRET");
     expect(run).toContain("DASHBOARD_SESSION_SECRET: env.DASHBOARD_SESSION_SECRET");
     expect(run).toContain("DASHBOARD_ENCRYPTION_KEY: env.DASHBOARD_ENCRYPTION_KEY");
-    // `--env production` is load-bearing: without it the command targets the
+    // why: `--env production` is load-bearing: without it the command targets the
     // top-level Worker, i.e. staging, and overwrites its secrets.
     expect(run).toContain("bunx wrangler secret bulk --env production");
-    // the alert pair is ONE step: a step-level env is not visible to that
+    // why: the alert pair is ONE step: a step-level env is not visible to that
     // step's own `if:`, so the set/unset branch lives in the shell — both arms
     // must still call the prod-scoped bulk write.
     const alert = steps.find((s) => s.name === "Write ALERT_WEBHOOK_URL secret (bind, or null-delete when unset)")!;
@@ -972,7 +972,7 @@ describe("deploy-prod.yml guards", () => {
     expect(alert.run).toContain("{ALERT_WEBHOOK_URL: null}");
     expect(alert.run).toContain("fi");
     expect(alert.run).not.toContain("${{");
-    // the null-delete arm mutates the Worker too, and the set arm binds the
+    // why: the null-delete arm mutates the Worker too, and the set arm binds the
     // webhook — both carry `--env production` on the SAME line as the write.
     // every mutating Wrangler invocation in this workflow carries the flag.
     const mutating = stepRuns.filter((r) => /bunx wrangler (secret bulk|d1 migrations apply|deploy)\b/.test(r));
@@ -983,19 +983,19 @@ describe("deploy-prod.yml guards", () => {
   test("resolve deploy tag: tag-based version output + loud non-tag failure before mutations", () => {
     const resolve = steps.find((s) => s.id === "ver");
     expect(resolve?.name).toBe("Resolve deploy tag");
-    // the run's own ref is the deploy identity — no independent input exists.
+    // why: the run's own ref is the deploy identity — no independent input exists.
     expect(resolve?.env?.REF_TYPE).toBe("${{ github.ref_type }}");
     expect(resolve?.env?.REF_NAME).toBe("${{ github.ref_name }}");
     expect(JSON.stringify(resolve?.env)).not.toContain("inputs.");
     const run = resolve!.run!;
-    // a non-tag run (e.g. dispatched on a branch) fails loudly here, before any
+    // why: a non-tag run (e.g. dispatched on a branch) fails loudly here, before any
     // cloud mutation — production can only ever deploy a tag.
     expect(run).toContain('if [ "$REF_TYPE" != "tag" ]; then');
     expect(run).toContain("::error::");
     expect(run).toContain("exit 1");
-    // the v-normalized tag is the expected healthz version
+    // note: the v-normalized tag is the expected healthz version
     expect(run).toContain('echo "version=v${REF_NAME#v}" >> "$GITHUB_OUTPUT"');
-    // the tag-ref gate must precede EVERY mutating Wrangler step — the
+    // why: the tag-ref gate must precede EVERY mutating Wrangler step — the
     // required-secret write, the ALERT write/delete, the D1 migration and the
     // deploy — not merely account verification. Moving any one of them above
     // the resolver would let a branch run reach a production mutation before it
@@ -1012,7 +1012,7 @@ describe("deploy-prod.yml guards", () => {
     const resolve = steps.find((s) => s.id === "ver")!;
     const dir = mkdtempSync(join(tmpdir(), "ver-"));
     try {
-      // GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
+      // note: GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
       const runOnce = (refType: string, refName: string) =>
         Bun.spawnSync(["bash", "-e", "-c", resolve.run!], {
           cwd: dir,
@@ -1038,12 +1038,12 @@ describe("deploy-prod.yml guards", () => {
     expect(runsText).toContain(
       "bunx wrangler d1 migrations apply mstar-inspector-prod-db --remote --env production",
     );
-    // the STAGING database must never be migrated by this workflow
+    // why: the STAGING database must never be migrated by this workflow
     expect(runsText).not.toMatch(/migrations apply mstar-inspector-db\b/);
   });
 
   test("no step targets the staging instance (comment narration excluded)", () => {
-    // step runs + `uses`/`with` values — comments are narration, not behavior
+    // note: step runs + `uses`/`with` values — comments are narration, not behavior
     expect(runsText).not.toContain("42ch.dev");
     expect(runsText).not.toContain("mstar-inspector-sandbox-v2");
     expect(steps.map((s) => s.uses ?? "").join("\n")).not.toContain("staging");
@@ -1058,7 +1058,7 @@ describe("deploy-prod.yml guards", () => {
   });
 
   /**
-   * Execute a deploy-step body with a stubbed `bunx` (the step's only external
+   * why: Execute a deploy-step body with a stubbed `bunx` (the step's only external
    * command) that prints a wrangler deploy log carrying `WRANGLER_VERSION_ID`:
    * `tee deploy.log` lands it on disk, so the extraction and its gate run for
    * real. `bash -eo pipefail` mirrors the step's `shell: bash`.
@@ -1099,11 +1099,11 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
   test("deploy-log version recording asserts the UUID shape and is NEVER fatal (nit e)", () => {
     const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
     const run = deploy.run!;
-    // `test -s` passes on a lone newline — the value is this release's evidence,
+    // why: `test -s` passes on a lone newline — the value is this release's evidence,
     // so the SHAPE is asserted.
     expect(run).not.toContain("test -s version_id.txt");
     expect(run).toContain("'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'");
-    // Recording only. The Worker is LIVE before this line and the secret writes
+    // why: Recording only. The Worker is LIVE before this line and the secret writes
     // come after it: a log-shape problem must never strand the run — it records
     // the explicit marker + a warning, and the post-secret re-capture overwrites
     // it.
@@ -1111,10 +1111,10 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     expect(run).toContain("::warning::");
     expect(run).not.toContain("::error");
     expect(run).not.toContain("exit 1");
-    // the narration states why: the re-capture supersedes this value.
+    // why: the narration states why: the re-capture supersedes this value.
     const text = readFileSync(join(REPO_ROOT, ".github", "workflows", WORKFLOW), "utf8");
     expect(text).toContain("the post-secret re-capture overwrites it");
-    // the re-capture step keeps its own, distinct marker
+    // note: the re-capture step keeps its own, distinct marker
     const recap = steps.find((s) => s.name === "Re-capture live Worker version")!;
     expect(recap.run).not.toContain("no Worker version id");
   });
@@ -1127,14 +1127,14 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     expect(ok.code).toBe(0);
     expect(ok.recorded).toBe(uuid);
 
-    // a short/non-UUID token: the pre-fix gate (`test -s`) accepted it, and the
+    // why: a short/non-UUID token: the pre-fix gate (`test -s`) accepted it, and the
     // round-3 fix must not `exit 1` on it either — the marker is recorded.
     const short = runDeployStep(deploy.run!, "deadbeef");
     expect(short.code).toBe(0);
     expect(short.recorded).toBe("unavailable (deploy log had no version id)");
     expect(short.out).toContain("::warning::");
 
-    // a value-less log line (trailing spaces): `cut` yields an empty field, the
+    // why: a value-less log line (trailing spaces): `cut` yields an empty field, the
     // file got a lone newline — the exact hole `test -s` left open — and the run
     // still continues.
     const blank = runDeployStep(deploy.run!, "  ");
@@ -1144,7 +1144,7 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
   });
 
   test("MUTATION/reintroducing `exit 1` in the deploy-log recording: a first bring-up would strand the run", () => {
-    // Round-3 nit 1's failure mode: the Worker is already live and the secrets
+    // why: Round-3 nit 1's failure mode: the Worker is already live and the secrets
     // are not written yet, so exiting on a log-shape problem leaves production
     // serving without them. Show the non-fatal pin above fails on that edit.
     const deploy = steps.find((s) => s.name === "Deploy Worker (prod)")!;
@@ -1168,26 +1168,26 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     const run = smoke!.run!;
     const norm = run.replace(/[ \t]+/g, " ").trim();
     expect(run).toContain("https://inspector.mstar.page/healthz");
-    // direction of the comparison: the live version must EQUAL the expected
+    // why: direction of the comparison: the live version must EQUAL the expected
     // tag (a flipped `!=`, or dropping the check, must fail the suite).
     expect(norm).toContain(
       `[ "$(printf '%s' "$body" | jq -r '.version')" = "$EXPECTED_VERSION" ]`,
     );
     expect(norm).toContain(`[ "$(printf '%s' "$body" | jq -r '.ok')" = "true" ]`);
-    // exactly five attempts — a fresh Worker version takes a moment to reach
+    // why: exactly five attempts — a fresh Worker version takes a moment to reach
     // the edge; fewer retries must fail the suite.
     expect(norm).toContain("for _ in 1 2 3 4 5; do");
-    // terminal arm: all attempts exhausted ⇒ loud, nonzero failure
+    // note: terminal arm: all attempts exhausted ⇒ loud, nonzero failure
     expect(norm).toContain('if [ "$ok" != 1 ]; then');
     expect(norm).toContain("::error::healthz did not report version $EXPECTED_VERSION within 5 attempts");
     expect(norm).toContain("exit 1");
-    // the expected value comes from the tag resolved in the earlier step
+    // why: the expected value comes from the tag resolved in the earlier step
     expect(smoke!.env?.EXPECTED_VERSION).toBe("${{ steps.ver.outputs.version }}");
     expect(smoke!.if).toBeUndefined();
   });
 
   test("healthz smoke script EXECUTES: matching version exits 0, mismatching version exits non-zero", () => {
-    // Substring pins above cannot see a flipped comparison (`ok=0` → `ok=1`
+    // why: Substring pins above cannot see a flipped comparison (`ok=0` → `ok=1`
     // would still pass). Execute the extracted script with a stubbed `curl` /
     // `sleep` so both directions are observable without touching the network.
     const smoke = steps.find((s) => s.name?.includes("healthz"))!;
@@ -1234,7 +1234,7 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     );
     expect(run).toContain("sha256:[0-9a-f]{64}");
     expect(run).toContain("image_digest.txt");
-    // Sandbox 1.0 durable_object: `containers list --json` reports an empty
+    // why: Sandbox 1.0 durable_object: `containers list --json` reports an empty
     // image for this account, so it must not be the digest source.
     expect(run).not.toContain("containers list");
   });
@@ -1244,14 +1244,14 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     const run = digest!.run!;
     const norm = run.replace(/[ \t]+/g, " ");
     expect(run).toContain("unchanged (no push in this deploy)");
-    // the suppression must sit on the EXTRACTION pipeline itself: a fail-fast
+    // why: the suppression must sit on the EXTRACTION pipeline itself: a fail-fast
     // shell exits on the unmatched grep before any later fallback is reached.
     const extractionLine = norm.split("\n").find((l) => l.includes("> image_digest.txt"))!;
     expect(extractionLine.trim()).toMatch(/image_digest\.txt \|\| true$/);
-    // fallback only when the file is empty — an unconditional echo would mask
+    // why: fallback only when the file is empty — an unconditional echo would mask
     // a real digest.
     expect(norm).toContain("if ! test -s image_digest.txt; then");
-    // an evidence step must carry no failure path of its own
+    // why: an evidence step must carry no failure path of its own
     expect(run).not.toContain("exit 1");
     expect(run).not.toContain("::error");
   });
@@ -1260,7 +1260,7 @@ printf 'Uploaded mstar-inspector-production\\nCurrent Version ID: %s\\n' "$WRANG
     const digest = steps.find((s) => s.name?.includes("image digest"))!;
     const dir = mkdtempSync(join(tmpdir(), "digest-"));
     try {
-      // GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
+      // note: GitHub's default `run:` shell is `bash -e {0}` — reproduce fail-fast.
       const runOnce = (log: string) => {
         writeFileSync(join(dir, "deploy.log"), log);
         const proc = Bun.spawnSync(["bash", "-e", "-c", digest.run!], {

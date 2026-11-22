@@ -1,5 +1,5 @@
 /**
- * The declaration base-URL rule `extract-omp-snapshot.ts` publishes.
+ * why: The declaration base-URL rule `extract-omp-snapshot.ts` publishes.
  *
  * Round 2 caught the code and the prose disagreeing: the rule says a URL is
  * refused when "*every* candidate is a loopback/plain-http host", while
@@ -24,7 +24,7 @@ describe("storableBaseUrl", () => {
     expect(storableBaseUrl("https://127.0.0.1:1234/v1")).toBeNull();
     expect(storableBaseUrl("http://127.0.0.1:8080/v1")).toBeNull();
     expect(storableBaseUrl("https://[::1]:9000/v1")).toBeNull();
-    // A host that merely CONTAINS "localhost" is a different machine.
+    // why: A host that merely CONTAINS "localhost" is a different machine.
     expect(storableBaseUrl("https://localhost.example.com/v1")).toBe("https://localhost.example.com/v1");
   });
 });
@@ -37,7 +37,7 @@ describe("declarationBaseUrl", () => {
   });
 
   test("a rejected leading candidate falls through to the next (the round-2 bug)", () => {
-    // `mostCommon(...) ?? seed` stopped here and returned null, discarding a
+    // why: `mostCommon(...) ?? seed` stopped here and returned null, discarding a
     // perfectly storable seed URL — contradicting the published rule.
     expect(declarationBaseUrl(["http://127.0.0.1:1234/v1", "https://api.example.com/v1"])).toBe(
       "https://api.example.com/v1",

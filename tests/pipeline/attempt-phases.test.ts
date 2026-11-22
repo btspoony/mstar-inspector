@@ -1,5 +1,5 @@
 /**
- * The five attempt phases, each driven ALONE from a hand-built input — and one
+ * note: The five attempt phases, each driven ALONE from a hand-built input — and one
  * case that simulates a RESTART: after `prepare`, only the returned data and the
  * attempt's sandbox id survive; `review`, `collect`, `publish` and `cleanup`
  * then run from the persisted records alone.
@@ -11,7 +11,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// Load shim FIRST: the execution module statically imports ./sandbox → the
+// note: Load shim FIRST: the execution module statically imports ./sandbox → the
 // workerd builtin `cloudflare:workers`. Every double is injected.
 import "../helpers/cloudflare-workers-mock";
 
@@ -54,7 +54,7 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { Lease } from "../../src/store/finding-lifecycle";
 import type { PostOctokit, PostPreparedLineCommentsInput, PostPreparedReviewInput } from "../../src/pipeline/comment";
-// Type-only (erased at compile time, so it cannot run before the shim above).
+// note: Type-only (erased at compile time, so it cannot run before the shim above).
 import type {
   AttemptRef,
   CheckHandle,
@@ -62,7 +62,7 @@ import type {
   ProcessDeps,
 } from "../../src/pipeline/review-attempt-execution";
 
-// Dynamic: the module graph under test must load after the workerd shim.
+// note: Dynamic: the module graph under test must load after the workerd shim.
 const {
   cleanupAttempt,
   collectAttempt,
@@ -73,7 +73,7 @@ const {
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
-// Dynamic so the module graph loads AFTER the workerd shim above (same reason
+// note: Dynamic so the module graph loads AFTER the workerd shim above (same reason
 // every product module in this file is loaded dynamically).
 const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedReviewWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
   "../../src/pipeline/comment"
@@ -100,7 +100,7 @@ beforeEach(() => {
 });
 
 /**
- * The seeded D1 + this case's doubles, assembled by hand. `share` carries the
+ * note: The seeded D1 + this case's doubles, assembled by hand. `share` carries the
  * pieces a RESTART keeps: the same database and the same container, but fresh
  * maps — the host resolves the App again, and nothing in-memory survives.
  */
@@ -124,7 +124,7 @@ async function makeDeps(
     checkSettlements: new Map(),
     credentials: new Map(),
   };
-  // The host channel: the adapter and the keys the host resolved for this
+  // note: The host channel: the adapter and the keys the host resolved for this
   // delivery. A phase never receives either across a boundary.
   deps.appCommenters.set(TEST_APP_ID, {
     commenter: h.fakeCommenter,
@@ -139,7 +139,7 @@ async function makeDeps(
   return { deps, db };
 }
 
-/** The attempt's data input — what a step host rebuilds from the queue message. */
+/** note: The attempt's data input — what a step host rebuilds from the queue message. */
 function makeRef(payload: ReviewJobPayload): AttemptRef {
   return {
     attemptId: ATTEMPT_ID,
@@ -235,7 +235,7 @@ describe("prepareAttempt", () => {
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
-    // The durable done-state: the delivery is a duplicate of this head.
+    // note: The durable done-state: the delivery is a duplicate of this head.
     h.kvState.getValue = "done";
 
     const step = await prepareAttempt(deps, makeRef(payload));
@@ -249,13 +249,13 @@ describe("prepareAttempt", () => {
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
-    // A fresh head: prepare runs to the end of its phase.
+    // note: A fresh head: prepare runs to the end of its phase.
     const step = await prepareAttempt(deps, makeRef(payload));
     if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
 
     const handoff = step.prepared;
     expect(handoff.headSha).toBe(SHA);
-    // The ONLY thing a restart may carry: this JSON document plus the attempt
+    // note: The ONLY thing a restart may carry: this JSON document plus the attempt
     // id. A live handle, a token or a Set would fail this equality.
     expect(JSON.parse(JSON.stringify(handoff))).toEqual(handoff);
     expect(handoff).not.toHaveProperty("sandbox");
@@ -273,33 +273,33 @@ describe("the restart round trip", () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const ref = makeRef(payload);
 
-    // --- invocation 1: prepare -------------------------------------------
+    // note: --- invocation 1: prepare -------------------------------------------
     const step = await prepareAttempt(deps, ref);
     if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
     const prepared: PreparedAttempt = JSON.parse(JSON.stringify(step.prepared));
 
-    // --- invocation 2: a NEW host (fresh maps), same database + container --
+    // note: --- invocation 2: a NEW host (fresh maps), same database + container --
     const { deps: resumed } = await makeDeps({ db });
     const reviewed = await reviewAttempt(resumed, ref, prepared);
     expect(reviewed.state).toBe("persisted");
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("persisted");
 
-    // --- invocation 3: collect, reading the paid result from the row ------
+    // note: --- invocation 3: collect, reading the paid result from the row ------
     const { deps: collecting } = await makeDeps({ db });
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
-    // The publication id is the whole handoff, and it is on the journal.
+    // note: The publication id is the whole handoff, and it is on the journal.
     const staged = await readPublication(db as never, collected.collected.publicationId);
     expect(staged?.phase).toBe("prepared");
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
 
-    // --- invocation 4: publish, from the journal row alone ----------------
+    // note: --- invocation 4: publish, from the journal row alone ----------------
     const { deps: publishing } = await makeDeps({ db });
     const outcome = await publishAttempt(publishing, ref, collected.collected.publicationId);
     expect(outcome).toEqual({ kind: "ok" });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
 
-    // --- invocation 5: cleanup, whose proof comes from the launch row -----
+    // note: --- invocation 5: cleanup, whose proof comes from the launch row -----
     const { deps: cleaning } = await makeDeps({ db });
     expect(await cleanupAttempt(cleaning, ref)).toEqual({ retention: "retained" });
     expect(h.sandbox.destroyCalls).toBe(1);
@@ -312,7 +312,7 @@ describe("the restart round trip", () => {
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const ref = makeRef(payload);
-    // A REAL Check row: the launch row's frozen identity is read from it, and a
+    // note: A REAL Check row: the launch row's frozen identity is read from it, and a
     // resumed settlement may claim only that generation.
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
@@ -326,7 +326,7 @@ describe("the restart round trip", () => {
     });
     if (claimed.kind !== "claimed") throw new Error(`the test could not create the row: ${claimed.kind}`);
     const handle: CheckHandle = { ...HANDLE, attemptId: claimed.attempt.identity.attemptId };
-    // The §7.10 seam, with its own record of what was adopted and concluded.
+    // note: The §7.10 seam, with its own record of what was adopted and concluded.
     const checks = {
       begun: 0,
       terminalized: [] as Array<{ publicationId: string | null; outcome: string }>,
@@ -353,7 +353,7 @@ describe("the restart round trip", () => {
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     const begunBeforePublish = checks.begun;
 
-    // The publishing host created no settlement: it must ADOPT the attempt's
+    // note: The publishing host created no settlement: it must ADOPT the attempt's
     // Check from D1 rather than leave the run `in_progress` after a success.
     const { deps: publishing } = await makeDeps({ db });
     publishing.checks = checks;
@@ -384,12 +384,12 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     const publicationId = collected.collected.publicationId;
-    // The fixture's diff covers the finding's line, so the staged publication
+    // note: The fixture's diff covers the finding's line, so the staged publication
     // carries exactly one frozen line intent (the batch under test).
     const staged = await readPublication(db as never, publicationId);
     expect(staged?.payload.lineIntents).toHaveLength(1);
 
-    // A REAL decryptable PEM: the recovery lane in the hook must resolve this
+    // note: A REAL decryptable PEM: the recovery lane in the hook must resolve this
     // App for itself (it is the production factory, not an injected reviewer).
     const pem = await testAppPem();
     db.raw
@@ -398,7 +398,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
         await createSecretbox(TEST_KEY).encryptSecret(pem, `github_apps.private_key_enc:${TEST_APP_ID}`),
         TEST_APP_ID,
       );
-    // The recovery lane routes by the EXACT (bot, installation) pair.
+    // note: The recovery lane routes by the EXACT (bot, installation) pair.
     db.raw
       .prepare(
         `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
@@ -420,7 +420,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
         pulls: {
           createReview: async (params) => {
             batches.push(params);
-            // The foreground's send window lapses HERE, inside the mutation —
+            // note: The foreground's send window lapses HERE, inside the mutation —
             // then the recovery lane runs against the SAME applied batch.
             clock.now = Date.now() + PUBLICATION_LEASE_MS + 1;
             const realFetch = globalThis.fetch;
@@ -440,7 +440,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
               }
               if (url.includes("/pulls/") && url.includes("/reviews")) {
                 if (init?.method === "POST") {
-                  // A second createReview: the forbidden duplicate batch.
+                  // note: A second createReview: the forbidden duplicate batch.
                   clock.recoveryCreate += 1;
                   return json(201, { id: 9100 });
                 }
@@ -458,7 +458,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
             } finally {
               globalThis.fetch = realFetch;
             }
-            // GitHub's real response omits ids; the capture reads them back by
+            // note: GitHub's real response omits ids; the capture reads them back by
             // the trusted thread marker, so echo the created batch with ids.
             const comments = (params.comments as Array<Record<string, unknown>>).map((comment, index) => ({
               ...comment,
@@ -475,7 +475,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
     const { deps: publishing } = await makeDeps({ db });
     expect(await publishAttempt(publishing, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // One mutation for one eligible batch: the foreground sent it; recovery
+    // note: One mutation for one eligible batch: the foreground sent it; recovery
     // found the durable intent and only read back (no second create).
     expect(batches).toHaveLength(1);
     expect(clock.recoveryCreate).toBe(0);
@@ -488,7 +488,7 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
       .get(publicationId) as { n: number };
     expect(captured.n).toBe(1);
 
-    // The intent is terminal for sending: even with the lease long lapsed, the
+    // note: The intent is terminal for sending: even with the lease long lapsed, the
     // same batch can never be claimed again.
     expect(
       await recordLineDispatchIntent(db as never, publicationId, "recovery-again", clock.now + PUBLICATION_LEASE_MS * 4),
@@ -514,7 +514,7 @@ describe("§7.9a condition 1 — only a `prepared` row may be dispatched", () =>
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     const publicationId = collected.collected.publicationId;
 
-    // An earlier lane claimed it and then lapsed: the row is `sending`, the
+    // note: An earlier lane claimed it and then lapsed: the row is `sending`, the
     // state the discovery lane owns — not a phase this send may dispatch from.
     const earlier = await claimPublication(
       db as never,
@@ -539,7 +539,7 @@ describe("§7.9a condition 1 — only a `prepared` row may be dispatched", () =>
 describe("§7.9a condition 1 — a refused dispatch keeps the publication link", () => {
   test("the refusal links the Check, and a later confirmation concludes from the proof", async () => {
     const { deps, db } = await makeDeps();
-    // A Check attempt with an attached run, released so the settlement adopts it.
+    // note: A Check attempt with an attached run, released so the settlement adopts it.
     const claimedCheck = await claimAttempt(db as never, {
       scope: SCOPE,
       githubAppId: 424242,
@@ -571,14 +571,14 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
     const publicationId = collected.collected.publicationId;
-    // The attempt's frozen Check identity (what the consumer's claim records in
+    // note: The attempt's frozen Check identity (what the consumer's claim records in
     // production), so the publish phase can adopt THIS generation's row.
     const frozen = db.raw
       .prepare(`SELECT attempt_key, generation FROM review_checks WHERE id = ?`)
       .get(checkAttemptId) as { attempt_key: string; generation: number };
     expect(await freezeAttemptIdentity(db as never, ref.attemptId, { key: frozen.attempt_key, generation: frozen.generation })).toBe(true);
 
-    // Another lane claimed the publication and lapsed: this send may not
+    // note: Another lane claimed the publication and lapsed: this send may not
     // dispatch from `sending`.
     expect(
       await claimPublication(
@@ -611,7 +611,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
                 external_id: identity.externalId,
                 status: "completed",
                 conclusion: terminal,
-                // Delivery is the conclusion AND the frozen text (spec §7.9).
+                // note: Delivery is the conclusion AND the frozen text (spec §7.9).
                 output: "output" in params ? (params.output as { title?: string; summary?: string }) : undefined,
                 app: { id: identity.githubAppId },
               },
@@ -638,7 +638,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
       getCheckGate: async () => gate,
     });
 
-    // The refusal: the phase sends nothing, and the Check freezes the
+    // note: The refusal: the phase sends nothing, and the Check freezes the
     // unconfirmed failure LINKED to the publication it was about to send. The
     // remote update fails, so the row stays recoverable.
     const { deps: publishing } = await makeDeps({ db });
@@ -661,13 +661,13 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.terminal_ms).toBeNull();
 
-    // The publication is then confirmed through the normal proof path.
+    // note: The publication is then confirmed through the normal proof path.
     const confirmedAt = Date.now();
     const proofLease = await claimPublication(db as never, publicationId, "proof-lane", confirmedAt, "sending");
     if (proofLease === null) throw new Error("fixture: the proof claim was refused");
     const staged = await readPublication(db as never, publicationId);
     if (staged === null) throw new Error("fixture: the staged publication is gone");
-    // The confirmed publication carries a readable tally, so its confirmation
+    // note: The confirmed publication carries a readable tally, so its confirmation
     // can actually revise the unconfirmed failure — the worker twin's shape.
     // Without a tally the proof-derived conclusion is the SAME failure and
     // there is nothing to revise.
@@ -707,7 +707,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
     ).toBe(true);
     expect(await applyPublishedLifecycle(db as never, publicationId, proofLease, confirmedAt)).toBe(true);
 
-    // The recovery conclusion reads THAT publication (the link), so the Check
+    // note: The recovery conclusion reads THAT publication (the link), so the Check
     // now concludes from the proof — a proof-derived summary, not the
     // unconfirmed fallback.
     now = confirmedAt + 120_000;
@@ -730,7 +730,7 @@ describe("§7.9a condition 1 — a refused dispatch keeps the publication link",
       terminal_ms: number | null;
     };
     expect(row.publication_id).toBe(publicationId);
-    // The confirmation REVISED the record: the proof's readable tally turns the
+    // note: The confirmation REVISED the record: the proof's readable tally turns the
     // unconfirmed failure into the gate's own verdict, not the failure fallback.
     expect(row.desired).toBe("success");
     expect(row.desired_summary).not.toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
@@ -744,7 +744,7 @@ describe("cleanupAttempt", () => {
   test("a launched row with no persisted result destroys nothing and releases nothing", async () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
-    // The claim was written AND the paid step was taken: no proof it returned.
+    // note: The claim was written AND the paid step was taken: no proof it returned.
     await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
     expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
 
@@ -756,7 +756,7 @@ describe("cleanupAttempt", () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
     await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
-    // The attempt is still `provisioned` when this cleanup decides to destroy —
+    // note: The attempt is still `provisioned` when this cleanup decides to destroy —
     // and a concurrent review takes the paid step in between.
     expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
 
@@ -769,12 +769,12 @@ describe("cleanupAttempt", () => {
       },
     };
 
-    // The CAS on `provisioned` loses, so nothing is destroyed and no handle is
+    // note: The CAS on `provisioned` loses, so nothing is destroyed and no handle is
     // even resolved: the container may be paying.
     expect(await cleanupAttempt(guarded, ref)).toEqual({ retention: "unknown" });
     expect(resolved).toBe(0);
     expect(h.sandbox.destroyCalls).toBe(0);
-    // Cleanup did not rewrite the row it lost: the launch stands.
+    // note: Cleanup did not rewrite the row it lost: the launch stands.
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
   });
 
@@ -782,10 +782,10 @@ describe("cleanupAttempt", () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
     await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null);
-    // The first cleanup won the CAS and is still destroying the container.
+    // note: The first cleanup won the CAS and is still destroying the container.
     expect(await abandonReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toBe(true);
 
-    // The second cleanup loses the CAS, and the row DECODES as `abandoned`: it
+    // note: The second cleanup loses the CAS, and the row DECODES as `abandoned`: it
     // returns unknown and touches neither the container nor capacity — never
     // `no-paid-work`, which would release a container somebody else owns.
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("abandoned");
@@ -797,12 +797,12 @@ describe("cleanupAttempt", () => {
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
 
-    // Absent is a state read like any other: the claim INSERTs the row already
+    // note: Absent is a state read like any other: the claim INSERTs the row already
     // `abandoned`, so a first-provisioning caller can no longer insert a paid
     // row after this cleanup decided there was none.
     expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "no-paid-work" });
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("abandoned");
-    // Nothing was ever activated, and activation precedes every container
+    // note: Nothing was ever activated, and activation precedes every container
     // handle — so there is no container to destroy and none is addressed.
     expect(h.sandbox.destroyCalls).toBe(0);
   });
@@ -813,7 +813,7 @@ describe("cleanupAttempt", () => {
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const ref = makeRef(payload);
-    // The durable facts a restart would find: prepared, launched, persisted.
+    // note: The durable facts a restart would find: prepared, launched, persisted.
     const step = await prepareAttempt(deps, ref);
     if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
     await reviewAttempt(deps, ref, JSON.parse(JSON.stringify(step.prepared)));
@@ -839,7 +839,7 @@ describe("runReviewAttemptWorkflow", () => {
 });
 
 describe("the owed Check mark", () => {
-  /** A real open Check row this attempt owns, and the handle that adopts it. */
+  /** note: A real open Check row this attempt owns, and the handle that adopts it. */
   async function seedOwnedCheck(db: Awaited<ReturnType<typeof createSeededTestD1>>) {
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
@@ -858,7 +858,7 @@ describe("the owed Check mark", () => {
     return { row, handle: { ...HANDLE, attemptId: row.id } };
   }
 
-  /** Prepare with a REAL Check row, so the launch row's identity is frozen. */
+  /** note: Prepare with a REAL Check row, so the launch row's identity is frozen. */
   async function preparedWithIdentity(db: Awaited<ReturnType<typeof createSeededTestD1>>, ref: AttemptRef) {
     const { row, handle } = await seedOwnedCheck(db);
     const { deps } = await makeDeps({ db });
@@ -874,16 +874,16 @@ describe("the owed Check mark", () => {
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
     const ref = makeRef(payload);
-    // A rival froze its own head on this attempt's row before the checkout.
+    // note: A rival froze its own head on this attempt's row before the checkout.
     await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), { key: "rival-head-key", generation: 1 });
     const { deps } = await makeDeps({ db });
-    const { handle } = await seedOwnedCheck(db); // this attempt's live claim: a different head
+    const { handle } = await seedOwnedCheck(db); // note: this attempt's live claim: a different head
     deps.checks = { begin: async () => handle, terminalize: async () => {} };
 
-    // The phase wraps its cause; the moved head is that cause.
+    // note: The phase wraps its cause; the moved head is that cause.
     await expect(prepareAttempt(deps, ref)).rejects.toMatchObject({ cause: expect.any(MovedHeadError) });
 
-    // The rival's identity stands, and nothing was reviewed under ours.
+    // note: The rival's identity stands, and nothing was reviewed under ours.
     const row = db.raw
       .prepare("SELECT attempt_key FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as { attempt_key: string };
@@ -901,7 +901,7 @@ describe("the owed Check mark", () => {
     const { handle } = await seedOwnedCheck(db);
     deps.checks = { begin: async () => handle, terminalize: async () => {} };
 
-    // The whole route runs: a moved head settles as skipped — no failure row,
+    // note: The whole route runs: a moved head settles as skipped — no failure row,
     // no pre-publication settlement, no retry — and the observed head is
     // re-admitted so a successor attempt owns it.
     const successors: ReviewJobPayload[] = [];
@@ -914,9 +914,9 @@ describe("the owed Check mark", () => {
       .prepare("SELECT attempt_key, state FROM review_launches WHERE attempt_id = ?")
       .get(ATTEMPT_ID) as { attempt_key: string; state: string };
     expect(row.attempt_key).toBe("rival-head-key");
-    // Nothing was launched on our identity.
+    // note: Nothing was launched on our identity.
     expect(row.state).not.toBe("launched");
-    // The successor carries the identity and ordering it actually has: the
+    // note: The successor carries the identity and ordering it actually has: the
     // marker for the skipped delivery, its own attach identity, and no
     // fabricated head_at (this delivery's stamp describes the SAME head, and
     // this payload has none).
@@ -925,7 +925,7 @@ describe("the owed Check mark", () => {
     expect(successors[0]!.head_at).toBeUndefined();
     expect(successors[0]!.successor_of).toBeString();
     expect(successors[0]!.attachDeliveryId).toMatch(/^successor:/);
-    // The durable outbox was written before the send and is marked delivered
+    // note: The durable outbox was written before the send and is marked delivered
     // once the queue accepted it.
     const outbox = db.raw.prepare("SELECT state FROM review_successors").all() as Array<{ state: string }>;
     expect(outbox).toHaveLength(1);
@@ -938,7 +938,7 @@ describe("the owed Check mark", () => {
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
     const ref = makeRef(payload);
-    // The identity this attempt will freeze is ALREADY there, identical.
+    // note: The identity this attempt will freeze is ALREADY there, identical.
     const { row, handle } = await seedOwnedCheck(db);
     await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), {
       key: row.attempt_key,
@@ -961,7 +961,7 @@ describe("the owed Check mark", () => {
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // The admitted claim is refused (another holder owns the row), so no handle
+    // note: The admitted claim is refused (another holder owns the row), so no handle
     // exists — the identity is still the admitted claim's own row.
     const ref = { ...makeRef(payload), checkClaimSha: SHA };
     const claimed = await claimAttempt(db as never, {
@@ -1024,7 +1024,7 @@ describe("the owed Check mark", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // Publishing resumes with NO adoptable handle, and the obligation is still
+    // note: Publishing resumes with NO adoptable handle, and the obligation is still
     // recorded — from the durable publication and the FROZEN identity.
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
@@ -1057,7 +1057,7 @@ describe("the owed Check mark", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // A key this attempt could never RE-DERIVE from its payload, frozen on both
+    // note: A key this attempt could never RE-DERIVE from its payload, frozen on both
     // rows: a recomputation would find no Check and write no mark.
     db.raw.prepare("UPDATE review_checks SET attempt_key = 'frozen-by-hand' WHERE id = ?").run(row.id);
     db.raw.prepare("UPDATE review_launches SET attempt_key = 'frozen-by-hand' WHERE attempt_id = ?").run(ATTEMPT_ID);
@@ -1087,7 +1087,7 @@ describe("the owed Check mark", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // The settlement adopts the attempt's own Check row, but its conclusion does
+    // note: The settlement adopts the attempt's own Check row, but its conclusion does
     // not land, so the row stays open and the obligation is the durable record.
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => handle, terminalize: async () => {} };
@@ -1119,7 +1119,7 @@ describe("a first publication past the frozen instant", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // The paid result is durable, but the attempt's instant has passed: the
+    // note: The paid result is durable, but the attempt's instant has passed: the
     // plan's cap "prevents starting ... a first result publication at or after
     // expiry", and a delayed or resumed host must honour it.
     const { deps: publishing } = await makeDeps({ db });
@@ -1129,7 +1129,7 @@ describe("a first publication past the frozen instant", () => {
     );
 
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
-    // Nothing was claimed, so no `sending` row pretends a send was attempted.
+    // note: Nothing was claimed, so no `sending` row pretends a send was attempted.
     expect((await readPublication(db as never, collected.collected.publicationId))?.phase).toBe("prepared");
   });
 
@@ -1152,7 +1152,7 @@ describe("a first publication past the frozen instant", () => {
     const { deps: publishing } = await makeDeps({ db });
     expect(await publishAttempt(publishing, ref, collected.collected.publicationId)).toEqual({ kind: "ok" });
 
-    // The phase cannot be authoritative alone: the marker scan inside the send
+    // note: The phase cannot be authoritative alone: the marker scan inside the send
     // is an unbounded await, so the instant rides the send and the adapter
     // checks it on the last line before the first write.
     const send = h.commenterCalls.find((call) => call.op === "post-prepared");
@@ -1192,7 +1192,7 @@ describe("a first publication past the frozen instant", () => {
     const { deps: reviewing } = await makeDeps({ db });
     await reviewAttempt(reviewing, ref, prepared);
 
-    // The cleanup owns the exact target: the staging path must take the same
+    // note: The cleanup owns the exact target: the staging path must take the same
     // exclusion before it stages (and before its UPDATE).
     const held = await claimDegradedTarget(db as never, {
       scope: SCOPE,
@@ -1222,7 +1222,7 @@ describe("a first publication past the frozen instant", () => {
     const { deps: reviewing } = await makeDeps({ db });
     await reviewAttempt(reviewing, ref, prepared);
 
-    // The adapter's guard refused at the mutation — nothing left the Worker.
+    // note: The adapter's guard refused at the mutation — nothing left the Worker.
     h.commenterState.preparedDegradedError = new PublicationDeadlineSpent(
       "create comment: the attempt's frozen deadline passed 5ms ago — nothing was sent",
     );
@@ -1230,7 +1230,7 @@ describe("a first publication past the frozen instant", () => {
     await expect(collectAttempt(collecting, ref, prepared)).rejects.toMatchObject({
       cause: expect.any(RoundBudgetSpent),
     });
-    // A refusal is not an outcome: the collect did not settle as `degraded`.
+    // note: A refusal is not an outcome: the collect did not settle as `degraded`.
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
   });
 
@@ -1239,7 +1239,7 @@ describe("a first publication past the frozen instant", () => {
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
-    // Invalid output: this collect would stage and send a DEGRADED notice.
+    // note: Invalid output: this collect would stage and send a DEGRADED notice.
     h.sandbox.runnerStdout = "not a verdict";
     const ref = makeRef(payload);
     const step = await prepareAttempt(deps, ref);
@@ -1258,7 +1258,7 @@ describe("a first publication past the frozen instant", () => {
 
 describe("an unreadable activation fact is unknown, never a review failure", () => {
   /**
-   * The attempt's D1 face with ONE statement class rejecting exactly once: the
+   * note: The attempt's D1 face with ONE statement class rejecting exactly once: the
    * fault then heals, so the assertions below read what the code concluded from
    * a failure it could not read through.
    */
@@ -1310,7 +1310,7 @@ describe("an unreadable activation fact is unknown, never a review failure", () 
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    // A prior entry provisioned AND activated this attempt: a container may
+    // note: A prior entry provisioned AND activated this attempt: a container may
     // exist, and the next entry's activation read is the only fact left.
     expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
     const inflightKey = {
@@ -1331,7 +1331,7 @@ describe("an unreadable activation fact is unknown, never a review failure", () 
       }),
     ).toEqual({ ok: true });
 
-    // The settlement this attempt owns: concluding it would claim an outcome
+    // note: The settlement this attempt owns: concluding it would claim an outcome
     // nobody observed.
     const concluded: string[] = [];
     deps.checks = {
@@ -1356,7 +1356,7 @@ describe("an unreadable activation fact is unknown, never a review failure", () 
     expect(h.sandbox.destroyCalls).toBe(0);
     const inflight = db.raw.prepare("SELECT attempt_id FROM review_inflight").all() as Array<{ attempt_id: string }>;
     expect(inflight).toEqual([{ attempt_id: ATTEMPT_ID }]);
-    // The launch row keeps the provisioning fact: nothing stamped a failure.
+    // note: The launch row keeps the provisioning fact: nothing stamped a failure.
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).not.toBe("failed");
   });
 });
@@ -1368,14 +1368,14 @@ describe("the workflow host entry", () => {
     deps.runnerConfigs.clear();
     const payload = makePayload();
 
-    // A restart that only has `collect`/`publish` left must not need the paid
+    // note: A restart that only has `collect`/`publish` left must not need the paid
     // provider: a removed or rotated key would otherwise settle a durable,
     // already-paid result as a failure.
     expect(await hydrateAttemptHost(payload, deps)).toBe("ready");
     expect(deps.appCommenters.has(TEST_APP_ID)).toBe(true);
     expect(deps.runnerConfigs.size).toBe(0);
 
-    // The step that SPENDS the key resolves it, once, and caches it.
+    // note: The step that SPENDS the key resolves it, once, and caches it.
     const config = await ensureRunnerConfig(payload, deps);
     expect(config.appCfg.modelChain).toBe("ark/deepseek-v4-flash");
     expect(deps.runnerConfigs.get(TEST_APP_ID)).toBe(config);
@@ -1390,7 +1390,7 @@ describe("a resumed settlement claims only the frozen pair", () => {
     h.sandbox.resolvedSha = SHA;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const ref = makeRef(payload);
-    // A real Check row, so prepare freezes the pair on the launch row.
+    // note: A real Check row, so prepare freezes the pair on the launch row.
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
       githubAppId: 424242,
@@ -1413,7 +1413,7 @@ describe("a resumed settlement claims only the frozen pair", () => {
     const collected = await collectAttempt(collecting, ref, prepared);
     if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
 
-    // The pair a resumed host has to claim on is gone: passing `undefined` would
+    // note: The pair a resumed host has to claim on is gone: passing `undefined` would
     // select the unrestricted fresh-claim path, which may MINT a generation.
     db.raw
       .prepare("UPDATE review_launches SET attempt_key = NULL, attempt_generation = NULL WHERE attempt_id = ?")
@@ -1439,7 +1439,7 @@ describe("a resumed settlement claims only the frozen pair", () => {
 });
 
 /**
- * The attempt's publication settlement mark — the operator report's third
+ * note: The attempt's publication settlement mark — the operator report's third
  * bucket end. It is written only when NO publication work remains: a proof that
  * never landed, or a lifecycle apply still owed to recovery, leaves the
  * attempt's publication interval open, and marking it would understate the
@@ -1447,7 +1447,7 @@ describe("a resumed settlement claims only the frozen pair", () => {
  */
 describe("the publication settlement mark", () => {
   /**
-   * The attempt up to its staged publication, with the handoff row whose mark
+   * note: The attempt up to its staged publication, with the handoff row whose mark
    * the report reads. Returns the publication id `publishAttempt` sends.
    */
   async function stagedPublication(): Promise<{
@@ -1485,7 +1485,7 @@ describe("the publication settlement mark", () => {
     const { db, ref, payload, publicationId } = await stagedPublication();
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
-    // The proof UPDATE fails; nothing else does. A plain D1 double with one
+    // note: The proof UPDATE fails; nothing else does. A plain D1 double with one
     // statement refused, named here so the access is checked at this seam.
     const failingDb = new Proxy(db as unknown as object, {
       get(target, prop) {
@@ -1504,10 +1504,10 @@ describe("the publication settlement mark", () => {
 
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // The send happened, and its staged/sending row is the recovery evidence.
+    // note: The send happened, and its staged/sending row is the recovery evidence.
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
     expect((await readPublication(db as never, publicationId))?.phase).toBe("sending");
-    // The publication lane has NOT closed, so no end-to-end interval exists yet.
+    // note: The publication lane has NOT closed, so no end-to-end interval exists yet.
     expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
   });
 
@@ -1527,7 +1527,7 @@ describe("the publication settlement mark", () => {
     const { db, ref, payload, publicationId } = await stagedPublication();
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
-    // The settlement rides the apply transaction; its failure rolls the apply
+    // note: The settlement rides the apply transaction; its failure rolls the apply
     // back, so the journal stays recoverable instead of applied-and-unmeasured.
     const underlying = db as unknown as { prepare(query: string): unknown };
     publishing.deps.env.DB = new Proxy(db as unknown as object, {
@@ -1547,14 +1547,14 @@ describe("the publication settlement mark", () => {
 
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // Confirmed and still due for recovery: never `applied` without its mark.
+    // note: Confirmed and still due for recovery: never `applied` without its mark.
     expect((await readPublication(db as never, publicationId))?.phase).toBe("confirmed");
     expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.settledMs).toBeNull();
   });
 
   test("a resumed publication whose Check is open and held elsewhere is not settled", async () => {
     const { db, ref, payload, publicationId } = await stagedPublication();
-    // The attempt froze a Check pair; ANOTHER holder owns the open row, so the
+    // note: The attempt froze a Check pair; ANOTHER holder owns the open row, so the
     // resumed host's `settlementFor` finds nothing to adopt.
     const claimed = await claimAttempt(db as never, {
       scope: SCOPE,
@@ -1578,7 +1578,7 @@ describe("the publication settlement mark", () => {
     publishing.deps.checks = undefined;
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // The rule discovers the frozen pair: the open row is an obligation, so the
+    // note: The rule discovers the frozen pair: the open row is an obligation, so the
     // publication is recorded but the attempt is not certified as settled.
     expect((await readPublication(db as never, publicationId))?.phase).toBe("applied");
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
@@ -1590,7 +1590,7 @@ describe("the publication settlement mark", () => {
     const { db, ref, payload, publicationId } = await stagedPublication();
     const publishing = await makeDeps({ db });
     publishing.deps.checks = { begin: async () => null, terminalize: async () => {} };
-    // The send is definitively rejected, but the failed-phase mark cannot land:
+    // note: The send is definitively rejected, but the failed-phase mark cannot land:
     // the journal stays recoverable, so the publication lane is still open.
     h.commenterState.preparedReviewReject = true;
     const underlying = db as unknown as { prepare(query: string): unknown };
@@ -1620,7 +1620,7 @@ describe("the publication settlement mark", () => {
     const payload = makePayload();
     registerGitOpsCommands(h.sandbox, payload);
     h.sandbox.resolvedSha = SHA;
-    // Invalid output: collect publishes a degraded notice instead of a review.
+    // note: Invalid output: collect publishes a degraded notice instead of a review.
     h.sandbox.runnerStdout = "not a verdict";
     const ref = makeRef(payload);
     const step = await prepareAttempt(deps, ref);
@@ -1649,7 +1649,7 @@ describe("the publication settlement mark", () => {
   });
 });
 
-/** A real Check row this attempt owns; its id is the publication lease's key. */
+/** note: A real Check row this attempt owns; its id is the publication lease's key. */
 async function seedCheckRow(db: TestD1) {
   const claimed = await claimAttempt(db as never, {
     scope: SCOPE,
@@ -1663,7 +1663,7 @@ async function seedCheckRow(db: TestD1) {
   });
   if (claimed.kind !== "claimed") throw new Error(`the test could not create the row: ${claimed.kind}`);
   const handle: CheckHandle = { ...HANDLE, attemptId: claimed.attempt.identity.attemptId };
-  // An attached run and a released lease: a settlement that adops this row can
+  // note: An attached run and a released lease: a settlement that adops this row can
   // conclude it, and a refusal leaves it recoverable.
   expect(await setCheckCreateState(db as never, handle.attemptId, claimed.lease, "sending", undefined, Date.now())).toBe(true);
   expect(await attachCheckRunId(db as never, handle.attemptId, claimed.lease, 4242, Date.now())).toBe(true);
@@ -1671,7 +1671,7 @@ async function seedCheckRow(db: TestD1) {
   return { checkId: handle.attemptId, handle };
 }
 
-/** Prepare + review + collect against a Check row this attempt owns. */
+/** note: Prepare + review + collect against a Check row this attempt owns. */
 async function preparedPublication(
   db: TestD1,
   ref: AttemptRef,
@@ -1702,7 +1702,7 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
       terminalize: async () => {},
     });
 
-    // Another lane owns the send's exact action: this one is refused at the
+    // note: Another lane owns the send's exact action: this one is refused at the
     // guard, before any request.
     expect(
       await claimPublicationLease(db as never, {
@@ -1737,7 +1737,7 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
       },
     };
 
-    // The publishing host adopts the Check through the REAL lifecycle, and sends
+    // note: The publishing host adopts the Check through the REAL lifecycle, and sends
     // through the PRODUCTION composition (guard + verb) over a scripted
     // transport.
     const publishing = await makeDeps({ db });
@@ -1799,7 +1799,7 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
 
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // Nothing was sent, and the Check still names the publication that a later
+    // note: Nothing was sent, and the Check still names the publication that a later
     // confirmation must correct it from.
     expect(attempted).toEqual([]);
     const row = db.raw
@@ -1834,7 +1834,7 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
       terminalize: async () => {},
     });
 
-    // The send ACQUIRES the action, then its marker scan outlives the lease:
+    // note: The send ACQUIRES the action, then its marker scan outlives the lease:
     // the last-line re-proof finds it gone. That is still no authority — never
     // proof the prepared target is wrong.
     const attempted: unknown[] = [];
@@ -1905,14 +1905,14 @@ describe("§7.9a condition 1 — a refused action lease keeps the publication li
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
     expect(attempted).toEqual([]);
-    // The row is handed back for recovery, never marked failed on a refusal
+    // note: The row is handed back for recovery, never marked failed on a refusal
     // that proved nothing about the prepared target.
     const publication = db.raw
       .prepare(`SELECT phase, holder FROM review_publications WHERE id = ?`)
       .get(publicationId) as { phase: string; holder: string | null };
     expect(publication.phase).toBe("prepared");
     expect(publication.holder).toBeNull();
-    // And the Check keeps the one publication a later confirmation corrects it from.
+    // note: And the Check keeps the one publication a later confirmation corrects it from.
     const row = db.raw
       .prepare(`SELECT publication_id, desired, recovery_state, terminal_ms FROM review_checks WHERE id = ?`)
       .get(checkId) as {
@@ -1951,7 +1951,7 @@ describe("§7.9a condition 1 — no execution handle still contends for the Chec
       }),
     ).not.toBeNull();
 
-    // No adoptable handle on this host: the eligibility is not authority, so the
+    // note: No adoptable handle on this host: the eligibility is not authority, so the
     // send must still present — and lose to — the Check row's action lease.
     const attempted: unknown[] = [];
     const transport: PostOctokit = {
@@ -2022,7 +2022,7 @@ describe("a line-batch bookkeeping fault never vetoes the close-out", () => {
     const { publicationId } = await preparedPublication(db, ref, checks);
     expect((await readPublication(db as never, publicationId))?.payload.lineIntents).toHaveLength(1);
 
-    // The batch's dispatch intent cannot be recorded (one lost reply; the row
+    // note: The batch's dispatch intent cannot be recorded (one lost reply; the row
     // itself is untouched). The review is already published and applied.
     const publishing = await makeDeps({ db });
     publishing.deps.checks = checks;
@@ -2069,9 +2069,9 @@ describe("a line-batch bookkeeping fault never vetoes the close-out", () => {
 
     expect(await publishAttempt(publishing.deps, ref, publicationId)).toEqual({ kind: "ok" });
 
-    // The applied review closed out: the Check concluded from its own proof.
+    // note: The applied review closed out: the Check concluded from its own proof.
     expect(concluded).toEqual([{ publicationId, outcome: "publication-unknown" }]);
-    // The batch was never sent, and no unproven intent was cleared.
+    // note: The batch was never sent, and no unproven intent was cleared.
     expect(h.commenterCalls.filter((call) => call.op === "line-comments")).toHaveLength(0);
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
     const row = db.raw

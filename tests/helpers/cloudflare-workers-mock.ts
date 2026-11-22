@@ -1,5 +1,5 @@
 /**
- * The suite's ONE `cloudflare:workers` mock registration — imported for its
+ * why: The suite's ONE `cloudflare:workers` mock registration — imported for its
  * side effect, before anything else, by every test file that (transitively)
  * loads the sandbox adapter (`src/pipeline/sandbox.ts` is the only importer of
  * the workerd builtin, and Bun's test runner cannot resolve it).
@@ -27,7 +27,7 @@ mock.module("cloudflare:workers", () => ({
       this.env = env;
     }
   },
-  // The Workflow base only stores (ctx, env) too. Tests drive the step
+  // note: The Workflow base only stores (ctx, env) too. Tests drive the step
   // composition through a step double, never the platform runtime, so a class
   // with the same construction surface is all the module graph needs.
   WorkflowEntrypoint: class {

@@ -1,5 +1,5 @@
 /**
- * GitHub Checks adapter tests (spec review-lifecycle §7.9) —
+ * note: GitHub Checks adapter tests (spec review-lifecycle §7.9) —
  * `src/pipeline/checks.ts` against the REAL attempt registry (migration 0021
  * through `createMigratedTestD1`) and a scripted Checks surface.
  *
@@ -106,7 +106,7 @@ async function seededDb(): Promise<TestD1> {
   return db;
 }
 
-/** Claim one attempt against the real registry. */
+/** note: Claim one attempt against the real registry. */
 async function claimedAttempt(
   db: TestD1,
   overrides: Partial<Parameters<typeof claimAttempt>[1]> = {},
@@ -127,7 +127,7 @@ async function claimedAttempt(
   return result;
 }
 
-/** A check-run payload GitHub would answer with, overrideable per test. */
+/** note: A check-run payload GitHub would answer with, overrideable per test. */
 function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload> = {}): CheckRunPayload {
   return {
     id: 4242,
@@ -142,11 +142,11 @@ function runPayload(identity: CheckIdentity, overrides: Partial<CheckRunPayload>
 }
 
 type CreateCall = { params: ChecksCreateParams; raw: Record<string, unknown> };
-/** The request shape the adapter sends: a terminal update or a text-only relabel. */
+/** note: The request shape the adapter sends: a terminal update or a text-only relabel. */
 type UpdateCall = { params: ChecksRelabelParams; raw: Record<string, unknown> };
 
 /**
- * A scripted Checks surface. `respond` decides each call's answer; throws are
+ * note: A scripted Checks surface. `respond` decides each call's answer; throws are
  * how an API/permission failure is simulated (octokit rejects with `{status}`).
  */
 function fakeChecks(respond: Partial<{
@@ -167,7 +167,7 @@ function fakeChecks(respond: Partial<{
     rest: {
       checks: {
         async create(params) {
-          // Record the RAW object the adapter built, so an extra key (a
+          // note: Record the RAW object the adapter built, so an extra key (a
           // details_url, a caller-chosen id) is visible to the assertions.
           creates.push({ params, raw: { ...params } as unknown as Record<string, unknown> });
           if (respond.create === undefined) throw Object.assign(new Error("nope"), { status: 500 });
@@ -177,7 +177,7 @@ function fakeChecks(respond: Partial<{
           updates.push({ params, raw: { ...params } as unknown as Record<string, unknown> });
           if (respond.update === undefined) throw Object.assign(new Error("nope"), { status: 500 });
           const payload = await respond.update(params);
-          // GitHub answers with the run it just stored, `output` included, so a
+          // note: GitHub answers with the run it just stored, `output` included, so a
           // responder that means "the reply carries no text" must say
           // `output: null` explicitly (spec §7.9: delivery needs the text).
           return { data: "output" in payload ? payload : { ...payload, output: params.output } };
@@ -198,13 +198,13 @@ function fakeChecks(respond: Partial<{
   return { octokit, creates, updates, lists };
 }
 
-/** The transaction clock every test drives explicitly (spec §7.0). */
+/** note: The transaction clock every test drives explicitly (spec §7.0). */
 let CLOCK = T0;
 function adapterFor(db: TestD1, octokit: ChecksOctokit | null) {
   return createChecksAdapter({ db, nowMs: () => CLOCK, getOctokit: async () => octokit });
 }
 
-/** The gate the seeded test App carries (migration 0045's DDL default). */
+/** note: The gate the seeded test App carries (migration 0045's DDL default). */
 const GATE: ReviewGate = { minScore: 80, passVerdicts: ["ship it"] };
 
 const SUCCESS: CheckConclusion = {
@@ -230,9 +230,9 @@ describe("beginCheck — the create contract", () => {
     expect(raw.owner).toBe("acme");
     expect(raw.repo).toBe("widgets");
     expect(raw.status).toBe("queued");
-    // spec §7.9 / RL-12: details_url is omitted ENTIRELY (not null, not "").
+    // note: spec §7.9 / RL-12: details_url is omitted ENTIRELY (not null, not "").
     expect("details_url" in raw).toBe(false);
-    // No caller-chosen run identity is ever sent on create.
+    // note: No caller-chosen run identity is ever sent on create.
     expect("id" in raw).toBe(false);
     expect("check_run_id" in raw).toBe(false);
     expect("output" in raw).toBe(false);
@@ -244,7 +244,7 @@ describe("beginCheck — the create contract", () => {
     let stateAtSend: string | undefined;
     const fake = fakeChecks({
       create: () => {
-        // Read the durable row at the moment GitHub would receive the request:
+        // note: Read the durable row at the moment GitHub would receive the request:
         // a lost response is only recoverable if this already says `sending`.
         stateAtSend = String((db.raw.prepare(`SELECT create_state FROM review_checks WHERE id = ?`).get(attempt.identity.attemptId) as { create_state: string }).create_state);
         return runPayload(attempt.identity);
@@ -257,7 +257,7 @@ describe("beginCheck — the create contract", () => {
   test("a create that never reached the wire leaves the row unsent", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    // No client at all: nothing was attempted, so `not-sent` must survive —
+    // note: No client at all: nothing was attempted, so `not-sent` must survive —
     // marking it `sending` would strand the attempt as possibly-sent.
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
@@ -267,7 +267,7 @@ describe("beginCheck — the create contract", () => {
   test("a client whose create method is MISSING keeps the row unsent (no request, no sending mark)", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    // A surface exists but the exact callable does not: calling it would throw
+    // note: A surface exists but the exact callable does not: calling it would throw
     // and look like a possibly-lost send, so it must be refused pre-emptively.
     const partial = { rest: { checks: { update: async () => ({ data: null }) } } } as unknown as ChecksOctokit;
     const result = await adapterFor(db, partial).beginCheck({ identity: attempt.identity, lease });
@@ -280,7 +280,7 @@ describe("beginCheck — the create contract", () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
-    // The clock advances past the lease while the client is being resolved —
+    // note: The clock advances past the lease while the client is being resolved —
     // exactly what a real token mint can do. The pre-flight snapshot is not a
     // sufficient send fence; the check must be re-sampled before the request.
     const adapter = createChecksAdapter({
@@ -294,7 +294,7 @@ describe("beginCheck — the create contract", () => {
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     expect(fake.creates).toHaveLength(0);
-    // Proven pre-send: the fence refused before any request left.
+    // note: Proven pre-send: the fence refused before any request left.
     if (result.kind === "unavailable") expect(result.requests).toBe(0);
     expect(await runState(db, attempt)).toBe("not-sent");
   });
@@ -314,7 +314,7 @@ describe("beginCheck — the create contract", () => {
         app: { id: GITHUB_APP_ID },
         status: "in_progress",
         conclusion: null,
-        // A create carries no text yet: the promotion relabel writes it.
+        // note: A create carries no text yet: the promotion relabel writes it.
         summary: null,
       },
     });
@@ -325,7 +325,7 @@ describe("beginCheck — the create contract", () => {
     const { attempt, lease } = await claimedAttempt(db);
     const result = await adapterFor(db, null).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    // No client, no request: nothing can have been created remotely.
+    // note: No client, no request: nothing can have been created remotely.
     if (result.kind === "unavailable") expect(result.requests).toBe(0);
     expect(await runState(db, attempt)).toBe("not-sent");
   });
@@ -336,7 +336,7 @@ describe("beginCheck — the create contract", () => {
     const bare = { rest: {} } as unknown as ChecksOctokit;
     const result = await adapterFor(db, bare).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    // A definitive pre-send refusal: reported as zero requests so a caller can
+    // note: A definitive pre-send refusal: reported as zero requests so a caller can
     // tell it apart from an answered failure.
     if (result.kind === "unavailable") expect(result.requests).toBe(0);
   });
@@ -373,11 +373,11 @@ describe("beginCheck — the create contract", () => {
       if (result.kind === "unavailable") {
         expect(result.reason).toContain(String(status));
         expect(result.reason.toLowerCase()).toContain("check create");
-        // The answer was requested: the run may exist, so the caller must
+        // note: The answer was requested: the run may exist, so the caller must
         // recover by adoption rather than create again.
         expect(result.requests).toBe(1);
       }
-      // The attempt stays honest: still un-created, nothing observed.
+      // note: The attempt stays honest: still un-created, nothing observed.
       const row = await rowOf(db, attempt);
       expect(row.observed).toBe("unknown");
       expect(row.check_run_id).toBeNull();
@@ -409,7 +409,7 @@ describe("beginCheck — the create contract", () => {
       const fake = fakeChecks({ create: () => runPayload(attempt.identity, foreign) });
       const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
       expect(result.kind).toBe("unavailable");
-      expect(fake.creates).toHaveLength(1); // it DID send; the answer was not ours
+      expect(fake.creates).toHaveLength(1); // note: it DID send; the answer was not ours
     }
   });
 
@@ -436,20 +436,20 @@ describe("beginCheck — the create contract", () => {
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const result = await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
-    // The refusal is a definitive pre-dispatch one: the additive contract
+    // note: The refusal is a definitive pre-dispatch one: the additive contract
     // reports a NUMBER, so a caller can read `requests` without narrowing.
     if (result.kind === "unavailable") {
       expect(result.requests).toBe(0);
       expect(result.reason).toMatch(/already owns/i);
     }
-    expect(fake.creates).toHaveLength(0); // no duplicate create for an owned run
+    expect(fake.creates).toHaveLength(0); // note: no duplicate create for an owned run
   });
 
   test("an ownership-read failure is unavailable with zero requests", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
-    // The ownership read is the FIRST D1 statement the lane issues; failing it
+    // note: The ownership read is the FIRST D1 statement the lane issues; failing it
     // inside `prepare` is the module-level equivalent of a D1 outage.
     const failingDb = {
       ...db,
@@ -467,7 +467,7 @@ describe("beginCheck — the create contract", () => {
     const result = await adapterFor(failingDb, fake.octokit).beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     if (result.kind === "unavailable") {
-      // A refused guard read never dispatched anything, and the count is
+      // note: A refused guard read never dispatched anything, and the count is
       // numeric rather than undefined.
       expect(result.requests).toBe(0);
       expect(result.reason).toMatch(/ownership read failed/i);
@@ -476,7 +476,7 @@ describe("beginCheck — the create contract", () => {
   });
 
   test("every unavailable lane result carries a numeric request count", async () => {
-    // The additive `requests` contract is only useful if NO refusal path can
+    // note: The additive `requests` contract is only useful if NO refusal path can
     // leave it undefined: an undefined count would be read as a false
     // zero-request classification by the recovery lane.
     const db = await seededDb();
@@ -528,14 +528,14 @@ describe("beginCheck — the create contract", () => {
   });
 });
 
-// A hoisted attempt for the "not our run" loop above (fresh db per iteration).
+// note: A hoisted attempt for the "not our run" loop above (fresh db per iteration).
 let attempt0!: { attempt: CheckAttempt; lease: Lease };
 const scopeForAttempt0 = await seededDb();
 attempt0 = await claimedAttempt(scopeForAttempt0);
 
 describe("persisted scope identity (spec §7.6 / §7.9)", () => {
   /**
-   * A valid lease proves WHO holds the attempt, not WHICH scope it belongs to.
+   * note: A valid lease proves WHO holds the attempt, not WHICH scope it belongs to.
    * Every scope-bound operation must therefore compare the caller's identity
    * against the persisted row before resolving a client or issuing a request:
    * otherwise a lease-holder could aim the purpose-scoped client at another
@@ -627,7 +627,7 @@ describe("the live-lease send fence (spec §7.9)", () => {
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const adapter = adapterFor(db, fake.octokit);
 
-    // The exact persisted lease triple, but time has passed its `untilMs`. An
+    // note: The exact persisted lease triple, but time has passed its `untilMs`. An
     // expired holder must not create a remote run merely because recovery has
     // not yet bumped the epoch.
     CLOCK = lease.untilMs + 1;
@@ -636,7 +636,7 @@ describe("the live-lease send fence (spec §7.9)", () => {
     expect(fake.creates).toHaveLength(0);
     expect((await rowOf(db, attempt)).check_run_id).toBeNull();
 
-    // Nothing local may be written under the expired lease either.
+    // note: Nothing local may be written under the expired lease either.
     expect(await setCheckCreateState(db, id, lease, "sending", undefined, CLOCK)).toBe(false);
     expect((await rowOf(db, attempt)).create_state).toBe("not-sent");
   });
@@ -667,18 +667,18 @@ describe("adoptCheckRun — the adoption fences", () => {
     const identity = attempt.identity;
     const ours = runPayload(identity, { status: "completed", conclusion: "action_required" });
     const crowd = [
-      runPayload(identity, { id: 1, external_id: "mstar-check:v1:other:1" }), // another attempt
-      runPayload(identity, { id: 2, app: { id: 999 } }), // another App
-      runPayload(identity, { id: 3, head_sha: `dead${SHA.slice(4)}` }), // another commit
-      runPayload(identity, { id: 4, name: "mstar-inspector review extra" }), // lookalike name
-      runPayload(identity, { id: 5, external_id: null }), // uncorrelated run
+      runPayload(identity, { id: 1, external_id: "mstar-check:v1:other:1" }), // note: another attempt
+      runPayload(identity, { id: 2, app: { id: 999 } }), // note: another App
+      runPayload(identity, { id: 3, head_sha: `dead${SHA.slice(4)}` }), // note: another commit
+      runPayload(identity, { id: 4, name: "mstar-inspector review extra" }), // note: lookalike name
+      runPayload(identity, { id: 5, external_id: null }), // note: uncorrelated run
       ours,
     ];
     const fake = fakeChecks({ pages: (_p, page) => (page === 1 ? { total_count: crowd.length, check_runs: crowd } : null) });
     const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity });
     expect(result).toEqual({ kind: "found", remote: toCheckRemote(ours)! });
     expect(fake.lists).toHaveLength(1);
-    // The bounded query carries the identity, not a name-only guess.
+    // note: The bounded query carries the identity, not a name-only guess.
     expect(fake.lists[0]).toMatchObject({
       owner: "acme",
       repo: "widgets",
@@ -706,7 +706,7 @@ describe("adoptCheckRun — the adoption fences", () => {
     const foreign = [
       runPayload(attempt.identity, { external_id: attempt.identity.externalId.replace(":1", ":1"), head_sha: SHA, app: { id: GITHUB_APP_ID } }),
     ];
-    // A run that matches on everything is ours; each single-field break is not.
+    // note: A run that matches on everything is ours; each single-field break is not.
     const exact = fakeChecks({ pages: (_p, page) => (page === 1 ? { total_count: 1, check_runs: foreign } : null) });
     expect((await adapterFor(db, exact.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("found");
     for (const broken of [
@@ -745,11 +745,11 @@ describe("adoptCheckRun — the adoption fences", () => {
     const fake = fakeChecks({
       pages: (_p, page) =>
         page === 1
-          // SATURATED (100 runs) with exactly ONE match: the pre-fix walk
+          // note: SATURATED (100 runs) with exactly ONE match: the pre-fix walk
           // returned `found` here without ever reading page 2.
           ? { total_count: 101, check_runs: [...filler, runPayload(identity, { id: 500 })] }
           : page === 2
-            // The duplicate the incomplete walk could not see.
+            // note: The duplicate the incomplete walk could not see.
             ? { total_count: 101, check_runs: [runPayload(identity, { id: 501 })] }
             : null,
     });
@@ -768,7 +768,7 @@ describe("adoptCheckRun — the adoption fences", () => {
         page === 1
           ? { total_count: 100, check_runs: [...filler, runPayload(identity, { id: 500 })] }
           : page === 2
-            // A SHORT page exhausts the candidate set: uniqueness is now proven.
+            // note: A SHORT page exhausts the candidate set: uniqueness is now proven.
             ? { total_count: 100, check_runs: [runPayload(identity, { id: 9, external_id: "someone-else" })] }
             : null,
     });
@@ -782,7 +782,7 @@ describe("adoptCheckRun — the adoption fences", () => {
     const { attempt } = await claimedAttempt(db);
     const identity = attempt.identity;
     const pageWith = (page: number, match: boolean) => {
-      // 100 runs = a SATURATED page; the match-bearing page carries 99 fillers
+      // note: 100 runs = a SATURATED page; the match-bearing page carries 99 fillers
       // plus our run, the other carries 100 fillers so the walk never exhausts.
       const fillers = Array.from({ length: match ? 99 : 100 }, (_, i) =>
         runPayload(identity, { id: page * 1000 + i, external_id: `x${page}-${i}` }),
@@ -798,7 +798,7 @@ describe("adoptCheckRun — the adoption fences", () => {
             : null,
     });
     const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity });
-    // Uniqueness was never proven: the bound is all the honesty this lane may spend.
+    // note: Uniqueness was never proven: the bound is all the honesty this lane may spend.
     expect(result.kind).toBe("incomplete");
     expect(fake.lists.map((p) => p.page)).toEqual([1, 2]);
   });
@@ -811,7 +811,7 @@ describe("adoptCheckRun — the adoption fences", () => {
     const fake = fakeChecks({ pages: (_p, page) => (page <= 2 ? { total_count: 9999, check_runs: filler(page) } : null) });
     const result = await adapterFor(db, fake.octokit).adoptCheckRun({ identity: attempt.identity });
     expect(result.kind).toBe("incomplete");
-    expect(fake.lists.map((p) => p.page)).toEqual([1, 2]); // the bound is honoured
+    expect(fake.lists.map((p) => p.page)).toEqual([1, 2]); // note: the bound is honoured
   });
 
   test("a complete walk with no match is absent (and adoption writes nothing)", async () => {
@@ -842,7 +842,7 @@ describe("adoptCheckRun — the adoption fences", () => {
   test("an errored or missing walk is incomplete (absence needs a complete read)", async () => {
     const db = await seededDb();
     const { attempt } = await claimedAttempt(db);
-    const failing = fakeChecks({}); // no `pages` responder → listForRef rejects 500
+    const failing = fakeChecks({}); // note: no `pages` responder → listForRef rejects 500
     expect((await adapterFor(db, failing.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
     expect((await adapterFor(db, null).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
   });
@@ -889,12 +889,12 @@ describe("completeCheck — the terminal send", () => {
       conclusion: "success",
       output: { title: CHECK_NAME, summary: SUCCESS.summary },
     });
-    // The text belongs to GitHub's `output` object only: a top-level pair is
+    // note: The text belongs to GitHub's `output` object only: a top-level pair is
     // dropped by the API, so a run would carry no gate result at all.
     expect("title" in raw).toBe(false);
     expect("summary" in raw).toBe(false);
     expect("details_url" in raw).toBe(false);
-    expect("external_id" in raw).toBe(false); // the caller cannot re-point a run at another identity
+    expect("external_id" in raw).toBe(false); // note: the caller cannot re-point a run at another identity
   });
 
   test("a lease that expires during client resolution blocks the update request", async () => {
@@ -998,7 +998,7 @@ describe("completeCheck — the terminal send", () => {
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
-    // The type excludes it; a cast proves the runtime guard holds too.
+    // note: The type excludes it; a cast proves the runtime guard holds too.
     const notTerminal = { desired: "in_progress", title: CHECK_NAME, summary: "s" } as unknown as CheckConclusion;
     expect(
       (await adapterFor(db, fake.octokit).completeCheck({ identity: attempt.identity, lease, checkRunId: 4242, conclusion: notTerminal })).kind,
@@ -1025,9 +1025,9 @@ describe("completeCheck — the terminal send", () => {
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     for (const echo of [
-      runPayload(attempt.identity, { status: "in_progress", conclusion: null }), // not completed
-      runPayload(attempt.identity, { status: "completed", conclusion: "failure" }), // different conclusion
-      runPayload(attempt.identity, { status: "completed", conclusion: "success", app: { id: 777 } }), // not ours
+      runPayload(attempt.identity, { status: "in_progress", conclusion: null }), // note: not completed
+      runPayload(attempt.identity, { status: "completed", conclusion: "failure" }), // note: different conclusion
+      runPayload(attempt.identity, { status: "completed", conclusion: "success", app: { id: 777 } }), // note: not ours
     ]) {
       const fake = fakeChecks({ update: () => echo });
       expect(
@@ -1055,7 +1055,7 @@ describe("completeCheck — the terminal send", () => {
       });
       expect(result.kind).toBe("unavailable");
       if (result.kind === "unavailable") expect(result.reason).toMatch(/check update/);
-      // An unavailable terminalization never marks the remote observed.
+      // note: An unavailable terminalization never marks the remote observed.
       expect((await rowOf(db, attempt)).observed).toBe("unknown");
     }
   });
@@ -1070,7 +1070,7 @@ describe("completeCheck — the terminal send", () => {
       updateBudgetMs: BUDGET_MS,
     });
 
-    // Layer 1 — the adapter: a send that never answers is an unproven REQUEST
+    // note: Layer 1 — the adapter: a send that never answers is an unproven REQUEST
     // (1), never a success claim, and it returns at the injected budget.
     const first = await claimedAttempt(db);
     await attachedRun(db, first.attempt, first.lease, 4242);
@@ -1089,7 +1089,7 @@ describe("completeCheck — the terminal send", () => {
       expect(timedOut.reason).toMatch(/check update/);
     }
 
-    // Layer 2 — the lifecycle: the same timed-out send reaches terminalize as
+    // note: Layer 2 — the lifecycle: the same timed-out send reaches terminalize as
     // `requests: 1`, so the attempt is released through the EXISTING
     // deferCheckRecovery path (no new release code lives in the adapter).
     const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
@@ -1118,7 +1118,7 @@ describe("completeCheck — the terminal send", () => {
   test("a reply without the frozen text is unconfirmed, never a delivery", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // Layer 1 — the adapter: the update landed with the right conclusion but no
+    // note: Layer 1 — the adapter: the update landed with the right conclusion but no
     // readable output, so the reply proves nothing about the text the user reads.
     const first = await claimedAttempt(db);
     await attachedRun(db, first.attempt, first.lease, 4242);
@@ -1135,11 +1135,11 @@ describe("completeCheck — the terminal send", () => {
     expect(unproven.kind).toBe("unavailable");
     if (unproven.kind === "unavailable") {
       expect(unproven.reason).toMatch(/frozen text/);
-      // It WAS a request: the run may already wear the conclusion.
+      // note: It WAS a request: the run may already wear the conclusion.
       expect(unproven.requests).toBe(1);
     }
 
-    // Layer 2 — the lifecycle turns that into UNKNOWN, never delivery: the row
+    // note: Layer 2 — the lifecycle turns that into UNKNOWN, never delivery: the row
     // keeps its frozen intent, nothing is observed, and recovery owns the run.
     const otherSha = "89abcdef0123456789abcdef0123456789abcdef";
     const second = await claimedAttempt(db, { headSha: otherSha });
@@ -1187,7 +1187,7 @@ describe("frozen terminal intent (spec §7.9)", () => {
     expect(await setCheckDesired(db, id, lease, SUCCESS, null, T0)).toBe(true);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity, { status: "completed", conclusion: "success" }) });
 
-    // The caller presents a DIVERGENT (and oversized) conclusion for the same
+    // note: The caller presents a DIVERGENT (and oversized) conclusion for the same
     // enum. The frozen text must win, so nothing unredacted/unbounded reaches
     // the public Check surface.
     const result = await adapterFor(db, fake.octokit).completeCheck({
@@ -1246,7 +1246,7 @@ describe("per-call update budget (spec §7.10)", () => {
     CLOCK = T0;
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
-    // The adapter carries NO `updateBudgetMs` of its own, so only the caller's
+    // note: The adapter carries NO `updateBudgetMs` of its own, so only the caller's
     // per-call value can end this send (its fallback is the 5 s default).
     const fake = fakeChecks({ update: () => Promise.withResolvers<CheckRunPayload>().promise });
     const lifecycle = createCheckLifecycle({
@@ -1270,21 +1270,21 @@ describe("per-call update budget (spec §7.10)", () => {
       updateBudgetMs: 100,
     });
 
-    // The update WAS sent and the per-call bound ended it: the 5 s fallback
+    // note: The update WAS sent and the per-call bound ended it: the 5 s fallback
     // would neither finish this fast nor name 100 ms as the bound.
     expect(Date.now() - startedAt).toBeLessThan(1_000);
     expect(fake.updates).toHaveLength(1);
     const row = await rowOf(db, attempt);
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.last_error).toContain("exceeded 100ms");
-    // A timed-out send may still have landed: `observed` never advances here.
+    // note: A timed-out send may still have landed: `observed` never advances here.
     expect(row.observed).toBe("unknown");
   });
 });
 
 describe("abandonment is not a conclusion (spec §7.10 / §7.9)", () => {
 test("a begin budget that expires DURING the attach still releases the attempt", async () => {
-    // The measured shape behind "a Check that only closes at the 900 s
+    // note: The measured shape behind "a Check that only closes at the 900 s
     // deadline": the consumer's 2 s bound expires while the attach write is in
     // flight, so the handle below is returned into a promise nobody awaits.
     // Left on a live lease the row can only be taken over when the execution
@@ -1304,7 +1304,7 @@ test("a begin budget that expires DURING the attach still releases the attempt",
       }),
     });
     const base = adapterFor(db, fake.octokit);
-    // The lifecycle's OWN attach write is where the budget expires: the adapter
+    // note: The lifecycle's OWN attach write is where the budget expires: the adapter
     // has already created and attached the run, so the pre-attach latch check
     // has passed and only the post-attach one can see the abandonment.
     const dbAtAttach = Object.create(db, {
@@ -1338,17 +1338,17 @@ test("a begin budget that expires DURING the attach still releases the attempt",
       string,
       string | number | null
     >;
-    // The run is retained for adoption, and the row is RELEASED rather than
+    // note: The run is retained for adoption, and the row is RELEASED rather than
     // left holding a lease nothing will terminalize.
     expect(row.check_run_id).toBe(4242);
     expect(row.holder).toBeNull();
     expect(row.lease_until_ms).toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.next_attempt_ms).toBe(T0 + 60_000);
-    // No conclusion of its own: the reconciler owes it.
+    // note: No conclusion of its own: the reconciler owes it.
     expect(row.desired).toBe("in_progress");
     expect(row.terminal_ms).toBeNull();
-    // The row names the branch, which is what the diagnostic column is for.
+    // note: The row names the branch, which is what the diagnostic column is for.
     expect(row.terminalize_outcome).toBe("no-handle");
   });
 
@@ -1372,7 +1372,7 @@ test("a begin budget that expires DURING the attach still releases the attempt",
       getAdapter: () => adapterFor(db, fake.octokit),
       getCheckGate: async () => GATE,
     });
-    // The consumer's 2 s bound elapsed while this create ran: the latch is
+    // note: The consumer's 2 s bound elapsed while this create ran: the latch is
     // already tripped when the lifecycle reads it.
     const latch = createCheckBeginLatch();
     latch.abandon();
@@ -1387,7 +1387,7 @@ test("a begin budget that expires DURING the attach still releases the attempt",
       latch,
     });
     expect(handle).toBeNull();
-    // The create DID run, and the run id is retained so recovery adopts it.
+    // note: The create DID run, and the run id is retained so recovery adopts it.
     expect(fake.creates).toHaveLength(1);
 
     const row = (await db.prepare(`SELECT * FROM review_checks WHERE head_sha = ?`).bind(SHA).first()) as Record<
@@ -1395,13 +1395,13 @@ test("a begin budget that expires DURING the attach still releases the attempt",
       string | number | null
     >;
     expect(row.check_run_id).toBe(4242);
-    // No terminal intent: freezing one is what left a red Check behind a review
+    // note: No terminal intent: freezing one is what left a red Check behind a review
     // that published afterwards. The reconciler owes this conclusion.
     expect(row.desired).toBe("in_progress");
     expect(row.desired_title).toBeNull();
     expect(row.desired_summary).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // Released with the honest recovery state (a request was spent) and the
+    // note: Released with the honest recovery state (a request was spent) and the
     // first backoff rung; no attempt burned beyond the claim's own.
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.holder).toBeNull();
@@ -1423,7 +1423,7 @@ describe("fetchCheckRun — the recovery lane's read", () => {
     const foreign = fakeChecks({ get: () => runPayload({ ...attempt.identity, externalId: "mstar-check:v1:x:1" }, { id: 4242 }) });
     expect((await adapterFor(db, foreign.octokit).fetchCheckRun({ identity: attempt.identity, checkRunId: 4242 })).kind).toBe("absent");
 
-    const gone = fakeChecks({}); // 404 by default
+    const gone = fakeChecks({}); // note: 404 by default
     expect((await adapterFor(db, gone.octokit).fetchCheckRun({ identity: attempt.identity, checkRunId: 4242 })).kind).toBe("absent");
   });
 
@@ -1463,7 +1463,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   ] as const;
 
   test("a confirmed normal publication decides from proof: success when the gate is met, whatever the terminal outcome", () => {
-    // A proven publication is never demoted by how the attempt ended. The
+    // note: A proven publication is never demoted by how the attempt ended. The
     // sweep is the WHOLE outcome vocabulary — an unconfirmed or expired
     // attempt, a pre-publication failure, a rejected degraded send, an
     // exhausted finalization — because the proof, not the terminal outcome,
@@ -1478,7 +1478,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
         });
         expect(decided.desired).toBe("success");
         expect(decided.summary).toBe(CHECK_SUMMARIES.gateMet(sha7, normal.round, "ship it", score, gate));
-        // The wording is pinned independently of the summary builder.
+        // note: The wording is pinned independently of the summary builder.
         expect(decided.summary).toContain('verdict "ship it"');
         expect(decided.summary).toContain(`score ${score}`);
         expect(decided.summary).toContain("floor 80");
@@ -1516,7 +1516,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   });
 
   test("an unreadable proof payload is the gate-unreadable failure, never an earlier passing row", async () => {
-    // RL-12: an earlier attempt for the same head SHA already wrote a passing
+    // note: RL-12: an earlier attempt for the same head SHA already wrote a passing
     // `reviews` row. This attempt's proof payload carries no artifact envelope,
     // so the review it published is UNREADABLE — and an unreadable proof must
     // never be backfilled from the projection of another attempt's apply.
@@ -1546,7 +1546,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       publicationId: unreadable.publicationId,
     });
     expect(read).toBeNull();
-    // Without a proof id there is no review to judge at all: `null`, never the
+    // note: Without a proof id there is no review to judge at all: `null`, never the
     // projection — the set row above stays unread by this call.
     expect(await readPublishedReview(db, { scope: SCOPE, headSha: SHA })).toBeNull();
 
@@ -1557,7 +1557,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   });
 
   test("an EMPTY allowed-verdict set misses every review — a saved [] gates every Check to failure", () => {
-    // The settings route stores an empty submission as `[]` (readable
+    // note: The settings route stores an empty submission as `[]` (readable
     // configuration, never a null gate — see apps-store.test.ts), so no
     // published verdict can be on the allowed set: every proof-carrying Check
     // concludes failure.
@@ -1597,7 +1597,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   });
 
   test("no proof + skipped (nothing to review and nothing to inherit) is neutral, never a failure", () => {
-    // The callers that know the reviewed head pass it (`inherited`); without
+    // note: The callers that know the reviewed head pass it (`inherited`); without
     // one there is no result to carry, and the round is not an execution
     // failure either.
     const decided = decideConclusion({ proof: null, outcome: "skipped", gate, review: null });
@@ -1605,7 +1605,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe(CHECK_SUMMARIES.skipped);
   });
 
-  // An EMPTY increment is not a free-standing round: its content IS the
+  // note: An EMPTY increment is not a free-standing round: its content IS the
   // reviewed head's, so the Check inherits THAT head's gate result. There is
   // no neutral exit on this branch (not even an unreadable baseline) —
   // otherwise one empty commit would replace a failing required Check for the
@@ -1623,7 +1623,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     });
     expect(decided.desired).toBe("failure");
     expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedGateMissed(sha7, base7, "needs fixes", 40, gate));
-    // The head has no new changes and the result belongs to the reviewed head.
+    // note: The head has no new changes and the result belongs to the reviewed head.
     expect(decided.summary).toContain(`No new changes at ${sha7}`);
     expect(decided.summary).toContain(base7);
     expect(decided.summary).toContain('verdict "needs fixes"');
@@ -1642,7 +1642,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe(CHECK_SUMMARIES.inheritedGateMet(sha7, base7, "ship it", 92, gate));
     expect(decided.summary).toContain(`No new changes at ${sha7}`);
     expect(decided.summary).toContain(`score 92`);
-    // Naming the inherited result is not an approval of the head under check.
+    // note: Naming the inherited result is not an approval of the head under check.
     expect(decided.summary).not.toMatch(/approve|approved/i);
   });
 
@@ -1676,7 +1676,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
   });
 
   test("the deadline concludes the same approved wording whatever evidence it could not read", () => {
-    // Which proof read was missing stays an internal attribution (the
+    // note: Which proof read was missing stays an internal attribution (the
     // reconciler logs it); the user-facing text is the category's.
     const decided = decideConclusion({ proof: null, outcome: "expired", gate, review: null });
     expect(decided.desired).toBe("failure");
@@ -1698,7 +1698,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.desired).toBe("failure");
       expect(decided.failureStatus).toBe("unknown-failure");
       expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
-      // A gate that could not be read must not be described as if it were.
+      // note: A gate that could not be read must not be described as if it were.
       expect(decided.summary).not.toContain("floor");
       expect(decided.summary).not.toContain("allowed:");
     }
@@ -1727,7 +1727,7 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
       expect(decided.summary.length).toBeLessThanOrEqual(2_000);
       expect(decided.desired).not.toBe("in_progress");
       expect(decided.desired).not.toBe("neutral");
-      // D3/RL-10: never an approval, never a merge gate.
+      // note: D3/RL-10: never an approval, never a merge gate.
       expect(decided.summary).not.toMatch(/approve|approved|request changes|merge gate required|blocking/i);
       expect(decided.summary).not.toMatch(/APPROVE|REQUEST_CHANGES/);
     }
@@ -1738,14 +1738,14 @@ describe("empty increment inheritance (spec §7.9)", () => {
   const BASE_SHA = "fedcba9876543210fedcba9876543210fedcba98";
   const BASE7 = BASE_SHA.slice(0, 7);
 
-  /** The reviewed head's row: exactly the fields the inherited read consumes. */
+  /** note: The reviewed head's row: exactly the fields the inherited read consumes. */
   function seedBaselineReview(
     db: TestD1,
     verdict: string,
     scorePct: number | null,
     envelope = JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
     /**
-     * The schema's `json_valid(envelope)` CHECK normally forbids an unparseable
+     * note: The schema's `json_valid(envelope)` CHECK normally forbids an unparseable
      * payload; disable it for the one case that exercises the reader's own
      * defensive parse (a schema divergence or a pre-CHECK row).
      */
@@ -1774,20 +1774,20 @@ describe("empty increment inheritance (spec §7.9)", () => {
     const cases: Array<{
       name: string;
       baseline: { verdict: string; scorePct: number | null } | null;
-      /** Raw row envelope, for a row whose payload cannot be read. */
+      /** note: Raw row envelope, for a row whose payload cannot be read. */
       envelope?: string;
-      /** Insert the envelope with the schema's JSON CHECK disabled. */
+      /** note: Insert the envelope with the schema's JSON CHECK disabled. */
       corruptEnvelope?: boolean;
       gate: ReviewGate | null;
       desired: CheckConclusion["desired"];
     }> = [
-      // The bypass this test exists for: an empty commit must not turn the
+      // note: The bypass this test exists for: an empty commit must not turn the
       // reviewed head's failing gate into a neutral required check.
       { name: "baseline below the gate", baseline: { verdict: "needs fixes", scorePct: 40 }, gate: GATE, desired: "failure" },
       { name: "baseline meets the gate", baseline: { verdict: "ship it", scorePct: 92 }, gate: GATE, desired: "success" },
       { name: "readable baseline, unreadable gate", baseline: { verdict: "ship it", scorePct: 92 }, gate: null, desired: "failure" },
       { name: "unreadable baseline", baseline: null, gate: GATE, desired: "failure" },
-      // The row exists but its payload cannot be read: still a failure, never
+      // note: The row exists but its payload cannot be read: still a failure, never
       // a neutral that an empty commit could use to shed a required check.
       { name: "corrupt baseline envelope", baseline: null, envelope: "{not json", corruptEnvelope: true, gate: GATE, desired: "failure" },
       { name: "baseline envelope without a verdict", baseline: null, envelope: JSON.stringify({ tally: { scorePct: 90 } }), gate: GATE, desired: "failure" },
@@ -1825,7 +1825,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
         inheritedHeadSha: BASE_SHA,
       });
 
-      // The ONE remote send is the inherited conclusion, the row freezes and
+      // note: The ONE remote send is the inherited conclusion, the row freezes and
       // observes it, and nothing was published: the Check is the only change.
       expect(fake.updates).toHaveLength(1);
       const row = await rowOf(db, attempt);
@@ -1840,7 +1840,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
         desired: testCase.desired,
         observed: testCase.desired,
       });
-      // The wording follows the branch: a readable baseline keeps the precise
+      // note: The wording follows the branch: a readable baseline keeps the precise
       // inherited verdict, while an unreadable baseline or gate is an execution
       // fault and carries the approved category text instead.
       const sentSummary = (fake.updates[0]!.params as ChecksUpdateParams).output.summary;
@@ -1858,7 +1858,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
 describe("terminalize reads only this attempt's own publication (spec §7.9)", () => {
   test("a prior generation's applied proof does not decide this attempt's Check", async () => {
     const db = await seededDb();
-    // RL-12: a re-trigger reuses the head SHA, so the earlier generation's
+    // note: RL-12: a re-trigger reuses the head SHA, so the earlier generation's
     // publication is head-matched too — and it is the OLDEST, which is exactly
     // the row a head-keyed read returns. Its applied proof carries a
     // gate-meeting verdict, so adopting it would freeze `success` on a round
@@ -1900,7 +1900,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
       getCheckGate: async () => GATE,
     });
 
-    // This attempt published nothing of its own and inherits no reviewed head,
+    // note: This attempt published nothing of its own and inherits no reviewed head,
     // so it has no proof to decide from: unproven, never the prior verdict.
     await lifecycle.terminalize({
       handle: {
@@ -1921,14 +1921,14 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
-    // The frozen intent claims no publication: the prior generation's link is
+    // note: The frozen intent claims no publication: the prior generation's link is
     // not this attempt's evidence.
     expect(row.publication_id).toBeNull();
   });
 
   test("a linked publication with no readable proof is UNPROVEN, never a prior generation's verdict", async () => {
     const db = await seededDb();
-    // One row exists per scope/head/kind, so a same-SHA re-trigger owns the
+    // note: One row exists per scope/head/kind, so a same-SHA re-trigger owns the
     // DEGRADED row: its own publication is still in flight and carries no proof
     // yet, while the PRIOR generation's `review` row is applied, proven and
     // gate-meeting. The store reader's head fallback returns that older row, so
@@ -1980,7 +1980,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
       getCheckGate: async () => GATE,
     });
 
-    // The attempt's own publication is linked but unreadable, so it has no
+    // note: The attempt's own publication is linked but unreadable, so it has no
     // proof to decide from: unproven, never the prior row's gate-derived
     // `success`.
     await lifecycle.terminalize({
@@ -2002,12 +2002,12 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
-    // The frozen link is THIS attempt's own publication, never the prior row.
+    // note: The frozen link is THIS attempt's own publication, never the prior row.
     expect(row.publication_id).toBe(ownId);
   });
   test("a budget-exhausted rerun never adopts a prior same-head publication's verdict", async () => {
     const db = await seededDb();
-    // RL-12: the exhausted rerun shares the head SHA with a PRIOR generation
+    // note: RL-12: the exhausted rerun shares the head SHA with a PRIOR generation
     // whose applied `review` proof meets the gate — under the reader's head
     // fallback that proof is readable, so the typed stop must suppress the
     // read itself instead of trusting the foreign-id guard alone.
@@ -2058,7 +2058,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
       seatsStopped: 3,
       changedLines: 402,
     };
-    // The exhaustion catch publishes nothing of its own (publicationId null);
+    // note: The exhaustion catch publishes nothing of its own (publicationId null);
     // an inherited head is set here only to keep the proof READ reachable —
     // under the defect it was the channel the prior verdict arrived through.
     await lifecycle.terminalize({
@@ -2082,7 +2082,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
     );
     const row = await rowOf(db, attempt);
     expect(row.desired).toBe("failure");
-    // The frozen intent claims no publication: the prior generation's link is
+    // note: The frozen intent claims no publication: the prior generation's link is
     // not this attempt's evidence.
     expect(row.publication_id).toBeNull();
   });
@@ -2103,7 +2103,7 @@ describe("identity helpers", () => {
       conclusion: null,
       summary: null,
     });
-    // The run's own text is evidence: it is what tells "the approved wording
+    // note: The run's own text is evidence: it is what tells "the approved wording
     // landed" apart from "something set the same conclusion".
     expect(toCheckRemote({ ...runPayload(identity), output: { title: "t", summary: "approved text" } })?.summary).toBe(
       "approved text",
@@ -2114,7 +2114,7 @@ describe("identity helpers", () => {
     expect(toCheckRemote({ ...runPayload(identity), id: "not-a-number" as unknown as number })).toBeNull();
     expect(toCheckRemote({ ...runPayload(identity), external_id: 42 as unknown as string })).toBeNull();
     expect(toCheckRemote({ ...runPayload(identity), app: { id: "abc" } as unknown as { id: number } })).toBeNull();
-    // A bigint id (the installed schema's `number | bigint`) is narrowed to a
+    // note: A bigint id (the installed schema's `number | bigint`) is narrowed to a
     // number, so remote evidence stays JSON-safe.
     expect(toCheckRemote({ ...runPayload(identity), id: 4242n as unknown as number })?.id).toBe(4242);
     expect(toCheckRemote({ ...runPayload(identity), app: { id: 1001n as unknown as number } })?.app).toEqual({ id: 1001 });
@@ -2137,7 +2137,7 @@ describe("identity helpers", () => {
 
 describe("credential boundary (spec §7.6 / §7.9)", () => {
   test("a REAL Checks operation rides the commenter's one review-write mint", async () => {
-    // This drives an actual adapter operation obtained through the real
+    // note: This drives an actual adapter operation obtained through the real
     // `createReviewCommenter`, over a controlled transport, and observes the
     // credential construction behind it. It fails if `getChecksOctokit` built a
     // second client, minted a second `createAppAuth`, or used any purpose other
@@ -2159,7 +2159,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
       const body = typeof init?.body === "string" ? init.body : "";
       requests.push({ method, url, body });
       if (url.includes("/access_tokens")) {
-        // The installation-token mint auth-app issues; answered locally.
+        // note: The installation-token mint auth-app issues; answered locally.
         return new Response(
           JSON.stringify({
             token: "ghs_controlled",
@@ -2170,7 +2170,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
           { status: 201, headers: { "content-type": "application/json" } },
         );
       }
-      // The Checks create the adapter issues.
+      // note: The Checks create the adapter issues.
       return new Response(
         JSON.stringify({
           id: 4242,
@@ -2197,15 +2197,15 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     const result = await commenter.checks!.beginCheck({ identity: attempt.attempt.identity, lease: attempt.lease });
     expect(result.kind).toBe("ready");
 
-    // The Checks call went through the wire, to the PERSISTED scope.
+    // note: The Checks call went through the wire, to the PERSISTED scope.
     const checksCall = requests.find((r) => r.url.includes("/check-runs"));
     expect(checksCall?.method).toBe("POST");
     expect(checksCall?.url).toBe("https://api.github.com/repos/acme/widgets/check-runs");
     expect(checksCall?.body).toContain(expected);
 
-    // ONE credential object served the whole operation.
+    // note: ONE credential object served the whole operation.
     expect(seam.constructed).toHaveLength(1);
-    // The mint that authorised it is the review-write one, for THIS repository,
+    // note: The mint that authorised it is the review-write one, for THIS repository,
     // carrying checks:write — not a sandbox or other-purpose grant.
     const write = seam.minted.find((m) => m.purpose === "review-write");
     expect(write).toBeDefined();
@@ -2213,24 +2213,24 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     expect(write?.installationId).toBe(SCOPE.installationId);
     expect(write?.permissions.checks).toBe("write");
     expect(write?.permissions.contents).toBe("write");
-    // The mint precedes the Checks request: the request used that grant.
+    // note: The mint precedes the Checks request: the request used that grant.
     expect(requests.findIndex((r) => r.url.includes("/access_tokens"))).toBeLessThan(
       requests.findIndex((r) => r.url.includes("/check-runs")),
     );
 
-    // The Sandbox lane still requests a read-only set with no checks scope.
+    // note: The Sandbox lane still requests a read-only set with no checks scope.
     await commenter
       .getInstallationToken({ scope: SCOPE, purpose: "sandbox-read" })
       .catch(() => undefined);
     const sandbox = seam.minted.find((m) => m.purpose === "sandbox-read");
     expect(sandbox?.permissions.contents).toBe("read");
     expect(sandbox?.permissions).not.toHaveProperty("checks");
-    // Still exactly one construction after a second lane ran.
+    // note: Still exactly one construction after a second lane ran.
     expect(seam.constructed).toHaveLength(1);
   });
 
   test("a renamed repository mints installation-wide instead of failing the Checks lane", async () => {
-    // Observed production shape: the persisted scope names a repository that
+    // note: Observed production shape: the persisted scope names a repository that
     // was renamed afterwards. GitHub matches `repositoryNames` EXACTLY, so the
     // scoped mint 404s forever while the REST paths themselves follow the
     // rename — the Check then never leaves `in_progress`.
@@ -2242,7 +2242,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     });
     const seam: AuthSeam = { constructed: [], minted: [] };
     const mintBodies: string[] = [];
-    // GitHub answers a rename with 404 on some paths and 422 on others; both
+    // note: GitHub answers a rename with 404 on some paths and 422 on others; both
     // must trigger the same retry.
     const refusalStatus = 422;
     const fetchImpl: CommenterFetch = async (input, init) => {
@@ -2275,7 +2275,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     const grant = await commenter.getInstallationToken({ scope: SCOPE, purpose: "review-write" });
     expect(grant.token).toBe("ghs_wide");
     expect(mintBodies).toHaveLength(2);
-    // The first mint was narrowed to the (now stale) repository name; the retry
+    // note: The first mint was narrowed to the (now stale) repository name; the retry
     // is the same installation and permission set, simply not repository-scoped.
     expect(mintBodies[0]).toContain('"repositories"');
     expect(mintBodies[1]).not.toContain('"repositories"');
@@ -2287,7 +2287,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   });
 
   test("the rename refusal is recognised on the error, its response, or only its message", () => {
-    // A guard that reads one shape silently disables the mint fallback, which is
+    // note: A guard that reads one shape silently disables the mint fallback, which is
     // how a renamed repository froze a Check for hours.
     expect(isNameRefusal(Object.assign(new Error("boom"), { status: 404 }))).toBe(true);
     expect(isNameRefusal(Object.assign(new Error("boom"), { status: 422 }))).toBe(true);
@@ -2295,7 +2295,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     expect(isNameRefusal({ message: "Repository not found" })).toBe(true);
     expect(isNameRefusal(new Error("Not Found"))).toBe(true);
     expect(isNameRefusal(Object.assign(new Error("nope"), { cause: { status: 422 } }))).toBe(true);
-    // Anything else stays a real failure, never a retry.
+    // note: Anything else stays a real failure, never a retry.
     expect(isNameRefusal(Object.assign(new Error("boom"), { status: 500 }))).toBe(false);
     expect(isNameRefusal(new Error("rate limited"))).toBe(false);
     expect(isNameRefusal(null)).toBe(false);
@@ -2305,7 +2305,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   test("a typed pre-dispatch refusal reports zero requests, an unknown failure stays conservative", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    // The transport refused BEFORE dispatch (a budget/allocation gate): the
+    // note: The transport refused BEFORE dispatch (a budget/allocation gate): the
     // marker is what tells the lane nothing left the process.
     const notDispatched = fakeChecks({
       create: () => {
@@ -2315,10 +2315,10 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     const zero = await adapterFor(db, notDispatched.octokit).beginCheck({ identity: attempt.identity, lease });
     expect(zero.kind).toBe("unavailable");
     if (zero.kind === "unavailable") expect(zero.requests).toBe(0);
-    // The `sending` mark is rolled back so the attempt is createable again.
+    // note: The `sending` mark is rolled back so the attempt is createable again.
     expect(await runState(db, attempt)).toBe("not-sent");
 
-    // An UNKNOWN failure must stay adopt-only: octokit's re-wrapped error
+    // note: An UNKNOWN failure must stay adopt-only: octokit's re-wrapped error
     // (marker parked on `cause`) is still recognised, but a plain error is not.
     const second = await claimedAttempt(db, { headSha: SHA.replace("0", "e") });
     const wrapped = fakeChecks({
@@ -2339,7 +2339,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
     const conservative = await adapterFor(db, unknown.octokit).beginCheck({ identity: third.attempt.identity, lease: third.lease });
     expect(conservative.kind).toBe("unavailable");
     if (conservative.kind === "unavailable") expect(conservative.requests).toBe(1);
-    // An unprovable failure keeps the durable `sending` mark (adopt-only).
+    // note: An unprovable failure keeps the durable `sending` mark (adopt-only).
     expect(await runState(db, third.attempt)).toBe("sending");
   });
 
@@ -2357,7 +2357,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
   test("an unowned attempt produces no request even when a client is present", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    // Terminalize the attempt through the store, then the adapter must refuse.
+    // note: Terminalize the attempt through the store, then the adapter must refuse.
     await attachedRun(db, attempt, lease, 4242);
     await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0);
     expect(await setCheckCreateState(db, attempt.identity.attemptId, lease, "sending", undefined, T0)).toBe(true);
@@ -2369,7 +2369,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
         throw new Error("must not send");
       },
     });
-    // A recovery takeover fences the original holder out of every send.
+    // note: A recovery takeover fences the original holder out of every send.
     const takeover: Lease = { holder: "reconciler", epoch: lease.epoch + 1, untilMs: lease.untilMs };
     expect((await adapterFor(db, fake.octokit).beginCheck({ identity: attempt.identity, lease: takeover })).kind).toBe("unavailable");
     expect(fake.creates).toHaveLength(0);
@@ -2379,7 +2379,7 @@ describe("credential boundary (spec §7.6 / §7.9)", () => {
 
 describe("the review-write permission set (spec §7.12)", () => {
   test("checks:write rides the one existing review-write set — no second credential", () => {
-    // The Checks lane reuses the commenter's purpose-scoped credential. Adding
+    // note: The Checks lane reuses the commenter's purpose-scoped credential. Adding
     // a separate client/permission set would be a second auth construction
     // point, which the plan forbids; this pins that the write set carries
     // checks:write and that the read-only sandbox grant stays narrow.
@@ -2397,19 +2397,19 @@ describe("the remote non-idempotency boundary (RL-12)", () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const id = attempt.identity.attemptId;
-    // The send was ATTEMPTED and the response was lost: `sending` with no id.
+    // note: The send was ATTEMPTED and the response was lost: `sending` with no id.
     expect(await setCheckCreateState(db, id, lease, "sending", undefined, T0)).toBe(true);
     const fake = fakeChecks({ create: () => runPayload(attempt.identity) });
     const adapter = adapterFor(db, fake.octokit);
 
-    // A second begin on a possibly-sent attempt must issue NO create request:
+    // note: A second begin on a possibly-sent attempt must issue NO create request:
     // `external_id` is correlation, not server-side idempotency (RL-12), so a
     // blind retry could leave two live runs for one head.
     const result = await adapter.beginCheck({ identity: attempt.identity, lease });
     expect(result.kind).toBe("unavailable");
     expect(fake.creates).toHaveLength(0);
 
-    // Nor is the state resettable into a createable one: `not-sent` is a
+    // note: Nor is the state resettable into a createable one: `not-sent` is a
     // definitive pre-send claim and may not be re-asserted after a send was
     // attempted. The row therefore stays honestly un-resolved.
     expect(await setCheckCreateState(db, id, lease, "not-sent", undefined, T0)).toBe(false);
@@ -2421,7 +2421,7 @@ describe("the remote non-idempotency boundary (RL-12)", () => {
     expect(row.create_state).toBe("sending");
     expect(row.observed).toBe("unknown");
 
-    // Read-only adoption remains the recovery route; with no matching run it
+    // note: Read-only adoption remains the recovery route; with no matching run it
     // reports incomplete rather than absence, and still creates nothing.
     const adopt = fakeChecks({});
     expect((await adapterFor(db, adopt.octokit).adoptCheckRun({ identity: attempt.identity })).kind).toBe("incomplete");
@@ -2429,23 +2429,23 @@ describe("the remote non-idempotency boundary (RL-12)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Attach at delivery acceptance (spec §7.7 step 4) and adoption (§7.9)
 // ---------------------------------------------------------------------------
 
-/** The delivery-side attach call, over the real registry and a scripted surface. */
+/** note: The delivery-side attach call, over the real registry and a scripted surface. */
 const ATTACH_INPUT = {
   scope: SCOPE,
   githubAppId: GITHUB_APP_ID,
   headSha: SHA,
   triggeredBy: "octocat",
   action: "review",
-  // The delivery identity the attach records on its row and hands to the
+  // note: The delivery identity the attach records on its row and hands to the
   // message: a later settlement must match BOTH.
   deliveryId: "fixture-delivery",
 } as const;
 
-/** A create response that echoes the attempt's own identity (the adapter's proof). */
+/** note: A create response that echoes the attempt's own identity (the adapter's proof). */
 function echoCreate(params: ChecksCreateParams): CheckRunPayload {
   return {
     id: 4242,
@@ -2459,7 +2459,7 @@ function echoCreate(params: ChecksCreateParams): CheckRunPayload {
 }
 
 /**
- * Count the adoption claim's ONE statement (epoch bump + execution-deadline
+ * note: Count the adoption claim's ONE statement (epoch bump + execution-deadline
  * move) instead of timing the retry: "was the second attempt entered?" is then
  * a number, not a wall clock. `before` runs synchronously just before the Nth
  * statement, which is how a test drives a state change strictly BETWEEN the two
@@ -2505,7 +2505,7 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
     expect(attached.kind).toBe("attached");
     expect(fake.creates).toHaveLength(1);
     const row = await attachRow(db);
-    // The durable facts the consumer's `begin` adopts, and nothing else: no
+    // note: The durable facts the consumer's `begin` adopts, and nothing else: no
     // holder, no lease, no spent attempt — the row is released, not owned.
     expect(row.create_state).toBe("known");
     expect(row.check_run_id).toBe(4242);
@@ -2514,10 +2514,10 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
     expect(row.recovery_state).toBe("pending");
     expect(row.desired).toBe("in_progress");
     expect(row.attempts).toBe(0);
-    // The attach window, not the execution window: a queued message admitted
+    // note: The attach window, not the execution window: a queued message admitted
     // minutes later must still find its row adoptable.
     expect(row.execution_deadline_ms).toBe(T0 + CHECK_ATTACH_WINDOW_MS);
-    // ...and if nobody adopts it, the recovery lane may take it at the grace
+    // note: ...and if nobody adopts it, the recovery lane may take it at the grace
     // instead of at the window's expiry. A due time, not a delay: adoption
     // ignores it, so the ordinary path still takes the row immediately.
     expect(row.next_attempt_ms).toBe(T0 + CHECK_ATTACH_GRACE_MS);
@@ -2530,7 +2530,7 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
     const deps = { db, adapter: adapterFor(db, fake.octokit), nowMs: () => CLOCK };
 
     expect((await attachCheckAtAcceptance(deps, ATTACH_INPUT)).kind).toBe("attached");
-    // A queue redelivery / a second webhook for the same head: the claim is
+    // note: A queue redelivery / a second webhook for the same head: the claim is
     // `busy`, so nothing is created and nothing is overwritten — a SKIP, not
     // a failure, so the caller logs nothing for it.
     const duplicate = await attachCheckAtAcceptance(deps, ATTACH_INPUT);
@@ -2543,7 +2543,7 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
   test("a failing create never throws: the row goes to the recovery lane as possibly-sent", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The scripted surface rejects the create (an API/permission failure).
+    // note: The scripted surface rejects the create (an API/permission failure).
     const fake = fakeChecks({});
 
     const attached = await attachCheckAtAcceptance(
@@ -2551,7 +2551,7 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
       ATTACH_INPUT,
     );
 
-    // A real failure, not a skip: this is the arm the caller owes a warn.
+    // note: A real failure, not a skip: this is the arm the caller owes a warn.
     expect(attached.kind).toBe("failed");
     expect(fake.creates).toHaveLength(1);
     const row = await attachRow(db);
@@ -2559,14 +2559,14 @@ describe("attach on delivery acceptance (spec §7.7 step 4)", () => {
     expect(row.recovery_state).toBe("remote-unconfirmed");
     expect(row.attempts).toBe(1);
     expect(row.next_attempt_ms).toBe(T0 + 60_000);
-    // The run id is unknown, so recovery adopts instead of blindly creating.
+    // note: The run id is unknown, so recovery adopts instead of blindly creating.
     expect(row.check_run_id).toBeNull();
   });
 
   test("an unavailable Checks surface is a FAILURE, not a skip: the caller owes one warn", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // No client at all (a missing/refused credential): nothing was created, and
+    // note: No client at all (a missing/refused credential): nothing was created, and
     // the row is handed to recovery. The distinction from `skipped` is what
     // makes the delivery path log the failure instead of staying silent.
     const result = await attachCheckAtAcceptance({ db, adapter: adapterFor(db, null), nowMs: () => CLOCK }, ATTACH_INPUT);
@@ -2617,7 +2617,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
       executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
     });
 
-    // The SAME row and the SAME run: no second generation, no second create.
+    // note: The SAME row and the SAME run: no second generation, no second create.
     expect(handle).not.toBeNull();
     expect(handle!.attemptId).toBe(attemptId);
     expect(fake.creates).toHaveLength(1);
@@ -2627,11 +2627,11 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     >;
     expect(adopted.holder).toBe(handle!.lease.holder);
     expect(adopted.lease_epoch).toBe(handle!.lease.epoch);
-    // The long attach window is narrowed to the execution window the adopting
+    // note: The long attach window is narrowed to the execution window the adopting
     // invocation owns.
     expect(adopted.execution_deadline_ms).toBe(CLOCK + CHECK_LEASE_MS);
 
-    // Step 12 runs against the adopted lease: the run reaches its conclusion
+    // note: Step 12 runs against the adopted lease: the run reaches its conclusion
     // inline, which is what the consumer records as `completed`.
     await lifecycle.terminalize({ handle: handle!, publicationId: null, outcome: "publication-unknown" });
     expect(fake.updates).toHaveLength(1);
@@ -2667,7 +2667,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     expect(handle).toBeNull();
     expect(fake.creates).toHaveLength(0);
     const row = await rowOf(db, attempt);
-    // The live holder keeps its lease: the epoch did not move.
+    // note: The live holder keeps its lease: the epoch did not move.
     expect(row.holder).toBe("run-a");
     expect(row.lease_epoch).toBe(1);
   });
@@ -2675,7 +2675,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
   test("a live, fresh delivery holder is not taken over: the consumer proceeds without a handle", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The overlap the ordering cannot remove: the delivery path gave up waiting
+    // note: The overlap the ordering cannot remove: the delivery path gave up waiting
     // and its attach is still running. A holder that wrote a moment ago is
     // working, not stalled, so the consumer must leave it alone.
     const { attempt, lease } = await claimedAttempt(db, { holder: "delivery:attach-in-flight" });
@@ -2702,7 +2702,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     CLOCK = T0;
     const { attempt, lease: deliveryLease } = await claimedAttempt(db, { holder: "delivery:stalled" });
     await attachedRun(db, attempt, deliveryLease, 4242);
-    // The holder has written nothing for longer than the staleness bound: one
+    // note: The holder has written nothing for longer than the staleness bound: one
     // token mint, one create and two D1 writes do not take that long, so it is
     // stalled (a reclaimed isolate, a hung release).
     await db
@@ -2721,13 +2721,13 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 
     expect(handle).not.toBeNull();
     expect(handle!.attemptId).toBe(attempt.identity.attemptId);
-    // Same run, narrowed window, epoch bumped: the adopting lease is the one
+    // note: Same run, narrowed window, epoch bumped: the adopting lease is the one
     // the handle carries.
     const adopted = await rowOf(db, attempt);
     expect(adopted.holder).toBe(handle!.lease.holder);
     expect(adopted.lease_epoch).toBe(2);
     expect(adopted.execution_deadline_ms).toBe(CLOCK + CHECK_LEASE_MS);
-    // The stalled holder's late release is refused: its lease triple no longer
+    // note: The stalled holder's late release is refused: its lease triple no longer
     // matches, so it cannot overwrite the adopting invocation's row.
     expect(await releaseCheckClaim(db, attempt.identity.attemptId, deliveryLease, CLOCK)).toBe(false);
     expect((await rowOf(db, attempt)).holder).toBe(handle!.lease.holder);
@@ -2736,7 +2736,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
   test("an attach that releases between the two adoption attempts is adopted by the retry", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The message was admitted while the delivery holder was still mid-attach:
+    // note: The message was admitted while the delivery holder was still mid-attach:
     // the first adoption refuses a fresh live holder, and the attach releases
     // strictly BETWEEN the two attempts — driven from the second adoption
     // statement, so nothing races a wall clock.
@@ -2765,7 +2765,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
 
-    // Exactly two adoption statements ran, and the second one took the row.
+    // note: Exactly two adoption statements ran, and the second one took the row.
     expect(counting.adoptions()).toBe(2);
     expect(handle).not.toBeNull();
     expect(handle!.attemptId).toBe(attempt.identity.attemptId);
@@ -2793,7 +2793,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
 
-    // A running review's holder is not waited for: one adoption statement, no
+    // note: A running review's holder is not waited for: one adoption statement, no
     // second attempt, no handle.
     expect(handle).toBeNull();
     expect(counting.adoptions()).toBe(1);
@@ -2822,7 +2822,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
 
-    // A frozen intent belongs to recovery: one adoption statement, no second
+    // note: A frozen intent belongs to recovery: one adoption statement, no second
     // attempt, no handle.
     expect(handle).toBeNull();
     expect(counting.adoptions()).toBe(1);
@@ -2847,7 +2847,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
       getAdapter: () => adapterFor(db, fake.octokit),
       getCheckGate: async () => GATE,
     });
-    // The consumer's 2 s budget elapsed while the adoption write was in flight:
+    // note: The consumer's 2 s budget elapsed while the adoption write was in flight:
     // the handle would go into a promise nobody awaits, so the row is handed
     // back with the run it owns recorded as a no-handle exit.
     const latch = createCheckBeginLatch();
@@ -2869,7 +2869,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     expect(released.recovery_state).toBe("remote-unconfirmed");
     expect(released.attempts).toBe(1);
     expect(released.terminalize_outcome).toBe("no-handle");
-    // The run id survives, so recovery adopts this run instead of a second one.
+    // note: The run id survives, so recovery adopts this run instead of a second one.
     expect(released.check_run_id).toBe(4242);
   });
 
@@ -2897,7 +2897,7 @@ describe("adoption of a released attach row (spec §7.9)", () => {
 });
 
 describe("skip settlement (spec §7.9 / RL-10)", () => {
-  /** Attach one run for the fixture scope and return the row's attempt id. */
+  /** note: Attach one run for the fixture scope and return the row's attempt id. */
   async function attachedAttempt(
     db: TestD1,
     fake: ReturnType<typeof fakeChecks>,
@@ -2910,7 +2910,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     return { attemptId: (await attachRow(db)).id as string, deliveryId: result.deliveryId };
   }
 
-  /** A scripted surface whose update echoes the intended terminal state. */
+  /** note: A scripted surface whose update echoes the intended terminal state. */
   function settlingFake(): ReturnType<typeof fakeChecks> {
     let externalId = "";
     return fakeChecks({
@@ -2931,7 +2931,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   }
 
   /**
-   * The attached head's OWN persisted review — the row a skip inherits. `null`
+   * note: The attached head's OWN persisted review — the row a skip inherits. `null`
    * score writes an envelope without a tally (readable verdict, unreadable
    * gate input).
    */
@@ -2954,7 +2954,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       );
   }
 
-  /** One skip of an attached run; returns the row the settlement left. */
+  /** note: One skip of an attached run; returns the row the settlement left. */
   async function skipHead(
     db: TestD1,
     fake: ReturnType<typeof fakeChecks>,
@@ -3002,12 +3002,12 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a skip inherits a head review below the floor — failure, never neutral", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // Allowed verdict, score under the floor: the gate is missed on the score.
+    // note: Allowed verdict, score under the floor: the gate is missed on the score.
     seedHeadReview(db, "ship it", 70);
     const fake = settlingFake();
     const { row } = await skipHead(db, fake);
 
-    // The bypass this test exists for: a repeat delivery of this head must not
+    // note: The bypass this test exists for: a repeat delivery of this head must not
     // turn its missed gate into a neutral required check.
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("failure");
     expect(fake.updates[0]!.params.output.summary).toBe(
@@ -3020,7 +3020,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a skip inherits a disallowed verdict above the floor — failure, never neutral", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // Passing score, verdict outside the gate's set: the gate is missed on the
+    // note: Passing score, verdict outside the gate's set: the gate is missed on the
     // verdict alone, which a score-only comparison would let through.
     seedHeadReview(db, "needs fixes", 95);
     const fake = settlingFake();
@@ -3036,7 +3036,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a malformed proof falls back to the reviews projection — one warning, never a throw", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The publication row exists but its proof cannot be parsed. The settlement
+    // note: The publication row exists but its proof cannot be parsed. The settlement
     // must fall back to the projection (which carries the failing gate) instead
     // of throwing into the caller's catch, which would leave the run to the
     // recovery lane.
@@ -3075,7 +3075,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(fake.updates[0]!.params.output.summary).toBe(
       CHECK_SUMMARIES.sameHeadInheritedGateMissed(SHA.slice(0, 7), "needs fixes", 40, GATE),
     );
-    // ONE warning, naming the read that failed.
+    // note: ONE warning, naming the read that failed.
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("publication proof unreadable");
     const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
@@ -3088,7 +3088,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a proof read fault settles nothing — no intent frozen, one warning", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The projection is readable, but the proof SELECT itself fails. The lane
+    // note: The projection is readable, but the proof SELECT itself fails. The lane
     // must not guess a verdict from a partially readable evidence set: it
     // settles nothing and leaves the run to the reconciler's deadline path.
     seedHeadReview(db, "needs fixes", 40);
@@ -3123,7 +3123,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
 
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("publication proof read failed");
-    // No intent, no remote request: the row keeps its claim and its
+    // note: No intent, no remote request: the row keeps its claim and its
     // `in_progress` conclusion, which the deadline path corrects.
     expect(fake.updates).toHaveLength(0);
     const row = (await db.prepare("SELECT * FROM review_checks WHERE id = ?").bind(attemptId).first()) as Record<
@@ -3140,7 +3140,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a confirmed publication without a reviews row still settles the gate result", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The publication is confirmed (its proof is persisted) while the `reviews`
+    // note: The publication is confirmed (its proof is persisted) while the `reviews`
     // projection has not landed: reading the projection alone would answer
     // "nothing to inherit" and settle neutral over a review that missed the
     // gate.
@@ -3189,7 +3189,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a confirmed publication with no readable payload fails closed, never neutral", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The publication is confirmed (its proof persisted) but its payload carries
+    // note: The publication is confirmed (its proof persisted) but its payload carries
     // no artifact, and there is no `reviews` row. A confirmed publication is
     // evidence that a review exists: not being able to read it must fail closed.
     db.raw
@@ -3240,7 +3240,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       db,
       nowMs: () => CLOCK,
       getAdapter: () => adapterFor(db, fake.octokit),
-      // The webhook lane's zero-config placeholder: absent, not "missed".
+      // note: The webhook lane's zero-config placeholder: absent, not "missed".
       getCheckGate: async () => null,
     });
 
@@ -3256,7 +3256,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       }),
     ).toBe(false);
 
-    // No evidence is not "the gate was missed": nothing is frozen and the run
+    // note: No evidence is not "the gate was missed": nothing is frozen and the run
     // is left to the reconciler, which reads the real gate.
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("gate is unreadable from this lane");
@@ -3285,7 +3285,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
   test("a degraded publication settles failure from its own summary, not the projection", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // The head's only confirmed publication is a parse-degrade notice; its
+    // note: The head's only confirmed publication is a parse-degrade notice; its
     // `reviews` row is PASSING. The degrade notice is what this head published,
     // and its own round concluded failure — the projection must not rescue it.
     db.raw
@@ -3346,7 +3346,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     });
 
     expect(settled).toBe(true);
-    // ONE bounded update, carrying neutral and the skip reason — never a
+    // note: ONE bounded update, carrying neutral and the skip reason — never a
     // proof-derived failure.
     expect(fake.updates).toHaveLength(1);
     expect((fake.updates[0]!.params as ChecksUpdateParams).conclusion).toBe("neutral");
@@ -3366,7 +3366,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     CLOCK = T0;
     const fake = settlingFake();
     const { attemptId, deliveryId } = await attachedAttempt(db, fake);
-    // No commenter/adapter at all (the paused gate makes zero credential
+    // note: No commenter/adapter at all (the paused gate makes zero credential
     // calls, architect lock L4): the settlement must still take the row and
     // leave a conclusion the recovery lane can send.
     const lifecycle = createCheckLifecycle({
@@ -3397,13 +3397,13 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(row.lease_until_ms).toBeNull();
     expect(row.next_attempt_ms).toBeNull();
     expect(row.terminal_ms).toBeNull();
-    // A frozen intent is due immediately: no due time, no proof to wait for.
+    // note: A frozen intent is due immediately: no due time, no proof to wait for.
     expect((await listCheckReconcileBatch(db, T0)).map((candidate) => candidate.identity.attemptId)).toEqual([attemptId]);
   });
   test("a retry after a neutral settlement claims a new generation and its own run", async () => {
     const db = await seededDb();
     CLOCK = T0;
-    // Each create mints a distinct run id, so "its own run" is provable.
+    // note: Each create mints a distinct run id, so "its own run" is provable.
     let runSeq = 5000;
     const externalByRun = new Map<number, string>();
     const fake = fakeChecks({
@@ -3431,7 +3431,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       getCheckGate: async () => GATE,
     });
 
-    // The guard refusal settles this delivery's run neutral.
+    // note: The guard refusal settles this delivery's run neutral.
     expect(
       await lifecycle.settleSkipped({
         scope: SCOPE,
@@ -3450,7 +3450,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     expect(settled.terminal_ms).not.toBeNull();
     const settledRunId = settled.check_run_id as number;
 
-    // The retry (60 s later) claims a NEW generation: the settled row does not
+    // note: The retry (60 s later) claims a NEW generation: the settled row does not
     // retire the head, and the new generation mints its own run.
     CLOCK = T0 + 60_000;
     const handle = await lifecycle.begin({ ...ATTACH_INPUT, executionDeadlineMs: CLOCK + CHECK_LEASE_MS });
@@ -3489,7 +3489,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       });
 
     expect(await settle()).toBe(true);
-    // The second delivery's skip finds a terminal row: nothing to take, no
+    // note: The second delivery's skip finds a terminal row: nothing to take, no
     // second remote update.
     expect(await settle()).toBe(false);
     expect(fake.updates).toHaveLength(1);
@@ -3536,7 +3536,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     });
     await attachedRun(db, attempt, lease, 4242);
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
-    // The id MATCHES the row's own delivery holder: the refusal here is the
+    // note: The id MATCHES the row's own delivery holder: the refusal here is the
     // frozen intent, not a missing identity.
     const deliveryId = "attach";
     const fake = settlingFake();
@@ -3567,7 +3567,7 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
     const db = await seededDb();
     CLOCK = T0;
     const fake = fakeChecks({ create: echoCreate });
-    // The admitted consumer adopts the row before this invocation releases it:
+    // note: The admitted consumer adopts the row before this invocation releases it:
     // the epoch moves, so the release matches zero rows. Driving the adoption
     // from the release statement makes the overlap exact.
     const wrapped = {
@@ -3593,17 +3593,17 @@ describe("skip settlement (spec §7.9 / RL-10)", () => {
       ATTACH_INPUT,
     );
 
-    // The consumer owns the row now: nothing failed, and the attach says so.
+    // note: The consumer owns the row now: nothing failed, and the attach says so.
     expect(result).toEqual({ kind: "skipped", reason: "adopted" });
   });
 });
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Attach a proven run id through the LEGAL transition path. The store now
+ * note: Attach a proven run id through the LEGAL transition path. The store now
  * refuses to attach an id to an attempt whose create was never sent (that
  * would record a run this attempt did not create), so tests must first record
  * the send attempt — exactly as the pipeline does.
@@ -3624,12 +3624,12 @@ async function runState(db: TestD1, attempt: CheckAttempt): Promise<string | nul
   return ((await rowOf(db, attempt)).create_state as string | null) ?? null;
 }
 
-// ---------------------------------------------------------------------------
+// note: ---------------------------------------------------------------------------
 // Zero-dispatch rollback
 // ---------------------------------------------------------------------------
 
 /**
- * The cross-task seam: `beginCheck` persists `create_state = 'sending'` before
+ * note: The cross-task seam: `beginCheck` persists `create_state = 'sending'` before
  * it may dispatch, and its LAST fence before the callable is a fresh live-lease
  * re-proof. When that fence fails, no Checks request was invoked — the row must
  * not be left claiming that one might have been.
@@ -3640,7 +3640,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     const { attempt, lease } = await claimedAttempt(db);
     const identity = attempt.identity;
     const fake = fakeChecks({ create: () => runPayload(identity) });
-    // `beginCheck` reads the clock twice before dispatch: once for the opening
+    // note: `beginCheck` reads the clock twice before dispatch: once for the opening
     // ownership guard, once for the pre-call live-lease re-proof. The clock
     // crosses the lease end on that SECOND read — exactly T2's post-`sending`,
     // pre-call fence — while the durable `sending` write still used the valid
@@ -3658,23 +3658,23 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     const result = await adapter.beginCheck({ identity, lease });
     expect(result.kind).toBe("unavailable");
     if (result.kind !== "unavailable") throw new Error("unreachable");
-    // The additive contract: zero Checks calls were invoked.
+    // note: The additive contract: zero Checks calls were invoked.
     expect(result.requests).toBe(0);
     expect(fake.creates).toHaveLength(0);
 
     const row = await rowOf(db, attempt);
     expect(row.create_state).toBe("not-sent");
     expect(row.check_run_id).toBeNull();
-    // Nothing else moved: no attempt, no backoff, no error, no identity loss.
+    // note: Nothing else moved: no attempt, no backoff, no error, no identity loss.
     expect(row.attempts).toBe(0);
     expect(row.next_attempt_ms).toBeNull();
-    // The `sending` mark is a transition, not an error, so nothing fabricated
+    // note: The `sending` mark is a transition, not an error, so nothing fabricated
     // and nothing real was lost.
     expect(row.last_error).toBeNull();
     expect(row.external_id).toBe(identity.externalId);
     expect(row.generation).toBe(identity.generation);
     expect(row.terminal_ms).toBeNull();
-    // The lease is intact so the caller can still release/attach under it.
+    // note: The lease is intact so the caller can still release/attach under it.
     expect(row.holder).toBe(lease.holder);
     expect(row.lease_epoch).toBe(lease.epoch);
   });
@@ -3683,7 +3683,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     const identity = attempt.identity;
-    // A real diagnostic already on the row (e.g. from an earlier deferral).
+    // note: A real diagnostic already on the row (e.g. from an earlier deferral).
     const PRIOR = "check get failed: 502 bad gateway";
     await db
       .prepare(`UPDATE review_checks SET last_error = ? WHERE id = ?`)
@@ -3705,7 +3705,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
     expect(result.kind).toBe("unavailable");
     const row = await rowOf(db, attempt);
     expect(row.create_state).toBe("not-sent");
-    // The sending mark is a transition, not an error: the prior value is
+    // note: The sending mark is a transition, not an error: the prior value is
     // neither overwritten with a fabricated sentinel nor cleared.
     expect(row.last_error).toBe(PRIOR);
   });
@@ -3713,7 +3713,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
   test("a stale epoch defeats the rollback: a newer holder's state is untouched", async () => {
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
-    // A newer recovery claim takes the row over (epoch bumps) after this
+    // note: A newer recovery claim takes the row over (epoch bumps) after this
     // caller's `sending` write.
     await db
       .prepare(`UPDATE review_checks SET holder = 'other-run', lease_epoch = ?, lease_until_ms = ? WHERE id = ?`)
@@ -3724,7 +3724,7 @@ describe("zero-dispatch create refusal rolls the sending mark back", () => {
       await rollbackCheckCreateDispatch(db, attempt.identity.attemptId, lease, T0),
     ).toBe(false);
     const row = await rowOf(db, attempt);
-    // The newer holder's row is exactly as it was.
+    // note: The newer holder's row is exactly as it was.
     expect(row.holder).toBe("other-run");
     expect(row.lease_epoch).toBe(lease.epoch + 1);
     expect(row.check_run_id).toBeNull();
@@ -3764,7 +3764,7 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
   const RELABEL_KEY = { headSha: SHA, triggeredBy: "octocat", action: "review", attachDeliveryId: "delivery-relabel" };
 
   /**
-   * A released delivery row in exactly the shape the store predicate relabels:
+   * note: A released delivery row in exactly the shape the store predicate relabels:
    * known run id, still `in_progress`, non-terminal, holder handed back.
    */
   async function relabelableRow(db: TestD1): Promise<void> {
@@ -3807,14 +3807,14 @@ describe("markQueuedBehindInflight — the held-check relabel is bounded", () =>
     expect(await relabel(adapterFor(db, fake.octokit), warns)).toBe(false);
     expect(warns).toHaveLength(1);
     expect(warns[0]).toContain("held check relabel failed: boom");
-    // The one request WAS sent — nothing here claims otherwise.
+    // note: The one request WAS sent — nothing here claims otherwise.
     expect(fake.updates).toHaveLength(1);
   });
 
   test("a send that never answers returns false inside the budget, so the retry is never held", async () => {
     const db = await seededDb();
     await relabelableRow(db);
-    // GitHub accepts the request and never answers it: only the budget ends it.
+    // note: GitHub accepts the request and never answers it: only the budget ends it.
     const fake = fakeChecks({ update: () => new Promise<CheckRunPayload>(() => {}) });
     const warns: string[] = [];
     const started = Date.now();
@@ -3867,13 +3867,13 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     expect(fake.updates).toHaveLength(1);
     const raw = fake.updates[0]!.raw;
     expect(raw.status).toBe("in_progress");
-    // The ids come from the persisted row, never from the caller.
+    // note: The ids come from the persisted row, never from the caller.
     expect(raw.check_run_id).toBe(4242);
     expect(raw.output).toEqual({
       title: CHECK_NAME,
       summary: "Review started for 0123456 — this run reports the review of this commit.",
     });
-    // A promotion is NON-terminal: no conclusion may ride it.
+    // note: A promotion is NON-terminal: no conclusion may ride it.
     expect("conclusion" in raw).toBe(false);
   });
 
@@ -3897,7 +3897,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
     const fake = fakeChecks({ update: () => runPayload(attempt.identity) });
-    CLOCK = lease.untilMs + 1; // the holder expired before this promotion
+    CLOCK = lease.untilMs + 1; // note: the holder expired before this promotion
 
     expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease)).toEqual({
       kind: "settled",
@@ -3935,7 +3935,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const warns: string[] = [];
     const started = Date.now();
 
-    // Abandoned, not failed: the PATCH may still be in flight, which is what
+    // note: Abandoned, not failed: the PATCH may still be in flight, which is what
     // forbids a terminal write from the same invocation.
     expect(await promote(adapterFor(db, fake.octokit), attempt.identity, lease, warns, 25)).toEqual({
       kind: "abandoned",
@@ -3950,7 +3950,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
-    // `terminal_ms` set while the intent still wants `in_progress`: the row is
+    // note: `terminal_ms` set while the intent still wants `in_progress`: the row is
     // finished but its persisted intent cannot say so — exactly the state the
     // lifecycle's own attempt read has to catch (the adapter's ownership read
     // would answer `null` too, so the adapter call is what this pins).
@@ -3983,7 +3983,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     });
 
     expect(answer).toEqual({ kind: "settled", promoted: false });
-    // The adapter is never reached for a run that already ended.
+    // note: The adapter is never reached for a run that already ended.
     expect(adapterCalls).toBe(0);
     expect((await rowOf(db, attempt)).observed).toBe("unknown");
   });
@@ -3992,7 +3992,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const db = await seededDb();
     const { attempt, lease } = await claimedAttempt(db);
     await attachedRun(db, attempt, lease, 4242);
-    // The run is still non-terminal, but the review has decided its result:
+    // note: The run is still non-terminal, but the review has decided its result:
     // promoting it to `in_progress` now would be a lie. This is the adapter's
     // OWN guard — the lifecycle passes here (attempt not terminal).
     expect(await setCheckDesired(db, attempt.identity.attemptId, lease, SUCCESS, null, T0)).toBe(true);
@@ -4026,7 +4026,7 @@ describe("markInProgress — the queued → in_progress promotion (spec §7.9)",
     const warns: string[] = [];
     const summary = "Review started for 0123456 — this run reports the review of this commit.";
 
-    // Not attached yet: nothing to promote, and nothing is sent.
+    // note: Not attached yet: nothing to promote, and nothing is sent.
     expect(await lifecycle.markInProgress({ handle, summary, updateBudgetMs: 1_000, warn: (d) => warns.push(d) })).toEqual({
       kind: "settled",
       promoted: false,
@@ -4080,7 +4080,7 @@ describe("budget-exhausted Check vocabulary", () => {
     );
   });
   test("a non-positive or non-integral budget never names an impossible window", () => {
-    // `preparationBudgetMs` is `capMs - reserveMs` unclamped: a round cap
+    // note: `preparationBudgetMs` is `capMs - reserveMs` unclamped: a round cap
     // below the reserve yields a negative record — the summary reports `0s`
     // while the durable row keeps the raw value, and a fractional window
     // renders exact decimal seconds.
@@ -4165,7 +4165,7 @@ describe("budget-exhausted Check vocabulary", () => {
       changedLines: 402,
     };
     const conclusion = decideConclusion({
-      // A prior generation's applied publication under RL-12: gate-meeting —
+      // note: A prior generation's applied publication under RL-12: gate-meeting —
       // under the defect this froze `success` on an exhausted rerun.
       proof: {
         publicationId: "prior",
@@ -4202,12 +4202,12 @@ describe("budget-exhausted Check vocabulary", () => {
 });
 
 describe("a resumed settlement acts only on the frozen generation", () => {
-  /** The lifecycle seam a resumed phase reaches `begin` through. */
+  /** note: The lifecycle seam a resumed phase reaches `begin` through. */
   function lifecycleFor(db: TestD1, onRemoteCall: () => void) {
     return createCheckLifecycle({
       db,
       nowMs: () => CLOCK,
-      // Any adapter use means the fence let the call through to a send.
+      // note: Any adapter use means the fence let the call through to a send.
       getAdapter: () =>
         ({
           beginCheck: async () => {
@@ -4224,7 +4224,7 @@ describe("a resumed settlement acts only on the frozen generation", () => {
     const first = await claimedAttempt(db);
     const frozen = await readCheckIdentity(db, first.attempt.identity.attemptId);
     if (frozen === null) throw new Error("fixture: the claim wrote no identity");
-    // The attempt's own generation ended WITHOUT a proven publication, so the
+    // note: The attempt's own generation ended WITHOUT a proven publication, so the
     // unrestricted claim path would happily mint generation 2 for this key.
     await db
       .prepare("UPDATE review_checks SET terminal_ms = ?, holder = NULL, lease_until_ms = NULL WHERE id = ?")
@@ -4245,7 +4245,7 @@ describe("a resumed settlement acts only on the frozen generation", () => {
       expect: frozen,
     });
 
-    // Refused BEFORE the claim, so no row exists for this call to leave behind.
+    // note: Refused BEFORE the claim, so no row exists for this call to leave behind.
     expect(adopted).toBeNull();
     expect(remoteCalls).toBe(0);
     const rows = db.raw
@@ -4278,7 +4278,7 @@ describe("a resumed settlement acts only on the frozen generation", () => {
       expect: frozen,
     });
 
-    // The identity check passes and the claim path runs: the open row is busy
+    // note: The identity check passes and the claim path runs: the open row is busy
     // (held by this very claim), so no adoption and no second row — but this
     // call is NOT refused by the frozen-pair rule, which is what the previous
     // case pins in the other direction.

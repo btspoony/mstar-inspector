@@ -1,5 +1,4 @@
-/**
- * Settings ops zone, unified providers, chains UI.
+/** note: Settings ops zone, unified providers, chains UI.
  * No DOM runner — source-scan pins over SettingsPage.tsx and its primitives
  * plus pure data helpers (the home suite that shared this style is
  * retired). The AppInfoSection degradation face is additionally pinned
@@ -42,8 +41,7 @@ import { BotSettingsView } from "../../src/spa/pages/BotSettingsPage";
 import { withLocation } from "./browser-stub";
 import { installDom } from "./dom";
 
-/**
- * The settings tab's source: the page plus the providers cluster it composes —
+/** note: The settings tab's source: the page plus the providers cluster it composes —
  * the card module and the three dialogs. The providers cluster lives in
  * settings-providers.tsx / providers-dialogs.tsx, so the tab's source pins
  * read all three documents.
@@ -54,8 +52,7 @@ const readSettingsSource = () =>
   readFileSync(join(import.meta.dir, "../../src/spa/pages/settings-providers.tsx"), "utf8") +
   readFileSync(join(import.meta.dir, "../../src/spa/pages/providers-dialogs.tsx"), "utf8");
 
-/**
- * One component's body in the tab's composed source: from its declaration to
+/** note: One component's body in the tab's composed source: from its declaration to
  * the next top-level `function …` (or EOF). Coverage division: this suite's
  * pins are SOURCE SCANS — branch-complete over these modules, including
  * faces no render reaches; the emitted face, composed primitives included,
@@ -73,10 +70,10 @@ const componentBody = (source: string, name: string): string => {
 const noopSave = (): Promise<{ kind: "success" | "error"; message: string }> =>
   Promise.resolve({ kind: "success", message: "unused" });
 
-/** The detail page reads only locale/role from the boot for this face. */
+/** invariant: The detail page reads only locale/role from the boot for this face. */
 const adminBoot = { locale: "en" as const, login: "octocat", name: "The Octocat", role: "admin" as const };
 
-/** A manage-face settings payload — the full settings tab body renders. */
+/** note: A manage-face settings payload — the full settings tab body renders. */
 const detailPayload = (): SettingsManagePayload => ({
   can_manage: true,
   installation: null,
@@ -123,7 +120,7 @@ const detailPayload = (): SettingsManagePayload => ({
 describe("settings layout", () => {
   test("the ops zone is one authorized section; providers and chains are shadcn", () => {
     const source = readSettingsSource();
-    // The ops zone is OpsSection, shared by the App page and the repository
+    // note: The ops zone is OpsSection, shared by the App page and the repository
     // surface; each caller owns the dialog its confirmed actions open.
     const appPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     expect(source).toContain("settings.ops");
@@ -148,7 +145,7 @@ describe("settings layout", () => {
     expect(source).toContain("settings.confirmRemoveKeyTitle");
     expect(source).toContain("settings.confirmRemoveCustomTitle");
     expect(source).toContain("onPending={onPending}");
-    // No fire-and-forget destructive POSTs outside the dialog flow.
+    // note: No fire-and-forget destructive POSTs outside the dialog flow.
     expect(source).not.toContain('onClick={() => void onSettings({ op: "remove-custom-provider"');
     expect(t("en", "settings.confirmRemoveKeyTitle", { provider: "ark" })).toContain("ark");
     expect(t("zh_CN", "settings.confirmRemoveCustomTitle", { provider: "acme" })).toContain("acme");
@@ -195,15 +192,15 @@ describe("settings dropdowns", () => {
 describe("runtime harness selector", () => {
   test("managers get a shadcn selector saved through op=save-sandbox-image; other members read-only", () => {
     const source = readSettingsSource();
-    // The editor posts the op with the selected registry id.
+    // note: The editor posts the op with the selected registry id.
     expect(source).toContain('op: "save-sandbox-image"');
     expect(source).toContain("sandbox_image_id: selected");
-    // The choices come from the manage payload's enabled registry rows.
+    // note: The choices come from the manage payload's enabled registry rows.
     expect(source).toContain("payload.sandbox_images.map");
-    // shadcn Select (no native select), like the chain/seat editors.
+    // note: shadcn Select (no native select), like the chain/seat editors.
     expect(source).toContain("SelectTrigger");
     expect(source).toContain("SelectItem");
-    // Read-only detail for non-managers, never the editor.
+    // invariant: Read-only detail for non-managers, never the editor.
     expect(source).toContain("settings.runtimeHarnessValue");
     expect(source).toContain("payload.app.sandbox_image_id");
   });
@@ -265,26 +262,26 @@ describe("settings copy is dictionary-backed", () => {
     expect(source).toContain("unsupported_provider");
   });
 
-  // The private verify-reason routing has no direct test seam; copy alone does not cover it.
+  // note: The private verify-reason routing has no direct test seam; copy alone does not cover it.
 });
 
 describe("configured providers + catalog add flow", () => {
   test("the providers card renders configured state only; the catalog is the Add Provider picker", () => {
     const source = readSettingsSource();
-    // Primary list = the groups derived from the key pool + declarations,
+    // note: Primary list = the groups derived from the key pool + declarations,
     // never the catalog dump.
     expect(source).toContain("providerGroups(payload)");
     expect(source).not.toContain("payload.provider_catalog.map");
-    // Empty configured state is a valid UI with Add Provider as the path.
+    // note: Empty configured state is a valid UI with Add Provider as the path.
     expect(source).toContain("settings.noConfiguredProviders");
-    // Masked status rides the configured key row.
+    // note: Masked status rides the configured key row.
     expect(source).toContain("settings.keyEnding");
     expect(source).toContain("settings.keyTooShort");
   });
 
   test("Add Provider: catalog selection drives the configuration form; custom path preserved", () => {
     const source = readSettingsSource();
-    // Header trigger → catalog picker → selected provider's form (the flow is
+    // note: Header trigger → catalog picker → selected provider's form (the flow is
     // a dialog, so the trigger advertises the overlay rather than an in-card
     // expansion).
     expect(source).toContain("settings.addProvider");
@@ -292,10 +289,10 @@ describe("configured providers + catalog add flow", () => {
     expect(source).toContain("selectedCatalogProvider");
     expect(source).toContain("providerFormKind");
     expect(source).toContain("settings.configureProvider");
-    // Built-in and template materialization paths, mutations unchanged.
+    // invariant: Built-in and template materialization paths, mutations unchanged.
     expect(source).toContain("/keys/verify");
     expect(source).toContain('op: "add-template-provider"');
-    // The custom declaration keeps its own flow, now a dialog of its own.
+    // note: The custom declaration keeps its own flow, now a dialog of its own.
     expect(source).toContain("CustomProviderDialog");
     expect(source).toContain('op: "add-custom-provider"');
   });
@@ -303,7 +300,7 @@ describe("configured providers + catalog add flow", () => {
   test("a failed verify keeps the provider unconfigured and surfaces the structured reason", () => {
     const source = readSettingsSource();
     expect(source).toContain("verifyReasonMessage(locale, reason)");
-    // Forms reset and close only on success — a rejected submit keeps the
+    // invariant: Forms reset and close only on success — a rejected submit keeps the
     // typed input and the add selection while the background reload refreshes
     // data in place (the outcome literal replaces the old
     // boolean, and the success branch keys off the outcome kind).
@@ -313,26 +310,26 @@ describe("configured providers + catalog add flow", () => {
   });
 
   test("op-triggered reloads are background: the card tree stays mounted across a failed verify (QC fix wave 1 F-001)", () => {
-    // SUPERSEDE (App detail IA): load() lives on the AppDetailPage shell
+    // note: SUPERSEDE (App detail IA): load() lives on the AppDetailPage shell
     // now; the tab's op handlers keep the background-reload contract.
     const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const source = readSettingsSource();
-    // load() defaults to the foreground (loading-flash) behavior; only the
+    // invariant: load() defaults to the foreground (loading-flash) behavior; only the
     // background variant skips the "loading" flip.
     expect(detail).toContain("background = false");
     expect(detail).toContain('if (!background) setState("loading")');
-    // Initial mount loads in the foreground — genuine navigation keeps the
+    // note: Initial mount loads in the foreground — genuine navigation keeps the
     // loading state.
     expect(detail).toContain("void load()");
-    // Every op-triggered refresh is a background reload: no unmount, so the
+    // note: Every op-triggered refresh is a background reload: no unmount, so the
     // Add Provider panel (open + selection) and every form's typed input
     // survive a failed verify.
     expect(source).toContain("await onReload({ background: true })");
     expect(source).not.toContain("await onReload()");
-    // A failed background refresh surfaces through the notice channel instead
+    // note: A failed background refresh surfaces through the notice channel instead
     // of the page-level error state — it must never unmount the tree either.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
-    // Success closes/resets deliberately: the onDone closure runs against the
+    // note: Success closes/resets deliberately: the onDone closure runs against the
     // mounted instance.
     expect(source).toContain("onDone();");
     expect(source).toContain("setSelectedId(undefined)");
@@ -342,7 +339,7 @@ describe("configured providers + catalog add flow", () => {
 
   test("catalog add-flow copy is dictionary-backed in both locales", () => {
     expect(t("en", "settings.addProvider")).toBe("Add provider");
-    // The zh label unifies on 模型提供方 (supersedes the
+    // note: The zh label unifies on 模型提供方 (supersedes the
     // settled "添加 Provider" — no bare "Provider" left on the picker
     // surface); en keeps "Add provider".
     expect(t("zh_CN", "settings.addProvider")).toBe("添加模型提供方");
@@ -350,7 +347,7 @@ describe("configured providers + catalog add flow", () => {
     expect(t("zh_CN", "settings.providersCopy")).toContain("添加模型提供方");
     expect(t("en", "settings.noConfiguredProviders")).toContain("No providers configured yet");
     expect(t("zh_CN", "settings.noConfiguredProviders")).toContain("尚未配置");
-    // The 常用提供方 common tier replaces 内置提供方 as the group
+    // note: The 常用提供方 common tier replaces 内置提供方 as the group
     // name (supersedes the "Built-in"/"内置" pins).
     expect(t("en", "settings.catalogBuiltin")).toBe("Common providers");
     expect(t("zh_CN", "settings.catalogBuiltin")).toBe("常用提供方");
@@ -365,20 +362,20 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
   const page = readSettingsSource();
 
   test("every configured key row is keyed by its key identity — two keys of one provider are two rows", () => {
-    // React keys: the group by provider id, the row by key id. The bare
+    // note: React keys: the group by provider id, the row by key id. The bare
     // provider collided as soon as a (App, provider) pool held a second key.
     expect(page).toContain("key={group.providerId}");
     expect(page).toContain("key={key.keyId}");
-    // Per-row delete carries the identity the route deletes by (plus the row's
+    // note: Per-row delete carries the identity the route deletes by (plus the row's
     // tail for the confirm copy).
     expect(page).toContain('kind: "remove-key",');
     expect(page).toContain("provider: key.provider,");
     expect(page).toContain("keyId: key.keyId,");
     expect(page).toContain("last4: key.last4,");
-    // …and the confirmed POST sends that identity (never a provider-only delete,
+    // invariant: …and the confirmed POST sends that identity (never a provider-only delete,
     // which would take the provider's other keys with it).
     expect(page).toContain("key_id: action.keyId");
-    // The feedback slot resolves through the SAME composite identity: match on
+    // note: The feedback slot resolves through the SAME composite identity: match on
     // the id alone and one key stored under two providers (ids hash the
     // plaintext) reports the outcome beside the wrong provider's row. The
     // lookup itself is pinned behaviourally in pages-data.test.ts.
@@ -390,7 +387,7 @@ describe("multi-key provider rows (one row per key, no client-side fold)", () =>
     expect(page).toContain("settings.providers.status.failed");
     const groupCard = page.slice(page.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain("key.verifiedStatus");
-    // A probe that could not reject a bogus key renders the weaker
+    // note: A probe that could not reject a bogus key renders the weaker
     // "reachable" state — never the "verified" claim: two distinct labels, and
     // the reachable one carries the accent tone.
     expect(page).toContain('ok: { tone: "success", label: "settings.providers.status.ok" }');
@@ -418,14 +415,14 @@ describe("custom-provider add-key copy", () => {
 describe("catalog provenance + eligibility messaging", () => {
   test("Add Provider discloses provenance and per-entry eligibility vs the selected runtime harness", () => {
     const source = readSettingsSource();
-    // Provenance: the catalog is generated, pinned metadata — not a live query.
+    // note: Provenance: the catalog is generated, pinned metadata — not a live query.
     expect(source).toContain("settings.catalogProvenance");
-    // Eligibility is judged against the App's SELECTED image id, never inferred.
+    // invariant: Eligibility is judged against the App's SELECTED image id, never inferred.
     expect(source).toContain("payload.app.sandbox_image_id");
     expect(source).toContain("settings.eligibilityBuiltin");
     expect(source).toContain("settings.eligibilityTemplate");
     expect(source).toContain("settings.eligibilityUnavailable");
-    // Unavailable rows keep their picker entry (marked), never hidden
+    // invariant: Unavailable rows keep their picker entry (marked), never hidden
     // silently — the short suffix moved into the combobox file with
     // the picker rows (supersedes the in-page pin).
     const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
@@ -434,13 +431,13 @@ describe("catalog provenance + eligibility messaging", () => {
 
   test("an unavailable entry gets an explanation instead of a form — nothing can save it silently", () => {
     const source = readSettingsSource();
-    // The gate sits above ProviderConfigForm: unavailable → copy only, no submit path.
+    // invariant: The gate sits above ProviderConfigForm: unavailable → copy only, no submit path.
     expect(source).toContain('selected.eligibility === "unavailable"');
   });
 
   test("the catalog picker names its combobox through the aria-labelledby precedent", () => {
     const source = readSettingsSource();
-    // MembersPage precedent: visible label span naming the picker — no
+    // note: MembersPage precedent: visible label span naming the picker — no
     // wrapping <label>. the span names the combobox input through
     // the labelledby prop (the aria-labelledby attribute itself moved into
     // provider-combobox.tsx, superseding the old attribute pin).
@@ -452,7 +449,7 @@ describe("catalog provenance + eligibility messaging", () => {
   });
 
   test("provenance copy is dictionary-backed in both locales", () => {
-    // The provenance line is rendered with the REAL payload catalog length, so
+    // note: The provenance line is rendered with the REAL payload catalog length, so
     // assert that length and the committed-snapshot sources — never a pinned
     // count that every breadth or union addition has to hand-edit.
     const count = Object.keys(PROVIDER_CATALOG).length;
@@ -501,7 +498,7 @@ describe("provider combobox", () => {
     ...overrides,
   });
 
-  // Common tier = the 5 frozen ids; the catalog group = everything else
+  // note: Common tier = the 5 frozen ids; the catalog group = everything else
   // (two template rows + one fabricated unavailable builtin whose label
   // matches the "gem" probe, so the filtered-face marking is observable).
   const catalog: CatalogProvider[] = [
@@ -516,13 +513,13 @@ describe("provider combobox", () => {
   ];
 
   test("the pure filter narrows on label or id, case-insensitively; clearing restores the full list", () => {
-    // "gem" keeps both the common Gemini and the unavailable catalog row —
+    // note: "gem" keeps both the common Gemini and the unavailable catalog row —
     // filtering never drops unavailable entries (they stay listed + marked).
     expect(filterCatalogProviders(catalog, "gem").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
     expect(filterCatalogProviders(catalog, "GEM").map((p) => p.id)).toEqual(["gemini", "gemini-image"]);
     expect(filterCatalogProviders(catalog, "copilot").map((p) => p.id)).toEqual(["copilot"]);
-    expect(filterCatalogProviders(catalog, "github").map((p) => p.id)).toEqual(["copilot"]); // label match
-    // Empty / whitespace query → the full catalog in payload order.
+    expect(filterCatalogProviders(catalog, "github").map((p) => p.id)).toEqual(["copilot"]); // note: label match
+    // note: Empty / whitespace query → the full catalog in payload order.
     expect(filterCatalogProviders(catalog, "")).toHaveLength(catalog.length);
     expect(filterCatalogProviders(catalog, "   ").map((p) => p.id)).toEqual(catalog.map((p) => p.id));
     expect(filterCatalogProviders(catalog, "zzz-no-match")).toEqual([]);
@@ -533,7 +530,7 @@ describe("provider combobox", () => {
     const groups = groupCatalogProviders(catalog);
     expect(groups.common.map((p) => p.id)).toEqual([...PROVIDER_IDS_COMMON]);
     expect(groups.common.every((p) => p.display_group === "common")).toBe(true);
-    // Within-group payload order is preserved; the unavailable row stays.
+    // invariant: Within-group payload order is preserved; the unavailable row stays.
     expect(groups.catalog.map((p) => p.id)).toEqual(["mistral", "workers-ai", "gemini-image"]);
     expect(groups.catalog.every((p) => p.display_group === "catalog")).toBe(true);
   });
@@ -552,19 +549,19 @@ describe("provider combobox", () => {
         }),
       );
     const full = panel("", "gemini");
-    // Common providers group renders before Catalog templates.
+    // invariant: Common providers group renders before Catalog templates.
     expect(full.indexOf("Common providers")).toBeGreaterThan(-1);
     expect(full.indexOf("Catalog templates")).toBeGreaterThan(full.indexOf("Common providers"));
-    // The selected row carries aria-selected.
+    // note: The selected row carries aria-selected.
     expect(full).toContain('aria-selected="true"');
-    // The unavailable catalog row stays listed and marked, with the suffix —
+    // invariant: The unavailable catalog row stays listed and marked, with the suffix —
     // and stays selectable — an unavailable row is dimmed, not disabled.
     expect(full).not.toContain('aria-disabled="true"');
     expect(full).not.toContain("pointer-events-none");
     expect(full).toContain("opacity-50");
     expect(full).toContain("unavailable under omp");
     const narrowed = panel("gem", "gemini");
-    // Narrowed to matching entries only — the common group keeps just Gemini
+    // invariant: Narrowed to matching entries only — the common group keeps just Gemini
     // (one of the frozen 5), the catalog group only the unavailable marked
     // row; every other entry is gone.
     expect(narrowed).toContain("Google Gemini");
@@ -577,7 +574,7 @@ describe("provider combobox", () => {
     expect(narrowed).not.toContain("Copilot");
     expect(narrowed).not.toContain("Mistral");
     expect(narrowed).not.toContain("Workers AI");
-    // An empty match renders the honest empty state, never a bare box.
+    // invariant: An empty match renders the honest empty state, never a bare box.
     expect(panel("zzz")).toContain("No providers match");
   });
 
@@ -619,21 +616,21 @@ describe("provider combobox", () => {
     expect(out).toContain('aria-autocomplete="list"');
     expect(out).toContain('aria-labelledby="settings-catalog-provider-label"');
     expect(out).toContain("Search model providers…");
-    // Closed → no listbox anywhere in the markup.
+    // note: Closed → no listbox anywhere in the markup.
     expect(out).not.toContain('role="listbox"');
   });
 
   test("Esc and outside-click dismiss; focus/typing opens (source pins at the QA minimum bar)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
-    // Esc closes.
+    // note: Esc closes.
     expect(source).toContain('if (event.key === "Escape") setOpen(false);');
-    // An outside pointerdown closes (contains check on the root ref).
+    // note: An outside pointerdown closes (contains check on the root ref).
     expect(source).toContain('document.addEventListener("pointerdown", onPointerDown);');
     expect(source).toContain("!rootRef.current.contains(event.target as Node)");
-    // Focus/typing opens, and every keystroke re-narrows the panel.
+    // note: Focus/typing opens, and every keystroke re-narrows the panel.
     expect(source).toContain("onFocus={() => setOpen(true)}");
     expect(source).toContain("setQuery(event.target.value);");
-    // An unavailable row SELECTS like any other: the
+    // note: An unavailable row SELECTS like any other: the
     // discovery entry must be reachable, and the add-provider dialog's
     // configuration step is where the reason and the absent submit path live.
     // The server-side eligibility pre-check stays the last line of defence.
@@ -642,43 +639,43 @@ describe("provider combobox", () => {
 
   test("keyboard selection: arrows walk the filtered list, Enter selects, highlight follows the filter, click re-opens after Esc (source pins, task-3 review fix)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
-    // The highlight walks the SAME order the panel renders: the shell derives
+    // note: The highlight walks the SAME order the panel renders: the shell derives
     // it from the same pure filter/group helpers (common block, then catalog).
     expect(source).toContain("groupCatalogProviders(filterCatalogProviders(providers, query))");
     expect(source).toContain("const visible = [...groups.common, ...groups.catalog];");
-    // ArrowDown/ArrowUp move the active-descendant highlight; arrows also
+    // note: ArrowDown/ArrowUp move the active-descendant highlight; arrows also
     // open the list standalone (the replaced Radix Select was keyboard-
     // operable — the plan's 可选 minimum bar).
     expect(source).toContain('if (event.key === "ArrowDown" || event.key === "ArrowUp")');
     expect(source).toContain("Math.min(index + 1, visible.length - 1)");
     expect(source).toContain("Math.max(index - 1, 0)");
-    // Enter selects the highlighted row, unavailable included — the keyboard
+    // note: Enter selects the highlighted row, unavailable included — the keyboard
     // path carries no extra red line the pointer path does not.
     expect(source).toContain('event.key === "Enter" && open');
     expect(source).toContain("if (active) select(active.id);");
-    // The input advertises the highlighted option while the list is open.
+    // note: The input advertises the highlighted option while the list is open.
     expect(source).toContain("aria-activedescendant={open && active ? optionId(listboxId, active.id) : undefined}");
-    // The highlight follows filter changes: every keystroke (and a selection)
+    // note: The highlight follows filter changes: every keystroke (and a selection)
     // resets it to the first match.
     expect(source).toContain("setActiveIndex(0);");
-    // Pointer/keyboard stay in sync: hovering a row moves the highlight.
+    // note: Pointer/keyboard stay in sync: hovering a row moves the highlight.
     expect(source).toContain("onMouseMove={() => onHoverOption?.(provider.id)}");
-    // After an Esc the input keeps focus, so focus alone never re-fires —
+    // invariant: After an Esc the input keeps focus, so focus alone never re-fires —
     // click re-opens the (filtered) list.
     expect(source).toContain("onClick={() => setOpen(true)}");
   });
 
   test("QC fix round: the keyboard highlight scrolls into view and Tab closes the list (source pins)", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
-    // F1: while open, a highlight change scrolls the active row into view
+    // note: F1: while open, a highlight change scrolls the active row into view
     // inside the max-h-72 scroll container — arrowing past the fold must not
     // let Enter commit an unseen row (the replaced Radix Select auto-scrolled
     // its active item).
     expect(source).toContain('scrollIntoView({ block: "nearest" })');
-    // The effect is gated: it runs only for the open list with a highlighted
+    // invariant: The effect is gated: it runs only for the open list with a highlighted
     // row (no scroll work while closed or in the zero-match state).
     expect(source).toContain("if (!open || !active) return;");
-    // …and it lives in the stateful SHELL, never in the SSR-pure panel (the
+    // invariant: …and it lives in the stateful SHELL, never in the SSR-pure panel (the
     // panel's static-markup testability depends on being effect-free).
     const panelBody = source.slice(
       source.indexOf("export function ProviderComboboxPanel"),
@@ -688,10 +685,10 @@ describe("provider combobox", () => {
     expect(panelBody).not.toContain("scrollIntoView");
     expect(panelBody).not.toContain("useEffect");
     expect(shellBody).toContain("scrollIntoView");
-    // F2: Tab closes the open list in the keydown handler — no stale overlay
+    // note: F2: Tab closes the open list in the keydown handler — no stale overlay
     // floating over the page with aria-expanded="true" after focus moves on.
     expect(source).toContain('if (event.key === "Tab") setOpen(false);');
-    // Deliberately keydown, not onBlur: a blur-close would fire before a
+    // why: Deliberately keydown, not onBlur: a blur-close would fire before a
     // row's click lands (the qc3 F-002 disposition).
     expect(source).not.toContain("onBlur");
   });
@@ -711,24 +708,24 @@ describe("provider combobox", () => {
         }),
       );
     const full = panel();
-    // Every option row carries its deterministic bridge id — the shape the
+    // note: Every option row carries its deterministic bridge id — the shape the
     // input's aria-activedescendant points at.
     expect(full).toContain('id="lb-option-anthropic"');
     expect(full).toContain('id="lb-option-gemini"');
     expect(full).toContain('id="lb-option-gemini-image"');
-    // Every visible provider is one listbox option with its deterministic id;
+    // note: Every visible provider is one listbox option with its deterministic id;
     // none is keyboard-active until the panel is told which row it is.
     expect(full.match(/role="option"/g)).toHaveLength(8);
     expect(full).not.toContain('data-active="true"');
     const openaiAt = panel({ activeId: "lb-option-openai" });
     expect(openaiAt.match(/data-active="true"/g)).toHaveLength(1);
-    // …and the active state sits on the ACTIVE row, not its neighbours.
+    // note: …and the active state sits on the ACTIVE row, not its neighbours.
     const openaiRow = openaiAt.slice(
       openaiAt.indexOf('id="lb-option-openai"'),
       openaiAt.indexOf("</div>", openaiAt.indexOf('id="lb-option-openai"')),
     );
     expect(openaiRow).toContain('data-active="true"');
-    // Zero-match state: the honest empty <p> carries the listbox id, so the
+    // note: Zero-match state: the honest empty <p> carries the listbox id, so the
     // open input's aria-controls never dangles.
     const empty = panel({ query: "zzz-no-match" });
     expect(empty).toContain('id="lb"');
@@ -738,13 +735,13 @@ describe("provider combobox", () => {
   test("picker copy is dictionary-backed; zh picker copy carries no bare Provider (AC1 sweep)", () => {
     expect(t("en", "settings.provider")).toBe("Model provider");
     expect(t("zh_CN", "settings.provider")).toBe("模型提供方");
-    expect(t("en", "settings.providers.title")).toBe("Providers"); // en keeps the section title
+    expect(t("en", "settings.providers.title")).toBe("Providers"); // note: en keeps the section title
     expect(t("zh_CN", "settings.providers.title")).toBe("模型提供方");
     expect(t("en", "settings.selectProvider")).toBe("Search model providers…");
     expect(t("zh_CN", "settings.selectProvider")).toBe("搜索模型提供方…");
     expect(t("en", "settings.noProviderMatch", { query: "zzz" })).toContain("zzz");
     expect(t("zh_CN", "settings.noProviderMatch", { query: "zzz" })).toContain("模型提供方");
-    // Picker-adjacent zh strings stay 模型提供方-consistent: zero bare
+    // invariant: Picker-adjacent zh strings stay 模型提供方-consistent: zero bare
     // "Provider" (the grep-verifiable AC1 closure, pinned per key;
     // en "Providers"/"Add provider" section/button titles are intentionally
     // unchanged).
@@ -778,7 +775,7 @@ describe("provider combobox", () => {
 describe("add-entry visibility + picker usability at breadth", () => {
   test("the Add Provider entry is a labeled, bordered control heading the providers section", () => {
     const source = readSettingsSource();
-    // The entry heads the section body — visible without scrolling; icon-only
+    // invariant: The entry heads the section body — visible without scrolling; icon-only
     // is not acceptable, the localized label rides the button beside a plus
     // glyph. A flow section owns no action slot, so the trigger precedes the
     // group list rather than sitting in a card header.
@@ -789,58 +786,58 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(body).toContain('{t(locale, "settings.addProvider")}');
     expect(body).toContain("<Plus");
     expect(body).toContain("onClick={() => setAddOpen(true)}");
-    // AC-4: the flow is an overlay, not an expanded row — the section body
+    // note: AC-4: the flow is an overlay, not an expanded row — the section body
     // holds the group list, and the dialog is mounted beside it.
     const triggerPos = body.indexOf("onClick={() => setAddOpen(true)}");
     const rowsPos = body.indexOf("groups.length === 0");
     expect(rowsPos).toBeGreaterThan(triggerPos);
     expect(body).not.toContain("<AddKeySection");
-    // The dialog is driven by that trigger; a completed flow reports through
+    // note: The dialog is driven by that trigger; a completed flow reports through
     // the shared outcome channel and closes through onOpenChange.
     expect(body).toContain("open={addOpen}");
     expect(body).toContain("onOpenChange={setAddOpen}");
   });
 
   test("the catalog picker is the provider combobox: common group first, then catalog, height-capped to an internal scroll", () => {
-    // Supersedes the "builtin SelectGroup precedes template
+    // note: Supersedes the "builtin SelectGroup precedes template
     // SelectGroup + <SelectContent className=\"max-h-72\">" pin — the Radix
     // Select left the add panel (AD-542); the chain/seat editors keep theirs.
     const source = readSettingsSource();
     expect(source).toContain("<ProviderCombobox");
     expect(source).not.toContain('<SelectContent className="max-h-72">');
-    // AD-547 separation: grouping reads display_group inside the combobox
+    // note: AD-547 separation: grouping reads display_group inside the combobox
     // only — the page (forms/config branching) never mentions it.
     expect(source).not.toContain("display_group");
     const combobox = readFileSync(join(import.meta.dir, "../../src/spa/components/provider-combobox.tsx"), "utf8");
-    // 常用提供方 (catalogBuiltin) heads the panel before 目录模板.
+    // invariant: 常用提供方 (catalogBuiltin) heads the panel before 目录模板.
     const commonPos = combobox.indexOf("settings.catalogBuiltin");
     const templatePos = combobox.indexOf("settings.catalogTemplate");
     expect(commonPos).toBeGreaterThan(-1);
     expect(templatePos).toBeGreaterThan(commonPos);
-    // Breadth usability: the panel is height-capped (internal scroll).
+    // note: Breadth usability: the panel is height-capped (internal scroll).
     expect(combobox).toContain("max-h-72");
   });
 
   test("the template form carries an editable prefilled base URL and a {account_id}-conditional account-id field", () => {
     const source = readSettingsSource();
-    // The override field is prefilled from the STORED declaration when the
+    // note: The override field is prefilled from the STORED declaration when the
     // provider already has one (else the catalog entry) and posts the optional
     // base_url override (empty string = use the catalog prefill).
     expect(source).toContain('useState(custom?.base_url ?? provider.base_url ?? "")');
     expect(source).toContain("base_url: baseUrl");
-    // Required only when the entry's catalog base URL is null — a prefilled
+    // invariant: Required only when the entry's catalog base URL is null — a prefilled
     // entry may be saved as-is or overridden.
     expect(source).toContain("required={provider.base_url === null}");
-    // The account-id demand tracks the EFFECTIVE base URL's {account_id}
+    // note: The account-id demand tracks the EFFECTIVE base URL's {account_id}
     // placeholder (typed override ?? catalog prefill), mirroring the save flow.
     expect(source).toContain('effectiveBaseUrl.includes("{account_id}")');
     expect(source).toContain("needsAccountId ? (");
-    // Success resets the typed base URL along with key/account id.
+    // note: Success resets the typed base URL along with key/account id.
     expect(source).toContain('setBaseUrl("")');
   });
 
   test("the template form initialises from a stored declaration, never the catalog default", () => {
-    // A stored declaration means the pool is already bound to that endpoint;
+    // note: A stored declaration means the pool is already bound to that endpoint;
     // re-submitting the catalog default would trip the store's endpoint lock
     // with no visible cause. Seeding the field from the declaration makes an
     // "add another key" submit a no-op on the endpoint.
@@ -910,7 +907,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
         onCustomEndpoint: () => {},
       }),
     );
-    // The stored endpoint substitutes the placeholder already: no
+    // note: The stored endpoint substitutes the placeholder already: no
     // {account_id} demand, and the catalog placeholder never reaches submit.
     expect(html).toContain('value="https://api.example.com/accounts/acct-1/v1"');
     expect(html).not.toContain('value="https://api.example.com/accounts/{account_id}/v1"');
@@ -922,7 +919,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
     expect(t("zh_CN", "settings.accountId")).toBe("账户 id");
     expect(t("en", "settings.accountId")).not.toContain("Cloudflare");
     expect(t("zh_CN", "settings.accountId")).not.toContain("Cloudflare");
-    // The provenance/count line interpolates the payload catalog length.
+    // note: The provenance/count line interpolates the payload catalog length.
     const count = Object.keys(PROVIDER_CATALOG).length;
     expect(t("en", "settings.catalogProvenance", { count })).toContain(`${count} providers`);
     expect(t("zh_CN", "settings.catalogProvenance", { count })).toContain(`${count} 个提供方`);
@@ -932,27 +929,27 @@ describe("add-entry visibility + picker usability at breadth", () => {
 describe("model chain tabs", () => {
   test("Default and named chains are peer shadcn tabs with a coherent selected state", () => {
     const source = readSettingsSource();
-    // The chain card is an accessible Radix tablist (roles + arrow-key nav via
+    // note: The chain card is an accessible Radix tablist (roles + arrow-key nav via
     // the existing shadcn Tabs primitives), not a stacked list.
     expect(source).toContain("TabsList");
     expect(source).toContain("TabsTrigger");
     expect(source).toContain("TabsContent");
-    // Tab ids come from the pure tab model; the selection coerces to a
+    // note: Tab ids come from the pure tab model; the selection coerces to a
     // tab that exists so deletes/reloads land on Default.
     expect(source).toContain("modelChainTabs(payload.model_chains)");
     expect(source).toContain("activeChainTabId(tabs, selectedTab)");
-    // The Default tab saves through op=save-chain; named tabs update in place
+    // note: The Default tab saves through op=save-chain; named tabs update in place
     // through op=add-chain — no rename op anywhere.
     expect(source).toContain('op: "save-chain"');
     expect(source).toContain('op: "add-chain", name: tab.id, chain: value');
-    // Only the named tabs' content offers remove, via the existing
+    // invariant: Only the named tabs' content offers remove, via the existing
     // confirm-dialog flow (pendingConfirmCopy → op=remove-chain).
     expect(source).toContain("onRemoveChain(tab.id)");
-    // after a successful create, the draft closes and the real
+    // invariant: after a successful create, the draft closes and the real
     // (stored-name) tab after the reload lands — the draft flow's success
     // branch lives in the ChainsSection onCreated callback.
     expect(source).toContain("setSelectedTab(created);");
-    // Chain mutation ops stay as-is.
+    // note: Chain mutation ops stay as-is.
     expect(source).toContain('op: "remove-chain"');
     expect(source).toContain("settings.confirmRemoveChainTitle");
   });
@@ -976,18 +973,18 @@ describe("model chain tabs", () => {
   });
 
   test("forceMount panels stay mounted but inactive ones are visually hidden (keepMounted mechanism)", () => {
-    // With forceMount, Radix pins every panel to present and never applies
+    // invariant: With forceMount, Radix pins every panel to present and never applies
     // its own hidden attribute — the local TabsContent wrapper's
     // data-[state=inactive]:hidden class is what hides inactive editors
     // while keeping them mounted for edit-state preservation.
     const tabsSource = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/tabs.tsx"), "utf8");
     const contentWrapper = tabsSource.slice(tabsSource.indexOf("function TabsContent"));
     expect(contentWrapper).toContain("data-[state=inactive]:hidden");
-    // The ChainsSection panels mount through that exact wrapper (forceMount on
+    // note: The ChainsSection panels mount through that exact wrapper (forceMount on
     // every TabsContent), so exactly one editor is visible per selected
     // trigger.
     const source = readSettingsSource();
-    // The four tab faces come from the design system's one door; the wrapper
+    // note: The four tab faces come from the design system's one door; the wrapper
     // they mount through is the one asserted above.
     const imported = /import \{([\s\S]*?)\} from "@design-system";/.exec(source)?.[1] ?? "";
     for (const name of ["Tabs", "TabsContent", "TabsList", "TabsTrigger"]) {
@@ -1003,25 +1000,25 @@ describe("chain draft peer tab", () => {
   test("+ 新建链 opens a draft peer tab: after the named tabs, auto-selected, never two drafts", () => {
     const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
-    // The entry mirrors the strip placement: outline button, plus
+    // note: The entry mirrors the strip placement: outline button, plus
     // glyph, localized label (icon-only is not acceptable) — a TabsList
     // SIBLING in the strip row, never a trigger inside the role=tablist.
     expect(chainsBody).toContain('variant="outline"');
     expect(chainsBody).toContain("<Plus");
     expect(chainsBody).toContain('{t(locale, "settings.addChain")}');
     expect(chainsBody).toContain("onClick={openDraft}");
-    // Single-draft rule: one boolean of draft state, and the click only ever
+    // invariant: Single-draft rule: one boolean of draft state, and the click only ever
     // OPENS it (a second draft can never exist — clicking again re-selects
     // the existing draft tab).
     expect(chainsBody).toContain("const [draftOpen, setDraftOpen] = useState(false);");
     const openDraftBody = chainsBody.slice(chainsBody.indexOf("function openDraft"), chainsBody.indexOf("return ("));
     expect(openDraftBody).toContain("setDraftOpen(true);");
     expect(openDraftBody).toContain("setSelectedTab(DRAFT_CHAIN_TAB_ID);");
-    // Non-reset equivalence (qc F2): open/re-focus never touches the lifted
+    // invariant: Non-reset equivalence (qc F2): open/re-focus never touches the lifted
     // draft name — the only resets are the explicit close-time ones (discard
     // + created), so re-clicking + 新建链 keeps whatever the user typed.
     expect(openDraftBody).not.toContain("setDraftName");
-    // Appended AFTER the last named tab (never before Default): the draft
+    // invariant: Appended AFTER the last named tab (never before Default): the draft
     // joins the coercion list by spreading after the stored tabs, and its
     // trigger renders after the stored-tabs map inside the TabsList. The
     // trigger's label is the live AD-551 mirror, not the static
@@ -1031,7 +1028,7 @@ describe("chain draft peer tab", () => {
     const draftTriggerPos = chainsBody.indexOf("{draftChainTabLabel(draftName, locale)}");
     expect(storedMapPos).toBeGreaterThan(-1);
     expect(draftTriggerPos).toBeGreaterThan(storedMapPos);
-    // The old disclosure between strip and Default panel is gone —
+    // note: The old disclosure between strip and Default panel is gone —
     // Default's area never shows creation UI.
     expect(chainsBody).not.toContain("createOpen");
     expect(chainsBody).not.toContain("NamedChainCreate");
@@ -1042,7 +1039,7 @@ describe("chain draft peer tab", () => {
   test("the add-chain control is a TabsList sibling: its source sits after the tablist close", () => {
     const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
-    // strip-level contract, structurally pinned (audit
+    // note: strip-level contract, structurally pinned (audit
     // F-10): the labels/props pins above cannot see WHERE the control sits —
     // a regression nesting the add-chain button inside the role=tablist would
     // still carry its outline variant, plus glyph, label and click handler
@@ -1059,22 +1056,22 @@ describe("chain draft peer tab", () => {
   test("the draft panel is the editor: name field first, model builder, save/discard, inline failure", () => {
     const source = readSettingsSource();
     const panelBody = source.slice(source.indexOf("function DraftChainPanel"), source.indexOf("function ChainEditor"));
-    // The name field lives INSIDE the draft panel (first), reusing the
+    // note: The name field lives INSIDE the draft panel (first), reusing the
     // chainName keys — Default's panel never shows creation UI.
     expect(panelBody).toContain('t(locale, "settings.chainName")');
     expect(panelBody).toContain('t(locale, "settings.chainNamePlaceholder")');
-    // The name input is capped at 64 (qc F4): the server's
+    // note: The name input is capped at 64 (qc F4): the server's
     // MODEL_CHAIN_NAME_PATTERN admits stored ids of at most 64 chars, so the
     // input cannot type past it and the live tab-strip label stays bounded.
     expect(panelBody).toContain("maxLength={64}");
     const namePos = panelBody.indexOf("settings.chainName");
     const editorPos = panelBody.indexOf("<ChainEditor");
     expect(editorPos).toBeGreaterThan(namePos);
-    // Save posts the frozen op=add-chain (entered name + built chain, one
+    // note: Save posts the frozen op=add-chain (entered name + built chain, one
     // call) with the shared 保存模型链 label semantics.
     expect(panelBody).toContain('op: "add-chain", name, chain: value');
     expect(panelBody).toContain('saveLabel={t(locale, "settings.saveChain")}');
-    // row-local unification: a rejected create renders INLINE through
+    // note: row-local unification: a rejected create renders INLINE through
     // ChainEditor's own region (inside this panel) and keeps the draft +
     // typed input; success forwards the saved outcome to the card's region
     // (the panel unmounts) and hands the trimmed stored name back so the
@@ -1082,7 +1079,7 @@ describe("chain draft peer tab", () => {
     expect(panelBody).toContain('outcome.kind === "success"');
     expect(panelBody).toContain("onOutcome(outcome)");
     expect(panelBody).toContain("onCreated(name.trim())");
-    // 放弃 discards without confirmation — the AD-552 discard rework supersedes the
+    // note: 放弃 discards without confirmation — the AD-552 discard rework supersedes the
     // old hover-only ghost row: the button is injected through ChainEditor's
     // actions prop into the save row, styled to be visible without hover
     // (outline + sm + fixed small width). It stays bound to this panel's
@@ -1096,7 +1093,7 @@ describe("chain draft peer tab", () => {
     expect(actionsNode).toContain('className="w-20"');
     expect(actionsNode).toContain("disabled={busy}");
     expect(actionsNode).toContain('t(locale, "settings.discardChain")}');
-    // The draft panel mounts inside its own forceMount TabsContent; the
+    // note: The draft panel mounts inside its own forceMount TabsContent; the
     // discard closes the draft — the selection then coerces through
     // activeChainTabId (the tab-model pin) back to Default — and,
     // per AD-551, resets the lifted draft name so a reopened draft starts
@@ -1113,7 +1110,7 @@ describe("chain draft peer tab", () => {
 
   test("a failed post-create reload keeps the draft open: the create resolves the load-failed error, not success", () => {
     const source = readSettingsSource();
-    // Bugbot fix: POST success alone is not completion — the chain
+    // note: Bugbot fix: POST success alone is not completion — the chain
     // is only usable once the awaited background reload lands it in the
     // payload. createDraftChain demotes a POST success whose reload failed to
     // the load-failed copy, so the panel's success branch (onOutcome +
@@ -1126,7 +1123,7 @@ describe("chain draft peer tab", () => {
     );
     expect(wrapper).toContain('outcome.kind === "success" && !outcome.reloaded');
     expect(wrapper).toContain('return { kind: "error", message: t(locale, "common.loadFailed") };');
-    // The panel's onCreate is the reload-checked wrapper, not the raw shared
+    // note: The panel's onCreate is the reload-checked wrapper, not the raw shared
     // POST — and the reload signal itself comes from load()'s resolved flag,
     // carried through submitSettings' awaited background refresh.
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
@@ -1142,15 +1139,14 @@ describe("chain draft peer tab", () => {
     expect(t("zh_CN", "settings.draftChain")).toBe("新链");
     expect(t("en", "settings.discardChain")).toBe("Discard");
     expect(t("zh_CN", "settings.discardChain")).toBe("放弃");
-    // The name-field keys survive the move into the panel.
+    // note: The name-field keys survive the move into the panel.
     expect(t("en", "settings.chainName")).toBe("Chain name");
     expect(t("zh_CN", "settings.chainName")).toBe("链名称");
   });
 });
 
 describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
-  /**
-   * The label faces are pure (the exported draftChainTabLabel mirror), so
+  /** note: The label faces are pure (the exported draftChainTabLabel mirror), so
    * they are pinned directly. The controlled panel is pinned behaviorally
    * through SSR of the exported DraftChainPanel: a typed name must reach the
    * markup — an internal useState("") would ignore the prop and render
@@ -1174,15 +1170,15 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
 
   test("typing mirrors into the tab label live; empty/whitespace falls back to 新链", () => {
     expect(draftChainTabLabel("my-chain", "en")).toBe("my-chain");
-    // The typed value is locale-independent — the fallback copy is what
+    // note: The typed value is locale-independent — the fallback copy is what
     // localizes.
     expect(draftChainTabLabel("my-chain", "zh_CN")).toBe("my-chain");
-    // The raw input is the label (trim only gates the fallback) — no data
+    // invariant: The raw input is the label (trim only gates the fallback) — no data
     // loss while typing.
     expect(draftChainTabLabel(" my-chain ", "en")).toBe(" my-chain ");
     expect(draftChainTabLabel("", "en")).toBe("New chain");
     expect(draftChainTabLabel("", "zh_CN")).toBe("新链");
-    // Whitespace-only counts as empty (the create would trim to "" anyway).
+    // why: Whitespace-only counts as empty (the create would trim to "" anyway).
     expect(draftChainTabLabel("   ", "zh_CN")).toBe("新链");
   });
 
@@ -1194,9 +1190,9 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
   test("the lifted state, wiring and both close-time resets live in ChainsSection (AD-551)", () => {
     const source = readSettingsSource();
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
-    // The name state lives in the card (the panel no longer owns it).
+    // note: The name state lives in the card (the panel no longer owns it).
     expect(chainsBody).toContain('const [draftName, setDraftName] = useState("");');
-    // Controlled wiring: the panel edits the card's state, the trigger
+    // note: Controlled wiring: the panel edits the card's state, the trigger
     // renders the live mirror of the same state.
     expect(chainsBody).toContain("name={draftName}");
     expect(chainsBody).toContain("onNameChange={setDraftName}");
@@ -1205,14 +1201,14 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
     expect(chainsBody.slice(triggerPos, chainsBody.indexOf("</TabsTrigger>", triggerPos))).toContain(
       "{draftChainTabLabel(draftName, locale)}",
     );
-    // Success path: the reset accompanies the close + the real (stored-name)
+    // note: Success path: the reset accompanies the close + the real (stored-name)
     // tab selection — the reopened draft starts blank, today's semantics.
     const createdHandler = chainsBody.slice(
       chainsBody.indexOf("onCreated={(created) => {"),
       chainsBody.indexOf("setSelectedTab(created);"),
     );
     expect(createdHandler).toContain('setDraftName("");');
-    // The panel body itself keeps no name state (controlled, not lifted back).
+    // note: The panel body itself keeps no name state (controlled, not lifted back).
     // Exact useState inventory (qc F3, closes ledger T2-S1): the busy gate is
     // the panel's ONLY state — an internal useState(name) shadow-init would
     // ignore the controlled prop and slip past a bare negative `useState("")`
@@ -1225,8 +1221,7 @@ describe("draft tab label live-sync (A2/A3 / AD-551)", () => {
 });
 
 describe("discard inline with the save row (A4/A5 / AD-552)", () => {
-  /**
-   * The discard is a pure render insertion through ChainEditor's optional
+  /** note: The discard is a pure render insertion through ChainEditor's optional
    * actions prop: every panel renders ONE control row (picker, add, save,
    * then the caller's actions), so the save keeps its intrinsic width instead
    * of stretching to the stack's full width, and the draft panel stops being
@@ -1250,7 +1245,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
     );
 
   test("one control row carries the picker, add, save and the caller's actions", () => {
-    // Before this, the save button was a bare child of the editor's stack
+    // invariant: Before this, the save button was a bare child of the editor's stack
     // (align-items: stretch made it full-bleed) while the draft panel's
     // discard opened a second row — the same primitive giving two answers.
     // "One row" is read off the rendered DOM the browser gets: the four
@@ -1266,7 +1261,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       const add = button("settings.addToChain");
       const save = button("settings.saveChain");
       const discard = button("settings.discardChain");
-      // The picker's accessible name is the field label a reader is told to use.
+      // note: The picker's accessible name is the field label a reader is told to use.
       expect(picker?.getAttribute("aria-label")).toBe(t("en", "settings.modelChainField"));
       expect(add).not.toBeNull();
       expect(save).not.toBeNull();
@@ -1276,7 +1271,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
       const pickerSlot = picker!.parentElement!;
       const row = add!.parentElement!;
       const controls: DomElement[] = [pickerSlot, add!, save!, discard!];
-      // The row is the container that holds the four controls DIRECTLY and
+      // note: The row is the container that holds the four controls DIRECTLY and
       // nothing else but their field label — the button primitive renders the
       // native button, so a control's parentElement is the flex row itself.
       // The editor's stack holds the model list, the empty-chain text and the
@@ -1291,7 +1286,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
           .map((child) => child.textContent),
       ).toEqual([t("en", "settings.modelChainField")]);
 
-      // Reading order inside that row: picker, add, save, caller's actions.
+      // note: Reading order inside that row: picker, add, save, caller's actions.
       const inOrder = [...row.querySelectorAll("*")];
       const positions = [picker!, add!, save!, discard!].map((control) => inOrder.indexOf(control));
       expect(positions).toEqual([...positions].sort((a, b) => a - b));
@@ -1303,7 +1298,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
 
   test("the discard is visibly styled without hover and carries no confirmation", () => {
     const html = panelHtml();
-    // Outline + sm + the fixed width land on the real button; the label is
+    // note: Outline + sm + the fixed width land on the real button; the label is
     // the untouched discardChain key. No confirmation dialog anywhere.
     expect(html).toContain('data-variant="outline"');
     expect(html).toContain('data-size="sm"');
@@ -1312,7 +1307,7 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
   });
 
   test("only the draft panel injects a discard; the stored-chain editors carry none", () => {
-    // The Default tab's editor renders on the manage face; the draft panel
+    // note: The Default tab's editor renders on the manage face; the draft panel
     // renders only after 新建链 opens it, so its discard is absent until then.
     const manage = withLocation("/dashboard/apps/1/bot", () =>
       renderToStaticMarkup(
@@ -1333,16 +1328,16 @@ describe("discard inline with the save row (A4/A5 / AD-552)", () => {
 describe("seat assignment section", () => {
   test("seats are an independent titled card below chain management, not a section of the chains card", () => {
     const source = readSettingsSource();
-    // SeatsSection is its own card component, rendered after ChainsSection for
+    // invariant: SeatsSection is its own card component, rendered after ChainsSection for
     // managers only (same authorization surface as chain editing).
     expect(source).toContain("function SeatsSection");
     expect(source.indexOf("function ChainsSection")).toBeLessThan(source.indexOf("function SeatsSection"));
     expect(source.indexOf("<ChainsSection")).toBeLessThan(source.indexOf("<SeatsSection"));
-    // The chains card no longer carries any seat control or seat save.
+    // note: The chains card no longer carries any seat control or seat save.
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).not.toContain("settings.seats");
     expect(chainsBody).not.toContain('op: "save-roles"');
-    // The seats card is titled and described through the dictionary.
+    // note: The seats card is titled and described through the dictionary.
     const seatsBody = source.slice(source.indexOf("function SeatsSection"));
     expect(seatsBody).toContain('t(locale, "settings.seats")');
     expect(seatsBody).toContain('t(locale, "settings.seatsCopy")');
@@ -1350,19 +1345,19 @@ describe("seat assignment section", () => {
 
   test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
     const source = readSettingsSource();
-    // Options derive from the same tab model as the chain tabs.
+    // note: Options derive from the same tab model as the chain tabs.
     expect(source).toContain("modelChainTabs(payload.model_chains)");
-    // Default is an explicit option (the reserved name, never a free-text
+    // invariant: Default is an explicit option (the reserved name, never a free-text
     // value), and every rendered value passes seatSelectValue so a stale or
     // deleted name renders as safe Default pending refresh.
     expect(source).toContain("<SelectItem value={DEFAULT_CHAIN_NAME}>");
     expect(source).toContain("value={seatSelectValue(tabs, seats[role])}");
-    // Full-map save semantics unchanged: op=save-roles with one role_<role>
+    // invariant: Full-map save semantics unchanged: op=save-roles with one role_<role>
     // field per audit seat, each coerced so an invalid reference can never
     // be submitted (the route 400s on unknown chain names).
     expect(source).toContain('op: "save-roles"');
     expect(source).toContain("fields[`role_${role}`] = seatSelectValue(tabs, seats[role])");
-    // The seat state re-derives from the payload ONLY when the offered
+    // invariant: The seat state re-derives from the payload ONLY when the offered
     // chain-tab set changes (review fix): the SeatsSection effect dep is the
     // tab-id-set key, not the raw payload identities — unrelated-op
     // background reloads keep unsaved seat picks.
@@ -1377,18 +1372,18 @@ describe("seat assignment section", () => {
     const tabs = modelChainTabs([
       { name: "deep", chain: "ark/deep", is_default: false, created_at: "t", updated_at: "t" },
     ]);
-    // Absent mapping, empty, and the reserved name all resolve to Default.
+    // note: Absent mapping, empty, and the reserved name all resolve to Default.
     expect(seatSelectValue(tabs, null)).toBe("default");
     expect(seatSelectValue(tabs, undefined)).toBe("default");
     expect(seatSelectValue(tabs, "")).toBe("default");
     expect(seatSelectValue(tabs, "default")).toBe("default");
-    // A current named chain keeps its stored name.
+    // note: A current named chain keeps its stored name.
     expect(seatSelectValue(tabs, "deep")).toBe("deep");
-    // Deletion cascade: a stored name no tab offers falls back to Default —
+    // note: Deletion cascade: a stored name no tab offers falls back to Default —
     // after the delete the refreshed tab model no longer lists it, so the
     // form submits "default", never the invalid reference.
     expect(seatSelectValue(modelChainTabs([]), "deep")).toBe("default");
-    // The role map derivation shared by the state seed and post-reload
+    // note: The role map derivation shared by the state seed and post-reload
     // re-derivation coerces every seat through the same rule.
     expect(
       seatRoleValues(["mstar-review-seat", "deep-seat"], { "mstar-review-seat": "deep", "deep-seat": "" }, tabs),
@@ -1413,31 +1408,31 @@ describe("seat assignment section", () => {
 describe("operational action hierarchy", () => {
   test("Disable is destructive-outline with reversible wording; Delete stays filled destructive behind its confirmation", () => {
     const source = readSettingsSource();
-    // The ops zone renders Disable through the destructive-outline family —
+    // note: The ops zone renders Disable through the destructive-outline family —
     // the red-outline variant is pinned to the disable action itself.
     expect(source).toContain(
       '<Button type="button" variant="destructive-outline" onClick={() => onPending({ kind: "disable" })}>',
     );
-    // Delete remains the stronger filled destructive action, still routed
+    // invariant: Delete remains the stronger filled destructive action, still routed
     // through the pendingConfirmCopy dialog with its destructive confirm
     // button.
     expect(source).toContain(
       '<Button type="button" variant="destructive" onClick={() => onPending({ kind: "delete" })}>',
     );
     expect(source).toContain('confirmCopy.destructive ? "destructive" : "default"');
-    // Pause and Enable keep the non-destructive secondary family (resume keeps
+    // note: Pause and Enable keep the non-destructive secondary family (resume keeps
     // the primary default) — nothing else in the ops zone went red.
     expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "pause" })}>');
     expect(source).toContain('<Button type="button" variant="secondary" onClick={() => onPending({ kind: "enable" })}>');
-    // Resume stays on the cva default variant — exact-pinned as a Button with
+    // invariant: Resume stays on the cva default variant — exact-pinned as a Button with
     // no variant attribute, so a regression to a destructive resume fails here.
     expect(source).toContain('<Button type="button" onClick={() => onPending({ kind: "resume" })}>');
     const opsBody = source.slice(source.indexOf("function OpsSection"), source.indexOf("function ChainsSection"));
     expect(opsBody).toContain('variant="destructive-outline"');
-    // The Disable confirm dialog's action button carries the plain verb; the
+    // note: The Disable confirm dialog's action button carries the plain verb; the
     // "(reversible)" parenthetical stays on the ops trigger copy only.
     expect(source).toContain('action: t(locale, "settings.confirmDisableAction")');
-    // Busy/disabled guards and the post-op background state refresh are
+    // note: Busy/disabled guards and the post-op background state refresh are
     // unchanged on the dialog and op paths.
     expect(source).toContain("if (!pending || busy) return;");
     expect(source).toContain("disabled={busy}");
@@ -1447,7 +1442,7 @@ describe("operational action hierarchy", () => {
   test("the destructive-outline variant is tokenized on the shadcn Button: no raw hex fork", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/design-system/primitives/button.tsx"), "utf8");
     expect(source).toContain('"destructive-outline":');
-    // The variant's border, label and hover tint resolve through the
+    // note: The variant's border, label and hover tint resolve through the
     // destructive token family; `tests/design-system/tokens.test.ts` owns that
     // bridge contract and fails a raw colour that has no bridge key. Here the
     // branch rules are pinned: no authored `dark:` split (the cascade is the
@@ -1461,7 +1456,7 @@ describe("operational action hierarchy", () => {
   test("disable copy identifies reversibility in both locales; delete copy stays irreversible", () => {
     expect(t("en", "apps.actions.disable")).toContain("reversible");
     expect(t("zh_CN", "apps.actions.disable")).toContain("可恢复");
-    // The reversibility wording belongs to the ops trigger only — the confirm
+    // invariant: The reversibility wording belongs to the ops trigger only — the confirm
     // dialog's action button carries the plain verb in both locales.
     expect(t("en", "settings.confirmDisableAction")).toBe("Disable");
     expect(t("zh_CN", "settings.confirmDisableAction")).toBe("停用");
@@ -1469,7 +1464,7 @@ describe("operational action hierarchy", () => {
     expect(t("zh_CN", "settings.confirmDisableAction")).not.toContain("可恢复");
     expect(t("en", "settings.confirmDisableBody")).toContain("until you enable it again");
     expect(t("zh_CN", "settings.confirmDisableBody")).toContain("再次启用");
-    // Delete keeps the explicit irreversible confirmation copy.
+    // note: Delete keeps the explicit irreversible confirmation copy.
     expect(t("en", "settings.confirmDeleteBody")).toContain("soft-delete");
     expect(t("zh_CN", "settings.confirmDeleteBody")).toContain("软删除");
     expect(t("en", "settings.confirmDeleteButton")).toBe("Delete App");
@@ -1478,14 +1473,13 @@ describe("operational action hierarchy", () => {
 });
 
 describe("ops danger zone: one row per action", () => {
-  /**
-   * The operations section is a danger zone: each row states what its control
+  /** note: The operations section is a danger zone: each row states what its control
    * does to deliveries and carries that one control. The confirm dialog keeps
    * the proceed-or-not body; the row owns the effect.
    */
   const opsSectionHtml = (locale: SpaBoot["locale"], app: Partial<SettingsAppMeta> = {}): string => {
     const payload = detailPayload();
-    // The App page's own ops zone (disable / enable / delete) and the repository
+    // note: The App page's own ops zone (disable / enable / delete) and the repository
     // surface's target ops (pause / resume) are the same section; this
     // suite reads the target-owned face, which renders the review row too.
     const html = withLocation("/dashboard/acme/repos/1", () =>
@@ -1517,14 +1511,14 @@ describe("ops danger zone: one row per action", () => {
         const doc = win.document;
         const button = (key: DictionaryKey): DomElement | null =>
           [...doc.querySelectorAll("button")].find((node) => node.textContent === t(locale, key)) ?? null;
-        // Row association, not global text order: a two-column danger zone
+        // note: Row association, not global text order: a two-column danger zone
         // (titles in one column, controls in another) keeps every string in
         // the same reading order and still breaks the layout. It fails here,
         // because the control's parent must be the element that states this
         // row's own effect — the same shape the chain row above is read with.
         for (const row of rows) {
           const label = t(locale, row.control);
-          // Every action label appears exactly once: a duplicated control —
+          // invariant: Every action label appears exactly once: a duplicated control —
           // even one rendered after its row, or inside it — fails the contract
           // "each row carries its own control".
           expect(
@@ -1546,7 +1540,7 @@ describe("ops danger zone: one row per action", () => {
         cleanup();
       }
     }
-    // The section summary stopped restating one behaviour per action.
+    // note: The section summary stopped restating one behaviour per action.
     expect(t("en", "settings.opsCopy")).not.toContain("404");
     expect(t("zh_CN", "settings.opsCopy")).not.toContain("404");
   });
@@ -1570,7 +1564,7 @@ describe("ops danger zone: one row per action", () => {
 
 describe("App workflow boundaries", () => {
   test("App settings reads as one workflow with the Apps list: a visible path back", () => {
-    // The REAL page is rendered under each pathname; the loader has not
+    // note: The REAL page is rendered under each pathname; the loader has not
     // resolved, so this is the loading face — which must still carry the
     // wayfinding link, derived from the page's own base.
     const render = (pathname: string): string =>
@@ -1581,11 +1575,11 @@ describe("App workflow boundaries", () => {
     const legacy = render("/dashboard/apps/1");
     expect(legacy).toContain('href="/dashboard/apps"');
     expect(legacy).toContain("Back to Apps");
-    // These renders ARE the loading face (the loader never resolved), so the
+    // invariant: These renders ARE the loading face (the loader never resolved), so the
     // link above is proven present before the payload lands.
     expect(legacy).toContain('data-slot="page-skeleton"');
 
-    // A workspace App page keeps the wayfinding inside its workspace: the
+    // note: A workspace App page keeps the wayfinding inside its workspace: the
     // legacy App family answers 404 under strict.
     const scoped = render("/dashboard/acme/apps/1");
     expect(scoped).toContain('href="/dashboard/acme/apps"');
@@ -1593,7 +1587,7 @@ describe("App workflow boundaries", () => {
 
     expect(t("en", "appDetail.backToApps")).toBe("Back to Apps");
     expect(t("zh_CN", "appDetail.backToApps")).toBe("返回应用");
-    // The decorative ArrowLeft rides the link — aria-hidden keeps the
+    // note: The decorative ArrowLeft rides the link — aria-hidden keeps the
     // accessible name at the backToApps text alone; inline-flex aligns
     // icon + label. Scoped to the ANCHOR's own markup: the loading skeleton
     // beside it also emits an aria-hidden <svg>, so a page-wide assertion
@@ -1602,7 +1596,7 @@ describe("App workflow boundaries", () => {
     expect(backLink).not.toBe("");
     expect(backLink).not.toContain("page-skeleton");
     expect(backLink).toContain("inline-flex items-center gap-1.5");
-    // Exactly ONE icon, and it is hidden from assistive tech (lucide supplies
+    // invariant: Exactly ONE icon, and it is hidden from assistive tech (lucide supplies
     // aria-hidden by default; the assertion guards against a decorative icon
     // that announces itself instead).
     expect(backLink.match(/<svg/g)?.length).toBe(1);
@@ -1612,25 +1606,25 @@ describe("App workflow boundaries", () => {
 
   test("successful configuration saves surface success feedback; failures keep the structured error", () => {
     const source = readSettingsSource();
-    // Success is no longer silent — and since the inline-outcome rework it is section-scoped:
+    // note: Success is no longer silent — and since the inline-outcome rework it is section-scoped:
     // handlers resolve the saved outcome to the card that caused it.
     expect(source).toContain('successMessage ?? t(locale, "settings.changesSaved")');
     expect(t("en", "settings.changesSaved")).toBe("Changes saved.");
     expect(t("zh_CN", "settings.changesSaved")).toBe("更改已保存。");
-    // Failure feedback is unchanged: structured API errors resolve in-section.
+    // invariant: Failure feedback is unchanged: structured API errors resolve in-section.
     expect(source).toContain("message: settingsErrorMessage(locale, body)");
   });
 
   test("configuration section headings are described and unlabeled selects are named", () => {
     const source = readSettingsSource();
-    // The delivery panel is the 投递状态 tab now; its labels ride the tab's own
+    // note: The delivery panel is the 投递状态 tab now; its labels ride the tab's own
     // section (AppDeliveryTab), which keeps them beside the controls they name.
     const deliveryTab = readFileSync(
       join(import.meta.dir, "../../src/spa/pages/AppDeliveryTab.tsx"),
       "utf8",
     );
     expect(deliveryTab).toContain('aria-label={t(locale, "appDetail.delivery.filterRepo")}');
-    // Selects without a visible label get an accessible name (DESIGN.md L2
+    // note: Selects without a visible label get an accessible name (DESIGN.md L2
     // label audit) — the runtime-image selector and the chain model picker.
     expect(source).toContain('aria-label={t(locale, "settings.runtimeHarness")}');
     expect(source).toContain('aria-label={t(locale, "settings.modelChainField")}');
@@ -1647,17 +1641,17 @@ describe("App workflow boundaries", () => {
 describe("notice channel (reviewer handoffs)", () => {
   test("success and warn notices are announced via role=status; errors keep role=alert", () => {
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
-    // WCAG 4.1.3: the "Changes saved." success notice must not be silent to
+    // invariant: WCAG 4.1.3: the "Changes saved." success notice must not be silent to
     // assistive tech — non-error notices are polite live-region status, and
     // errors keep the assertive alert.
     expect(source).toContain('role={kind === "error" ? "alert" : "status"}');
   });
 
   test("a deleted App reports its own irreversible outcome, not the generic saved notice", () => {
-    // The App page's ops zone owns the delete dialog now; the App settings
+    // note: The App page's ops zone owns the delete dialog now; the App settings
     // body has no manager branch left to open one.
     const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
-    // The delete branch pins the dedicated copy and skips the background
+    // note: The delete branch pins the dedicated copy and skips the background
     // reload — the soft-deleted App's settings GET is a guaranteed 404, so
     // the generic path would overwrite the outcome with "Load failed."
     const deleteBranch = source.slice(
@@ -1666,31 +1660,31 @@ describe("notice channel (reviewer handoffs)", () => {
     );
     expect(deleteBranch).toContain('t(locale, "settings.deleteSuccess")');
     expect(deleteBranch).toContain("refetch: false");
-    // Source pin (qc2 F-001): the property-form `refetch: false` call site is
+    // note: Source pin (qc2 F-001): the property-form `refetch: false` call site is
     // the delete branch's alone — any other op copied onto it would silently
     // lose its background reload and fail this count.
     expect(source.match(/refetch: false\s*[},]/g)?.length).toBe(1);
     expect(t("en", "settings.deleteSuccess")).toContain("deleted");
     expect(t("zh_CN", "settings.deleteSuccess")).toContain("已删除");
-    // Configuration saves keep the generic saved notice.
+    // note: Configuration saves keep the generic saved notice.
     expect(readSettingsSource()).toContain('successMessage ?? t(locale, "settings.changesSaved")');
   });
 });
 
 describe("section-scoped op feedback", () => {
   test("op outcomes resolve to the originating card; the top notice is page-level reload failure only", () => {
-    // SUPERSEDE (App detail IA): load() — and with it the page-level notice
+    // note: SUPERSEDE (App detail IA): load() — and with it the page-level notice
     // writes — lives on the AppDetailPage shell now.
     const detail = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const source = readSettingsSource();
-    // Handlers RESOLVE the outcome (OpNotice) instead of pushing to the page
+    // note: Handlers RESOLVE the outcome (OpNotice) instead of pushing to the page
     // channel — nothing outside load() writes the top notice anymore.
     expect(source).not.toContain("onNotice");
-    // The outcome type is declared once, beside the notice primitive it feeds.
+    // note: The outcome type is declared once, beside the notice primitive it feeds.
     const pageNoticeSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
     expect(pageNoticeSource).toContain("export type OpNotice =");
     expect(source).toContain("Promise<OpNotice>");
-    // The only top-notice writes left are load()'s two background-failure
+    // invariant: The only top-notice writes left are load()'s two background-failure
     // paths (parse failure + request failure) — the page-level
     // channel for background reloads. Ops never land there; card-local
     // notices (AppInfoSection's own `setNotice({ … })` outcome region) are that
@@ -1698,7 +1692,7 @@ describe("section-scoped op feedback", () => {
     expect(detail.match(/setNotice\(\{/g)?.length).toBe(2);
     const outsideInfoCard = source.slice(0, source.indexOf("export function AppInfoSection"));
     expect(outsideInfoCard).not.toContain("setNotice({");
-    // Bugbot fix: a successful load() — foreground or background —
+    // note: Bugbot fix: a successful load() — foreground or background —
     // clears the page banner, so a recovered reload never leaves a stale
     // "load failed" up. New shape: failure writes 2 + success clear 1, and
     // the clear is pinned INSIDE load()'s success path (between the payload
@@ -1709,7 +1703,7 @@ describe("section-scoped op feedback", () => {
       detail.indexOf("return true;"),
     );
     expect(loadSuccessPath).toContain("setNotice(null);");
-    // Carry-over (Task 2 review), refined by a later audit fix (F-09): a
+    // note: Carry-over (Task 2 review), refined by a later audit fix (F-09): a
     // network-level POST failure (postForm throws before an outcome exists)
     // resolves the dedicated save-failed copy so the op's card still reports
     // — no silent failure surface, and a failed save no longer claims the
@@ -1717,17 +1711,17 @@ describe("section-scoped op feedback", () => {
     // channels plus the identity card's refresh (whose fetch rejects with no
     // status to key a message from).
     expect(source).toContain('message: t(locale, "common.saveFailed")');
-    // Two transport catches per face, minus the key-verify one: the identity
+    // note: Two transport catches per face, minus the key-verify one: the identity
     // card's refresh and the config store's own save; the bot page's settings
     // save, key delete and the share transition (its PATCH has no body to read
     // a cause from when the request never lands). A failed verify names its own
     // face (`settings.providers.submitFailed`), because that dialog is the
     // surface that must tell the operator nothing was stored.
     expect(source.match(/t\(locale, "common\.saveFailed"\)/g)?.length).toBe(5);
-    // Page-level reload failures keep the load-failed copy: load()'s two
+    // note: Page-level reload failures keep the load-failed copy: load()'s two
     // background-failure paths and the draft create's reload-failure return.
     expect(source).toContain('message: t(locale, "common.loadFailed")');
-    // The in-card copy is dictionary-backed in both locales.
+    // note: The in-card copy is dictionary-backed in both locales.
     expect(t("en", "common.saveFailed")).toContain("save");
     expect(t("zh_CN", "common.saveFailed")).toContain("保存");
     expect(t("en", "common.loadFailed")).toContain("load");
@@ -1736,22 +1730,22 @@ describe("section-scoped op feedback", () => {
 
   test("each card owns an inline notice region: runtime harness, providers, chains, seats, ops", () => {
     const source = readSettingsSource();
-    // The shared local region component wraps PageNotice, so every region
+    // note: The shared local region component wraps PageNotice, so every region
     // inherits the banner's alert/status roles and notice tokens (WCAG
     // 4.1.3 — pinned on PageNotice.tsx itself in the notice-channel describe).
     const pageNoticeSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/PageNotice.tsx"), "utf8");
     expect(pageNoticeSource).toContain("function NoticeRegion");
     expect(pageNoticeSource).toContain("return <PageNotice kind={notice.kind} message={notice.message} />;");
-    // Runtime image: region inside the editor, next to the save trigger.
+    // note: Runtime image: region inside the editor, next to the save trigger.
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
       source.indexOf("function OpsSection"),
     );
     expect(runtimeBody).toContain("<NoticeRegion notice={notice} />");
-    // Ops zone: region directly under the pause/disable/delete button row.
+    // note: Ops zone: region directly under the pause/disable/delete button row.
     const opsBody = source.slice(source.indexOf("function OpsSection"), source.indexOf("function ChainsSection"));
     expect(opsBody).toContain("<NoticeRegion notice={notice} />");
-    // Providers: card region directly under the add panel serves the verify /
+    // note: Providers: card region directly under the add panel serves the verify /
     // template forms only — the dialog-confirmed removes moved to a
     // group-local region (pinned in the F-08 test below).
     const providersBody = source.slice(
@@ -1759,36 +1753,36 @@ describe("section-scoped op feedback", () => {
       source.indexOf("function ProviderGroupCard"),
     );
     expect(providersBody).toContain("<NoticeRegion notice={notice} />");
-    // Chains: card region below every tabpanel (dialog removes + draft
+    // note: Chains: card region below every tabpanel (dialog removes + draft
     // success) — the editors' own regions are pinned in the regression test.
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<NoticeRegion notice={notice} />");
-    // Seats: region inside the seat form, under its save button.
+    // note: Seats: region inside the seat form, under its save button.
     const seatsBody = source.slice(source.indexOf("function SeatsSection"), source.indexOf("function DraftChainPanel"));
     expect(seatsBody).toContain("<NoticeRegion notice={notice} />");
   });
 
   test("the chains 400 renders inside the chains card (user-reported regression pin)", () => {
     const source = readSettingsSource();
-    // ChainEditor is shared by the Default tab, every named tab and the draft
+    // note: ChainEditor is shared by the Default tab, every named tab and the draft
     // panel — each instance resolves its save outcome into its OWN region,
     // inside the tabpanel, inside the chains card. A rejected save-chain /
     // add-chain (e.g. the not_in_verified_models 400) can no longer surface
     // on the page top.
     const editorBody = componentBody(source, "ChainEditor");
-    // The save rides the button now: a failure still resolves into this
+    // note: The save rides the button now: a failure still resolves into this
     // editor's own region (the region pin below), a success into the
     // button's check plus assistive copy.
     expect(editorBody).toContain('const outcome = await onSave(chain.join(", "));');
     expect(editorBody).toContain("setNotice(outcome);");
     expect(editorBody).toContain("<NoticeRegion notice={notice} />");
-    // The region renders after the save trigger — the feedback sits where the
+    // invariant: The region renders after the save trigger — the feedback sits where the
     // user is looking when the outcome lands.
     const buttonPos = editorBody.indexOf('saveLabel ?? t(locale, "settings.saveChain")');
     const regionPos = editorBody.indexOf("<NoticeRegion notice={notice} />");
     expect(buttonPos).toBeGreaterThan(-1);
     expect(regionPos).toBeGreaterThan(buttonPos);
-    // Every chain panel mounts through ChainEditor (Default shown here; the
+    // note: Every chain panel mounts through ChainEditor (Default shown here; the
     // named-tab map and the draft panel reuse it in the same card).
     const chainsBody = source.slice(source.indexOf("function ChainsSection"), source.indexOf("function SeatsSection"));
     expect(chainsBody).toContain("<ChainEditor");
@@ -1797,7 +1791,7 @@ describe("section-scoped op feedback", () => {
 
   test("dialog-confirmed ops report into the card that owns the action", () => {
     const source = readSettingsSource();
-    // The two faces own their own confirms: the bot page's removes report into
+    // note: The two faces own their own confirms: the bot page's removes report into
     // the chains / providers cards, the target detail's ops into its ops zone.
     const botView = componentBody(
       readFileSync(join(import.meta.dir, "../../src/spa/pages/BotSettingsPage.tsx"), "utf8"),
@@ -1809,7 +1803,7 @@ describe("section-scoped op feedback", () => {
     );
     expect(botConfirm).toContain('setChainsNotice(await submitSettings({ op: "remove-chain", name: action.name }))');
     expect(botConfirm).toContain("setProvidersRemoveOutcome({");
-    // The App-scoped ops zone lives on the App detail page and reports into
+    // note: The App-scoped ops zone lives on the App detail page and reports into
     // its own region there.
     const detailSource = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDetailPage.tsx"), "utf8");
     const targetConfirm = detailSource.slice(
@@ -1821,10 +1815,10 @@ describe("section-scoped op feedback", () => {
     expect(detailSource).toContain("notice={notice}");
     expect(source).toContain("notice={providersNotice}");
     expect(source).toContain("notice={chainsNotice}");
-    // the removes no longer write the card-level providers state —
+    // note: the removes no longer write the card-level providers state —
     // that region keeps only the add-flow (verify / template) outcomes.
     expect(botConfirm).not.toContain("setProvidersNotice(");
-    // The add-flow forms forward their outcome into the providers card's
+    // note: The add-flow forms forward their outcome into the providers card's
     // region; the draft panel forwards its SUCCESS into the chains card's
     // region (its own panel unmounts on success).
     expect(source).toContain("onOutcome={setProvidersNotice}");
@@ -1833,7 +1827,7 @@ describe("section-scoped op feedback", () => {
 
   test("provider remove outcomes render beside the removed row's group (audit UI-45-05)", () => {
     const source = readSettingsSource();
-    // The outcome state carries the removed row's slot, captured in the bot
+    // note: The outcome state carries the removed row's slot, captured in the bot
     // page's onConfirm from the PRE-POST payload: the awaited background reload
     // drops the row from the payload before the outcome resolves, so the
     // position must be remembered — the row unmounts with the fresh payload
@@ -1847,13 +1841,13 @@ describe("section-scoped op feedback", () => {
       botView.indexOf("const confirmCopy"),
     );
     expect(confirmBody).toContain("const slot = payload.configured_providers.findIndex(");
-    // The captured slot is the row's own identity's — the key path matches the
+    // note: The captured slot is the row's own identity's — the key path matches the
     // (provider, key_id) pair the POST carries, the custom path its
     // provider_id (both pinned in the multi-key describe / pages-data suite).
     expect(confirmBody).toContain("const slot = configuredKeySlot(payload.configured_providers, action.provider, action.keyId);");
     expect(confirmBody).toContain("row.kind === \"custom\" && row.provider_id === action.providerId");
     expect(confirmBody).toContain("slot: slot >= 0 ? slot : payload.configured_providers.length");
-    // The card resolves that slot back to the provider it named, so the group
+    // why: The card resolves that slot back to the provider it named, so the group
     // card owning the row renders the outcome — through the shared
     // NoticeRegion, so the group-local region inherits the roles
     // (alert/status) and notice tokens.
@@ -1867,7 +1861,7 @@ describe("section-scoped op feedback", () => {
       'removedRow.kind === "key" ? removedRow.provider : removedRow.provider_id',
     );
     expect(providersBody).toContain("removedProviderId === group.providerId ? removeOutcome.notice : null");
-    // A success took the row — and possibly the whole group — away, so the
+    // note: A success took the row — and possibly the whole group — away, so the
     // outcome falls back to the card's own region instead of pointing at a
     // group that no longer exists.
     expect(providersBody).toContain("orphanRemoveNotice");
@@ -1876,14 +1870,14 @@ describe("section-scoped op feedback", () => {
 
   test("a stale delete's no-change outcome is a localized warning, never 'Changes saved.'", () => {
     const source = readSettingsSource();
-    // The remove routes answer the tolerant no-op as `changed: false`; the
+    // note: The remove routes answer the tolerant no-op as `changed: false`; the
     // shared op-outcome resolver renders the localized no-change copy with
     // warn styling (the row is still there — the region sits below it).
     expect(source).toContain("removeChanged(body) === false");
     expect(source).toContain('{ kind: "warn", message: t(locale, "settings.removeNoChange") }');
     expect(t("en", "settings.removeNoChange")).toContain("Nothing changed");
     expect(t("zh_CN", "settings.removeNoChange")).toContain("未做任何更改");
-    // The template form lists the pool it appends to — the materialized
+    // note: The template form lists the pool it appends to — the materialized
     // provider's stored rows come from the same keys face as a built-in's.
     const templateForm = source.slice(
       source.indexOf('if (formKind === "template")'),
@@ -1895,14 +1889,14 @@ describe("section-scoped op feedback", () => {
 
   test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
     const source = readSettingsSource();
-    // One guard per form: the trigger disables while its own POST is in
+    // note: One guard per form: the trigger disables while its own POST is in
     // flight (the confirm dialog's pre-existing disabled={busy} guard stays).
     const runtimeBody = source.slice(
       source.indexOf("function RuntimeHarnessEditor"),
       source.indexOf("function OpsSection"),
     );
     expect(runtimeBody).toContain("disabled={busy}");
-    // ProviderConfigForm is the providers module's tail: the slice runs to the
+    // note: ProviderConfigForm is the providers module's tail: the slice runs to the
     // end of the composed source.
     const providerFormBody = source.slice(source.indexOf("function ProviderConfigForm"));
     expect(providerFormBody).toContain("disabled={busy}");
@@ -1912,7 +1906,7 @@ describe("section-scoped op feedback", () => {
     expect(editorBody).toContain("disabled={busy}");
     const seatsBody = source.slice(source.indexOf("function SeatsSection"), source.indexOf("function DraftChainPanel"));
     expect(seatsBody).toContain("disabled={busy}");
-    // Stale-error rule (pinned): a region's content is replaced wholesale by
+    // note: Stale-error rule (pinned): a region's content is replaced wholesale by
     // the next op targeting that same region — setters always receive the
     // fresh outcome, no manual clears, no cross-card resets. (The save
     // clusters resolve the outcome into a local first, so a success can ride
@@ -1920,7 +1914,7 @@ describe("section-scoped op feedback", () => {
     expect(source).toContain("const outcome = await onSettings({ op: \"save-sandbox-image\", sandbox_image_id: selected });");
     expect(source).toContain('const outcome = await onSave(chain.join(", "));');
     expect(source).toContain("const outcome = await onSettings(fields);");
-    // The rule is pinned per named cluster — each save flow's own outcome
+    // note: The rule is pinned per named cluster — each save flow's own outcome
     // resolution — not by a page-wide count another site's copy could
     // satisfy: deleting any one of these three makes this test fail.
     // ProviderConfigForm carries no setNotice of its own: it hands the fresh
@@ -1936,7 +1930,7 @@ describe("section-scoped op feedback", () => {
 
 describe("settings header typography", () => {
   test("app-slug heading is the rendered PageHeader h1; no off-scale page heading remains (audit UI-45-08)", () => {
-    // SUPERSEDE (App detail IA): the slug heading moved onto the
+    // note: SUPERSEDE (App detail IA): the slug heading moved onto the
     // AppDetailPage shell as the identity header, and its face now lives in
     // the one PageHeader spelling (heading-24 page title, serving BOTH tabs).
     // The settings tab carries no page heading of its own anymore — asserted
@@ -1955,11 +1949,11 @@ describe("settings header typography", () => {
         }),
       ),
     );
-    // Exactly one heading, and it is the heading-24 h1 carrying the slug.
+    // invariant: Exactly one heading, and it is the heading-24 h1 carrying the slug.
     expect(shell.match(/<h1/g)).toHaveLength(1);
     expect(shell).toContain('<h1 data-slot="page-header-title"');
     expect(shell).toContain(">Acme</h1>");
-    // Rendering alone cannot express OWNERSHIP — a shell inlining the same
+    // note: Rendering alone cannot express OWNERSHIP — a shell inlining the same
     // markup renders byte-identical output — so the face's single home is
     // pinned on source: PageHeader owns the title slot, the shell composes
     // <PageHeader>, and no page source carries a second copy.
@@ -1973,7 +1967,7 @@ describe("settings header typography", () => {
     expect(shellSource).toContain("<PageHeader");
     expect(shellSource).not.toContain("--typo-heading-24");
     expect(tabSource).not.toContain("--typo-heading-24");
-    // The off-scale 18px class no longer appears anywhere on the face: this
+    // note: The off-scale 18px class no longer appears anywhere on the face: this
     // render carries the FULL settings tab body, so the old page heading and
     // every card behind it are observed at once.
     expect(shell).not.toContain("text-lg");
@@ -1983,7 +1977,7 @@ describe("settings header typography", () => {
 describe("provider entry controls", () => {
   test("every provider-flow entry is a labelled dialog trigger; no in-card disclosure is left", () => {
     const source = readSettingsSource();
-    // Both inline panels (AddProviderSection's and CustomExpand's) are gone,
+    // note: Both inline panels (AddProviderSection's and CustomExpand's) are gone,
     // so their aria-expanded disclosures are gone with them;
     // the entry controls now advertise the overlay they open (WCAG 4.1.2), and
     // the card body holds no expandable region.
@@ -1995,20 +1989,19 @@ describe("provider entry controls", () => {
     expect(providersBody).not.toContain("aria-expanded=");
     expect(source).not.toContain("CustomExpand");
     expect(source).not.toContain("AddProviderSection");
-    // The add-key trigger sits in the group header beside the declaration's
+    // note: The add-key trigger sits in the group header beside the declaration's
     // remove, so a second key never detours through the catalog again.
     const groupCard = source.slice(source.indexOf("function ProviderGroupCard"));
     expect(groupCard).toContain('aria-haspopup="dialog"');
     expect(groupCard).toContain('t(locale, "settings.addKey")');
-    // The one disclosure that stays in the providers area is the model-id
+    // invariant: The one disclosure that stays in the providers area is the model-id
     // list, and it pairs aria-controls with its expanded state.
     expect(groupCard).toContain("aria-controls={modelsOpen ? modelsId : undefined}");
   });
 });
 
 describe("GitHub App identity card", () => {
-  /**
-   * The card is a pure presentational component (no hooks, no browser API),
+  /** note: The card is a pure presentational component (no hooks, no browser API),
    * so its degradation face — the load-bearing contract — is pinned
    * behaviorally: static SSR markup of the exported card, no DOM runner.
    * createElement keeps this .ts file free of JSX. `canManage`
@@ -2021,7 +2014,7 @@ describe("GitHub App identity card", () => {
       createElement(AppInfoSection, { locale: "en", app, workspaceId: WORKSPACE_ID, canManage }),
     );
 
-  /** The App's stable workspace id (never the route ref/slug). */
+  /** invariant: The App's stable workspace id (never the route ref/slug). */
   const WORKSPACE_ID = "ws_0123456789abcdefghijkl";
 
   function meta(overrides: Partial<SettingsAppMeta> = {}): SettingsAppMeta {
@@ -2058,26 +2051,26 @@ describe("GitHub App identity card", () => {
 
   test("synced profile renders avatar img, hyperlinked name (new tab, noopener), description, AppID", () => {
     const out = html(meta(synced));
-    // (a) the avatar is the synced GitHub URL, rendered as a plain <img>
+    // note: (a) the avatar is the synced GitHub URL, rendered as a plain <img>
     // (an external image — no CSP is configured in this repo, so nothing
     // blocks the direct avatar origin; there is no image proxy either).
     expect(out).toContain('<img src="https://avatars.githubusercontent.com/in/1234?v=4"');
-    // (b) the name is the link: href = github_html_url, NEW tab, noopener.
+    // note: (b) the name is the link: href = github_html_url, NEW tab, noopener.
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
     expect(out).toContain('target="_blank"');
     expect(out).toContain('rel="noopener noreferrer"');
     expect(out).toContain("Acme Reviewer");
     expect(out).toContain('aria-label="View Acme Reviewer on GitHub"');
-    // (c) the description renders when present.
+    // note: (c) the description renders when present.
     expect(out).toContain("Reviews pull requests for Acme.");
-    // (d) the numeric App id renders in plaintext (B1 pin allows the id).
+    // note: (d) the numeric App id renders in plaintext (B1 pin allows the id).
     expect(out).toContain("App ID: 123456");
-    // The optional synced-at hint localizes through the dictionary.
+    // note: The optional synced-at hint localizes through the dictionary.
     expect(out).toContain("Synced ");
   });
 
   test("never-synced App degrades to local fields, and the icon is derived from the App id", () => {
-    // (e) all metadata null — the card still renders (title + local App id)
+    // note: (e) all metadata null — the card still renders (title + local App id)
     // and no anchor pretends a synced profile exists. The avatar is NOT a
     // placeholder here: the cached column is empty, so the mark comes from the
     // numeric App id on read (the first page load shows the real icon).
@@ -2089,7 +2082,7 @@ describe("GitHub App identity card", () => {
   });
 
   test("mixed-null metadata renders only the present fields, per-field degradation", () => {
-    // (f) name + url synced, everything else null: the link renders, the
+    // note: (f) name + url synced, everything else null: the link renders, the
     // absent fields render nothing — no placeholder text, no layout collapse.
     const out = html(
       meta({
@@ -2099,17 +2092,17 @@ describe("GitHub App identity card", () => {
     );
     expect(out).toContain('href="https://github.com/settings/apps/acme-reviewer"');
     expect(out).toContain("Acme Reviewer");
-    // Same derivation as the never-synced face: the id, not the empty column.
+    // invariant: Same derivation as the never-synced face: the id, not the empty column.
     expect(out).toContain(appAvatarUrl(123456).replaceAll("&", "&amp;"));
     expect(out).not.toContain("Reviews pull requests");
     expect(out).not.toContain("Synced ");
     expect(out).toContain("App ID: 123456");
-    // A synced name whose html_url is missing degrades to plain text — never
+    // invariant: A synced name whose html_url is missing degrades to plain text — never
     // a link with an empty href.
     const urlless = html(meta({ github_name: synced.github_name }));
     expect(urlless).not.toContain("<a ");
     expect(urlless).toContain("Acme Reviewer");
-    // The fourth matrix cell — a synced URL whose name is absent: the name
+    // note: The fourth matrix cell — a synced URL whose name is absent: the name
     // gate makes a stray <a> structurally impossible, so the URL renders
     // nowhere (no href, no text).
     const nameless = html(meta({ github_html_url: synced.github_html_url }));
@@ -2118,7 +2111,7 @@ describe("GitHub App identity card", () => {
   });
 
   test("manager face targets the GitHub App settings page derived from the html_url slug (AD-623)", () => {
-    // The public page's slug (the html_url's apps/<slug> tail, trailing-slash
+    // note: The public page's slug (the html_url's apps/<slug> tail, trailing-slash
     // tolerant) names the settings target — never github_name (display name
     // ≠ URL slug) nor the local SettingsAppMeta.slug (local App slug ≠ GitHub
     // App slug): a name/local-slug that differ from the URL slug still derive
@@ -2137,7 +2130,7 @@ describe("GitHub App identity card", () => {
       true,
     );
     expect(mismatched).toContain('href="https://github.com/settings/apps/url-slug-app"');
-    // The honest manager label names the manage destination; the external-link
+    // note: The honest manager label names the manage destination; the external-link
     // contract (new tab + noopener) survives the target switch.
     expect(manager).toContain('aria-label="Manage Acme Reviewer on GitHub"');
     expect(manager).toContain('target="_blank"');
@@ -2148,14 +2141,14 @@ describe("GitHub App identity card", () => {
     const member = html(meta({ ...synced, github_html_url: "https://github.com/apps/acme-reviewer" }));
     expect(member).toContain('href="https://github.com/apps/acme-reviewer"');
     expect(member).toContain('aria-label="View Acme Reviewer on GitHub"');
-    // The server validates only the https:// prefix (github-app-metadata.ts),
+    // invariant: The server validates only the https:// prefix (github-app-metadata.ts),
     // so a segment-less url reaches the client: the manager face derives
     // nothing and keeps the public-page link — and the label follows the REAL
     // destination (View, not Manage).
     const degraded = html(meta({ ...synced, github_html_url: "https://github.com" }), true);
     expect(degraded).toContain('href="https://github.com"');
     expect(degraded).toContain('aria-label="View Acme Reviewer on GitHub"');
-    // A deep public path derives nothing either (qc round 1, qc2-F-001): the
+    // invariant: A deep public path derives nothing either (qc round 1, qc2-F-001): the
     // manager face keeps the PUBLIC href and the honest View label — the
     // sub-path never masquerades as the settings slug.
     const deepPath = html(
@@ -2165,7 +2158,7 @@ describe("GitHub App identity card", () => {
     expect(deepPath).toContain('href="https://github.com/apps/url-slug-app/settings"');
     expect(deepPath).not.toContain('href="https://github.com/settings/apps/settings"');
     expect(deepPath).toContain('aria-label="View Acme Reviewer on GitHub"');
-    // github_html_url=null stays plain text on BOTH faces — no anchor, no
+    // invariant: github_html_url=null stays plain text on BOTH faces — no anchor, no
     // crash, the degradation face unchanged.
     for (const canManage of [false, true]) {
       const out = html(meta({ github_name: synced.github_name }), canManage);
@@ -2176,14 +2169,14 @@ describe("GitHub App identity card", () => {
 
   test("the card precedes the manage conditional — both faces see it", () => {
     const source = readSettingsSource();
-    // SUPERSEDE (App detail IA): the slug row is the AppDetailPage shell's
+    // note: SUPERSEDE (App detail IA): the slug row is the AppDetailPage shell's
     // identity header now; inside the tab, the card ordering contract is
     // AppInfoSection → manage conditional.
     const cardPos = source.indexOf("<AppInfoSection");
     const managePos = source.indexOf("{payload.can_manage ? (");
     expect(cardPos).toBeGreaterThan(-1);
     expect(managePos).toBeGreaterThan(cardPos);
-    // Per-field degradation is structural: every synced field is gated by its
+    // note: Per-field degradation is structural: every synced field is gated by its
     // own null check inside the card body, and the link pins the new-tab +
     // noopener contract.
     const cardBody = source.slice(
@@ -2207,13 +2200,13 @@ describe("GitHub App identity card", () => {
     expect(t("zh_CN", "settings.appInfoAppId", { id: 123456 })).toBe("App ID：123456");
     expect(t("en", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("View Acme on GitHub");
     expect(t("zh_CN", "settings.appInfoViewOnGithub", { name: "Acme" })).toBe("在 GitHub 上查看 Acme");
-    // the honest manager-face label rides the settings destination
+    // note: the honest manager-face label rides the settings destination
     // (atomic en/zh pair).
     expect(t("en", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("Manage Acme on GitHub");
     expect(t("zh_CN", "settings.appInfoManageOnGithub", { name: "Acme" })).toBe("在 GitHub 上管理 Acme");
     expect(t("en", "settings.appInfoSynced", { time: "5 minutes ago" })).toBe("Synced 5 minutes ago");
     expect(t("zh_CN", "settings.appInfoSynced", { time: "5 分钟前" })).toBe("同步于 5 分钟前");
-    // D5 force-refresh pair (en/zh parity).
+    // note: D5 force-refresh pair (en/zh parity).
     expect(t("en", "settings.appInfoRefresh")).toBe("Refresh from GitHub");
     expect(t("zh_CN", "settings.appInfoRefresh")).toBe("从 GitHub 刷新");
     expect(t("en", "settings.appInfoRefreshDone")).toBe("Identity refreshed from GitHub.");
@@ -2234,13 +2227,13 @@ describe("GitHub App identity card", () => {
 
     test("manager-only: the refresh button renders only on the manager face with a reload path", () => {
       expect(card(true, async () => true)).toContain(t("en", "settings.appInfoRefresh"));
-      // No reload path → no button (the identity face renders nothing).
+      // invariant: No reload path → no button (the identity face renders nothing).
       expect(card(true)).not.toContain(t("en", "settings.appInfoRefresh"));
       expect(card(false, async () => true)).not.toContain(t("en", "settings.appInfoRefresh"));
     });
 
     test("the delivery URL renders on the manager face, composed from the workspace id + local App UID", () => {
-      // The webhook repoint needs the absolute URL GitHub posts to; the deploy
+      // note: The webhook repoint needs the absolute URL GitHub posts to; the deploy
       // doc sends the operator to this card for it, so the card must carry it —
       // and only for the manager, because a member has no repoint duty.
       const deliveryUrl = (canManage: boolean): string =>
@@ -2248,7 +2241,7 @@ describe("GitHub App identity card", () => {
 
       const manager = deliveryUrl(true);
       expect(manager).toContain(t("en", "settings.appInfoDeliveryUrl"));
-      // workspace segment = the payload's stable id (NOT the path ref), app
+      // note: workspace segment = the payload's stable id (NOT the path ref), app
       // segment = the local App UID.
       expect(manager).toContain(`https://worker.example/webhook/${WORKSPACE_ID}/app-acme`);
 
@@ -2268,7 +2261,7 @@ describe("GitHub App identity card", () => {
     });
 
     test("a workspace SLUG in the path never reaches the delivery URL — the payload's id does", () => {
-      // The route segment is a ref, which may be a slug (`acme`); GitHub must
+      // invariant: The route segment is a ref, which may be a slug (`acme`); GitHub must
       // be pointed at the stable workspace id, so the URL comes from the
       // payload only.
       const out = withLocation(
@@ -2292,10 +2285,10 @@ describe("GitHub App identity card", () => {
         source.indexOf("function InstallationsSection"),
       );
       expect(cardBody).toContain("${apiBase()}/api/apps/${app.github_app_id}/refresh-metadata");
-      // Manager-only gate + busy guard.
+      // invariant: Manager-only gate + busy guard.
       expect(cardBody).toContain("canManage && onReload");
       expect(cardBody).toContain("disabled={refreshing}");
-      // Success: card-local notice + background reload, and the reload sits
+      // note: Success: card-local notice + background reload, and the reload sits
       // AFTER the failure branch's return — a keyed 400 never reloads.
       const successReload = cardBody.indexOf("await onReload?.()");
       expect(cardBody).toContain('t(locale, "settings.appInfoRefreshDone")');
@@ -2303,13 +2296,13 @@ describe("GitHub App identity card", () => {
       const errorNotice = cardBody.indexOf("message: settingsErrorMessage(locale, body)");
       expect(errorNotice).toBeGreaterThan(-1);
       expect(errorNotice).toBeLessThan(successReload);
-      // The failure notice is the keyed settings-error resolver (the card
+      // note: The failure notice is the keyed settings-error resolver (the card
       // gains no error channel of its own).
       expect(cardBody).toContain("settingsErrorMessage(locale, body)");
     });
 
     test("a transport failure (fetch rejects) shows the save-failure notice and never reloads", async () => {
-      // Offline / a restarting Worker / DNS: the fetch REJECTS, so there is no
+      // note: Offline / a restarting Worker / DNS: the fetch REJECTS, so there is no
       // status to resolve a key from. Before the catch this was an unhandled
       // rejection with zero feedback — the operator saw the button re-enable
       // and nothing else.
@@ -2349,7 +2342,7 @@ describe("GitHub App identity card", () => {
         const alert = container.querySelector('[role="alert"]');
         expect(alert?.textContent).toBe(t("en", "common.saveFailed"));
         expect(reloads).toBe(0);
-        // The button recovered (the finally still clears the busy flag).
+        // note: The button recovered (the finally still clears the busy flag).
         expect((button as unknown as HTMLButtonElement).disabled).toBe(false);
 
         await act(async () => root.unmount());
@@ -2364,7 +2357,7 @@ describe("GitHub App identity card", () => {
 describe("GitHub App settings link wiring (AD-623)", () => {
   test("the page threads payload.can_manage into the card; the settings URL derives only through the helper", () => {
     const source = readSettingsSource();
-    // Presentation-layer threading only — the payload contract gains nothing.
+    // invariant: Presentation-layer threading only — the payload contract gains nothing.
     // Threading is presentation-only: the card gets the payload's own
     // `can_manage` and `workspace_id` (never a path-derived value).
     // `canManage` is the bot's writability, not the workspace role: a Blocked
@@ -2376,7 +2369,7 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     expect(source).toContain(
       "<AppInfoSection\n          locale={locale}\n          app={payload.app}\n          workspaceId={payload.workspace_id}\n          canManage={false}\n        />",
     );
-    // The card body routes the manager target through the pure helper (the
+    // note: The card body routes the manager target through the pure helper (the
     // forbidden derivations — github_name / the local slug — cannot reach the
     // URL through it: it takes the html_url alone).
     const cardBody = source.slice(
@@ -2391,14 +2384,14 @@ describe("GitHub App settings link wiring (AD-623)", () => {
     expect(githubAppSettingsUrl("https://github.com/apps/acme")).toBe("https://github.com/settings/apps/acme");
     expect(githubAppSettingsUrl("https://github.com/apps/acme/")).toBe("https://github.com/settings/apps/acme");
     expect(githubAppSettingsUrl("https://github.com/apps/acme///")).toBe("https://github.com/settings/apps/acme");
-    // Already settings-shaped urls derive their own slug back (idempotent face).
+    // note: Already settings-shaped urls derive their own slug back (idempotent face).
     expect(githubAppSettingsUrl("https://github.com/settings/apps/acme-reviewer")).toBe(
       "https://github.com/settings/apps/acme-reviewer",
     );
   });
 
   test("deep-path shapes derive null (qc round 1, qc2-F-001): no sub-path masquerades as the slug", () => {
-    // A deeper public path has TWO segments after `apps` — the tail segment
+    // invariant: A deeper public path has TWO segments after `apps` — the tail segment
     // (e.g. "settings") must not be read as the slug; the helper returns null
     // so the caller keeps the public-page link.
     expect(githubAppSettingsUrl("https://github.com/apps/acme/settings")).toBeNull();
@@ -2417,7 +2410,7 @@ describe("GitHub App settings link wiring (AD-623)", () => {
 describe("runtime harness row tightness", () => {
   test("select shell is content-adaptive; save button sits in the same flex-wrap row", () => {
     const source = readSettingsSource();
-    // User-reported regression: the wrapper reserved min-w-64 (256px) while the
+    // note: User-reported regression: the wrapper reserved min-w-64 (256px) while the
     // trigger only rendered short option content — a perceived gap between the
     // select and its save button. The shell must stay content-adaptive.
     const runtimeBody = source.slice(
@@ -2426,7 +2419,7 @@ describe("runtime harness row tightness", () => {
     );
     expect(runtimeBody).toContain('<div className="w-fit max-w-xs">');
     expect(runtimeBody).not.toContain("min-w-64");
-    // Same-row adjacency: the save trigger follows the select inside the
+    // note: Same-row adjacency: the save trigger follows the select inside the
     // flex-wrap row (narrow screens still wrap the button below cleanly).
     const row = runtimeBody.slice(
       runtimeBody.indexOf('className="flex flex-wrap items-center gap-2"'),
@@ -2439,7 +2432,7 @@ describe("runtime harness row tightness", () => {
 
 describe("the tenant support notice renders nothing until the client read", () => {
   test("the SSR render of a member's shell is empty", () => {
-    // The grants read is a `useEffect`, so the static markup carries nothing —
+    // why: The grants read is a `useEffect`, so the static markup carries nothing —
     // no grant line, no error and no retry. The render-time contract lives in
     // tests/spa/support-notice.test.tsx (DOM mount).
     const markup = renderToStaticMarkup(
@@ -2460,7 +2453,7 @@ describe("review depth control", () => {
       ["deep", "Deep — most thorough, slower"],
       [REVIEW_DEPTH_INHERIT, "Follow operator default (currently Standard)"],
     ]);
-    // The inherit face names the level NULL currently resolves to, so a
+    // note: The inherit face names the level NULL currently resolves to, so a
     // manager never has to open the operator console to know what it runs.
     expect(reviewDepthOptions("zh_CN", "deep").map((option) => option.label)).toEqual([
       "快速 — 单轮快速评审",
@@ -2472,8 +2465,7 @@ describe("review depth control", () => {
 
 });
 
-/**
- * The settings sections split by OWNER: the bot's credentials, providers,
+/** note: The settings sections split by OWNER: the bot's credentials, providers,
  * chains, seats, sandbox image and installations are bot-scoped and live on
  * the bot page; the review policy (trigger, depth, gate, pause) belongs to
  * the repository surface's target detail. The App page's settings

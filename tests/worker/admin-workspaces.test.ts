@@ -1,5 +1,4 @@
-/**
- * The console's workspace list and plan assignment (spec operator-admin-surface
+/** note: The console's workspace list and plan assignment (spec operator-admin-surface
  * §3.2 / §3.3).
  *
  * Pinned at the product seams: the list's SQL-side counts and resolved plan,
@@ -25,7 +24,7 @@ const MEMBER = "regular-member";
 const STAMP = "2026-10-01T00:00:00.000Z";
 const DAY_MS = 86_400_000;
 
-// --- fixtures (raw writes; the routes and stores read real SQL) -------------
+// note: --- fixtures (raw writes; the routes and stores read real SQL) -------------
 
 function insertUser(db: TestD1, login: string): string {
   const id = crypto.randomUUID();
@@ -85,7 +84,7 @@ function insertSubscription(db: TestD1, workspaceId: string, planId: string): vo
 }
 
 function count(db: TestD1, sql: string): number {
-  // The raw test handle returns a plain row object, like the other raw reads.
+  // note: The raw test handle returns a plain row object, like the other raw reads.
   const row = db.raw.prepare(sql).get() as { n: number } | null;
   return row?.n ?? 0;
 }
@@ -173,7 +172,7 @@ async function listOf(db: TestD1): Promise<Array<Record<string, unknown>>> {
   return ((await res.json()) as { workspaces: Array<Record<string, unknown>> }).workspaces;
 }
 
-// --- the list ---------------------------------------------------------------
+// note: --- the list ---------------------------------------------------------------
 
 describe("GET /_internal_admin/api/workspaces", () => {
   test("returns owner, live counts, resolved plan and creation stamp", async () => {
@@ -192,20 +191,20 @@ describe("GET /_internal_admin/api/workspaces", () => {
     });
     insertMember(db, "ws-alpha", aliceId, "owner");
     insertMember(db, "ws-alpha", bobId, "member");
-    // One live pending invite and one lapsed row still stored as `pending`:
+    // note: One live pending invite and one lapsed row still stored as `pending`:
     // the lapsed one holds no seat and must not be counted.
     insertInvite(db, { workspaceId: "ws-alpha", login: "carol", expiresAt: liveFromNow() });
     insertInvite(db, { workspaceId: "ws-alpha", login: "dave", expiresAt: lapsedFromNow() });
     insertSubscription(db, "ws-alpha", "pro");
 
-    // No subscription and no owner: the row still resolves to the free plan.
+    // note: No subscription and no owner: the row still resolves to the free plan.
     insertWorkspace(db, {
       id: "ws-beta",
       name: "Beta",
       createdAt: "2026-10-02T00:00:00.000Z",
     });
 
-    // The no-cap tier: its `included_members` is NULL, which must stay NULL.
+    // invariant: The no-cap tier: its `included_members` is NULL, which must stay NULL.
     insertWorkspace(db, {
       id: "ws-gamma",
       name: "Gamma",
@@ -213,7 +212,7 @@ describe("GET /_internal_admin/api/workspaces", () => {
     });
     insertSubscription(db, "ws-gamma", "unlimited");
 
-    // `default` is seeded by migration 0026; newest-first puts it first.
+    // note: `default` is seeded by migration 0026; newest-first puts it first.
     expect(await listOf(db)).toEqual([
       {
         id: "default",
@@ -281,7 +280,7 @@ describe("GET /_internal_admin/api/workspaces", () => {
     }>;
     const capOf = (id: string) => catalogue.find((plan) => plan.id === id)?.included_members;
 
-    // An unlimited workspace reports no cap — it must never be serialised as 0.
+    // invariant: An unlimited workspace reports no cap — it must never be serialised as 0.
     expect(rows.find((row) => row.id === "ws-gamma")).toMatchObject({
       planId: "unlimited",
       includedMembers: null,
@@ -291,7 +290,7 @@ describe("GET /_internal_admin/api/workspaces", () => {
   });
 });
 
-// --- the plan assignment ----------------------------------------------------
+// note: --- the plan assignment ----------------------------------------------------
 
 describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
   test("assigning pro then unlimited changes what the workspace resolves to", async () => {
@@ -326,7 +325,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
       includedMembers: null,
     });
 
-    // One audit row per successful change, with the before/after pair.
+    // invariant: One audit row per successful change, with the before/after pair.
     expect(auditRows(db)).toEqual([
       {
         action: "workspace.plan.set",
@@ -363,7 +362,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
     expect(await res.json()).toEqual({
       error: 'unknown planId "enterprise": the plans catalogue has no such row',
     });
-    // Neither the subscription nor the ledger moved.
+    // note: Neither the subscription nor the ledger moved.
     expect(subscriptionOf(db, "ws-alpha")).toEqual({
       plan_id: "pro",
       status: "active",
@@ -416,7 +415,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
       id: "free",
       includedMembers: 5,
     });
-    // A downgrade never removes anyone.
+    // invariant: A downgrade never removes anyone.
     expect(count(db, "SELECT COUNT(*) AS n FROM workspace_members WHERE workspace_id = 'ws-six'")).toBe(
       6,
     );
@@ -430,7 +429,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
       },
     ]);
 
-    // The existing invite seat guard is what blocks NEW invites.
+    // note: The existing invite seat guard is what blocks NEW invites.
     const blockedInvite = createInvite(
       db,
       {
@@ -450,9 +449,9 @@ describe("PATCH /_internal_admin/api/workspaces/:id/plan", () => {
   });
 });
 
-// --- the slug authoring -----------------------------------------------------
+// note: --- the slug authoring -----------------------------------------------------
 
-/** The stored slug of a workspace row, read raw. */
+/** note: The stored slug of a workspace row, read raw. */
 function slugOf(db: TestD1, workspaceId: string): string | null {
   const row = db.raw
     .prepare("SELECT slug FROM workspaces WHERE id = ?")
@@ -514,7 +513,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
       body: JSON.stringify({ slug: "members" }),
     });
     expect(res.status).toBe(409);
-    // The refusal body is the admin API's `{ error }` shape.
+    // note: The refusal body is the admin API's `{ error }` shape.
     const body = (await res.json()) as { error?: string };
     expect(body.error).toContain("reserved");
     expect(slugOf(db, "ws-alpha")).toBe("ws-alpha");
@@ -525,7 +524,7 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
     insertWorkspace(db, { id: "ws-alpha", name: "Alpha", createdAt: STAMP });
-    // Stored mixed-case by direct insert: the grammar is lowercase-only, so a
+    // invariant: Stored mixed-case by direct insert: the grammar is lowercase-only, so a
     // case-differing attempt is the only way to reach the COLLATE NOCASE guard.
     insertWorkspace(db, { id: "ws-beta", name: "Beta", createdAt: STAMP, slug: "Taken-One" });
 
@@ -569,13 +568,13 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
   });
 
   test("a driver UNIQUE violation maps to slug_taken, any other driver error is rethrown", async () => {
-    // A concurrent writer can slip past the UPDATE's WHERE guards; the slug
+    // note: A concurrent writer can slip past the UPDATE's WHERE guards; the slug
     // index is the last line. Its message is the only conflict signal D1
     // exposes, so the mapping is pinned here — wording drift must fail this
     // test instead of turning into a 500 in production.
     const failingBatch = (message: string): DashboardD1 =>
       ({
-        // The statements are built before `batch` runs; only the batch throws.
+        // invariant: The statements are built before `batch` runs; only the batch throws.
         prepare: () => ({ bind: () => ({}) }),
         batch: async () => {
           throw new Error(message);
@@ -586,14 +585,14 @@ describe("PATCH /_internal_admin/api/workspaces/:id/slug", () => {
     expect(
       await setWorkspaceSlug(failingBatch("D1_ERROR: UNIQUE constraint failed: workspaces.slug"), input),
     ).toEqual({ kind: "slug_taken" });
-    // Any other driver failure is a failure, never a refusal.
+    // invariant: Any other driver failure is a failure, never a refusal.
     await expect(setWorkspaceSlug(failingBatch("D1_ERROR: network unavailable"), input)).rejects.toThrow(
       "network unavailable",
     );
   });
 });
 
-// --- authorization and registration ----------------------------------------
+// note: --- authorization and registration ----------------------------------------
 
 describe("the workspace routes answer only an allowlisted operator on saas", () => {
   test("a member, an unauthenticated caller and the self-hosted mode get 404 with no write", async () => {

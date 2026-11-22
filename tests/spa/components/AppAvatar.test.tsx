@@ -1,5 +1,4 @@
-/**
- * AppAvatar — the App's brand mark on both dashboard surfaces.
+/** note: AppAvatar — the App's brand mark on both dashboard surfaces.
  *
  * The icon URL is derived from the GitHub App id, so it is a plain CDN object
  * that can 404. The contract pinned here is the FALLBACK, which only a DOM
@@ -63,7 +62,7 @@ describe("AppAvatar", () => {
       const svg = mounted.container.querySelector("svg");
       expect(mounted.container.querySelector("img")).toBeNull();
       expect(svg).not.toBeNull();
-      // Same box, so the row height never changes across the swap.
+      // why: Same box, so the row height never changes across the swap.
       expect(mounted.container.firstElementChild?.className).toContain(BOX);
     } finally {
       await mounted.cleanup();
@@ -84,7 +83,7 @@ describe("AppAvatar", () => {
   });
 
   test("a NULL cached avatar is derived from the App id — a real icon on the first load", async () => {
-    // The column is empty (never synced, or synced by a version that could not
+    // invariant: The column is empty (never synced, or synced by a version that could not
     // derive the URL), so the mark comes from the numeric App id on read.
     const mounted = await mount(null, 1234);
     try {

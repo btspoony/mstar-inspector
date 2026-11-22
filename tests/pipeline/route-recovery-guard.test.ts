@@ -1,5 +1,5 @@
 /**
- * Route recovery claim 8 — the guard neither drops a queued retry silently nor
+ * note: Route recovery claim 8 — the guard neither drops a queued retry silently nor
  * reassigns work whose paid state is unknown.
  *
  * "A widened guard does not silently drop a queued retry: either the retry is
@@ -11,7 +11,7 @@
  */
 import { beforeEach, describe, expect, test } from "bun:test";
 
-// Load shim FIRST: a static import of the consumer would be hoisted above it (it
+// note: Load shim FIRST: a static import of the consumer would be hoisted above it (it
 // imports ./sandbox → `cloudflare:workers`, unresolvable in Bun's runner). The
 // module graph under test is loaded dynamically on purpose.
 import "../helpers/cloudflare-workers-mock";
@@ -30,7 +30,7 @@ import {
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import type { AttemptRef } from "../../src/pipeline/review-attempt-execution";
 import type { TestD1 } from "../store/helpers";
-/** The KV the recovery pass writes failed-claim stamps to (a minimal double). */
+/** note: The KV the recovery pass writes failed-claim stamps to (a minimal double). */
 const routeKv = { get: async () => null, put: async () => {}, delete: async () => {} };
 
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
@@ -42,7 +42,7 @@ beforeEach(() => {
 
 const PR = { installation_id: 123, owner: TEST_OWNER, repo: TEST_REPO, pr_number: 42, workspace_id: "default" };
 
-/** A live admission row holding the PR (another attempt's review). */
+/** note: A live admission row holding the PR (another attempt's review). */
 async function seedLiveHolder(db: TestD1, headSha: string): Promise<void> {
   const acquired = await acquireInflight(db as never, PR, {
     systemCap: 32,
@@ -59,10 +59,10 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
   test("the terminal guard drop records the retry the reconciler owes", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: "1111111111111111111111111111111111111111" });
-    // The live review covers a DIFFERENT commit: this delivery is a genuine
+    // note: The live review covers a DIFFERENT commit: this delivery is a genuine
     // drop, not the benign duplicate of the same head.
     await seedLiveHolder(db, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    // Past the last rung of the level's retry ladder.
+    // note: Past the last rung of the level's retry ladder.
     h.queueState.attempts = 6;
     const started: AttemptRef[] = [];
     const consumer = createReviewConsumer(
@@ -78,12 +78,12 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
 
     await consumer(h.makeBatch(payload));
 
-    // The delivery is acked (the guard is not an error) and recorded as dropped.
+    // note: The delivery is acked (the guard is not an error) and recorded as dropped.
     expect(started).toHaveLength(0);
     expect(h.messageAckCalls).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(1);
 
-    // …and the review is OWED: one outbox row carries the delivery, so the
+    // note: …and the review is OWED: one outbox row carries the delivery, so the
     // recovery pass re-enqueues it after the guard has had time to release.
     const owed = await listOwedSuccessors(db as never, 10);
     expect(owed).toHaveLength(1);
@@ -100,7 +100,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     );
     expect(sent).toHaveLength(1);
     expect(sent[0]!.head_sha).toBe(payload.head_sha);
-    // A second recovery pass sends nothing: the row is delivered. (A second
+    // note: A second recovery pass sends nothing: the row is delivered. (A second
     // DROP re-arms it — see the next cases — but a delivered row itself is not
     // re-sent.)
     await reconcileReviewRoute(
@@ -116,7 +116,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
 
   test("a lost comment-triggered delivery is handed back with its claim, so the owed retry can run", async () => {
     const db = await createSeededTestD1();
-    // Capacity is full with another PR, so this comment delivery is refused for
+    // note: Capacity is full with another PR, so this comment delivery is refused for
     // a reason the whole ladder cannot clear.
     db.raw
       .prepare(
@@ -157,7 +157,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
 
     await consumer(h.makeBatch(payload));
 
-    // The claim was handed back (the retry this delivery records could
+    // note: The claim was handed back (the retry this delivery records could
     // otherwise never run), and the retry is owed.
     const claim = db.raw.query("SELECT state, payload_json FROM comment_trigger_claims").get() as {
       state: string;
@@ -167,7 +167,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     expect(JSON.parse(claim.payload_json!)).toEqual(payload);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(1);
 
-    // The recovery pass's re-delivery consumes the claim and runs.
+    // note: The recovery pass's re-delivery consumes the claim and runs.
     const sent: ReviewJobPayload[] = [];
     await reconcileReviewRoute(
       {
@@ -197,7 +197,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     const db = await createSeededTestD1();
     await seedLiveHolder(db, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     h.queueState.attempts = 6;
-    // The outbox write fails: the ack is the promise that recovery exists, so
+    // note: The outbox write fails: the ack is the promise that recovery exists, so
     // it must not be given.
     const failing = {
       prepare(query: string) {
@@ -220,7 +220,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
       { ...h.overrides, startAttempt: async () => {} },
     );
 
-    // The write's own failure surfaces (nothing was acknowledged).
+    // note: The write's own failure surfaces (nothing was acknowledged).
     await expect(
       consumer(h.makeBatch(makePayload({ head_sha: "1111111111111111111111111111111111111111" }))),
     ).rejects.toThrow(/D1 unavailable/);
@@ -251,7 +251,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     expect(sent).toHaveLength(1);
     expect(await listOwedSuccessors(db as never, 10)).toHaveLength(0);
 
-    // The guard still holds through the re-delivery's whole ladder, so it is
+    // note: The guard still holds through the re-delivery's whole ladder, so it is
     // dropped again: the row becomes owed again, or the guard outliving one
     // ladder would lose the review for good.
     await consumer(h.makeBatch(payload));
@@ -267,7 +267,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     const first = await recordGuardDropIntent(db as never, { dedupeKey, payload, nowMs: 1 });
     expect(first.generation).toBe(1);
 
-    // The pass read generation 1. While its send is in flight, the next ladder
+    // note: The pass read generation 1. While its send is in flight, the next ladder
     // drops the delivery again and re-arms the row (generation 2).
     const sent: ReviewJobPayload[] = [];
     const env = {
@@ -282,14 +282,14 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
     };
     await reconcileReviewRoute(env, Date.now());
 
-    // The delivered mark of the STALE generation must not bury the re-arm.
+    // note: The delivered mark of the STALE generation must not bury the re-arm.
     expect(await successorGeneration(db as never, dedupeKey)).toBe(2);
     const owed = await listOwedSuccessors(db as never, 10);
     expect(owed).toHaveLength(1);
     expect(owed[0]!.generation).toBe(2);
     expect(await markSuccessorDelivered(db as never, dedupeKey, 1, Date.now())).toBe(false);
 
-    // The next pass sends the fresh generation — which this test's send hook
+    // note: The next pass sends the fresh generation — which this test's send hook
     // re-arms again, so the row keeps its obligation instead of being buried.
     await reconcileReviewRoute(env, Date.now() + 1_000);
     expect(sent).toHaveLength(2);
@@ -301,7 +301,7 @@ describe("claim 8 — a dropped retry is owed, never ack-and-forget", () => {
 describe("claim 8 — an unknown paid state holds the PR and its capacity", () => {
   test("an expired lease whose paid exec is unaccounted for is not replaced", async () => {
     const db = await createSeededTestD1();
-    // The attempt was launched and nothing says it stopped: its admission row
+    // note: The attempt was launched and nothing says it stopped: its admission row
     // has expired, but the paid state is unknown.
     const expired = await acquireInflight(db as never, PR, {
       systemCap: 32,
@@ -331,7 +331,7 @@ describe("claim 8 — an unknown paid state holds the PR and its capacity", () =
       },
     );
 
-    // Another delivery for the same PR (a newer head) is HELD — expiry only
+    // note: Another delivery for the same PR (a newer head) is HELD — expiry only
     // schedules a check, never a replacement run.
     await consumer(h.makeBatch(makePayload({ head_sha: "3333333333333333333333333333333333333333" })));
     expect(started).toHaveLength(0);

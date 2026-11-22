@@ -53,8 +53,7 @@ const renderBar = () =>
     </BarChart>,
   );
 
-/**
- * Real series geometry = a rect whose x/y are present (any coordinate) and
+/** note: Real series geometry = a rect whose x/y are present (any coordinate) and
  * whose height is a positive integer — a zero-height rect is the animation
  * initial-frame / empty-data face this pin exists to exclude.
  */
@@ -68,7 +67,7 @@ describe("recharts pin probe", () => {
     const html = renderBar();
     expect(html).toContain('class="recharts-surface" width="520" height="200"');
     expect(html).toContain('viewBox="0 0 520 200"');
-    // The 3.x failure shape, byte-for-byte excluded: an empty wrapper div
+    // note: The 3.x failure shape, byte-for-byte excluded: an empty wrapper div
     // with no <svg> at all.
     expect(html).toContain("<svg");
   });
@@ -76,7 +75,7 @@ describe("recharts pin probe", () => {
   test("bars render as real series geometry — rect with non-empty x/y/height and data-driven labels", () => {
     const html = renderBar();
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
-    // The datum flowed the full pipeline: the severity series labels render
+    // note: The datum flowed the full pipeline: the severity series labels render
     // as axis tick text, not just geometry from nowhere.
     expect(html).toContain("must-fix");
     expect(html).toContain("should-fix");
@@ -85,7 +84,7 @@ describe("recharts pin probe", () => {
 
   test("the pin path never routes through ResponsiveContainer — fixed dimensions only", () => {
     const html = renderBar();
-    // Kebab-case only: recharts 3.x's empty-wrapper face carries a
+    // invariant: Kebab-case only: recharts 3.x's empty-wrapper face carries a
     // responsive-container class; the camelCase component name can never
     // appear in markup (tautological — dropped, qc3-S-4).
     expect(html).not.toContain("responsive-container");
@@ -99,7 +98,7 @@ describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
   ];
 
   test("the static/SSR face renders at the fixed 560 default — no viewBox upscale", () => {
-    // Server render never measures (no effects run, ResizeObserver is not
+    // invariant: Server render never measures (no effects run, ResizeObserver is not
     // consulted): the designed 560×166 face the geometry pins ride.
     expect(DEFAULT_CHART_WIDTH).toBe(560);
     const html = renderToStaticMarkup(
@@ -114,7 +113,7 @@ describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
     expect(html).toContain('viewBox="0 0 560 166"');
   });
 
-  /** Minimal ResizeObserver stub — records the observed target and calls. */
+  /** note: Minimal ResizeObserver stub — records the observed target and calls. */
   class StubResizeObserver {
     static instances: StubResizeObserver[] = [];
     callback: ResizeObserverCallback;
@@ -142,14 +141,14 @@ describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
       const el = { nodeType: 1 } as unknown as HTMLElement;
       const detach = attachWidthObserver(el, (w) => reported.push(w));
 
-      // The container is observed exactly once.
+      // invariant: The container is observed exactly once.
       const stub = StubResizeObserver.instances.at(-1)!;
       expect(stub.observed).toBe(el);
 
-      // A real reading flows through, rounded to whole pixels.
+      // note: A real reading flows through, rounded to whole pixels.
       stub.callback([{ contentRect: { width: 943.6, height: 166 } } as ResizeObserverEntry], stub);
       expect(reported).toEqual([944]);
-      // A zero reading (hidden/detached container) is ignored — the face holds.
+      // invariant: A zero reading (hidden/detached container) is ignored — the face holds.
       stub.callback([{ contentRect: { width: 0 } } as ResizeObserverEntry], stub);
       expect(reported).toEqual([944]);
 
@@ -177,8 +176,7 @@ describe("measured-width pin (v0.3.4 — true-size chart rendering)", () => {
   });
 });
 
-/**
- * Window-bucketing contract (2026-09-20) — the trend card's buckets:
+/** note: Window-bucketing contract (2026-09-20) — the trend card's buckets:
  * `insightsTrendPoints` picks the source per window (day windows read the
  * zero-filled `daily_trend`; week windows zero-fill the frozen
  * `weekly_trend` over the `findings_distribution` grid) and the chart
@@ -196,7 +194,7 @@ const trendFixture = (overrides: Partial<InsightsSummary>): InsightsSummary => (
   ...overrides,
 });
 
-/** A 30-day window: the zero-filled day grid rides `daily_trend` (weekly_trend present but ignored). */
+/** note: A 30-day window: the zero-filled day grid rides `daily_trend` (weekly_trend present but ignored). */
 const DAY_WINDOW = trendFixture({
   window_days: 30,
   weekly_trend: [{ week_start: "2026-01-05", reviews: 99, findings: 99 }],
@@ -207,7 +205,7 @@ const DAY_WINDOW = trendFixture({
   ],
 });
 
-/** A 90-day window: raw `weekly_trend` buckets + the distribution week grid with an empty middle week. */
+/** note: A 90-day window: raw `weekly_trend` buckets + the distribution week grid with an empty middle week. */
 const WEEK_WINDOW = trendFixture({
   window_days: 90,
   weekly_trend: [
@@ -240,7 +238,7 @@ describe("insightsTrendPoints (window-bucketing contract)", () => {
 
   test("week windows (31–90) zero-fill weekly_trend over the findings_distribution grid", () => {
     const points = insightsTrendPoints(WEEK_WINDOW);
-    // Same bucket count as the stacked charts; the empty week renders as a
+    // note: Same bucket count as the stacked charts; the empty week renders as a
     // 0/0 bucket, covered weeks overlay their counts, grid order rules.
     expect(points).toHaveLength(WEEK_WINDOW.findings_distribution.length);
     expect(points).toEqual([
@@ -251,17 +249,17 @@ describe("insightsTrendPoints (window-bucketing contract)", () => {
   });
 
   test("the > 30 predicate mirrors the store's granularity derivation — sources never mix", () => {
-    // 30 on week-shaped data → day path (daily_trend) — the weekly rows
+    // note: 30 on week-shaped data → day path (daily_trend) — the weekly rows
     // and grid never leak into a day window.
     expect(insightsTrendPoints({ ...WEEK_WINDOW, window_days: 30 })).toEqual([]);
-    // 31 (legal direct-URL window) on day-shaped data → week path (the
+    // note: 31 (legal direct-URL window) on day-shaped data → week path (the
     // grid) — the daily rows never leak into a week window.
     expect(insightsTrendPoints({ ...DAY_WINDOW, window_days: 31 })).toEqual([]);
   });
 });
 
 describe("trend card static render (day and week window faces)", () => {
-  // The exact consumption form AppInsightsTab ships: helper output mapped
+  // note: The exact consumption form AppInsightsTab ships: helper output mapped
   // onto TrendPoint (the `week` field carries the bucket start).
   const renderTrend = (points: InsightsTrendPoint[]) =>
     renderToStaticMarkup(
@@ -279,7 +277,7 @@ describe("trend card static render (day and week window faces)", () => {
     expect(html).toContain('viewBox="0 0 560 166"');
     expect(html).not.toContain("responsive-container");
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
-    // The zero-findings day keeps its grid slot on the pinned M/D axis —
+    // note: The zero-findings day keeps its grid slot on the pinned M/D axis —
     // tick text even without positive-height bars.
     expect(html).toContain("9/9");
   });
@@ -290,7 +288,7 @@ describe("trend card static render (day and week window faces)", () => {
     expect(html).toContain('height="166"');
     expect(html).not.toContain("responsive-container");
     expect(geometryRects(html).length).toBeGreaterThanOrEqual(1);
-    // The 0/0 empty week keeps its grid slot (time continuity) — labeled,
+    // note: The 0/0 empty week keeps its grid slot (time continuity) — labeled,
     // while only covered weeks contribute geometry.
     expect(html).toContain("9/7");
   });

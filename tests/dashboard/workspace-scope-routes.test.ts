@@ -1,5 +1,5 @@
 /**
- * The two workspace-scope read faces, driven through
+ * why: The two workspace-scope read faces, driven through
  * the real worker mount:
  *
  *   GET /dashboard/<ref>/api/insights/summary
@@ -53,7 +53,7 @@ function seedWorkspace(db: TestD1, id: string, login: string, role = "owner"): v
     login,
     "2026-10-01T00:00:00.000Z",
   );
-  // The manage rule is the workspace role: a plain member would 403.
+  // why: The manage rule is the workspace role: a plain member would 403.
   seed(
     db,
     "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES (?, ?, ?, ?)",
@@ -113,7 +113,7 @@ async function get(db: TestD1, path: string, login: string): Promise<Response> {
 }
 
 /**
- * `ws-two` owns two live targets on two bots (two repositories, one review and
+ * note: `ws-two` owns two live targets on two bots (two repositories, one review and
  * one ledger row each). `ws-empty` owns a bot but no target yet.
  */
 function fixture(): TestD1 {
@@ -227,7 +227,7 @@ describe("GET /dashboard/<ref>/api/pull-requests/:owner/:repo/:number (workspace
     seedPullRequest(db, widgets, "bot-one", "acme", "widgets", 1);
     seedPullRequest(db, own, "bot-foreign", "acme", "portal", 2);
 
-    // Both callers are managers of their own workspace, so only the SCOPE can
+    // why: Both callers are managers of their own workspace, so only the SCOPE can
     // decide: frank's own PR reads 200, the same address under dana's workspace
     // is dana's 200, and a foreign workspace asking for it is a 404.
     expect((await get(db, "ws-foreign/api/pull-requests/acme/portal/2", "frank")).status).toBe(200);

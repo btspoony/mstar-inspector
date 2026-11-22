@@ -1,5 +1,4 @@
-/**
- * I-000644: the declared-provider model sync. A template / custom declaration's
+/** note: I-000644: the declared-provider model sync. A template / custom declaration's
  * stored `model_ids` is what every fallback chain actually runs, so the card, the
  * picker and the sync all speak about this ONE list.
  *
@@ -66,8 +65,7 @@ function makeEnv(db: unknown): Env {
   } as Env;
 }
 
-/**
- * One declared provider with the given stored vocabulary, and a key pool that
+/** note: One declared provider with the given stored vocabulary, and a key pool that
  * is either empty (`withKey: false` — the keyless template provider) or holds
  * the seed credential. A keyless pool is reached by declaring with a key and
  * then deleting it, because the store refuses to create a declaration with no
@@ -109,7 +107,7 @@ async function preview(login: string, env: Env, provider: string): Promise<Respo
   );
 }
 
-/** A provider response shaped like the live commandcode endpoint. */
+/** note: A provider response shaped like the live commandcode endpoint. */
 function mockVocabulary(entries: Array<{ id: string; supported_endpoints?: string[] }>): ReturnType<typeof spyOn> {
   return spyOn(globalThis, "fetch").mockImplementation((async () =>
     new Response(JSON.stringify({ object: "list", data: entries }), {
@@ -118,7 +116,7 @@ function mockVocabulary(entries: Array<{ id: string; supported_endpoints?: strin
     })) as unknown as typeof fetch);
 }
 
-/** The live commandcode vocabulary, both dialects, as measured. */
+/** note: The live commandcode vocabulary, both dialects, as measured. */
 const LIVE = [
   { id: "deepseek/deepseek-v4-pro", supported_endpoints: ["/chat/completions", "/responses"] },
   { id: "Qwen/Qwen3.8-Max", supported_endpoints: ["/chat/completions"] },
@@ -140,7 +138,7 @@ describe("provider model sync (I-000644)", () => {
 
   test("a keyless provider syncs: the fetched list replaces the stored one, ids verbatim", async () => {
     const { db, app, store } = await seededWorld();
-    // Declared with NO key at all — the endpoint answers unauthenticated.
+    // note: Declared with NO key at all — the endpoint answers unauthenticated.
     await declare(store, app.id, { ...COMMANDCODE, model_ids: ["stale-a", "stale-b"] }, false);
     const outbound: RequestInit[] = [];
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (_u: string, init?: RequestInit) => {
@@ -154,10 +152,10 @@ describe("provider model sync (I-000644)", () => {
     const res = await post("mallory", makeEnv(db), { op: "sync-provider-models", provider: "commandcode" });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Synced 2 models for commandcode");
-    // No credential was invented for a keyless pool.
+    // safety: No credential was invented for a keyless pool.
     expect(new Headers(outbound[0]?.headers).get("authorization")).toBeNull();
 
-    // The messages-only Claude id is NOT stored on a chat-completions
+    // invariant: The messages-only Claude id is NOT stored on a chat-completions
     // declaration, and the two chat ids keep the provider's own spelling.
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["deepseek/deepseek-v4-pro", "Qwen/Qwen3.8-Max"]);
@@ -262,7 +260,7 @@ describe("provider model sync (I-000644)", () => {
       added: 1,
       dropped: 2,
     });
-    // A preview is a read: the stored list is exactly what it was.
+    // invariant: A preview is a read: the stored list is exactly what it was.
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["deepseek/deepseek-v4-pro", "stale-a", "stale-b"]);
   });

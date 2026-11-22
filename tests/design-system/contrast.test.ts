@@ -1,5 +1,5 @@
 /**
- * The chart fill contrast link — WCAG 1.4.11's 3:1 bar for a chart fill.
+ * why: The chart fill contrast link — WCAG 1.4.11's 3:1 bar for a chart fill.
  *
  * `I-000232` was reported once before and closed on an arithmetic error, so
  * the guard is pinned twice over: the shipped ratios are read through
@@ -36,7 +36,7 @@ describe("chart fill contrast", () => {
         CHART_CONTRAST_MIN,
       );
     }
-    // The margin the lift bought: the inset face is the tightest at 3.020:1,
+    // why: The margin the lift bought: the inset face is the tightest at 3.020:1,
     // where the shared #2563a8 measured 2.696:1.
     expect(measure("dark", "chart-5", "surface-inset")).toBeCloseTo(3.02, 2);
   });
@@ -46,7 +46,7 @@ describe("chart fill contrast", () => {
       ...resolveTheme(theme).semantic,
       "chart-5": "#1c4a80",
     }));
-    // Same hue family, darker: below the bar on all three dark surfaces, while
+    // why: Same hue family, darker: below the bar on all three dark surfaces, while
     // the light page still clears it — so the failure names the pairs.
     expect(
       chartContrastFailures(muted).map(({ theme, fill, backdrop }) => `${theme}:${fill}@${backdrop}`),
@@ -62,7 +62,7 @@ describe("chart fill contrast", () => {
   });
 
   test("the thin pairs are measured, so an eroding margin is a visible diff", () => {
-    // The two thinnest declared pairs after the lift: light chart-3 (3.186:1 on
+    // why: The two thinnest declared pairs after the lift: light chart-3 (3.186:1 on
     // the page white) and dark chart-5 on the page canvas (3.580:1).
     expect(measure("light", "chart-3", "surface-page")).toBeCloseTo(3.186, 2);
     expect(measure("dark", "chart-5", "surface-page")).toBeCloseTo(3.58, 2);

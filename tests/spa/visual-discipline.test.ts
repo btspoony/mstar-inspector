@@ -1,5 +1,4 @@
-/**
- * Visual discipline guard for hand-written source (2026-10).
+/** note: Visual discipline guard for hand-written source (2026-10).
  *
  * The scanned files must not carry raw colour literals, bracket-syntax
  * arbitrary values, default-palette Tailwind utilities, or a border width with
@@ -68,17 +67,16 @@ import { PALETTE_UTILITY_SOURCE } from "../helpers/tailwind-palette";
 const REPO = new URL("../../", import.meta.url).pathname;
 
 const SPA_DIR = join(REPO, "src/spa");
-/**
- * The design-system primitives — the one directory whose class strings a page
+/** note: The design-system primitives — the one directory whose class strings a page
  * does not restyle. Its own root, so a site there is reachable (I-000260).
  */
 const PRIMITIVES_DIR = join(REPO, "src/design-system/primitives");
-/** The one stylesheet the token source derives — the gate's link 1 owns it. */
+/** note: The one stylesheet the token source derives — the gate's link 1 owns it. */
 const GENERATED_STYLESHEET = "styles/tokens.css";
-/** A file that can carry a class string or a colour. */
+/** note: A file that can carry a class string or a colour. */
 const COLOUR_SOURCE = /\.(?:tsx?|css|html)$/;
 
-/** Every hand-written colour-carrying file under `root`, derived not listed. */
+/** note: Every hand-written colour-carrying file under `root`, derived not listed. */
 function colourSources(root: string = SPA_DIR): string[] {
   return listFiles(root)
     .filter((file) => COLOUR_SOURCE.test(file))
@@ -105,16 +103,15 @@ const TARGETS = [...SPA_TARGETS, ...PRIMITIVE_TARGETS];
  */
 const ARBITRARY_COLOUR = /\[(#[0-9a-fA-F]{3,8})/g;
 const ARBITRARY_GEOMETRY = /\[(\d+px|calc\(|color-mix\()/g;
-/** The two DESIGN.md Spacing & Layout page measures — the one documented
+/** note: The two DESIGN.md Spacing & Layout page measures — the one documented
  * arbitrary pair. `scanContent` strips them from every page target, so the
  * count pin below holds them to their single `Layout.tsx` site. */
 const DOCUMENTED_MEASURE = /max-w-\[(?:960|1200)px\]/g;
-/** Bare hex, excluding hex used inside rgba(/hsl( function arguments. */
+/** note: Bare hex, excluding hex used inside rgba(/hsl( function arguments. */
 const HEX_OUTSIDE_FN = /#[0-9a-fA-F]{3,8}\b/g;
-/** rgba(/hsl( argument spans stripped before the hex rule runs. */
+/** invariant: rgba(/hsl( argument spans stripped before the hex rule runs. */
 const FN_SPAN = /\b(?:rgba|hsl)a?\([^)]*\)/g;
-/**
- * Default-palette Tailwind colour utility: `text-red-500`, `bg-zinc-100`,
+/** note: Default-palette Tailwind colour utility: `text-red-500`, `bg-zinc-100`,
  * `border-slate-700`, `border-t-red-500`. The utility prefix is part of the
  * pattern, so a token that merely carries a palette name
  * (`bg-(--gray-200)`) cannot match.
@@ -126,19 +123,19 @@ const FN_SPAN = /\b(?:rgba|hsl)a?\([^)]*\)/g;
  */
 const PALETTE_UTILITY = new RegExp(PALETTE_UTILITY_SOURCE, "g");
 
-/** Allow-list: starts empty. A hit here must be a proven false positive. */
+/** invariant: Allow-list: starts empty. A hit here must be a proven false positive. */
 const ALLOW: string[] = [];
 
 type GuardRule = { label: string; re: RegExp; strip?: RegExp };
 
-/** The colour vocabulary — every scanned file answers to these. */
+/** note: The colour vocabulary — every scanned file answers to these. */
 const COLOUR_RULES: GuardRule[] = [
   { label: "arbitrary-value", re: ARBITRARY_COLOUR },
   { label: "colour-literal", re: HEX_OUTSIDE_FN, strip: FN_SPAN },
   { label: "palette-utility", re: PALETTE_UTILITY },
 ];
 
-/** The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY.
+/** note: The page layer owns no geometry of its own either — see ARBITRARY_GEOMETRY.
  * Exception: the two DOCUMENTED_MEASURE page widths, which the pin below holds
  * to their one `Layout.tsx` site. */
 const PAGE_RULES: GuardRule[] = [
@@ -146,16 +143,15 @@ const PAGE_RULES: GuardRule[] = [
   ...COLOUR_RULES,
 ];
 
-/** A primitive answers the colour vocabulary (its geometry is its own job). */
+/** note: A primitive answers the colour vocabulary (its geometry is its own job). */
 const PRIMITIVES_RULES = COLOUR_RULES;
 
-/**
- * A quoted class string: `className="…"`, `cn("…")`, `class="…"`. The quote
+/** note: A quoted class string: `className="…"`, `cn("…")`, `class="…"`. The quote
  * may not follow a word character, so a prose apostrophe (`don't`) never opens
  * a literal.
  */
 const CLASS_LITERAL = /(?<![\w$])(["'`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
-/** `border` / `border-{side}`: width only, so preflight leaves the colour currentColor. */
+/** invariant: `border` / `border-{side}`: width only, so preflight leaves the colour currentColor. */
 const BARE_BORDER = /^border(?:-[trblsexy])?$/;
 const BORDER_SIDE = /^[trblsexy]$/;
 const BORDER_WIDTH_VALUE = /^(?:\d+|px|thin|medium|thick|\[[^\]]*\])$/;
@@ -168,7 +164,7 @@ const BORDER_STYLE = /^(?:solid|dashed|dotted|double|none|hidden|collapse|separa
  */
 const COMMENT = /\/\*[\s\S]*?\*\/|(?<!:)\/\/[^\n]*/g;
 
-/** Variant prefixes: `hover:`, `after:`, `md:`, `data-[x]:`, `[&:not(:last-child)]:`. */
+/** invariant: Variant prefixes: `hover:`, `after:`, `md:`, `data-[x]:`, `[&:not(:last-child)]:`. */
 function stripVariants(token: string): string {
   let current = token;
   for (;;) {
@@ -178,7 +174,7 @@ function stripVariants(token: string): string {
   }
 }
 
-/** A token that names a border colour rather than a width, side or style. */
+/** note: A token that names a border colour rather than a width, side or style. */
 function isBorderColour(token: string): boolean {
   const match = /^border-(?:(?:t|r|b|l|s|e|x|y)-)?(.+)$/.exec(token);
   if (match === null) return false;
@@ -186,8 +182,7 @@ function isBorderColour(token: string): boolean {
   return !(BORDER_SIDE.test(suffix) || BORDER_WIDTH_VALUE.test(suffix) || BORDER_STYLE.test(suffix));
 }
 
-/**
- * A border-width utility with no colour in the same class string. `border`
+/** note: A border-width utility with no colour in the same class string. `border`
  * and `border-{side}` set a width only; with no colour named, preflight leaves
  * `border-color: currentColor`, which is the shape I-000235 shipped seven of.
  * The unit is the class string, not the token: `border-b border-border`,
@@ -239,20 +234,20 @@ function scanContent(content: string, file: string, rules: GuardRule[] = PAGE_RU
 describe("visual discipline guard", () => {
   test("matcher pairs: violations match, compliant token and scale forms do not", () => {
     const matched = (line: string) => scanContent(line, "fixture.tsx").map((v) => v.text);
-    // must match (bracket syntax)
-    expect(matched(`<div className="bg-[#1a2b3c]" />`)).toEqual(["[#1a2b3c", "#1a2b3c"]); // both rules fire on one literal
+    // invariant: must match (bracket syntax)
+    expect(matched(`<div className="bg-[#1a2b3c]" />`)).toEqual(["[#1a2b3c", "#1a2b3c"]); // note: both rules fire on one literal
     expect(matched(`<div className="w-[17px]" />`)).toEqual(["[17px"]);
     expect(matched(`<div className="w-[calc(100%-1rem)]" />`)).toEqual(["[calc("]);
     expect(matched(`<div className="bg-[color-mix(in_srgb,red,blue)]" />`)).toEqual(["[color-mix("]);
     expect(matched(`style={{ color: "#fff" }}`)).toEqual(["#fff"]);
-    // must match (default palette utility)
+    // invariant: must match (default palette utility)
     expect(matched(`<div className="text-red-500 bg-zinc-100 border-slate-700" />`)).toEqual([
       "text-red-500",
       "bg-zinc-100",
       "border-slate-700",
     ]);
     expect(matched(`<div className="hover:bg-rose-50" />`)).toEqual(["bg-rose-50"]);
-    // must match (v4 colour-bearing shadow/ring families — each emits
+    // invariant: must match (v4 colour-bearing shadow/ring families — each emits
     // --tw-*-color; a bare `shadow`/`ring` prefix would miss them)
     expect(
       matched(
@@ -267,30 +262,30 @@ describe("visual discipline guard", () => {
       "inset-ring-red-500",
       "scrollbar-thumb-red-500",
     ]);
-    // must NOT match; the shadow/ring SIZE utilities carry no colour
+    // invariant: must NOT match; the shadow/ring SIZE utilities carry no colour
     expect(
       matched(`<div className="shadow-sm inset-shadow-xs ring-offset-2 drop-shadow-lg ring-2" />`),
     ).toEqual([]);
-    // must NOT match; token forms of the same families
+    // invariant: must NOT match; token forms of the same families
     expect(matched(`<div className="shadow-(--shadow-contact) ring-offset-(--gray-200)" />`)).toEqual([]);
-    // must NOT match
+    // invariant: must NOT match
     expect(matched(`<div className="p-4 gap-2 grid-cols-3 -translate-y-1" />`)).toEqual([]);
-    expect(matched(`<div className="after:bottom-[-2px]" />`)).toEqual([]); // `[` followed by `-`, not a digit; same for CSS-var shorthand like text-(length:--typo-…)
-    // must NOT match; the token forms the repo actually uses
+    expect(matched(`<div className="after:bottom-[-2px]" />`)).toEqual([]); // invariant: `[` followed by `-`, not a digit; same for CSS-var shorthand like text-(length:--typo-…)
+    // invariant: must NOT match; the token forms the repo actually uses
     expect(
       matched(`<div className="bg-(--gray-200) text-(--gray-700) border-(--gray-400)" />`),
     ).toEqual([]);
-    // must NOT match; the two DESIGN.md Spacing & Layout page measures are the
+    // invariant: must NOT match; the two DESIGN.md Spacing & Layout page measures are the
     // documented arbitrary pair (Layout.tsx content column), not hand-rolled geometry
     expect(matched(`<div className={\`mx-auto w-full \${wide ? "max-w-[1200px]" : "max-w-[960px]"}\`} />`)).toEqual([]);
-    expect(matched(`<div className="text-(--brand-700) brand-700" />`)).toEqual([]); // brand is not a default palette name
+    expect(matched(`<div className="text-(--brand-700) brand-700" />`)).toEqual([]); // note: brand is not a default palette name
     // must NOT match; the rgba(/hsl( stripper is load-bearing here — #223 is a valid 3-digit hex
     expect(matched(`style={{ color: "rgba(255,255,255,0.5)", borderColor: "hsl(#223 3% 4%)" }}`)).toEqual([]);
-    expect(matched(`// #abcdef in a comment is still a violation`)).toEqual(["#abcdef"]); // guard: comments are not exempt
+    expect(matched(`// #abcdef in a comment is still a violation`)).toEqual(["#abcdef"]); // note: guard: comments are not exempt
   });
 
   test("border-axis palette forms: border-t-red-500 and divide-x-red-500 matched neither matcher before I-000255; the shared source now rejects every spelling", () => {
-    // The previous source required the family immediately after a bare prefix,
+    // invariant: The previous source required the family immediately after a bare prefix,
     // so the side/span spellings below passed the source scan, the
     // rendered-attribute scan and the component class list alike.
     const matched = (line: string) => scanContent(line, "fixture.tsx").map((v) => v.text);
@@ -298,20 +293,20 @@ describe("visual discipline guard", () => {
     expect(matched(`<div className="border-x-slate-700" />`)).toEqual(["border-x-slate-700"]);
     expect(matched(`<div className="border-e-gray-100" />`)).toEqual(["border-e-gray-100"]);
     expect(matched(`<div className="divide-x-red-500" />`)).toEqual(["divide-x-red-500"]);
-    // The bare black/white spelling takes the axis too.
+    // note: The bare black/white spelling takes the axis too.
     expect(matched(`<div className="border-t-black" />`)).toEqual(["border-t-black"]);
-    // StatusBadge compiles the same source without flags — the axis forms are
+    // note: StatusBadge compiles the same source without flags — the axis forms are
     // caught there too, not only in this guard.
     const noFlags = new RegExp(PALETTE_UTILITY_SOURCE);
     expect(noFlags.test("border-t-red-500")).toBe(true);
     expect(noFlags.test("divide-x-red-500")).toBe(true);
-    // Previously-catchable forms stay caught, and token forms stay clean.
+    // note: Previously-catchable forms stay caught, and token forms stay clean.
     expect(matched(`<div className="border-slate-700" />`)).toEqual(["border-slate-700"]);
     expect(matched(`<div className="border-t-(--border-subtle) divide-x-(--border-subtle)" />`)).toEqual([]);
   });
 
   test("bare black/white across the whole colour series: shadow-black and caret-black passed the nine-prefix clause; every series prefix is rejected now", () => {
-    // The previous black/white clause listed nine prefixes, so the rest of the
+    // why: The previous black/white clause listed nine prefixes, so the rest of the
     // series — the very prefixes the family clause carries — passed every
     // guard while painting a palette step.
     const matched = (line: string) => scanContent(line, "fixture.tsx").map((v) => v.text);
@@ -324,11 +319,11 @@ describe("visual discipline guard", () => {
     expect(matched(`<div className="scrollbar-thumb-black" />`)).toEqual(["scrollbar-thumb-black"]);
     expect(matched(`<div className="scrollbar-track-white" />`)).toEqual(["scrollbar-track-white"]);
     expect(matched(`<div className="ring-offset-white" />`)).toEqual(["ring-offset-white"]);
-    // The side/span axis applies to black/white too: `divide-x-black` and
+    // note: The side/span axis applies to black/white too: `divide-x-black` and
     // `divide-y-white` matched neither clause while painting a palette step.
     expect(matched(`<div className="divide-x-black" />`)).toEqual(["divide-x-black"]);
     expect(matched(`<div className="divide-y-white" />`)).toEqual(["divide-y-white"]);
-    // The nine the clause already carried stay caught; size and shadow-scale
+    // note: The nine the clause already carried stay caught; size and shadow-scale
     // utilities do not become false positives.
     expect(matched(`<div className="bg-black text-white border-black" />`)).toEqual([
       "bg-black",
@@ -336,7 +331,7 @@ describe("visual discipline guard", () => {
       "border-black",
     ]);
     expect(matched(`<div className="shadow-sm inset-shadow-xs ring-offset-2" />`)).toEqual([]);
-    // StatusBadge compiles the same source without flags.
+    // note: StatusBadge compiles the same source without flags.
     expect(new RegExp(PALETTE_UTILITY_SOURCE).test("shadow-black")).toBe(true);
     expect(new RegExp(PALETTE_UTILITY_SOURCE).test("caret-white")).toBe(true);
   });
@@ -352,7 +347,7 @@ describe("visual discipline guard", () => {
       "[&:not(:last-child)]:border-b",
     ]);
     expect(rejected(`<div className="border-t" />`)).toEqual(["border-t"]);
-    // A colour in the same class string clears the finding — the unit is the
+    // note: A colour in the same class string clears the finding — the unit is the
     // string, not the individual token.
     expect(rejected(`<div className="border-b border-border" />`)).toEqual([]);
     expect(rejected(`<div className="border border-(--border-default)" />`)).toEqual([]);
@@ -360,14 +355,14 @@ describe("visual discipline guard", () => {
     expect(
       rejected(`<div className={cn(TABLE_COLS, "border-(--border-subtle) px-4 py-3 [&:not(:last-child)]:border-b")} />`),
     ).toEqual([]);
-    // Widths that are not the bare side spellings are out of this rule's shape.
+    // note: Widths that are not the bare side spellings are out of this rule's shape.
     expect(rejected(`<div className="border-2" />`)).toEqual([]);
-    // Prose quoting the word is not a class string: comments are blanked first.
+    // note: Prose quoting the word is not a class string: comments are blanked first.
     expect(rejected(`// a bare \`border\` carries width only`)).toEqual([]);
-    // A no-space trailing comment must not eat the closing quote: the previous
+    // invariant: A no-space trailing comment must not eat the closing quote: the previous
     // stripper blanked the character before `//`, so this violation escaped.
     expect(rejected(`const cls = "border"//no colour named`)).toEqual(["border"]);
-    // The `//` of a URL is not a comment opener, so its line stays intact.
+    // invariant: The `//` of a URL is not a comment opener, so its line stays intact.
     expect(rejected(`const url = "https://example.test"; cn("border")`)).toEqual(["border"]);
   });
 
@@ -383,7 +378,7 @@ describe("visual discipline guard", () => {
       const targets = colourSources(root);
       expect(targets).toContain(join(root, "components/Seeded.tsx"));
       expect(targets).toContain(join(root, "styles/fonts.css"));
-      // The generated stylesheet is link 1's to prove, not this scan's to repeat.
+      // note: The generated stylesheet is link 1's to prove, not this scan's to repeat.
       expect(targets).not.toContain(join(root, "styles/tokens.css"));
       const found = targets.flatMap((file) => scanContent(readFileSync(file, "utf8"), relative(root, file)));
       expect(found.map((v) => v.text)).toEqual(["text-red-500", "#fff"]);
@@ -391,7 +386,7 @@ describe("visual discipline guard", () => {
       rmSync(root, { recursive: true, force: true });
     }
 
-    // The real tree: the two directories the hand list omitted are targets, and
+    // note: The real tree: the two directories the hand list omitted are targets, and
     // the generated stylesheet is not.
     expect(TARGETS.length).toBeGreaterThan(0);
     expect(TARGETS).toContain(join(SPA_DIR, "components/state/PageSkeleton.tsx"));
@@ -400,7 +395,7 @@ describe("visual discipline guard", () => {
   });
 
   test("the primitives root is walked, and a bare border seeded there is caught", () => {
-    // The guard used to describe `src/spa` as its whole surface, so the nine
+    // why: The guard used to describe `src/spa` as its whole surface, so the nine
     // colourless border sites I-000260 recorded under the primitives were
     // unreachable: the header claimed a rule the walk never applied there.
     const root = mkdtempSync(join(tmpdir(), "colour-primitives-"));
@@ -417,21 +412,21 @@ describe("visual discipline guard", () => {
       rmSync(root, { recursive: true, force: true });
     }
 
-    // …and the shipped tree really is on that walk: the coverage is the tree's,
+    // note: …and the shipped tree really is on that walk: the coverage is the tree's,
     // not the header's.
     expect(TARGETS).toContain(join(PRIMITIVES_DIR, "dialog.tsx"));
     expect(TARGETS).toContain(join(PRIMITIVES_DIR, "sheet.tsx"));
   });
 
   test("the documented measure exemption reaches one Layout.tsx site: the pair occurs there and nowhere else", () => {
-    // The geometry rule strips DOCUMENTED_MEASURE from every page target, so
+    // note: The geometry rule strips DOCUMENTED_MEASURE from every page target, so
     // without this pin a page could hand-roll `max-w-[960px]` and stay green.
     const hits = SPA_TARGETS.flatMap((file) =>
       Array.from(readFileSync(file, "utf8").matchAll(new RegExp(DOCUMENTED_MEASURE)), (match) =>
         `${relative(SPA_DIR, file)}:${match[0]}`,
       ),
     );
-    // The pin is the SET of hits: one site, both measures, no other file. The
+    // note: The pin is the SET of hits: one site, both measures, no other file. The
     // order the two literals appear in inside that one expression is not the
     // contract, so a swap there must stay green.
     const expected = ["Layout.tsx:max-w-[1200px]", "Layout.tsx:max-w-[960px]"];

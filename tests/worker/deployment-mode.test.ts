@@ -1,5 +1,4 @@
-/**
- * `DEPLOYMENT_MODE` — the deployment-shape switch (2026-10).
+/** note: `DEPLOYMENT_MODE` — the deployment-shape switch (2026-10).
  *
  * It decides ONE product question: does a deployment with no accounts yet
  * tell its first signer-in that this sign-in created the first account? The
@@ -34,12 +33,12 @@ const CLIENT_SECRET = "oauth-client-secret";
 
 const INVALID_MODE_MESSAGE = 'DEPLOYMENT_MODE must be "self-hosted" or "saas", received';
 
-/** A migrated store with NO accounts — the empty-instance fixture. */
+/** note: A migrated store with NO accounts — the empty-instance fixture. */
 function emptyInstance(): TestD1 {
   return createMigratedTestD1();
 }
 
-/** The same store with one existing account (the "populated table" row of the matrix). */
+/** note: The same store with one existing account (the "populated table" row of the matrix). */
 function populatedInstance(): TestD1 {
   const db = createMigratedTestD1();
   db.raw
@@ -70,7 +69,7 @@ afterEach(() => {
   globalThis.fetch = origFetch;
 });
 
-/** GitHub identity stub: token exchange then `/user` for the given login. */
+/** note: GitHub identity stub: token exchange then `/user` for the given login. */
 function stubGitHubIdentity(login: string): void {
   globalThis.fetch = (async (url: unknown) => {
     const target = String(url);
@@ -87,7 +86,7 @@ function stubGitHubIdentity(login: string): void {
   }) as unknown as typeof fetch;
 }
 
-/** Run the real OAuth callback for `login` and answer with the response. */
+/** note: Run the real OAuth callback for `login` and answer with the response. */
 async function oauthCallback(login: string, env: Env): Promise<Response> {
   stubGitHubIdentity(login);
   const state = await createStateValue(SESSION_SECRET);
@@ -99,7 +98,7 @@ async function oauthCallback(login: string, env: Env): Promise<Response> {
   );
 }
 
-/** The marker value the callback minted, or null when it set none. */
+/** note: The marker value the callback minted, or null when it set none. */
 function firstInstanceMarker(res: Response): string | null {
   const cookie = res.headers
     .getSetCookie()
@@ -107,21 +106,21 @@ function firstInstanceMarker(res: Response): string | null {
   return cookie === null || cookie === undefined ? null : cookie.split(";")[0]!.slice(FIRST_INSTANCE_COOKIE.length + 1);
 }
 
-/** Read the injected boot out of a shell document. */
+/** note: Read the injected boot out of a shell document. */
 function bootOf(html: string): SpaBoot {
   const json = /window\.__BOOT__=(\{.*?\});<\/script>/s.exec(html)?.[1];
   if (json === undefined) throw new Error("no boot in shell");
   return JSON.parse(json) as SpaBoot;
 }
 
-/** Does this response clear the first-instance marker? */
+/** note: Does this response clear the first-instance marker? */
 function spendsMarker(res: Response): boolean {
   return res.headers
     .getSetCookie()
     .some((value) => value.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && value.includes("Max-Age=0"));
 }
 
-/** GET a shell path with the given cookies, assets bound. */
+/** note: GET a shell path with the given cookies, assets bound. */
 async function shell(path: string, env: Env, cookies: string[]): Promise<Response> {
   return worker.fetch(shellRequest(path, cookies, "GET"), withSpaAssets(env));
 }
@@ -156,10 +155,10 @@ describe("OAuth callback face — empty instance", () => {
     const db = emptyInstance();
     const res = await oauthCallback("founder", envFor(db, "self-hosted"));
     expect(res.status).toBe(302);
-    // Sign-in joins no workspace, so the landing is the creation surface.
+    // why: Sign-in joins no workspace, so the landing is the creation surface.
     expect(res.headers.get("Location")).toBe("/dashboard");
     expect(firstInstanceMarker(res)).not.toBeNull();
-    // The sign-in itself wrote the account.
+    // note: The sign-in itself wrote the account.
     expect(db.raw.query("SELECT github_login FROM users").all()).toEqual([{ github_login: "founder" }]);
   });
 
@@ -195,7 +194,7 @@ describe("OAuth callback face — invalid mode is a named 500", () => {
       const res = await oauthCallback("founder", envFor(db, mode));
       expect(res.status).toBe(500);
       expect(await res.text()).toBe(`${INVALID_MODE_MESSAGE} ${received}`);
-      // Fail loud BEFORE any write: no account, no session cookie.
+      // invariant: Fail loud BEFORE any write: no account, no session cookie.
       expect(db.raw.query("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 0 });
       expect(res.headers.getSetCookie().some((c) => c.startsWith(`${SESSION_COOKIE}=`))).toBe(false);
     });
@@ -203,7 +202,7 @@ describe("OAuth callback face — invalid mode is a named 500", () => {
 });
 
 describe("SPA boot face — the marker drives the guidance", () => {
-  // A seeded account: the shell re-reads the users row (QC W-001), so a
+  // note: A seeded account: the shell re-reads the users row (QC W-001), so a
   // session whose login has no row is the removed-member 302 instead.
   const LOGIN = "veteran";
 
@@ -218,7 +217,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
     for (const mode of ["self-hosted", "saas"] as const) {
       const res = await signedInShell(db, mode, null);
       expect(res.status).toBe(200);
-      // The SPA branches rendering on this field instead of inferring the shape
+      // note: The SPA branches rendering on this field instead of inferring the shape
       // or asking for a second fetch.
       expect(bootOf(await res.text()).deploymentMode, mode).toBe(mode);
     }
@@ -230,7 +229,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
     const res = await signedInShell(db, "self-hosted", marker);
     expect(res.status).toBe(200);
     expect(bootOf(await res.text()).emptyInstance).toBe(true);
-    // One-shot: a statement about the sign-in, never a session property.
+    // invariant: One-shot: a statement about the sign-in, never a session property.
     expect(
       res.headers.getSetCookie().some((c) => c.startsWith(`${FIRST_INSTANCE_COOKIE}=`) && c.includes("Max-Age=0")),
     ).toBe(true);
@@ -256,7 +255,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
     const db = populatedInstance();
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
     const [body, sig] = marker.split(".");
-    // Same reasoning as tests/worker/dashboard.test.ts: the final base64url
+    // note: Same reasoning as tests/worker/dashboard.test.ts: the final base64url
     // char of a 32-byte HMAC carries padding bits, so a last-char flip can
     // decode to the identical bytes. Replace the whole signature.
     const res = await signedInShell(
@@ -270,7 +269,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
 
   test("an expired marker is refused", async () => {
     const db = populatedInstance();
-    // Minted 200 s ago: past FIRST_INSTANCE_MAX_AGE_SEC (120 s).
+    // note: Minted 200 s ago: past FIRST_INSTANCE_MAX_AGE_SEC (120 s).
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET, Date.now() - 200_000);
     const res = await signedInShell(db, "self-hosted", marker);
     expect(res.status).toBe(200);
@@ -287,7 +286,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
 
   test("the marker is spent on the no-session redirect branch too", async () => {
     const marker = await createFirstInstanceValue(LOGIN, SESSION_SECRET);
-    // No session cookie → the login redirect, which still must not leave the
+    // invariant: No session cookie → the login redirect, which still must not leave the
     // marker alive for the shell the next request loads.
     const res = await shell("/dashboard", envFor(populatedInstance(), "self-hosted"), [
       `${FIRST_INSTANCE_COOKIE}=${marker}`,
@@ -296,7 +295,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
     expect(spendsMarker(res)).toBe(true);
   });
 
-  // A self-hosted deployer is usually an operator or already has a workspace,
+  // note: A self-hosted deployer is usually an operator or already has a workspace,
   // so the FIRST request after the callback is the `/dashboard` 302 and the
   // shell is the SECOND one. Only the response that delivers the boot may
   // spend the marker — otherwise the 302 eats the guidance (AC2's headline).
@@ -309,7 +308,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
         .prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', ?, 'member', ?)")
         .run(id, now);
     } else {
-      // A live grant on the migration-seeded `default` workspace: the operator
+      // note: A live grant on the migration-seeded `default` workspace: the operator
       // landing, which redirects through the support classifier.
       db.raw
         .prepare(
@@ -336,7 +335,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
       expect(landed.headers.get("Location")).toBe("/dashboard/default/repos");
       expect(spendsMarker(landed)).toBe(false);
 
-      // The browser follows that 302; this response renders the first-login
+      // note: The browser follows that 302; this response renders the first-login
       // screen, so this is the one that carries — and spends — the marker.
       const rendered = await shell("/dashboard/default/apps", env, cookies);
       expect(rendered.status).toBe(200);
@@ -352,7 +351,7 @@ describe("SPA boot face — the marker drives the guidance", () => {
       `${FIRST_INSTANCE_COOKIE}=${await createFirstInstanceValue(LOGIN, SESSION_SECRET)}`,
     ];
 
-    // HEAD carries no document, so it has no boot to deliver the guidance in;
+    // why: HEAD carries no document, so it has no boot to deliver the guidance in;
     // spending the marker there would lose it for the GET that follows.
     const head = await worker.fetch(shellRequest("/dashboard", cookies, "HEAD"), withSpaAssets(env));
     expect(head.status).toBe(200);
@@ -395,8 +394,7 @@ describe("SPA boot face — invalid mode is a named 500", () => {
 });
 
 describe("empty instance end to end — the sign-in that created the account", () => {
-  /**
-   * The two halves of the empty-instance matrix above are asserted separately
+  /** note: The two halves of the empty-instance matrix above are asserted separately
    * (the callback mints the marker on an empty table; the shell renders it from
    * a marker). This walks the real pair: the callback's cookies are followed
    * through its redirects to the shell document, so the marker minted at the
@@ -426,7 +424,7 @@ describe("empty instance end to end — the sign-in that created the account", (
       const landed = await landingShell(await oauthCallback("founder", env), env);
       expect(landed.status).toBe(200);
       expect(bootOf(landed.html).emptyInstance).toBe(showsGuidance ? true : undefined);
-      // The sign-in itself wrote the only account, so this asserted the
+      // why: The sign-in itself wrote the only account, so this asserted the
       // guidance against a table that is no longer empty.
       expect(db.raw.query("SELECT COUNT(*) AS n FROM users").get()).toEqual({ n: 1 });
     });

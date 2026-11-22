@@ -1,5 +1,5 @@
 /**
- * Recheck wire contract tests (spec review-lifecycle §7.3) —
+ * why: Recheck wire contract tests (spec review-lifecycle §7.3) —
  * `packages/shared/src/recheck-wire.ts` `validateRecheckDoc` against a trusted input.
  *
  * Document-level distrust fails the whole document closed; a row-level content
@@ -83,7 +83,7 @@ const REMOVED_STILL_PRESENT: EvidenceSlice = {
 };
 
 /**
- * The still-present block with one line INSERTED inside it: every cited old
+ * why: The still-present block with one line INSERTED inside it: every cited old
  * line is still on the new side, but no longer contiguous, so a joined-block
  * test would read the interruption as a removal.
  */
@@ -106,7 +106,7 @@ const TARGET: RecheckTarget = {
   associationIds: ["assoc-1"],
 };
 
-/** A hunk in an unrelated file whose lines happen to byte-match the concern. */
+/** why: A hunk in an unrelated file whose lines happen to byte-match the concern. */
 const FOREIGN_HUNK: EvidenceSlice = {
   id: "slice-foreign", headSha: SHA, baseSha: "b" + "0".repeat(39), path: "src/other.ts", oldPath: null,
   kind: "hunk",
@@ -155,7 +155,7 @@ function evidence(overrides: Partial<Assessment["evidence"]> = {}): NonNullable<
   } as NonNullable<Assessment["evidence"]>;
 }
 
-/** A single addressed result that passes every addressed-grade check. */
+/** note: A single addressed result that passes every addressed-grade check. */
 function addressedResult(overrides: Partial<Assessment> = {}): Assessment {
   return {
     rowId: "row-1",
@@ -169,7 +169,7 @@ function addressedResult(overrides: Partial<Assessment> = {}): Assessment {
 
 const TARGET_2: RecheckTarget = { ...TARGET, rowId: "row-2", findingId: "f-2", associationIds: ["assoc-2"] };
 
-/** The row that must survive whatever the offending row did. */
+/** note: The row that must survive whatever the offending row did. */
 const SURVIVOR: Assessment = {
   rowId: "row-2",
   disposition: "unverifiable",
@@ -178,12 +178,12 @@ const SURVIVOR: Assessment = {
   relatedCurrentFindingIndexes: [],
 };
 
-/** Input carrying a second target, so a degraded row leaves a visible survivor. */
+/** why: Input carrying a second target, so a degraded row leaves a visible survivor. */
 function pairedInput(overrides: Partial<RecheckInput> = {}): RecheckInput {
   return input({ targets: [TARGET, TARGET_2], ...overrides });
 }
 
-/** A row-level fault drops only that row; the document and the rest stand. */
+/** why: A row-level fault drops only that row; the document and the rest stand. */
 function expectDroppedRow(
   outcome: ReturnType<typeof validateRecheckDoc>,
   expected: { index: number; rowId: string | null; error: string },
@@ -211,7 +211,7 @@ describe("validateRecheckDoc — acceptance", () => {
   });
 
   test("accepts a may-fix original finding on the input wire", () => {
-    // The class rides the trusted input's original finding; the wire type is
+    // why: The class rides the trusted input's original finding; the wire type is
     // closed at compile time, so a may-fix original must be part of it.
     const mayFixTarget: RecheckTarget = { ...TARGET, original: { ...ORIGINAL, mergeClass: "may-fix" } };
     const doc = { schema: "mstar.recheck/v1", headSha: SHA, results: [addressedResult()] };
@@ -229,7 +229,7 @@ describe("validateRecheckDoc — acceptance", () => {
         { rowId: "row-1", disposition: "dismissed", reason: "non-fix-dismissal", evidence: null, relatedCurrentFindingIndexes: [] },
       ],
     };
-    // One at a time — the two results above share a rowId only to show each
+    // why: One at a time — the two results above share a rowId only to show each
     // shape validates standalone.
     for (const single of doc.results) {
       const result = validateRecheckDoc({ schema: "mstar.recheck/v1", headSha: SHA, results: [single] }, input());
@@ -469,7 +469,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("a non-closure row may carry a whitespace-only or empty quote", () => {
-    // The visible-quote requirement belongs to the Addressed proof path: a
+    // why: The visible-quote requirement belongs to the Addressed proof path: a
     // dismissal or an unverifiable note cites evidence without claiming a code
     // match, so a blank quote is not a row fault there.
     for (const [disposition, reason] of [
@@ -547,7 +547,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("a trailing blank on a still-present removed-code quote cannot forge closure", () => {
-    // The quote still matches the cited OLD lines after normalization, so the
+    // why: The quote still matches the cited OLD lines after normalization, so the
     // presence check is the only thing standing between present code and a
     // false closure — it must normalize too, or one trailing space passes.
     const result = validateRecheckDoc(
@@ -567,7 +567,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("replaced-code citing old lines still present on the hunk new side drops that row", () => {
-    // An unchanged context line inside the hunk proves nothing was replaced:
+    // why: An unchanged context line inside the hunk proves nothing was replaced:
     // replaced-code carries the same still-present guard as removed-code, and
     // it normalizes too, so a trailing blank cannot disguise present code.
     for (const quote of ["const b = 2;", "const b = 2; "]) {
@@ -589,7 +589,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("an insertion INSIDE the cited block cannot forge a removal: every cited line must be gone", () => {
-    // The block is no longer contiguous, but every cited old line survives, so
+    // why: The block is no longer contiguous, but every cited old line survives, so
     // nothing was removed. A joined-block `includes` would pass this row.
     const result = validateRecheckDoc(
       {
@@ -616,7 +616,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("a replaced range that keeps an identical context line still proves the replacement", () => {
-    // Real replacements keep some context: only the lines the change actually
+    // why: Real replacements keep some context: only the lines the change actually
     // removed are gone, so the block is NOT wholly present and the row stands.
     const replaced = {
       ...REPLACED_HUNK,
@@ -637,7 +637,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("a replaced range whose cited text recurs elsewhere in the hunk still proves the replacement", () => {
-    // The cited line was replaced in place and the same text is added again at
+    // why: The cited line was replaced in place and the same text is added again at
     // the end of the hunk. Reading the WHOLE new side finds that recurrence and
     // false-rejects a genuine replacement; only the cited range's own
     // counterpart (new lines 5-6) says anything about this range.
@@ -660,7 +660,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
   });
 
   test("current-code on a renamed file is eligible (the concern's old path identifies it)", () => {
-    // removed-code/replaced-code already accept `oldPath`; a rename must not
+    // why: removed-code/replaced-code already accept `oldPath`; a rename must not
     // strand a current-code fix in the file the concern used to live in.
     const renamed = { ...HUNK, path: "src/b.ts", oldPath: "src/a.ts" };
     const outcome = validateRecheckDoc(
@@ -685,14 +685,14 @@ describe("validateRecheckDoc — addressed eligibility", () => {
           SURVIVOR,
         ],
       },
-      // original concern lives in src/a.ts, slice cites src/old.ts
+      // why: original concern lives in src/a.ts, slice cites src/old.ts
       pairedInput(),
     );
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
   });
 
   test("current-code citing an unrelated file drops that row (lines may move, files may not)", () => {
-    // The quote byte-matches the concern's own lines, but they are cited from
+    // why: The quote byte-matches the concern's own lines, but they are cited from
     // another file: a fix in src/other.ts proves nothing about src/a.ts.
     const foreign = validateRecheckDoc(
       {
@@ -704,7 +704,7 @@ describe("validateRecheckDoc — addressed eligibility", () => {
     );
     expectDroppedRow(foreign, { index: 0, rowId: "row-1", error: "does not match the original concern file" });
 
-    // The same file cited OUTSIDE the original line range stays eligible: a fix
+    // why: The same file cited OUTSIDE the original line range stays eligible: a fix
     // may move the code, so current-code is not range-bound. It still has to
     // cite an ADDED line — moving the proof to the context line at 8 would
     // prove presence only.
@@ -836,7 +836,7 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
       },
       pairedInput(),
     );
-    // The strict shape fails, but the row already proved its rowId, so the
+    // why: The strict shape fails, but the row already proved its rowId, so the
     // rejection stays attributable to row-1 instead of going unidentified.
     expectDroppedRow(result, { index: 0, rowId: "row-1", error: "exactly" });
   });
@@ -858,7 +858,7 @@ describe("validateRecheckDoc — disposition/reason pairing and shapes", () => {
 });
 
 /**
- * The scenario every round must satisfy: an answer for a target either
+ * why: The scenario every round must satisfy: an answer for a target either
  * survives validation (`doc.results`) or is recorded as a rejection with a
  * reason. An input row in neither set is a prior finding that vanished.
  */
@@ -881,7 +881,7 @@ function expectEveryRowHasVerdict(
 describe("validateRecheckDoc — per-row verdicts at the documented input limits", () => {
   const LIMIT_INPUT = maxRecheckInput();
 
-  /** One answer per target; `override` replaces the row at that index. */
+  /** note: One answer per target; `override` replaces the row at that index. */
   function answers(override: { index: number; row: Record<string, unknown> } | null = null): Record<string, unknown>[] {
     return LIMIT_INPUT.targets.map((target, index) => {
       if (override !== null && override.index === index) return override.row;

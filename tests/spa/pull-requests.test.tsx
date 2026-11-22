@@ -1,5 +1,4 @@
-/**
- * Pull requests tab: the scoped PR ledger (one repository target, or the whole
+/** note: Pull requests tab: the scoped PR ledger (one repository target, or the whole
  * workspace), its list face and the routing/deep-link contract.
  *
  * Static-SSR pins over the pure faces (the InsightsRecordsView idiom): the
@@ -137,7 +136,7 @@ const ROW_CLOSED: PullRequestRow = {
   failure_count: 2,
 };
 
-/** A second PR's detail payload — the switch target in the S2 test. */
+/** note: A second PR's detail payload — the switch target in the S2 test. */
 const DETAIL_B: PullRequestDetail = {
   pull_request: { ...ROW_HEAD, number: 9, title: "Bump the dependencies" },
   counts: { findings: 0, reviews: 0, failures: 0, must_fix: 0 },
@@ -146,7 +145,7 @@ const DETAIL_B: PullRequestDetail = {
 
 describe("tab shell rendering (static SSR)", () => {
   test("the App detail hosts neither the ledger nor its trigger — the repository detail owns them", async () => {
-    // The App detail's two faces are 应用设置 and 已安装: the PR ledger moved to
+    // note: The App detail's two faces are 应用设置 and 已安装: the PR ledger moved to
     // the repository surface, so no payload makes it appear here.
     for (const payload of [managePayload, identityPayload]) {
       const tabNames = await withMarkup(renderDetail(payload), (container) =>
@@ -163,17 +162,17 @@ describe("pull requests list face (static SSR)", () => {
     const markup = renderToStaticMarkup(
       createElement(PullRequestsListView, { locale: "en", rows: [ROW_OPEN, ROW_CLOSED], onOpen: noSearch }),
     );
-    // PR identity cell: `#number` + title, owner/repo on the meta line.
+    // note: PR identity cell: `#number` + title, owner/repo on the meta line.
     expect(markup).toContain("#42");
     expect(markup).toContain("Add the export button");
     expect(markup).toContain("acme/web");
-    // State badges from the closed vocabulary.
+    // note: State badges from the closed vocabulary.
     expect(markup).toContain(t("en", "pullRequests.state.open"));
     expect(markup).toContain(t("en", "pullRequests.state.closed"));
-    // Latest verdict, and the no-review dash for the null case.
+    // note: Latest verdict, and the no-review dash for the null case.
     expect(markup).toContain("ship it");
     expect(markup).toContain("Revert the cache change");
-    // The failures column header rides the table; the count INSIDE the
+    // note: The failures column header rides the table; the count INSIDE the
     // column is pinned by the mounted suite.
     expect(markup).toContain(t("en", "pullRequests.columnFailures"));
   });
@@ -184,13 +183,12 @@ describe("pull requests list face (static SSR)", () => {
     );
     expect(markup).toContain(t("en", "pullRequests.emptyTitle"));
     expect(markup).toContain(t("en", "pullRequests.emptyDescription"));
-    // No table shell leaks through the empty state.
+    // safety: No table shell leaks through the empty state.
     expect(markup).not.toContain("<table");
   });
 });
 
-/**
- * The reviewing-now badge on a LIST row (compass D11). The projection is the
+/** note: The reviewing-now badge on a LIST row (compass D11). The projection is the
  * server's: `live` paints the badge with the holding attempt's head sha (or
  * its acquisition time when a comment trigger carried none), `none` paints no
  * label at all, and `unknown` paints a note that is neither of those.
@@ -232,7 +230,7 @@ describe("reviewing-now badge on the list row (D11)", () => {
   });
 
   test("no live lock leaves the state pill alone — no badge, no label of its own", async () => {
-    // The one shape every non-reviewing disposition (no row, expired,
+    // note: The one shape every non-reviewing disposition (no row, expired,
     // released, queued without a lock, superseded before admission, abandoned
     // after release) renders as.
     const texts = await badges(replay({ state: "none" }));
@@ -251,18 +249,18 @@ describe("reviewing-now badge on the list row (D11)", () => {
 
 describe("pull requests data plane (pure helpers)", () => {
   test("the list URL is base-prefixed and addresses the scope, not an App", () => {
-    // One repository: the target-addressed family, its id encoded.
+    // note: One repository: the target-addressed family, its id encoded.
     expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" })).toBe(
       "/dashboard/api/targets/1/pull-requests",
     );
     expect(scopedPullRequestsUrl("/dashboard/acme", { kind: "target", targetId: "12345" })).toBe(
       "/dashboard/acme/api/targets/12345/pull-requests",
     );
-    // Every repository: the workspace's own ledger, no target segment.
+    // note: Every repository: the workspace's own ledger, no target segment.
     expect(scopedPullRequestsUrl("/dashboard", { kind: "workspace" })).toBe(
       "/dashboard/api/pull-requests",
     );
-    // The removed App-addressed family is never emitted.
+    // invariant: The removed App-addressed family is never emitted.
     for (const url of [
       scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" }),
       scopedPullRequestsUrl("/dashboard", { kind: "workspace" }),
@@ -275,21 +273,21 @@ describe("pull requests data plane (pure helpers)", () => {
     expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" }, "acme/web")).toBe(
       "/dashboard/api/targets/1/pull-requests?repo=acme%2Fweb",
     );
-    // No selection is exactly the unfiltered URL.
+    // invariant: No selection is exactly the unfiltered URL.
     expect(scopedPullRequestsUrl("/dashboard", { kind: "target", targetId: "1" })).toBe(
       "/dashboard/api/targets/1/pull-requests",
     );
   });
 
   test("a ledger read stamped for another scope derives to a clean loading face", () => {
-    // Target 1's answered read: rows, option list, ok state, target 1's stamp.
+    // note: Target 1's answered read: rows, option list, ok state, target 1's stamp.
     const targetOne: ListRead = {
       scope: "target:1",
       rows: [ROW_OPEN],
       repos: ["acme/web"],
       kind: "ok",
     };
-    // Under target 2 the rows, the option list and the ok state are gone —
+    // note: Under target 2 the rows, the option list and the ok state are gone —
     // nothing survives the switch, so the operator's first frame cannot be
     // another scope's ledger.
     expect(currentListRead(targetOne, "target:2")).toEqual({
@@ -298,11 +296,11 @@ describe("pull requests data plane (pure helpers)", () => {
       repos: null,
       kind: "loading",
     });
-    // The same stamp under its own scope passes through untouched.
+    // invariant: The same stamp under its own scope passes through untouched.
     expect(currentListRead(targetOne, "target:1")).toBe(targetOne);
-    // The workspace scope is a different read from any target's.
+    // note: The workspace scope is a different read from any target's.
     expect(currentListRead(targetOne, "workspace").rows).toBeNull();
-    // An error is scope-scoped too: target 1's failure must not announce on 2.
+    // invariant: An error is scope-scoped too: target 1's failure must not announce on 2.
     expect(currentListRead({ scope: "target:1", rows: null, repos: null, kind: "error" }, "target:2")).toEqual({
       scope: "target:2",
       rows: null,
@@ -316,7 +314,7 @@ describe("pull requests data plane (pure helpers)", () => {
     expect(pullRequestRefOf("42")).toBeNull();
     expect(pullRequestRefOf("acme/web/abc")).toBeNull();
     expect(pullRequestRefOf("/web/42")).toBeNull();
-    // Path traversal: encodeURIComponent cannot neutralise a dot-segment
+    // note: Path traversal: encodeURIComponent cannot neutralise a dot-segment
     // (".." encodes to ".."), so the parse boundary rejects it outright.
     expect(pullRequestRefOf("../settings/1")).toBeNull();
     expect(pullRequestRefOf("acme/../1")).toBeNull();
@@ -327,23 +325,23 @@ describe("pull requests data plane (pure helpers)", () => {
       rows: [ROW_OPEN],
       repos: [],
     });
-    // Nullable display fields coerce to ""; an unknown state clamps to open.
+    // note: Nullable display fields coerce to ""; an unknown state clamps to open.
     const drifted = { ...ROW_OPEN, title: null, head_sha: undefined, state: "draft" };
     expect(parsePullRequestList({ pull_requests: [drifted] })).toEqual({
       rows: [{ ...ROW_OPEN, title: "", head_sha: "", state: "open" }],
       repos: [],
     });
-    // A row without its address is dropped individually — the rest stay.
+    // note: A row without its address is dropped individually — the rest stay.
     const noAddress = { ...ROW_OPEN, owner: null };
     expect(parsePullRequestList({ pull_requests: [noAddress, ROW_CLOSED] })).toEqual({
       rows: [ROW_CLOSED],
       repos: [],
     });
-    // A malformed latest_review coerces to null, not a failed row.
+    // note: A malformed latest_review coerces to null, not a failed row.
     expect(
       parsePullRequestList({ pull_requests: [{ ...ROW_OPEN, latest_review: "ship it" }] }),
     ).toEqual({ rows: [{ ...ROW_OPEN, latest_review: null }], repos: [] });
-    // The envelope keeps its shape.
+    // note: The envelope keeps its shape.
     expect(parsePullRequestList({})).toBeNull();
   });
 
@@ -353,7 +351,7 @@ describe("pull requests data plane (pure helpers)", () => {
       repos: ["acme/web", "acme/api", 7, null, { owner: "x" }],
     });
     expect(parsed?.repos).toEqual(["acme/web", "acme/api"]);
-    // An absent repos field (an older payload) yields an empty option set —
+    // note: An absent repos field (an older payload) yields an empty option set —
     // the toolbar then offers just the all option, never a re-derivation
     // from the loaded rows.
     expect(parsePullRequestList({ pull_requests: [ROW_OPEN] })?.repos).toEqual([]);
@@ -369,7 +367,7 @@ describe("pull requests data plane (pure helpers)", () => {
 
 describe("pull requests tab (mounted)", () => {
   test("the workspace scope reads every repository and an empty workspace is the empty state, not an error", async () => {
-    // Zero live targets → the server answers `{ pull_requests: [], repos: [] }`.
+    // invariant: Zero live targets → the server answers `{ pull_requests: [], repos: [] }`.
     // That is the product's 暂无拉取请求 empty state (J4), never an error face or
     // a request naming a target that does not exist.
     const calls: string[] = [];
@@ -428,10 +426,10 @@ describe("pull requests tab (mounted)", () => {
         (button) => button.textContent === ROW_OPEN.title,
       );
       await press(win, title);
-      // The button's click must not bubble into the row handler: one press,
+      // invariant: The button's click must not bubble into the row handler: one press,
       // one open — two would open the same PR twice.
       expect(opened).toEqual([ROW_OPEN]);
-      // The rest of the row is still the row's own click target.
+      // note: The rest of the row is still the row's own click target.
       await press(win, container.querySelector("tbody td:last-child"));
       expect(opened).toEqual([ROW_OPEN, ROW_OPEN]);
     } finally {
@@ -448,12 +446,12 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(text()).toContain("Fix the login flow");
 
-      // Switch to PR B: A's detail is retained in state but must NOT render.
+      // invariant: Switch to PR B: A's detail is retained in state but must NOT render.
       await rerender("acme/web/2");
       expect(text()).not.toContain("Fix the login flow");
       expect(text()).toContain(t("en", "common.loading"));
 
-      // B's fetch fails: the error face replaces the loading face — A's
+      // note: B's fetch fails: the error face replaces the loading face — A's
       // data never reappears — and a retry is offered.
       await act(async () => {
         resolve("/pull-requests/acme/web/2", new Response("boom", { status: 500 }));
@@ -467,7 +465,7 @@ describe("pull requests tab (mounted)", () => {
       );
       expect(retry).toBeDefined();
 
-      // Retry re-issues the read; B's payload lands.
+      // note: Retry re-issues the read; B's payload lands.
       await press(win, retry);
       await act(async () => {
         resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
@@ -483,7 +481,7 @@ describe("pull requests tab (mounted)", () => {
   test("a failed read for A leaves no error on B's transition frame (N1)", async () => {
     const { container, text, rerender, resolve, unmount } = await mountTabWithGatedFetch("acme/web/1");
     try {
-      // A's read fails: the error face is correct FOR A.
+      // note: A's read fails: the error face is correct FOR A.
       await act(async () => {
         resolve("/pull-requests/acme/web/1", new Response("boom", { status: 500 }));
       });
@@ -491,7 +489,7 @@ describe("pull requests tab (mounted)", () => {
       expect(container.querySelector('[role="alert"]')).not.toBeNull();
       expect(text()).toContain(t("en", "common.loadFailed"));
 
-      // Switch to B: the face is the loading face — never A's error, which
+      // invariant: Switch to B: the face is the loading face — never A's error, which
       // would name the wrong PR (and announce assertively) before B's
       // fetch is even issued.
       await rerender("acme/web/2");
@@ -499,7 +497,7 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).not.toContain(t("en", "common.loadFailed"));
       expect(container.querySelector('[role="alert"]')).toBeNull();
 
-      // B's read lands; B's face replaces the loading face.
+      // note: B's read lands; B's face replaces the loading face.
       await act(async () => {
         resolve("/pull-requests/acme/web/2", jsonResponse(DETAIL_B));
       });
@@ -519,7 +517,7 @@ describe("pull requests tab (mounted)", () => {
       expect(fetches).toHaveLength(1);
       expect(text()).toContain("Fix the login flow");
 
-      // The parent re-renders: `pullRequestRefOf` hands over a fresh ref object,
+      // note: The parent re-renders: `pullRequestRefOf` hands over a fresh ref object,
       // which must not count as a dependency change.
       await rerender("acme/web/1");
       expect(fetches).toHaveLength(1);
@@ -536,11 +534,11 @@ describe("pull requests tab (mounted)", () => {
     try {
       await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
       await act(async () => {});
-      // The detail is the whole face the deep link asked for: no list read.
+      // note: The detail is the whole face the deep link asked for: no list read.
       expect(text()).toContain("Fix the login flow");
       expect(listReads()).toHaveLength(0);
 
-      // Closing the detail is the list's cue — exactly one read, whose rows
+      // invariant: Closing the detail is the list's cue — exactly one read, whose rows
       // replace the unmounted detail.
       await press(
         win,
@@ -558,7 +556,7 @@ describe("pull requests tab (mounted)", () => {
   });
 
   test("switching targets never paints the previous target's ledger while the new read is pending", async () => {
-    // The tab instance survives a target switch (the repository page keeps it
+    // invariant: The tab instance survives a target switch (the repository page keeps it
     // mounted across a sibling navigation), so the ledger is stamped with its
     // scope: target 1's row must be gone the instant the tab belongs to 2.
     const { container, fetches, text, switchTarget, resolve, unmount } = await mountTabWithGatedFetch("");
@@ -569,7 +567,7 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(text()).toContain("Add the export button");
 
-      // Target 2's read is issued but not answered: the loading face stands
+      // note: Target 2's read is issued but not answered: the loading face stands
       // in, with neither target 1's row nor its empty/error state.
       await switchTarget("2");
       const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
@@ -580,7 +578,7 @@ describe("pull requests tab (mounted)", () => {
       expect(container.querySelector('[role="alert"]')).toBeNull();
       expect(container.querySelector("table")).toBeNull();
 
-      // Target 2's own ledger replaces the loading face.
+      // note: Target 2's own ledger replaces the loading face.
       await act(async () =>
         resolve("/targets/2/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })),
       );
@@ -606,7 +604,7 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(unfilteredReads()).toHaveLength(1);
 
-      // acme/api has NO rows in the current window — it is still an option,
+      // note: acme/api has NO rows in the current window — it is still an option,
       // proving the option set comes from the payload, not the rows.
       const options = await openOptions();
       expect(options.map((option) => option.textContent)).toEqual([
@@ -615,7 +613,7 @@ describe("pull requests tab (mounted)", () => {
         "acme/web",
       ]);
 
-      // Selecting it issues the filtered request and renders the rows it
+      // note: Selecting it issues the filtered request and renders the rows it
       // returns — the filter is server-side, not a local array filter.
       await press(win, options.find((option) => option.textContent === "acme/api") as unknown as Element);
       expect(repoParamReads()).toHaveLength(1);
@@ -626,7 +624,7 @@ describe("pull requests tab (mounted)", () => {
       expect(container.textContent ?? "").toContain("Revert the cache change");
       expect(container.textContent ?? "").not.toContain("Add the export button");
 
-      // Refresh re-reads WITH the current filter.
+      // note: Refresh re-reads WITH the current filter.
       await press(
         win,
         [...container.querySelectorAll("button")].find(
@@ -640,7 +638,7 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(container.textContent ?? "").toContain("Revert the cache change");
 
-      // Back to the all option: the unfiltered URL is requested again.
+      // note: Back to the all option: the unfiltered URL is requested again.
       const allOptions = await openOptions();
       await press(win, allOptions[0] as unknown as Element);
       expect(unfilteredReads()).toHaveLength(2);
@@ -662,14 +660,14 @@ describe("pull requests tab (mounted)", () => {
       await act(async () => {});
       expect(unfilteredReads()).toHaveLength(1);
 
-      // Select acme/api: the filtered read is issued…
+      // note: Select acme/api: the filtered read is issued…
       await press(win, container.querySelector('[role="combobox"]'));
       const option = [...win.document.querySelectorAll('[role="option"]')].find(
         (row) => row.textContent === "acme/api",
       );
       await press(win, option as unknown as Element);
       expect(repoParamReads()).toHaveLength(1);
-      // …and fails. The error face owns the content area, but the toolbar
+      // note: …and fails. The error face owns the content area, but the toolbar
       // must not disappear with it: the operator is stranded otherwise,
       // and ErrorState's retry would only re-issue the same failing URL.
       await act(async () => resolve("repo=acme%2Fapi", new Response("boom", { status: 500 })));
@@ -682,7 +680,7 @@ describe("pull requests tab (mounted)", () => {
       expect(refresh).toBeDefined();
       expect((refresh as HTMLButtonElement | undefined)?.disabled).toBe(false);
 
-      // The carried option list still names the selection — no dead entry —
+      // note: The carried option list still names the selection — no dead entry —
       // and choosing the all option issues the unfiltered URL.
       await press(win, container.querySelector('[role="combobox"]'));
       const options = [...win.document.querySelectorAll('[role="option"]')];
@@ -707,7 +705,7 @@ describe("pull requests tab (mounted)", () => {
     try {
       await act(async () => resolve("/pull-requests", jsonResponse(payload)));
       await act(async () => {});
-      // Select a repo: the ledger is re-read with the repo request parameter.
+      // note: Select a repo: the ledger is re-read with the repo request parameter.
       await press(win, container.querySelector('[role="combobox"]'));
       const option = [...win.document.querySelectorAll('[role="option"]')].find(
         (row) => row.textContent === "acme/api",
@@ -721,7 +719,7 @@ describe("pull requests tab (mounted)", () => {
       expect(container.textContent ?? "").toContain("Revert the cache change");
       expect(container.textContent ?? "").not.toContain("Add the export button");
 
-      // The tab instance survives the target switch, but the filter does not:
+      // invariant: The tab instance survives the target switch, but the filter does not:
       // the new target's ledger is read unfiltered and the select is back on
       // the all option.
       await switchTarget("2");
@@ -754,7 +752,7 @@ describe("pull requests tab (mounted)", () => {
 
       await press(win, refreshButton());
       expect(listReads()).toHaveLength(2);
-      // The second read is gated: the control reports the in-flight read.
+      // note: The second read is gated: the control reports the in-flight read.
       expect(refreshButton()?.disabled).toBe(true);
 
       await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_CLOSED] })));
@@ -770,12 +768,12 @@ describe("pull requests tab (mounted)", () => {
     const { container, fetches, text, win, rerender, resolve, unmount } = await mountTabWithGatedFetch("");
     const listReads = () => fetches.filter((url) => url.endsWith("/pull-requests"));
     try {
-      // The ledger loads, so a later failure has stale rows to hide.
+      // note: The ledger loads, so a later failure has stale rows to hide.
       await act(async () => resolve("/pull-requests", jsonResponse({ pull_requests: [ROW_OPEN] })));
       await act(async () => {});
       expect(text()).toContain("Add the export button");
 
-      // Open a PR, then close it: the close re-reads the list, and that read
+      // note: Open a PR, then close it: the close re-reads the list, and that read
       // fails. The stale row must not stand in for the current ledger.
       await rerender("acme/web/133");
       await act(async () => resolve("/pull-requests/acme/web/133", jsonResponse(DETAIL)));
@@ -794,7 +792,7 @@ describe("pull requests tab (mounted)", () => {
       expect(text()).toContain(t("en", "common.loadFailed"));
       expect(text()).not.toContain("Add the export button");
 
-      // Retry re-reads; the ledger it returns replaces the error face.
+      // note: Retry re-reads; the ledger it returns replaces the error face.
       const retry = [...container.querySelectorAll("button")].find(
         (button) => button.textContent === t("en", "common.retry"),
       );

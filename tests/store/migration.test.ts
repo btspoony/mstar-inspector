@@ -1,5 +1,5 @@
 /**
- * Migration tests — the DDL in
+ * why: Migration tests — the DDL in
  * `migrations/0001_reviews.sql` + `0002_mstar_review_v1.sql` is the single
  * source of truth; these tests execute it statement by statement through
  * `execMigrationScript` (`./helpers`) on the bun:sqlite test double, which is
@@ -35,7 +35,7 @@ import type { D1Like } from "../../src/store/types";
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 
 /**
- * The parent table of THIS fixture's shape: 0056 renames `github_apps` to
+ * why: The parent table of THIS fixture's shape: 0056 renames `github_apps` to
  * `review_bots`, and the describes below seed both the pre- and post-rename
  * schema, so a raw query cannot hard-code either name.
  */
@@ -47,7 +47,7 @@ function appTable(db: TestD1): "github_apps" | "review_bots" {
 }
 
 /**
- * The App route-key column of THIS fixture's shape. Migration 0036 renamed
+ * why: The App route-key column of THIS fixture's shape. Migration 0036 renamed
  * `slug` to `webhook_path`, and the describes below seed both the pre- and
  * post-0036 schema, so a raw query cannot hard-code either name.
  */
@@ -58,7 +58,7 @@ function appPathColumn(db: TestD1): "slug" | "webhook_path" | null {
 }
 
 /**
- * Insert one github_apps row into whichever shape the fixture carries. The
+ * why: Insert one github_apps row into whichever shape the fixture carries. The
  * local route key is `slug` before 0036, `webhook_path` until 0038, and gone
  * afterwards (the row id carries it) — this helper is the one place that
  * knows the difference.
@@ -70,7 +70,7 @@ function insertGithubAppRow(
     githubAppId?: number;
     name?: string;
     createdBy?: string;
-    /** SQL expression for deleted_at (defaults NULL). */
+    /** note: SQL expression for deleted_at (defaults NULL). */
     deletedExpr?: string;
     extraColumns?: string;
     extraValues?: string;
@@ -139,7 +139,7 @@ function insertReview(db: D1Like, overrides: Partial<typeof REVIEW> = {}): Promi
 }
 
 /**
- * Every migration before review configuration moves off the bot row — the
+ * why: Every migration before review configuration moves off the bot row — the
  * chain a live database carries while the moved columns are still on it. The
  * split's own fixtures start here and apply that one file on top.
  */
@@ -147,26 +147,26 @@ const BEFORE_TARGET_SPLIT = migrationsAfter("0002_mstar_review_v1.sql").filter(
   (name) => migrationNumber(name) < migrationNumber("0057_review_targets.sql"),
 );
 
-/** A DB shaped like production immediately before the target split. */
+/** note: A DB shaped like production immediately before the target split. */
 function createBeforeSplitD1(): TestD1 {
   const db = createTestD1();
   for (const name of BEFORE_TARGET_SPLIT) execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   return db;
 }
 
-/** Every table / index name the schema holds. */
+/** note: Every table / index name the schema holds. */
 function schemaNames(db: TestD1, type: "table" | "index"): string[] {
   return (
     db.raw.query("SELECT name FROM sqlite_master WHERE type = ?").all(type) as Array<{ name: string }>
   ).map((row) => row.name);
 }
 
-/** Every column name of one table, in declaration order. */
+/** note: Every column name of one table, in declaration order. */
 function columnNames(db: TestD1, table: string): string[] {
   return (db.raw.query(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((column) => column.name);
 }
 
-/** The tables one column's foreign key references. */
+/** note: The tables one column's foreign key references. */
 function foreignKeyTargets(db: TestD1, table: string, column: string): string[] {
   return (db.raw.query(`PRAGMA foreign_key_list(${table})`).all() as Array<{ from: string; table: string }>)
     .filter((key) => key.from === column)
@@ -180,13 +180,13 @@ describe("migrations/0001_reviews.sql", () => {
     const reviewCols: Record<string, number> = Object.fromEntries(reviews.map((c) => [c.name, c.notnull]));
     const reviewPks: Record<string, number> = Object.fromEntries(reviews.map((c) => [c.name, c.pk]));
 
-    expect(reviewPks["id"]).toBe(1); // TEXT PRIMARY KEY (SQLite does not imply NOT NULL)
+    expect(reviewPks["id"]).toBe(1); // note: TEXT PRIMARY KEY (SQLite does not imply NOT NULL)
     expect(reviewCols["id"]).toBe(0);
     expect(reviewCols["installation_id"]).toBe(1);
     expect(reviewCols["owner"]).toBe(1);
     expect(reviewCols["repo"]).toBe(1);
     expect(reviewCols["pr_number"]).toBe(1);
-    expect(reviewCols["head_sha"]).toBe(1); // NOT NULL — empty sha must never be stored
+    expect(reviewCols["head_sha"]).toBe(1); // note: NOT NULL — empty sha must never be stored
     expect(reviewCols["verdict"]).toBe(1);
     expect("base_sha" in reviewCols).toBe(true);
     expect("reviewed_at" in reviewCols).toBe(true);
@@ -195,12 +195,12 @@ describe("migrations/0001_reviews.sql", () => {
     expect("provider" in reviewCols).toBe(true);
     expect("skill_version" in reviewCols).toBe(true);
     expect("raw_output" in reviewCols).toBe(true);
-    expect("envelope" in reviewCols).toBe(true); // migration 0002
+    expect("envelope" in reviewCols).toBe(true); // note: migration 0002
 
     const findings = db.raw.query("PRAGMA table_info(findings)").all() as Array<{ name: string; notnull: number; pk: number }>;
     const findingCols: Record<string, number> = Object.fromEntries(findings.map((c) => [c.name, c.notnull]));
     const findingPks: Record<string, number> = Object.fromEntries(findings.map((c) => [c.name, c.pk]));
-    expect(findingPks["id"]).toBe(1); // TEXT PRIMARY KEY
+    expect(findingPks["id"]).toBe(1); // note: TEXT PRIMARY KEY
     expect(findingCols["id"]).toBe(0);
     expect(findingCols["review_id"]).toBe(1);
     expect(findingCols["severity"]).toBe(1);
@@ -262,14 +262,14 @@ describe("migrations/0001_reviews.sql", () => {
 });
 
 describe("migrations/0007_reviews_app_id_index.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0006 with live rows)", () => {
     const db = createTestD1();
-    // Reviews exist BEFORE the later migrations — the wrangler sequence on a
+    // why: Reviews exist BEFORE the later migrations — the wrangler sequence on a
     // live deployment: a legacy row (app_id NULL) and, once 0004/0005 exist,
     // an attributed row.
     insertReview(db);
@@ -292,7 +292,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
       .run();
     db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-2'");
 
-    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    // why: Metadata-only CREATE INDEX builds over the live rows without rewriting.
     expect(() => applyMigrationFile(db, "0007_reviews_app_id_index.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(count.n).toBe(2);
@@ -319,19 +319,19 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
 });
 
 describe("migrations/0008_github_apps_ops.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
+  /** note: Raw-insert one pre-0008-shaped github_apps row (the 0004 column list). */
   function insertPre0008App(db: ReturnType<typeof createTestD1>): void {
     insertGithubAppRow(db, { id: "app-1", name: "acmes-app", githubAppId: 1001 });
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0007 with live rows)", () => {
     const db = createTestD1();
-    insertReview(db); // a live review predates the ALTER (wrangler order)
+    insertReview(db); // note: a live review predates the ALTER (wrangler order)
     for (const name of [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
@@ -343,13 +343,13 @@ describe("migrations/0008_github_apps_ops.sql", () => {
     }
     insertPre0008App(db);
 
-    // Metadata-only ADD COLUMNs alter the table without rewriting it (the
+    // why: Metadata-only ADD COLUMNs alter the table without rewriting it (the
     // 0002/0005 precedent) — the live row survives untouched.
     expect(() => applyMigrationFile(db, "0008_github_apps_ops.sql")).not.toThrow();
     const row = db.raw
       .query(`SELECT ${appPathColumn(db) ?? "id"} AS webhook_path, status, review_enabled, last_webhook_at FROM github_apps WHERE id = 'app-1'`)
       .get() as { webhook_path: string; status: string; review_enabled: number; last_webhook_at: string | null };
-    // Existing rows materialize to the resume default (L5: every App known
+    // note: Existing rows materialize to the resume default (L5: every App known
     // before the migration stays reviewing), last delivery never seen.
     expect(row.review_enabled).toBe(1);
     expect(row.last_webhook_at).toBeNull();
@@ -368,7 +368,7 @@ describe("migrations/0008_github_apps_ops.sql", () => {
     }>;
     const reviewEnabled = columns.find((col) => col.name === "review_enabled");
     expect(reviewEnabled).toBeDefined();
-    expect(reviewEnabled!.notnull).toBe(1); // NOT NULL is legal with a non-NULL DEFAULT (L5)
+    expect(reviewEnabled!.notnull).toBe(1); // note: NOT NULL is legal with a non-NULL DEFAULT (L5)
     expect(reviewEnabled!.dflt_value).toBe("1");
     const lastWebhookAt = columns.find((col) => col.name === "last_webhook_at");
     expect(lastWebhookAt).toBeDefined();
@@ -399,19 +399,19 @@ describe("migrations/0008_github_apps_ops.sql", () => {
 });
 
 describe("migrations/0009_app_model_roles.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  /** note: Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: ReturnType<typeof createTestD1>, id: string, githubAppId = 1001): void {
     insertGithubAppRow(db, { id, githubAppId });
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0008 with live rows)", () => {
     const db = createTestD1();
-    insertReview(db); // a live review predates the CREATE TABLE (wrangler order)
+    insertReview(db); // note: a live review predates the CREATE TABLE (wrangler order)
     for (const name of [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
@@ -424,7 +424,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
     }
     insertApp(db, "app-1");
 
-    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    // why: Append-only CREATE TABLE over the live rows — nothing existing changes.
     expect(() => applyMigrationFile(db, "0009_app_model_roles.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(count.n).toBe(1);
@@ -442,7 +442,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
         .prepare(`INSERT INTO bot_model_roles (bot_id, role, selector) VALUES ('app-1', 'code-reviewer', 'x/y')`)
         .run(),
     ).toThrow(/UNIQUE constraint failed/);
-    // The same role under ANOTHER bot is a distinct row (per-bot role maps).
+    // invariant: The same role under ANOTHER bot is a distinct row (per-bot role maps).
     db.raw
       .prepare(`INSERT INTO bot_model_roles (bot_id, role, selector) VALUES ('app-2', 'code-reviewer', 'x/y')`)
       .run();
@@ -458,7 +458,7 @@ describe("migrations/0009_app_model_roles.sql", () => {
         .prepare(`INSERT INTO bot_model_roles (bot_id, role, selector) VALUES ('no-such-app', 'code-reviewer', 'x/y')`)
         .run(),
     ).toThrow(/FOREIGN KEY constraint failed/);
-    // Deliberate: the schema carries NO role CHECK — the store's MODEL_ROLE_IDS
+    // note: Deliberate: the schema carries NO role CHECK — the store's MODEL_ROLE_IDS
     // mirror + parity test own the 4-name vocabulary (spec § B6 语义锁).
     db.raw
       .prepare(`INSERT INTO bot_model_roles (bot_id, role, selector) VALUES ('app-1', 'not-a-seat', 'x/y')`)
@@ -480,12 +480,12 @@ describe("migrations/0009_app_model_roles.sql", () => {
 });
 
 describe("migrations/0010_review_failures.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: ReturnType<typeof createTestD1>, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one failure row (full column control). */
+  /** note: Raw-insert one failure row (full column control). */
   function insertFailure(
     db: ReturnType<typeof createTestD1>,
     overrides: Partial<Record<string, unknown>> = {},
@@ -511,7 +511,7 @@ describe("migrations/0010_review_failures.sql", () => {
 
   test("applies cleanly over a seeded production-shaped DB (0001–0009 with live rows); existing tables untouched", () => {
     const db = createTestD1();
-    insertReview(db); // a live review predates the CREATE TABLE (wrangler order)
+    insertReview(db); // note: a live review predates the CREATE TABLE (wrangler order)
     for (const name of [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
@@ -524,7 +524,7 @@ describe("migrations/0010_review_failures.sql", () => {
       applyMigrationFile(db, name);
     }
 
-    // Append-only CREATE TABLE over the live rows — nothing existing changes.
+    // why: Append-only CREATE TABLE over the live rows — nothing existing changes.
     expect(() => applyMigrationFile(db, "0010_review_failures.sql")).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviewCount.n).toBe(1);
@@ -543,7 +543,7 @@ describe("migrations/0010_review_failures.sql", () => {
     };
     expect(row.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
-    // A NULL in any one of the NOT NULL columns is refused while the rest
+    // invariant: A NULL in any one of the NOT NULL columns is refused while the rest
     // stay valid.
     const base = {
       installation_id: 123,
@@ -555,7 +555,7 @@ describe("migrations/0010_review_failures.sql", () => {
       error: "err",
     };
     for (const column of Object.keys(base)) {
-      // The nulled column is only known at runtime; the cast restores the
+      // why: The nulled column is only known at runtime; the cast restores the
       // static shape so bun:sqlite's binding types accept the spread.
       const values = { ...base, [column]: null } as typeof base;
       expect(() =>
@@ -582,7 +582,7 @@ describe("migrations/0010_review_failures.sql", () => {
     insertFailure(db, { stage: "runner" });
     insertFailure(db, { id: "failure-2", stage: "sandbox" });
     insertFailure(db, { id: "failure-3", stage: "pipeline" });
-    // Even a nonsense stage stores — the store leaf's FAILURE_STAGES gate is
+    // note: Even a nonsense stage stores — the store leaf's FAILURE_STAGES gate is
     // the enforcement point, never the schema.
     insertFailure(db, { id: "failure-4", stage: "not-a-stage" });
     const count = db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
@@ -592,8 +592,8 @@ describe("migrations/0010_review_failures.sql", () => {
   test("rows are per-attempt events — the five-tuple is NOT unique; head_sha may be empty (pre-checkout failure)", () => {
     const db = createMigratedTestD1();
     insertFailure(db);
-    insertFailure(db, { id: "failure-2" }); // same sha, attempt 2 (retry)
-    insertFailure(db, { id: "failure-3", head_sha: "" }); // failed before the checkout resolved
+    insertFailure(db, { id: "failure-2" }); // note: same sha, attempt 2 (retry)
+    insertFailure(db, { id: "failure-3", head_sha: "" }); // note: failed before the checkout resolved
     const count = db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
     expect(count.n).toBe(3);
   });
@@ -607,17 +607,17 @@ describe("migrations/0010_review_failures.sql", () => {
 });
 
 describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  /** note: Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string): void {
     insertGithubAppRow(db, { id });
   }
 
-  /** The pre-0020 shape (0001–0019, filename order) — what production runs today. */
+  /** note: The pre-0020 shape (0001–0019, filename order) — what production runs today. */
   function createPre0020Db(): TestD1 {
     const db = createTestD1();
     for (const name of [
@@ -646,9 +646,9 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 
   test("applies cleanly over a seeded production-shaped DB (0001–0019 with live rows)", () => {
     const db = createPre0020Db();
-    insertReview(db); // a live review predates the CREATE TABLEs (wrangler order)
+    insertReview(db); // note: a live review predates the CREATE TABLEs (wrangler order)
     insertApp(db, "app-1");
-    // Append-only CREATE TABLEs + indexes over the live rows — nothing
+    // why: Append-only CREATE TABLEs + indexes over the live rows — nothing
     // existing changes.
     expect(() => applyMigrationFile(db, "0020_finding_lifecycle.sql")).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
@@ -674,7 +674,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
       idx_finding_rotation: "review_findings",
       idx_thread_recovery: "review_threads",
     });
-    // The rotation index covers the §7.2 scope+state prefix in order.
+    // note: The rotation index covers the §7.2 scope+state prefix in order.
     const rotationColumns = db.raw.query("PRAGMA index_info(idx_finding_rotation)").all() as Array<{ name: string }>;
     expect(rotationColumns.map((c) => c.name)).toEqual([
       "bot_id", "installation_id", "owner", "repo", "pr_number", "state", "last_scheduled_ms", "id",
@@ -693,7 +693,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
         .run(id, "0".repeat(40));
     insert("pub-1");
     expect(() => insert("pub-2")).toThrow(/UNIQUE constraint failed/);
-    // Same SHA with a different kind is a distinct publication (review vs degraded).
+    // invariant: Same SHA with a different kind is a distinct publication (review vs degraded).
     db.raw
       .prepare(
         `INSERT INTO review_publications (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, created_ms, updated_ms)
@@ -750,7 +750,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
   test("FKs: unknown bots are refused; lifecycle rows require their publication/finding parents", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-1");
-    // Publication with an unknown bot_id — FK refused.
+    // invariant: Publication with an unknown bot_id — FK refused.
     expect(() =>
       db.raw
         .prepare(
@@ -766,7 +766,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
          VALUES ('pub-1', 'app-1', 123, 'acme', 'widgets', 42, ?, 'review', 'prepared', '{}', 1000, 1000)`,
       )
       .run("0".repeat(40));
-    // A finding row needs its publication parents.
+    // invariant: A finding row needs its publication parents.
     expect(() =>
       db.raw
         .prepare(
@@ -786,7 +786,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
       .get() as { tbl_name: string } | null;
     expect(index).not.toBeNull();
     expect(index!.tbl_name).toBe("review_publications");
-    // The §7.0 scope prefix leads, then the probe's discriminating equalities
+    // note: The §7.0 scope prefix leads, then the probe's discriminating equalities
     // — so the per-message lookup seeks instead of scanning every retained
     // row of the scope.
     const columns = db.raw.query("PRAGMA index_info(idx_publication_scope)").all() as Array<{ name: string }>;
@@ -794,7 +794,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
       "bot_id", "installation_id", "owner", "repo", "pr_number", "kind", "phase",
     ]);
 
-    // The degraded-journal probe (`hasUnprovenDegradedPublication`) is what
+    // why: The degraded-journal probe (`hasUnprovenDegradedPublication`) is what
     // the index exists for: without it the planner falls back to the
     // scope-only UNIQUE autoindex and discards the whole non-degraded and
     // terminal remainder of the scope.
@@ -810,7 +810,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
   });
 
   test("the rotation query binds the scope prefix through idx_finding_rotation (recorded plan)", () => {
-    // The §7.2 ORDER BY is an expression (COALESCE) → SQLite temp-sorts;
+    // note: The §7.2 ORDER BY is an expression (COALESCE) → SQLite temp-sorts;
     // planner choice for expression-ordered queries is NOT asserted
     // (AL-21-2 convention) — the plan is recorded and the index existence +
     // column order is asserted above.
@@ -831,7 +831,7 @@ describe("migrations/0020_finding_lifecycle.sql (spec review-lifecycle §7.1)", 
 describe("migrations/0002_mstar_review_v1.sql", () => {
   test("adds the envelope column to reviews (TEXT, nullable)", async () => {
     const db = createTestD1();
-    // The M1-era insert path (no envelope) is unchanged by the ALTER, and a
+    // note: The M1-era insert path (no envelope) is unchanged by the ALTER, and a
     // fresh row defaults to envelope NULL.
     await insertReview(db);
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string | null };
@@ -844,7 +844,7 @@ describe("migrations/0002_mstar_review_v1.sql", () => {
     await expect(
       db.prepare("UPDATE reviews SET envelope = 'not json' WHERE id = ?").bind(REVIEW.id).run(),
     ).rejects.toThrow(/CHECK constraint failed/);
-    // NULL envelope is legal — every M1-era row keeps envelope NULL.
+    // invariant: NULL envelope is legal — every M1-era row keeps envelope NULL.
     await db.prepare("UPDATE reviews SET envelope = NULL WHERE id = ?").bind(REVIEW.id).run();
     const row = db.raw.query("SELECT envelope FROM reviews").get() as { envelope: string | null };
     expect(row.envelope).toBeNull();
@@ -862,14 +862,14 @@ describe("migrations/0002_mstar_review_v1.sql", () => {
   });
 });
 describe("migrations/0013_findings_review_id_index.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0010 with live rows)", () => {
     const db = createTestD1();
-    insertReview(db); // a live review AND finding predate the CREATE INDEX
+    insertReview(db); // note: a live review AND finding predate the CREATE INDEX
     db.raw
       .prepare(
         `INSERT INTO findings (id, review_id, severity, category, title)
@@ -889,7 +889,7 @@ describe("migrations/0013_findings_review_id_index.sql", () => {
       applyMigrationFile(db, name);
     }
 
-    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    // why: Metadata-only CREATE INDEX builds over the live rows without rewriting.
     expect(() => applyMigrationFile(db, "0013_findings_review_id_index.sql")).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviewCount.n).toBe(1);
@@ -909,7 +909,7 @@ describe("migrations/0013_findings_review_id_index.sql", () => {
   });
 
   test("the findings-by-review hot path uses the index (EXPLAIN QUERY PLAN)", () => {
-    // Mirrors the 0007 index assertion: on the fully migrated (empty) schema
+    // note: Mirrors the 0007 index assertion: on the fully migrated (empty) schema
     // the equality probe binds to the index — same planner determinism the
     // 0007 test relies on. AL-21-2's planner-brittleness caveat applies to
     // the GROUP-BY recurrence query, not this single-column probe.
@@ -921,14 +921,14 @@ describe("migrations/0013_findings_review_id_index.sql", () => {
   });
 });
 describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   test("applies cleanly over a seeded production-shaped DB (0001–0013 with live rows)", () => {
     const db = createTestD1();
-    insertReview(db); // a live review predates the CREATE INDEX
+    insertReview(db); // note: a live review predates the CREATE INDEX
     for (const name of [
       "0003_dashboard_users.sql",
       "0004_github_apps.sql",
@@ -943,7 +943,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
       applyMigrationFile(db, name);
     }
 
-    // Metadata-only CREATE INDEX builds over the live rows without rewriting.
+    // why: Metadata-only CREATE INDEX builds over the live rows without rewriting.
     expect(() => applyMigrationFile(db, "0014_idx_reviews_reviewed_at.sql")).not.toThrow();
     const reviewCount = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
     expect(reviewCount.n).toBe(1);
@@ -961,7 +961,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
   });
 
   test("the insights window predicate seeks the index (EXPLAIN QUERY PLAN)", () => {
-    // The window predicate `reviewed_at >= datetime('now', …)` is a
+    // why: The window predicate `reviewed_at >= datetime('now', …)` is a
     // range probe — with 0014 the planner seeks the window slice instead of
     // full-scanning reviews. Recorded for the record (plan convention);
     // planner choice is a runtime fact (AL-21-2 caveat applies to GROUP-BY
@@ -979,7 +979,7 @@ describe("migrations/0014_idx_reviews_reviewed_at.sql", () => {
 });
 
 describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -990,7 +990,7 @@ describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
     db.raw
       .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
       .run("u-1", "OctoCat", "admin", "2026-01-01T00:00:00.000Z");
-    // Metadata-only CREATE UNIQUE INDEX builds over the live rows without
+    // why: Metadata-only CREATE UNIQUE INDEX builds over the live rows without
     // rewriting — the append-only 0003+ convention.
     expect(() => applyMigrationFile(db, "0016_users_login_nocase_unique.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM users").get() as { n: number };
@@ -1004,7 +1004,7 @@ describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
     db.raw
       .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES (?, ?, ?, ?)")
       .run("u-1", "OctoCat", "admin", "2026-01-01T00:00:00.000Z");
-    // The 0003 BINARY UNIQUE does not fire across case variants — the 0016
+    // note: The 0003 BINARY UNIQUE does not fire across case variants — the 0016
     // NOCASE index is what makes the second row impossible.
     expect(() =>
       db.raw
@@ -1029,17 +1029,17 @@ describe("migrations/0016_users_login_nocase_unique.sql (QC W-1)", () => {
 });
 
 describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  /** note: Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, githubAppId = 1001): void {
     insertGithubAppRow(db, { id, githubAppId });
   }
 
-  /** The pre-chains shape (0001–0016) with live app_model_config / app_model_roles rows. */
+  /** note: The pre-chains shape (0001–0016) with live app_model_config / app_model_roles rows. */
   function createPreChainsDb(): TestD1 {
     const db = createTestD1();
     for (const name of [
@@ -1072,7 +1072,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     db.raw
       .prepare(`INSERT INTO app_model_roles (app_id, role, selector) VALUES ('app-1', 'code-reviewer', 'openai/gpt-5')`)
       .run();
-    // Append-only CREATE TABLE + backfill DML over the live rows — nothing
+    // why: Append-only CREATE TABLE + backfill DML over the live rows — nothing
     // existing changes (the first INSERT…SELECT in the migration set).
     expect(() => applyMigrationFile(db, "0017_app_model_chains.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
@@ -1083,7 +1083,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     const db = createPreChainsDb();
     insertApp(db, "app-1");
     insertApp(db, "app-2", 1002);
-    // app-1 has a chain; app-2 has a NULL chain row; app-3 has no row at all.
+    // note: app-1 has a chain; app-2 has a NULL chain row; app-3 has no row at all.
     db.raw
       .prepare(`INSERT INTO app_model_config (app_id, model_chain, updated_at) VALUES ('app-1', 'ark/deepseek-v4-flash, openai/gpt-5:thinking', datetime('now'))`)
       .run();
@@ -1094,7 +1094,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
     const rows = db.raw
       .query("SELECT app_id, name, chain, is_default FROM app_model_chains ORDER BY app_id")
       .all() as Array<{ app_id: string; name: string; chain: string; is_default: number }>;
-    // Exactly one default row, holding the verbatim chain (byte-identical).
+    // invariant: Exactly one default row, holding the verbatim chain (byte-identical).
     expect(rows).toEqual([
       { app_id: "app-1", name: "default", chain: "ark/deepseek-v4-flash, openai/gpt-5:thinking", is_default: 1 },
     ]);
@@ -1142,7 +1142,7 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
         .prepare(`INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at) VALUES ('app-1', 'fast', 'x/y', 0, datetime('now'), datetime('now'))`)
         .run(),
     ).toThrow(/UNIQUE constraint failed/);
-    // The same name under ANOTHER bot is a distinct row (per-bot chains).
+    // invariant: The same name under ANOTHER bot is a distinct row (per-bot chains).
     db.raw
       .prepare(`INSERT INTO bot_model_chains (bot_id, name, chain, is_default, created_at, updated_at) VALUES ('app-2', 'fast', 'x/y', 0, datetime('now'), datetime('now'))`)
       .run();
@@ -1187,12 +1187,12 @@ describe("migrations/0017_app_model_chains.sql (spec §4.4)", () => {
 });
 
 describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  /** note: Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
     insertGithubAppRow(db, {
       id,
@@ -1201,7 +1201,7 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
     });
   }
 
-  /** The pre-0018 shape (0001–0017, filename order) — what production runs today. */
+  /** note: The pre-0018 shape (0001–0017, filename order) — what production runs today. */
   function createPre0018Db(): TestD1 {
     const db = createTestD1();
     for (const name of [
@@ -1228,10 +1228,10 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
 
   test("applies cleanly over a seeded production-shaped DB (0001–0017 with live rows, incl. a soft-deleted app)", () => {
     const db = createPre0018Db();
-    insertReview(db); // a live review predates the ALTER (wrangler order)
+    insertReview(db); // note: a live review predates the ALTER (wrangler order)
     insertApp(db, "app-1");
-    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // soft-deleted rows backfill too
-    // Metadata-only ADD COLUMN alters the table without rewriting it (the
+    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // note: soft-deleted rows backfill too
+    // why: Metadata-only ADD COLUMN alters the table without rewriting it (the
     // 0008 precedent) — every live row survives untouched.
     expect(() => applyMigrationFile(db, "0018_app_sandbox_images.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM github_apps").get() as { n: number };
@@ -1249,7 +1249,7 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
     const col = columns.find((c) => c.name === "sandbox_image_id");
     expect(col).toBeDefined();
     expect(col!.type).toBe("TEXT");
-    expect(col!.notnull).toBe(1); // NOT NULL is legal with a non-NULL DEFAULT (0008 precedent)
+    expect(col!.notnull).toBe(1); // note: NOT NULL is legal with a non-NULL DEFAULT (0008 precedent)
     expect(col!.dflt_value).toBe("'omp'");
   });
 
@@ -1299,12 +1299,12 @@ describe("migrations/0018_app_sandbox_images.sql (spec § Runtime-image contract
 });
 
 describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** Raw-insert one github_apps row (the 0004 column list is sufficient). */
+  /** note: Raw-insert one github_apps row (the 0004 column list is sufficient). */
   function insertApp(db: TestD1, id: string, opts: { githubAppId?: number; deleted?: boolean } = {}): void {
     insertGithubAppRow(db, {
       id,
@@ -1313,7 +1313,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
     });
   }
 
-  /** The pre-0019 shape (0001–0018, filename order) — what production runs today. */
+  /** note: The pre-0019 shape (0001–0018, filename order) — what production runs today. */
   function createPre0019Db(): TestD1 {
     const db = createTestD1();
     for (const name of [
@@ -1341,10 +1341,10 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
 
   test("applies cleanly over a seeded production-shaped DB (0001–0018 with live rows, incl. a soft-deleted app)", () => {
     const db = createPre0019Db();
-    insertReview(db); // a live review predates the ALTER (wrangler order)
+    insertReview(db); // note: a live review predates the ALTER (wrangler order)
     insertApp(db, "app-1");
-    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // soft-deleted rows backfill too
-    // Metadata-only ADD COLUMNs alter the table without rewriting it (the
+    insertApp(db, "app-gone", { githubAppId: 1002, deleted: true }); // note: soft-deleted rows backfill too
+    // why: Metadata-only ADD COLUMNs alter the table without rewriting it (the
     // 0008 precedent) — every live row survives untouched, and old rows
     // read as "never synced" (all five columns NULL).
     expect(() => applyMigrationFile(db, "0019_github_apps_metadata.sql")).not.toThrow();
@@ -1411,7 +1411,7 @@ describe("migrations/0019_github_apps_metadata.sql (AD-531)", () => {
 });
 
 describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
-  /** The exact grant SQL of each lookup below, copied from its owner module. */
+  /** note: The exact grant SQL of each lookup below, copied from its owner module. */
   const NEWEST = `g.rowid = (
             SELECT MAX(x.rowid) FROM support_grants x
              WHERE x.workspace_id = g.workspace_id
@@ -1419,7 +1419,7 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
           )`;
   const GRANT_COLUMNS = `id, workspace_id, operator_login, reason, granted_by, created_at, expires_at`;
 
-  /** `EXPLAIN QUERY PLAN` detail lines, in the planner's order. */
+  /** note: `EXPLAIN QUERY PLAN` detail lines, in the planner's order. */
   function plan(db: TestD1, sql: string): string[] {
     return (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((p) => p.detail);
   }
@@ -1440,7 +1440,7 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
 
   test("the operator_login-only grant count seeks the new operator window index", () => {
     const db = createMigratedTestD1();
-    // `admin/users.ts` LIST_USERS_SQL: a login-keyed, expiry-bounded count that
+    // note: `admin/users.ts` LIST_USERS_SQL: a login-keyed, expiry-bounded count that
     // has no workspace equality to lead `support_grants_lookup` with.
     expect(
       plan(
@@ -1453,7 +1453,7 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
 
   test("the all-workspaces grant list seeks the new expiry index", () => {
     const db = createMigratedTestD1();
-    // `listAllActiveSupportGrants`: `expires_at` alone, so neither the lookup
+    // note: `listAllActiveSupportGrants`: `expires_at` alone, so neither the lookup
     // index nor the operator window can bound it.
     const lines = plan(
       db,
@@ -1484,7 +1484,7 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
       ),
     ).toContain("SEARCH g USING INDEX support_grants_lookup (workspace_id=?)");
 
-    // The `NEWEST_GRANT_APPEND` correlation both reads above depend on.
+    // note: The `NEWEST_GRANT_APPEND` correlation both reads above depend on.
     expect(
       plan(db, "SELECT MAX(x.rowid) FROM support_grants x WHERE x.workspace_id = ? AND x.operator_login = ?"),
     ).toContain("SEARCH x USING COVERING INDEX support_grants_lookup (workspace_id=? AND operator_login=?)");
@@ -1492,12 +1492,12 @@ describe("migrations/0034_support_grant_indexes.sql (I-000167)", () => {
 });
 
 describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
-  /** The sweep's candidate SQL, copied from `expireLapsedInvites`'s subquery. */
+  /** note: The sweep's candidate SQL, copied from `expireLapsedInvites`'s subquery. */
   const CANDIDATES = `SELECT id FROM workspace_invites
      WHERE status = 'pending' AND expires_at <= ?
      ORDER BY expires_at, id LIMIT ?`;
 
-  /** `EXPLAIN QUERY PLAN` detail lines, in the planner's order. */
+  /** note: `EXPLAIN QUERY PLAN` detail lines, in the planner's order. */
   function plan(db: TestD1, sql: string): string[] {
     return (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>).map((p) => p.detail);
   }
@@ -1509,7 +1509,7 @@ describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
   test("indexes the pending set by the candidate order (expires_at, id)", () => {
     const db = createMigratedTestD1();
     expect(indexColumns(db, "workspace_invites_expiry")).toEqual(["expires_at", "id"]);
-    // Partial, like both 0028 indexes: only the live pending set is indexed.
+    // note: Partial, like both 0028 indexes: only the live pending set is indexed.
     const row = db.raw
       .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'workspace_invites_expiry'")
       .get() as { sql: string };
@@ -1520,7 +1520,7 @@ describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
     const db = createMigratedTestD1();
     const lines = plan(db, CANDIDATES);
     expect(lines[0]).toBe("SEARCH workspace_invites USING COVERING INDEX workspace_invites_expiry (expires_at<?)");
-    // The trailing `id` index column is what keeps the ORDER BY out of a temp
+    // why: The trailing `id` index column is what keeps the ORDER BY out of a temp
     // B-tree — a `(expires_at)`-only index would sort every candidate row.
     expect(lines.join("\n")).not.toContain("TEMP B-TREE");
   });
@@ -1534,14 +1534,14 @@ describe("migrations/0035_workspace_invite_expiry_index.sql (I-000096)", () => {
 });
 
 describe("migrations/0036_app_identity.sql", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
-  /** The pre-0036 shape: the 0001–0035 chain, i.e. what production runs today. */
+  /** note: The pre-0036 shape: the 0001–0035 chain, i.e. what production runs today. */
   function createPre0036Db(): TestD1 {
-    // createTestD1 already applied the 0001/0002 base shape, so the chain here
+    // why: createTestD1 already applied the 0001/0002 base shape, so the chain here
     // starts at 0003 and stops before the migration under test.
     const db = createTestD1();
     const names = readdirSync(MIGRATIONS_DIR)
@@ -1551,7 +1551,7 @@ describe("migrations/0036_app_identity.sql", () => {
     return db;
   }
 
-  /** One live row, seeded by whichever shape this fixture carries. */
+  /** note: One live row, seeded by whichever shape this fixture carries. */
   function insertApp(db: TestD1, id: string, path: string, githubAppId: number): void {
     insertGithubAppRow(db, { id, name: path, githubAppId });
   }
@@ -1563,7 +1563,7 @@ describe("migrations/0036_app_identity.sql", () => {
 
     expect(() => applyMigrationFile(db, "0036_app_identity.sql")).not.toThrow();
 
-    // The values are the point: a rename that dropped or rewrote them would
+    // invariant: The values are the point: a rename that dropped or rewrote them would
     // break every webhook URL GitHub already has registered.
     const rows = db.raw
       .query("SELECT id, webhook_path FROM github_apps ORDER BY id")
@@ -1584,7 +1584,7 @@ describe("migrations/0036_app_identity.sql", () => {
       notnull: number;
     }>;
     expect(cols.find((c) => c.name === "webhook_path")!.notnull).toBe(1);
-    // Two rows may not share a route key (the constraint moved with the
+    // invariant: Two rows may not share a route key (the constraint moved with the
     // rename, so it is still enforced on the new name).
     const insertWithPath = (id: string, githubAppId: number): void => {
       db.raw
@@ -1614,7 +1614,7 @@ describe("migrations/0036_app_identity.sql", () => {
     expect(col!.type).toBe("TEXT");
     expect(col!.notnull).toBe(0);
     expect(col!.dflt_value).toBeNull();
-    // Deliberately unindexed: the column caches a mutable upstream fact, so no
+    // why: Deliberately unindexed: the column caches a mutable upstream fact, so no
     // index — unique or otherwise — may gate another App's write on it.
     expect(db.raw.query("PRAGMA index_info(review_bots_github_slug)").all()).toEqual([]);
   });
@@ -1623,12 +1623,12 @@ describe("migrations/0036_app_identity.sql", () => {
     const db = createMigratedTestD1();
     insertApp(db, "app-1", "one", 3001);
     insertApp(db, "app-2", "two", 3002);
-    // Both legacy rows migrated as "never synced" and must coexist.
+    // note: Both legacy rows migrated as "never synced" and must coexist.
     const nulls = db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE github_slug IS NULL").get() as { n: number };
     expect(nulls.n).toBe(2);
 
     db.raw.prepare("UPDATE review_bots SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
-    // GitHub frees and reuses a slug, so a stale cached copy plus a live one is
+    // why: GitHub frees and reuses a slug, so a stale cached copy plus a live one is
     // a legitimate state, not a conflict. Identity is `github_app_id`.
     expect(() =>
       db.raw.prepare("UPDATE review_bots SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
@@ -1657,7 +1657,7 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
   test("existing rows read NULL (never attempted) and the column round-trips the datetime TEXT form", () => {
     const db = createMigratedTestD1();
     insertGithubAppRow(db, { id: "app-1", name: "attempt-app", githubAppId: 4001 });
-    // The ADD COLUMN is metadata-only: the live row survives and reads NULL,
+    // note: The ADD COLUMN is metadata-only: the live row survives and reads NULL,
     // which the read path treats as stale (one attempt after the deploy).
     const before = db.raw
       .query("SELECT github_metadata_attempted_at FROM review_bots WHERE id = 'app-1'")
@@ -1673,13 +1673,13 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
 });
 
 describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () => {
-  /** Apply one migration file verbatim (filename order = wrangler order). */
+  /** note: Apply one migration file verbatim (filename order = wrangler order). */
   function applyMigrationFile(db: TestD1, name: string): void {
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
 
   /**
-   * One migration file as executable statements, comments stripped. The file
+   * why: One migration file as executable statements, comments stripped. The file
    * is executed statement by statement inside a caller-owned transaction so no
    * implicit commit can move a `PRAGMA` out of it — `exec(wholeFile)` is what
    * would make bun:sqlite commit early and turn the in-transaction
@@ -1695,9 +1695,9 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
       .filter((statement) => statement.length > 0);
   }
 
-  /** The pre-0038 shape: 0003 … 0037, i.e. what production runs today. */
+  /** note: The pre-0038 shape: 0003 … 0037, i.e. what production runs today. */
   function createPre0038Db(): TestD1 {
-    // createTestD1 already applied the 0001/0002 base shape, so the chain here
+    // why: createTestD1 already applied the 0001/0002 base shape, so the chain here
     // starts at 0003 and stops before the migration under test.
     const db = createTestD1();
     for (const name of readdirSync(MIGRATIONS_DIR)
@@ -1709,7 +1709,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
   }
 
   /**
-   * Two live Apps, each with its own workspace mapping, installation and
+   * why: Two live Apps, each with its own workspace mapping, installation and
    * delivery — the child rows the rebuild must carry across its DROP TABLE.
    */
   function seedLiveData(db: TestD1): void {
@@ -1726,7 +1726,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
       createdBy: "octocat",
       deletedExpr: "datetime('now')",
     });
-    // Distinguishable credentials per row: the copy must not swap them.
+    // safety: Distinguishable credentials per row: the copy must not swap them.
     db.raw
       .prepare("UPDATE github_apps SET private_key_enc = ?, webhook_secret_enc = ?, github_slug = ? WHERE id = ?")
       .run("v1.primary.cGVtLTE=", "v1.primary.c2VjcmV0LTE=", "acme-reviewer", "app-live-1");
@@ -1786,7 +1786,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect(childrenBefore.installations).toHaveLength(2);
     expect(childrenBefore.deliveries).toHaveLength(2);
 
-    // D1 runs every migration file inside one implicit transaction with
+    // why: D1 runs every migration file inside one implicit transaction with
     // foreign keys enforced. The statements run one by one inside a
     // caller-owned transaction so nothing can commit early: a whole-file
     // `exec` lets bun:sqlite commit, and the file's `PRAGMA foreign_keys = OFF`
@@ -1796,7 +1796,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     db.raw.exec("PRAGMA foreign_keys = ON");
     const statements = statementsOf("0038_webhook_path_drop.sql");
     expect(statements.length).toBeGreaterThan(5);
-    // Captured at the parent DROP, inside the transaction.
+    // note: Captured at the parent DROP, inside the transaction.
     const atDrop: { foreign_keys?: number; defer_foreign_keys?: number } = {};
     const apply = db.raw.transaction(() => {
       for (const statement of statements) {
@@ -1811,12 +1811,12 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     });
     expect(() => apply()).not.toThrow();
 
-    // The in-transaction `PRAGMA foreign_keys = OFF` was ignored (SQLite keeps
+    // note: The in-transaction `PRAGMA foreign_keys = OFF` was ignored (SQLite keeps
     // the setting until the transaction ends), and the deferred check is the
     // one holding the parent DROP together.
     expect(atDrop).toEqual({ foreign_keys: 1, defer_foreign_keys: 1 });
 
-    // The rows survive field for field, in the same order and with the same
+    // invariant: The rows survive field for field, in the same order and with the same
     // values (the copy is positional, so a swapped column would show up here).
     const appsAfter = db.raw
       .query(
@@ -1828,7 +1828,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect(appsAfter).toEqual(appsBefore);
     expect(appsAfter.map((row) => (row as { github_app_id: number }).github_app_id)).toEqual([1001, 1002]);
 
-    // No child row was cascaded, dropped or rewritten.
+    // invariant: No child row was cascaded, dropped or rewritten.
     expect(db.raw.query("SELECT app_id, workspace_id FROM app_workspaces ORDER BY app_id").all()).toEqual(
       childrenBefore.workspaces,
     );
@@ -1844,13 +1844,13 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     ).toEqual(childrenBefore.deliveries);
     expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
 
-    // The column is gone, and the one remaining identity constraint still bites.
+    // invariant: The column is gone, and the one remaining identity constraint still bites.
     const columns = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>;
     expect(columns.map((column) => column.name)).not.toContain("webhook_path");
     expect(() =>
       insertGithubAppRow(db, { id: "app-dup", githubAppId: 1001 }),
     ).toThrow(/UNIQUE constraint failed: github_apps.github_app_id/);
-    // FK enforcement is still live after the rebuild (the file restores it).
+    // invariant: FK enforcement is still live after the rebuild (the file restores it).
     expect(() =>
       db.raw
         .prepare("INSERT INTO app_installations (id, app_id, installation_id, seen_at) VALUES ('inst-x', 'nope', 1, '2026-01-01 00:00:00')")
@@ -1859,7 +1859,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
   });
 
   test("replaying the file on an already-migrated schema is a no-op, leaving no staging table", () => {
-    // No ledger exists in the test double, so the realistic second run is a raw
+    // note: No ledger exists in the test double, so the realistic second run is a raw
     // replay. The rebuild must be idempotent on the post-0038 shape (the
     // ledger is what normally prevents this call), and it must not leave the
     // staging table or a half-rebuilt schema behind. The world is bounded at
@@ -1894,7 +1894,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect(
       (db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{ name: string }>).map((column) => column.name),
     ).not.toContain("webhook_path");
-    // The file's own PRAGMA switches leave FK enforcement ON for the rest of
+    // note: The file's own PRAGMA switches leave FK enforcement ON for the rest of
     // the run (the connection default the migration must not weaken).
     expect((db.raw.query("PRAGMA foreign_keys").get() as { foreign_keys: number }).foreign_keys).toBe(1);
   });
@@ -1902,7 +1902,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
 
 describe("migrations/0043_workspace_concurrency_bound.sql", () => {
   test("clamps rows above the maximum when applied, and a replay is a no-op", async () => {
-    // Apply everything BEFORE 0043, so the file runs for the first time over
+    // why: Apply everything BEFORE 0043, so the file runs for the first time over
     // rows that already exist — the real deploy order.
     const db = createTestD1();
     const before = readdirSync(MIGRATIONS_DIR)
@@ -1920,7 +1920,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       `INSERT INTO workspaces (id, slug, name, created_at, max_concurrent_reviews)
        VALUES (?1, ?1, ?1, '2026-11-04T00:00:00.000Z', ?2)`,
     );
-    // 33 and 64 were legal under the previous shared 1..64 range; 32 is the
+    // note: 33 and 64 were legal under the previous shared 1..64 range; 32 is the
     // new maximum, 8 an ordinary value, NULL the absent setting.
     for (const [id, cap] of [
       ["ws_40", 40],
@@ -1931,7 +1931,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     ] as const) {
       insert.run(id, cap);
     }
-    // The system row is deliberately outside the clamp's WHERE: its old
+    // note: The system row is deliberately outside the clamp's WHERE: its old
     // maximum (64) fits inside the new one (256).
     db.raw
       .prepare(
@@ -1945,7 +1945,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
     const rows = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
       .all() as Array<{ id: string; cap: number | null }>;
-    // The clamp literal in the migration is this constant's value; deriving the
+    // why: The clamp literal in the migration is this constant's value; deriving the
     // expectation here makes a future bound change fail loudly.
     expect(Object.fromEntries(rows.map((row) => [row.id, row.cap]))).toEqual({
       ws_40: WORKSPACE_CONCURRENCY_MAX,
@@ -1955,7 +1955,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       ws_null: null,
     });
 
-    // The migration's product promise: a formerly-64 value reads as an
+    // invariant: The migration's product promise: a formerly-64 value reads as an
     // ordinary, non-degraded cap after the clamp.
     expect(await getEffectiveConcurrency(db, "ws_40")).toEqual({
       system: 64,
@@ -1964,13 +1964,13 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       degraded: false,
     });
 
-    // The system row is untouched by the clamp.
+    // invariant: The system row is untouched by the clamp.
     const system = db.raw
       .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
       .get() as { value: string };
     expect(system.value).toBe("64");
 
-    // The previous values survive in the migration's own record table.
+    // invariant: The previous values survive in the migration's own record table.
     const recorded = db.raw
       .prepare(
         `SELECT workspace_id, previous_value, clamped_to
@@ -1982,7 +1982,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
       { workspace_id: "ws_40", previous_value: 40, clamped_to: WORKSPACE_CONCURRENCY_MAX },
     ]);
 
-    // Replaying the file on the clamped schema is a no-op.
+    // invariant: Replaying the file on the clamped schema is a no-op.
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0043_workspace_concurrency_bound.sql"), "utf8"));
     const replay = db.raw
       .query("SELECT id, max_concurrent_reviews AS cap FROM workspaces WHERE id LIKE 'ws\\_%' ESCAPE '\\' ORDER BY id")
@@ -1998,7 +1998,7 @@ describe("migrations/0043_workspace_concurrency_bound.sql", () => {
 describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
   const GATE_MIGRATION = "0045_review_gate_and_owner_allowlist.sql";
 
-  /** A DB shaped like production at 0044: every earlier file, applied in order. */
+  /** note: A DB shaped like production at 0044: every earlier file, applied in order. */
   function preGateDb(): TestD1 {
     const db = createTestD1();
     const gate = migrationNumber(GATE_MIGRATION);
@@ -2012,7 +2012,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
 
   test("existing rows materialize the gate and visibility defaults with no backfill", () => {
     const db = preGateDb();
-    // A row written before the migration carries no gate configuration.
+    // note: A row written before the migration carries no gate configuration.
     insertGithubAppRow(db, { id: "legacy-app", githubAppId: 9001, name: "legacy-app" });
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, GATE_MIGRATION), "utf8"));
 
@@ -2034,7 +2034,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       github_visibility: null,
     });
 
-    // The columns' own contract: NOT NULL, and a nullable visibility (the
+    // invariant: The columns' own contract: NOT NULL, and a nullable visibility (the
     // default VALUES themselves are pinned above, row-level).
     const cols = db.raw.query("PRAGMA table_info(github_apps)").all() as Array<{
       name: string;
@@ -2047,7 +2047,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     expect(byName.allowlist_enabled).toMatchObject({ type: "INTEGER", notnull: 1 });
     expect(byName.github_visibility).toMatchObject({ type: "TEXT", notnull: 0 });
 
-    // The score CHECK is two-sided: both directions reject, and 0 is the
+    // invariant: The score CHECK is two-sided: both directions reject, and 0 is the
     // accepted floor of `BETWEEN 0 AND 100`.
     for (const outOfRange of [101, -1]) {
       expect(() =>
@@ -2061,12 +2061,12 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       .query("SELECT check_min_score FROM github_apps WHERE id = 'legacy-app'")
       .get() as { check_min_score: number };
     expect(floorRow.check_min_score).toBe(0);
-    // A fractional score sits INSIDE 0..100, so only the CHECK's own INTEGER
+    // invariant: A fractional score sits INSIDE 0..100, so only the CHECK's own INTEGER
     // cast equality refuses it; without that clause it would be stored.
     expect(() =>
       db.raw.prepare("UPDATE github_apps SET check_min_score = 80.5 WHERE id = 'legacy-app'").run(),
     ).toThrow();
-    // ...and the INTEGER affinity still normalizes a whole-number value, so the
+    // invariant: ...and the INTEGER affinity still normalizes a whole-number value, so the
     // tightening refuses fractions only.
     db.raw.prepare("UPDATE github_apps SET check_min_score = '90.0' WHERE id = 'legacy-app'").run();
     const wholeRow = db.raw
@@ -2077,7 +2077,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       db.raw.prepare("UPDATE github_apps SET github_visibility = 'secret' WHERE id = 'legacy-app'").run(),
     ).toThrow();
     db.raw.prepare("UPDATE github_apps SET github_visibility = 'private' WHERE id = 'legacy-app'").run();
-    // JSON well-formedness is enforced; enumeration is not expressible in
+    // invariant: JSON well-formedness is enforced; enumeration is not expressible in
     // DDL, so a well-formed off-vocabulary array is still storable and the
     // store read path — not the CHECK — rejects it.
     expect(() =>
@@ -2096,7 +2096,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
     insert.run("allow-app", "acme");
     expect(() => insert.run("allow-app", "acme")).toThrow();
     insert.run("allow-app", "beta");
-    // An unknown App is refused by the FK, not silently stored.
+    // invariant: An unknown App is refused by the FK, not silently stored.
     expect(() => insert.run("ghost-app", "acme")).toThrow();
 
     const owners = db.raw
@@ -2104,7 +2104,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
       .all() as Array<{ owner_login: string }>;
     expect(owners.map((entry) => entry.owner_login)).toEqual(["acme", "beta"]);
 
-    // No ON DELETE (NO ACTION), the 0006/app-config precedent: the parent →
+    // invariant: No ON DELETE (NO ACTION), the 0006/app-config precedent: the parent →
     // child direction refuses too, so soft-delete stays the only removal path
     // and a bot can never lose its rows by hard deletion.
     expect(() => db.raw.prepare("DELETE FROM review_bots WHERE id = 'allow-app'").run()).toThrow(
@@ -2114,7 +2114,7 @@ describe("migrations/0045_review_gate_and_owner_allowlist.sql", () => {
 });
 
 describe("migrations/0046_reviews_context_incomplete.sql", () => {
-  /** The shipped chain before the column: every migration below 0046. */
+  /** note: The shipped chain before the column: every migration below 0046. */
   function createPre0046Db(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -2149,7 +2149,7 @@ describe("migrations/0046_reviews_context_incomplete.sql", () => {
 });
 
 describe("migrations/0049_reviews_duration_ms.sql", () => {
-  /** The shipped chain before the column: every migration below 0049. */
+  /** note: The shipped chain before the column: every migration below 0049. */
   function createPre0049Db(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -2171,7 +2171,7 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, "0049_reviews_duration_ms.sql"), "utf8"));
 
-    // No duration is fabricated for history: a pre-column round reports none,
+    // invariant: No duration is fabricated for history: a pre-column round reports none,
     // and the UI omits the time rather than printing a made-up 0.
     const row = db.raw.query("SELECT duration_ms FROM reviews WHERE id = 'r1'").get() as {
       duration_ms: number | null;
@@ -2192,7 +2192,7 @@ describe("migrations/0049_reviews_duration_ms.sql", () => {
 });
 
 /**
- * The recheck rotation's PR-scoped thread probe (migration 0047).
+ * why: The recheck rotation's PR-scoped thread probe (migration 0047).
  *
  * `selectAssessmentTargets` (spec §7.2) also selects ADDRESSED findings that
  * own a non-terminal association, so every rotation pass probes
@@ -2205,7 +2205,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
   const SCOPE = { appId: "scope-app", installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 };
   const SHA = "0123456789abcdef0123456789abcdef01234567";
 
-  /** The scope/publication rows the lifecycle FKs require, plus two findings. */
+  /** note: The scope/publication rows the lifecycle FKs require, plus two findings. */
   function seedRotationFixture(): TestD1 {
     const db = createMigratedTestD1();
     insertGithubAppRow(db, { id: SCOPE.appId, githubAppId: 9003, name: "scope-app" });
@@ -2243,7 +2243,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
     };
     insertFinding("row-open", "open", 1000);
     insertFinding("row-addressed", "addressed", 2000);
-    // An addressed row with no association: the probe must not select it.
+    // note: An addressed row with no association: the probe must not select it.
     insertFinding("row-untracked", "addressed", 3000);
     db.raw
       .prepare(
@@ -2266,7 +2266,7 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
 
   test("the selector's association probe rides the index instead of scanning review_threads", async () => {
     const db = seedRotationFixture();
-    // Record the statement the REAL selector prepares — never a copy.
+    // why: Record the statement the REAL selector prepares — never a copy.
     const prepared: string[] = [];
     const recording: D1Like = {
       prepare(sql: string) {
@@ -2283,13 +2283,13 @@ describe("idx_thread_pr_scope (migration 0047_thread_pr_scope.sql)", () => {
       .map((row) => row.detail)
       .join("\n");
     expect(plan).toContain("SEARCH t USING INDEX idx_thread_pr_scope");
-    // A full scan of the cross-installation table is the regression this pins.
+    // invariant: A full scan of the cross-installation table is the regression this pins.
     expect(plan.split("\n").some((line) => line.startsWith("SCAN t"))).toBe(false);
   });
 });
 
 /**
- * migration 0048 — the durable comment-trigger claim.
+ * why: migration 0048 — the durable comment-trigger claim.
  *
  * The table is the at-most-once proof for a bot-mention comment: the worker
  * inserts one row before its queue send, so the PRIMARY KEY (never a KV
@@ -2320,7 +2320,7 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
       "queued_ms",
       "consumed_ms",
     ]);
-    // The PK IS the dedup: exactly the five identity columns, in that order.
+    // invariant: The PK IS the dedup: exactly the five identity columns, in that order.
     expect(columns.filter((c) => c.pk > 0).map((c) => c.name)).toEqual([
       "installation_id",
       "owner",
@@ -2328,7 +2328,7 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
       "pr_number",
       "comment_id",
     ]);
-    // Two nullable columns: `consumed_ms` is only set at consumption, and
+    // invariant: Two nullable columns: `consumed_ms` is only set at consumption, and
     // `payload_json` is cleared there (a tombstone keeps no payload).
     const NULLABLE: Record<string, true> = { consumed_ms: true, payload_json: true };
     for (const column of columns) {
@@ -2346,10 +2346,10 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
     );
 
     insert.run("queued");
-    // The whole point: one comment id, one claim.
+    // invariant: The whole point: one comment id, one claim.
     expect(() => insert.run("queued")).toThrow();
 
-    // The same comment id on another PR is a different claim.
+    // invariant: The same comment id on another PR is a different claim.
     db.raw
       .prepare(
         `INSERT INTO comment_trigger_claims
@@ -2358,7 +2358,7 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
       )
       .run();
 
-    // The vocabulary is closed: a typo can never strand a claim unreadable.
+    // invariant: The vocabulary is closed: a typo can never strand a claim unreadable.
     expect(() => insert.run("claimed")).toThrow();
     for (const state of ["consumed", "expired"] as const) {
       db.raw
@@ -2375,7 +2375,7 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
     ).map((c) => c.name);
     expect(indexColumns).toEqual(["state", "queued_ms"]);
 
-    // The statement the sweep prepares — projection, `attempts` predicate and
+    // why: The statement the sweep prepares — projection, `attempts` predicate and
     // the operator LIMIT included — never a hand-written twin that can drift.
     const plan = (
       db.raw
@@ -2392,7 +2392,7 @@ describe("migrations/0048_comment_trigger_claims.sql", () => {
 describe("migrations/0049_workspace_check_min_score.sql", () => {
   const SCORE_MIGRATION = "0049_workspace_check_min_score.sql";
 
-  /** A DB shaped like production at 0048: every earlier file, applied in order. */
+  /** note: A DB shaped like production at 0048: every earlier file, applied in order. */
   function preScoreDb(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -2415,7 +2415,7 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, SCORE_MIGRATION), "utf8"));
 
-    // The workspace keeps its row and starts at the absent state (the platform
+    // note: The workspace keeps its row and starts at the absent state (the platform
     // default lives in code, not in a column default that could freeze it).
     expect(db.raw.query("SELECT check_min_score FROM workspaces WHERE id = 'ws'").get()).toEqual({
       check_min_score: null,
@@ -2425,7 +2425,7 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
     ).find((c) => c.name === "check_min_score");
     expect(column).toMatchObject({ notnull: 0, dflt_value: null });
 
-    // The migration must never rebuild `github_apps`: that DROP TABLE would
+    // invariant: The migration must never rebuild `github_apps`: that DROP TABLE would
     // fire `pull_requests`' ON DELETE CASCADE and empty the PR ledger.
     expect(db.raw.query("SELECT id FROM pull_requests").all()).toEqual([{ id: "pr-1" }]);
     expect(db.raw.query("SELECT check_min_score FROM github_apps WHERE id = 'app-kept'").get()).toEqual({
@@ -2450,7 +2450,7 @@ describe("migrations/0049_workspace_check_min_score.sql", () => {
 describe("migrations/0050_reviews_round.sql", () => {
   const ROUND_MIGRATION = "0050_reviews_round.sql";
 
-  /** A DB shaped like production at 0049: every earlier file, applied in order. */
+  /** note: A DB shaped like production at 0049: every earlier file, applied in order. */
   function preRoundDb(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -2472,7 +2472,7 @@ describe("migrations/0050_reviews_round.sql", () => {
 
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, ROUND_MIGRATION), "utf8"));
 
-    // Pre-column rows read NULL, which is exactly the branch the detail read
+    // note: Pre-column rows read NULL, which is exactly the branch the detail read
     // turns into its positional fallback.
     expect(db.raw.query("SELECT round FROM reviews WHERE id = 'r-1'").get()).toEqual({ round: null });
     const column = (
@@ -2480,14 +2480,13 @@ describe("migrations/0050_reviews_round.sql", () => {
     ).find((c) => c.name === "round");
     expect(column).toMatchObject({ notnull: 0, dflt_value: null });
 
-    // ALTER TABLE must preserve the row.
+    // invariant: ALTER TABLE must preserve the row.
     expect(db.raw.query("SELECT id FROM reviews").all()).toEqual([{ id: "r-1" }]);
   });
 });
 
 /**
-
- * Ordinal hygiene. This table IS the keep-and-order decision — not a
+ * why: Ordinal hygiene. This table IS the keep-and-order decision — not a
  * convenience list: applied state is not determinable from the repo, so the
  * five pairs were kept, nothing was renamed, and their apply order is the
  * filename byte order the total comparator in `./helpers` produces.
@@ -2511,7 +2510,7 @@ const KEPT_DUPLICATE_ORDINALS: ReadonlyMap<number, readonly string[]> = new Map(
   [87, ["0087_review_attempt_queue_wait.sql", "0087_terminal_failure_status.sql"]],
 ]);
 
-/** Group migration filenames by numeric prefix; a group of 2+ is a repeated ordinal. */
+/** note: Group migration filenames by numeric prefix; a group of 2+ is a repeated ordinal. */
 function groupByOrdinal(names: readonly string[]): Map<number, string[]> {
   const groups = new Map<number, string[]>();
   for (const name of names) {
@@ -2522,7 +2521,7 @@ function groupByOrdinal(names: readonly string[]): Map<number, string[]> {
 }
 
 /**
- * Throw for any repeated ordinal the table does not record, or whose file set
+ * why: Throw for any repeated ordinal the table does not record, or whose file set
  * differs from the recorded pair (a third file for `0043` is undocumented too).
  */
 function assertOnlyRecordedDuplicates(names: readonly string[]): void {
@@ -2539,7 +2538,7 @@ function assertOnlyRecordedDuplicates(names: readonly string[]): void {
 }
 
 describe("migrations/ ordinals", () => {
-  /** Readdir order is a filesystem detail; byte order is what the decision states. */
+  /** note: Readdir order is a filesystem detail; byte order is what the decision states. */
   const names = readdirSync(MIGRATIONS_DIR)
     .filter((name) => name.endsWith(".sql"))
     .sort();
@@ -2564,7 +2563,7 @@ describe("migrations/ ordinals", () => {
 });
 
 /**
- * migration 0051 — the trailing-24h secondary-rate-limit count's index.
+ * why: migration 0051 — the trailing-24h secondary-rate-limit count's index.
  *
  * The read (`countGithubRateLimited24h`) states a `created_at` window and an
  * `error` prefix test, and no stage predicate — so 0048's partial index cannot
@@ -2584,11 +2583,11 @@ describe("migrations/0051_review_failures_rate_limit_window.sql", () => {
         .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_rate_limited_created'")
         .get() as { sql: string } | null
     )?.sql;
-    // Not partial: the read states no stage, and its LIKE prefix arrives as a
+    // note: Not partial: the read states no stage, and its LIKE prefix arrives as a
     // bound value, which no index predicate could be matched against.
     expect(indexSql).not.toContain("WHERE");
 
-    // The statement the REAL store prepares — never a hand-written twin.
+    // why: The statement the REAL store prepares — never a hand-written twin.
     const prepared: string[] = [];
     const recording: D1Like = {
       prepare(sql: string) {
@@ -2611,13 +2610,13 @@ describe("migrations/0051_review_failures_rate_limit_window.sql", () => {
 });
 
 /**
- * migration 0056 — `github_apps` is a review bot, and the family it owns plus
+ * why: migration 0056 — `github_apps` is a review bot, and the family it owns plus
  * every row that records which bot acted takes the bot vocabulary. The rename
  * is in place: `ALTER TABLE ... RENAME` rewrites the foreign keys and index
  * definitions SQLite holds, so no table is rebuilt and no row is rewritten.
  */
 describe("migrations/0056_review_bots_rename.sql", () => {
-  /** Table pairs, in the order the file renames them (parent first). */
+  /** note: Table pairs, in the order the file renames them (parent first). */
   const RENAMED_TABLES = [
     ["github_apps", "review_bots"],
     ["app_installations", "bot_installations"],
@@ -2632,7 +2631,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     ["app_provider_models", "bot_provider_models"],
   ] as const;
 
-  /** Every table whose row attributes a fact to the bot that produced it. */
+  /** note: Every table whose row attributes a fact to the bot that produced it. */
   const BOT_ATTRIBUTED = [
     "bot_installations",
     "bot_workspaces",
@@ -2687,7 +2686,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     for (const name of ["idx_reviews_bot_id", "idx_webhook_deliveries_bot_created", "idx_pull_requests_bot_pr"]) {
       expect(indexes, name).toContain(name);
     }
-    // RENAME COLUMN rewrote these definitions; their names are unchanged.
+    // invariant: RENAME COLUMN rewrote these definitions; their names are unchanged.
     for (const name of ["idx_publication_scope", "idx_finding_rotation", "idx_thread_pr_scope"]) {
       expect(indexes, name).toContain(name);
     }
@@ -2702,7 +2701,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
       ["reviews", "bot_id"],
       ["pull_requests", "bot_id"],
       ["review_checks", "bot_id"],
-      // The allowlist's column keeps its name; its foreign key follows the parent.
+      // invariant: The allowlist's column keeps its name; its foreign key follows the parent.
       ["app_owner_allowlist", "app_id"],
     ] as const) {
       const targets = (
@@ -2715,7 +2714,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
   });
 
   test("applies over a populated pre-rename schema without rewriting a row", () => {
-    // The deploy's real input: the pre-rename schema already carrying rows.
+    // note: The deploy's real input: the pre-rename schema already carrying rows.
     const db = createTestD1();
     for (const name of readdirSync(MIGRATIONS_DIR)
       .filter((name) => name.endsWith(".sql") && name >= "0003" && name < "0056")
@@ -2733,7 +2732,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
     insertReview(db);
     db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-1'");
 
-    // Each read projects the post-rename column name, so equality compares the
+    // invariant: Each read projects the post-rename column name, so equality compares the
     // row and not the spelling.
     const before = {
       bot: db.raw.query("SELECT * FROM github_apps").all(),
@@ -2762,7 +2761,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
 });
 
 /**
- * migration 0057 — review configuration leaves the bot for a workspace-owned
+ * why: migration 0057 — review configuration leaves the bot for a workspace-owned
  * target. One target per bot carries the moved settings, both attribution
  * columns point at it, the owner allowlist moves onto it, and the bot row keeps
  * only the columns an execution identity owns.
@@ -2770,7 +2769,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
 describe("migrations/0057_review_targets.sql", () => {
   const SPLIT_MIGRATION = "0057_review_targets.sql";
 
-  /** The columns an execution identity keeps, in declaration order. */
+  /** note: The columns an execution identity keeps, in declaration order. */
   const BOT_COLUMNS = [
     "id",
     "github_app_id",
@@ -2796,7 +2795,7 @@ describe("migrations/0057_review_targets.sql", () => {
   ];
 
   /**
-   * The target's declaration order at the shipped schema: 0057's columns minus
+   * note: The target's declaration order at the shipped schema: 0057's columns minus
    * the installation-keyed trio 0067 dropped, plus the repository identity and
    * the inheritance switch it appended.
    */
@@ -2818,11 +2817,11 @@ describe("migrations/0057_review_targets.sql", () => {
     "repo_owner",
     "repo_name",
     "follow_workspace_defaults",
-    // 0070 appends the draft-review gate after the split's columns.
+    // note: 0070 appends the draft-review gate after the split's columns.
     "review_drafts",
   ];
 
-  /** The bot columns the target inherits, projected the same on both sides. */
+  /** note: The bot columns the target inherits, projected the same on both sides. */
   const INHERITED =
     "name, review_enabled, review_trigger_mode, review_level, check_min_score, " +
     "check_pass_verdicts, allowlist_enabled, created_by, created_at, updated_at, deleted_at";
@@ -2852,7 +2851,7 @@ describe("migrations/0057_review_targets.sql", () => {
   }
 
   /**
-   * The live shape the migration upgrades: two bots (one active with a single
+   * note: The live shape the migration upgrades: two bots (one active with a single
    * live installation and an owner allowlist, one soft-deleted with two live
    * installations), a review and a PR ledger row under each plus a legacy
    * review with no bot attribution, one queued claim and one tombstone.
@@ -2885,7 +2884,7 @@ describe("migrations/0057_review_targets.sql", () => {
       )
       .run(0, "manual", null, 90, '["ship it"]', 0, null, "bot-b");
 
-    // bot-a: one live installation plus a removed one — a removed row is not a
+    // note: bot-a: one live installation plus a removed one — a removed row is not a
     // binding and does not lift the live count off one. bot-b: two live rows, so
     // its target stays unbound.
     db.raw.exec(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default'), ('bot-b', 'default');
@@ -2926,7 +2925,7 @@ describe("migrations/0057_review_targets.sql", () => {
         appRef: { appId: "bot-a" },
       }),
     );
-    // A tombstone: a terminal row keeps no payload, so the rewrite never sees it.
+    // invariant: A tombstone: a terminal row keeps no payload, so the rewrite never sees it.
     insertClaim(db, 9002, "consumed", null);
 
     return db.raw.query(`SELECT id, ${INHERITED} FROM review_bots ORDER BY id`).all() as Array<
@@ -2943,12 +2942,12 @@ describe("migrations/0057_review_targets.sql", () => {
       { bot_id: "bot-a", n: 1 },
       { bot_id: "bot-b", n: 1 },
     ]);
-    // The read projects the target's column names, so equality compares the row
+    // invariant: The read projects the target's column names, so equality compares the row
     // and not the spelling.
     expect(db.raw.query(`SELECT bot_id AS id, ${INHERITED} FROM review_targets ORDER BY bot_id`).all()).toEqual(
       before,
     );
-    // The workspace is the bot's; the target copies the bot's soft-delete stamp.
+    // invariant: The workspace is the bot's; the target copies the bot's soft-delete stamp.
     expect(db.raw.query("SELECT bot_id, workspace_id FROM review_targets ORDER BY bot_id").all()).toEqual([
       { bot_id: "bot-a", workspace_id: "default" },
       { bot_id: "bot-b", workspace_id: "default" },
@@ -2964,12 +2963,12 @@ describe("migrations/0057_review_targets.sql", () => {
     ]);
     applySplit(db);
 
-    // A settings resume can never be blocked by a stale copy of the old flag.
+    // invariant: A settings resume can never be blocked by a stale copy of the old flag.
     expect(db.raw.query("SELECT id, review_enabled FROM review_bots ORDER BY id").all()).toEqual([
       { id: "bot-a", review_enabled: 1 },
       { id: "bot-b", review_enabled: 1 },
     ]);
-    // Effective pause (either flag 0) is the old flag: the paused bot's target
+    // invariant: Effective pause (either flag 0) is the old flag: the paused bot's target
     // holds the 0.
     expect(db.raw.query("SELECT bot_id, review_enabled FROM review_targets ORDER BY bot_id").all()).toEqual([
       { bot_id: "bot-a", review_enabled: 1 },
@@ -3005,7 +3004,7 @@ describe("migrations/0057_review_targets.sql", () => {
       { id: "review-b", bot_id: "bot-b", target_id: targets["bot-b"] },
       { id: "review-legacy", bot_id: null, target_id: null },
     ]);
-    // The ledger has no botless row: every row names a target.
+    // invariant: The ledger has no botless row: every row names a target.
     const ledger = db.raw.query("SELECT id, bot_id, target_id FROM pull_requests ORDER BY id").all() as Array<{
       id: string;
       bot_id: string;
@@ -3044,13 +3043,13 @@ describe("migrations/0057_review_targets.sql", () => {
     seedBeforeSplit(db);
     applySplit(db);
 
-    // bot-b's backfilled target is unbound, so the slot is open…
+    // note: bot-b's backfilled target is unbound, so the slot is open…
     insertTarget(db, { id: "target-456", installationId: 456 });
-    // …and the second claim of the same installation is what the index refuses.
+    // note: …and the second claim of the same installation is what the index refuses.
     expect(() => insertTarget(db, { id: "target-456-again", installationId: 456 })).toThrow(
       /UNIQUE constraint failed/,
     );
-    // A different installation is a different binding; NULL is never indexed.
+    // invariant: A different installation is a different binding; NULL is never indexed.
     insertTarget(db, { id: "target-457", installationId: 457 });
     insertTarget(db, { id: "target-unbound-1", installationId: null });
     insertTarget(db, { id: "target-unbound-2", installationId: null });
@@ -3076,7 +3075,7 @@ describe("migrations/0057_review_targets.sql", () => {
       action: "created",
       triggered_by: "issue_comment",
       comment_id: 9001,
-      // The sweep resends this row verbatim: the bot ref replaces the old key
+      // note: The sweep resends this row verbatim: the bot ref replaces the old key
       // and the target id rides along.
       botRef: { appId: "bot-a" },
       targetId: targetA,
@@ -3091,7 +3090,7 @@ describe("migrations/0057_review_targets.sql", () => {
     applySplit(db);
 
     expect(columnNames(db, "review_bots")).toEqual(BOT_COLUMNS);
-    // Rows keep their values: the columns are dropped in place, nothing is copied.
+    // invariant: Rows keep their values: the columns are dropped in place, nothing is copied.
     expect(
       db.raw
         .query("SELECT id, name, private_key_enc, webhook_secret_enc, github_slug, github_visibility, status FROM review_bots ORDER BY id")
@@ -3116,7 +3115,7 @@ describe("migrations/0057_review_targets.sql", () => {
         status: "active",
       },
     ]);
-    // The parent keeps its own constraints.
+    // invariant: The parent keeps its own constraints.
     const insertBot = db.raw.prepare(
       `INSERT INTO review_bots (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
        VALUES (?, ?, 'fresh', 'enc', 'enc', 'mallory', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
@@ -3125,7 +3124,7 @@ describe("migrations/0057_review_targets.sql", () => {
     insertBot.run("bot-c", 5003);
     expect(() => db.raw.prepare("UPDATE review_bots SET status = 'paused' WHERE id = 'bot-c'").run()).toThrow();
 
-    // The PR ledger is untouched — nothing drops the parent its foreign key
+    // invariant: The PR ledger is untouched — nothing drops the parent its foreign key
     // cascades from — and the old per-bot key is replaced by the per-target one.
     expect(db.raw.query("SELECT id FROM pull_requests ORDER BY id").all()).toEqual([{ id: "pr-a" }, { id: "pr-b" }]);
     const indexes = schemaNames(db, "index");
@@ -3147,7 +3146,7 @@ describe("migrations/0057_review_targets.sql", () => {
       ),
     ).toEqual(["target_id"]);
 
-    // Every child still resolves the parent, and the two new
+    // invariant: Every child still resolves the parent, and the two new
     // attribution columns resolve the target.
     for (const table of ["reviews", "pull_requests", "bot_installations", "review_targets"]) {
       expect(foreignKeyTargets(db, table, "bot_id"), `${table}.bot_id`).toEqual(["review_bots"]);
@@ -3193,7 +3192,7 @@ describe("migrations/0057_review_targets.sql", () => {
   test("fails the migration when a bot has no workspace row instead of skipping it", () => {
     const db = createBeforeSplitD1();
     seedBeforeSplit(db);
-    // The INSERT…SELECT joins the workspace row, so an orphan bot would get no
+    // invariant: The INSERT…SELECT joins the workspace row, so an orphan bot would get no
     // target silently; the guard is what makes it fail.
     insertGithubAppRow(db, { id: "bot-orphan", githubAppId: 5003 });
 
@@ -3222,7 +3221,7 @@ describe("migrations/0057_review_targets.sql", () => {
   });
 
   test("the per-bot target lookup uses the index, not a table scan (EXPLAIN QUERY PLAN)", () => {
-    // 0067 replaced the single-column index with the composite `(bot_id,
+    // note: 0067 replaced the single-column index with the composite `(bot_id,
     // repo_id)`: its leading column still answers a bare `bot_id` predicate, so
     // every dashboard read, webhook fallback and backfill UPDATE seeks.
     const db = createMigratedTestD1();
@@ -3238,7 +3237,7 @@ describe("migrations/0057_review_targets.sql", () => {
     expect(columnNames(db, "review_targets")).toEqual(TARGET_COLUMNS);
     expect(columnNames(db, "reviews")).toContain("target_id");
     expect(columnNames(db, "pull_requests")).toContain("target_id");
-    // 0067 dropped the installation-keyed identity and the owner allowlist.
+    // note: 0067 dropped the installation-keyed identity and the owner allowlist.
     expect(schemaNames(db, "table")).not.toContain("app_owner_allowlist");
     expect(schemaNames(db, "table")).not.toContain("target_owner_allowlist");
 
@@ -3269,7 +3268,7 @@ describe("migrations/0057_review_targets.sql", () => {
       review_level: null,
       check_min_score: 80,
       check_pass_verdicts: '["ship it"]',
-      // 0067's added columns: a row created with its own config does not
+      // note: 0067's added columns: a row created with its own config does not
       // inherit, and an unclaimed target carries no repository identity.
       follow_workspace_defaults: 0,
       repo_id: null,
@@ -3297,7 +3296,7 @@ describe("migrations/0057_review_targets.sql", () => {
 describe("migrations/0058_review_bot_scope.sql", () => {
   const SCOPE_MIGRATION = "0058_review_bot_scope.sql";
 
-  /** Production's shape at 0057: every file before this one, in order. */
+  /** note: Production's shape at 0057: every file before this one, in order. */
   function preScopeDb(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -3335,7 +3334,7 @@ describe("migrations/0058_review_bot_scope.sql", () => {
     expect(columns.find((c) => c.name === "scope")?.dflt_value).toBe("'owned'");
     expect(columns.find((c) => c.name === "shared_at")).toMatchObject({ notnull: 0, dflt_value: null });
 
-    // A pre-column bot is owned and has never been shared: the default is the
+    // note: A pre-column bot is owned and has never been shared: the default is the
     // whole backfill.
     expect(db.raw.query("SELECT scope, shared_at FROM review_bots WHERE id = 'bot-pre-scope'").get()).toEqual({
       scope: "owned",
@@ -3375,7 +3374,7 @@ describe("migrations/0058_review_bot_scope.sql", () => {
 });
 
 /**
- * Migration 0081 retires the claim table the earlier migrations built: 0067
+ * why: Migration 0081 retires the claim table the earlier migrations built: 0067
  * recreated it bot-level for a setup redirect this deployment never receives,
  * so the table's whole life is two statements — created by 0067, dropped here.
  */
@@ -3383,7 +3382,7 @@ describe("migrations/0081_drop_install_claims.sql", () => {
   const RETIRE = "0081_drop_install_claims.sql";
   const CREATE = "0067_repo_target_identity.sql";
 
-  /** The schema exactly before 0067 — 0059's target-keyed claim table is live. */
+  /** note: The schema exactly before 0067 — 0059's target-keyed claim table is live. */
   function dbAt0066(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -3396,7 +3395,7 @@ describe("migrations/0081_drop_install_claims.sql", () => {
 
   test("0067 still recreates the claim table bot-level, so 0081 has something to drop", () => {
     const db = dbAt0066();
-    // 0059's target-keyed table is what 0067 finds: same name, other key.
+    // note: 0059's target-keyed table is what 0067 finds: same name, other key.
     expect(columnNames(db, "install_claims")).toContain("target_id");
     expect(columnNames(db, "install_claims")).not.toContain("bot_id");
     execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
@@ -3421,7 +3420,7 @@ describe("migrations/0081_drop_install_claims.sql", () => {
     expect(schemaNames(db, "table")).not.toContain("install_claims");
     expect(schemaNames(db, "index")).not.toContain("install_claims_user_open");
     expect(schemaNames(db, "index")).not.toContain("install_claims_live_bot");
-    // The retirement is the file's only statement: applying it over the
+    // invariant: The retirement is the file's only statement: applying it over the
     // 0067-era schema leaves the claim table gone and nothing else touched.
     const before = dbAt0066();
     execMigrationScript(before.raw, readFileSync(join(MIGRATIONS_DIR, CREATE), "utf8"));
@@ -3435,7 +3434,7 @@ describe("migrations/0081_drop_install_claims.sql", () => {
 describe("migrations/0060_execution_ledger_target.sql", () => {
   const LEDGER_TARGET_MIGRATION = "0060_execution_ledger_target.sql";
 
-  /** Production's shape at 0059: every file before this one, in order. */
+  /** note: Production's shape at 0059: every file before this one, in order. */
   function preLedgerTargetDb(): TestD1 {
     const db = createTestD1();
     for (const name of migrationsAfter("0002_mstar_review_v1.sql").filter(
@@ -3451,7 +3450,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   }
 
   /**
-   * One bot, its workspace mapping, one target, and the installation the bot
+   * note: One bot, its workspace mapping, one target, and the installation the bot
    * holds — the tuple a failure row reaches its bot through (it carries no
    * bot id of its own).
    */
@@ -3481,7 +3480,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
       .run();
   }
 
-  /** The ledger row an execution row is attributed through. */
+  /** note: The ledger row an execution row is attributed through. */
   function seedPullRequest(db: TestD1, id: string, prNumber: number): void {
     db.raw
       .prepare(
@@ -3560,11 +3559,11 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
       ["audit_events", before.audit],
     ] as const) {
       const after = columns(db, table);
-      // Appended, never inserted mid-table: every pre-migration column keeps
+      // invariant: Appended, never inserted mid-table: every pre-migration column keeps
       // its ordinal, so a `SELECT *` reader's positions do not shift.
       expect(after.map((column) => column.name).slice(0, prior.length), table).toEqual(prior);
       expect(after.map((column) => column.name), table).toEqual([...prior, "target_id"]);
-      // Nullable on the add: a NOT NULL add would need a dummy default, and the
+      // invariant: Nullable on the add: a NOT NULL add would need a dummy default, and the
       // guard below is what refuses an unattributed row.
       expect(after.find((column) => column.name === "target_id"), table).toMatchObject({
         notnull: 0,
@@ -3579,7 +3578,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     seedPullRequest(db, "pr-42", 42);
     seedFinding(db, "finding-42", 42);
     seedFailure(db, "failure-42", 42);
-    // An audit row predates the column and carries no target: the migration
+    // note: An audit row predates the column and carries no target: the migration
     // adds the column without inventing attribution for history.
     seedAuditEvent(db, "audit-1");
 
@@ -3599,7 +3598,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   test("leaves a finding whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // The ledger row is gone (the 90-day sweep removes terminal PRs), so no
+    // note: The ledger row is gone (the 90-day sweep removes terminal PRs), so no
     // target can ever be derived for this finding — the same history shape the
     // failures guard was narrowed for.
     seedFinding(db, "finding-orphan", 77);
@@ -3614,7 +3613,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   test("leaves a failure whose PR row was swept NULL, and does not abort", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // The PR ledger row is gone: no target can ever be derived for this
+    // note: The PR ledger row is gone: no target can ever be derived for this
     // failure, which is the shape production history has (a pruned ledger).
     seedFailure(db, "failure-orphan", 77);
 
@@ -3626,7 +3625,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   });
 
   test("a moved installation resolves to the live binding, whichever order the rows were seeded", () => {
-    // One installation, two binding rows: bot-a's is removed, bot-b's is live,
+    // note: One installation, two binding rows: bot-a's is removed, bot-b's is live,
     // each with its own ledger row at the same PR key. The guard counts one live
     // candidate; the UPDATE must agree rather than take SQLite's scan order, so
     // both seeded orders must answer target-b.
@@ -3660,7 +3659,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
                    '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
         )
         .run();
-      // `seedParents` already gave bot-a an installation row; mark it removed
+      // note: `seedParents` already gave bot-a an installation row; mark it removed
       // rather than inserting a second one (the pair is unique), then add the
       // live binding, in the order this iteration asks for.
       const removeA = (): void => {
@@ -3704,7 +3703,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   test("refuses a finding whose bot resolves to two different targets", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // The same shape as the failures case, on the findings path: one bot, two
+    // note: The same shape as the failures case, on the findings path: one bot, two
     // ledger rows at the same (owner, repo, pr_number) under different targets.
     // Without the ambiguity guard the scalar subquery would pick one of them,
     // and the row would be invisible to the other workspace's face.
@@ -3743,7 +3742,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   test("an unattributed candidate row is not a candidate: both guards leave the NULL alone", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // A pull_requests row exists at the key but carries no target of its own
+    // note: A pull_requests row exists at the key but carries no target of its own
     // (the column is nullable since 0057). Nothing can be derived from it, so
     // both ledgers must pass rather than abort — and must not read it as an
     // attribution the UPDATE missed.
@@ -3771,7 +3770,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
   test("refuses a failure whose installation resolves to two different targets", () => {
     const db = preLedgerTargetDb();
     seedParents(db);
-    // A second bot in a second workspace, holding the SAME installation id and
+    // note: A second bot in a second workspace, holding the SAME installation id and
     // its own pull-request row at the same key, pointing at its own target.
     db.raw
       .prepare(
@@ -3813,7 +3812,7 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
     seedPullRequest(db, "pr-a", 42);
     seedFailure(db, "failure-42", 42);
 
-    // One row of several is NOT an attribution: the guard refuses before the
+    // invariant: One row of several is NOT an attribution: the guard refuses before the
     // UPDATE, so nothing is written and no workspace reads a borrowed row.
     expect(() => applyLedgerTargetMigration(db)).toThrow(
       "CHECK constraint failed: guard_failures_ambiguous_target",
@@ -3844,14 +3843,14 @@ describe("migrations/0060_execution_ledger_target.sql", () => {
 describe("migrations/0073_maintenance_replay_rotation_index.sql", () => {
   test("the replay drain is index-ordered, so a retained dead backlog is not sorted per selection", () => {
     const db = createMigratedTestD1();
-    // The drain's own statement, not a copy: a change to its predicate or
+    // why: The drain's own statement, not a copy: a change to its predicate or
     // ORDER BY must keep seeking the rotation index or fail here.
     const plan = db.raw
       .query(`EXPLAIN QUERY PLAN ${MAINTENANCE_REPLAY_OUTBOX_SQL}`)
       .all(JSON.stringify([]), 1) as Array<{ detail: string }>;
     const details = plan.map((row) => row.detail).join("\n");
     expect(details).toContain("USING INDEX idx_review_failures_maintenance_replay_rotation");
-    // The whole point: LIMIT stops the scan. A temp B-tree means the pending
+    // invariant: The whole point: LIMIT stops the scan. A temp B-tree means the pending
     // set was read and sorted in full, which is the backlog-proportional work
     // the finding named.
     expect(details).not.toContain("TEMP B-TREE");

@@ -1,5 +1,4 @@
-/**
- * Save feedback rides the button; success notices expire on their own.
+/** note: Save feedback rides the button; success notices expire on their own.
  *
  * Three layers, pinned where each contract lives:
  * 1. the Button status face (static SSR) — one leading glyph per state,
@@ -32,7 +31,7 @@ import { WorkspaceSettingsPage } from "../../src/spa/pages/WorkspaceSettingsPage
 import type { SpaBoot } from "../../src/spa/boot";
 import { installDom } from "./dom";
 
-// Rendered on main before the status face existed — the no-status markup
+// invariant: Rendered on main before the status face existed — the no-status markup
 // must stay byte-identical.
 const PLAIN_BUTTON_MARKUP =
   '<button data-slot="button" data-variant="default" data-size="default" class="inline-flex shrink-0 items-center justify-center gap-2 rounded-sm text-sm font-medium whitespace-nowrap transition-[color,background-color,border-color,box-shadow,transform,opacity] duration-(--duration-base) ease-(--ease-in-out) outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 bg-primary text-primary-foreground hover:bg-primary-hover active:bg-primary-hover h-(--control-h-md) px-4 py-2 has-[&gt;svg]:px-3" type="submit">Save changes</button>';
@@ -115,18 +114,18 @@ describe("useSaveSignal", () => {
         signalProbe.succeed();
       });
       expect(signalProbe.status).toBe("success");
-      // Still confirming just before its own deadline…
+      // invariant: Still confirming just before its own deadline…
       await act(async () => {
         jest.advanceTimersByTime(1999);
       });
       expect(signalProbe.status).toBe("success");
-      // …and idle once it passes, so a stale confirmation never lingers.
+      // invariant: …and idle once it passes, so a stale confirmation never lingers.
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
       expect(signalProbe.status).toBe("idle");
 
-      // An error is the sticky face: it survives any deadline until the next submit.
+      // invariant: An error is the sticky face: it survives any deadline until the next submit.
       await act(async () => {
         signalProbe.fail();
       });
@@ -136,7 +135,7 @@ describe("useSaveSignal", () => {
       });
       expect(signalProbe.status).toBe("error");
 
-      // A new submit restarts the clock: the pending revert is cancelled.
+      // note: A new submit restarts the clock: the pending revert is cancelled.
       await act(async () => {
         signalProbe.succeed();
       });
@@ -156,7 +155,7 @@ describe("useSaveSignal", () => {
   });
 
   test("a late completion after unmount is ignored: no transition, no new timer", async () => {
-    // The write is still in flight when the form unmounts (a navigation
+    // note: The write is still in flight when the form unmounts (a navigation
     // away); the retained succeed/fail callbacks must not transition state
     // nor arm the revert timer once teardown has run.
     jest.useFakeTimers();
@@ -168,7 +167,7 @@ describe("useSaveSignal", () => {
         signalProbe.start();
       });
       expect(signalProbe.status).toBe("loading");
-      const armed = jest.getTimerCount(); // an in-flight save arms none
+      const armed = jest.getTimerCount(); // note: an in-flight save arms none
       await act(async () => root.unmount());
 
       await act(async () => {
@@ -201,7 +200,7 @@ describe("useSaveSignal", () => {
       });
       const armed = jest.getTimerCount();
       await act(async () => root.unmount());
-      // The teardown removed exactly one timer: the revert this success armed.
+      // invariant: The teardown removed exactly one timer: the revert this success armed.
       expect(jest.getTimerCount()).toBe(armed - 1);
       await act(async () => {
         jest.advanceTimersByTime(10_000);
@@ -232,7 +231,7 @@ describe("NoticeRegion success expiry", () => {
       await act(async () => {
         jest.advanceTimersByTime(1);
       });
-      // Hidden locally — the region renders nothing without the parent clearing.
+      // invariant: Hidden locally — the region renders nothing without the parent clearing.
       expect(container.querySelector('[role="status"]')).toBeNull();
 
       await act(async () => {
@@ -274,7 +273,7 @@ describe("NoticeRegion success expiry", () => {
       await act(async () => {
         regionPush({ kind: "success", message: "Second." });
       });
-      // The replacement restarted the clock: 2500ms in, the second notice stays.
+      // invariant: The replacement restarted the clock: 2500ms in, the second notice stays.
       await act(async () => {
         jest.advanceTimersByTime(2500);
       });
@@ -327,7 +326,7 @@ function stubWorkspaceSettingsFetch(put: (body: string) => Response) {
         headers: { "Content-Type": "application/json" },
       });
     }
-    // The read-only usage card the page composes above these settings: a
+    // invariant: The read-only usage card the page composes above these settings: a
     // settled payload, so the page carries no unrelated failure notice.
     if (url.endsWith("/api/settings/review-usage")) {
       return new Response(
@@ -377,9 +376,9 @@ describe("workspace name card end to end", () => {
       const { button } = await submitName(win, container as unknown as Element, "Acme Labs");
       expect(button.getAttribute("data-status")).toBe("success");
       expect(button.querySelector("svg.lucide-circle-check")).not.toBeNull();
-      // The success never renders as a notice box on the op channel…
+      // invariant: The success never renders as a notice box on the op channel…
       expect(container.querySelector("p[role=\"status\"]")).toBeNull();
-      // …the copy stays in the DOM as assistive text announced by a live region…
+      // invariant: …the copy stays in the DOM as assistive text announced by a live region…
       expect(container.textContent).toContain(t("en", "workspace.nameSaved"));
       const live = container.querySelector("span[role=\"status\"]") as unknown as HTMLSpanElement;
       expect(live.className).toContain("sr-only");
@@ -421,7 +420,7 @@ describe("workspace name card end to end", () => {
       );
       expect(alerts.some((text) => text.includes("name taken"))).toBe(true);
 
-      // The failure does not self-clear: face and notice outlive any deadline.
+      // note: The failure does not self-clear: face and notice outlive any deadline.
       await act(async () => {
         jest.advanceTimersByTime(10_000);
       });
@@ -465,7 +464,7 @@ describe("stale error replacement", () => {
       const { container, root } = mount(win);
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
 
-      // 1. The SIBLING cluster (the review-gate floor card) fails FIRST,
+      // note: 1. The SIBLING cluster (the review-gate floor card) fails FIRST,
       //    through its own form — a real UI path, so its persistent error
       //    notice exists on the page before the name card ever submits.
       const floor = win.document.querySelector(
@@ -483,12 +482,12 @@ describe("stale error replacement", () => {
       });
       expect(container.textContent).toContain("floor too high");
 
-      // 2. The name card fails too: two persistent alert boxes coexist.
+      // note: 2. The name card fails too: two persistent alert boxes coexist.
       await submitName(win, container as unknown as Element, "Taken Name");
       expect(container.textContent).toContain("name taken");
       expect(container.querySelectorAll("p[role=\"alert\"]")).toHaveLength(2);
 
-      // 3. The name card's retry lands: its OWN stale error is replaced by
+      // note: 3. The name card's retry lands: its OWN stale error is replaced by
       //    the check plus the success copy as assistive text.
       refuseName = false;
       await submitName(win, container as unknown as Element, "Acme Labs");
@@ -497,7 +496,7 @@ describe("stale error replacement", () => {
       const retried = container.querySelector("form button[type=\"submit\"]") as unknown as HTMLButtonElement;
       expect(retried.getAttribute("data-status")).toBe("success");
 
-      // 4. Isolation measured, not annotated: the sibling's notice survives
+      // invariant: 4. Isolation measured, not annotated: the sibling's notice survives
       //    the name card's retry. Each workspace card owns its notice state
       //    and there is no shared region a widened clear could hide in — a
       //    clear that reached the sibling would remove this very node.
@@ -551,7 +550,7 @@ describe("runtime page save face", () => {
         });
       };
 
-      // Pending: the spinner rides the button with aria-busy.
+      // note: Pending: the spinner rides the button with aria-busy.
       await typeValue("40");
       await act(async () => {
         button().dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as Event);
@@ -561,7 +560,7 @@ describe("runtime page save face", () => {
       expect(button().getAttribute("aria-busy")).toBe("true");
       expect(button().querySelector("svg.lucide-loader-circle")).not.toBeNull();
 
-      // Success: the check replaces the spinner, then the face reverts.
+      // note: Success: the check replaces the spinner, then the face reverts.
       await act(async () => {
         resolvePatch?.(
           new Response(JSON.stringify({ concurrency: 40 }), {
@@ -578,7 +577,7 @@ describe("runtime page save face", () => {
       });
       expect(button().getAttribute("data-status")).toBeNull();
 
-      // Failure: the alert face AND the persistent readable error notice.
+      // note: Failure: the alert face AND the persistent readable error notice.
       resolvePatch = null;
       await typeValue("20");
       await act(async () => {
@@ -599,7 +598,7 @@ describe("runtime page save face", () => {
         (node) => node.textContent ?? "",
       );
       expect(alerts.some((text) => text.includes("out of range"))).toBe(true);
-      // The failure does not self-clear.
+      // note: The failure does not self-clear.
       await act(async () => {
         jest.advanceTimersByTime(10_000);
       });
@@ -659,13 +658,13 @@ describe("in-flight save announcement", () => {
       await act(async () => root.render(createElement(WorkspaceSettingsPage, { boot })));
       const savingCopy = t("en", "common.saving");
 
-      // In flight: the spinner is aria-hidden and the label is unchanged, so
+      // invariant: In flight: the spinner is aria-hidden and the label is unchanged, so
       // one polite live region carries the Saving copy — exactly one.
       await submitName(win, container as unknown as Element, "Acme Labs");
       expect(resolveNamePut).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // Success: the in-flight region is replaced by the success copy as
+      // note: Success: the in-flight region is replaced by the success copy as
       // assistive text — no stale Saving text survives the outcome.
       await act(async () => {
         resolveNamePut?.(
@@ -739,7 +738,7 @@ describe("in-flight save announcement", () => {
       expect(resolveConcurrencyPut).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // Refusal: the error notice is unchanged and no Saving copy, no stale
+      // invariant: Refusal: the error notice is unchanged and no Saving copy, no stale
       // success text survives on the card.
       await act(async () => {
         resolveConcurrencyPut?.(
@@ -796,7 +795,7 @@ describe("in-flight save announcement", () => {
       expect(resolvePatch).not.toBeNull();
       expect(savingRegions(container as unknown as Element, savingCopy)).toHaveLength(1);
 
-      // Success: the card's live region carries the success copy instead —
+      // note: Success: the card's live region carries the success copy instead —
       // the in-flight announcement is gone, nothing stale survives.
       await act(async () => {
         resolvePatch?.(
@@ -854,7 +853,7 @@ describe("in-flight save announcement", () => {
           .closest("form")
           ?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
       });
-      // In flight: the region repeats the action the button's face names —
+      // note: In flight: the region repeats the action the button's face names —
       // the verifying copy — and never the generic Saving copy. (The dialog
       // renders through a portal, so the regions live on the document.)
       const verifyingCopy = t("en", "settings.providers.verifying");
@@ -862,7 +861,7 @@ describe("in-flight save announcement", () => {
       expect(savingRegions(doc, verifyingCopy)).toHaveLength(1);
       expect(savingRegions(doc, t("en", "common.saving"))).toHaveLength(0);
 
-      // The outcome clears the region — no stale in-flight copy survives.
+      // invariant: The outcome clears the region — no stale in-flight copy survives.
       await act(async () => {
         resolveVerify?.({ kind: "success", message: "added" });
       });
@@ -903,7 +902,7 @@ describe("in-flight save announcement", () => {
         form?.dispatchEvent(new win.Event("submit", { bubbles: true, cancelable: true }) as unknown as Event);
       });
       expect(resolveSettings).not.toBeNull();
-      // Exactly one region with the copy that button's busy face names — the
+      // invariant: Exactly one region with the copy that button's busy face names — the
       // button is disabled while busy, so its own relabel is not a channel.
       const savingCopy = t("en", "settings.providers.saving");
       const doc = win.document as unknown as Element;
