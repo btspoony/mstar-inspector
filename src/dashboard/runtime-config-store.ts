@@ -845,6 +845,51 @@ export async function getReviewRouteWorkflowGate(
   }
 }
 
+/**
+ * One operator save of the route switch, one audit row: `before` carries the
+ * stored value only when the read path would trust it (a hand-edited value is
+ * `null`, the same way it reads), `after` the accepted one.
+ */
+const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.route_workflow.set', 'runtime', '${REVIEW_ROUTE_WORKFLOW_KEY}',
+          json_object('before', (SELECT CASE WHEN value IN ('on', 'off') THEN value ELSE NULL END
+                                FROM review_runtime_settings WHERE key = ?5),
+                      'after', ?3),
+          ?4)`;
+
+/** What one accepted save holds and what the gate answers afterwards. */
+export type ReviewRouteWorkflowWrite = {
+  stored: ReviewRouteWorkflowGate["mode"];
+  effective: ReviewRouteWorkflowGate;
+};
+
+/**
+ * Set the route switch. The write is exactly as strict as the read: anything
+ * but `on` / `off` refuses (`invalid_value`, nothing written, no audit row), so
+ * a value the gate would not trust can never be stored through the product.
+ * `effective` is the gate's answer after the write, never this function's
+ * assumption.
+ */
+export async function setReviewRouteWorkflow(
+  db: DashboardD1,
+  value: string,
+  operator: string,
+): Promise<ReviewRouteWorkflowWrite> {
+  if (value !== "on" && value !== "off") {
+    throw new RuntimeConfigError("invalid_value", "the review route workflow must be exactly on | off");
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(REVIEW_ROUTE_WORKFLOW_AUDIT_SQL)
+      .bind(crypto.randomUUID(), operator, value, now, REVIEW_ROUTE_WORKFLOW_KEY),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ROUTE_WORKFLOW_KEY, value, now, operator),
+  ]);
+  return { stored: value, effective: await getReviewRouteWorkflowGate(db) };
+}
+
 /** The audit ledger's target id for the cap (one operator save, one row). */
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
 

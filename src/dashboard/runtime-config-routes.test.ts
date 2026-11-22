@@ -21,7 +21,7 @@ import type { Env } from "../worker/env";
 import { createMigratedTestD1, type TestD1 } from "../../tests/store/helpers";
 import { withSpaAssets } from "../../tests/helpers/spa";
 import { t } from "../i18n";
-import { SWEEP_LIMITS } from "./runtime-config-store";
+import { SWEEP_LIMITS, getReviewRouteWorkflowGate } from "./runtime-config-store";
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 
 const SESSION_SECRET = ["test", "runtime", "routes", "session", "32-bytes!"].join("-");
@@ -126,6 +126,15 @@ function auditRows(db: TestD1): AuditRow[] {
     .all() as AuditRow[];
 }
 
+/** The audit rows' parsed payloads — the before/after of each save. */
+function auditDetails(db: TestD1): Array<Record<string, unknown>> {
+  return (
+    db.raw
+      .prepare("SELECT detail_json FROM platform_audit_events ORDER BY rowid")
+      .all() as Array<{ detail_json: string }>
+  ).map((row) => JSON.parse(row.detail_json) as Record<string, unknown>);
+}
+
 /** Seed the system cap straight into the store's table. */
 function seedSystemCap(db: TestD1, value: number): void {
   seed(
@@ -219,6 +228,9 @@ const DEFAULT_ATTEMPT_CAP = {
   degraded: false,
 };
 
+/** The absent-row route switch: off, and no stored row behind it. */
+const DEFAULT_ROUTE_WORKFLOW = { mode: "off", saved: false, degraded: false };
+
 /** The empty trailing-24h admission-drop read: every reason present at zero. */
 const DEFAULT_ADMISSION_DROPS = {
   "pr-held": 0,
@@ -245,6 +257,14 @@ function storedRecheckBudget(db: TestD1): string | null {
 function storedLevel(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.level.default'")
+    .get() as { value: string } | null;
+  return row?.value ?? null;
+}
+
+/** The stored route-switch row, raw so a refused write is observable. */
+function storedRouteWorkflow(db: TestD1): string | null {
+  const row = db.raw
+    .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.route.workflow'")
     .get() as { value: string } | null;
   return row?.value ?? null;
 }
@@ -404,6 +424,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -504,6 +525,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -522,6 +544,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -901,6 +924,133 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
     expect(storedSystem(db)).toBeNull();
     expect(storedLevel(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);
+  });
+});
+
+describe("PATCH /_internal_admin/api/runtime routeWorkflow", () => {
+  test("writing on stores it, and the gate the queue handler reads answers on", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ routeWorkflow: { value: "on" } }),
+    });
+    expect(res.status).toBe(200);
+    // The response carries the gate's own read-back, not the request's echo.
+    expect(await res.json()).toEqual({
+      routeWorkflow: { stored: "on", effective: { mode: "on", saved: true, degraded: false } },
+    });
+    expect(storedRouteWorkflow(db)).toBe("on");
+    expect(await getReviewRouteWorkflowGate(db)).toEqual({
+      mode: "on",
+      saved: true,
+      degraded: false,
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.route_workflow.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.route.workflow",
+      },
+    ]);
+    // The audit row names the operator (above) and the previous value (absent).
+    expect(auditDetails(db)).toEqual([{ before: null, after: "on" }]);
+  });
+
+  test("off is stored and read, and deleting the row also reads off", async () => {
+    const { db } = fixture();
+    await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ routeWorkflow: { value: "on" } }) });
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ routeWorkflow: { value: "off" } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      routeWorkflow: { stored: "off", effective: { mode: "off", saved: true, degraded: false } },
+    });
+    expect(await getReviewRouteWorkflowGate(db)).toEqual({
+      mode: "off",
+      saved: true,
+      degraded: false,
+    });
+    // A stored `off` is a save; an absent row is the same answer without one.
+    seed(db, "DELETE FROM review_runtime_settings WHERE key = ?", "review.route.workflow");
+    expect(await getReviewRouteWorkflowGate(db)).toEqual({
+      mode: "off",
+      saved: false,
+      degraded: false,
+    });
+    // The second save names the value it replaced.
+    expect(auditDetails(db)).toEqual([
+      { before: null, after: "on" },
+      { before: "on", after: "off" },
+    ]);
+  });
+
+  test("anything but the two exact strings is a 400 that leaves the stored value intact", async () => {
+    const { db } = fixture();
+    await runtimeApi(db, { method: "PATCH", body: JSON.stringify({ routeWorkflow: { value: "on" } }) });
+    for (const body of [
+      JSON.stringify({ routeWorkflow: { value: "ON" } }),
+      JSON.stringify({ routeWorkflow: { value: "on " } }),
+      JSON.stringify({ routeWorkflow: { value: "1" } }),
+      JSON.stringify({ routeWorkflow: { value: "true" } }),
+      JSON.stringify({ routeWorkflow: { value: "" } }),
+      JSON.stringify({ routeWorkflow: { value: "On" } }),
+      // Non-strings and the bare string are the shape disagreements.
+      JSON.stringify({ routeWorkflow: { value: 1 } }),
+      JSON.stringify({ routeWorkflow: { value: true } }),
+      JSON.stringify({ routeWorkflow: "on" }),
+      JSON.stringify({ routeWorkflow: {} }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    // A refusal writes nothing: the earlier save stands, and no audit row lands.
+    expect(storedRouteWorkflow(db)).toBe("on");
+    expect(auditRows(db)).toHaveLength(1);
+    expect(await getReviewRouteWorkflowGate(db)).toEqual({
+      mode: "on",
+      saved: true,
+      degraded: false,
+    });
+  });
+
+  test("a hand-edited row is reported untrusted with its raw value, and a save repairs it", async () => {
+    const { db } = fixture();
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
+      "review.route.workflow",
+      "ON",
+      new Date().toISOString(),
+    );
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      routeWorkflow: Record<string, unknown>;
+    };
+    expect(read.routeWorkflow).toEqual({
+      mode: "off",
+      saved: false,
+      degraded: true,
+      reason: "untrusted",
+      rejected: '"ON"',
+    });
+    expect(
+      (
+        await runtimeApi(db, {
+          method: "PATCH",
+          body: JSON.stringify({ routeWorkflow: { value: "on" } }),
+        })
+      ).status,
+    ).toBe(200);
+    // A value the read path refuses is not a trusted "before".
+    expect(auditDetails(db)).toEqual([{ before: null, after: "on" }]);
+    expect(await getReviewRouteWorkflowGate(db)).toEqual({
+      mode: "on",
+      saved: true,
+      degraded: false,
+    });
   });
 });
 

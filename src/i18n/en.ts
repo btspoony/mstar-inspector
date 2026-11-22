@@ -1575,6 +1575,26 @@ export const en = {
       /** No attempt is admitted while the stored cap cannot be read. */
       attemptCapUnreadable:
         "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
+      /** The review route's operating switch — the gate that admits deliveries. */
+      routeWorkflowTitle: "Review route",
+      routeWorkflowDescription:
+        "Whether a queued review delivery creates a Workflow instance. Off refuses every delivery; a change applies to the next batch.",
+      routeWorkflowStoredLabel: "Stored value",
+      routeWorkflowEffectiveLabel: "Effective now",
+      /** {value} = the stored `on` / `off`. */
+      routeWorkflowStoredSaved: "{value} — saved",
+      /** No row: the read path's absent-row answer. */
+      routeWorkflowStoredAbsent: "off — no value saved",
+      /** {value} = the rejected raw row, quoted — a hand-edited value. */
+      routeWorkflowStoredUntrusted: "off — untrusted (stored value {value})",
+      /** The stored row could not be read at all. */
+      routeWorkflowStoredUnreadable: "off — unreadable",
+      routeWorkflowEffectiveOn: "on — deliveries create a Workflow instance",
+      routeWorkflowEffectiveOff: "off — deliveries are refused and nothing is created",
+      routeWorkflowSave: "Save",
+      routeWorkflowSaved: "Saved.",
+      /** Fallback when the write fails with an unrecognised error. */
+      routeWorkflowFailed: "Could not change the review route.",
       /** Admission refusals the pipeline recorded over the trailing 24h. */
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:

@@ -1122,6 +1122,74 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("the route card calls an untrusted row off and names its raw value", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...RUNTIME,
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      }),
+    );
+    // The read path refuses this row, so the card never echoes it as `on`…
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      'off — untrusted (stored value "ON")',
+    );
+    // …and states the answer the queue handler acts on.
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "off — deliveries are refused and nothing is created",
+    );
+    await surface.close();
+  });
+
+  test("saving the route card repairs an untrusted row and shows the gate's answer", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ routeWorkflow: { stored: "off", effective: { mode: "off", saved: true, degraded: false } } })
+        : json({
+            ...RUNTIME,
+            routeWorkflow: {
+              mode: "off",
+              saved: false,
+              degraded: true,
+              reason: "untrusted",
+              rejected: '"ON"',
+            },
+          }),
+    );
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { routeWorkflow: { value: "off" } },
+      },
+    ]);
+    // The card adopts the server's read-back, so the repaired row no longer
+    // reads as untrusted and the effective line is what the gate answered.
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "off — saved",
+    );
+    expect(surface.container.querySelector('[data-route-workflow="effective"]')?.textContent).toBe(
+      "off — deliveries are refused and nothing is created",
+    );
+    expect(surface.text()).toContain("Saved.");
+    await surface.close();
+  });
+
+  test("an older server without a routeWorkflow field hides only that card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector('[data-route-workflow="form"]')).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
+
   test("the admission-drop card renders all four reasons and their 24h counts", async () => {
     const surface = await runtimeScreen(() =>
       json({
