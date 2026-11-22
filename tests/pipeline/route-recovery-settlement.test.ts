@@ -27,6 +27,7 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore, type FailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { claimAttempt } from "../../src/store/review-checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -36,6 +37,7 @@ import type { D1Like, D1StatementLike } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
+const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 const { AttemptPhaseError, cleanupAttempt, settleAttemptFailure } = await import(
   "../../src/pipeline/review-attempt-execution"
 );
@@ -816,5 +818,69 @@ describe("a persisted launch that never staged a publication", () => {
 
     expect(failureRows(db)).toHaveLength(0);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
+  });
+});
+
+// note: ---------------------------------------------------------------------------
+// The recorded failure's retry entry (I-000684)
+// ---------------------------------------------------------------------------
+
+describe("the recorded publication failure leaves the head re-triggerable", () => {
+  test("a redelivery for the same head still runs instead of being skipped", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    // note: The same crash window as above: persisted, window closed, nothing staged.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: "attempt-4d-retryable",
+      payload,
+      nowMs: 9_100_000,
+      enqueuedMs: 0,
+      deadlineMs: 9_999_999,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run("attempt-4d-retryable");
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run("attempt-4d-retryable", 9_100_000, 9_200_000, 9_300_000);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 10_000_000);
+    expect(failureRows(db)).toHaveLength(1);
+
+    // note: The settlement's claim is `failed` — "a commit that was NOT reviewed, so a
+    // redelivery must enqueue again rather than be skipped" (`src/contracts/idem.ts`).
+    // This is the entry the recorded failure is retried through; nothing else is
+    // needed for the operator's re-trigger.
+    h.kvState.entries.set(
+      idemKey({
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: payload.head_sha!,
+      }),
+      "failed",
+    );
+    const started: AttemptRef[] = [];
+    const consumer = createReviewConsumer(env, h.testLog, {
+      ...h.overrides,
+      startAttempt: async (_deps, ref) => {
+        started.push(ref);
+        return "created";
+      },
+    });
+    // note: A fresh delivery of the same head (its own attach identity), which is what a
+    // re-trigger is: the claim the settlement wrote is `failed`, so this must run.
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "redelivery-2" })));
+
+    expect(started).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
   });
 });
