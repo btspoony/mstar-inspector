@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { listCheckReconcileBatch } from "../../src/store/review-checks";
 import { clearConcludedCheckOwed } from "../../src/pipeline/review-attempt";
 
@@ -24,7 +25,7 @@ describe("owed-Check marks on review_launches (EXPLAIN QUERY PLAN)", () => {
   test("the due batch probes owed marks through idx_review_launches_check_owed", async () => {
     const db = createMigratedTestD1();
     const captured: string[] = [];
-    await listCheckReconcileBatch(capturing(db, captured), 1_000);
+    await listCheckReconcileBatch(capturing(db, captured), 1_000, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit);
     const sql = captured.find((s) => s.includes("FROM review_launches l"));
     expect(sql).toBeDefined();
     const detail = plan(db, sql!);

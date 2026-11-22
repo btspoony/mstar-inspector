@@ -1,4 +1,5 @@
 import { createMigratedTestD1, execMigrationScript } from "../tests/store/helpers";
+import { RECONCILE_DEFAULTS } from "../src/contracts/reconcile-settings";
 import { listCheckReconcileBatch } from "../src/store/review-checks";
 import { clearConcludedCheckOwed } from "../src/pipeline/review-attempt";
 
@@ -49,7 +50,7 @@ for (const attempts of [5_000, 20_000, 80_000]) {
     const times: number[] = [];
     for (let i = 0; i < runs; i++) {
       const start = performance.now();
-      rows = (await listCheckReconcileBatch(handle, now)).length;
+      rows = (await listCheckReconcileBatch(handle, now, RECONCILE_DEFAULTS.checkMaxAttempts, RECONCILE_DEFAULTS.checkSelectLimit)).length;
       await clearConcludedCheckOwed(handle);
       times.push(performance.now() - start);
     }
