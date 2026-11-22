@@ -1,5 +1,4 @@
-/**
- * Unit tests: migration 0006 + the per-App config store
+/** note: Unit tests: migration 0006 + the per-App config store
  * (`bot_provider_keys` BYOK keys + `bot_model_config` model chain) + the
  * /dashboard/default/apps/:appId/settings route family (spec
  * dashboard-multi-app-platform § Per-App BYOK + § Crypto envelope, architect
@@ -82,16 +81,15 @@ import { htmlGet, withSpaAssets } from "../helpers/spa";
 import { parseSettings } from "../../src/spa/pages/data";
 import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 
-/** base64 of exactly 32 bytes — the secretbox master-key requirement. */
+/** invariant: base64 of exactly 32 bytes — the secretbox master-key requirement. */
 const TEST_KEY = Buffer.alloc(32, 11).toString("base64");
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const PLAIN_ANTHROPIC_KEY = sk("ant-mallory-verysecret-9988");
 const PLAIN_CHAIN = "ark/deepseek-v4-flash, openai/gpt-5:thinking";
-/** SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
+/** note: SQLite datetime('now') format the store writes (UTC "YYYY-MM-DD HH:MM:SS"). */
 const SQLITE_TS_RE = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
-/**
- * First 16 hex chars of SHA-256(plaintext) — the pool id the store derives
+/** note: First 16 hex chars of SHA-256(plaintext) — the pool id the store derives
  * for a key. A local mirror (the review-side parseModelSelectors precedent):
  * the tests lock the exact derivation, never re-derive it with store code.
  */
@@ -100,9 +98,9 @@ async function keyIdOf(plainKey: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 16);
 }
 
-// --- fixtures ---
+// note: --- fixtures ---
 
-/** Synchronous parameterized write on the raw bun:sqlite handle. */
+/** note: Synchronous parameterized write on the raw bun:sqlite handle. */
 function rawRun(
   db: ReturnType<typeof createTestD1>,
   sql: string,
@@ -116,8 +114,7 @@ function rawCount(db: ReturnType<typeof createTestD1>, table: string): number {
   return row.n;
 }
 
-/**
- * Production-shaped DB: 0001/0002 + a seeded review row, then the later
+/** note: Production-shaped DB: 0001/0002 + a seeded review row, then the later
  * migrations — `APP_CONFIG_BASE_MIGRATIONS` (0006 is applied SEPARATELY by the
  * migration test so an app row can exist before it — the wrangler sequence).
  */
@@ -132,15 +129,14 @@ function createPopulatedPre0006D1(): TestD1 {
   return db;
 }
 
-/** The pre-pool shape (`APP_CONFIG_PRE_POOL_MIGRATIONS`, 0006 → 0038) the 0024/0025 tests seed. */
+/** note: The pre-pool shape (`APP_CONFIG_PRE_POOL_MIGRATIONS`, 0006 → 0038) the 0024/0025 tests seed. */
 function createPreProviderPoolD1(): TestD1 {
   const db = createPopulatedPre0006D1();
   applyMigrations(db, APP_CONFIG_PRE_POOL_MIGRATIONS);
   return db;
 }
 
-/**
- * The config routes' shape: the pre-pool one plus 0024/0025, 0029/0031–0035
+/** note: The config routes' shape: the pre-pool one plus 0024/0025, 0029/0031–0035
  * and the derived tail (`migrationsAfter(0038)` — 0038 being the last file
  * applied by hand). A new migration joins the tail with no lockstep edit,
  * except when it indexes a table below the anchor: that dependency is
@@ -176,8 +172,7 @@ function createBatchRejectingD1(inner: AppConfigD1): AppConfigD1 & { batchCalls(
   };
 }
 
-/**
- * D1 double that runs `removeDeclaration` the first time the store prepares a
+/** note: D1 double that runs `removeDeclaration` the first time the store prepares a
  * write into bot_custom_provider_keys — the CONTROLLED interleaving the
  * ownership gate must absorb: the caller's declaration read has already
  * passed, the declaration (and its pool) is gone by the time the key write
@@ -210,8 +205,7 @@ function createDeclarationRaceD1(inner: AppConfigD1, removeDeclaration: () => vo
   };
 }
 
-/**
- * D1 double that injects a CONCURRENT same-id save at the one moment that
+/** note: D1 double that injects a CONCURRENT same-id save at the one moment that
  * matters: after this caller's `isNew` / count pre-checks have already passed,
  * and BEFORE its batch executes. The injected save takes the App's LAST
  * declaration slot under the very id this caller is declaring.
@@ -230,8 +224,7 @@ function createLastSlotRaceD1(inner: AppConfigD1, winLastSlot: () => Promise<voi
   };
 }
 
-/**
- * D1 double that commits a concurrent remove + re-declaration at ANOTHER
+/** note: D1 double that commits a concurrent remove + re-declaration at ANOTHER
  * endpoint just before the FIRST statement that reads the custom-provider key
  * pool runs — the interleaving a two-statement consumer read splits on (the
  * declaration read has already happened when the pool statement executes).
@@ -271,7 +264,7 @@ function createPoolReadRaceD1(inner: AppConfigD1, race: () => Promise<void>): Ap
   };
 }
 
-/** Seed a review_bots row with genuinely decryptable encrypted columns. */
+/** note: Seed a review_bots row with genuinely decryptable encrypted columns. */
 async function seedApp(
   db: TestD1,
   opts: { slug: string; createdBy: string; githubAppId?: number },
@@ -287,17 +280,16 @@ async function seedApp(
     webhookSecretEnc: await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     createdBy: opts.createdBy,
     workspaceId: "default",
-    // Fixture seeding: the plan cap is not what this test exercises.
+    // note: Fixture seeding: the plan cap is not what this test exercises.
     maxApps: null,
   });
-  // Creation writes no target (D13): the App pages read its repository target,
+  // note: Creation writes no target (D13): the App pages read its repository target,
   // so the fixture seeds the one a real add-repository would.
   seedTarget(db, id, { name: opts.slug, repoName: opts.slug });
   return row;
 }
 
-/**
- * Seed a github_apps row on the PRE-POOL shape (0006 → 0038). That shape
+/** note: Seed a github_apps row on the PRE-POOL shape (0006 → 0038). That shape
  * predates 0045's gate columns, but `createApp` writes `check_min_score`, so
  * these migration tests seed the row raw instead of widening the historical
  * shape with a production migration they do not test. The ciphertexts are
@@ -324,8 +316,7 @@ function seedPrePoolApp(
   return { id };
 }
 
-/**
- * Seed a github_apps row on a PRE-0038 shape (the migration-order tests below
+/** note: Seed a github_apps row on a PRE-0038 shape (the migration-order tests below
  * stop before the rebuild, so the old local route key is still NOT NULL).
  * `createApp` writes the post-0038 column set and cannot be used there.
  */
@@ -340,14 +331,14 @@ function seedPreMigrationAppRow(db: DashboardD1, id: string, slug: string): void
     .run(id, id, slug, slug);
 }
 
-/** mallory owns "mallorys-app"; ada owns "adas-app"; hubot owns none; octocat is admin. */
+/** note: mallory owns "mallorys-app"; ada owns "adas-app"; hubot owns none; octocat is admin. */
 async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>; app: GithubAppRow; otherApp: GithubAppRow }> {
   const db = createAppConfigD1();
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "ada", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
-  // Manage is the workspace role: `octocat` and `mallory` are owners, the
+  // note: Manage is the workspace role: `octocat` and `mallory` are owners, the
   // other two are plain members — the creator column grants nothing.
   db.raw
     .prepare(
@@ -368,7 +359,7 @@ async function seededWorld(): Promise<{ db: ReturnType<typeof createAppConfigD1>
   return { db, app, otherApp };
 }
 
-// --- route drivers (same shape as apps-ui.test.ts) ---
+// note: --- route drivers (same shape as apps-ui.test.ts) ---
 
 function makeEnv(db: unknown, overrides: Partial<Env> = {}): Env {
   return {
@@ -406,8 +397,7 @@ async function postForm(
   );
 }
 
-/**
- * The same POST with a body that may REPEAT a field — the shape a browser (or
+/** note: The same POST with a body that may REPEAT a field — the shape a browser (or
  * a hand-built client) sends when one key appears twice, which parseBody's
  * all form aggregates into an array.
  */
@@ -427,10 +417,9 @@ async function postFormEntries(
   );
 }
 
-// SPA ownership: settings HTML GET is SPA-owned (shared spa helper).
+// note: SPA ownership: settings HTML GET is SPA-owned (shared spa helper).
 
-/**
- * The fixture App is addressed by its immutable GitHub App id (D0);
+/** note: The fixture App is addressed by its immutable GitHub App id (D0);
  * `mallorys-app` is only its webhook path and GitHub slug now. The operator
  * notices name the App by that same GitHub slug (D6), so the English bodies
  * pinned below are unchanged.
@@ -438,17 +427,17 @@ async function postFormEntries(
 const APP_ID = 1001;
 const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
 
-// --- migration 0006 ---
+// note: --- migration 0006 ---
 
 describe("migration 0006_app_provider_config.sql (on a seeded production-shaped DB)", () => {
   test("applies cleanly after 0001–0005 over existing review AND app rows", () => {
     const db = createPopulatedPre0006D1();
-    // An app row exists BEFORE 0006 applies — the FK parent is populated,
+    // invariant: An app row exists BEFORE 0006 applies — the FK parent is populated,
     // exactly the wrangler order on a live deployment.
     seedPreMigrationAppRow(db, "app-pre-0006", "pre-existing");
     return Promise.resolve().then(() => {
       expect(() => applyMigrations(db, ["0006_app_provider_config.sql"])).not.toThrow();
-      // Append-only: the seeded review row (app_id NULL = legacy) is untouched.
+      // invariant: Append-only: the seeded review row (app_id NULL = legacy) is untouched.
       const row = db.raw.query("SELECT app_id FROM reviews WHERE id = 'review-1'").get() as {
         app_id: string | null;
       };
@@ -457,7 +446,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   });
 
   test("app_provider_keys: composite PK (app_id, provider) rejects a duplicate pair; other apps may repeat the provider", async () => {
-    // The DDL this test pins belongs to 0006, so it runs on the PRE-pool
+    // why: The DDL this test pins belongs to 0006, so it runs on the PRE-pool
     // shape: 0024 rebuilds the table onto the (app_id, provider, key_id) PK.
     const db = createPreProviderPoolD1();
     const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
@@ -476,7 +465,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
         app.id,
       ),
     ).toThrow(/UNIQUE constraint failed/);
-    // The same provider under ANOTHER app is a distinct row (per-App keys).
+    // note: The same provider under ANOTHER app is a distinct row (per-App keys).
     rawRun(
       db,
       `INSERT INTO app_provider_keys (app_id, provider, key_enc, created_at)
@@ -525,7 +514,7 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
         app.id,
       ),
     ).toThrow(/UNIQUE constraint failed/);
-    // NULL chain and a second app's row are both legal.
+    // note: NULL chain and a second app's row are both legal.
     rawRun(
       db,
       `INSERT INTO bot_model_config (bot_id, model_chain, updated_at)
@@ -543,11 +532,11 @@ describe("migration 0006_app_provider_config.sql (on a seeded production-shaped 
   });
 });
 
-// --- migration 0012 (bot_provider_keys.updated_at) ---
+// note: --- migration 0012 (bot_provider_keys.updated_at) ---
 
 describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
   test("0012 applies over a pre-0012 row (created_at kept, updated_at added NULL); the store then backfills it", async () => {
-    // --- the migration replay on the historical shape (0006 → 0024) ---
+    // note: --- the migration replay on the historical shape (0006 → 0024) ---
     // A pre-0012 DB with a live key row: the column set and the two-segment
     // AAD a real deployment carries across 0012/0015/0024.
     const history = createPopulatedPre0006D1();
@@ -573,16 +562,16 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     const replay = history.raw
       .query("SELECT key_id, key_enc, created_at, updated_at FROM app_provider_keys")
       .get() as { key_id: string; key_enc: string; created_at: string; updated_at: string | null };
-    expect(replay.created_at).toBe("2026-01-01 00:00:00"); // untouched by the ALTER
-    expect(replay.updated_at).toBeNull(); // the 存量行 placeholder source
-    expect(replay.key_id).toBe(""); // 0024's sentinel, promoted by the store
+    expect(replay.created_at).toBe("2026-01-01 00:00:00"); // invariant: untouched by the ALTER
+    expect(replay.updated_at).toBeNull(); // note: the 存量行 placeholder source
+    expect(replay.key_id).toBe(""); // note: 0024's sentinel, promoted by the store
     await expect(
       createSecretbox(TEST_KEY).decryptSecret(replay.key_enc, "app_provider_keys.key_enc:app-pre-0012:anthropic"),
     ).resolves.toBe(PLAIN_ANTHROPIC_KEY);
-    // 0056 is the tail of the shape below; the full chain is applied with it,
+    // note: 0056 is the tail of the shape below; the full chain is applied with it,
     // which is what every store test in this file runs on.
 
-    // --- the store's re-set on the renamed chain ---
+    // note: --- the store's re-set on the renamed chain ---
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const carriedEnc = await createSecretbox(TEST_KEY).encryptSecret(
@@ -601,9 +590,9 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
       created_at: string;
       updated_at: string | null;
     };
-    expect(row.created_at).toBe("2026-01-01 00:00:00"); // untouched by the ALTER
-    expect(row.updated_at).toBeNull(); // the 存量行 placeholder source
-    // The store's re-set fills updated_at from a fresh clock read — a legacy
+    expect(row.created_at).toBe("2026-01-01 00:00:00"); // invariant: untouched by the ALTER
+    expect(row.updated_at).toBeNull(); // note: the 存量行 placeholder source
+    // note: The store's re-set fills updated_at from a fresh clock read — a legacy
     // row becomes current — while created_at stays the key's entry time (the
     // pool order (created_at, key_id) does not shift on a re-submission).
     await configStore(db).addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
@@ -611,13 +600,13 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
       created_at: string;
       updated_at: string;
     };
-    expect(afterReset.created_at).toBe("2026-01-01 00:00:00"); // unchanged: updated in place
+    expect(afterReset.created_at).toBe("2026-01-01 00:00:00"); // invariant: unchanged: updated in place
     expect(afterReset.updated_at).toMatch(SQLITE_TS_RE);
     expect(afterReset.updated_at > "2026-01-01 00:00:00").toBe(true);
   });
 
   test("pre-pool shape (0006 → 0038) creates app_custom_providers with the AL-23-1 DDL shape", async () => {
-    const db = createPreProviderPoolD1(); // 0006 → 0038 via APP_CONFIG_PRE_POOL_MIGRATIONS
+    const db = createPreProviderPoolD1(); // note: 0006 → 0038 via APP_CONFIG_PRE_POOL_MIGRATIONS
     const cols = db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{
       name: string;
       type: string;
@@ -626,7 +615,7 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
     }>;
     const byName: Record<string, { type: string; notnull: number; pk: number }> = {};
     for (const c of cols) byName[c.name] = c;
-    // AL-23-1 DDL: bot_id FK, provider_id, base_url, api, model_ids TEXT
+    // note: AL-23-1 DDL: bot_id FK, provider_id, base_url, api, model_ids TEXT
     // (JSON array), api_key_enc NOT NULL, created_at/updated_at, composite
     // PK (app_id, provider_id) — the AAD rowKey source.
     for (const col of ["app_id", "provider_id", "base_url", "api", "model_ids", "api_key_enc", "created_at", "updated_at"]) {
@@ -639,11 +628,11 @@ describe("migration 0012_custom_providers_and_key_updated_at.sql", () => {
   });
 });
 
-// --- migration 0017 (default + named chains + backfill DML) ---
+// note: --- migration 0017 (default + named chains + backfill DML) ---
 
 describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
   test("applies cleanly over a seeded production-shaped DB; backfill DML migrates the pre-chains shape", async () => {
-    // A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
+    // note: A pre-0017 DB (0001–0016) with the pre-chains shape seeded RAW —
     // exactly the wrangler order on a live deployment.
     const db = createPopulatedPre0006D1();
     applyMigrations(db, [
@@ -669,7 +658,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
       app.id,
     );
     expect(() => applyMigrations(db, ["0017_app_model_chains.sql"])).not.toThrow();
-    // The backfill produced the chains shape from the pre-chains rows:
+    // note: The backfill produced the chains shape from the pre-chains rows:
     // default row (verbatim chain) + seat-<role> named chain + seat ref.
     const chains = db.raw
       .query("SELECT name, chain, is_default FROM app_model_chains WHERE app_id = ? ORDER BY name")
@@ -695,7 +684,7 @@ describe("migration 0017_app_model_chains.sql (spec §4.4)", () => {
   });
 });
 
-// --- migration 0024 (per-key provider pools) ---
+// note: --- migration 0024 (per-key provider pools) ---
 
 describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () => {
   const LEGACY_KEY = sk("legacy-anthropic-4242");
@@ -718,7 +707,7 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
     expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_keys)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
-    // The row is carried over UNCHANGED: D1 migrations are SQL, and SQL cannot
+    // invariant: The row is carried over UNCHANGED: D1 migrations are SQL, and SQL cannot
     // decrypt — so the envelope keeps the two-segment AAD and the row keeps
     // its bookkeeping under the sentinel key_id. The store (which holds the
     // master key) completes the promotion on the first read.
@@ -762,13 +751,13 @@ describe("migration 0024_provider_multi_key.sql (per-key provider pools)", () =>
       legacyEnc,
     );
     expect(() => applyMigrations(db, ["0024_provider_multi_key.sql"])).not.toThrow();
-    // The declaration keeps its shape MINUS the key material and its
+    // note: The declaration keeps its shape MINUS the key material and its
     // verification bookkeeping (both now belong to the key row).
     const declCols = (db.raw.query("PRAGMA table_info(app_custom_providers)").all() as Array<{ name: string }>).map(
       (c) => c.name,
     );
     expect(declCols).toEqual(["app_id", "provider_id", "base_url", "api", "model_ids", "created_at", "updated_at"]);
-    // The key material moved across verbatim (sentinel id, old AAD, old
+    // note: The key material moved across verbatim (sentinel id, old AAD, old
     // bookkeeping) — the store promotes it on first read.
     const keyRow = db.raw
       .query("SELECT provider, key_id, key_enc, created_at, updated_at, verified_at, verified_status FROM app_custom_provider_keys")
@@ -798,7 +787,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
     const db = createPreProviderPoolD1();
     const app = await seedPrePoolApp(db, { slug: "a", createdBy: "mallory" });
     applyMigrations(db, ["0024_provider_multi_key.sql"]);
-    // The pre-0025 aggregate: one un-attributable row per (App, provider).
+    // note: The pre-0025 aggregate: one un-attributable row per (App, provider).
     rawRun(
       db,
       `INSERT INTO app_provider_models (app_id, provider, models_json, fetched_at)
@@ -808,7 +797,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
     expect(() => applyMigrations(db, ["0025_provider_model_evidence.sql"])).not.toThrow();
     const cols = db.raw.query("PRAGMA table_info(app_provider_models)").all() as Array<{ name: string; pk: number }>;
     expect(cols.filter((c) => c.pk > 0).map((c) => c.name)).toEqual(["app_id", "provider", "key_id"]);
-    // The copy is deliberately EMPTY: an aggregate cannot say which key
+    // note: The copy is deliberately EMPTY: an aggregate cannot say which key
     // contributed which model, so carrying it forward would be dead data —
     // the next verification rebuilds the evidence per key.
     expect(rawCount(db, "app_provider_models")).toBe(0);
@@ -829,7 +818,7 @@ describe("migration 0025_provider_model_evidence.sql (per-key model evidence)", 
   });
 });
 
-// --- store: provider keys ---
+// note: --- store: provider keys ---
 
 describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("addProviderKey encrypts INSIDE the store under the per-key AAD (round-trip)", async () => {
@@ -839,14 +828,14 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const row = db.raw
       .query("SELECT bot_id, provider, key_id, key_enc, created_at FROM bot_provider_keys")
       .get() as { bot_id: string; provider: string; key_id: string; key_enc: string; created_at: string };
-    // Only ciphertext lands in D1: a v1 envelope, never the plaintext.
+    // invariant: Only ciphertext lands in D1: a v1 envelope, never the plaintext.
     expect(row.key_enc).toMatch(/^v1\.primary\./);
     expect(row.key_enc).not.toContain(PLAIN_ANTHROPIC_KEY);
     expect(row.bot_id).toBe(app.id);
     expect(row.provider).toBe("anthropic");
     expect(row.key_id).toBe(await keyIdOf(PLAIN_ANTHROPIC_KEY));
     expect(row.created_at).toMatch(SQLITE_TS_RE);
-    // The per-key AAD decrypts the exact plaintext back.
+    // note: The per-key AAD decrypts the exact plaintext back.
     const plain = await createSecretbox(TEST_KEY).decryptSecret(
       row.key_enc,
       `app_provider_keys.key_enc:${app.id}:anthropic:${row.key_id}`,
@@ -863,15 +852,15 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       key_enc: string;
     };
     const box = createSecretbox(TEST_KEY);
-    // A different provider of the SAME app (cross-provider read)…
+    // note: A different provider of the SAME app (cross-provider read)…
     await expect(
       box.decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:openai:${row.key_id}`),
     ).rejects.toThrow(/AAD mismatch/);
-    // …the same provider of a DIFFERENT app (cross-App read)…
+    // note: …the same provider of a DIFFERENT app (cross-App read)…
     await expect(
       box.decryptSecret(row.key_enc, `app_provider_keys.key_enc:other-app:anthropic:${row.key_id}`),
     ).rejects.toThrow(/AAD mismatch/);
-    // …and a SIBLING slot of the same pool (the three-segment extension: one
+    // note: …and a SIBLING slot of the same pool (the three-segment extension: one
     // row's ciphertext is unusable for another slot).
     await expect(
       box.decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:anthropic:${"0".repeat(16)}`),
@@ -887,7 +876,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.addProviderKey(app.id, "anthropic", one);
     await store.addProviderKey(app.id, "anthropic", two);
     expect(rawCount(db, "bot_provider_keys")).toBe(2);
-    // Pool order is (created_at, key_id) — two adds in the same second order
+    // note: Pool order is (created_at, key_id) — two adds in the same second order
     // by their derived ids, so the expectation is built the same way.
     const idOne = await keyIdOf(one);
     const idTwo = await keyIdOf(two);
@@ -903,7 +892,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(list.map((key) => key.last4)).toEqual([first.slice(-4), second.slice(-4)]);
     expect(list.every((key) => key.provider === "anthropic")).toBe(true);
     expect(list.every((key) => key.verifiedAt === null && key.verifiedStatus === null)).toBe(true);
-    // The optional provider filter scopes the list to one pool.
+    // note: The optional provider filter scopes the list to one pool.
     expect((await store.listProviderKeys(app.id, "anthropic")).length).toBe(2);
     expect((await store.listProviderKeys(app.id, "openai")).length).toBe(0);
   });
@@ -915,7 +904,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const one = sk("first-key-aaaa");
     const two = sk("second-key-bbbb");
     await store.addProviderKey(app.id, "anthropic", one);
-    // Backdate BOTH stored timestamps to DISTINCT past values so the second
+    // why: Backdate BOTH stored timestamps to DISTINCT past values so the second
     // save's fresh clock read is observably later than the previous update,
     // not merely later than creation time. Deterministic: no sleeps, no fake
     // timers (the backdated-row case below uses the same mechanism).
@@ -938,8 +927,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       updated_at: string;
     };
     expect(after.key_id).toBe(await keyIdOf(one));
-    expect(after.key_enc).not.toBe(before.key_enc); // rewritten: a fresh IV
-    // The shipped re-submission contract: created_at is the key's ENTRY time
+    expect(after.key_enc).not.toBe(before.key_enc); // invariant: rewritten: a fresh IV
+    // note: The shipped re-submission contract: created_at is the key's ENTRY time
     // and stays; updated_at moves FORWARD from a fresh clock read — strictly
     // past the previous update, which the distinct backdated fixture is the
     // counterexample guard for. `SQLITE_TS_RE` checks shape only, so the
@@ -947,8 +936,8 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     // time) is what rejects a stale or backwards update.
     expect(after.created_at).toBe(before.created_at);
     expect(after.updated_at).toMatch(SQLITE_TS_RE);
-    expect(after.updated_at > before.updated_at).toBe(true); // same-format string compare
-    // A DIFFERENT key is a new pool slot, never an overwrite of the first.
+    expect(after.updated_at > before.updated_at).toBe(true); // invariant: same-format string compare
+    // invariant: A DIFFERENT key is a new pool slot, never an overwrite of the first.
     await store.addProviderKey(app.id, "anthropic", two);
     expect(rawCount(db, "bot_provider_keys")).toBe(2);
     expect((await store.getAppConfig(app.id)).keys.anthropic!.slice().sort()).toEqual([one, two].sort());
@@ -967,10 +956,10 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       ProviderKeyLimitError,
     );
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    // Growth-only per pool: re-submitting a stored key still lands (no growth)…
+    // invariant: Growth-only per pool: re-submitting a stored key still lands (no growth)…
     await expect(store.addProviderKey(app.id, "anthropic", keys[0]!)).resolves.toBeUndefined();
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    // …and the cap is per (App, provider): another pool starts from zero.
+    // note: …and the cap is per (App, provider): another pool starts from zero.
     await expect(store.addProviderKey(app.id, "openai", sk("pool-openai-1-1111"))).resolves.toBeUndefined();
     expect(rawCount(db, "bot_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER + 1);
   });
@@ -978,7 +967,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
   test("a legacy two-segment-AAD row still decrypts and is promoted to the three-segment form", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    // The carried row a live deployment holds after 0024: sentinel key id and
+    // invariant: The carried row a live deployment holds after 0024: sentinel key id and
     // the old two-segment AAD. The store promotes it on the first read.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       PLAIN_ANTHROPIC_KEY,
@@ -992,13 +981,13 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       legacyEnc,
     );
     const store = configStore(db);
-    // The first read decrypts with the OLD AAD and serves the plaintext …
+    // note: The first read decrypts with the OLD AAD and serves the plaintext …
     expect(await store.getAppConfig(app.id)).toEqual({
       appId: app.id,
       keys: { anthropic: [PLAIN_ANTHROPIC_KEY] },
       modelChain: null,
     });
-    // … and the row is rewritten under the three-segment AAD with the derived
+    // note: … and the row is rewritten under the three-segment AAD with the derived
     // id, keeping its timestamps and verification bookkeeping.
     const keyId = await keyIdOf(PLAIN_ANTHROPIC_KEY);
     const row = db.raw
@@ -1020,11 +1009,11 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await expect(
       box.decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:anthropic:${keyId}`),
     ).resolves.toBe(PLAIN_ANTHROPIC_KEY);
-    // The promotion is one-way: the old AAD no longer opens the row.
+    // note: The promotion is one-way: the old AAD no longer opens the row.
     await expect(
       box.decryptSecret(row.key_enc, `app_provider_keys.key_enc:${app.id}:anthropic`),
     ).rejects.toThrow(/AAD mismatch/);
-    // A second read is a plain three-segment read (no churn on the row).
+    // note: A second read is a plain three-segment read (no churn on the row).
     expect(await store.listProviderKeys(app.id)).toEqual([
       {
         provider: "anthropic",
@@ -1044,7 +1033,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.addProviderKey(app.id, "openai", sk("openai-key-7777"));
     await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     const list = await store.listProviderKeys(app.id);
-    // Provider-ascending; ONLY the masked tail of each key (plus the pool id
+    // invariant: Provider-ascending; ONLY the masked tail of each key (plus the pool id
     // and the per-key bookkeeping — no key material).
     expect(list).toEqual([
       {
@@ -1072,7 +1061,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    // Non-hex short keys, so the containment asserts below cannot collide with
+    // why: Non-hex short keys, so the containment asserts below cannot collide with
     // a derived (hex) key id.
     await store.addProviderKey(app.id, "groq", "wxyz");
     await store.addProviderKey(app.id, "kilo", "xyz");
@@ -1092,7 +1081,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const one = sk("first-key-aaaa");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    // The runtime loads a one-key pool, so that key's own report IS the pool's
+    // why: The runtime loads a one-key pool, so that key's own report IS the pool's
     // vocabulary — nothing to reconcile, and a later upstream model launch
     // must be able to land on the next re-verify.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
@@ -1109,16 +1098,16 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const two = sk("second-key-bbbb");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    // TWO keys with IDENTICAL reports: the intersection IS that list.
+    // note: TWO keys with IDENTICAL reports: the intersection IS that list.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m2", "m3"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
 
-    // A SUBSET: the offered set narrows to what BOTH can serve, so the
+    // note: A SUBSET: the offered set narrows to what BOTH can serve, so the
     // dropdown never offers a model the credential the runtime picks cannot.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2", "m3"]);
     expect(await cachedModels()).toEqual([["m2", "m3"]]);
-    // Not disjoint: B becomes a SUBSET of A, so the shared model is what
+    // why: Not disjoint: B becomes a SUBSET of A, so the shared model is what
     // survives — the genuine disjoint case is "the disjoint path" below.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m3"]);
     expect(await cachedModels()).toEqual([["m3"]]);
@@ -1133,14 +1122,14 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const three = sk("third-key-cccc");
     const cachedModels = async () => (await store.getVerifiedModels(app.id)).map((row) => row.models);
 
-    // A and B serve only "shared"; removing C must not erase THEIR evidence —
+    // invariant: A and B serve only "shared"; removing C must not erase THEIR evidence —
     // that erasure is what let the next INSERT cache ONE key's list verbatim
     // for a two-key pool.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["shared"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["shared"]);
     await store.saveVerifiedKey(app.id, "anthropic", three, ["shared"]);
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(three))).toBe(true);
-    // B has since gained "b-only" while A still serves only "shared" — and the
+    // invariant: B has since gained "b-only" while A still serves only "shared" — and the
     // runtime may resolve with A, so "b-only" must NOT be offered.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["b-only", "shared"]);
     expect(await cachedModels()).toEqual([["shared"]]);
@@ -1157,7 +1146,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m1"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["m1"]);
     expect(await cachedModels()).toEqual([["m1"]]);
-    // Both keys gained m2 upstream: each re-verify refreshes ITS OWN report, so
+    // note: Both keys gained m2 upstream: each re-verify refreshes ITS OWN report, so
     // the recomputed intersection adds m2 back — the historical aggregate could
     // never do this.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["m1", "m2"]);
@@ -1175,7 +1164,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
 
     await store.saveVerifiedKey(app.id, "anthropic", one, ["only-first"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["only-second"]);
-    // Empty models IS the probe-only signal: composeModelOptions yields no
+    // invariant: Empty models IS the probe-only signal: composeModelOptions yields no
     // options and findFailingSelector falls back to syntax-only for that
     // provider, so a chain naming either model still saves and the runtime
     // resolves it against the pool.
@@ -1185,7 +1174,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       { provider: "anthropic", source: "probe", selectors: [] },
     ]);
     expect(findFailingSelector(["anthropic/only-first", "anthropic/only-second"], cached, [])).toBeNull();
-    // Both keys gained the same model: the recomputed intersection surfaces it
+    // note: Both keys gained the same model: the recomputed intersection surfaces it
     // instead of staying stuck at the empty historical aggregate.
     await store.saveVerifiedKey(app.id, "anthropic", one, ["common"]);
     await store.saveVerifiedKey(app.id, "anthropic", two, ["common"]);
@@ -1197,7 +1186,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     await store.saveVerifiedKey(app.id, "anthropic", sk("first-key-aaaa"), ["m1", "m2"]);
-    // The unverified sibling rides the same pool, so the runtime may resolve
+    // why: The unverified sibling rides the same pool, so the runtime may resolve
     // with it: its vocabulary is unknown, and offering the verified key's list
     // is exactly the F4 failure. Unknown → nothing offered (probe face).
     await store.addProviderKey(app.id, "anthropic", sk("second-key-bbbb"));
@@ -1215,21 +1204,21 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(rawCount(db, "bot_provider_models")).toBe(1);
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(one))).toBe(true);
     expect(rawCount(db, "bot_provider_keys")).toBe(1);
-    // The evidence is keyed by the credential that produced it, so deleting a
+    // safety: The evidence is keyed by the credential that produced it, so deleting a
     // key drops only ITS evidence (models only the deleted credential could
     // serve can no longer be offered; the survivor keeps what it reported).
     // The sibling key itself survives…
     expect(rawCount(db, "bot_provider_models")).toBe(0);
     expect((await store.getAppConfig(app.id)).keys.anthropic).toEqual([two]);
-    // …and a re-verification of the surviving key rebuilds its own evidence.
+    // note: …and a re-verification of the surviving key rebuilds its own evidence.
     await store.saveVerifiedKey(app.id, "anthropic", two, ["claude-sonnet-4-6"]);
     expect(rawCount(db, "bot_provider_models")).toBe(1);
-    // The last key's delete clears its evidence too (a verified list for a
+    // note: The last key's delete clears its evidence too (a verified list for a
     // keyless provider is exactly the stale state the dropdown must never show).
     expect(await store.deleteProviderKey(app.id, "anthropic", await keyIdOf(two))).toBe(true);
     expect(rawCount(db, "bot_provider_keys")).toBe(0);
     expect(rawCount(db, "bot_provider_models")).toBe(0);
-    // An unknown key id is an idempotent no-op.
+    // note: An unknown key id is an idempotent no-op.
     expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
   });
 
@@ -1242,7 +1231,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.saveVerifiedKey(app.id, "anthropic", one, ["claude-sonnet-4-6"]);
     await store.addProviderKey(app.id, "anthropic", two);
     const poolBefore = db.raw.query("SELECT * FROM bot_provider_keys WHERE bot_id = ? ORDER BY key_id").all(app.id);
-    // A STALE / unmatched key id while a sibling key still exists: the delete
+    // note: A STALE / unmatched key id while a sibling key still exists: the delete
     // statement matches nothing, so every row survives — wiping anything here
     // would contradict the route's own "nothing changed" report.
     expect(await store.deleteProviderKey(app.id, "anthropic", "0".repeat(16))).toBe(false);
@@ -1250,7 +1239,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     expect(db.raw.query("SELECT * FROM bot_provider_keys WHERE bot_id = ? ORDER BY key_id").all(app.id)).toEqual(
       poolBefore,
     );
-    // The verified key keeps its own evidence (`two` was added unverified, so it
+    // note: The verified key keeps its own evidence (`two` was added unverified, so it
     // has none — that is what makes the pool's vocabulary unknown).
     expect((await store.getVerifiedModels(app.id)).map((row) => ({ provider: row.provider, models: row.models }))).toEqual([
       { provider: "anthropic", models: [] },
@@ -1261,7 +1250,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("legacy-delete-me-4242");
-    // The carried row a live deployment holds after 0024.
+    // invariant: The carried row a live deployment holds after 0024.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       legacy,
       `app_provider_keys.key_enc:${app.id}:anthropic`,
@@ -1273,7 +1262,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       app.id,
       legacyEnc,
     );
-    // Carried verbatim under the sentinel id: only the DELETE's OWN promotion
+    // invariant: Carried verbatim under the sentinel id: only the DELETE's OWN promotion
     // can make the derived id addressable — no list/config call ran before it.
     const carried = db.raw.query("SELECT key_id FROM bot_provider_keys").get() as { key_id: string };
     expect(carried.key_id).toBe("");
@@ -1295,7 +1284,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const serialized = JSON.stringify(cfgX);
     expect(serialized).not.toContain(sk("y-anthropic-key-2222"));
     expect(serialized).not.toContain(sk("y-openai-key-3333"));
-    // The masked list is scoped the same way.
+    // note: The masked list is scoped the same way.
     const listX = await store.listProviderKeys(x.id);
     expect(listX.map((key) => key.keyId)).toEqual([await keyIdOf(sk("x-anthropic-key-1111"))]);
     expect(listX.map((key) => key.last4)).toEqual(["1111"]);
@@ -1319,7 +1308,7 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     const key = sk("v1-aaaa");
     await store.addProviderKey(app.id, "anthropic", key);
-    // Backdate the row so the second write's clock is observably LATER.
+    // why: Backdate the row so the second write's clock is observably LATER.
     rawRun(
       db,
       "UPDATE bot_provider_keys SET created_at = '2026-01-01 00:00:00', updated_at = '2026-01-01 00:00:00' WHERE bot_id = ? AND provider = 'anthropic'",
@@ -1332,12 +1321,12 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
       updated_at: string;
     };
     expect(row.updated_at).toMatch(SQLITE_TS_RE);
-    // created_at is the key's ENTRY time and stays: a re-submission updates in
+    // invariant: created_at is the key's ENTRY time and stays: a re-submission updates in
     // place, so the pool order (created_at, key_id) never shifts under a
     // re-verify.
     expect(row.created_at).toBe("2026-01-01 00:00:00");
-    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true); // same-format string compare
-    // The masked list reflects the moved timestamp.
+    expect(row.updated_at > "2026-01-01 00:00:00").toBe(true); // note: same-format string compare
+    // note: The masked list reflects the moved timestamp.
     const list = await store.listProviderKeys(app.id);
     expect(list).toEqual([
       {
@@ -1357,11 +1346,11 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     const store = configStore(db);
     await store.addProviderKey(app.id, "anthropic", PLAIN_ANTHROPIC_KEY);
     await store.addProviderKey(app.id, "kilo", sk("kilo-key-1234"));
-    // The legacy shape: a pre-0012 row whose updated_at is NULL.
+    // note: The legacy shape: a pre-0012 row whose updated_at is NULL.
     rawRun(db, "UPDATE bot_provider_keys SET updated_at = NULL WHERE provider = 'kilo'");
     const list = await store.listProviderKeys(app.id);
     expect(list).toHaveLength(2);
-    // provider-ascending: anthropic (current) then kilo (legacy placeholder).
+    // note: provider-ascending: anthropic (current) then kilo (legacy placeholder).
     expect(list[0]).toEqual({
       provider: "anthropic",
       keyId: await keyIdOf(PLAIN_ANTHROPIC_KEY),
@@ -1412,26 +1401,26 @@ describe("app-config store (createAppConfigStore) — provider keys", () => {
     await store.upsertCustomProvider(app.id, custom, customKey);
     await store.addProviderKey(otherApp.id, "zai", foreignKey);
 
-    // Built-in pool: the row decrypts under its own three-segment AAD.
+    // note: Built-in pool: the row decrypts under its own three-segment AAD.
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toEqual({
       plainKey: builtinKey,
       custom: false,
     });
-    // Declaration pool: a template provider's keys live in the other table,
+    // note: Declaration pool: a template provider's keys live in the other table,
     // with the other AAD form.
     await expect(store.getProviderKeyPlaintext(app.id, custom.provider_id, await keyIdOf(customKey))).resolves.toEqual({
       plainKey: customKey,
       custom: true,
     });
-    // Cross-App: another App's key id is not this App's.
+    // note: Cross-App: another App's key id is not this App's.
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(foreignKey))).resolves.toBeNull();
-    // A deleted key is gone, not stale.
+    // note: A deleted key is gone, not stale.
     await store.deleteProviderKey(app.id, "zai", await keyIdOf(builtinKey));
     await expect(store.getProviderKeyPlaintext(app.id, "zai", await keyIdOf(builtinKey))).resolves.toBeNull();
   });
 });
 
-// --- store: model chain + full config ---
+// note: --- store: model chain + full config ---
 
 describe("app-config store (createAppConfigStore) — model chain + getAppConfig", () => {
   test("setModelChain stores VERBATIM (spaces and :thinking suffixes untouched); getModelChain reads it back", async () => {
@@ -1442,7 +1431,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const row = db.raw
       .query("SELECT chain, updated_at FROM bot_model_chains WHERE name = 'default'")
       .get() as { chain: string | null; updated_at: string };
-    expect(row.chain).toBe(PLAIN_CHAIN); // plaintext by design — not a secret
+    expect(row.chain).toBe(PLAIN_CHAIN); // safety: plaintext by design — not a secret
     expect(row.updated_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });
 
@@ -1464,7 +1453,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     await store.setModelChain(app.id, null);
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    // Clearing an app that never had a chain is a quiet no-op.
+    // invariant: Clearing an app that never had a chain is a quiet no-op.
     await expect(store.setModelChain(app.id, null)).resolves.toBeUndefined();
   });
 
@@ -1476,7 +1465,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     await store.setModelChain(app.id, "");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    // Clearing an app with no stored chain is a quiet no-op, like null.
+    // note: Clearing an app with no stored chain is a quiet no-op, like null.
     await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
   });
 
@@ -1484,12 +1473,12 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
-    // Route semantics (空 = 清除, raw.trim() === "") aligned at the store: a
+    // note: Route semantics (空 = 清除, raw.trim() === "") aligned at the store: a
     // blank chain never lands as a row, whatever the caller passed.
     await store.setModelChain(app.id, "   ");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    // Interior/trailing whitespace in a chain WITH content is configuration —
+    // note: Interior/trailing whitespace in a chain WITH content is configuration —
     // stored exactly as given (the runner-side selector parse trims segments).
     const padded = "  openai/gpt-5 , anthropic/claude-x  ";
     await store.setModelChain(app.id, padded);
@@ -1499,7 +1488,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   test("getAppConfig returns the decrypted keys + chain; an app without config is an EMPTY config", async () => {
     const db = createAppConfigD1();
     const bare = await seedApp(db, { slug: "bare", createdBy: "mallory" });
-    // Zero-config is an EMPTY config, not a fallback: there is no global env
+    // note: Zero-config is an EMPTY config, not a fallback: there is no global env
     // chain or key anymore — the consumer's assertAppConfigComplete
     // fail-closes such an App (missing model chain).
     expect(await configStore(db).getAppConfig(bare.id)).toEqual({
@@ -1530,7 +1519,7 @@ describe("app-config store (createAppConfigStore) — model chain + getAppConfig
   });
 });
 
-// --- store: model chains + seats (spec §4.4) ---
+// note: --- store: model chains + seats (spec §4.4) ---
 
 describe("app-config store (createAppConfigStore) — model chains + seats", () => {
   test("setModelChain stores the default row VERBATIM (:thinking suffix and padding untouched); getModelChain reads it back", async () => {
@@ -1542,7 +1531,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const row = db.raw
       .query("SELECT bot_id, name, chain, is_default FROM bot_model_chains WHERE name = 'default'")
       .get() as { bot_id: string; name: string; chain: string; is_default: number };
-    expect(row.chain).toBe("  ark/deepseek-v4-flash:high "); // plaintext by design — not a secret
+    expect(row.chain).toBe("  ark/deepseek-v4-flash:high "); // safety: plaintext by design — not a secret
     expect(row.is_default).toBe(1);
     expect(row.bot_id).toBe(app.id);
   });
@@ -1565,7 +1554,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await store.setModelChain(app.id, null);
     expect(rawCount(db, "bot_model_chains")).toBe(0);
     expect(await store.getModelChain(app.id)).toBeNull();
-    // Clearing a default that never existed resolves without error.
+    // invariant: Clearing a default that never existed resolves without error.
     await expect(store.setModelChain(app.id, "")).resolves.toBeUndefined();
   });
 
@@ -1585,7 +1574,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     await store.setModelChain(app.id, "first/model");
-    // A rogue is_default=1 row (a direct-DB write the store never made —
+    // invariant: A rogue is_default=1 row (a direct-DB write the store never made —
     // the "race" shape the batch invariant must absorb).
     rawRun(
       db,
@@ -1594,7 +1583,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       app.id,
     );
     await store.setModelChain(app.id, "second/model");
-    // Exactly ONE is_default=1 row after the write, and it is the 'default' row.
+    // invariant: Exactly ONE is_default=1 row after the write, and it is the 'default' row.
     const defaults = db.raw
       .query("SELECT name, chain FROM bot_model_chains WHERE bot_id = ? AND is_default = 1")
       .all(app.id) as Array<{ name: string; chain: string }>;
@@ -1647,13 +1636,13 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     await store.setModelChainSeat(app.id, "frontend-dev", "fast");
     expect(await store.removeModelChain(app.id, "fast")).toBe(true);
-    // The chain row is gone AND both reference rows are gone (absent = default).
-    expect(rawCount(db, "bot_model_chains")).toBe(1); // only the default row
+    // note: The chain row is gone AND both reference rows are gone (absent = default).
+    expect(rawCount(db, "bot_model_chains")).toBe(1); // invariant: only the default row
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
     expect(await store.getModelChainSeats(app.id)).toEqual({});
-    // Removing an unknown name is an idempotent no-op returning false.
+    // note: Removing an unknown name is an idempotent no-op returning false.
     expect(await store.removeModelChain(app.id, "nope")).toBe(false);
-    // The reserved 'default' row cannot be removed via this method.
+    // note: The reserved 'default' row cannot be removed via this method.
     await expect(store.removeModelChain(app.id, "default")).rejects.toThrow(InvalidModelChainNameError);
   });
 
@@ -1664,15 +1653,15 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
-    // Blank clears the reference row (the seat uses the default chain).
+    // note: Blank clears the reference row (the seat uses the default chain).
     await store.setModelChainSeat(app.id, "code-reviewer", "");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
     expect(await store.getModelChainSeats(app.id)).toEqual({});
-    // The reserved "default" name also clears (never stored as a reference).
+    // invariant: The reserved "default" name also clears (never stored as a reference).
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     await store.setModelChainSeat(app.id, "code-reviewer", "default");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
-    // Clearing a seat that never had a reference resolves without error.
+    // invariant: Clearing a seat that never had a reference resolves without error.
     await expect(store.setModelChainSeat(app.id, "code-reviewer", "")).resolves.toBeUndefined();
   });
 
@@ -1695,7 +1684,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       await expect(store.clearModelChainSeat(app.id, role)).rejects.toThrow(UnknownModelRoleError);
       await expect(store.setModelChainSeats(app.id, { [role]: "fast" })).rejects.toThrow(UnknownModelRoleError);
     }
-    // Even a VALID role is rejected when it rides an invalid map entry.
+    // note: Even a VALID role is rejected when it rides an invalid map entry.
     await expect(
       store.setModelChainSeats(app.id, { "code-reviewer": "fast", reviewer: "fast" }),
     ).rejects.toThrow(UnknownModelRoleError);
@@ -1710,7 +1699,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     await store.setModelChainSeats(app.id, {
       "mstar-review-seat": "fast",
-      "code-reviewer": "", // cleared by the same save (absent = default)
+      "code-reviewer": "", // note: cleared by the same save (absent = default)
       "fullstack-dev": "fast",
       "frontend-dev": "",
     });
@@ -1718,7 +1707,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       "fullstack-dev": "fast",
       "mstar-review-seat": "fast",
     });
-    // Validation is whole-map-first: the valid entry in this map must NOT
+    // invariant: Validation is whole-map-first: the valid entry in this map must NOT
     // reach the DB — zero rows touched by the failed call.
     await expect(
       store.setModelChainSeats(app.id, { "frontend-dev": "fast", "code-reviewer": "no-such-chain" }),
@@ -1731,7 +1720,7 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const store = configStore(db);
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
-    // A padded known name stores the TRIMMED reference (the consumer read
+    // note: A padded known name stores the TRIMMED reference (the consumer read
     // must resolve it — no `references missing chain "fast "` failure).
     await store.setModelChainSeat(app.id, "code-reviewer", "  fast  ");
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
@@ -1740,10 +1729,10 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
       .query("SELECT chain_name FROM bot_model_chain_seats WHERE bot_id = ? AND role = ?")
       .get(app.id, "code-reviewer") as { chain_name: string };
     expect(chainName.chain_name).toBe("fast");
-    // A padded reference resolves instead of throwing (the fail-closed
+    // note: A padded reference resolves instead of throwing (the fail-closed
     // consumer read is the exact failure F-001 prevented).
     await expect(store.getModelOverridesForConsumer(app.id)).resolves.toEqual({ "code-reviewer": "openai/gpt-5" });
-    // Padded "default" / whitespace-only clear the reference row.
+    // invariant: Padded "default" / whitespace-only clear the reference row.
     await store.setModelChainSeat(app.id, "code-reviewer", "  default  ");
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
@@ -1757,8 +1746,8 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     const store = configStore(db);
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5");
     await store.setModelChainSeats(app.id, {
-      "code-reviewer": "fast ", // trailing space — must store "fast", not "fast "
-      "frontend-dev": "  default  ", // padded reserved name — clears
+      "code-reviewer": "fast ", // invariant: trailing space — must store "fast", not "fast "
+      "frontend-dev": "  default  ", // note: padded reserved name — clears
     });
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
@@ -1775,12 +1764,12 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await expect(
       configStore(failing).setModelChainSeats(app.id, {
         "mstar-review-seat": "fast",
-        "code-reviewer": "", // blank = clear — must not land either
+        "code-reviewer": "", // invariant: blank = clear — must not land either
       }),
     ).rejects.toThrow(/simulated D1 batch failure/);
-    // The whole map rides ONE batch — there is no sequential-apply path.
+    // note: The whole map rides ONE batch — there is no sequential-apply path.
     expect(failing.batchCalls()).toBe(1);
-    // Atomic: the pre-existing row is untouched — nothing half-applied.
+    // invariant: Atomic: the pre-existing row is untouched — nothing half-applied.
     expect(await configStore(db).getModelChainSeats(app.id)).toEqual({ "code-reviewer": "fast" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
   });
@@ -1792,14 +1781,14 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
     await store.setModelChain(app.id, "ark/deepseek-v4-flash");
     await store.upsertModelChain(app.id, "fast", "openai/gpt-5:thinking, anthropic/claude-x");
     await store.upsertModelChain(app.id, "cheap", "groq/llama-3-3");
-    // code-reviewer → named chain (in the map); mstar-review-seat → default
+    // note: code-reviewer → named chain (in the map); mstar-review-seat → default
     // chain (omitted); fullstack-dev → no reference row (omitted).
     await store.setModelChainSeat(app.id, "code-reviewer", "fast");
     await store.setModelChainSeat(app.id, "mstar-review-seat", "default");
     expect(await store.getModelOverridesForConsumer(app.id)).toEqual({
       "code-reviewer": "openai/gpt-5:thinking, anthropic/claude-x",
     });
-    // A seat referencing a missing chain (direct-DB tamper) fails loud.
+    // note: A seat referencing a missing chain (direct-DB tamper) fails loud.
     rawRun(
       db,
       `INSERT INTO bot_model_chain_seats (bot_id, role, chain_name) VALUES (?, 'frontend-dev', 'ghost')`,
@@ -1831,18 +1820,18 @@ describe("app-config store (createAppConfigStore) — model chains + seats", () 
 
   test("unknown bot_id → FK violation on insert (fail-loud, same as every write here)", async () => {
     const db = createAppConfigD1();
-    // upsertModelChain's name gate passes, so the INSERT hits the FK.
+    // why: upsertModelChain's name gate passes, so the INSERT hits the FK.
     await expect(
       configStore(db).upsertModelChain("no-such-app", "fast", "openai/gpt-5"),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });
 
-// --- store: custom providers ---
+// note: --- store: custom providers ---
 
 describe("app-config store (createAppConfigStore) — custom providers", () => {
   const CUSTOM: AppCustomProvider = {
-    // NOT a built-in: "ark" is a PROVIDER_IDS member from the
+    // note: NOT a built-in: "ark" is a PROVIDER_IDS member from the
     // AL-24-5 ark entry, so a custom declaration must use a free id.
     provider_id: "my-custom",
     base_url: "https://ark.cn-beijing.volces.com/api/v3",
@@ -1854,15 +1843,15 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("upsert stores the declaration and its key row (secretbox envelope at rest); the list face carries NO key material", async () => {
     const { db, app } = await seededWorld();
     await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    // The declaration keeps only what the runner needs — no key material.
+    // invariant: The declaration keeps only what the runner needs — no key material.
     const decl = db.raw
       .query("SELECT * FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?")
       .get(app.id, CUSTOM.provider_id) as { model_ids: string; created_at: string; updated_at: string };
-    // model_ids is stored as a TEXT JSON array (AL-23-1 DDL).
+    // note: model_ids is stored as a TEXT JSON array (AL-23-1 DDL).
     expect(JSON.parse(decl.model_ids)).toEqual([...CUSTOM.model_ids]);
     expect(decl.created_at).toMatch(SQLITE_TS_RE);
     expect(decl.updated_at).toBe(decl.created_at);
-    // At rest the key is a secretbox envelope in the per-key pool table.
+    // note: At rest the key is a secretbox envelope in the per-key pool table.
     const keyRow = db.raw
       .query("SELECT provider, key_id, key_enc, verified_at, verified_status FROM bot_custom_provider_keys WHERE bot_id = ?")
       .get(app.id) as {
@@ -1876,12 +1865,12 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(keyRow.key_id).toBe(await keyIdOf(PLAIN_CUSTOM_KEY));
     expect(keyRow.key_enc).toMatch(/^v1\.primary\./);
     expect(keyRow.key_enc).not.toContain(PLAIN_CUSTOM_KEY);
-    // The declaration flow stored the key after a probe that proved the
+    // invariant: The declaration flow stored the key after a probe that proved the
     // ENDPOINT answered — `ark.cn-beijing.volces.com` is not a known
     // key-rejecting host, so the row carries the weaker state.
     expect(keyRow.verified_status).toBe("reachable");
     expect(keyRow.verified_at).toMatch(SQLITE_TS_RE);
-    // The list faces are decrypt-free: declaration + masked tail, never keys.
+    // invariant: The list faces are decrypt-free: declaration + masked tail, never keys.
     await expect(configStore(db).listCustomProviders(app.id)).resolves.toEqual([{ ...CUSTOM, has_keys: true }]);
     const keys = await configStore(db).listCustomProviderKeys(app.id);
     expect(keys.map((key) => ({ provider: key.provider, last4: key.last4, verifiedStatus: key.verifiedStatus }))).toEqual([
@@ -1897,11 +1886,11 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       .query("SELECT key_id, key_enc FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?")
       .get(app.id, CUSTOM.provider_id) as { key_id: string; key_enc: string };
     const box = createSecretbox(TEST_KEY);
-    // The full-row rowKey (the 0006 L1 precedent, extended per key) decrypts.
+    // note: The full-row rowKey (the 0006 L1 precedent, extended per key) decrypts.
     await expect(
       box.decryptSecret(row.key_enc, `app_custom_provider_keys.key_enc:${app.id}:${CUSTOM.provider_id}:${row.key_id}`),
     ).resolves.toBe(PLAIN_CUSTOM_KEY);
-    // The envelope is bound to all THREE components — any single one off fails.
+    // note: The envelope is bound to all THREE components — any single one off fails.
     await expect(
       box.decryptSecret(row.key_enc, `app_custom_provider_keys.key_enc:${app.id}:other:${row.key_id}`),
     ).rejects.toThrow();
@@ -1927,7 +1916,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(JSON.parse(decl.model_ids)).toEqual(["deepseek-v4-flash"]);
     expect(decl.updated_at).toMatch(SQLITE_TS_RE);
     expect(decl.updated_at > "2026-01-01 00:00:00").toBe(true);
-    // The SAME key re-submitted updates its own slot (no second row)…
+    // note: The SAME key re-submitted updates its own slot (no second row)…
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(1);
     const keyRow = db.raw.query("SELECT key_enc FROM bot_custom_provider_keys").get() as { key_enc: string };
     await expect(
@@ -1936,7 +1925,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         `app_custom_provider_keys.key_enc:${app.id}:${CUSTOM.provider_id}:${await keyIdOf(PLAIN_CUSTOM_KEY)}`,
       ),
     ).resolves.toBe(PLAIN_CUSTOM_KEY);
-    // …while a DIFFERENT key becomes a second slot of the same declaration.
+    // note: …while a DIFFERENT key becomes a second slot of the same declaration.
     await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-v4-flash"] }, sk("custom-ark-7777"));
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
@@ -1951,7 +1940,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const selectDeclaration = `SELECT base_url, api, model_ids, created_at, updated_at
        FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?`;
     const before = db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id);
-    // Both endpoint columns are locked while the pool carries credentials the
+    // safety: Both endpoint columns are locked while the pool carries credentials the
     // declaration flow verified for the CURRENT endpoint.
     for (const moved of [
       { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" },
@@ -1961,13 +1950,13 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         ProviderEndpointLockedError,
       );
     }
-    // Byte-identical declaration, untouched pool: the refusal wrote nothing.
+    // invariant: Byte-identical declaration, untouched pool: the refusal wrote nothing.
     expect(db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id)).toEqual(before);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
-    // model_ids still move while the endpoint does not (declaration config,
+    // note: model_ids still move while the endpoint does not (declaration config,
     // never a credential binding).
     await store.upsertCustomProvider(app.id, { ...CUSTOM, model_ids: ["deepseek-r1"] }, PLAIN_CUSTOM_KEY);
-    // An EMPTIED pool frees the endpoint: remove the credentials, re-declare.
+    // safety: An EMPTIED pool frees the endpoint: remove the credentials, re-declare.
     await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(PLAIN_CUSTOM_KEY));
     await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(sk("custom-ark-7777")));
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
@@ -1983,7 +1972,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     const MOVED: AppCustomProvider = { ...CUSTOM, base_url: "https://elsewhere.example.com/v1" };
     const MOVED_KEY = sk("custom-moved-6161");
-    // Controlled interleaving: a concurrent remove + re-declaration commits at
+    // note: Controlled interleaving: a concurrent remove + re-declaration commits at
     // the moment the OLD two-statement read had already taken the declaration
     // and not yet the pool (the first statement that reads the pool table).
     const racing = configStore(
@@ -1992,7 +1981,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         await configStore(db).upsertCustomProvider(app.id, MOVED, MOVED_KEY);
       }),
     );
-    // Endpoint and credentials are ONE view: the snapshot is either {A, keyA} or
+    // safety: Endpoint and credentials are ONE view: the snapshot is either {A, keyA} or
     // {B, keyB}, never {A, keyB}.
     await expect(racing.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...MOVED, api_keys: [MOVED_KEY] },
@@ -2002,7 +1991,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("custom-provider keys resolve through the pool table: ordered, maskable, deletable, legacy rows promoted", async () => {
     const db = createAppConfigD1();
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
-    // The declaration is written by the store; its slot is then replaced with
+    // note: The declaration is written by the store; its slot is then replaced with
     // the CARRIED form a live deployment holds after 0024 (sentinel key id,
     // the old declaration AAD, backdated stamps).
     await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
@@ -2021,7 +2010,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       legacyEnc,
     );
     const store = configStore(db);
-    // The legacy row still decrypts through the consumer face and is promoted
+    // note: The legacy row still decrypts through the consumer face and is promoted
     // to the three-segment AAD under its derived id.
     expect(await store.getCustomProvidersForConsumer(app.id)).toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
@@ -2037,14 +2026,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         `app_custom_provider_keys.key_enc:${app.id}:${CUSTOM.provider_id}:${legacyRow.key_id}`,
       ),
     ).resolves.toBe(PLAIN_CUSTOM_KEY);
-    // A second key joins the pool; order is (created_at, key_id) — the legacy
+    // note: A second key joins the pool; order is (created_at, key_id) — the legacy
     // row was backdated, so it stays first.
     const second = sk("custom-ark-7777");
     await store.addCustomProviderKey(app.id, CUSTOM.provider_id, second, CUSTOM);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(2);
     const keys = await store.listCustomProviderKeys(app.id, CUSTOM.provider_id);
     expect(keys.map((key) => key.keyId)).toEqual([await keyIdOf(PLAIN_CUSTOM_KEY), await keyIdOf(second)]);
-    // The append persists its verify outcome instead of leaving the row
+    // note: The append persists its verify outcome instead of leaving the row
     // unverified: this declaration's base derives `/api/v3/v1/models`, which is
     // not an allow-listed key-rejecting URL, so the new row is 'reachable'.
     expect(keys.map((key) => key.verifiedStatus)).toEqual(["ok", "reachable"]);
@@ -2052,11 +2041,11 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(await store.getCustomProvidersForConsumer(app.id)).toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY, second] },
     ]);
-    // One delete removes exactly ONE slot.
+    // invariant: One delete removes exactly ONE slot.
     expect(await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, await keyIdOf(second))).toBe(true);
     expect((await store.getCustomProvidersForConsumer(app.id))[0]!.api_keys).toEqual([PLAIN_CUSTOM_KEY]);
     expect(await store.deleteCustomProviderKey(app.id, CUSTOM.provider_id, "0".repeat(16))).toBe(false);
-    // An undeclared provider id is a caller bug, never a silent slot.
+    // invariant: An undeclared provider id is a caller bug, never a silent slot.
     await expect(store.addCustomProviderKey(app.id, "not-declared", second, CUSTOM)).rejects.toThrow(
       InvalidCustomProviderError,
     );
@@ -2071,7 +2060,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await expect(store.removeCustomProvider(app.id, "nope")).resolves.toBe(false);
     await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(true);
     await expect(store.listCustomProviders(app.id)).resolves.toEqual([]);
-    // The pool goes with the declaration — a leftover key row would be
+    // why: The pool goes with the declaration — a leftover key row would be
     // unreachable data (and would resurface on a re-declaration).
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
     await expect(store.removeCustomProvider(app.id, CUSTOM.provider_id)).resolves.toBe(false);
@@ -2085,7 +2074,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       await store.addCustomProviderKey(app.id, CUSTOM.provider_id, sk(`custom-pool-key-${i}-${i}${i}${i}`), CUSTOM);
     }
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
-    // Backdate the declaration so ANY write to it is visible: datetime('now')
+    // note: Backdate the declaration so ANY write to it is visible: datetime('now')
     // has one-second resolution, so a same-second rewrite could hide a commit.
     rawRun(
       db,
@@ -2100,14 +2089,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await expect(
       store.upsertCustomProvider(
         app.id,
-        // The ENDPOINT stays put on purpose: an endpoint change with a populated
+        // invariant: The ENDPOINT stays put on purpose: an endpoint change with a populated
         // pool is refused earlier (A1, ProviderEndpointLockedError) — this case
         // pins the POOL-CAP refusal and its atomicity.
         { ...CUSTOM, model_ids: ["changed-model"] },
         ninth,
       ),
     ).rejects.toThrow(ProviderKeyLimitError);
-    // Byte-identical declaration: the refusal committed neither write.
+    // note: Byte-identical declaration: the refusal committed neither write.
     expect(db.raw.query(selectDeclaration).get(app.id, CUSTOM.provider_id)).toEqual(before);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_KEYS_PER_PROVIDER);
     const consumer = await store.getCustomProvidersForConsumer(app.id);
@@ -2118,7 +2107,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("a crypto failure at declaration time leaves NO declaration behind", async () => {
     const { db, app } = await seededWorld();
-    // No master key bound: the key can never be encrypted, so the declaration
+    // why: No master key bound: the key can never be encrypted, so the declaration
     // must not be committed either (it was, when the declaration wrote first).
     const store = createAppConfigStore(db, undefined);
     await expect(store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY)).rejects.toThrow(/secretbox/);
@@ -2130,7 +2119,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    // Controlled interleaving: the removal (the same two DELETEs
+    // note: Controlled interleaving: the removal (the same two DELETEs
     // removeCustomProvider runs as ONE batch) lands AFTER the caller's
     // declaration read and BEFORE its key write.
     const race = () => {
@@ -2147,7 +2136,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     ).rejects.toThrow(InvalidCustomProviderError);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
-    // Re-declaring the SAME id must not revive the refused credential.
+    // safety: Re-declaring the SAME id must not revive the refused credential.
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
     await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
@@ -2174,7 +2163,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("a lost last-declaration-slot race leaves the losing save's key uncommitted (same-id concurrent create)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    // Seven declarations, so the App sits ONE slot below the cap.
+    // why: Seven declarations, so the App sits ONE slot below the cap.
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
       await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
@@ -2182,7 +2171,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const LOSING = sk("custom-losing-8282");
     const WINNING = sk("custom-winning-9292");
     const target = "prov-last";
-    // The concurrent save wins the LAST slot under the SAME id "prov-last",
+    // note: The concurrent save wins the LAST slot under the SAME id "prov-last",
     // after this caller's absence/count reads passed and before its batch.
     const racing = configStore(
       createLastSlotRaceD1(db, async () => {
@@ -2200,7 +2189,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
         LOSING,
       ),
     ).rejects.toThrow("custom provider cap (8) reached");
-    // The winner's declaration is intact — the loser's refused write committed
+    // note: The winner's declaration is intact — the loser's refused write committed
     // NEITHER a declaration change NOR a credential.
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const decl = db.raw
@@ -2208,14 +2197,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       .get(app.id, target) as { base_url: string; model_ids: string };
     expect(decl.base_url).toBe("https://winner.example.com/v1");
     expect(JSON.parse(decl.model_ids)).toEqual(["winner-model"]);
-    // Exactly the winner's key — no losing row, hence no verification or
+    // invariant: Exactly the winner's key — no losing row, hence no verification or
     // ciphertext update for the loser either. (One key per declaration: the
     // seven earlier ones plus the winner's.)
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const consumer = await store.getCustomProvidersForConsumer(app.id);
     expect(consumer.find((row) => row.provider_id === target)!.api_keys).toEqual([WINNING]);
 
-    // Same-key variant: the re-submitted identity already sits in the pool, so
+    // note: Same-key variant: the re-submitted identity already sits in the pool, so
     // pool admission's "key already there" branch passes — the growth gate is
     // the ONLY thing refusing it. The winner's ciphertext and verification
     // bookkeeping must survive byte-identical (a conflict-update would have
@@ -2233,7 +2222,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
           { ...CUSTOM, provider_id: target, base_url: "https://winner.example.com/v1", model_ids: ["winner-model"] },
           WINNING,
         );
-        // Snapshot the winner's committed row the instant it lands: the
+        // note: Snapshot the winner's committed row the instant it lands: the
         // loser's refused re-submit must leave these columns byte-identical.
         winnerRow = db2.raw
           .query("SELECT key_enc, verified_at, verified_status FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?")
@@ -2255,14 +2244,14 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   test("a raced same-id create that lost the last slot at the SAME endpoint still admits its key and declaration update", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    // Seven declarations → the App sits ONE slot below the cap.
+    // note: Seven declarations → the App sits ONE slot below the cap.
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
       await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     const WINNING = sk("custom-winner-same-endpoint-7171");
     const LOSING = sk("custom-loser-same-endpoint-6161");
     const target = "prov-last";
-    // The concurrent save fills the LAST slot under the SAME id AND the SAME
+    // note: The concurrent save fills the LAST slot under the SAME id AND the SAME
     // endpoint after this caller's absence/count reads have passed: the caller
     // still carries `newDeclaration: true`, so its belief is stale — the row it
     // wants already exists, and updating it raises no declaration count.
@@ -2278,20 +2267,20 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     await expect(
       racing.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: target, model_ids: ["loser-model"] }, LOSING),
     ).resolves.toBeUndefined();
-    // The declaration was UPDATEed in place (no ninth row) …
+    // note: The declaration was UPDATEed in place (no ninth row) …
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const decl = db.raw
       .query("SELECT base_url, model_ids FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?")
       .get(app.id, target) as { base_url: string; model_ids: string };
     expect(decl.base_url).toBe(CUSTOM.base_url);
     expect(JSON.parse(decl.model_ids)).toEqual(["loser-model"]);
-    // … and both credentials live in the one pool: 7 seeded + winner + loser.
+    // safety: … and both credentials live in the one pool: 7 seeded + winner + loser.
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT + 1);
     const consumer = await store.getCustomProvidersForConsumer(app.id);
     expect([...consumer.find((row) => row.provider_id === target)!.api_keys].sort()).toEqual(
       [WINNING, LOSING].sort(),
     );
-    // A GENUINELY new declaration at the cap is still refused: the gate admits
+    // note: A GENUINELY new declaration at the cap is still refused: the gate admits
     // exactly the writes that add no declaration row.
     await expect(
       store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-over" }, PLAIN_CUSTOM_KEY),
@@ -2303,7 +2292,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const WINNING = sk("custom-winning-8282");
     const LOSING = sk("custom-losing-9292");
-    // The concurrent save commits between this caller's absence read and its
+    // note: The concurrent save commits between this caller's absence read and its
     // batch: the caller's plain INSERT used to hit the (app_id, provider_id)
     // primary-key conflict and roll the whole batch back as a generic 500.
     const racing = configStore(
@@ -2312,7 +2301,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       }),
     );
     await expect(racing.upsertCustomProvider(app.id, CUSTOM, LOSING)).resolves.toBeUndefined();
-    // One declaration, BOTH keys: the loser's credential joins the declaration
+    // safety: One declaration, BOTH keys: the loser's credential joins the declaration
     // that already carries its endpoint — no half state, no dropped key.
     expect(rawCount(db, "bot_custom_providers")).toBe(1);
     const consumer = await configStore(db).getCustomProvidersForConsumer(app.id);
@@ -2320,7 +2309,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(consumer[0]!.base_url).toBe(CUSTOM.base_url);
     expect([...consumer[0]!.api_keys].sort()).toEqual([WINNING, LOSING].sort());
 
-    // Same-race variant at ANOTHER endpoint: the loser's credential was
+    // safety: Same-race variant at ANOTHER endpoint: the loser's credential was
     // verified for an endpoint the surviving declaration does not carry, so
     // the credit is refused loudly — and still commits nothing.
     const { db: db2, app: app2 } = await seededWorld();
@@ -2359,7 +2348,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const app = await seedApp(db, { slug: "a", createdBy: "mallory" });
     const legacy = sk("custom-legacy-delete-5151");
     await configStore(db).upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    // The carried slot a live deployment holds after 0024: sentinel key id and
+    // invariant: The carried slot a live deployment holds after 0024: sentinel key id and
     // the old declaration AAD.
     const legacyEnc = await createSecretbox(TEST_KEY).encryptSecret(
       legacy,
@@ -2385,36 +2374,36 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
 
   test("store backstop: an invalid declaration throws InvalidCustomProviderError before any write", async () => {
     const { db, app } = await seededWorld();
-    // Record<string, unknown> so the enum-violating api literal type-checks;
+    // why: Record<string, unknown> so the enum-violating api literal type-checks;
     // the spread is cast to AppCustomProvider at the call site.
     const bad: Array<Record<string, unknown>> = [
-      { provider_id: "Bad_ID" }, // uppercase — outside [a-z0-9][a-z0-9-]{0,63}
-      { provider_id: "-lead" }, // leading hyphen
-      { provider_id: "x".repeat(65) }, // over 64 chars
-      { provider_id: "anthropic" }, // collides with a PROVIDER_IDS built-in (copy says NON-built-in)
-      { base_url: "http://insecure.example.com" }, // http, not https
+      { provider_id: "Bad_ID" }, // note: uppercase — outside [a-z0-9][a-z0-9-]{0,63}
+      { provider_id: "-lead" }, // note: leading hyphen
+      { provider_id: "x".repeat(65) }, // note: over 64 chars
+      { provider_id: "anthropic" }, // note: collides with a PROVIDER_IDS built-in (copy says NON-built-in)
+      { base_url: "http://insecure.example.com" }, // note: http, not https
       { base_url: "https://" }, // https prefix but NO host (PR #10 review)
-      { base_url: `https://example.com/${"x".repeat(2049)}` }, // over 2048 chars
-      { api: "google-vertex" }, // outside the AL-23-1 three-form enum
-      { model_ids: [] }, // empty
-      { model_ids: ["ok", " "] }, // blank model id entry
-      { model_ids: ["ok", "   "] }, // whitespace-only model id entry
-      { model_ids: ["ok", "x".repeat(129)] }, // over-length model id
-      { model_ids: Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, i) => `m${i}`) }, // over the store bound
+      { base_url: `https://example.com/${"x".repeat(2049)}` }, // note: over 2048 chars
+      { api: "google-vertex" }, // note: outside the AL-23-1 three-form enum
+      { model_ids: [] }, // note: empty
+      { model_ids: ["ok", " "] }, // note: blank model id entry
+      { model_ids: ["ok", "   "] }, // invariant: whitespace-only model id entry
+      { model_ids: ["ok", "x".repeat(129)] }, // note: over-length model id
+      { model_ids: Array.from({ length: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1 }, (_, i) => `m${i}`) }, // note: over the store bound
     ];
     for (const patch of bad) {
       await expect(
         configStore(db).upsertCustomProvider(app.id, { ...CUSTOM, ...patch } as AppCustomProvider, PLAIN_CUSTOM_KEY),
       ).rejects.toThrow(InvalidCustomProviderError);
     }
-    // The key is required at declaration and bounded by the existing 4096 cap.
+    // note: The key is required at declaration and bounded by the existing 4096 cap.
     await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "")).rejects.toThrow(InvalidCustomProviderError);
     await expect(configStore(db).upsertCustomProvider(app.id, CUSTOM, "k".repeat(4097))).rejects.toThrow(ProviderKeyTooLongError);
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(0);
   });
 
-  // QC wave-1 (seat3 W-1) rewording: the runner's base-wins merge
+  // note: QC wave-1 (seat3 W-1) rewording: the runner's base-wins merge
   // skips a custom id colliding with a capability host of the App's SELECTED
   // sandbox image (omp declares ark) while the consumer STILL injects
   // its key — the declaration is silently dead on every review, so the
@@ -2431,7 +2420,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     expect(rawCount(db, "bot_custom_providers")).toBe(0);
   });
 
-  // QC wave-1 (seat3 W-2): every other AL-23-1/AL-23-2 input dimension is
+  // note: QC wave-1 (seat3 W-2): every other AL-23-1/AL-23-2 input dimension is
   // bounded; the DECLARATION COUNT per App is the missing one (exec env +
   // runner input grow without bound). The cap is growth-only: updating an
   // existing declaration never counts against it.
@@ -2442,17 +2431,17 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
       await store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: `prov-${i}` }, PLAIN_CUSTOM_KEY);
     }
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
-    // Growth past the cap is refused with zero writes.
+    // invariant: Growth past the cap is refused with zero writes.
     await expect(
       store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-new" }, PLAIN_CUSTOM_KEY),
     ).rejects.toThrow("custom provider cap (8) reached");
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
-    // Re-declaring an EXISTING id is an update, not growth — allowed.
+    // note: Re-declaring an EXISTING id is an update, not growth — allowed.
     await expect(
       store.upsertCustomProvider(app.id, { ...CUSTOM, provider_id: "prov-1", model_ids: ["fresh-model"] }, PLAIN_CUSTOM_KEY),
     ).resolves.toBeUndefined();
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
-    // The cap is per-App: a different App starts from zero.
+    // note: The cap is per-App: a different App starts from zero.
     const other = await seededWorld();
     await expect(
       configStore(other.db).upsertCustomProvider(other.app.id, { ...CUSTOM, provider_id: "prov-1" }, PLAIN_CUSTOM_KEY),
@@ -2471,7 +2460,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertCustomProvider(app.id, CUSTOM, PLAIN_CUSTOM_KEY);
-    // Upsert → consumer face → keys match (the T4/T5 consume contract —
+    // note: Upsert → consumer face → keys match (the T4/T5 consume contract —
     // the round-trip goes through the store, not ad-hoc secretbox).
     await expect(store.getCustomProvidersForConsumer(app.id)).resolves.toEqual([
       { ...CUSTOM, api_keys: [PLAIN_CUSTOM_KEY] },
@@ -2479,7 +2468,7 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
     const row = db.raw
       .query("SELECT key_enc FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ?")
       .get(app.id, CUSTOM.provider_id) as { key_enc: string };
-    // Tamper: replace the whole envelope. A last-char flip can land in the
+    // note: Tamper: replace the whole envelope. A last-char flip can land in the
     // base64 padding bits and decode to the same bytes, so the GCM tag would
     // still verify (~1/16 flake); same reasoning as
     // tests/worker/dashboard.test.ts.
@@ -2502,10 +2491,10 @@ describe("app-config store (createAppConfigStore) — custom providers", () => {
   });
 });
 
-// --- duplication locks (Q2: dashboard may not import pipeline/review) ---
+// note: --- duplication locks (Q2: dashboard may not import pipeline/review) ---
 
 describe("duplication locks", () => {
-  // PROVIDER_IDS — a direct re-export of the generated
+  // note: PROVIDER_IDS — a direct re-export of the generated
   // contract's builtin sequence (src/contracts/provider-catalog.generated.ts;
   // dashboard → pipeline imports stay forbidden, so the mirror binds the
   // CONTRACT, not the pipeline face). The locks below fail on any drift
@@ -2514,25 +2503,25 @@ describe("duplication locks", () => {
   test("PROVIDER_IDS mirrors the pipeline catalog's builtin key sequence exactly", () => {
     expect([...PROVIDER_IDS]).toEqual(Object.keys(PROVIDERS));
     expect([...PROVIDER_IDS]).toEqual([...PROVIDER_IDS_BUILTIN]);
-    // 19 ids: the 18 built-in omp providers + `ark` (the
+    // note: 19 ids: the 18 built-in omp providers + `ark` (the
     // AL-24-5 entry — the in-image ark base provider's keys ride the
     // per-App BYOK pool under this id in the credential payload).
     expect(PROVIDER_IDS).toHaveLength(19);
   });
 
-  // PROVIDER_META (spec §5; breadth rewire) — the dashboard's
+  // note: PROVIDER_META (spec §5; breadth rewire) — the dashboard's
   // catalog mirror: now the FULL generated catalog re-export (builtin AND
   // template tier, breadth included) instead of a hand-maintained copy. The
   // lock guards the re-export: PROVIDER_META must equal the generated
   // PROVIDER_CATALOG (structurally — the mirror type ignores `envName`).
   test("PROVIDER_META mirrors the pipeline catalog's display metadata exactly", () => {
     expect(PROVIDER_META).toEqual(PROVIDER_CATALOG);
-    // The mirror carries the builtin tier (the 19) plus the full template
+    // note: The mirror carries the builtin tier (the 19) plus the full template
     // tier (workers-ai + the snapshot breadth + the omp union) — the provider
     // list UI and the materialization route consume it.
     expect(Object.keys(PROVIDER_META).filter((id) => PROVIDER_META[id]!.tier === "builtin")).toHaveLength(19);
     expect(PROVIDER_META["workers-ai"]!.tier).toBe("template");
-    // A union row is reachable through the mirror the picker renders from. A
+    // note: A union row is reachable through the mirror the picker renders from. A
     // mixed-protocol provider is ONE row whose `protocols` are its options —
     // the per-protocol ids are not rows of the mirror.
     for (const id of ["commandcode", "typesafe"]) {
@@ -2562,32 +2551,32 @@ describe("duplication locks", () => {
   });
 
   test("MODEL_ROLE_IDS mirrors the review-side seat vocabulary exactly (parity lock)", () => {
-    // quick/default seat: the frontmatter `name:` of the agent definition the
+    // note: quick/default seat: the frontmatter `name:` of the agent definition the
     // runtime installs for Bun fan-out (packages/runner/src/seat-agent.md — the real
     // seat-name SSOT on the review side).
     const seatAgent = readFileSync(join(import.meta.dir, "../../packages/runner/src/seat-agent.md"), "utf8");
     const quickSeat = /^name:\s*(\S+)\s*$/m.exec(seatAgent)?.[1];
     expect(quickSeat).toBe("mstar-review-seat");
-    // Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp for
+    // note: Deep seats: DEEP_SEAT_ROLES is exported from runtime-omp for
     // this parity lock ( the dashboard's own
     // import boundary — Q2 — stays: src/dashboard still has zero review
     // imports, the mirror constant remains its SSOT).
     const deepSeats: readonly string[] = DEEP_SEAT_ROLES;
     expect(deepSeats).toEqual(["code-reviewer", "fullstack-dev", "frontend-dev"]);
-    // The mirror is exactly the quick seat followed by the deep seats.
+    // invariant: The mirror is exactly the quick seat followed by the deep seats.
     expect([...MODEL_ROLE_IDS]).toEqual([quickSeat!, ...(deepSeats ?? [])]);
-    expect(MODEL_ROLE_IDS).toHaveLength(4); // spec § B6 语义锁: exactly the 4 audit seats
+    expect(MODEL_ROLE_IDS).toHaveLength(4); // invariant: spec § B6 语义锁: exactly the 4 audit seats
   });
 
   test("the registry carries build inputs only — no provider surface to collide with", () => {
-    // The image declares no provider and no model, so the custom-id collision
+    // why: The image declares no provider and no model, so the custom-id collision
     // vocabulary is the built-in id list alone.
     expect(enabledSandboxImages().map((image) => image.id)).toEqual(["omp"]);
     expect("hosts" in getSandboxImage("omp")!).toBe(false);
   });
 });
 
-// --- routes ---
+// note: --- routes ---
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
   test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
@@ -2620,7 +2609,7 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
     };
     expect(body.can_manage).toBe(true);
-    // Both faces carry the read-only selection; the manage face adds the
+    // invariant: Both faces carry the read-only selection; the manage face adds the
     // selector choices from the registry's enabled entries only.
     expect(body.app.sandbox_image_id).toBe("omp");
     expect(body.sandbox_images).toEqual([{ id: "omp", enabled: true }]);
@@ -2674,8 +2663,8 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
     const row = db.raw
       .query("SELECT sandbox_image_id, updated_at FROM review_bots WHERE id = ?")
       .get(app.id) as { sandbox_image_id: string; updated_at: string };
-    expect(row.sandbox_image_id).toBe("omp"); // nothing stored
-    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // no operator-mutation churn
+    expect(row.sandbox_image_id).toBe("omp"); // invariant: nothing stored
+    expect(row.updated_at).toBe("2026-01-01 00:00:00"); // note: no operator-mutation churn
   });
 
   test("non-manager (member, not creator) gets 403 and nothing is stored", async () => {
@@ -2690,11 +2679,11 @@ describe("sandbox image selection (payload + op=save-sandbox-image)", () => {
       .query("SELECT sandbox_image_id, updated_at FROM review_bots WHERE id = ?")
       .get(app.id) as { sandbox_image_id: string; updated_at: string };
     expect(row.sandbox_image_id).toBe("omp");
-    expect(row.updated_at).toBe(app.updated_at); // ada's refused save touched nothing
+    expect(row.updated_at).toBe(app.updated_at); // invariant: ada's refused save touched nothing
   });
 
   test("app.review_trigger_mode: manager face carries the column default 'every_push'; non-manager face has no such key", async () => {
-    // The seeded row never chose a mode, so the column default 'every_push'
+    // why: The seeded row never chose a mode, so the column default 'every_push'
     // is what the manager face must serve (spec review-trigger-policy §2).
     // The non-manager settings face is identity-set only — no trigger mode.
     const { db } = await seededWorld();
@@ -2729,12 +2718,12 @@ describe("API settings face — several repositories under one App (targets_many
     expect(res.status).toBe(200);
     const body = (await res.json()) as { targets_many?: boolean; target_id?: string };
     expect(body.targets_many).toBe(false);
-    // The single target the fixture App's creation seeded.
+    // note: The single target the fixture App's creation seeded.
     expect(body.target_id).toBeString();
   });
 
   test("a Blocked read with two repositories serves target_id null and targets_many, and parses", async () => {
-    // The Blocked manager face was the one arm that could not name its state:
+    // note: The Blocked manager face was the one arm that could not name its state:
     // omitting `target_id` there made the SPA's parse read it as the
     // zero-repository App. It now says `null` explicitly, so "several" and
     // "none" stay distinguishable on the wire.
@@ -2768,7 +2757,7 @@ describe("API settings face — several repositories under one App (targets_many
     expect(body.blocked_reason).toBe("bot_not_shared");
     expect(body.targets_many).toBe(true);
     expect(body.target_id).toBeNull();
-    // The SPA's parser accepts that shape and keeps the rule that a manager
+    // note: The SPA's parser accepts that shape and keeps the rule that a manager
     // read naming a target must carry its policy.
     const parsed = parseSettings({ ...body, can_manage: true, workspace_id: consumer });
     expect(parsed).not.toBeNull();
@@ -2790,7 +2779,7 @@ describe("review gate (payload and ops)", () => {
       app: { github_visibility: string | null };
     };
     expect(body.can_manage).toBe(true);
-    // The inherited default floor (no workspace default set): 60 points and
+    // note: The inherited default floor (no workspace default set): 60 points and
     // "ship it"; a never-probed App reads as 'unknown'.
     expect(body.check_gate).toEqual({ min_score: 60, pass_verdicts: ["ship it"] });
     expect(body.app.github_visibility).toBe("unknown");
@@ -2804,7 +2793,7 @@ describe("review gate (payload and ops)", () => {
 
   test("manager face: an unreadable stored gate serves check_gate null and keeps the rest of the payload", async () => {
     const { db, app } = await seededWorld();
-    // A JSON-valid but off-vocabulary verdict list passes the DDL CHECK and is
+    // note: A JSON-valid but off-vocabulary verdict list passes the DDL CHECK and is
     // unreadable configuration to the store. The settings face must not 500 on
     // it: the gate arrives as null, the SPA renders a read-only notice, and
     // every other field stays readable.
@@ -2853,7 +2842,7 @@ describe("POST /dashboard/default/apps/:appId/settings — add-key (op=add-key)"
       .query("SELECT key_enc FROM bot_provider_keys WHERE bot_id = ? AND provider = 'anthropic'")
       .get(app.id) as { key_enc: string };
     expect(row.key_enc).toMatch(/^v1\.primary\./);
-    // The plain-text response never echoes the key material.
+    // invariant: The plain-text response never echoes the key material.
     expect(body).not.toContain(PLAIN_ANTHROPIC_KEY);
   });
 
@@ -2986,7 +2975,7 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
     expect(clear.status).toBe(200);
     expect(await clear.text()).toContain("Cleared the model chain for mallorys-app");
     expect(rawCount(db, "bot_model_chains")).toBe(0);
-    // Then a real save replaces…
+    // note: Then a real save replaces…
     await postForm(SETTINGS, cookie, env, { op: "save-chain", model_chain: "first/model" });
     expect(await configStore(db).getModelChain(app.id)).toBe("first/model");
     await postForm(SETTINGS, cookie, env, { op: "save-chain", model_chain: "second/model" });
@@ -3029,7 +3018,7 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
     const { db, app } = await seededWorld();
     await configStore(db).setModelChain(app.id, "existing/model");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // note: parseBody({ all: true }) aggregates duplicate keys into an array — the
     // handler must reject, never treat the array as an empty clear.
     const res = await worker.fetch(
       new Request(`https://worker.local${SETTINGS}`, {
@@ -3041,7 +3030,7 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("submitted more than once");
-    // The stored chain is untouched — the duplicate was never a clear.
+    // invariant: The stored chain is untouched — the duplicate was never a clear.
     expect(await configStore(db).getModelChain(app.id)).toBe("existing/model");
   });
 
@@ -3065,10 +3054,9 @@ describe("POST /dashboard/default/apps/:appId/settings — save-chain (op=save-c
   });
 });
 
-// --- the Role models editor (settings op save-roles) ---
+// note: --- the Role models editor (settings op save-roles) ---
 
-/**
- * The exact body the Role models editor posts: the hidden op plus one
+/** note: The exact body the Role models editor posts: the hidden op plus one
  * role_<role> field per MODEL_ROLE_IDS seat (blank = the seat uses the
  * default chain), plus any `extra` fields for the tampering cases.
  * F-002 (QC wave): the route now ENFORCES the full map — a partial
@@ -3120,7 +3108,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
       makeEnv(db),
       roleForm({
         "mstar-review-seat": "seat-mstar-review-seat",
-        // code-reviewer / frontend-dev posted blank → cleared by the same save
+        // note: code-reviewer / frontend-dev posted blank → cleared by the same save
       }),
     );
     expect(res.status).toBe(200);
@@ -3141,10 +3129,10 @@ describe("Role models editor (save-roles op, chain references)", () => {
       roleForm({ "mstar-review-seat": "seat-mstar-review-seat", "code-reviewer": "" }),
     );
     expect(res.status).toBe(500);
-    // With the atomic batch the pre-existing copy is now TRUE — a failed
+    // note: With the atomic batch the pre-existing copy is now TRUE — a failed
     // save genuinely stored nothing.
     expect(await res.text()).toContain("The dashboard database rejected the change — nothing was stored.");
-    // Atomic: the store state is exactly as before the failed save.
+    // invariant: Atomic: the store state is exactly as before the failed save.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
   });
@@ -3184,7 +3172,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     expect(await res.text()).toContain(
       "mstar-review-seat is not a known model chain",
     );
-    // Zero partial writes: the valid entry never landed, the old row is intact.
+    // invariant: Zero partial writes: the valid entry never landed, the old row is intact.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
   });
 
@@ -3192,7 +3180,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
     await store.upsertModelChain(app.id, "seat-code-reviewer", "openai/gpt-5");
-    // The route trims BEFORE bind: the known-chain check and the store
+    // invariant: The route trims BEFORE bind: the known-chain check and the store
     // upsert see the same name, so "seat-code-reviewer " stores
     // "seat-code-reviewer" — the consumer read resolves instead of
     // throwing the fail-closed "references missing chain" error.
@@ -3230,7 +3218,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
     await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
-    // parseBody({ all: true }) aggregates duplicate keys into an array — the
+    // note: parseBody({ all: true }) aggregates duplicate keys into an array — the
     // handler must reject the duplicate explicitly, never silently last-wins.
     const res = await worker.fetch(
       new Request(`https://worker.local${SETTINGS}`, {
@@ -3242,7 +3230,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     );
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("submitted more than once");
-    // Zero writes: the pre-existing mapping survives untouched.
+    // invariant: Zero writes: the pre-existing mapping survives untouched.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
   });
@@ -3257,7 +3245,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     });
     expect(res.status).toBe(400);
     expect(await res.text()).toContain("No role chain references were submitted");
-    // The existing mapping survives — an empty map was never saved.
+    // invariant: The existing mapping survives — an empty map was never saved.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
   });
 
@@ -3266,7 +3254,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
     const store = configStore(db);
     await store.upsertModelChain(app.id, "seat-code-reviewer", "old/model");
     await store.setModelChainSeat(app.id, "code-reviewer", "seat-code-reviewer");
-    // Only ONE seat key is submitted — the other three are absent, and a
+    // invariant: Only ONE seat key is submitted — the other three are absent, and a
     // strict-subset save would silently keep their stale reference rows.
     const res = await postForm(
       SETTINGS,
@@ -3276,13 +3264,13 @@ describe("Role models editor (save-roles op, chain references)", () => {
     );
     expect(res.status).toBe(400);
     const body = await res.text();
-    // The error names exactly which seats are missing.
+    // invariant: The error names exactly which seats are missing.
     expect(body).toContain("mstar-review-seat");
     expect(body).toContain("fullstack-dev");
     expect(body).toContain("frontend-dev");
     expect(body).not.toContain("code-reviewer role field is missing");
     expect(body).toContain("role fields are missing");
-    // Zero writes: the pre-existing mapping is untouched.
+    // invariant: Zero writes: the pre-existing mapping is untouched.
     expect(await store.getModelChainSeats(app.id)).toEqual({ "code-reviewer": "seat-code-reviewer" });
     expect(rawCount(db, "bot_model_chain_seats")).toBe(1);
   });
@@ -3311,7 +3299,7 @@ describe("Role models editor (save-roles op, chain references)", () => {
 
 });
 
-// --- named chains (settings ops add-chain / remove-chain) ---
+// note: --- named chains (settings ops add-chain / remove-chain) ---
 
 describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-chain / remove-chain)", () => {
   test("owner adds a named chain: stored with is_default=0, plain-text 200", async () => {
@@ -3385,7 +3373,7 @@ describe("POST /dashboard/default/apps/:appId/settings — named chains (op=add-
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Removed the fast model chain for mallorys-app");
-    expect(rawCount(db, "bot_model_chains")).toBe(1); // only the default row
+    expect(rawCount(db, "bot_model_chains")).toBe(1); // invariant: only the default row
     expect(rawCount(db, "bot_model_chain_seats")).toBe(0);
   });
 
@@ -3469,7 +3457,7 @@ describe("POST /dashboard/default/apps/:appId/settings/key/delete (per-key delet
   });
 });
 
-// --- per-key usage probe ---
+// note: --- per-key usage probe ---
 
 describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage probe)", () => {
   const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
@@ -3480,8 +3468,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     fetchSpy = undefined;
   });
 
-  /**
-   * D1 double that REFUSES every provider-key statement: the no-probe refusal
+  /** note: D1 double that REFUSES every provider-key statement: the no-probe refusal
    * must land before any pool read, so a route that decrypted first would
    * answer `unexpected` (or 500) instead of `unsupported_provider`.
    */
@@ -3500,7 +3487,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
   test("a provider without a probe is unsupported_provider — zero outbound requests, zero key reads", async () => {
     const { db } = await seededWorld();
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
-      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // note: Fail fast: no outbound request may leave the Worker on a denied path,
       // and a regression must fail here instead of timing out on the network.
       throw new Error("unexpected outbound request");
     }) as unknown as typeof fetch);
@@ -3565,7 +3552,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(body.limits).toEqual([
       expect.objectContaining({ id: "zai:week", kind: "window", usedFraction: 0.125, unit: "tokens" }),
     ]);
-    // The plaintext travelled as ONE outbound header — never into the response.
+    // invariant: The plaintext travelled as ONE outbound header — never into the response.
     expect(JSON.stringify(body)).not.toContain(plainKey);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
@@ -3587,7 +3574,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       plainKey,
     );
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
-      // Fail fast: no outbound request may leave the Worker on a denied path,
+      // note: Fail fast: no outbound request may leave the Worker on a denied path,
       // and a regression must fail here instead of timing out on the network.
       throw new Error("unexpected outbound request");
     }) as unknown as typeof fetch);
@@ -3606,7 +3593,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       }),
       params: { provider: "commandcode", host: "proxy.example" },
     });
-    // The credential never left the Worker.
+    // safety: The credential never left the Worker.
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
@@ -3641,7 +3628,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       status: "ok",
       limits: [{ id: "commandcode:month", kind: "balance", remaining: 10, unit: "credits", shared: true }],
     });
-    // The credential went to the vendor's own two routes, carrying this key.
+    // safety: The credential went to the vendor's own two routes, carrying this key.
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const calls = fetchSpy.mock.calls as unknown as Array<[string, RequestInit]>;
     expect(calls.map(([url]) => url)).toEqual([
@@ -3658,7 +3645,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     const store = configStore(db);
     const builtinKey = sk("usage-builtin-9999");
     const declarationKey = sk("usage-declaration-0000");
-    // The App holds BOTH: a built-in-pool row and a same-id declaration on a
+    // note: The App holds BOTH: a built-in-pool row and a same-id declaration on a
     // foreign host. The pool that answered decides which endpoint applies.
     await store.addProviderKey(app.id, "commandcode", builtinKey);
     await store.upsertCustomProvider(
@@ -3689,7 +3676,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
     expect(await builtin.json()).toMatchObject({ ok: true, status: "ok" });
     expect(fetchSpy).toHaveBeenCalledTimes(2);
 
-    // The same App, same provider, but the DECLARATION pool's key: it belongs
+    // note: The same App, same provider, but the DECLARATION pool's key: it belongs
     // to the off-vendor declaration and is refused with no further request.
     const declared = await postForm(USAGE, cookie, makeEnv(db), {
       provider: "commandcode",
@@ -3713,7 +3700,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
       },
       sk("usage-broken-1111"),
     );
-    // Tamper ONE declaration's model_ids: the usage path reads only base_url,
+    // invariant: Tamper ONE declaration's model_ids: the usage path reads only base_url,
     // so a neighbour's corruption must not become `unexpected`.
     rawRun(db, "UPDATE bot_custom_providers SET model_ids = '{not json' WHERE bot_id = ? AND provider_id = 'broken'", app.id);
     const plainKey = sk("usage-zai-neighbour-2222");
@@ -3737,7 +3724,7 @@ describe("POST /dashboard/default/api/apps/:appId/keys/usage (per-key usage prob
   });
 });
 
-// --- custom provider declarations (settings ops) ---
+// note: --- custom provider declarations (settings ops) ---
 
 describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=add-custom-provider / remove-custom-provider)", () => {
   let fetchSpy: ReturnType<typeof spyOn>;
@@ -3758,8 +3745,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   };
   const mallory = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-  /**
-   * The first catalog-declared provider+model the vendor table covers. Chosen
+  /** note: The first catalog-declared provider+model the vendor table covers. Chosen
    * at runtime, never a literal: this suite pins shape, not a vendor's numbers.
    */
   const coveredCatalogModel = (): { provider: string; model: string } | null => {
@@ -3787,7 +3773,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   });
 
   test("the typesafe protocol is declarable and round-trips as a stored declaration", async () => {
-    // omp's TypeSafe wire (a plain Bearer models probe) is one of the
+    // note: omp's TypeSafe wire (a plain Bearer models probe) is one of the
     // materializable custom protocols, so a `typesafe` template row can be
     // saved through the same add-custom-provider form.
     const { db, app } = await seededWorld();
@@ -3839,7 +3825,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   test("400: a NEW declaration beyond the 8-provider cap → 400 re-render, zero writes; filling the cap and updating an existing id stay allowed (QC W-2)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    // A local declaration fixture (the store describe's CUSTOM is scoped
+    // note: A local declaration fixture (the store describe's CUSTOM is scoped
     // there; the route describe carries CUSTOM_FORM instead).
     const decl = (providerId: string): AppCustomProvider => ({
       provider_id: providerId,
@@ -3847,19 +3833,19 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       api: "openai-completions",
       model_ids: ["deepseek-v4-flash"],
     });
-    // The bound is inclusive: with 7 declared, the 8th NEW id is allowed.
+    // note: The bound is inclusive: with 7 declared, the 8th NEW id is allowed.
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
       await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("custom-ark-9988"));
     }
     const fill = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-8" });
     expect(fill.status).toBe(200);
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
-    // A 9th NEW id → 400 with a cap message, zero writes.
+    // invariant: A 9th NEW id → 400 with a cap message, zero writes.
     const over = await postForm(SETTINGS, await mallory(), makeEnv(db), { ...CUSTOM_FORM, provider_id: "prov-9" });
     expect(over.status).toBe(400);
     expect(await over.text()).toContain("custom providers");
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
-    // Updating an EXISTING declaration at the cap stays allowed (no growth).
+    // invariant: Updating an EXISTING declaration at the cap stays allowed (no growth).
     const update = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       ...CUSTOM_FORM,
       provider_id: "prov-1",
@@ -3877,7 +3863,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     const target = "prov-last";
 
-    // Order 1 — the competing same-id save commits AFTER the route's
+    // invariant: Order 1 — the competing same-id save commits AFTER the route's
     // listCustomProviders read and the store's absence/count reads, before the
     // caller's write batch: the route read saw 7 rows (below the cap), so it
     // admits; the store's growth gate admits it too because the row it wants
@@ -3900,16 +3886,16 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain(`Declared custom provider ${target}`);
-    // The declaration was updated in place (no ninth row) …
+    // note: The declaration was updated in place (no ninth row) …
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
     const row = db.raw
       .query("SELECT model_ids FROM bot_custom_providers WHERE bot_id = ? AND provider_id = ?")
       .get(app.id, target) as { model_ids: string };
     expect(JSON.parse(row.model_ids)).toEqual(["loser-model"]);
-    // … and both credentials share the one pool (7 seeded + winner + loser).
+    // safety: … and both credentials share the one pool (7 seeded + winner + loser).
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(MAX_CUSTOM_PROVIDER_COUNT + 1);
 
-    // Order 2 — the competing save already committed when the request arrives:
+    // note: Order 2 — the competing save already committed when the request arrives:
     // the read now sees 8 rows INCLUDING the target id, so the `.some()` arm
     // exempts it (dropping that arm would 400 a legitimate update).
     const { db: db2, app: app2 } = await seededWorld();
@@ -3927,7 +3913,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(late.status).toBe(200);
     expect(rawCount(db2, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
 
-    // The boundary still holds: a genuinely NEW id at the cap is 400 with the
+    // note: The boundary still holds: a genuinely NEW id at the cap is 400 with the
     // cap key and zero writes (the pre-check is not weakened to admit growth).
     const over = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
       ...CUSTOM_FORM,
@@ -3951,7 +3937,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     for (let i = 1; i < MAX_CUSTOM_PROVIDER_COUNT; i++) {
       await store.upsertCustomProvider(app.id, decl(`prov-${i}`), sk("template-seed-key"));
     }
-    // The competing save of the SAME template id lands after the route read and
+    // invariant: The competing save of the SAME template id lands after the route read and
     // the store's reads, before this request's batch.
     const raced = createLastSlotRaceD1(db, async () => {
       await configStore(db).upsertCustomProvider(
@@ -3973,7 +3959,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(res.status).toBe(200);
     expect(rawCount(db, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
 
-    // Order 2 — the competing save already committed when the request arrives:
+    // note: Order 2 — the competing save already committed when the request arrives:
     // the read sees 8 rows INCLUDING the template id, so the
     // `storedDeclaration !== undefined` arm is the ONLY thing admitting this
     // legitimate re-materialization (a plain `length >= cap` gate would 400 it).
@@ -4000,7 +3986,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(late.status).toBe(200);
     expect(rawCount(db2, "bot_custom_providers")).toBe(MAX_CUSTOM_PROVIDER_COUNT);
 
-    // The boundary: a genuinely NEW template id at the cap is still refused.
+    // note: The boundary: a genuinely NEW template id at the cap is still refused.
     const over = await postForm(SETTINGS, await mallory(), makeEnv(db2), {
       op: "add-template-provider",
       template_id: "tokengo",
@@ -4014,7 +4000,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
 
   test("400: the store's atomic cap throw (race — pre-check passed, insert lost) maps to 400, not 500 (PR #10)", async () => {
     const { db } = await seededWorld();
-    // The route pre-check reads listCustomProviders (7 rows → passes); the
+    // note: The route pre-check reads listCustomProviders (7 rows → passes); the
     // store's atomic conditional INSERT then matches zero rows (a concurrent
     // save won the last slot) → InvalidCustomProviderError → the route must
     // answer 400 (the keyed rejection face since the SPA 400 rework), never 500.
@@ -4051,15 +4037,15 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const raceLosing: AppConfigD1 = {
       prepare(query: string): D1StatementLike {
         if (query.includes("SELECT * FROM bot_custom_providers")) {
-          return fakeStmt({ all: sevenRows }); // route pre-check: 7 < 8 → passes
+          return fakeStmt({ all: sevenRows }); // note: route pre-check: 7 < 8 → passes
         }
         if (query.includes("SELECT provider_id FROM bot_custom_providers")) {
-          return fakeStmt({ first: null }); // new id
+          return fakeStmt({ first: null }); // note: new id
         }
         if (query.includes("SELECT COUNT(*) AS n FROM bot_custom_providers")) {
-          return fakeStmt({ first: { n: 7 } }); // store pre-check passes
+          return fakeStmt({ first: { n: 7 } }); // note: store pre-check passes
         }
-        // The race lost: a concurrent save took the last slot, so BOTH
+        // note: The race lost: a concurrent save took the last slot, so BOTH
         // statements of the batch — the key, which runs first, and the
         // declaration, which shares its growth gate — match zero rows.
         if (query.includes("INSERT INTO bot_custom_provider_keys")) {
@@ -4103,7 +4089,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       params: { provider: "my-custom" },
     });
     expect(rawCount(db, "bot_custom_provider_keys")).toBe(1);
-    // The template save path carries the same guard (its own provider id).
+    // note: The template save path carries the same guard (its own provider id).
     const tpl = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "add-template-provider",
       template_id: "subconscious",
@@ -4130,7 +4116,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
   test("append against an EXISTING declaration keeps the STORED api/model_ids (F2)", async () => {
     const { db, app } = await seededWorld();
     const store = configStore(db);
-    // A template id may legitimately hold a declaration whose api/model_ids
+    // note: A template id may legitimately hold a declaration whose api/model_ids
     // differ from the catalog's (only built-in and capability-host ids are
     // refused at declaration). The catalog prefill is what the operator's
     // FIRST save materialized; a later append must not rewrite it.
@@ -4144,7 +4130,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       },
       sk("sub-template-existing"),
     );
-    // The append submits a base URL but no protocol/model ids (the template
+    // note: The append submits a base URL but no protocol/model ids (the template
     // form has no control for either).
     const appended = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "add-template-provider",
@@ -4173,7 +4159,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     expect(created.status).toBe(200);
     const [decl] = await store.listCustomProviders(app.id);
-    expect(decl!.api).toBe("openai-completions"); // the catalog's protocol
+    expect(decl!.api).toBe("openai-completions"); // note: the catalog's protocol
     expect(decl!.model_ids).toEqual(
       [...PROVIDER_CATALOG["subconscious"]!.models].slice(0, MAX_CUSTOM_PROVIDER_MODEL_IDS),
     );
@@ -4181,7 +4167,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
 
   test("add-template-provider clips a wider-than-store catalog vocabulary to the store's model-id bound", async () => {
     const { db, app } = await seededWorld();
-    // nano-gpt carries the snapshot's widest vocabulary — well past the store
+    // note: nano-gpt carries the snapshot's widest vocabulary — well past the store
     // bound the declaration gate enforces.
     const catalogModels = PROVIDER_CATALOG["nano-gpt"]!.models;
     expect(catalogModels.length).toBeGreaterThan(MAX_CUSTOM_PROVIDER_MODEL_IDS);
@@ -4212,7 +4198,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     });
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("Saved the my-custom model list for mallorys-app");
-    // The stored declaration carries the parsed list — and neither the
+    // note: The stored declaration carries the parsed list — and neither the
     // endpoint nor the key pool moved with it.
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl).toEqual({
@@ -4223,7 +4209,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       models_meta: meta,
       has_keys: true,
     });
-    // The settings payload the SPA re-reads reflects the new list.
+    // note: The settings payload the SPA re-reads reflects the new list.
     const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
     expect(payload.status).toBe(200);
     const body = (await payload.json()) as {
@@ -4253,14 +4239,14 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual(meta);
-    // The SPA payload the form re-seeds from carries the overlay too.
+    // note: The SPA payload the form re-seeds from carries the overlay too.
     const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; models_meta?: Record<string, unknown> }>;
     };
     expect(body.custom_providers.find((p) => p.provider_id === "my-custom")!.models_meta).toEqual(meta);
 
-    // A selected model with no context window and no catalog entry: the save is
+    // note: A selected model with no context window and no catalog entry: the save is
     // ACCEPTED. Only the stated model carries a size entry — fresh-b stores as
     // unstated, and the runtime's own default applies to it.
     const unstated = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4274,7 +4260,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(afterUnstated!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(afterUnstated!.models_meta).toEqual({ "fresh-a": { contextWindow: 64000, maxTokens: 2048 } });
 
-    // A stated but non-positive size is refused with the invalid-value key —
+    // note: A stated but non-positive size is refused with the invalid-value key —
     // and the refusal writes nothing: the stored list AND overlay stay exactly
     // what the accepted save above left behind.
     const invalid = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4297,7 +4283,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const store = configStore(db);
-    // The dialog posts what the operator typed and nothing else: an absent
+    // invariant: The dialog posts what the operator typed and nothing else: an absent
     // max token count is not a zero and not a default, and the parser keeps
     // only the stated field. Nothing here is a save precondition.
     const partial = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4310,7 +4296,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const [decl] = await store.listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["fresh-a", "fresh-b"]);
     expect(decl!.models_meta).toEqual({ "fresh-a": { contextWindow: 200000 } });
-    // The round-trip: the face the dialog re-seeds from returns exactly that,
+    // invariant: The round-trip: the face the dialog re-seeds from returns exactly that,
     // with no second field invented for the same model.
     const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
@@ -4325,7 +4311,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const store = configStore(db);
-    // The form submits an overlay with every size blank: the declaration saves
+    // note: The form submits an overlay with every size blank: the declaration saves
     // as unstated — a missing number is never a save precondition.
     const allBlank = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
@@ -4336,7 +4322,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(allBlank.status).toBe(200);
     const [afterBlank] = await store.listCustomProviders(app.id);
     expect(afterBlank!.model_ids).toEqual(["fresh-a"]);
-    // Unstated is stored by carrying no size entry — nothing is invented.
+    // invariant: Unstated is stored by carrying no size entry — nothing is invented.
     expect(afterBlank!.models_meta).toBeUndefined();
   });
 
@@ -4355,7 +4341,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       models_meta: JSON.stringify(overlay),
     });
     expect(seeded.status).toBe(200);
-    // A caller that edits ONLY the id list (a native form, a script, a client
+    // invariant: A caller that edits ONLY the id list (a native form, a script, a client
     // that never renders the size fields) omits models_meta entirely. That is
     // "states nothing about the models", not "states nothing for every model":
     // the surviving id keeps what it stated and the dropped id takes its entry
@@ -4382,7 +4368,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       model_ids: "fresh-a, fresh-b",
       models_meta: JSON.stringify(overlay),
     });
-    // A native form submits its untouched size fields as an empty value: that
+    // invariant: A native form submits its untouched size fields as an empty value: that
     // is "no size typed", not "delete the sizes this declaration stores".
     const blank = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
@@ -4405,7 +4391,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       model_ids: "fresh-a",
       models_meta: JSON.stringify({ "fresh-a": { contextWindow: 128000, maxTokens: 8192 } }),
     });
-    // "{}" is a statement about these models — the dialog sends it when nothing
+    // invariant: "{}" is a statement about these models — the dialog sends it when nothing
     // is typed and the catalogue supplies nothing — so it replaces the overlay.
     const cleared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
@@ -4430,7 +4416,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       models_meta: JSON.stringify(overlay),
     });
     const before = await store.listCustomProviders(app.id);
-    // A repeated field reaches the route as string[] (parseBody all); a file
+    // note: A repeated field reaches the route as string[] (parseBody all); a file
     // part as File. Either way the submission is unreadable, so it is refused
     // instead of being treated as "states nothing".
     const repeated = await postFormEntries(SETTINGS, await mallory(), makeEnv(db), [
@@ -4442,7 +4428,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     ]);
     expect(repeated.status).toBe(400);
     expect(await repeated.json()).toMatchObject({ key: "settings.error.modelMetaMalformed" });
-    // Nothing moved: the ids AND the overlay are exactly what was stored.
+    // invariant: Nothing moved: the ids AND the overlay are exactly what was stored.
     expect(await store.listCustomProviders(app.id)).toEqual(before);
   });
 
@@ -4452,7 +4438,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       const covered = coveredCatalogModel();
       if (covered === null) return;
       const { db, app } = await seededWorld();
-      // The catalog's ID, the App's own endpoint: the read side resolves the
+      // note: The catalog's ID, the App's own endpoint: the read side resolves the
       // model's sizes by id alone (catalogLimitsFor and the SPA pre-fill), but
       // this save stores only what the operator states — nothing is copied.
       const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4483,7 +4469,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       if (covered === null) return;
       const meta = PROVIDER_CATALOG[covered.provider]!;
       const { db, app } = await seededWorld();
-      // A catalog id is declarable (it is a template tier id, not a built-in
+      // note: A catalog id is declarable (it is a template tier id, not a built-in
       // env-name provider), so the save under test is a real update.
       const declared = await postForm(SETTINGS, await mallory(), makeEnv(db), {
         op: "add-custom-provider",
@@ -4494,7 +4480,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
         key: sk("catalog-covered-key"),
       });
       expect(declared.status).toBe(200);
-      // The operator states NOTHING for the model: the catalog supplies both
+      // invariant: The operator states NOTHING for the model: the catalog supplies both
       // sizes, so the save is accepted and the overlay stays empty.
       const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
         op: "update-provider-models",
@@ -4505,9 +4491,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       expect(saved.status).toBe(200);
       const [decl] = await configStore(db).listCustomProviders(app.id);
       expect(decl!.model_ids).toEqual([covered.model]);
-      // No override field was invented from the vendor number.
+      // note: No override field was invented from the vendor number.
       expect(decl!.models_meta).toBeUndefined();
-      // The settings face still knows the model's sizes — via the catalog.
+      // note: The settings face still knows the model's sizes — via the catalog.
       const payload = await get("/dashboard/default/api/provider-catalog", await mallory(), makeEnv(db));
       const body = (await payload.json()) as {
         provider_catalog: Array<{ id: string; model_limits: Record<string, { contextWindow: number; maxTokens: number }> }>;
@@ -4527,7 +4513,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     const { db, app } = await seededWorld();
     await postForm(SETTINGS, await mallory(), makeEnv(db), CUSTOM_FORM);
     const before = await configStore(db).listCustomProviders(app.id);
-    // `my-custom` is not in the vendor table and the form states nothing:
+    // invariant: `my-custom` is not in the vendor table and the form states nothing:
     // there is no number for the product to ask for, so the save lands as
     // unstated — the pinned runtime back-fills its own default.
     const saved = await postForm(SETTINGS, await mallory(), makeEnv(db), {
@@ -4539,13 +4525,13 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(saved.status).toBe(200);
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
-    // Unstated is stored as NO size entry: the override never carries a number
+    // invariant: Unstated is stored as NO size entry: the override never carries a number
     // the operator did not state.
     expect(decl!.models_meta).toBeUndefined();
-    // The endpoint and the key pool did not move with the list.
+    // note: The endpoint and the key pool did not move with the list.
     expect(decl!.base_url).toBe(before[0]!.base_url);
     expect(decl!.has_keys).toBe(true);
-    // The settings payload the SPA re-seeds from round-trips the unstated model.
+    // note: The settings payload the SPA re-seeds from round-trips the unstated model.
     const payload = await get(`/dashboard/default/api/apps/${APP_ID}/settings`, await mallory(), makeEnv(db));
     const body = (await payload.json()) as {
       custom_providers: Array<{ provider_id: string; model_ids: string[]; models_meta?: Record<string, unknown> }>;
@@ -4564,7 +4550,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     };
     expect(typeof body.model_limits_snapshot).toBe("string");
     expect(body.model_limits_snapshot.length).toBeGreaterThan(0);
-    // Shape only: every row carries the table, every carried size is a
+    // invariant: Shape only: every row carries the table, every carried size is a
     // positive whole token count. No vendor number is pinned.
     for (const row of body.provider_catalog) {
       expect(typeof row.model_limits).toBe("object");
@@ -4579,7 +4565,7 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
 
   test("update-provider-models refuses an undeclared provider with the keyed 400, zero writes", async () => {
     const { db } = await seededWorld();
-    // A well-formed statement, so the refusal under test is the store's
+    // why: A well-formed statement, so the refusal under test is the store's
     // undeclared-declaration gate rather than the meta shape gate.
     const res = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
@@ -4617,12 +4603,12 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
       key: "settings.error.modelIdsTooMany",
       params: { count: MAX_CUSTOM_PROVIDER_MODEL_IDS + 1, limit: MAX_CUSTOM_PROVIDER_MODEL_IDS },
     });
-    // Neither refusal touched the stored declaration.
+    // note: Neither refusal touched the stored declaration.
     expect(await configStore(db).listCustomProviders(app.id)).toEqual(before);
   });
 
   test("a declaration on a collapsed per-protocol id's endpoint saves a catalog-known model without a stated size", async () => {
-    // The live case: a declaration created when the catalog still shipped one
+    // note: The live case: a declaration created when the catalog still shipped one
     // row per protocol. The row that absorbed its id states the sizes, and the
     // declaration sits on one of that row's protocol endpoints — so a blank
     // size field saves instead of demanding a hand-typed number.
@@ -4653,9 +4639,9 @@ describe("POST /dashboard/default/apps/:appId/settings — custom providers (op=
     expect(res.status).toBe(200);
     const [decl] = await configStore(db).listCustomProviders(app.id);
     expect(decl!.model_ids).toEqual([model!]);
-    // The catalog's numbers are never copied into the stored override.
+    // invariant: The catalog's numbers are never copied into the stored override.
     expect(decl!.models_meta).toBeUndefined();
-    // The same blank statement for a model neither side sizes also saves:
+    // note: The same blank statement for a model neither side sizes also saves:
     // stored as unstated, with no copy of anyone's number.
     const unstated = await postForm(SETTINGS, await mallory(), makeEnv(db), {
       op: "update-provider-models",
