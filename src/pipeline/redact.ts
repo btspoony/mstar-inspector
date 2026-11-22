@@ -48,10 +48,6 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
 /** Regex metacharacters, escaped so a credential form matches literally. */
 const REGEX_METACHARACTERS = /[.*+?^${}()|[\]\\]/g;
 
-// why: a value shorter than a credential cannot be redacted safely — it would
-// match ordinary text (and a 3-char secret matches inside a SHA).
-const MIN_SECRET_LENGTH = 8;
-
 /** A retained document whose host-written identity paths are protected. */
 export type RetainedDocument = "run" | "recheck" | "report" | "text";
 
@@ -122,11 +118,15 @@ export type RedactionOutcome<T> = {
 /** Mutable counter one walk threads through its leaves. */
 type RedactionState = { replaced: number };
 
-/** The applicable credential forms, longest first. */
+/**
+ * Every form of every non-empty credential, longest first. No length floor: a
+ * short custom provider key is still a credential, and identity fields are
+ * protected by PATH, so a short value cannot reach one.
+ */
 function applicableForms(secrets: readonly string[]): string[] {
   const forms = new Set<string>();
   for (const secret of new Set(secrets)) {
-    if (secret === "" || secret.length < MIN_SECRET_LENGTH) continue;
+    if (secret === "") continue;
     for (const form of Object.values(secretTransforms(secret))) {
       if (form !== "") forms.add(form);
     }
@@ -134,19 +134,6 @@ function applicableForms(secrets: readonly string[]): string[] {
   // A shorter form that is a substring of a longer one must not shred the
   // longer match first.
   return [...forms].sort((left, right) => right.length - left.length);
-}
-
-/**
- * Credentials this pass will NOT apply, counted ONCE per distinct value: a skip
- * is a property of the secret list, not of a document count, so four documents
- * with one short value report 1. Empty values are not credentials.
- */
-export function skippedSecrets(secrets: readonly string[]): number {
-  let skipped = 0;
-  for (const secret of new Set(secrets)) {
-    if (secret !== "" && secret.length < MIN_SECRET_LENGTH) skipped += 1;
-  }
-  return skipped;
 }
 
 /**

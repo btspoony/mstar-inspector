@@ -14,7 +14,6 @@ import {
   redactReviewOutputExact,
   redactSecrets,
   secretTransforms,
-  skippedSecrets,
 } from "../../src/pipeline/redact";
 import { buildReviewBody } from "../../src/pipeline/comment";
 import type { ReviewOutput } from "../../src/review/schema";
@@ -260,17 +259,28 @@ describe("redactDocument", () => {
     expect(again.replaced).toBe(0);
   });
 
-  test("a short credential is never applied and is counted once per distinct value", () => {
-    expect(skippedSecrets(["abc"])).toBe(1);
-    expect(skippedSecrets(["abc", "abc", "", "abcdefgh"])).toBe(1);
-
+  test("a 3-character credential is redacted; the host identity path is still byte-identical", () => {
+    const key = "abc";
+    const headSha = "abcabcabcabcabcabcabcabcabcabcabcabcabca";
     const envelope = JSON.stringify({
-      target: { head_sha: "abcabcabcabcabcabcabcabcabcabcabcabcabca" },
-      note: "abc",
+      target: { head_sha: headSha },
+      note: key,
+      findings: [{ body: `leak ${key}` }],
     });
-    const outcome = redactDocument(envelope, ["abc"], "run");
-    expect(outcome.value).toBe(envelope);
-    expect(outcome.replaced).toBe(0);
+
+    const outcome = redactDocument(envelope, [key], "run");
+    // Fixture shape is ours: the envelope serialized above.
+    const redacted = JSON.parse(outcome.value) as {
+      target: { head_sha: string };
+      note: string;
+      findings: { body: string }[];
+    };
+
+    // The path walk — not a length floor — is what protects identity.
+    expect(redacted.target.head_sha).toBe(headSha);
+    expect(redacted.note).toBe("[REDACTED]");
+    expect(redacted.findings[0]?.body).toBe("leak [REDACTED]");
+    expect(outcome.replaced).toBe(2);
   });
 
   test("a payload with no secret present keeps its exact bytes", () => {
