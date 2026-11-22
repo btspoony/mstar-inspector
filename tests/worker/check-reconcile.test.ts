@@ -231,6 +231,45 @@ async function markedUnconfirmed(db: TestD1, headSha: string, publicationId: str
   return attemptId;
 }
 
+/**
+ * The §7.9a shape a correction is owed from: a TERMINAL unconfirmed failure
+ * linked to its OWN publication, which has since confirmed with a passing
+ * review. Returns the attempt id, its publication id and the confirmation
+ * instant.
+ */
+async function owedCorrectionFixture(
+  db: TestD1,
+): Promise<{ attemptId: string; journalId: string; confirmedAt: number }> {
+  const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
+  const attemptId = attempt.identity.attemptId;
+  await attachProvenRun(db, attemptId, lease, CLAIM_AT + 1);
+  const journalId = seedJournal(db, SCOPE, SHA, "sending", CLAIM_AT + 500);
+  await terminalizeHarness(db, () => CLAIM_AT + 1_000, []).terminalize({
+    handle: { attemptId, scope: SCOPE, githubAppId: NUMERIC_APP, headSha: SHA, lease },
+    publicationId: journalId,
+    outcome: "publication-unknown",
+  });
+  db.raw
+    .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
+    .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
+  const confirmedAt = CLAIM_AT + 61_000;
+  const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
+  if (proofLease === null) throw new Error("fixture: the proof claim was refused");
+  expect(
+    await recordPublicationProof(db as never, journalId, proofLease, {
+      publicationId: journalId,
+      scope: SCOPE,
+      headSha: SHA,
+      kind: "review",
+      round: 3,
+      commentId: 9001,
+      bodySha256: "a".repeat(64),
+      confirmedMs: confirmedAt,
+    }),
+  ).toBe(true);
+  return { attemptId, journalId, confirmedAt };
+}
+
 describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
   test("the reconciler takes it at the attach grace and never creates a second run", async () => {
     const db = seededDb();
@@ -815,7 +854,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       }),
     });
     expect(second.examined).toBe(0);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     expect(await db.prepare(`SELECT COUNT(*) AS n FROM review_checks`).first<{ n: number }>()).toEqual({ n: 1 });
   });
 
@@ -900,7 +939,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
 
     // EXACTLY once: the consumed mark cannot be reopened, and a later pass
     // sends nothing more.
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     const second = await run(db, {
       now: () => clock + 60_000,
       credentials: scriptedCredentials(db, {
@@ -911,6 +950,163 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     });
     expect(second.examined).toBe(0);
     expect(pushed).toHaveLength(1);
+  });
+
+  test("§7.9a: a correction the request budget defers is delivered on the NEXT pass", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const fetchStub = stubFetch();
+    try {
+      // First pass: the reopen happens, but the row's ≤6 requests are spent on
+      // the readback, so the UPDATE is refused BEFORE dispatch.
+      const first = await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+          }),
+          complete: async (identity, _id, conclusion) => {
+            pushed.push(conclusion);
+            return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+          },
+        }),
+      });
+      expect(first.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    // OWED, not delivered: the correction survives the deferral on the row.
+    let row = await rawRow(db, attemptId);
+    expect(row.terminal_ms).toBeNull();
+    expect(row.correction_desired).toBe("success");
+    expect(row.correction_generation).toBe(1);
+
+    const second = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(second.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect(pushed[0]!.summary).toContain('verdict "ship it"');
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+    // The successful send settled the debt.
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: two deferrals in a row still deliver the correction once", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const pushed: CheckConclusion[] = [];
+    const deferring = () =>
+      scriptedCredentials(db, {
+        requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      });
+    const fetchStub = stubFetch();
+    try {
+      for (const at of [clock, clock + 60_000]) {
+        const deferred = await run(db, { now: () => at, credentials: deferring() });
+        expect(deferred.completed).toBe(0);
+      }
+    } finally {
+      fetchStub.restore();
+    }
+    expect(pushed).toHaveLength(0);
+    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+
+    const delivered = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    expect((await rawRow(db, attemptId)).observed).toBe("success");
+  });
+
+  test("§7.9a: an owed correction whose target generation moved sends nothing", async () => {
+    const db = seededDb();
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      // Defer the correction so the row carries the obligation into a later pass.
+      await run(db, {
+        now: () => clock,
+        credentials: scriptedCredentials(db, {
+          requestsPerCall: CHECK_ROW_MAX_REQUESTS,
+          fetch: async (identity) => ({
+            kind: "found",
+            remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+          }),
+        }),
+      });
+    } finally {
+      fetchStub.restore();
+    }
+    expect((await rawRow(db, attemptId)).correction_generation).toBe(1);
+
+    // The generation the obligation targeted has moved: it is no longer this
+    // row's correction to deliver.
+    db.raw.prepare(`UPDATE review_checks SET generation = generation + 1 WHERE id = ?`).run(attemptId);
+
+    const summary = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async () => {
+          throw new Error("a stale correction must not be sent");
+        },
+      }),
+    });
+    expect(summary.completed).toBe(0);
+    // Dropped, not resurrected.
+    const row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    expect(row.observed).toBe("failure");
+    // Without the owed correction the pass is the ordinary one: the dropped
+    // conclusion is refused locally instead of replacing the run's failure.
+    expect(row.last_error).toContain("remote run concluded failure");
   });
 
   test("§7.9a: a DIFFERENT publication's confirmation never revises a linked terminal record", async () => {
@@ -965,8 +1161,8 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     }
     // Both the foreign id and the row's own still-unproven link are refused by
     // the guarded transition itself.
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
 
     let row = await rawRow(db, attemptId);
     expect(row.terminal_ms).not.toBeNull();
@@ -990,9 +1186,9 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         confirmedMs: clock + 90_000,
       }),
     ).toBe(true);
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 120_000)).toBe(false);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(true);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 120_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 120_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 120_000)).toBe(true);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 120_000)).toBe(false);
     row = await rawRow(db, attemptId);
     expect(row.terminal_ms).toBeNull();
     // Reopened, not yet revised: the frozen text still asserts the unconfirmed
@@ -1025,7 +1221,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       credentials: scriptedCredentials(db, { complete: async () => { throw new Error("no send expected"); } }),
     });
     expect(summary.examined).toBe(0);
-    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, "publication-other", "success", clock + 60_000)).toBe(false);
   });
 
   test("§7.9a: the revision is fenced on the TERMINAL record itself", async () => {
@@ -1052,7 +1248,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     // and that link's proof all still hold, so `terminal_ms IS NOT NULL` is the
     // condition refusing this call.
     db.raw.prepare(`UPDATE review_checks SET terminal_ms = NULL WHERE id = ?`).run(attemptId);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
   });
 
   test("§7.9a: a record SUPERSEDED by a newer open generation is never reopened", async () => {
@@ -1077,7 +1273,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
       .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
     // Refused: revising the superseded record would re-send an older run and
     // collide with the one-open-row index the new generation holds.
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 60_000)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 60_000)).toBe(false);
     const row = await rawRow(db, attemptId);
     expect(row.terminal_ms).not.toBeNull();
     expect(row.recovery_state).toBe("remote-unconfirmed");
@@ -1108,7 +1304,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     db.raw
       .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
       .run(JSON.stringify({ ...proofFor(attempt.identity), publicationId: journalId }), journalId);
-    expect(await reopenTerminalCorrection(db, attemptId, journalId, clock + 1)).toBe(false);
+    expect(await reopenTerminalCorrection(db, attemptId, journalId, "success", clock + 1)).toBe(false);
   });
 
   test("§7.9a: a mark that never confirms cannot displace one that is ready", async () => {

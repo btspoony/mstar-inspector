@@ -57,6 +57,7 @@ import {
   checkSuspensionKindOf,
   checkSuspensionReason,
   claimCheckRecovery,
+  clearCheckCorrectionOwed,
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
@@ -823,7 +824,16 @@ async function reopenTerminalCheck(
   // this pass writes nothing at all.
   if (proofRead.kind !== "read") return;
   if ((await pairUnusableReason(db, scope)) !== null) return;
-  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, now()))) return;
+  // The conclusion the revision owes, decided ONCE from the proof this row
+  // linked — the same decision the ordinary attempt makes, so the deferred pass
+  // has a durable conclusion to deliver instead of re-deriving one from
+  // evidence that may have moved by then.
+  const [gate, review] = await Promise.all([
+    readRecoveryGate(db, scope),
+    readRecoveryReview(db, row.identity, publicationId),
+  ]);
+  const owed = decideConclusion({ proof: proofRead.proof, outcome: "expired", gate, review });
+  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, owed.desired, now()))) return;
   log.info(
     { event: "ops_check_terminal_correction_reopened", attempt_id: attemptId, publication_id: publicationId },
     "terminal Check reopened for its own publication's confirmed outcome — one revision",
@@ -881,6 +891,16 @@ async function reconcileCheckAttempt(
     return;
   }
 
+  // §7.9a carried across passes: a reopened correction the request budget
+  // deferred before dispatch is still OWED on the row. It is this pass's
+  // correction only while the generation it targets still holds; a superseded
+  // target is dropped below, never resurrected.
+  const owedDesired =
+    row.correctionGeneration !== null && row.correctionGeneration === row.identity.generation
+      ? row.correctionDesired
+      : null;
+  let isCorrection = correction || owedDesired !== null;
+
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
   // not push terminal rows behind its App-identity probe. While the exact
@@ -927,7 +947,7 @@ async function reconcileCheckAttempt(
   // settlement's `neutral` (§7.9): that conclusion is final, nothing can
   // correct it and it owes no publication, so waiting for a proof that will
   // never exist would leave the run open for the whole window.
-  if (!correction && beforeDeadline && row.desired !== "neutral") {
+  if (!isCorrection && beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with
@@ -1028,9 +1048,17 @@ async function reconcileCheckAttempt(
   // throw that keeps re-selecting the same due attempt forever.
   const [gate, review] = await Promise.all([
     readRecoveryGate(db, scope),
-    readRecoveryReview(db, owned, proof?.publicationId ?? null),
+    readRecoveryReview(db, owned.identity, proof?.publicationId ?? null),
   ]);
   const conclusion = terminalConclusion(owned, proof, gate, review);
+  // A deferred obligation the evidence or the generation has moved past is
+  // DROPPED under this claim rather than sent: carrying it here would resurrect
+  // a conclusion this row no longer owes. The same-pass revision (`correction`)
+  // is never dropped — it was decided moments ago from this proof.
+  if (!correction && row.correctionGeneration !== null && conclusion.desired !== owedDesired) {
+    await clearCheckCorrectionOwed(db, attemptId, lease, now());
+    isCorrection = false;
+  }
   // The approved wording no longer names which evidence the deadline could not
   // read, so that attribution lands where the operator reads diagnosis: one log
   // line per unconfirmed conclusion, never a user-visible field.
@@ -1244,7 +1272,7 @@ async function reconcileCheckAttempt(
       // own publication now contradicts it. There the new conclusion must
       // reach THAT run — refusing GitHub's existing failure would leave the
       // correction local, which is the same defect one layer later.
-      if (!correction) {
+      if (!isCorrection) {
         await settleFailedAttempt(
           db, now, attemptsBefore, row, lease,
           `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
@@ -1647,13 +1675,13 @@ async function readRecoveryGate(db: D1Like, scope: Scope): Promise<ReviewGate | 
  */
 async function readRecoveryReview(
   db: D1Like,
-  owned: CheckOwnership,
+  identity: CheckIdentity,
   publicationId: string | null,
 ): Promise<PublishedReview | null> {
   try {
     return await readPublishedReview(db, {
-      scope: owned.identity.scope,
-      headSha: owned.identity.headSha,
+      scope: identity.scope,
+      headSha: identity.headSha,
       ...(publicationId === null ? {} : { publicationId }),
     });
   } catch {

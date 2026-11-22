@@ -158,6 +158,12 @@ export type CheckAttempt = {
   /** The approved failure category frozen with the intent; NULL when none applies. */
   terminalFailureStatus: CheckFailureStatus | null;
   /**
+   * The §7.9a correction this row still owes a deferred send (migration 0093),
+   * and the generation it targets. Both NULL means no correction is owed.
+   */
+  correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
+  correctionGeneration: number | null;
+  /**
    * When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
    * publication this attempt set in motion.
@@ -442,6 +448,8 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     attempts: row.attempts,
     terminalMs: row.terminal_ms,
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
+    correctionDesired: row.correction_desired as Exclude<CheckDesired, "in_progress"> | null,
+    correctionGeneration: row.correction_generation,
     createdAtMs: row.created_ms,
   };
 }
@@ -1819,7 +1827,9 @@ export async function recordCheckObservation(
             terminal_ms = CASE WHEN ? THEN ? ELSE terminal_ms END,
             terminal_dispatch_ms = CASE WHEN ? THEN NULL ELSE terminal_dispatch_ms END,
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
-            last_error = CASE WHEN ? THEN NULL ELSE last_error END`,
+            last_error = CASE WHEN ? THEN NULL ELSE last_error END,
+            correction_desired = CASE WHEN ? THEN NULL ELSE correction_desired END,
+            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END`,
     [
       observed,
       remote.id,
@@ -1830,6 +1840,10 @@ export async function recordCheckObservation(
       // The dispatch intent clears only when THIS observation is the terminal
       // it dispatched: a mere `running` read proves nothing about the request.
       agrees ? 1 : 0,
+      agrees ? 1 : 0,
+      agrees ? 1 : 0,
+      // The owed §7.9a correction is settled by the same validated response
+      // that resolves its send — never by a deferral or a refusal.
       agrees ? 1 : 0,
       agrees ? 1 : 0,
     ],
@@ -1900,6 +1914,13 @@ const CORRECTABLE_NOW_SQL = `EXISTS (
  * new obligation carrying new evidence, not another try of the failed one; its
  * own sends are then bounded by the ordinary recovery cap.
  *
+ * The SAME statement records the obligation as OWED: `conclusion` (decided from
+ * that proof) plus the generation it targets. A pass the request budget defers
+ * before dispatch therefore leaves the correction durable, and the pass that
+ * finally sends it clears the record through `recordCheckObservation` — the
+ * same fenced write that resolves a successful send. One pair of columns is one
+ * slot, so a row can never queue a second correction behind an owed one.
+ *
  * `false` means the row is no longer that shape — already reopened (a second
  * caller, or a second confirmation), already corrected, or never marked.
  */
@@ -1907,23 +1928,48 @@ export async function reopenTerminalCorrection(
   db: D1Like,
   id: string,
   publicationId: string,
+  conclusion: Exclude<CheckDesired, "in_progress">,
   nowMs: CheckClock,
 ): Promise<boolean> {
   const result = await db
     .prepare(
       `UPDATE review_checks
-          SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
-              next_attempt_ms = NULL, last_error = NULL, holder = NULL,
-              lease_until_ms = NULL, updated_ms = ?
-        WHERE id = ? AND terminal_ms IS NOT NULL
-          AND recovery_state = 'remote-unconfirmed'
-          AND desired = 'failure' AND observed = 'failure'
-          AND publication_id = ?
-          AND ${CORRECTABLE_NOW_SQL}`,
+         SET terminal_ms = NULL, recovery_state = 'pending', attempts = 0,
+             next_attempt_ms = NULL, last_error = NULL, holder = NULL,
+             lease_until_ms = NULL,
+             correction_desired = ?, correction_generation = generation,
+             updated_ms = ?
+       WHERE id = ? AND terminal_ms IS NOT NULL
+         AND recovery_state = 'remote-unconfirmed'
+         AND desired = 'failure' AND observed = 'failure'
+         AND publication_id = ?
+         AND ${CORRECTABLE_NOW_SQL}`,
     )
-    .bind(nowMs, id, publicationId)
+    .bind(conclusion, nowMs, id, publicationId)
     .run();
   return result.meta.changes === 1;
+}
+
+/**
+ * Drop a correction this row can no longer owe — its target generation moved,
+ * or the evidence no longer supports the conclusion it was recorded with. The
+ * row is not the correction's to send any more, so the obligation is cleared
+ * under the CURRENT claim instead of being carried into a stale conclusion.
+ */
+export async function clearCheckCorrectionOwed(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  return runFenced(
+    db,
+    id,
+    lease,
+    `correction_desired = NULL, correction_generation = NULL`,
+    [],
+    nowMs,
+  );
 }
 
 // ---------------------------------------------------------------------------
