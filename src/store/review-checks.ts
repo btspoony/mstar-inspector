@@ -204,10 +204,6 @@ export const CHECK_RECOVERY_LEASE_MS = 120_000;
  * execution deadline alone governs those, because the model may still be running.
  */
 export const CHECK_STALE_HOLDER_MS = 120_000;
-/** Recovery attempt cap (spec §7.11.2: maxAttempts = 5). */
-export const CHECK_MAX_ATTEMPTS = 5;
-/** Reconcile batch size (spec §7.11.2: limit = 25). */
-export const CHECK_RECONCILE_LIMIT = 25;
 /**
  * Backoff after the Nth failed recovery attempt (spec §7.11.1's ladder, which
  * §7.11.2's bounded Check recovery inherits); indexed by `attempts - 1`.
@@ -692,7 +688,7 @@ export async function claimCheckRecovery(
   id: string,
   holder: string,
   nowMs: number,
-  maxAttempts: number = CHECK_MAX_ATTEMPTS,
+  maxAttempts: number,
 ): Promise<Lease | null> {
   const claim = await db
     .prepare(
@@ -2006,8 +2002,8 @@ export async function listReenableableCheckPairs(
 export async function listCheckReconcileBatch(
   db: D1Like,
   nowMs: number,
-  maxAttempts: number = CHECK_MAX_ATTEMPTS,
-  limit: number = CHECK_RECONCILE_LIMIT,
+  maxAttempts: number,
+  limit: number,
 ): Promise<CheckAttempt[]> {
   const { results } = await db
     .prepare(

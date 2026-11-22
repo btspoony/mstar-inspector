@@ -1,4 +1,5 @@
 
+import { RECONCILE_DEFAULTS } from "../../src/contracts/reconcile-settings";
 import { describe, expect, test } from "bun:test";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import {
@@ -75,7 +76,7 @@ describe("execution lease renewal", () => {
       ),
     ).toBe(true);
     const T1 = T0 + 60_000;
-    const recovered = await claimCheckRecovery(db, claim.attemptId, "recovery:1", T1);
+    const recovered = await claimCheckRecovery(db, claim.attemptId, "recovery:1", T1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(recovered).not.toBeNull();
     expect(recovered!.untilMs).toBe(T1 + CHECK_RECOVERY_LEASE_MS);
 
@@ -111,7 +112,7 @@ describe("execution lease renewal", () => {
       ),
     ).toBe(true);
     const T1 = T0 + 60_000;
-    const takeover = await claimCheckRecovery(db, claim.attemptId, "recovery:2", T1);
+    const takeover = await claimCheckRecovery(db, claim.attemptId, "recovery:2", T1, RECONCILE_DEFAULTS.checkMaxAttempts);
     expect(takeover).not.toBeNull();
     expect(takeover!.epoch).toBe(mine!.epoch + 1);
 
