@@ -50,6 +50,7 @@ import {
   releaseAttachedCheck,
   releaseCheckClaim,
   recordCheckObservation,
+  recordTerminalDispatch,
   reopenTerminalCorrection,
   retryCheckRecovery,
   setCheckCreateState,
@@ -234,12 +235,13 @@ async function markedUnconfirmed(db: TestD1, headSha: string, publicationId: str
 
 /**
  * The §7.9a shape a correction is owed from: a TERMINAL unconfirmed failure
- * linked to its OWN publication, which has since confirmed with a passing
- * review. Returns the attempt id, its publication id and the confirmation
- * instant.
+ * linked to its OWN publication, which has since confirmed. The score decides
+ * the owed conclusion against the App's gate. Returns the attempt id, its
+ * publication id and the confirmation instant.
  */
 async function owedCorrectionFixture(
   db: TestD1,
+  scorePct = 96,
 ): Promise<{ attemptId: string; journalId: string; confirmedAt: number }> {
   const { attempt, lease } = await claim(db, { executionDeadlineMs: CLAIM_AT + CHECK_LEASE_MS });
   const attemptId = attempt.identity.attemptId;
@@ -252,7 +254,7 @@ async function owedCorrectionFixture(
   });
   db.raw
     .prepare(`UPDATE review_publications SET payload_json = ? WHERE id = ?`)
-    .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", 96)), journalId);
+    .run(JSON.stringify(reviewPayload(SCOPE, SHA, "ship it", scorePct)), journalId);
   const confirmedAt = CLAIM_AT + 61_000;
   const proofLease = await claimPublication(db as never, journalId, "proof-lane", confirmedAt, "sending");
   if (proofLease === null) throw new Error("fixture: the proof claim was refused");
@@ -269,6 +271,27 @@ async function owedCorrectionFixture(
     }),
   ).toBe(true);
   return { attemptId, journalId, confirmedAt };
+}
+
+/**
+ * The §7.11.2 budget deferral a correction can hit: the credential resolution
+ * burns the row's whole request allowance, so the first remote call after the
+ * claim is refused BEFORE dispatch and the pass gives the claim straight back —
+ * no attempt spent, every durable field left as the reopen wrote it.
+ */
+function deferredCorrectionCredentials(db: TestD1): CheckCredentialFactory {
+  const resolution = scriptedCredentials(db, {
+    fetch: async (identity) => ({
+      kind: "found",
+      remote: remoteFor(identity, { status: "in_progress", conclusion: null }),
+    }),
+  });
+  return async (input) => {
+    for (let i = 0; i < CHECK_ROW_MAX_REQUESTS; i += 1) {
+      await input.transport.fetchImpl("https://api.github.com/checks");
+    }
+    return resolution(input);
+  };
 }
 
 describe("an attach row nobody adopted (spec §7.9 / §7.11.2)", () => {
@@ -1254,6 +1277,116 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     row = await rawRow(db, attemptId);
     expect(row.observed).toBe("success");
     expect(row.correction_generation).toBeNull();
+  });
+
+  test("§7.9a: a lowered score floor re-decides the owed correction instead of dropping it", async () => {
+    const db = seededDb();
+    // The debt is decided under a 90-point floor; the proof scores 80.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      const deferred = await run(db, { now: () => clock, credentials: deferredCorrectionCredentials(db) });
+      expect(deferred.completed).toBe(0);
+    } finally {
+      fetchStub.restore();
+    }
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBe("failure");
+    expect(row.correction_dispatched_ms).toBeNull();
+
+    // The operator lowers the floor: the SAME proof now decides success. Nothing
+    // was sent, so the authorization to replace GitHub's failure MUST survive —
+    // dropping it here is what left the Check red for good.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+
+    const pushed: CheckConclusion[] = [];
+    const delivered = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(delivered.completed).toBe(1);
+    expect(pushed).toHaveLength(1);
+    expect(pushed[0]!.desired).toBe("success");
+    row = await rawRow(db, attemptId);
+    expect(row.desired).toBe("success");
+    expect(row.observed).toBe("success");
+    expect(row.recovery_state).toBe("done");
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_dispatched_ms).toBeNull();
+  });
+
+  test("§7.9a: a possibly-dispatched revision is read back, never rewritten", async () => {
+    const db = seededDb();
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
+    const clock = confirmedAt + 1_000;
+    const fetchStub = stubFetch();
+    try {
+      await run(db, { now: () => clock, credentials: deferredCorrectionCredentials(db) });
+    } finally {
+      fetchStub.restore();
+    }
+    expect((await rawRow(db, attemptId)).correction_desired).toBe("failure");
+
+    // A send for that revision was attempted: the adapter stamps the dispatch
+    // intent before the request, so the revision may be on GitHub.
+    const lease = await claimCheckRecovery(db, attemptId, "correction-guard", clock + 30_000);
+    if (lease === null) throw new Error("fixture: the row was not claimable");
+    expect(await recordTerminalDispatch(db, attemptId, lease, clock + 30_000)).toBe(true);
+    expect(await releaseCheckClaim(db, attemptId, lease, clock + 31_000)).toBe(true);
+    let row = await rawRow(db, attemptId);
+    expect(row.correction_dispatched_ms).not.toBeNull();
+
+    // The floor drops, so the same proof now decides success — but a possibly
+    // sent revision is never rewritten.
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+    const pushed: CheckConclusion[] = [];
+    const dropping = await run(db, {
+      now: () => clock + 60_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async (identity, _id, conclusion) => {
+          pushed.push(conclusion);
+          return { kind: "completed", remote: remoteFor(identity, { conclusion: conclusion.desired, summary: conclusion.summary }) };
+        },
+      }),
+    });
+    expect(dropping.completed).toBe(0);
+    expect(pushed).toHaveLength(0);
+    row = await rawRow(db, attemptId);
+    expect(row.correction_desired).toBeNull();
+    expect(row.correction_generation).toBeNull();
+    // The dispatch intent is retained: that revision may still be on the run.
+    expect(row.terminal_dispatch_ms).not.toBeNull();
+
+    // The following pass reads the run back and sends no second update.
+    const readback = await run(db, {
+      now: () => clock + 120_000,
+      credentials: scriptedCredentials(db, {
+        fetch: async (identity) => ({
+          kind: "found",
+          remote: remoteFor(identity, { status: "completed", conclusion: "failure", summary: UNCONFIRMED }),
+        }),
+        complete: async () => {
+          throw new Error("a possibly-sent correction must never be re-sent");
+        },
+      }),
+    });
+    expect(readback.completed).toBe(0);
   });
 
   test("§7.9a: agreeing with an older failure never settles an owed success", async () => {

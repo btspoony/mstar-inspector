@@ -22,3 +22,12 @@ ALTER TABLE review_checks ADD COLUMN correction_desired TEXT
 
 ALTER TABLE review_checks ADD COLUMN correction_generation INTEGER
   CHECK ((correction_desired IS NULL) = (correction_generation IS NULL));
+
+-- Whether the owed revision may already have been DISPATCHED. Set by the same
+-- terminal-dispatch write that records a send while a debt exists, cleared by a
+-- refusal proven pre-send or when the debt settles. The distinction is what
+-- lets an undispatched revision be re-decided in place (the authorization to
+-- replace the original failure survives a changed conclusion) while a possibly
+-- sent one can only be read back: rewriting it could double a request GitHub
+-- already received.
+ALTER TABLE review_checks ADD COLUMN correction_dispatched_ms INTEGER;

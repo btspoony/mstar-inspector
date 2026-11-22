@@ -210,6 +210,8 @@ export type ReviewCheckRow = {
   correction_desired: string | null;
   /** The row generation that owed conclusion targets; NULL when none is owed. */
   correction_generation: number | null;
+  /** When the owed revision was dispatched; NULL while it has provably not left. */
+  correction_dispatched_ms: number | null;
   observed: string;
   recovery_state: string;
   publication_id: string | null;

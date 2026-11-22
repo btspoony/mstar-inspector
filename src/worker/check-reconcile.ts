@@ -74,6 +74,7 @@ import {
   reenableChecksForApps,
   releaseCheckClaim,
   releaseExpiredCheckClaim,
+  replaceCheckCorrection,
   reopenTerminalCorrection,
   setCheckDesired,
   suspendCheckForPause,
@@ -1105,18 +1106,43 @@ async function reconcileCheckAttempt(
   const gate = gateRead.kind === "read" ? gateRead.value : null;
   const review = reviewRead.kind === "read" ? reviewRead.value : null;
   const conclusion = terminalConclusion(owned, proof, gate, review);
-  // A REAL change in the evidence voids the obligation. The debt and the intent
-  // it froze are dropped under this claim, and the pass stops: delivering the
-  // new conclusion now would send it before the next pass re-decides from the
-  // evidence it just read.
+  // The evidence now decides a DIFFERENT conclusion than the contract's debt.
+  // Two situations look the same here and must not be conflated:
+  //   - the revision was never sent: the AUTHORIZATION to replace GitHub's
+  //     original failure is still valid, only the conclusion it owes moved (an
+  //     operator lowered/raised the score floor). Re-decide it in place and
+  //     deliver it this pass — dropping it here is what stranded the Check.
+  //   - the revision may already be on GitHub: it can only be read back, so the
+  //     authorization is dropped and the pass stops; the existing dispatch
+  //     intent keeps any later pass on readback.
+  let authorizedReplacement = false;
   if (!correction && owedDesired !== null && conclusion.desired !== owedDesired) {
-    await dropCheckCorrection(db, attemptId, lease, now());
-    await releaseCheckClaim(db, attemptId, lease, now());
+    if (current.correctionDispatchedMs !== null) {
+      await dropCheckCorrection(db, attemptId, lease, now());
+      await releaseCheckClaim(db, attemptId, lease, now());
+      log.info(
+        {
+          event: "ops_check_terminal_correction_dropped",
+          attempt_id: attemptId,
+          detail: `evidence now concludes ${conclusion.desired}, owed ${owedDesired}, revision may be dispatched`,
+        },
+        "owed correction dropped — the sent revision is read back, never rewritten",
+      );
+      return;
+    }
+    if (!(await replaceCheckCorrection(db, attemptId, lease, conclusion, now()))) {
+      await releaseCheckClaim(db, attemptId, lease, now());
+      return;
+    }
+    authorizedReplacement = true;
     log.info(
-      { event: "ops_check_terminal_correction_dropped", attempt_id: attemptId, detail: `evidence now concludes ${conclusion.desired}, owed ${owedDesired}` },
-      "owed correction dropped — the evidence changed, nothing sent",
+      {
+        event: "ops_check_terminal_correction_replaced",
+        attempt_id: attemptId,
+        detail: `owed ${owedDesired} → ${conclusion.desired}`,
+      },
+      "owed correction re-decided in place — the evidence changed before anything was sent",
     );
-    return;
   }
   // The approved wording no longer names which evidence the deadline could not
   // read, so that attribution lands where the operator reads diagnosis: one log
@@ -1155,8 +1181,11 @@ async function reconcileCheckAttempt(
   // this evidence produced. A positive intent the evidence now denies must
   // never be sent on its own authority (only the documented known-stop refusal
   // keeps today's behaviour: a cap/budget stop is never rewritten, and its
-  // frozen text is still the honest record). The attempt settles instead.
+  // frozen text is still the honest record). The attempt settles instead. A
+  // replacement this pass just authorized pre-froze the new intent, so it can
+  // never be undone by this guard.
   const supersededPositive =
+    !authorizedReplacement &&
     !intentFrozen &&
     intent.desired !== "failure" &&
     conclusion.desired === "failure";
