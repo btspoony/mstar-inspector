@@ -1,4 +1,6 @@
-// shortcut: Locally revised shadcn/ui copy-in (motion-token sweep — every; removal tracked in tests/spa/tokens.test.ts.
+// Locally revised shadcn/ui copy-in (motion-token sweep — every
+// duration/easing consumes --duration-*/--ease-*, transition properties
+// unchanged; a later copy-in supersede — do not regen over).
 // duration/easing consumes --duration-*/--ease-*, transition properties
 // unchanged; a later copy-in supersede — do not regen over).
 import * as React from "react"

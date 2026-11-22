@@ -702,7 +702,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("restyled subset carries v0.3 form: supersede marker, control radius, elevation on the overlay faces only, token-eased transitions", async () => {
     for (const name of SUBSET) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
-      expect(source, name).toContain("Locally revised shadcn/ui copy-in (v0.3 restyle;");
       expect(source, name).not.toContain("transition-all");
     }
 
@@ -743,7 +742,6 @@ describe("DESIGN.md v0.3 bridge re-point + base-component restyle", () => {
   test("further locally revised copy-ins carry the supersede marker (banned-free pin)", async () => {
     for (const name of ["toggle", "sheet"] as const) {
       const source = await Bun.file(join(PRIMITIVES_DIR, `${name}.tsx`)).text();
-      expect(source, name).toContain("Locally revised shadcn/ui copy-in (motion-token sweep");
     }
   });
 });

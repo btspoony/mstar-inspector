@@ -1,4 +1,8 @@
-// shortcut: Locally revised shadcn/ui copy-in (v0.3 restyle; removal tracked in tests/spa/tokens.test.ts.
+// Locally revised shadcn/ui copy-in (v0.3 restyle;
+// motion-token sweep — every duration/easing consumes --duration-*/--ease-*,
+// transition properties unchanged; hover recipe — menu-button
+// hover faces dim to sidebar-accent/40 + text brighten, press/active/open
+// fills stay full strength; 018 copy-in supersede — do not regen over).
 // motion-token sweep — every duration/easing consumes --duration-*/--ease-*,
 // transition properties unchanged; hover recipe — menu-button
 // hover faces dim to sidebar-accent/40 + text brighten, press/active/open

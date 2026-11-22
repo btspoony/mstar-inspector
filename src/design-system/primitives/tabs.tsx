@@ -1,4 +1,4 @@
-// shortcut: Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over); removal tracked in tests/spa/tokens.test.ts.
+// Locally revised shadcn/ui copy-in (v0.3 restyle; a later copy-in supersede — do not regen over).
 import * as React from "react"
 import { cva, type VariantProps } from "class-variance-authority"
 import * as TabsPrimitive from "@radix-ui/react-tabs"
