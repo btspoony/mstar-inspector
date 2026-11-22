@@ -836,6 +836,33 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   // not run, and the failure row says which read could not answer. Fail-closed
   // — a verdict the platform could not compute never admits a delivery — and
   // never silent: the row and one structured warn both name the cause.
+  if (outcome.kind === "job") {
+    // THE ROUTE GATE, AT ACCEPTANCE (spec § Deployment gate). A closed route
+    // must be honoured HERE — before the Check is attached and before anything
+    // is enqueued. Attaching first would leave an eligible head with an
+    // `in_progress` Check that nothing adopts, and the reconciler would later
+    // report an unconfirmed failure for work the gate declined. A closed gate
+    // is NOT a failure: no Check, no terminal outcome, no reconciler work.
+    const routeGate = await getReviewRouteWorkflowGate(db);
+    if (routeGate.mode !== "on") {
+      const line = JSON.stringify({
+        event: "review_route_gate_closed",
+        review_route_workflow: "off",
+        gate_saved: routeGate.saved,
+        gate_degraded: routeGate.degraded,
+        gate_reason: routeGate.reason ?? null,
+        installation_id: outcome.payload.installation_id,
+        owner: outcome.payload.owner,
+        repo: outcome.payload.repo,
+        pr_number: outcome.payload.pr_number,
+        head_sha: outcome.payload.head_sha,
+        msg: "review route is off (review.route.workflow) — delivery refused at acceptance: no Check attached, nothing enqueued",
+      });
+      if (routeGate.degraded) console.warn(line);
+      else console.log(line);
+      return c.text("ignored", 200);
+    }
+  }
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
   if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {

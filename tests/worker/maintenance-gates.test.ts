@@ -65,6 +65,14 @@ async function seedApp(db: TestD1): Promise<string> {
        VALUES (?, 'default', ?, ?, ?, ?, ?, 'every_push', 'tester', datetime('now'), datetime('now'))`,
     )
     .run(`target-${id}`, id, id, 5100, "btspoony", "mstar-inspector");
+  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // default per spec § Deployment gate; this suite exercises maintenance).
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+       VALUES ('review.route.workflow', 'on', datetime('now'))`,
+    )
+    .run();
   return id;
 }
 
