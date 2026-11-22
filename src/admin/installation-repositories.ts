@@ -44,10 +44,11 @@ export function createRepoLookup(
     let jwt: string | null = null;
     if (encryptionKey !== undefined) {
       const row = await db
-        // safety: tenant-bypass — internal maintenance read (the data-upgrade
+        // shortcut: tenant-bypass — internal maintenance read (the data-upgrade
         // runner's binding seam): it resolves one bot's App credentials by exact
         // id to mint an installation token and returns no identity, ownership or
-        // response field.
+        // response field. Upgrade: tenant-filter it once the data-upgrade runner
+        // becomes workspace-scoped.
         .prepare("SELECT github_app_id, private_key_enc FROM review_bots WHERE id = ?1")
         .bind(botId)
         .first<{ github_app_id: number; private_key_enc: string }>();
