@@ -1244,6 +1244,45 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an unconfirmed save puts the switch back on the gate's answer", async () => {
+    let runtimeReads = 0;
+    const surface = await runtimeScreen((request) => {
+      if (request.method === "PATCH") return json({ routeWorkflow: { stored: "on" } });
+      runtimeReads += 1;
+      if (runtimeReads > 1) return new Response("unavailable", { status: 503 });
+      return json({ ...RUNTIME, routeWorkflow: { mode: "off", saved: true, degraded: false } });
+    });
+    // Start on a known `off`, then ask for `on`.
+    await surface.click(
+      surface.container.querySelector('button[aria-label="Review route OFF"]'),
+    );
+    expect(surface.container.querySelector('button[aria-label="Review route ON"]')).not.toBeNull();
+
+    const form = surface.container.querySelector('[data-route-workflow="form"]')!;
+    await surface.click(form.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      {
+        url: "/_internal_admin/api/runtime",
+        method: "PATCH",
+        body: { routeWorkflow: { value: "on" } },
+      },
+    ]);
+
+    // Neither the echo nor the re-read confirmed it, so the switch returns to
+    // the gate's answer: the control and the status line cannot disagree.
+    expect(surface.text()).toContain("The save could not be confirmed");
+    expect(surface.container.querySelector('button[aria-label="Review route ON"]')).toBeNull();
+    const toggle = surface.container.querySelector(
+      'button[aria-label="Review route OFF"]',
+    ) as unknown as HTMLButtonElement | null;
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute("aria-pressed")).toBe("false");
+    expect(surface.container.querySelector('[data-route-workflow="stored"]')?.textContent).toBe(
+      "off — saved",
+    );
+    await surface.close();
+  });
+
   test("an older server without a routeWorkflow field hides only that card", async () => {
     const surface = await runtimeScreen(() => json(RUNTIME));
     expect(surface.container.querySelector('[data-route-workflow="form"]')).toBeNull();

@@ -710,6 +710,11 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       // The write landed (2xx); only a readable gate answer may be rendered.
       const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
       if (answer === null) {
+        // Nothing confirmed the write, so the switch goes back to the last
+        // confirmed gate answer — the same value the status line shows. A
+        // control reading `on` beside a status reading `off` is the failure
+        // this card exists to prevent.
+        setRouteWorkflowTarget(null);
         setNotice({
           kind: "error",
           message: t(locale, "admin.runtime.routeWorkflowUnconfirmed"),
