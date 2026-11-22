@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * pr-verdict.ts — decide whether a refresh run may publish.
+ * note: pr-verdict.ts — decide whether a refresh run may publish.
  *
  *   bun run scripts/provider-catalog/pr-verdict.ts \
  *     --typecheck success --test failure --log "${RUNNER_TEMP}/test.log"
@@ -56,6 +56,6 @@ if (import.meta.main) {
   const log = await readFile(flag("log"), "utf8").catch(() => "");
   const result = verdict(flag("typecheck"), flag("test"), log);
   console.log(result.green ? `green — ${result.reason}` : `RED — ${result.reason}`);
-  // The gate: a red run must abort the job, so nothing is published.
+  // safety: a red run must abort the job, so nothing is published.
   if (!result.green) process.exit(1);
 }

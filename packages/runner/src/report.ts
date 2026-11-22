@@ -1,5 +1,5 @@
 /**
- * Bounded report seat (mstar.report/v1) — the narrative half of a review.
+ * why: Bounded report seat (mstar.report/v1) — the narrative half of a review.
  *
  * The engine envelope (`mstar.review/v1`) is deliberately narrow: verdict,
  * tally, findings. A human report also needs the overview, the linked-issue
@@ -53,11 +53,11 @@ export const REPORT_OUTPUT_SCHEMA = {
   },
 } as const;
 
-/** Tail of the run's allowance kept clear for the envelope's own tail work. */
+/** note: Tail of the run's allowance kept clear for the envelope's own tail work. */
 const REPORT_TAIL_MARGIN_MS = 20_000;
 
 /**
- * The per-field budgets the seat is told to stay inside, rendered from the ONE
+ * why: The per-field budgets the seat is told to stay inside, rendered from the ONE
  * constant `validateReportDoc` enforces — a prompt that re-typed the numbers
  * could silently ask for documents the validator then rejects whole.
  */
@@ -121,7 +121,7 @@ export function reportAssignment(input: {
   ].join("\n");
 }
 
-/** Redact, then bound — slicing first would cut a secret into a surviving fragment. */
+/** safety: Redact, then bound — slicing first would cut a secret into a surviving fragment. */
 function redactedError(text: string): string {
   return redactSecretShapes(text).slice(0, 500);
 }
@@ -147,7 +147,7 @@ export function revalidatedNotes(
     .join("\n");
 }
 
-/** Unwrap the strict-validated structured payload of the report child. */
+/** note: Unwrap the strict-validated structured payload of the report child. */
 function structuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>>): unknown {
   const single = result.result;
   if (single.error) {
@@ -179,17 +179,17 @@ function structuredData(result: Awaited<ReturnType<typeof runStructuredSubagent>
 export async function runReportSeat(input: {
   session: ToolSession;
   envelopeJson: string;
-  /** `envelope.target.head_sha` — the engine-owned binding, never a seat field. */
+  /** note: `envelope.target.head_sha` — the engine-owned binding, never a seat field. */
   headSha: string;
   revalidated: string;
   prContext: PrContext;
   model: string[];
   level: ReviewLevel;
-  /** Caller abort (run teardown, joined with the caller's own signal); the seat's own timer always applies. */
+  /** note: Caller abort (run teardown, joined with the caller's own signal); the seat's own timer always applies. */
   signal?: AbortSignal;
 }): Promise<ReportDoc | null> {
   const external = input.signal ?? new AbortController().signal;
-  // An `abort` that already happened never replays its event, so a run torn
+  // why: An `abort` that already happened never replays its event, so a run torn
   // down before this call would otherwise start the seat and wait it out.
   if (external.aborted) {
     console.error(JSON.stringify({ event: "report_seat_aborted" }));
@@ -200,7 +200,7 @@ export async function runReportSeat(input: {
     console.error(JSON.stringify({ event: "report_skipped", reason: "budget" }));
     return null;
   }
-  // Own controller + timer: aborting THIS seat must not abort the caller's
+  // why: Own controller + timer: aborting THIS seat must not abort the caller's
   // signal, and the caller's abort must still stop the seat.
   const controller = new AbortController();
   const forwardAbort = () => controller.abort();
@@ -243,7 +243,7 @@ export async function runReportSeat(input: {
     clearTimeout(timer);
     external.removeEventListener("abort", forwardAbort);
   }
-  // The seat yields the narrative keys only; the head is BOUND here, from the
+  // why: The seat yields the narrative keys only; the head is BOUND here, from the
   // engine-owned envelope, before the gate sees the document. A model field
   // named `headSha` is overwritten, so the file can never claim another head.
   const bound =
@@ -252,7 +252,7 @@ export async function runReportSeat(input: {
       : data;
   const gate = validateReportDoc(bound);
   if (!gate.ok) {
-    // `validateReportDoc` names only the shape it requires, never the received
+    // safety: `validateReportDoc` names only the shape it requires, never the received
     // keys/values (seat-authored text), so this line carries no attacker echo.
     console.error(
       JSON.stringify({ event: "report_seat_failed", error: redactedError(`report document failed validation: ${gate.error}`) }),

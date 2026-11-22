@@ -27,7 +27,7 @@ requested="${2:-}"
 deployed="${3:-}"
 serving="${4:-}"
 
-# Two version-creating steps: the first deploy can succeed while the version
+# why: Two version-creating steps: the first deploy can succeed while the version
 # that actually serves never lands (a secret write or the serving deploy
 # fails). That SHA must not be reported as what this run shipped.
 # The fourth argument is the caller declaring "a separate serving step exists",

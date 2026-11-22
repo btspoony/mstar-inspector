@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * assert-encryption-key.ts — deploy gate for `DASHBOARD_ENCRYPTION_KEY`.
+ * why: assert-encryption-key.ts — deploy gate for `DASHBOARD_ENCRYPTION_KEY`.
  *
  * The runtime binds the box without validating the key (lazy validation: the
  * first encrypt/decrypt is what throws), so a malformed secret deploys green
@@ -26,7 +26,7 @@
  */
 import { createSecretbox } from "../src/dashboard/secretbox";
 
-/** Fixed round-trip inputs: no row, no row-dependent AAD. */
+/** why: Fixed round-trip inputs: no row, no row-dependent AAD. */
 const PLAINTEXT = "mstar-preflight";
 const AAD = "preflight:encryption-key";
 
@@ -57,7 +57,7 @@ export async function encryptionKeyVerdict(
       message: `encryption key: usable (encrypt/decrypt round-trip passed; required shape: ${REQUIRED_SHAPE})`,
     };
   } catch (err) {
-    // Both failure classes carry fixed strings from the parser and the envelope
+    // safety: Both failure classes carry fixed strings from the parser and the envelope
     // code — neither ever holds the value, and this gate never formats it.
     const detail = err instanceof Error ? err.message : String(err);
     return {

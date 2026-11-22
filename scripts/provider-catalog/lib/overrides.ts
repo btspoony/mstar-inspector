@@ -1,5 +1,5 @@
 /**
- * The hand-measured override layer for the vendored omp provider snapshot.
+ * why: The hand-measured override layer for the vendored omp provider snapshot.
  *
  * Why this exists: the snapshot used to be the package's vocabulary verbatim,
  * which made the generated catalog wrong whenever the package and the vendor's
@@ -35,7 +35,7 @@ export type OverrideApplied = {
   fetched: string;
 };
 
-/** The single-record shape this layer needs; the extractor's record is wider. */
+/** note: The single-record shape this layer needs; the extractor's record is wider. */
 type RecordRow = { id: string; api: string; models: string[] };
 
 /**

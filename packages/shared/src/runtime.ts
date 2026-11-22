@@ -1,5 +1,5 @@
 /**
- * AgentRuntime port — interface signature locked verbatim to the
+ * why: AgentRuntime port — interface signature locked verbatim to the
  * agent-runtime spec § TypeScript 端口.
  *
  * Pure types + constants only: zero omp SDK RUNTIME import, zero I/O, safe to
@@ -23,9 +23,9 @@ export const REVIEW_LEVELS = ["quick", "default", "deep"] as const;
 export type ReviewLevel = (typeof REVIEW_LEVELS)[number];
 
 /**
- * Seats per Bun fan-out level — commands/amazing-pr-review.md 档位表.
- * `deep` deliberately has NO seats entry: it runs one parent session, not a
- * seat partition.
+ * why: Seats per Bun fan-out level — skills/mstar-audit/references/pr-review.md
+ * § Review depth (tiers). `deep` deliberately has NO seats entry: it runs one
+ * parent session, not a seat partition.
  */
 export const REVIEW_SEATS: Record<Exclude<ReviewLevel, "deep">, number> = { quick: 1, default: 2 };
 
@@ -62,7 +62,7 @@ export type CustomProviderDeclaration = {
   api: string;
   model_ids: string[];
   /**
-   * What the App owner stated about each of `model_ids` (keyed by that id).
+   * note: What the App owner stated about each of `model_ids` (keyed by that id).
    * ABSENT means nothing was stated — this is NOT the same statement as `{}`,
    * and the consumer never produces the empty object. An absent fact inside an
    * entry is absent too: the runner must not read zero as "unset".
@@ -82,9 +82,9 @@ export type CustomProviderDeclaration = {
  * candidate; `name`, `reasoning` and `input` may stay unset and stay unset.
  */
 export type CustomProviderModelMeta = {
-  /** Tokens the model can hold — a positive whole count. */
+  /** note: Tokens the model can hold — a positive whole count. */
   contextWindow?: number;
-  /** Token cap one completion may spend — a positive whole count. */
+  /** note: Token cap one completion may spend — a positive whole count. */
   maxTokens?: number;
   name?: string;
   reasoning?: boolean;
@@ -103,7 +103,7 @@ export type CapabilityHostModel = {
   id: string;
   name: string;
   reasoning: boolean;
-  /** Input modalities (omp: e.g. ["text"]). */
+  /** note: Input modalities (omp: e.g. ["text"]). */
   input: readonly string[];
   contextWindow: number;
   maxTokens: number;
@@ -122,29 +122,29 @@ export type CapabilityHostModel = {
  * tests/review/runtime-boundary derives the admitted set from the Dockerfile).
  */
 export type CapabilityHost = {
-  /** Host id — the selector prefix (e.g. `acme/fast-model`). */
+  /** note: Host id — the selector prefix (e.g. `acme/fast-model`). */
   id: string;
-  /** Providers/BYOK catalog id whose transported pool this host resolves from. */
+  /** note: Providers/BYOK catalog id whose transported pool this host resolves from. */
   catalogProviderId: string;
-  /** Retained registry metadata — no longer an active key-resolution input. */
+  /** note: Retained registry metadata — no longer an active key-resolution input. */
   apiKeyEnv: string;
   baseUrl: string;
   api: string;
-  /** Retained registry metadata — synthesis emits `auth: oauth` for every block. */
+  /** note: Retained registry metadata — synthesis emits `auth: oauth` for every block. */
   auth: string;
   models: readonly CapabilityHostModel[];
 };
 
 export type AgentRuntimeRunInput = {
   level: ReviewLevel;
-  /** 容器内 PR clone 的绝对路径（exec cwd；席位 worktree = 该只读 clone）。 */
+  /** note: 容器内 PR clone 的绝对路径（exec cwd；席位 worktree = 该只读 clone）。 */
   worktreePath: string;
-  /** 每席可见的 recon 事实（owner/repo#pr、head sha、diff 统计、该席文件范围）。 */
+  /** note: 每席可见的 recon 事实（owner/repo#pr、head sha、diff 统计、该席文件范围）。 */
   reconFacts: readonly string[];
-  /** 模型选择链；SSOT = env `OMP_REVIEW_MODEL`（逗号分隔，容器注入）。 */
+  /** note: 模型选择链；SSOT = env `OMP_REVIEW_MODEL`（逗号分隔，容器注入）。 */
   modelSelectors: readonly string[];
   /**
-   * Per-seat model overrides (spec Architect lock L3): agent
+   * note: Per-seat model overrides (spec Architect lock L3): agent
    * name → selector chain (B2 `parseModelChain` grammar, `:thinking` suffix
    * verbatim). OPTIONAL — absent = the legacy runner input, resolved
    * byte-identically to the pre-chains behavior. Shape is validated by the
@@ -155,7 +155,7 @@ export type AgentRuntimeRunInput = {
    */
   modelOverrides?: Record<string, string>;
   /**
-   * Directory holding the synthesized COMPLETE per-review models.yml
+   * why: Directory holding the synthesized COMPLETE per-review models.yml
    * (AL-23-1): the runner ALWAYS synthesizes
    * /tmp/omp-agent-<uuid>/models.yml — the (empty) capability base plus the
    * custom-provider declarations (a base id wins on collision) — and rides
@@ -166,7 +166,7 @@ export type AgentRuntimeRunInput = {
    */
   agentDir: string;
   /**
-   * The run's credential store, handed to the session IN MEMORY (never a
+   * safety: The run's credential store, handed to the session IN MEMORY (never a
    * file): the runner loads the transported pool into it and every
    * `createAgentSession` call receives this exact instance. REQUIRED, even on
    * a keyless run — omitting it makes the SDK fall back to
@@ -177,7 +177,7 @@ export type AgentRuntimeRunInput = {
    */
   authStorage: AuthStorage;
   /**
-   * Optional typed recheck input (spec review-lifecycle
+   * note: Optional typed recheck input (spec review-lifecycle
    * §7.3/§7.8): the worker-captured assessment targets, trusted evidence
    * catalog and untrusted discussion snapshot for the SAME head this run
    * reviews (headSha equality is enforced downstream by validateRecheckDoc).
@@ -187,7 +187,7 @@ export type AgentRuntimeRunInput = {
    */
   recheck?: RecheckInput;
   /**
-   * The ABSOLUTE instant this run's exec is killed at — `Date.now()` epoch ms
+   * why: The ABSOLUTE instant this run's exec is killed at — `Date.now()` epoch ms
    * on the WORKER's clock, the deadline the caller already derived from its
    * round budget, never a duration. The runner anchors the shared review
    * deadline AT this instant, so the runner-input write and the runner's own
@@ -200,7 +200,7 @@ export type AgentRuntimeRunInput = {
    */
   outerDeadlineEpochMs?: number;
   /**
-   * The seat's ask budget in UTF-8 bytes, read once from the operator's
+   * note: The seat's ask budget in UTF-8 bytes, read once from the operator's
    * `review.recheck.assignment_max_bytes` system row. ABSENT = the runner's
    * documented default (`RECHECK_ASSIGNMENT_MAX_BYTES`), so a legacy input
    * keeps its behaviour byte-identically. It rides the input, NOT the frozen
@@ -208,13 +208,13 @@ export type AgentRuntimeRunInput = {
    */
   recheckAssignmentMaxBytes?: number;
   /**
-   * Optional PR context (the description plus its closing issues) for the
+   * note: Optional PR context (the description plus its closing issues) for the
    * report seat. ABSENT = no report seat runs and the result's `report` is
    * null, so the legacy runner input stays byte-identical.
    */
   prContext?: PrContext;
   /**
-   * Optional caller abort for the whole run (port-level teardown). The review
+   * why: Optional caller abort for the whole run (port-level teardown). The review
    * paths join it with their own teardown signal before handing it to the
    * report seat, so a caller that abandons a run stops a seat that is already
    * in flight. ABSENT = the legacy runtime input: the report seat keeps only
@@ -228,21 +228,21 @@ export type ReviewRunResult = {
   envelope: MstarReviewV1;
   recheck: RecheckDoc | null;
   /**
-   * Why the recheck round ended — present whenever the input carried a
+   * note: Why the recheck round ended — present whenever the input carried a
    * recheck document, so a round with `recheck: null` is still attributable
    * (budget skip / seat failure / invalid document). Absent = no recheck
    * round was requested.
    */
   recheckStatus?: RecheckStatus;
   /**
-   * The narrative report (mstar.report/v1), or null when the run produced
+   * note: The narrative report (mstar.report/v1), or null when the run produced
    * none (no `prContext` in the input, the seat failed, or its document did
    * not pass `validateReportDoc`). Never throws: a missing report degrades the
    * published sections to `none`.
    */
   report: ReportDoc | null;
   /**
-   * The `provider/model` the run's session ACTUALLY served on — observed by the
+   * why: The `provider/model` the run's session ACTUALLY served on — observed by the
    * runner, never derived from the configured chain. ABSENT means no model
    * served (a round that failed before any prompt), which is a different fact
    * from "the chain head": a consumer that fell back to the chain head would
@@ -275,7 +275,7 @@ export const APPLIED_MODEL_MAX_CHARS = 256;
 
 export interface AgentRuntime {
   /**
-   * Runs a full review, resolving ONLY with a validated `mstar.review/v1`
+   * note: Runs a full review, resolving ONLY with a validated `mstar.review/v1`
    * envelope (result shape `{ envelope, recheck, report }`: each side doc is
    * either a validated document or `null` — a seat failure, timeout or empty
    * output never masquerades as success and never loses the review body);

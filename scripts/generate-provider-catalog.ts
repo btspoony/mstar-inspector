@@ -73,7 +73,7 @@ const OMP_SNAPSHOT_PATH = path.resolve("scripts/provider-catalog/generated/omp-a
 const OUT_PATH = path.resolve("src/contracts/provider-catalog.generated.ts");
 const OUT_LIMITS_PATH = path.resolve("src/contracts/provider-model-limits.generated.ts");
 
-/** The size fields this generator consumes from each model's `limit` row. */
+/** note: The size fields this generator consumes from each model's `limit` row. */
 type SnapshotLimit = { context?: number; output?: number };
 
 type SnapshotProvider = {
@@ -86,15 +86,15 @@ type SnapshotProvider = {
   limits?: Record<string, SnapshotLimit>;
 };
 
-/** One model's sizes in the generated table, in tokens. */
+/** note: One model's sizes in the generated table, in tokens. */
 type ModelLimit = { contextWindow: number; maxTokens: number };
 
-/** The vendored omp provider union input (`omp-api-key-providers.json`). */
+/** note: The vendored omp provider union input (`omp-api-key-providers.json`). */
 type OmpSnapshot = {
   source: {
     version: string;
     extracted: string;
-    /** Buckets measured from the vendor's live endpoint, applied over the package. */
+    /** note: Buckets measured from the vendor's live endpoint, applied over the package. */
     overrides?: {
       provider: string;
       bucket: string;
@@ -111,11 +111,11 @@ type OmpSnapshot = {
     baseUrl: string | null;
     api: string;
     models: string[];
-    /** Set only where a mixed-protocol row id differs from its omp provider. */
+    /** note: Set only where a mixed-protocol row id differs from its omp provider. */
     sourceProviderId?: string;
   }[];
   ompProviderIds: string[];
-  /** models.dev snapshot keys a mixed-protocol omp provider takes over. */
+  /** note: models.dev snapshot keys a mixed-protocol omp provider takes over. */
   ownsSnapshotKeys?: string[];
   excluded: {
     alias: Record<string, string>;
@@ -125,7 +125,7 @@ type OmpSnapshot = {
   };
 };
 
-/** One builtin-tier entry spec. `sourceKey` = the models.dev snapshot key
+/** note: One builtin-tier entry spec. `sourceKey` = the models.dev snapshot key
  *  carrying the ecosystem metadata (absent → no ecosystem data; all fields
  *  local). `label`/`envName` are the omp-facing SSOT (runner contract).
  *
@@ -134,7 +134,7 @@ type OmpSnapshot = {
  *  shape and protocol, so the settings face can open the custom-provider
  *  form from the catalog entry instead of restating either value. */
 type BuiltinSpec = {
-  /** Selector-facing provider id (the catalog record key). */
+  /** note: Selector-facing provider id (the catalog record key). */
   id: string;
   sourceKey?: string;
   label: string;
@@ -145,14 +145,14 @@ type BuiltinSpec = {
   modelCount?: number;
 };
 
-/** The 19 builtin ids in mapping order (the PROVIDER_ENV_NAMES /
+/** note: The 19 builtin ids in mapping order (the PROVIDER_ENV_NAMES /
  *  PROVIDER_IDS parity sequence — AL-24-5, `ark` last). */
 const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "anthropic", sourceKey: "anthropic", label: "Anthropic", envName: "ANTHROPIC_API_KEY" },
   { id: "openai", sourceKey: "openai", label: "OpenAI", envName: "OPENAI_API_KEY" },
   { id: "gemini", sourceKey: "google", label: "Google Gemini", envName: "GEMINI_API_KEY" },
   { id: "copilot", sourceKey: "github-copilot", label: "GitHub Copilot", envName: "COPILOT_GITHUB_TOKEN" },
-  // Console-only builtins carry the declaration prefill the settings face
+  // why: Console-only builtins carry the declaration prefill the settings face
   // opens the custom form with: azure's host is per-deployment and AI
   // Gateway's path needs account + gateway ids, so neither has a probeable
   // host of its own (provider-verify: `unsupported`).
@@ -174,7 +174,7 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "umans", sourceKey: "umans-ai-coding-plan", label: "Umans AI Coding Plan", envName: "UMANS_AI_CODING_PLAN_API_KEY" },
   { id: "minimax", sourceKey: "minimax", label: "MiniMax", envName: "MINIMAX_API_KEY" },
   { id: "opencode", sourceKey: "opencode", label: "OpenCode", envName: "OPENCODE_API_KEY" },
-  // cursor: not present in the models.dev snapshot — local metadata only.
+  // note: cursor: not present in the models.dev snapshot — local metadata only.
   { id: "cursor", label: "Cursor", envName: "CURSOR_ACCESS_TOKEN", baseUrl: null, doc: "https://cursor.com/docs/api/overview" },
   {
     id: "ai-gateway",
@@ -188,7 +188,7 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
   { id: "ark", sourceKey: "volcengine", label: "Ark", envName: "ARK_API_KEY" },
 ];
 
-/** Display-only grouping of the settings picker (AD-547): the
+/** note: Display-only grouping of the settings picker (AD-547): the
  *  常用 (common) tier — a fixed-order subset of the builtin ids shown first
  *  in the Add-provider picker; every other entry renders under the 目录模板
  *  group. ZERO runner semantics: the BYOK allowlist remains
@@ -196,7 +196,7 @@ const BUILTIN_ORDER: BuiltinSpec[] = [
  *  gate verify/save/consumer behavior. */
 const COMMON_PROVIDER_IDS: readonly string[] = ["anthropic", "openai", "gemini", "copilot", "xai"];
 
-// Fail loud (mirrors the breadth-collision guard): the display tier must be
+// invariant: Fail loud (mirrors the breadth-collision guard): the display tier must be
 // a duplicate-free subset of the builtin ids — an invalid table breaks
 // generation instead of silently drifting into the committed contract.
 const builtinIds = BUILTIN_ORDER.map((spec) => spec.id);
@@ -209,7 +209,7 @@ if (
   );
 }
 
-/** Template-tier entries (spec §5): metadata + prefill only — NOT
+/** note: Template-tier entries (spec §5): metadata + prefill only — NOT
  *  runner-consumable as env-name entries; the save flow materializes them
  *  through the existing custom-provider machinery (bot_custom_providers).
  *  `baseUrl` carries the `{account_id}` placeholder the save flow
@@ -235,7 +235,7 @@ const TEMPLATES: Record<string, { label: string; baseUrl: string; api: string; m
   },
 };
 
-/** Breadth rule (b): snapshot keys deduped into a hand-curated TEMPLATES
+/** note: Breadth rule (b): snapshot keys deduped into a hand-curated TEMPLATES
  *  entry (snapshot key → catalog template id) instead of becoming their own
  *  breadth row. */
 const TEMPLATE_DEDUPE_SNAPSHOT_KEYS: Record<string, string> = {
@@ -243,7 +243,7 @@ const TEMPLATE_DEDUPE_SNAPSHOT_KEYS: Record<string, string> = {
 };
 
 /**
- * Mirror of CUSTOM_PROVIDER_ID_PATTERN (src/dashboard/app-config-store.ts)
+ * invariant: Mirror of CUSTOM_PROVIDER_ID_PATTERN (src/dashboard/app-config-store.ts)
  * — a breadth id materializes into a custom-provider declaration, so it
  * must satisfy the exact store grammar. The copy is parity-locked by
  * tests/pipeline/providers.test.ts; keep the two regex literals byte-equal.
@@ -252,29 +252,29 @@ const CUSTOM_PROVIDER_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 
 type BreadthAudit = {
-  /** Rule (a) skips: snapshot keys consumed as a builtin sourceKey. */
+  /** note: Rule (a) skips: snapshot keys consumed as a builtin sourceKey. */
   excludedSourceKeys: string[];
-  /** Rule (b) skips: snapshot keys deduped into a hand-curated template. */
+  /** note: Rule (b) skips: snapshot keys deduped into a hand-curated template. */
   dedupedKeys: string[];
-  /** Rule (c) skips: remaining ids failing the custom-provider id grammar. */
+  /** note: Rule (c) skips: remaining ids failing the custom-provider id grammar. */
   idPatternFails: string[];
-  /** Snapshot keys that became breadth template rows. */
+  /** note: Snapshot keys that became breadth template rows. */
   breadthCount: number;
-  /** omp union: ids already present in the catalog (builtin or template). */
+  /** note: omp union: ids already present in the catalog (builtin or template). */
   ompAlreadyPresent: string[];
-  /** omp union: ids that name the same vendor as an existing catalog row. */
+  /** note: omp union: ids that name the same vendor as an existing catalog row. */
   ompAliasSkips: string[];
-  /** omp union: non-model providers (no env key, or a search/local surface). */
+  /** note: omp union: non-model providers (no env key, or a search/local surface). */
   ompNonModel: string[];
-  /** omp union: records that could not be materialized, with the failing rule. */
+  /** note: omp union: records that could not be materialized, with the failing rule. */
   ompNotMaterializable: string[];
-  /** omp union: provider rows emitted (one per provider, protocols as options). */
+  /** note: omp union: provider rows emitted (one per provider, protocols as options). */
   ompRowCount: number;
-  /** models.dev keys skipped because a mixed-protocol omp row owns them. */
+  /** note: models.dev keys skipped because a mixed-protocol omp row owns them. */
   ompOwnedKeys: string[];
 };
 
-/** The template `api` vocabulary — mirrors CUSTOM_PROVIDER_API_IDS in
+/** invariant: The template `api` vocabulary — mirrors CUSTOM_PROVIDER_API_IDS in
  *  src/dashboard/app-config-store.ts (parity-locked by
  *  tests/pipeline/providers.test.ts; keep the entries byte-equal). */
 const MATERIALIZABLE_APIS: readonly string[] = [
@@ -284,7 +284,7 @@ const MATERIALIZABLE_APIS: readonly string[] = [
   "typesafe",
 ];
 
-/** The only `{placeholder}` a union row may carry; the save flow substitutes
+/** invariant: The only `{placeholder}` a union row may carry; the save flow substitutes
  *  exactly this one. Any other placeholder is unmaterializable. */
 const ALLOWED_URL_PLACEHOLDERS: Record<string, true> = { account_id: true };
 
@@ -298,12 +298,12 @@ export function buildCatalog(
   catalog: Record<string, unknown>;
   audit: BreadthAudit;
   sources: Record<string, string>;
-  /** Collapsed per-protocol record id → the provider row that absorbed it. */
+  /** note: Collapsed per-protocol record id → the provider row that absorbed it. */
   legacy: Record<string, string>;
 } {
   const catalog: Record<string, unknown> = {};
   const legacy: Record<string, string> = {};
-  // catalog provider id → the models.dev snapshot key carrying its model
+  // note: catalog provider id → the models.dev snapshot key carrying its model
   // vocabulary. Only source-backed rows can contribute model sizes; the omp
   // union rows (own vocabulary) and local-only rows (cursor) have none.
   const sources: Record<string, string> = {};
@@ -336,7 +336,7 @@ export function buildCatalog(
       doc: tpl.doc,
     };
   }
-  // A deduped curated template still draws its model vocabulary from the
+  // why: A deduped curated template still draws its model vocabulary from the
   // snapshot row it replaces (the workers-ai models are the directory's @cf
   // ids), so sizes are resolvable for it.
   for (const [snapshotKey, catalogId] of Object.entries(TEMPLATE_DEDUPE_SNAPSHOT_KEYS)) {
@@ -359,21 +359,21 @@ export function buildCatalog(
     ompRowCount: 0,
     ompOwnedKeys: [],
   };
-  // Snapshot insertion order (JSON.parse preserves it for non-numeric keys)
+  // why: Snapshot insertion order (JSON.parse preserves it for non-numeric keys)
   // is the deterministic breadth order — the pinned file's own sequence.
   for (const [key, source] of Object.entries(snapshot)) {
     if (builtinSourceKeys.has(key)) {
       audit.excludedSourceKeys.push(key);
       continue;
     }
-    // Own-property lookup (see the collision guard below): a snapshot key
+    // why: Own-property lookup (see the collision guard below): a snapshot key
     // named like an inherited Object.prototype property (e.g. `constructor`)
     // must not match the dedupe table through the prototype chain.
     if (Object.hasOwn(TEMPLATE_DEDUPE_SNAPSHOT_KEYS, key)) {
       audit.dedupedKeys.push(key);
       continue;
     }
-    // A mixed-protocol omp provider needs one declaration per protocol, which
+    // why: A mixed-protocol omp provider needs one declaration per protocol, which
     // a single models.dev row cannot express — the omp union owns that key.
     if (omp !== undefined && (omp.ownsSnapshotKeys ?? []).includes(key)) {
       audit.ompOwnedKeys.push(key);
@@ -383,7 +383,7 @@ export function buildCatalog(
       audit.idPatternFails.push(key);
       continue;
     }
-    // Fail loud (audit DEBT-46-05): a snapshot key that survives rules
+    // invariant: Fail loud (audit DEBT-46-05): a snapshot key that survives rules
     // (a)-(c) but collides with a builtin id or the curated workers-ai
     // template must never silently overwrite the hand-maintained entry.
     // Own-property check: prototype-chain names (e.g. `constructor`) are
@@ -399,14 +399,14 @@ export function buildCatalog(
       label: source.name,
       tier: "template",
       envName: null,
-      // The snapshot `api` field carries the default base URL — shipped
+      // note: The snapshot `api` field carries the default base URL — shipped
       // verbatim (may be null or non-https; the save flow's base-URL
       // override + existing https validator make such rows materializable).
       baseUrl: source.api ?? null,
-      // The snapshot carries NO protocol field — the ecosystem-norm default
+      // note: The snapshot carries NO protocol field — the ecosystem-norm default
       // for the directory; curated templates keep their own value.
       api: "openai-completions",
-      // The FULL snapshot vocabulary: the settings face shows a configured
+      // note: The FULL snapshot vocabulary: the settings face shows a configured
       // provider's real model list, and the add-template-provider flow clips
       // it to the store's own 128-entry bound (MAX_CUSTOM_PROVIDER_MODEL_IDS)
       // at materialization time.
@@ -415,14 +415,14 @@ export function buildCatalog(
     };
     audit.breadthCount += 1;
   }
-  // Third input: the vendored omp API-key provider snapshot. Runs AFTER the
+  // why: Third input: the vendored omp API-key provider snapshot. Runs AFTER the
   // models.dev breadth pass so rules (a)/(b) can see every catalog row the
   // earlier passes produced. Every surviving record is a template row — the
   // builtin allowlist never grows. The scan covers EVERY omp provider id so
   // the generated header can name, by rule, each one that did not become a
   // row.
   if (omp !== undefined) {
-    // Rule (a) sees the catalog rows AND the models.dev keys the builtin tier
+    // note: Rule (a) sees the catalog rows AND the models.dev keys the builtin tier
     // consumed: an omp provider that names a builtin's source key (e.g.
     // `cloudflare-ai-gateway` → the `ai-gateway` builtin) is already covered
     // by that builtin row, even though the key itself is not a catalog id.
@@ -433,7 +433,7 @@ export function buildCatalog(
     const recordsByProvider: Record<string, OmpSnapshot["providers"]> = {};
     const recordIds = new Set<string>();
     for (const record of omp.providers) {
-      // A duplicate row id is a corrupted extraction: the second record would
+      // why: A duplicate row id is a corrupted extraction: the second record would
       // silently overwrite the first as "already present".
       if (recordIds.has(record.id)) {
         throw new Error(
@@ -444,7 +444,7 @@ export function buildCatalog(
       const providerId = record.sourceProviderId ?? record.id;
       (recordsByProvider[providerId] ??= []).push(record);
     }
-    // The union loop below walks ompProviderIds; a record grouped under any
+    // why: The union loop below walks ompProviderIds; a record grouped under any
     // other id would never be visited, so reject it instead of dropping it.
     const ompProviderIdSet = new Set(omp.ompProviderIds);
     for (const providerId of Object.keys(recordsByProvider)) {
@@ -456,13 +456,13 @@ export function buildCatalog(
     }
     for (const providerId of omp.ompProviderIds) {
       const records = recordsByProvider[providerId] ?? [];
-      // Rule (a)/(b)/(c): a provider with no vendored record was already
+      // why: Rule (a)/(b)/(c): a provider with no vendored record was already
       // excluded at extraction — restate WHY, from the pinned exclusion
       // tables, so the header audit stays complete and checkable.
       if (records.length === 0) {
         if (Object.hasOwn(catalogBeforeUnion, providerId)) audit.ompAlreadyPresent.push(providerId);
         else if (Object.hasOwn(omp.excluded.alias, providerId)) {
-          // Rule (b) claims the provider is COVERED BY another catalog row, so
+          // why: Rule (b) claims the provider is COVERED BY another catalog row, so
           // a target that is not a row would silently drop the provider while
           // the audit header kept asserting that coverage.
           const target = omp.excluded.alias[providerId]!;
@@ -486,7 +486,7 @@ export function buildCatalog(
         }
         continue;
       }
-      // Classify every record of the provider BEFORE emitting: a mixed-protocol
+      // why: Classify every record of the provider BEFORE emitting: a mixed-protocol
       // provider ships several rows, and only the ones that actually ship count
       // toward the "more than one row" decision below.
       const decisions = records.map((record) => {
@@ -507,7 +507,7 @@ export function buildCatalog(
         }
         return { record, skip: null };
       });
-      // Only the records that actually ship become the provider row's protocol
+      // note: Only the records that actually ship become the provider row's protocol
       // options; every skip stays audited under its own rule.
       const shipped: OmpSnapshot["providers"] = [];
       for (const { record, skip } of decisions) {
@@ -526,18 +526,18 @@ export function buildCatalog(
         shipped.push(record);
       }
       if (shipped.length === 0) continue;
-      // One row per provider, living under the provider id: a provider another
+      // why: One row per provider, living under the provider id: a provider another
       // pass already emitted absorbs the whole group instead of being
       // rewritten (two rows for one provider is the split this shape removes).
       if (Object.hasOwn(catalog, providerId)) {
         for (const record of shipped) audit.ompAlreadyPresent.push(record.id);
         continue;
       }
-      // The base record (id == provider id) is the DEFAULT protocol: its api,
+      // note: The base record (id == provider id) is the DEFAULT protocol: its api,
       // base URL and vocabulary are the row's own scalars, so a consumer that
       // knows nothing about `protocols` keeps the default's behaviour.
       const defaultRecord = shipped.find((record) => record.id === providerId) ?? shipped[0]!;
-      // Remaining options in code-unit api order — derived, never the
+      // why: Remaining options in code-unit api order — derived, never the
       // snapshot's incidental ordering.
       const options = shipped
         .filter((record) => record !== defaultRecord)
@@ -550,7 +550,7 @@ export function buildCatalog(
         api: defaultRecord.api,
         models: defaultRecord.models,
         doc: null,
-        // Emitted only where the provider ships more than one materializable
+        // why: Emitted only where the provider ships more than one materializable
         // protocol: a single-protocol row's own scalars already are its one
         // option, and every other row keeps the same seven-key shape.
         ...(shipped.length > 1
@@ -564,23 +564,23 @@ export function buildCatalog(
           : {}),
       };
       audit.ompRowCount += 1;
-      // The record ids this row absorbed stay readable on the read faces
+      // why: The record ids this row absorbed stay readable on the read faces
       // (label, sizes, usage probe) without rewriting any stored declaration.
       for (const record of shipped) {
         if (record.id !== providerId) legacy[record.id] = providerId;
       }
-      // A provider id that names a models.dev key draws that row's numbers: the
+      // note: A provider id that names a models.dev key draws that row's numbers: the
       // union owns the vocabulary, the directory only donates sizes.
       if (Object.hasOwn(snapshot, providerId)) sources[providerId] = providerId;
     }
   }
-  // Code-unit id order — the emitted map must not depend on group visit order.
+  // why: Code-unit id order — the emitted map must not depend on group visit order.
   const legacySorted: Record<string, string> = {};
   for (const id of Object.keys(legacy).sort()) legacySorted[id] = legacy[id]!;
   return { catalog, audit, sources, legacy: legacySorted };
 }
 
-/** Keep a snapshot model's sizes only when both are usable token counts —
+/** why: Keep a snapshot model's sizes only when both are usable token counts —
  *  a missing or non-positive half would silently become a zero in the table. */
 function modelLimitOf(raw: SnapshotLimit | undefined): ModelLimit | undefined {
   const context = raw?.context;
@@ -591,7 +591,7 @@ function modelLimitOf(raw: SnapshotLimit | undefined): ModelLimit | undefined {
   return { contextWindow: context, maxTokens: output };
 }
 
-/** Per-model sizes for exactly the providers/models the catalog lists. A
+/** why: Per-model sizes for exactly the providers/models the catalog lists. A
  *  source-backed row with no resolvable size is a data defect (the snapshot
  *  dropped a model the catalog still carries), not a silent omission — only
  *  rows that draw their vocabulary from somewhere else (the omp union, the
@@ -608,7 +608,7 @@ function buildModelLimits(
     const sourceKey = sources[providerId];
     const source = sourceKey === undefined ? undefined : snapshot[sourceKey];
     const row: Record<string, ModelLimit> = {};
-    // A mixed-protocol row states one vocabulary per protocol; the snapshot
+    // note: A mixed-protocol row states one vocabulary per protocol; the snapshot
     // numbers cover every id the row can materialize, so the table iterates
     // the whole union (an id the directory does not carry stays unsized).
     const vocabularies = entry as { models: string[]; protocols?: { models: string[] }[] };
@@ -635,7 +635,7 @@ function buildModelLimits(
 }
 
 async function main(): Promise<void> {
-  // The newest dated snapshot is the input — ISO names sort lexicographically,
+  // why: The newest dated snapshot is the input — ISO names sort lexicographically,
   // so discovery needs no date constant (the provenance header names the file).
   const snapshotFile = pickNewestSnapshot(await readdir(INPUTS_DIR));
   const snapshotPath = path.join(INPUTS_DIR, snapshotFile.file);
@@ -650,7 +650,7 @@ async function main(): Promise<void> {
   const builtinIdsLiteral = JSON.stringify(BUILTIN_ORDER.map((spec) => spec.id), null, 2);
   const commonIdsLiteral = JSON.stringify(COMMON_PROVIDER_IDS, null, 2);
   const wrapList = (items: string[]): string => (items.length === 0 ? "(none)" : items.join(", "));
-  // The measured layer is the one fact a reader cannot derive from the package:
+  // why: The measured layer is the one fact a reader cannot derive from the package:
   // say where each overridden bucket came from, and when it was measured.
   const overrides = omp.source.overrides ?? [];
   const overrideLines =
@@ -667,7 +667,7 @@ ${overrides
   )
   .join("\n")}`;
 
-  // The auditComment/moduleSource template literals stay at column 0 — their
+  // invariant: The auditComment/moduleSource template literals stay at column 0 — their
   // line-leading whitespace is generated-file content, and the regeneration
   // byte-identity lock (tests/pipeline/providers.test.ts) must not shift.
   const auditComment = ` * Breadth enumeration (deterministic, auditable — every excluded snapshot
@@ -831,7 +831,7 @@ export const TEMPLATE_PROVIDERS: Record<string, ProviderCatalogEntry> = Object.f
 ) as Record<string, ProviderCatalogEntry>;
 `;
 
-  // QC wave (seat1): the parity locks (tests/worker/app-config.test.ts)
+  // note: QC wave (seat1): the parity locks (tests/worker/app-config.test.ts)
   // fail CI on drift between this contract and the dashboard mirror — the
   // mirror is now a direct re-export of this module, so the lock
   // guards the re-export instead of a hand-maintained copy.
@@ -884,7 +884,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
   );
 }
 
-// Authoring path: the read/write tail runs only when the script is executed
+// why: Authoring path: the read/write tail runs only when the script is executed
 // directly (`bun run scripts/generate-provider-catalog.ts`); importing the
 // module (the collision guard tests) gets the pure buildCatalog with zero
 // file I/O.

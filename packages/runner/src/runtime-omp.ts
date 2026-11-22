@@ -1,5 +1,5 @@
 /**
- * omp AgentRuntime adapter — the
+ * note: omp AgentRuntime adapter — the
  * SINGLE omp SDK import point of this module tree. The former single-session
  * PR adapter (src/review/session.ts + review.ts + run.ts) is retired here.
  * quick/default: the parent session never prompts a model — it only hosts
@@ -118,7 +118,7 @@ import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/rech
 import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 
 /**
- * Environment override for the mstar-harness plugin root — the primary,
+ * note: Environment override for the mstar-harness plugin root — the primary,
  * documented configuration surface. Tests and CI inject a fixture root
  * through it; the test fixture mirrors this name
  * (tests/review/plugin-root-fixture.ts).
@@ -149,7 +149,7 @@ export function resolveHarnessRoot(): string {
 export const REVIEW_TOOL_NAMES = ["read", "grep", "glob"] as const;
 
 /**
- * The caller's first selector. The consumer fails closed on a chain-less App,
+ * note: The caller's first selector. The consumer fails closed on a chain-less App,
  * so this is always present; an empty chain here is a caller bug and fails
  * loud rather than inventing a provider.
  */
@@ -175,13 +175,7 @@ export function parseModelSelectors(raw: string | undefined): string[] {
 }
 
 /**
- * Load every skill from the local mstar-harness plugin root and require the
- * mstar-audit judgment skill to be present (Global Constraints).
- * Seats receive these as session skills; their prompts point at the plugin
- * root's pr-review reference by absolute path (engine prReviewSeatPrompt).
- */
-/**
- * Structured progress on stderr, one line per setup stage.
+ * note: Structured progress on stderr, one line per setup stage.
  *
  * The run's failure mode so far has been total silence: a stall inside setup
  * reaches the caller as "exit 124, stdout 0B" with nothing to say which stage
@@ -209,7 +203,7 @@ export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
 }
 
 /**
- * The base isolation settings record shared by EVERY review session
+ * why: The base isolation settings record shared by EVERY review session
  * (quick/default parent, deep parent): in-memory-equivalent isolation minus
  * the deep-only deltas — no outbound fetch, model fallback on, the caller's
  * model chain as the retry fallback. ONE definition: the deep
@@ -231,7 +225,7 @@ function baseIsolationSettings(fallbackChain: string[] | undefined): {
 }
 
 /**
- * quick/default parent session options — migrated from the M1
+ * note: quick/default parent session options — migrated from the M1
  * src/review/session.ts with `appendSystemPrompt` REMOVED (the seat prompts
  * are engine-generated; this parent never prompts a model). Everything else
  * is the M1 isolation set: in-memory session, read-only tool whitelist, no
@@ -248,7 +242,7 @@ export function buildSessionOptions(opts: {
   modelPattern: string;
   fallbackChain?: string[];
   /**
-   * Directory holding the synthesized COMPLETE per-review models.yml
+   * note: Directory holding the synthesized COMPLETE per-review models.yml
    * (AL-23-1): passed to createAgentSession so the
    * SDK's ModelRegistry reads <agentDir>/models.yml (discoverModels →
    * model-registry single-file loader). REQUIRED — the registry removed the baked
@@ -257,7 +251,7 @@ export function buildSessionOptions(opts: {
    */
   agentDir: string;
   /**
-   * The run's in-memory credential store (AgentRuntimeRunInput.authStorage) —
+   * why: The run's in-memory credential store (AgentRuntimeRunInput.authStorage) —
    * passed straight through to createAgentSession. REQUIRED: without it the
    * SDK falls back to `discoverAuthStorage(agentDir)`, recreating
    * `<agentDir>/agent.db` on disk and handing the review agent's own
@@ -287,7 +281,7 @@ export function buildSessionOptions(opts: {
 }
 
 /**
- * The parent AgentSession is not a ToolSession (missing cwd / hasUI /
+ * note: The parent AgentSession is not a ToolSession (missing cwd / hasUI /
  * getSessionFile / getSessionSpawns — tsc-verified against 18.13.3). Shim the
  * four members over a Proxy and delegate everything else, bound to the real
  * session so private internal state keeps working:
@@ -306,7 +300,7 @@ function asToolSession(session: AgentSession, cwd: string): ToolSession {
       if (prop === "hasUI") return false;
       if (prop === "getSessionFile") return () => null;
       if (prop === "getSessionSpawns") return () => null;
-      // The pinned SDK declares `effectiveExtensionRoots` as a getter on the
+      // why: The pinned SDK declares `effectiveExtensionRoots` as a getter on the
       // session, then calls it as a method from its own task module
       // (`request.session.effectiveExtensionRoots?.()`), so it reads an object
       // and the call throws — every seat dies there, before any model turn.
@@ -319,10 +313,10 @@ function asToolSession(session: AgentSession, cwd: string): ToolSession {
       const value: unknown = Reflect.get(target, prop, target);
       return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
     },
-  }) as unknown as ToolSession; // the get-trap supplies the four members tsc flags as missing
+  }) as unknown as ToolSession; // note: the get-trap supplies the four members tsc flags as missing
 }
 
-/** One accepted finding — shared by the seat wire contract and the deep parent envelope schema (mstar.review/v1 finding shape, SP3 § Schema). */
+/** note: One accepted finding — shared by the seat wire contract and the deep parent envelope schema (mstar.review/v1 finding shape, SP3 § Schema). */
 const REVIEW_FINDING_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -340,7 +334,7 @@ const REVIEW_FINDING_SCHEMA = {
 } as const;
 
 /**
- * The `incomplete` fact shared by the envelope and its tally (engine
+ * note: The `incomplete` fact shared by the envelope and its tally (engine
  * `PrIncomplete`): the declared cause plus the scope the run never reached.
  * Structural only — the single-line/blank rules and the verdict-conditional
  * presence stay with the engine validator, never re-encoded here.
@@ -355,7 +349,7 @@ const INCOMPLETE_FACT_SCHEMA = {
   },
 } as const;
 
-/** Inspector-owned seat wire contract (spec § 席位输出契约), strict-validated by the SDK. */
+/** note: Inspector-owned seat wire contract (spec § 席位输出契约), strict-validated by the SDK. */
 const SEAT_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -366,7 +360,7 @@ const SEAT_OUTPUT_SCHEMA = {
 } as const;
 
 /**
- * Parent-session output contract for the deep path — the
+ * note: Parent-session output contract for the deep path — the
  * mstar.review/v1 envelope shape as a strict JSON Schema (spec Architect
  * lock L2). The SDK's strict mode only enforces shape; the engine
  * vocabulary SSOT re-validates the extracted payload (including the
@@ -431,19 +425,19 @@ export type SeatPlan = {
   scope: readonly string[];
 };
 
-/** git-numstat line: `"<added>\t<deleted>\t<path>"` (binary counts are "-"). */
+/** note: git-numstat line: `"<added>\t<deleted>\t<path>"` (binary counts are "-"). */
 const NUMSTAT_RE = /^(\d+|-)\t(\d+|-)\t(.+)$/;
 
-/** `<owner>/<repo>#<pr>` recon fact → envelope target fields. */
+/** note: `<owner>/<repo>#<pr>` recon fact → envelope target fields. */
 const PR_FACT_RE = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#(\d+)$/;
 
-/** `head <sha>` recon fact → envelope target.head_sha. */
+/** note: `head <sha>` recon fact → envelope target.head_sha. */
 const HEAD_FACT_RE = /^head ([0-9a-f]{7,64})$/;
 
-/** Changed files with a balancing weight (added + deleted lines). */
+/** note: Changed files with a balancing weight (added + deleted lines). */
 type ChangedFile = { path: string; lines: number };
 
-/** Extract the partition universe: numstat-shaped recon facts, in order. */
+/** note: Extract the partition universe: numstat-shaped recon facts, in order. */
 function parseChangedFiles(reconFacts: readonly string[]): ChangedFile[] {
   const files: ChangedFile[] = [];
   for (const fact of reconFacts) {
@@ -473,13 +467,13 @@ export function parseTarget(reconFacts: readonly string[]): MstarReviewV1["targe
   return target;
 }
 
-/** Top-level directory bucket of a changed path; repo-root files share "(root)". */
+/** note: Top-level directory bucket of a changed path; repo-root files share "(root)". */
 function topDir(path: string): string {
   const slash = path.indexOf("/");
   return slash === -1 ? "(root)" : path.slice(0, slash);
 }
 
-/** Seat label from the group's directories: lowercase-kebab, capped at 48 chars. */
+/** note: Seat label from the group's directories: lowercase-kebab, capped at 48 chars. */
 function seatLabel(dirs: readonly string[]): string {
   const label = [...dirs].sort().join("-").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return label.length === 0 ? "combined" : label.slice(0, 48);
@@ -506,7 +500,7 @@ export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel
     const half = Math.ceil(paths.length / 2);
     const first = paths.slice(0, half);
     const second = paths.slice(half);
-    // Single changed file: both seats take it (overlap + merge dedupe keeps
+    // why: Single changed file: both seats take it (overlap + merge dedupe keeps
     // combined coverage without an empty seat scope).
     return [
       { domain: "changeset-1", seat: "part-1", scope: first },
@@ -534,7 +528,7 @@ export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel
     { dirs: [] as string[], paths: [] as string[], lines: 0 },
   ];
   for (const [dir, cluster] of sorted) {
-    // Lightest group wins; ties go to group 0 (deterministic).
+    // why: Lightest group wins; ties go to group 0 (deterministic).
     const target = groups[1]!.lines < groups[0]!.lines ? groups[1]! : groups[0]!;
     target.dirs.push(dir);
     target.paths.push(...cluster.paths);
@@ -546,14 +540,14 @@ export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel
   ];
 }
 
-/** Per-seat recon facts: the shared facts plus this seat's file scope. */
+/** note: Per-seat recon facts: the shared facts plus this seat's file scope. */
 function seatReconFacts(reconFacts: readonly string[], plan: SeatPlan): string[] {
   if (plan.scope.length === 0) return [...reconFacts];
   return [...reconFacts, `File scope for this seat (review ONLY these files):`, ...plan.scope];
 }
 
 /**
- * Whole-minute rendering of a shared soft remainder at the prompt/delivery
+ * note: Whole-minute rendering of a shared soft remainder at the prompt/delivery
  * sites: `remainingSoftMinutes` stays exact and a message reads in minutes. A
  * negative remainder keeps its sign and rounds to at least one minute over, so
  * an overrun is never displayed as time left.
@@ -562,13 +556,13 @@ function budgetMinutes(remainingMinutes: number): number {
   return remainingMinutes >= 0 ? Math.round(remainingMinutes) : -Math.max(1, Math.round(-remainingMinutes));
 }
 
-/** The dispatch head's figure: the shared remainder at dispatch, rendered. */
+/** note: The dispatch head's figure: the shared remainder at dispatch, rendered. */
 function dispatchBudgetMinutes(level: ReviewLevel): number {
   return budgetMinutes(remainingSoftMinutes(Date.now(), level));
 }
 
 /**
- * Hard wall-clock cap for one fan-out seat: twice the tier's SOFT cap, never
+ * why: Hard wall-clock cap for one fan-out seat: twice the tier's SOFT cap, never
  * beyond the remaining OUTER exec budget less the reserved tail. The two clocks
  * are distinct by construction — the soft cap is a convergence target that
  * aborts nothing (it only drives the dispatch head and the nudges), this is the
@@ -581,28 +575,28 @@ function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
 }
 
 /**
- * One progress nudge for a seat that is still running. The engine owns the
+ * note: One progress nudge for a seat that is still running. The engine owns the
  * cadence and the tier figures; the harness `/amazing-pr-review` § Seat
  * supervision owns the model-facing procedure — this type carries only what the
  * delivery itself needs.
  */
 export type SeatNudge = {
   text: string;
-  /** `aside` (next step boundary) inside the cap, `steer` (interrupting) past it. */
+  /** note: `aside` (next step boundary) inside the cap, `steer` (interrupting) past it. */
   deliverAs: "aside" | "steer";
 };
 
-/** One supervised seat: its address, whether it is still running, and how a nudge reaches it. */
+/** note: One supervised seat: its address, whether it is still running, and how a nudge reaches it. */
 export type SupervisedSeat = {
-  /** The id the seat is addressable as (its reserved registry ref id). */
+  /** note: The id the seat is addressable as (its reserved registry ref id). */
   id: string;
-  /** Per-seat stop state: this seat's OWN settlement, never "the whole group finished". */
+  /** invariant: Per-seat stop state: this seat's OWN settlement, never "the whole group finished". */
   isRunning: () => boolean;
   deliver: (nudge: SeatNudge) => Promise<void>;
 };
 
 /**
- * The nudge in force at `nowMs`, plus the tick to wait before the next one. The
+ * note: The nudge in force at `nowMs`, plus the tick to wait before the next one. The
  * regime flips the moment the review is past its soft cap: the tick shortens to
  * `overrunSeconds` and delivery stops being an aside at the next step boundary
  * and interrupts the running turn instead. The remainder is recomputed from the
@@ -627,7 +621,7 @@ function seatNudge(nowMs: number, level: ReviewLevel): SeatNudge & { intervalMs:
 }
 
 /**
- * Wait one cadence tick. A real awaited timer — no busy-wait and no detached
+ * note: Wait one cadence tick. A real awaited timer — no busy-wait and no detached
  * interval — resolved early AND cleared the moment the supervised work settles,
  * so a returned seat leaves no pending timer behind.
  */
@@ -642,11 +636,11 @@ function waitTick(intervalMs: number, done: Promise<void>): Promise<boolean> {
 }
 
 /**
- * Deliver one nudge to a live seat session. A session with no turn in flight is
+ * note: Deliver one nudge to a live seat session. A session with no turn in flight is
  * not nudged: an `aside` would start a fresh turn and a `steer` could resume one
  * — either would restart a seat that already returned.
  */
-/** The cross-agent session surface a nudge needs: the registry exposes
+/** note: The cross-agent session surface a nudge needs: the registry exposes
  *  AgentSessionHandle, a dispatched seat holds its own AgentSession — both
  *  answer these three members. */
 type NudgeableSession = {
@@ -658,7 +652,7 @@ type NudgeableSession = {
 async function nudgeSession(session: NudgeableSession | null | undefined, nudge: SeatNudge): Promise<void> {
   if (!session?.isStreaming) return;
   if (nudge.deliverAs === "aside") {
-    // The registry hands out an AgentSessionHandle, which exposes the same
+    // note: The registry hands out an AgentSessionHandle, which exposes the same
     // non-interrupting delivery through `prompt(..., { streamingBehavior })`.
     await session.prompt(nudge.text, { streamingBehavior: "aside" });
     return;
@@ -667,7 +661,7 @@ async function nudgeSession(session: NudgeableSession | null | undefined, nudge:
 }
 
 /**
- * Keep every seat that is still running moving on the engine cadence until the
+ * note: Keep every seat that is still running moving on the engine cadence until the
  * work it supervises settles. Supervision is fire-and-observe: its effects are
  * messages, and a failed delivery is logged, never thrown (non-fatal is the
  * contract). A seat leaves the tick set the moment ITS OWN promise settles
@@ -682,7 +676,7 @@ export async function superviseSeats(opts: {
 }): Promise<void> {
   for (;;) {
     if (await waitTick(seatNudge(Date.now(), opts.level).intervalMs, opts.done)) return;
-    // Recomputed after the wait: crossing the soft cap during a wait must
+    // why: Recomputed after the wait: crossing the soft cap during a wait must
     // upgrade the very next nudge (figure AND delivery strength).
     const nudge = seatNudge(Date.now(), opts.level);
     for (const seat of opts.seats) {
@@ -696,17 +690,17 @@ export async function superviseSeats(opts: {
   }
 }
 
-/** Seat assignment = engine prReviewSeatPrompt — zero copies of harness text. */
+/** note: Seat assignment = engine prReviewSeatPrompt — zero copies of harness text. */
 function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: SeatPlan): string {
   return prReviewSeatPrompt({
-    stage: 2, // quick/default fold collection into the domain seat (harness tier table).
+    stage: 2, // note: quick/default fold collection into the domain seat (harness tier table).
     domain: plan.domain,
     seat: plan.seat,
     skillRoot: `${pluginRoot}/skills/mstar-audit`,
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
-    // The tier's SHARED soft remainder at dispatch, recomputed from the one
+    // why: The tier's SHARED soft remainder at dispatch, recomputed from the one
     // process anchor so a later wave gets less and no seat ever sees a fresh
     // allowance. The engine owns the head wording; negative = already over cap.
     budgetRemainingMinutes: dispatchBudgetMinutes(input.level),
@@ -714,7 +708,7 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 }
 
 /**
- * One capped seat's coverage gap: which seat the wall-clock cap stopped —
+ * note: One capped seat's coverage gap: which seat the wall-clock cap stopped —
  * the fact the budget-exhausted signal counts and the non-cap `incomplete`
  * fact's unscanned list names. The cap itself needs no text here: its only
  * readers are the count and the seat's scope.
@@ -722,7 +716,7 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 type SeatGap = { plan: SeatPlan };
 
 /**
- * One settled seat: the payload it collected (`null` = nothing usable), the
+ * note: One settled seat: the payload it collected (`null` = nothing usable), the
  * coverage gap a CAP stop declares (`null` = the cap did not fire), and the
  * failure a result the seat did not deliver cleanly carries (`null` = it
  * delivered). {@link seatOutput} decides which of the three a result is;
@@ -735,7 +729,7 @@ type SeatOutcome = {
 };
 
 /**
- * The published review's `summary_md` budget in characters. The consumer
+ * note: The published review's `summary_md` budget in characters. The consumer
  * truncates the summary to this many characters KEEPING THE HEAD
  * (`src/pipeline/comment.ts`: SUMMARY_MD_LIMIT / `truncateSummary`), so anything
  * the coverage notes push past it is lost from the END. Restated here with the
@@ -745,7 +739,7 @@ type SeatOutcome = {
 export const SUMMARY_MD_BUDGET = 8_000;
 
 /**
- * Characters one capped seat's coverage line may spend, scope list included.
+ * note: Characters one capped seat's coverage line may spend, scope list included.
  * Bounding lines by CHARACTERS (not by a file count) keeps a long path from
  * crowding the line — or a second capped seat — out of the published body; a
  * disclosure longer than this (an outsized stop reason) is cut with a marker.
@@ -753,7 +747,7 @@ export const SUMMARY_MD_BUDGET = 8_000;
 export const SEAT_GAP_MAX_CHARS = 400;
 
 /**
- * The scope list for a coverage note: whole paths while they fit in `budget`,
+ * note: The scope list for a coverage note: whole paths while they fit in `budget`,
  * then how many paths the line could not name — a cut list is always marked,
  * never silent.
  */
@@ -772,7 +766,7 @@ function scopeList(paths: readonly string[], budget: number): string {
 }
 
 /**
- * One scope line: `head` plus the scope list, never longer than `maxChars`.
+ * note: One scope line: `head` plus the scope list, never longer than `maxChars`.
  * The list gets the budget the head and `separator` leave, is `the whole diff`
  * for a seat with no file scope, and is omitted behind the head when that
  * budget cannot hold a list. A line still over `maxChars` is cut with an
@@ -788,7 +782,7 @@ function scopeLine(head: string, separator: string, maxChars: number, scope: rea
 }
 
 /**
- * The engine summary fitted into `budget` characters, its cut MARKED. The
+ * note: The engine summary fitted into `budget` characters, its cut MARKED. The
  * publisher's head-keeping truncation semantics, applied here and earlier so
  * a gathered deep transcript keeps inside the body the publisher truncates
  * at.
@@ -801,7 +795,7 @@ function fittedSummary(summary: string, budget: number): string {
 }
 
 /**
- * A thrown error's one-line, bounded message: whitespace flattened and the
+ * note: A thrown error's one-line, bounded message: whitespace flattened and the
  * text cut at `SEAT_GAP_MAX_CHARS` with a marker, so a multi-line seat error
  * stays a single stderr/disclosure line like every other bounded diagnostic.
  * Empty for a reason that carries no message.
@@ -814,7 +808,7 @@ function causeText(reason: unknown): string {
 }
 
 /**
- * The SDK's own reason for a wall-clock stop: its abort-reason resolver returns
+ * note: The SDK's own reason for a wall-clock stop: its abort-reason resolver returns
  * exactly this wording — and only this wording — when the per-subagent runtime
  * limit it was handed fires, and it carries the cap that fired. Every other
  * abort (provider, session, shutdown) reports its own message or the caller's
@@ -824,7 +818,7 @@ function causeText(reason: unknown): string {
 const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRuntimeMs=[^)]+\)/;
 
 /**
- * Extract and guard the strict-validated seat payload.
+ * note: Extract and guard the strict-validated seat payload.
  *
  * The CAP decides the classification, and it is checked FIRST: a seat the
  * wall-clock cap stopped is a STOPPED seat, never a failure — the cap explains
@@ -845,7 +839,7 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
   const structured = single.structuredOutput;
   const collected =
     structured?.status === "valid" && structured.data !== undefined ? (structured.data as SeatOutput) : null;
-  // A payload the seat did not deliver cleanly: its own error, or a payload the
+  // invariant: A payload the seat did not deliver cleanly: its own error, or a payload the
   // strict schema refused. Never admitted, whatever stopped the seat.
   const rejectedPayload =
     single.error !== undefined ||
@@ -875,13 +869,13 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
   return { output: collected, gap: null, failure: null };
 }
 
-/** Spec fingerprint: explicit hint, else the `file:line:title` composite. */
+/** note: Spec fingerprint: explicit hint, else the `file:line:title` composite. */
 function findingFingerprint(finding: MstarReviewFinding): string {
   return finding.fingerprint_hint ?? `${finding.file_path}:${finding.line_start}:${finding.title}`;
 }
 
 /**
- * Merge seat outputs: exact-dedupe findings by fingerprint (first seat wins).
+ * note: Merge seat outputs: exact-dedupe findings by fingerprint (first seat wins).
  */
 export function mergeSeatOutputs(outputs: readonly SeatOutput[]): MstarReviewFinding[] {
   const findings = new Map<string, MstarReviewFinding>();
@@ -896,10 +890,10 @@ export function mergeSeatOutputs(outputs: readonly SeatOutput[]): MstarReviewFin
   return [...findings.values()];
 }
 
-/** Filename of the shipped seat definition (`./seat-agent.md`) inside the clone's `.omp/agents/`. */
+/** note: Filename the shipped `seat-agent.md` is installed as inside the clone's `.omp/agents/`. */
 const SEAT_AGENT_FILE = "mstar-review-seat.md";
 
-/** Install the shipped seat-agent definition into the PR clone (the session cwd) for omp discovery; runReview removes it again when the run ends. */
+/** note: Install the shipped seat-agent definition into the PR clone (the session cwd) for omp discovery; runReview removes it again when the run ends. */
 async function installSeatAgent(cwd: string): Promise<void> {
   const definition = await readFile(join(import.meta.dir, "seat-agent.md"), "utf8");
   const agentsDir = join(cwd, ".omp", "agents");
@@ -908,7 +902,7 @@ async function installSeatAgent(cwd: string): Promise<void> {
 }
 
 /**
- * Deep Stage 2 seat roles (harness pr-review § Review pipeline): the
+ * why: Deep Stage 2 seat roles (harness pr-review § Review pipeline): the
  * three-stage flow dispatches exactly these harness roles as domain seats
  * (each carrying the in-domain security lens). Installing ONLY these keeps
  * the task-tool agent schema minimal, and the cleanup set static. Exported
@@ -917,10 +911,10 @@ async function installSeatAgent(cwd: string): Promise<void> {
  */
 export const DEEP_SEAT_ROLES = ["code-reviewer", "fullstack-dev", "frontend-dev"] as const;
 
-/** Filenames the deep path may install — known statically, so a partially-failed install cleans up exactly like a complete one. */
+/** note: Filenames the deep path may install — known statically, so a partially-failed install cleans up exactly like a complete one. */
 const DEEP_SEAT_ROLE_FILES: readonly string[] = DEEP_SEAT_ROLES.map((role) => `${role}.md`);
 
-/** Strip a `---`-fenced frontmatter block; the role body is what the seat reads. */
+/** note: Strip a `---`-fenced frontmatter block; the role body is what the seat reads. */
 function stripFrontmatter(markdown: string): string {
   const normalized = markdown.replace(/\r\n?/g, "\n");
   if (!normalized.startsWith("---")) return normalized.trim();
@@ -930,7 +924,7 @@ function stripFrontmatter(markdown: string): string {
 }
 
 /**
- * Rewrite a harness role file into an OMP-native read-only seat definition
+ * note: Rewrite a harness role file into an OMP-native read-only seat definition
  * (qc2 F-001): harness agents/*.md carry OpenCode-style frontmatter (`tools`
  * as an object map), which the SDK `parseAgentFields` reads as NO tool list —
  * it parses an array or a CSV string, and a malformed declaration collapses
@@ -963,7 +957,7 @@ function toOmpSeatDefinition(role: string, source: string): string {
 }
 
 /**
- * Install the deep seat definitions into the PR clone for omp project-scope
+ * note: Install the deep seat definitions into the PR clone for omp project-scope
  * discovery (discoverAgents reads <session-cwd>/.omp/agents/): the deep
  * parent dispatches its Stage 2 domain seats with the SDK built-in `task`
  * tool against these definitions (spec Architect lock L1). Each harness role
@@ -985,7 +979,7 @@ async function installDeepSeatAgents(cwd: string, pluginRoot: string): Promise<v
   }
 }
 
-/** Remove the agent definitions a run installed; rmdir only removes the dirs we left empty. */
+/** note: Remove the agent definitions a run installed; rmdir only removes the dirs we left empty. */
 async function removeInstalledAgents(cwd: string, names: readonly string[]): Promise<void> {
   await Promise.all(names.map((name) => rm(join(cwd, ".omp", "agents", name), { force: true }).catch(() => {})));
   await rmdir(join(cwd, ".omp", "agents")).catch(() => {});
@@ -993,7 +987,7 @@ async function removeInstalledAgents(cwd: string, names: readonly string[]): Pro
 }
 
 /**
- * Run `review` with the GitHub token env aliases removed from the process
+ * note: Run `review` with the GitHub token env aliases removed from the process
  * env (qc2 F-004: `GH_TOKEN` and `GITHUB_TOKEN` — the common `gh` alias;
  * spec: the deep parent env carries no writable GitHub token). The SDK
  * session has no env override surface, so the strip window covers the parent
@@ -1016,7 +1010,7 @@ async function withoutGitHubTokenEnv<T>(review: () => Promise<T>): Promise<T> {
   }
 }
 /**
- * Deep parent session options — the quick/default isolation set plus the
+ * note: Deep parent session options — the quick/default isolation set plus the
  * three deep-only deltas (spec Architect locks L1/L2): the SDK built-in
  * `task` tool joins the whitelist so the parent can dispatch seats
  * (`canSpawnAtDepth(task.maxRecursionDepth ?? 2, 0)` passes for a top-level
@@ -1049,9 +1043,9 @@ function deepSessionOptions(opts: {
   modelPattern: string;
   fallbackChain?: string[];
   agentModelOverrides?: Record<string, string>;
-  /** Directory of the synthesized per-review models.yml — required. */
+  /** note: Directory of the synthesized per-review models.yml — required. */
   agentDir: string;
-  /** The run's in-memory credential store — required (see buildSessionOptions). */
+  /** note: The run's in-memory credential store — required (see buildSessionOptions). */
   authStorage: AuthStorage;
 }): CreateAgentSessionOptions {
   const overrides = opts.agentModelOverrides;
@@ -1060,7 +1054,7 @@ function deepSessionOptions(opts: {
     ...buildSessionOptions(opts),
     ...(hasOverrides
       ? {
-          // The base isolation record (ONE definition, shared with
+          // why: The base isolation record (ONE definition, shared with
           // buildSessionOptions) plus EXACTLY the overrides key — a future
           // isolation setting added to the base can never drift away from
           // the deep-with-overrides path (Phase 5 fix, PR #7 review).
@@ -1078,7 +1072,7 @@ function deepSessionOptions(opts: {
 }
 
 /**
- * Deep parent assignment — orchestration glue only. The review procedure is
+ * note: Deep parent assignment — orchestration glue only. The review procedure is
  * the harness /amazing-pr-review command loaded from the plugin root at
  * runtime (zero-copy: no command text lives in this repo); the return
  * contract is the session's strict output schema, so the prompt only needs
@@ -1087,7 +1081,7 @@ function deepSessionOptions(opts: {
  */
 async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): Promise<string> {
   const command = await readFile(join(pluginRoot, "commands", "amazing-pr-review.md"), "utf8");
-  // The deep parent gets the SAME budget head as the Bun fan-out seats so it
+  // why: The deep parent gets the SAME budget head as the Bun fan-out seats so it
   // knows the clock it must finish inside. These lines are inspector-authored
   // orchestration prose (the engine owns only the seat prompt); every figure is
   // read from the engine budget table, never re-typed.
@@ -1139,7 +1133,7 @@ async function deepAssignment(input: AgentRuntimeRunInput, pluginRoot: string): 
 }
 
 /**
- * The review-seat model chain (Architect lock L2;
+ * note: The review-seat model chain (Architect lock L2;
  * shared by the review seats AND the recheck seat — spec §7.8 "Recheck uses
  * the existing review-seat model selection"):
  *   - input.modelSelectors is the single model SSOT (the runner parses
@@ -1163,7 +1157,7 @@ function seatModelChain(input: AgentRuntimeRunInput): string[] {
 }
 
 /**
- * The scope a stopped deep turn did not fully cover: ONE entry naming the deep
+ * note: The scope a stopped deep turn did not fully cover: ONE entry naming the deep
  * parent, because the parent IS the review's whole-diff unit — the `task` seats
  * it dispatches are its own children, invisible to the caller, so they are not
  * separate units to declare.
@@ -1171,14 +1165,14 @@ function seatModelChain(input: AgentRuntimeRunInput): string[] {
 const DEEP_STOP_UNSCANNED = "deep-parent: the whole diff";
 
 /**
- * What a deep turn that ended (or failed) without yielding states as its cause
+ * note: What a deep turn that ended (or failed) without yielding states as its cause
  * when no more specific reason is known — the fatal error and the synthesized
  * `incomplete` fact use the one wording.
  */
 const DEEP_NO_YIELD_CAUSE = "deep parent turn produced no structured yield (mstar.review/v1 envelope)";
 
 /**
- * The deep parent-session path (spec § 父 session 约束 +
+ * note: The deep parent-session path (spec § 父 session 约束 +
  * Architect locks L1/L2): one parent LLM turn runs the harness three-stage
  * flow and dispatches its own seats via the built-in `task` tool; the turn
  * must end in a schema-validated `yield` of the mstar.review/v1 envelope,
@@ -1238,11 +1232,11 @@ export function servedModel(
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
   const skills = await loadHarnessSkills(pluginRoot);
-  // The session cwd IS the PR clone: .omp/agents discovery and every task
+  // why: The session cwd IS the PR clone: .omp/agents discovery and every task
   // tool seat cwd resolve against the review tree.
   const cwd = input.worktreePath;
   const wantsRecheck = input.recheck !== undefined;
-  // Two seats dispatch against the shared definition: the recheck seat and the
+  // why: Two seats dispatch against the shared definition: the recheck seat and the
   // report seat (which runs on `prContext` alone). Keying the install to the
   // recheck left a report-only deep round dispatching a seat omp cannot
   // resolve — a failure that reads as "report unavailable".
@@ -1253,7 +1247,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
   let session: AgentSession | undefined;
   let recheckSession: AgentSession | undefined;
   let reportSession: AgentSession | undefined;
-  // The run's teardown signal: aborted the moment teardown begins, so a report
+  // why: The run's teardown signal: aborted the moment teardown begins, so a report
   // seat still in flight stops with the run (its own timer stays the bound
   // while the run lives). A caller-supplied abort joins it.
   const teardown = new AbortController();
@@ -1269,10 +1263,10 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           modelPattern: primaryModelSelector(input),
           fallbackChain: [...input.modelSelectors],
           agentModelOverrides: input.modelOverrides,
-          // The synthesized per-review models.yml directory —
+          // note: The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
-          // The in-memory credential store — without it the SDK would create
+          // why: The in-memory credential store — without it the SDK would create
           // <agentDir>/agent.db and expose the key pool to the session's tools.
           authStorage: input.authStorage,
         }),
@@ -1280,7 +1274,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const parentSession = created.session;
       session = parentSession;
 
-      // One dedicated session per seat that prompts: the quick/default
+      // why: One dedicated session per seat that prompts: the quick/default
       // isolation set — read/grep/glob only, no `task` tool, no yield
       // schema — its own in-memory session manager. The deep parent's session
       // carries the envelope's single prompt/yield stream, so no seat rides it.
@@ -1314,7 +1308,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         });
       }
 
-      // Capture the structured yield the turn must end with, and the gathered
+      // why: Capture the structured yield the turn must end with, and the gathered
       // `agent_end` payload of a turn that ends without one. Yield capture
       // rides `tool_execution_end`, NOT start: the SDK yield tool validates the
       // payload inside execute() — after the start event — and retries up to
@@ -1327,7 +1321,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       const runParentTurn = async (): Promise<MstarReviewV1> => {
         let yielded: unknown;
         let yieldError: string | undefined;
-        // The turn's TERMINAL account of itself (`gathered`, see the end-event
+        // note: The turn's TERMINAL account of itself (`gathered`, see the end-event
         // branch) plus the two pieces the bounded wait below needs: whether a
         // `agent_pause` parked the session on a delivery that resumes
         // it, and the promise that settles the wait when that continuation
@@ -1335,13 +1329,13 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         // corrected re-yield is still observed.
         let gathered: { summary?: string; stopped?: string } | undefined;
         let resuming = false;
-        // The terminal-end latch, armed BEFORE the prompt so an `agent_end`
+        // why: The terminal-end latch, armed BEFORE the prompt so an `agent_end`
         // that lands while the prompt is settling still settles it — only the
         // terminal end resolves it (a yield never ends a parked turn), and the
         // bounded continuation wait below reads this one latch.
         const { promise: outcome, resolve: outcomeKnown } = Promise.withResolvers<void>();
         const unsubscribe = parentSession.subscribe((event) => {
-          // A paused model loop is a scheduling pause, NOT the turn's stop: the
+          // why: A paused model loop is a scheduling pause, NOT the turn's stop: the
           // SDK resumes the run from the work that paused it (a steer, a
           // follow-up, a background wake, a child agent or a peer message), so
           // its `agent_end` — or a yield — is still to come. Recording the
@@ -1352,7 +1346,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             return;
           }
           if (event.type === "agent_end") {
-            // The terminal assistant entry is the turn's own last word, and
+            // note: The terminal assistant entry is the turn's own last word, and
             // `errorMessage` rides IT — the stop the SDK recorded when it
             // reported one (a deadline or a cancelled turn; a boundary exit
             // records nothing, so absence is not evidence of a clean stop).
@@ -1390,18 +1384,18 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             yieldError = record.error;
             return;
           }
-          // Incremental section yields (array-typed `type`) carry partial data
+          // why: Incremental section yields (array-typed `type`) carry partial data
           // that can never satisfy the envelope; only terminal (untyped) yields
           // with a payload count.
           if (record.status === "success" && !Array.isArray(record.type) && record.data !== undefined) {
             yielded = record.data;
-            // A resumed continuation can yield again (a corrected payload), so
+            // why: A resumed continuation can yield again (a corrected payload), so
             // while a parked end is in flight only the terminal end settles
             // the wait — the last successful yield wins.
           }
         });
 
-        // The deep parent carries NO SDK runtime limit (a structured seat's
+        // why: The deep parent carries NO SDK runtime limit (a structured seat's
         // `task.maxRuntimeMs` never applies to it), so the run's own deadline
         // evidence is this timer at the SAME bound a fan-out seat gets. When
         // it fires the turn is aborted at the wall clock and
@@ -1416,14 +1410,14 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           });
         };
         let turnError: unknown;
-        // The timer starts at the dispatch boundary, after the assignment
+        // why: The timer starts at the dispatch boundary, after the assignment
         // read below — a blocked read must not let this abort fire on a seat
         // that was never prompted. Undefined until then; the outer finally's
         // clearTimeout is a no-op before dispatch.
         let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
         try {
           const assignment = await deepAssignment(input, pluginRoot);
-          // A read that spent the deadline declines the turn: the deep parent
+          // why: A read that spent the deadline declines the turn: the deep parent
           // was never dispatched, so the signal counts 0 of 0 — only an
           // actually dispatched seat can be counted dispatched or stopped.
           // An IMMINENT deadline still dispatches: the deadline timer owns
@@ -1436,7 +1430,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         } catch (error) {
           turnError = error;
         } finally {
-          // The prompt settling is NOT the turn's end when the SDK reported a
+          // why: The prompt settling is NOT the turn's end when the SDK reported a
           // pause: the queued delivery resumes this session on a
           // later tick, and this listener is what observes the continuation's
           // yield or terminal end. Wait for it here, bounded by the run's own
@@ -1461,7 +1455,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           clearTimeout(deadlineTimer);
           unsubscribe();
         }
-        // The run's own wall clock stopped this turn: a budget failure, not a
+        // why: The run's own wall clock stopped this turn: a budget failure, not a
         // review verdict. The deep parent is the ONE dispatched seat this
         // path has (its `task` children are its own, invisible here), so the
         // signal counts 1 of 1 — thrown before any yield is accepted and
@@ -1472,7 +1466,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           throw new RunnerBudgetExhausted(1, 1);
         }
         if (yielded === undefined) {
-          // A turn that ENDED without a yield is a stopped deep run, not an
+          // why: A turn that ENDED without a yield is a stopped deep run, not an
           // exception: its gathered content and its declared cause/scope
           // become a synthesized `incomplete` envelope — the fact has ONE
           // source, never a hand-built or post-edited one. `gathered` is
@@ -1487,7 +1481,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
               yieldError !== undefined ? `deep parent yielded an error: ${yieldError}` : DEEP_NO_YIELD_CAUSE,
             );
           }
-          // The cause, most specific first: the yield contract's own error,
+          // why: The cause, most specific first: the yield contract's own error,
           // the turn's failure, the stop the SDK recorded on the ended turn,
           // else the bare fact that the turn produced no yield. Whitespace
           // collapses to one line — the engine's incomplete fact rejects a
@@ -1507,7 +1501,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             incomplete: { reason: cause, unscanned: [DEEP_STOP_UNSCANNED] },
             ...(gathered.summary === undefined ? {} : { summary_md: gathered.summary }),
           });
-          // The engine vocabulary is the SSOT for the synthesized envelope
+          // why: The engine vocabulary is the SSOT for the synthesized envelope
           // too: an `agent_end` transcript is no more trusted than a yielded
           // payload, so only this gate may throw past it.
           const stopGate = validateMstarReviewV1(stoppedEnvelope);
@@ -1519,14 +1513,14 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           }
           return stoppedEnvelope;
         }
-        // A prompt throw AFTER a successful yield must stay observable (qc3
+        // why: A prompt throw AFTER a successful yield must stay observable (qc3
         // S-002): the envelope below is engine-validated, so returning it
         // stands — but the partially-failed turn is logged, not swallowed.
         if (turnError !== undefined) {
           console.error("deep parent turn raised after a successful yield", turnError);
         }
 
-        // SDK strict schema enforcement only guarantees shape — the engine
+        // why: SDK strict schema enforcement only guarantees shape — the engine
         // vocabulary stays the SSOT (spec Architect lock L2).
         const gate = validateMstarReviewV1(yielded);
         if (!gate.ok) {
@@ -1536,7 +1530,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         return yielded as MstarReviewV1;
       };
 
-      // The parent turn is the only seat this process can address on the deep
+      // why: The parent turn is the only seat this process can address on the deep
       // path (its own `task` children are addressed by the parent itself — see
       // deepAssignment): nudge it while the turn runs, never after it returns.
       let parentRunning = true;
@@ -1561,12 +1555,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       try {
         envelope = await parentTurn;
       } catch (error) {
-        // Review failure aborts the recheck seat too (spec §7.8);
+        // why: Review failure aborts the recheck seat too (spec §7.8);
         // runRecheckSeat never rejects — awaiting only reaps the seat.
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         if (error instanceof RunnerBudgetExhausted) {
-          // The budget stop still owns this round's attribution: the settled
+          // why: The budget stop still owns this round's attribution: the settled
           // recheck round (the seat was aborted by the stop, never left
           // running) and the model the parent session actually served.
           error.recheck = settled?.doc ?? null;
@@ -1575,17 +1569,17 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         }
         throw error;
       } finally {
-        // Supervision never outlives the turn it supervises (no pending timer
+        // invariant: Supervision never outlives the turn it supervises (no pending timer
         // can survive the review) and never masks its outcome.
         await supervision;
       }
-      // The review settled: await the already-running recheck on ITS OWN
+      // why: The review settled: await the already-running recheck on ITS OWN
       // budget. It started with this run's anchored outer deadline, so the
       // await is bounded and is never a fresh cap. Stop it only when the
       // outer deadline leaves no room to finish, instead of blocking the tail.
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
-      // The narrative report runs after BOTH the parent turn and the recheck
+      // why: The narrative report runs after BOTH the parent turn and the recheck
       // seat settled (it cites their results), on its OWN session: the parent's
       // prompt/yield stream is the envelope's, never a seat's.
       let report: ReportDoc | null = null;
@@ -1600,12 +1594,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             runTeardownSignal(teardown, input),
           );
         } catch (error) {
-          // Optional narrative: a seat session that cannot be created must
+          // why: Optional narrative: a seat session that cannot be created must
           // never fail a review that already settled.
           console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
         }
       }
-      // The deep parent IS the reviewer: its session model is the applied one.
+      // note: The deep parent IS the reviewer: its session model is the applied one.
       const appliedModel = servedModel(session);
       return {
         envelope,
@@ -1616,23 +1610,23 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       };
     });
   } finally {
-    // Signal before the sessions settle: on the caller-abort path a report seat
+    // safety: Signal before the sessions settle: on the caller-abort path a report seat
     // may still be in flight, and it must stop with the run it belongs to.
     teardown.abort();
-    // Teardown order: every session settles BEFORE the agent-file cleanup
+    // safety: Teardown order: every session settles BEFORE the agent-file cleanup
     // (never concurrent agent-file writes/cleanup, spec §7.8).
     for (const live of [session, recheckSession, reportSession]) {
       if (live) {
         try {
           await live.dispose();
         } catch (error) {
-          // Teardown failure must not mask the primary outcome; the session
+          // why: Teardown failure must not mask the primary outcome; the session
           // is one-shot and owns no other resources.
           console.error("omp review runtime session dispose failed", error);
         }
       }
     }
-    // Undo the seat installs; the set is static (installedFiles), so a
+    // why: Undo the seat installs; the set is static (installedFiles), so a
     // partially-failed install cleans up exactly like a complete one (qc1
     // F-002). The clone itself is caller-owned and must survive (rmdir
     // removes the dirs only if we left them empty).
@@ -1641,7 +1635,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
 }
 
 /**
- * The run's teardown signal: the review-scoped controller, joined with the
+ * note: The run's teardown signal: the review-scoped controller, joined with the
  * caller's own abort when the port supplies one. The report seat is the only
  * consumer — it runs after the review settles, so teardown is the one place
  * that can stop it while it is in flight.
@@ -1651,7 +1645,7 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
 }
 
 /**
- * Run the narrative report seat for one settled review, serial and bounded.
+ * note: Run the narrative report seat for one settled review, serial and bounded.
  * Absent `prContext` = legacy input: no seat, `null` — byte-identical behavior.
  * `signal` is the run's teardown signal, so a torn-down run stops the seat
  * instead of waiting out its own timer.
@@ -1669,12 +1663,12 @@ async function runReportSeatFor(
   if (input.prContext === undefined) return null;
   const headSha = envelope.target?.head_sha;
   if (headSha === undefined) {
-    // An unbound report would be indistinguishable from the previous run's
+    // why: An unbound report would be indistinguishable from the previous run's
     // file at the fixed path, so no head means no report — never a guess.
     console.error(JSON.stringify({ event: "report_skipped", reason: "head-sha-missing" }));
     return null;
   }
-  // omp resolves the seat from the clone's `.omp/agents/`: dispatching without
+  // why: omp resolves the seat from the clone's `.omp/agents/`: dispatching without
   // the definition fails inside the SDK and surfaces as an anonymous seat
   // failure. The report is OPTIONAL narrative — a missing definition degrades
   // to `report: null` (sections render `none`) and names itself loudly; it must
@@ -1699,14 +1693,14 @@ async function runReportSeatFor(
 }
 
 /**
- * The delivered omp AgentRuntime. Resolves ONLY with an
+ * note: The delivered omp AgentRuntime. Resolves ONLY with an
  * engine-validated mstar.review/v1 envelope in `envelope` plus the
  * concurrent recheck document (or null) in `recheck`; anything
  * short of that throws.
  */
 export const ompAgentRuntime: AgentRuntime = {
   async runReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
-    // Port-level guard: the type system makes a bad level unrepresentable in
+    // why: Port-level guard: the type system makes a bad level unrepresentable in
     // TS, but runtime values arrive from JSON (runner `--level`) — reject
     // instead of silently degrading (spec: throw, 不静默降档). Deep branches
     // first: the parent-session path never enters this Bun
@@ -1724,21 +1718,21 @@ export const ompAgentRuntime: AgentRuntime = {
 
     const pluginRoot = resolveHarnessRoot();
     const skills = await loadHarnessSkills(pluginRoot);
-    // The session cwd IS the PR clone (spec § 席位 worktree = 该只读 clone).
+    // why: The session cwd IS the PR clone (spec § 席位 worktree = 该只读 clone).
     // Seat read/grep/glob resolve relative paths against
     // buildExecutorOptions' `cwd: session.cwd`, and omp agent discovery picks
     // up the seat definition installed at <worktree>/.omp/agents/ (the clone
     // is ephemeral, so installing there is fine — it is removed on exit).
     const cwd = input.worktreePath;
     let session: AgentSession | undefined;
-    // The run's teardown signal (same contract as the deep path): aborting it
+    // why: The run's teardown signal (same contract as the deep path): aborting it
     // stops a report seat still in flight, and a caller-supplied abort joins it.
     const teardown = new AbortController();
     try {
       traceStage("enter_run_review");
       await installSeatAgent(cwd);
       traceStage("seat_installed");
-      // Seat model chain: single SSOT derivation shared with the recheck
+      // note: Seat model chain: single SSOT derivation shared with the recheck
       // seat — see seatModelChain (the L2 rationale lives there).
       const seatModels = seatModelChain(input);
       traceStage("models_resolved");
@@ -1749,7 +1743,7 @@ export const ompAgentRuntime: AgentRuntime = {
           skills,
           modelPattern: primaryModelSelector(input),
           fallbackChain: [...input.modelSelectors],
-          // The synthesized per-review models.yml directory —
+          // note: The synthesized per-review models.yml directory —
           // present on EVERY run (no baked in-image base remains).
           agentDir: input.agentDir,
           authStorage: input.authStorage,
@@ -1766,7 +1760,7 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       const toolSession = asToolSession(session, cwd);
 
-      // spec §7.8: the recheck seat runs CONCURRENTLY as one
+      // note: spec §7.8: the recheck seat runs CONCURRENTLY as one
       // more structured child on the SAME read-only ToolSession (separate
       // result slot). runRecheckSeat never throws; once the review work
       // settles the runner awaits that same seat on ITS OWN budget (derived
@@ -1787,21 +1781,21 @@ export const ompAgentRuntime: AgentRuntime = {
                 : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
             })
           : null;
-      // Each seat's reserved registry id — the engine-mandated `<domain>-<seat>`
+      // why: Each seat's reserved registry id — the engine-mandated `<domain>-<seat>`
       // slug its prompt also carries. Reserved up front through `identity.id`
       // (the SDK returns a caller-supplied id verbatim) so the supervisor can
       // address THAT seat while it runs instead of racing the SDK's own
       // allocation for an id it never reports back.
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
-      // Each seat's served model, captured the moment it settles (below).
+      // note: Each seat's served model, captured the moment it settles (below).
       const servedBySeat = new Map<string, string | undefined>();
-      // The hard cap this wave dispatches with: one figure for every seat of
+      // note: The hard cap this wave dispatches with: one figure for every seat of
       // the review, read at the moment they actually start.
       const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
-      // Per-seat stop state: a seat's OWN promise settlement — never "the whole
+      // invariant: Per-seat stop state: a seat's OWN promise settlement — never "the whole
       // group finished". A seat that returned is never messaged again.
       const settledSeats = new Set<string>();
-      // The ALL-SETTLED barrier: one failing seat must never cut supervision (or
+      // why: The ALL-SETTLED barrier: one failing seat must never cut supervision (or
       // teardown) short for a sibling that is still running, so the fan-out
       // waits for every seat's OWN settlement and rethrows the first failure
       // only afterwards.
@@ -1823,7 +1817,7 @@ export const ompAgentRuntime: AgentRuntime = {
             });
             return seatOutput(result, index, plan);
           } finally {
-            // Capture the served model HERE, at the seat's own settlement: the
+            // why: Capture the served model HERE, at the seat's own settlement: the
             // registry ref survives a keep-alive child
             // (packages/runner/node_modules/@oh-my-pi/pi-coding-agent/src/task/
             // executor.ts — only a non-keep-alive run unregisters), but an idle
@@ -1834,7 +1828,7 @@ export const ompAgentRuntime: AgentRuntime = {
           }
         }),
       );
-      // Supervision runs BESIDE the fan-out and ends off that same barrier: the
+      // why: Supervision runs BESIDE the fan-out and ends off that same barrier: the
       // supervisor stops per seat (its own settlement), the loop stops only once
       // EVERY seat has settled.
       const supervision = superviseSeats({
@@ -1848,18 +1842,18 @@ export const ompAgentRuntime: AgentRuntime = {
       });
       let outcomes: SeatOutcome[];
       let rejectedSeats = 0;
-      // A rejected seat promise carries its cause in the rejection itself —
+      // why: A rejected seat promise carries its cause in the rejection itself —
       // there is no outcome object to read it from, so capture it here or the
       // only diagnosis of a dead seat is lost with the promise.
       let rejectedReason: unknown = undefined;
-      // Every seat lost to a cause that is NOT the cap, with its seat id: the
+      // why: Every seat lost to a cause that is NOT the cap, with its seat id: the
       // evidence a budget stop would otherwise drop when a sibling's cap
       // claims the whole wave. Gathered beside the fan-out (results stay
       // index-aligned with the dispatch list) so the budget path below can
       // log them before it throws.
       const siblingLosses: { seat: string; detail: string }[] = [];
       try {
-        const results = await group; // never rejects: the barrier absorbs every seat
+        const results = await group; // note: never rejects: the barrier absorbs every seat
         outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
         const rejections = results.filter((result) => result.status === "rejected");
         rejectedSeats = rejections.length;
@@ -1871,12 +1865,12 @@ export const ompAgentRuntime: AgentRuntime = {
             siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
           }
         });
-        // Positive deadline evidence: at least one settled seat declares the
+        // why: Positive deadline evidence: at least one settled seat declares the
         // wall-clock cap stopped it. Decided here because it outranks both
         // failure branches below — a wave the cap stopped publishes the budget
         // signal, never a non-cap error or an `incomplete` verdict.
         const capStopped = outcomes.some((outcome) => outcome.gap !== null);
-        // The wave's verdict on a lost seat. A settled seat that failed without
+        // why: The wave's verdict on a lost seat. A settled seat that failed without
         // a cap carries its own error; a seat promise that rejected outright
         // produced no outcome at all (the SDK threw, or a bug of ours). Both are
         // fatal while the wave still has a usable payload to lose: a wave with a
@@ -1887,7 +1881,7 @@ export const ompAgentRuntime: AgentRuntime = {
         // lost seat still aborts the recheck child.
         const rejected = results.find((result) => result.status === "rejected");
         const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-        // A cap stop is budget evidence for the whole wave and wins over every
+        // why: A cap stop is budget evidence for the whole wave and wins over every
         // other loss shape: while one gap exists the budget path below owns
         // the outcome, so the non-cap rethrow is skipped entirely.
         if (!capStopped && outcomes.some((outcome) => outcome.output !== null)) {
@@ -1899,13 +1893,13 @@ export const ompAgentRuntime: AgentRuntime = {
         if (recheckWork) await recheckWork;
         throw error;
       } finally {
-        // Supervision never outlives the fan-out it supervises (no pending
+        // invariant: Supervision never outlives the fan-out it supervises (no pending
         // timer can survive the review) and never masks its outcome.
 
         await supervision;
       }
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
-      // The seats this wave did not settle: every dispatched seat that stopped
+      // why: The seats this wave did not settle: every dispatched seat that stopped
       // short (the wall-clock cap fired, or it delivered nothing usable without
       // one) plus every seat whose promise REJECTED outright — a rejection is a
       // lost seat too, it just carries no outcome object. ONE stopped seat is
@@ -1915,7 +1909,7 @@ export const ompAgentRuntime: AgentRuntime = {
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
       const stoppedSeats =
         outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
-      // A wall-clock-capped wave is a BUDGET stop, not a review verdict: the
+      // why: A wall-clock-capped wave is a BUDGET stop, not a review verdict: the
       // runner reports the seat counts it observed via `RunnerBudgetExhausted`
       // and never synthesizes an envelope — findings a capped wave collected
       // stay unpublished by construction (already-published work is the
@@ -1926,7 +1920,7 @@ export const ompAgentRuntime: AgentRuntime = {
       if (gaps.length > 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
-        // The SEATS served the round, not the host session: the same unanimous-
+        // note: The SEATS served the round, not the host session: the same unanimous-
         // served rule the success path applies — attribution is still the
         // round's fact on a budget stop.
         const served = new Set<string>();
@@ -1937,7 +1931,7 @@ export const ompAgentRuntime: AgentRuntime = {
         const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
         exhausted.recheck = settled?.doc ?? null;
         if (settled !== null) exhausted.recheckStatus = settled.status;
-        // The cap explains only its own seats: every sibling the cap did NOT
+        // why: The cap explains only its own seats: every sibling the cap did NOT
         // stop is a non-cap loss the closed signal cannot carry, so its seat
         // and bounded cause go to stderr here — the run's only other channel —
         // or the failure is dropped the moment the budget signal wins.
@@ -1950,36 +1944,25 @@ export const ompAgentRuntime: AgentRuntime = {
         throw exhausted;
       }
 
-      // The review settled: await the already-running recheck on ITS OWN
+      // why: The review settled: await the already-running recheck on ITS OWN
       // budget — bounded by the same anchored outer deadline, never a fresh
       // cap. Abort only when the outer deadline leaves no room to finish.
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const findings = mergeSeatOutputs(outputs);
-      // Why the wave produced nothing. The failure message is the ONLY
-      // diagnosis a lost seat carries (its payload never arrived, so there is
-      // no per-seat document to read), and the unusable-wave branch below is
-      // reached exactly when a seat was lost without a cap explaining it. It
-      // rides the declared reason so the durable review row and the published
-      // body name the cause instead of restating the symptom; bounded like the
-      // scope entries beside it.
-      //
-      // ENGINE-OWNED, STAGED HERE: composing an `incomplete` fact from seat
-      // results is the engine's job, not a consumer's. Every consumer that
-      // synthesizes a review will otherwise rediscover which failure shapes
-      // exist — and miss one, exactly as this code missed the rejected-promise
-      // shape until a real run showed it. `@mstar-harness/engine` should accept
-      // the seat outcomes and derive verdict + reason + unscanned itself;
-      // when it does, delete this block and pass nothing. Filed upstream with
-      // the shape the engine needs. Keep this marker until that lands so the
-      // staging is visible rather than looking like a settled design.
+      // why: The failure message is the ONLY diagnosis a lost seat carries (its
+      // payload never arrived, so there is no per-seat document to read), and
+      // the unusable-wave branch below is reached exactly when a seat was lost
+      // without a cap explaining it. It rides the declared reason so the
+      // durable review row and the published body name the cause instead of
+      // restating the symptom; bounded like the scope entries beside it.
       const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      // The rejection COUNT, not the reason's nullishness, decides whether a
+      // why: The rejection COUNT, not the reason's nullishness, decides whether a
       // seat's cause exists: a promise that rejected with null/undefined still
       // carries that recorded fact, and `?? ""` here would erase it.
       const lostSeatText = causeText(lostSeatDetail ?? (rejectedSeats === 0 ? "" : rejectedReason));
       const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
-      // The stopped seats are declared as the engine's `incomplete` fact,
+      // note: The stopped seats are declared as the engine's `incomplete` fact,
       // synthesized — never post-edited onto the envelope. A wave that stopped
       // everywhere still synthesizes with `findings: []`: throwing would lose
       // the review entirely, and a zero-finding envelope reporting a clean
@@ -1993,7 +1976,7 @@ export const ompAgentRuntime: AgentRuntime = {
           : {
               incomplete: {
                 reason: `no dispatched seat produced a usable payload${lostSeatCause}`,
-                // Every dispatched seat is lost in the unusable-wave branch, so
+                // why: Every dispatched seat is lost in the unusable-wave branch, so
                 // the dispatch list IS the unscanned set there — rejected seats
                 // included, and no seat silently dropped from the disclosure.
                 // Each entry is the terse seat/scope list the fact is read for,
@@ -2010,7 +1993,7 @@ export const ompAgentRuntime: AgentRuntime = {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
-      // The narrative report runs AFTER the settled review, serially: it must
+      // why: The narrative report runs AFTER the settled review, serially: it must
       // never compete with a seat for the run's model budget, and it can only
       // describe findings that already exist. A null report (no prContext, a
       // failed seat, an invalid document) degrades the sections to `none` —
@@ -2024,7 +2007,7 @@ export const ompAgentRuntime: AgentRuntime = {
         settled?.doc ?? null,
         runTeardownSignal(teardown, input),
       );
-      // The SEATS served the round, not the host session: read each dispatched
+      // note: The SEATS served the round, not the host session: read each dispatched
       // seat's own session model (the same registry the supervisor addresses
       // them through). A unanimous answer is the applied model; seats that
       // disagree on one round have no single applied model, which is ABSENT —
@@ -2043,19 +2026,19 @@ export const ompAgentRuntime: AgentRuntime = {
         ...(appliedModel === undefined ? {} : { appliedModel }),
       };
     } finally {
-      // Signal before the session settles: a report seat still in flight on the
+      // safety: Signal before the session settles: a report seat still in flight on the
       // caller-abort path must stop with the run.
       teardown.abort();
       if (session) {
         try {
           await session.dispose();
         } catch (error) {
-          // Teardown failure must not mask the primary outcome; the session
+          // why: Teardown failure must not mask the primary outcome; the session
           // is one-shot and owns no other resources.
           console.error("omp review runtime session dispose failed", error);
         }
       }
-      // Undo the seat-agent install; the clone itself is caller-owned and
+      // why: Undo the seat-agent install; the clone itself is caller-owned and
       // must survive (rmdir removes the dirs only if we left them empty).
       await removeInstalledAgents(cwd, [SEAT_AGENT_FILE]);
     }

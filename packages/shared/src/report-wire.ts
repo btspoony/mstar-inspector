@@ -1,5 +1,5 @@
 /**
- * Typed report wire format + fail-closed validator (mstar.report/v1).
+ * why: Typed report wire format + fail-closed validator (mstar.report/v1).
  *
  * The envelope (`mstar.review/v1`) is engine-owned and rejects unknown keys, so
  * the narrative sections a human report needs — overview, linked-issue
@@ -34,9 +34,9 @@
 
 /** The PR facts the report seat may read (worker-captured, untrusted text). */
 export type PrContext = {
-  /** The pull request description as GitHub returns it (may be empty). */
+  /** note: The pull request description as GitHub returns it (may be empty). */
   prBody: string;
-  /** Closing/mentioned issues, already bounded and capped by the consumer. */
+  /** note: Closing/mentioned issues, already bounded and capped by the consumer. */
   issues: { number: number; title: string; body: string }[];
 };
 
@@ -44,20 +44,20 @@ export type PrContext = {
 export type ReportDoc = {
   schema: "mstar.report/v1";
   /**
-   * The reviewed head, written by the runner from the envelope's
+   * why: The reviewed head, written by the runner from the envelope's
    * `target.head_sha`. The consumer rejects a document bound to another head:
    * the path is fixed, so a skipped seat leaves the PREVIOUS run's file there.
    */
   headSha: string;
-  /** 2–3 sentences on what the PR does. */
+  /** note: 2–3 sentences on what the PR does. */
   overview: string;
-  /** Per-criterion met/unmet/cut notes for the linked issues. */
+  /** note: Per-criterion met/unmet/cut notes for the linked issues. */
   linkedIssueAc: string;
-  /** The checks actually run and what they showed. */
+  /** note: The checks actually run and what they showed. */
   verified: string;
-  /** Leads investigated and rejected, one bullet each. */
+  /** note: Leads investigated and rejected, one bullet each. */
   rejected: string;
-  /** Ordered fix plan (markdown), rendered in a collapsible block. */
+  /** note: Ordered fix plan (markdown), rendered in a collapsible block. */
   planToFix: string;
 };
 
@@ -73,21 +73,21 @@ export const REPORT_FIELD_MAX_CHARS = {
   planToFix: 6_000,
 } as const;
 
-/** Every field's budget summed: 16,500 characters for a fully budgeted document. */
+/** note: Every field's budget summed: 16,500 characters for a fully budgeted document. */
 const REPORT_TOTAL_FIELD_CHARS = Object.values(REPORT_FIELD_MAX_CHARS).reduce(
   (total, chars) => total + chars,
   0,
 );
 
 /**
- * Worst-case serialized cost of ONE character: every field is a JSON string,
+ * why: Worst-case serialized cost of ONE character: every field is a JSON string,
  * and JSON escapes a control character (or a lone surrogate) to `\uXXXX` —
  * six ASCII bytes per UTF-16 unit. No in-budget document can cost more.
  */
 const REPORT_MAX_BYTES_PER_CHAR = 6;
 
 /**
- * Keys, quotes, separators, the schema tag and a 64-character `headSha` —
+ * why: Keys, quotes, separators, the schema tag and a 64-character `headSha` —
  * ~180 bytes for the exact key set, so this is provable slack.
  */
 const REPORT_JSON_HEADROOM_BYTES = 256;
@@ -113,13 +113,13 @@ export const PR_CONTEXT_MAX_CHARS = 4_000;
 const FIELDS = ["overview", "linkedIssueAc", "verified", "rejected", "planToFix"] as const;
 
 /**
- * A git object name, the same shape the runner's `head <sha>` recon fact
+ * note: A git object name, the same shape the runner's `head <sha>` recon fact
  * accepts (`runtime-omp.ts` `HEAD_FACT_RE`). Short shas are legitimate
  * (`7`), full ones are `40`/`64`.
  */
 const HEAD_SHA_RE = /^[0-9a-f]{7,64}$/;
 
-/** No Node Buffer in this module — it is imported by the Worker. */
+/** why: No Node Buffer in this module — it is imported by the Worker. */
 const UTF8 = new TextEncoder();
 
 export type ReportGateResult = { ok: true; doc: ReportDoc } | { ok: false; error: string };
@@ -138,7 +138,7 @@ export function validateReportDoc(value: unknown): ReportGateResult {
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
   const expected = [...FIELDS, "headSha", "schema"].sort();
-  // Every reason below names only the shape this module REQUIRES. The received
+  // why: Every reason below names only the shape this module REQUIRES. The received
   // keys and values are seat-authored text (a model echoing a PR body), and the
   // callers log these reasons, so echoing them would put attacker-controlled
   // text into a structured-log field.
@@ -148,7 +148,7 @@ export function validateReportDoc(value: unknown): ReportGateResult {
   if (record["schema"] !== "mstar.report/v1") {
     return { ok: false, error: `schema must be "mstar.report/v1"` };
   }
-  // Shape only — WHETHER this is the reviewed head is the consumer's check
+  // note: Shape only — WHETHER this is the reviewed head is the consumer's check
   // (it holds the authoritative checked-out sha). A value that is not a git
   // object name can never match one, so it fails here with its own reason.
   const headSha = record["headSha"];
@@ -172,7 +172,7 @@ export function validateReportDoc(value: unknown): ReportGateResult {
     }
     doc[field] = raw;
   }
-  // The read bounds the FILE in bytes; the budgets above bound CHARACTERS, and
+  // why: The read bounds the FILE in bytes; the budgets above bound CHARACTERS, and
   // `REPORT_FILE_MAX_BYTES` is derived from them at JSON's worst-case escape
   // cost, so an in-budget document can never outgrow the read. The check stays
   // as the gate's half of that contract: if the two constants ever drift, the

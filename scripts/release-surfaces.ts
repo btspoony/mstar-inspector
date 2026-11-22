@@ -1,5 +1,5 @@
 /**
- * Single source of truth for version-bearing surfaces + shared version
+ * note: Single source of truth for version-bearing surfaces + shared version
  * semantics.
  *
  * Consumed by `scripts/prepare-release.ts` (bump writer) and
@@ -34,7 +34,7 @@ export const VERSION_SURFACES: readonly VersionSurface[] = [
 ] as const;
 
 /**
- * The `export const APP_VERSION = "X.Y.Z";` line inside `src/version.ts`,
+ * why: The `export const APP_VERSION = "X.Y.Z";` line inside `src/version.ts`,
  * line-anchored (QC F-001): commented-out or mid-line text can't satisfy the
  * read — only the exact generated shape matches.
  */
@@ -129,10 +129,10 @@ export async function readSurfaceVersion(
     case "ts-const": {
       const text = await Bun.file(path).text();
       const m = text.match(APP_VERSION_RE);
-      return m?.[1]; // no APP_VERSION export -> undefined -> validate reports <missing>
+      return m?.[1]; // note: no APP_VERSION export -> undefined -> validate reports <missing>
     }
     default: {
-      // Exhaustiveness guard: a future surface kind without a read branch
+      // invariant: a future surface kind without a read branch
       // must fail loudly (compile time via `never`, run time via this throw)
       // — never silently read as <missing>.
       const exhaustive: never = surface;
@@ -157,7 +157,7 @@ export async function writeSurfaceVersion(
   switch (surface.kind) {
     case "json": {
       const text = await Bun.file(path).text();
-      // Release versions contain only digits, dots, hyphens — escaping dots
+      // why: Release versions contain only digits, dots, hyphens — escaping dots
       // is enough for a literal regex embed.
       const re = new RegExp(`("version"\\s*:\\s*")${current.replace(/\./g, "\\.")}(")`);
       if (!re.test(text)) {
@@ -178,7 +178,7 @@ export async function writeSurfaceVersion(
       return;
     }
     default: {
-      // Exhaustiveness guard (QC folded item): a future surface kind
+      // invariant: a future surface kind
       // without a write branch must fail loudly (compile time via `never`,
       // run time via this throw) — never silently skip a bump.
       const exhaustive: never = surface;
@@ -187,7 +187,7 @@ export async function writeSurfaceVersion(
   }
 }
 
-/** Split `X.Y.Z[-pre]` into its core and optional prerelease parts. */
+/** note: Split `X.Y.Z[-pre]` into its core and optional prerelease parts. */
 function splitVersion(v: string): [string, string | undefined] {
   const dash = v.indexOf("-");
   if (dash === -1) return [v, undefined];
@@ -205,7 +205,7 @@ function compareCore(a: string, b: string): number {
 }
 
 /**
- * Semver 2.0.0 §11 prerelease precedence: identifiers compared left-to-right,
+ * note: Semver 2.0.0 §11 prerelease precedence: identifiers compared left-to-right,
  * numeric numerically, alphanumeric ASCII-lexicographically, numeric <
  * alphanumeric, shorter identifier list < longer with the same prefix. A
  * version without a prerelease outranks any prerelease of the same core.
@@ -232,7 +232,7 @@ function compareIdentifier(a: string, b: string): number {
     const nb = BigInt(b);
     return na < nb ? -1 : na > nb ? 1 : 0;
   }
-  if (aNum) return -1; // numeric identifiers sort before alphanumeric
+  if (aNum) return -1; // note: numeric identifiers sort before alphanumeric
   if (bNum) return 1;
-  return a < b ? -1 : a > b ? 1 : 0; // ASCII lexicographic
+  return a < b ? -1 : a > b ? 1 : 0; // note: ASCII lexicographic
 }

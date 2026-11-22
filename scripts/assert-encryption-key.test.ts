@@ -1,5 +1,5 @@
 /**
- * The encryption-key preflight's verdict (`scripts/assert-encryption-key.ts`).
+ * why: The encryption-key preflight's verdict (`scripts/assert-encryption-key.ts`).
  *
  * The verdict is the gate's only decision, so the table below is over the
  * VALUES: every shape `importKey` rejects aborts with the required shape named,
@@ -21,11 +21,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { encryptionKeyVerdict, REQUIRED_SHAPE } from "./assert-encryption-key";
 
-/** 32 raw bytes as standard base64 — the one accepted shape. */
+/** note: 32 raw bytes as standard base64 — the one accepted shape. */
 const KEY_32 = btoa("k".repeat(32));
-/** The same bytes in base64url (`-`/`_` for `+`/`/`): rejected by the parser. */
+/** note: The same bytes in base64url (`-`/`_` for `+`/`/`): rejected by the parser. */
 const KEY_32_URL = btoa("ÿ".repeat(32)).replace(/\+/g, "-").replace(/\//g, "_");
-/** Raw bytes as standard base64, for the wrong-length rows. */
+/** note: Raw bytes as standard base64, for the wrong-length rows. */
 const keyOf = (n: number) => btoa("k".repeat(n));
 
 describe("encryptionKeyVerdict: the key shapes the runtime parser rejects", () => {
@@ -33,20 +33,20 @@ describe("encryptionKeyVerdict: the key shapes the runtime parser rejects", () =
     const verdict = await encryptionKeyVerdict(KEY_32);
     expect(verdict.ok).toBe(true);
     expect(verdict.message).toContain(REQUIRED_SHAPE);
-    // The gate's success means the plaintext came back, not merely that the
+    // why: The gate's success means the plaintext came back, not merely that the
     // import succeeded — a green verdict after a broken GCM round-trip would be
     // the same lie the issue reports.
     expect(verdict.message).toContain("round-trip passed");
   });
 
-  /** Every malformed row: refused, shape named, length named, value never echoed. */
+  /** note: Every malformed row: refused, shape named, length named, value never echoed. */
   const REFUSED: { label: string; value: string | undefined; detail: string }[] = [
     { label: "unset", value: undefined, detail: "is not set" },
     { label: "empty string", value: "", detail: "is not set" },
     { label: "not base64", value: "not-a-base64-key!", detail: "is not valid base64" },
     { label: "31 bytes", value: keyOf(31), detail: "must decode to exactly 32 bytes (got 31)" },
     { label: "33 bytes", value: keyOf(33), detail: "must decode to exactly 32 bytes (got 33)" },
-    // `openssl rand -hex 32` is the other obvious generation mistake: 64 base64
+    // why: `openssl rand -hex 32` is the other obvious generation mistake: 64 base64
     // characters, i.e. 48 bytes.
     { label: "hex-encoded key", value: "e".repeat(64), detail: "must decode to exactly 32 bytes (got 48)" },
     { label: "base64url", value: KEY_32_URL, detail: "is not valid base64" },
@@ -56,11 +56,11 @@ describe("encryptionKeyVerdict: the key shapes the runtime parser rejects", () =
     test(`${label} fails, naming the shape and the observed length`, async () => {
       const verdict = await encryptionKeyVerdict(value);
       expect(verdict.ok).toBe(false);
-      // The parser's own words, not a re-derived rule: the message carries the
+      // why: The parser's own words, not a re-derived rule: the message carries the
       // reason the runtime would have thrown at first use.
       expect(verdict.message).toContain(detail);
       expect(verdict.message).toContain(REQUIRED_SHAPE);
-      // The refusal is a sentence an operator can act on, never the value.
+      // invariant: The refusal is a sentence an operator can act on, never the value.
       if (value) {
         expect(verdict.message).not.toContain(value);
         expect(verdict.message).not.toContain(value.slice(0, 6));
@@ -69,7 +69,7 @@ describe("encryptionKeyVerdict: the key shapes the runtime parser rejects", () =
   }
 
   test("the base64url fixture really is outside the standard alphabet", () => {
-    // Guards the row above from passing for the wrong reason (a 32-byte value
+    // why: Guards the row above from passing for the wrong reason (a 32-byte value
     // that happened to need no `+`/`/` would be valid standard base64).
     expect(KEY_32_URL).toMatch(/[-_]/);
     expect(keyOf(32)).not.toBe(KEY_32_URL);
@@ -83,7 +83,7 @@ describe("encryptionKeyVerdict: the key shapes the runtime parser rejects", () =
 
 describe("the gate reads no database", () => {
   test("its only import is the runtime secretbox", () => {
-    // The plan's acceptance criterion is "a valid key passes regardless of
+    // why: The plan's acceptance criterion is "a valid key passes regardless of
     // whether the database holds encrypted rows". That holds because the gate
     // has no database handle at all: an empty production D1 is indistinguishable
     // from a full one here.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * collect-deploy-evidence.ts — bounded-wait deploy evidence collector.
+ * why: collect-deploy-evidence.ts — bounded-wait deploy evidence collector.
  * Consumes the evidence chain of one deploy workflow (`--workflow`, default
  * `deploy.yml`; the Release workflow passes `deploy-prod.yml` so the section
  * cites the production deploy): for the
@@ -92,7 +92,7 @@ export type GhRun = {
   conclusion: string | null;
   displayTitle: string;
   /**
-   * The ref the run was dispatched/pushed on (`gh run list --json headBranch`).
+   * note: The ref the run was dispatched/pushed on (`gh run list --json headBranch`).
    * This is what separates the release's own tag-bound run from a manual
    * rollback dispatched on the same commit (see `--ref`).
    */
@@ -104,25 +104,25 @@ export type GhRun = {
  * decision logic without network or the `gh` binary.
  */
 export type GhRunner = {
-  /** `gh run list --workflow <workflow> --commit <sha> --json ...`; throws on gh failure. */
+  /** note: `gh run list --workflow <workflow> --commit <sha> --json ...`; throws on gh failure. */
   listRuns(sha: string, workflow: string): GhRun[];
-  /** `gh run download <id> -n deploy-evidence -D <dir>`; throws on failure. */
+  /** note: `gh run download <id> -n deploy-evidence -D <dir>`; throws on failure. */
   downloadArtifact(runId: number, destDir: string): void;
 };
 
 export type CollectOptions = {
   sha: string;
-  /** Deploy workflow file whose runs are collected (e.g. `deploy.yml`, `deploy-prod.yml`). */
+  /** note: Deploy workflow file whose runs are collected (e.g. `deploy.yml`, `deploy-prod.yml`). */
   workflow: string;
   /**
-   * Expected run ref (the release tag). Preferred when selecting among the
+   * note: Expected run ref (the release tag). Preferred when selecting among the
    * runs for `sha`: a manual rollback dispatched on the same commit carries a
    * different `headBranch`. A preference — except alongside `sinceRun`, where
    * it becomes a requirement (only this ref's post-boundary run may be cited).
    */
   ref?: string;
   /**
-   * Dispatch boundary: run ids are monotonically increasing, so only runs with
+   * note: Dispatch boundary: run ids are monotonically increasing, so only runs with
    * a greater id can belong to a deploy dispatched after this boundary was
    * captured. The boundary spans every ref of the commit — a run for another
    * tag on the same commit predates this dispatch too and must not be cited.
@@ -133,18 +133,18 @@ export type CollectOptions = {
    * selection unchanged.
    */
   sinceRun?: number;
-  /** Total bounded-wait budget. Default via CLI: 15 min. */
+  /** note: Total bounded-wait budget. Default via CLI: 15 min. */
   waitMs: number;
-  /** Poll interval. Default via CLI: 30 s. */
+  /** note: Poll interval. Default via CLI: 30 s. */
   intervalMs: number;
   runner: GhRunner;
-  /** Deadline clock — tests pass a fake. Default: Date.now. */
+  /** note: Deadline clock — tests pass a fake. Default: Date.now. */
   now?: () => number;
-  /** Inter-poll sleep — tests pass a no-op recorder. Default: Bun.sleepSync. */
+  /** note: Inter-poll sleep — tests pass a no-op recorder. Default: Bun.sleepSync. */
   sleep?: (ms: number) => void;
-  /** Env the run link resolves from. Default: process.env. */
+  /** note: Env the run link resolves from. Default: process.env. */
   env?: Record<string, string | undefined>;
-  /** Artifact download dir. Default: a fresh mkdtemp (removed after reading). */
+  /** note: Artifact download dir. Default: a fresh mkdtemp (removed after reading). */
   artifactDir?: string;
 };
 
@@ -152,7 +152,7 @@ export type CollectKind = "success" | "deploy-failed" | "pending" | "no-run" | "
 
 export type CollectResult = {
   kind: CollectKind;
-  /** The markdown section (no trailing newline) for the release notes. */
+  /** note: The markdown section (no trailing newline) for the release notes. */
   section: string;
 };
 
@@ -181,7 +181,7 @@ export function validateEvidenceShape(value: string, file: string): string {
   return value;
 }
 
-/** Error text (`gh` stderr can be multi-line) collapsed to keep the `- ` bullet shape. */
+/** why: Error text (`gh` stderr can be multi-line) collapsed to keep the `- ` bullet shape. */
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -215,7 +215,7 @@ export function parseArgs(argv: string[]): {
     if (a === "--help" || a === "-h") help = true;
     else if (a === "--workflow" || a.startsWith("--workflow=")) {
       const value = a === "--workflow" ? rest[++i] : a.slice("--workflow=".length);
-      // A missing value must never swallow the next flag (`--workflow --help`),
+      // why: A missing value must never swallow the next flag (`--workflow --help`),
       // and a flag token is never a workflow file name.
       if (!value || value.startsWith("-")) {
         throw new Error(
@@ -225,7 +225,7 @@ export function parseArgs(argv: string[]): {
       workflow = value;
     } else if (a === "--ref" || a.startsWith("--ref=")) {
       const value = a === "--ref" ? rest[++i] : a.slice("--ref=".length);
-      // Same contract as --workflow: never swallow the next flag. Whitespace
+      // why: Same contract as --workflow: never swallow the next flag. Whitespace
       // and backticks are rejected here because this value is interpolated
       // into a `- ` bullet (see the output contract above).
       if (!value || value.startsWith("-") || /[\s`]/.test(value)) {
@@ -236,7 +236,7 @@ export function parseArgs(argv: string[]): {
       ref = value;
     } else if (a === "--since-run" || a.startsWith("--since-run=")) {
       const value = a === "--since-run" ? rest[++i] : a.slice("--since-run=".length);
-      // Same contract as --workflow/--ref: never swallow the next flag. Run ids
+      // why: Same contract as --workflow/--ref: never swallow the next flag. Run ids
       // are positive integers — a non-numeric value is a usage error, not a
       // silently ignored boundary (ignoring it would let a pre-boundary run be
       // cited as this release's evidence).
@@ -279,7 +279,7 @@ export function runLink(runId: number, env: Record<string, string | undefined>):
 }
 
 /**
- * `gh run list` is newest-first. Among the runs for the SHA, prefer the first
+ * why: `gh run list` is newest-first. Among the runs for the SHA, prefer the first
  * (newest) run whose own dispatch ref (`headBranch`) equals `ref`: a manual
  * rollback dispatched on the same commit carries a different ref. A match is
  * proof the run deployed exactly `ref` — deploy-prod.yml takes no `ref` input
@@ -318,7 +318,7 @@ function pickRun(
   if (ref) {
     const matching = selectable.find((r) => r.headBranch === ref);
     if (matching) return { run: matching, refFallback: false };
-    // Above the boundary only the requested ref's run may be cited; never
+    // invariant: Above the boundary only the requested ref's run may be cited; never
     // fall back to a run whose identity is unproven.
     if (sinceRun !== undefined) return undefined;
     return { run: newest, refFallback: true };
@@ -326,13 +326,13 @@ function pickRun(
   return { run: newest, refFallback: false };
 }
 
-/** States the preference miss explicitly — the cited run did not match the ref the release deployed, so it may not be the release's own deploy. */
+/** note: States the preference miss explicitly — the cited run did not match the ref the release deployed, so it may not be the release's own deploy. */
 function refFallbackLine(ref: string, sha: string): string {
   return `- Run identity: no run on ref \`${ref}\` for commit \`${sha}\` — the newest run for the commit is reported instead, which is not that ref's deploy`;
 }
 
 /**
- * The wait each section attributes to itself: the bounded window the collector
+ * why: The wait each section attributes to itself: the bounded window the collector
  * actually spent, or — for a zero window (a prerelease Release never dispatches,
  * so there is nothing to wait for) — an honest immediate check instead of a
  * rounded-up `~1 min` that never happened.
@@ -387,7 +387,7 @@ function failedSection(
 }
 
 /**
- * No-run cause is workflow-agnostic: `deploy-prod.yml` has no `paths-ignore`,
+ * why: No-run cause is workflow-agnostic: `deploy-prod.yml` has no `paths-ignore`,
  * so a filter skip must never be claimed for it (the Release workflow
  * dispatches that run explicitly; absence means no run was created).
  *
@@ -430,7 +430,7 @@ function degradedSection(
 }
 
 /**
- * Terminal-state handling for a completed run: success downloads the
+ * why: Terminal-state handling for a completed run: success downloads the
  * `deploy-evidence` artifact and reads `version_id.txt` + `image_digest.txt`;
  * any artifact-side failure degrades (never fails the release).
  */
@@ -478,7 +478,7 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
   const deadline = now() + opts.waitMs;
   let seen: GhRun | undefined;
   let seenRefFallback = false;
-  // Runs for the commit existed but none was selectable — they predate the
+  // why: Runs for the commit existed but none was selectable — they predate the
   // dispatch boundary, or they are another ref's runs above it: either way the
   // commit does have runs, none may be cited, and the section must say which
   // (never "no run was created").
@@ -490,7 +490,7 @@ export function collectDeployEvidence(opts: CollectOptions): CollectResult {
       picked = pickRun(runs, opts.ref, opts.sinceRun);
       if (picked === undefined && runs.length > 0) sawExcludedRuns = true;
     } catch (err) {
-      // gh missing / auth / network — deterministic enough to surface now
+      // why: gh missing / auth / network — deterministic enough to surface now
       // rather than burn the whole window retrying (evidence is not a gate).
       const extra = opts.ref && seenRefFallback ? [refFallbackLine(opts.ref, opts.sha)] : [];
       return { kind: "degraded", section: degradedSection(err, seen, env, extra) };
@@ -540,7 +540,7 @@ export function createGhRunner(): GhRunner {
         workflow,
         "--commit",
         sha,
-        // Explicit page size, never gh's 20-row default: this is the same
+        // why: Explicit page size, never gh's 20-row default: this is the same
         // commit-keyed lookup the Release step performs, and it must see a
         // same-tag run that can sit behind many newer runs of OTHER tags for
         // the commit (a commit rolled back to repeatedly accumulates them). A
@@ -607,7 +607,7 @@ export function runCli(
     console.error("Usage: bun run scripts/collect-deploy-evidence.ts <merge-sha> (or set MERGE_SHA)");
     return 1;
   }
-  // Same gate as positional SHAs (folded task-1 review fix): env-provided
+  // why: Same gate as positional SHAs (folded task-1 review fix): env-provided
   // values must not bypass the full-SHA validation gh's exact-match relies on.
   if (!FULL_SHA_RE.test(sha)) {
     console.error(
@@ -631,7 +631,7 @@ export function runCli(
       env,
     });
   } catch (err) {
-    // Catch-all: an unexpected bug must still not fail the release (exit 0).
+    // why: Catch-all: an unexpected bug must still not fail the release (exit 0).
     result = { kind: "degraded", section: degradedSection(err, undefined, env) };
   }
   write(result.section + "\n");
@@ -639,7 +639,7 @@ export function runCli(
   return 0;
 }
 
-// Run only when executed directly — importing the module (unit tests) must
+// why: Run only when executed directly — importing the module (unit tests) must
 // not spawn gh or sleep.
 if (import.meta.main) {
   process.exit(runCli(process.argv, process.env));

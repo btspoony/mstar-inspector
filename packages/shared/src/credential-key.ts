@@ -1,6 +1,6 @@
 /**
- * The one rule both credential boundaries share: a provider KEY VALUE must
- * never look like a config COMMAND VALUE.
+ * why: The one rule both credential boundaries share: a provider KEY VALUE
+ * must never look like a config COMMAND VALUE.
  *
  * The pinned omp SDK treats a config value starting with `!` as a command:
  * `isCommandConfigValue` (pi-coding-agent/src/config/resolve-config-value.ts)

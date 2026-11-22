@@ -1,5 +1,5 @@
 /**
- * Seat model-failover probe — a ONE-SHOT diagnostic, not a runtime path.
+ * note: Seat model-failover probe — a ONE-SHOT diagnostic, not a runtime path.
  *
  * When the first selector of an App's chain answers a quota `400`, the seat is
  * supposed to apply the next selector. Three gates can drop that candidate
@@ -56,16 +56,16 @@ export type ProbeSelectorVerdict = {
   selector: string;
   provider: string;
   modelId: string;
-  /** The FIRST gate that drops this selector — `eligible` when none does. */
+  /** note: The FIRST gate that drops this selector — `eligible` when none does. */
   gate: ProbeGate;
   registry: { resolved: boolean; metadata: ProbeModelMetadata | null };
   poolKey: { configured: boolean };
   context: {
-    /** null = not evaluated (no live context was available to measure it). */
+    /** note: null = not evaluated (no live context was available to measure it). */
     fits: boolean | null;
     retryContextTokens: number | null;
     contextWindow: number | null;
-    /** `contextWindow - reserve`, the SDK's own fit budget (null when unresolved). */
+    /** note: `contextWindow - reserve`, the SDK's own fit budget (null when unresolved). */
     fitBudget: number | null;
   };
 };
@@ -73,28 +73,27 @@ export type ProbeSelectorVerdict = {
 export type ProbeReport = {
   chain: readonly string[];
   selectors: readonly ProbeSelectorVerdict[];
-  /** The first selector the gates drop — the candidate disposition. */
   droppedCandidate: ProbeSelectorVerdict | null;
 };
 
 export type ProbeInput = {
-  /** The App's configured chain, verbatim (comma-separated selectors). */
+  /** note: The App's configured chain, verbatim (comma-separated selectors). */
   chain: string;
-  /** The selected image's capability hosts — the synthesized base. */
+  /** note: The selected image's capability hosts — the synthesized base. */
   capabilityHosts: readonly CapabilityHost[];
-  /** The App's custom declarations (the post-037a declaration shape). */
+  /** note: The App's custom declarations (the post-037a declaration shape). */
   customProviders?: readonly CustomProviderDeclaration[];
   /**
-   * The transported pool exactly as the consumer ships it: provider id -> keys.
+   * safety: The transported pool exactly as the consumer ships it: provider id -> keys.
    * FAKE keys only; the probe never reaches a network.
    */
   pool: Record<string, readonly string[]>;
-  /** The retry context the candidate must hold, in tokens. */
+  /** note: The retry context the candidate must hold, in tokens. */
   retryContextTokens: number;
 };
 
 /**
- * `provider/model[:variant]` — the provider is the FIRST segment (model ids
+ * note: `provider/model[:variant]` — the provider is the FIRST segment (model ids
  * may contain slashes), and a trailing `:variant` is a thinking suffix unless
  * the literal id resolves (the SDK tries the literal id first).
  */
@@ -109,7 +108,7 @@ function splitSelector(selector: string): { provider: string; modelId: string; l
 }
 
 /**
- * `SessionMaintenance.contextFitsModel`'s arithmetic against a given context
+ * note: `SessionMaintenance.contextFitsModel`'s arithmetic against a given context
  * size: a non-positive window fits everything (the SDK's own first line), and
  * otherwise the retry context must fit under `window - reserve`. An ABSENT
  * retry context means the gate cannot be judged (a failed round never exposes
@@ -130,7 +129,7 @@ function contextFit(
 }
 
 /**
- * The runtime's gate walk, over an ALREADY-BUILT registry — the ONE place the
+ * why: The runtime's gate walk, over an ALREADY-BUILT registry — the ONE place the
  * three rules are spelled. The one-shot probe (below) and the runner's failure
  * attribution both call this, so an attribution can never drift from the
  * diagnostic.
@@ -138,14 +137,14 @@ function contextFit(
 export function walkSeatGates(opts: {
   registry: ModelRegistry;
   chain: readonly string[];
-  /** The retry context, when the caller knows it; absent = context not judged. */
+  /** note: The retry context, when the caller knows it; absent = context not judged. */
   retryContextTokens?: number;
 }): ProbeSelectorVerdict[] {
   const { registry } = opts;
   const selectors: ProbeSelectorVerdict[] = [];
   for (const selector of opts.chain) {
     const { provider, modelId, literalThenBase } = splitSelector(selector);
-    // The registry's own lookup — literal id first, then the thinking-suffix
+    // why: The registry's own lookup — literal id first, then the thinking-suffix
     // base, exactly the order the SDK's resolver applies.
     const model = literalThenBase.map((id) => registry.find(provider, id)).find((entry) => entry !== undefined);
     if (model === undefined) {
@@ -156,7 +155,7 @@ export function walkSeatGates(opts: {
         gate: "registry",
         registry: { resolved: false, metadata: null },
         poolKey: { configured: false },
-        // An unresolved selector never reached the context gate: "not
+        // why: An unresolved selector never reached the context gate: "not
         // evaluated" (null), matching `contextFit` and this shape's contract —
         // `false` would read as "measured and it did not fit".
         context: { fits: null, retryContextTokens: opts.retryContextTokens ?? null, contextWindow: null, fitBudget: null },
@@ -180,7 +179,7 @@ export function walkSeatGates(opts: {
       selector,
       provider,
       modelId,
-      // The runtime's gate order: resolution, then credential, then window.
+      // note: The runtime's gate order: resolution, then credential, then window.
       gate: !configured ? "pool_key" : fit.fits === false ? "context" : "eligible",
       registry: { resolved: true, metadata },
       poolKey: { configured },
@@ -225,13 +224,13 @@ export async function probeSeatFailover(input: ProbeInput): Promise<ProbeReport>
 export type ChainAttribution = {
   selector: string;
   /**
-   * `served` is set ONLY from an observation the runtime supplied; a configured
+   * invariant: `served` is set ONLY from an observation the runtime supplied; a configured
    * entry the round never reported on is a `candidate`, whatever its position.
    */
   role: "served" | "candidate";
   verdict: "served" | "dropped" | "eligible";
   gate: ProbeGate;
-  /** Operator-actionable sentence — never key material, never a pool size. */
+  /** safety: Operator-actionable sentence — never key material, never a pool size. */
   reason: string;
 };
 
@@ -328,7 +327,7 @@ export function attributionEntries(attributions: readonly ChainAttribution[]): s
   return attributions.map((entry) => `${entry.selector} ${entry.reason}`);
 }
 
-/** The counted fold that replaces the entries the budget could not carry. */
+/** note: The counted fold that replaces the entries the budget could not carry. */
 function omittedMarker(count: number): string {
   return `+${count} more chain ${count === 1 ? "entry" : "entries"} omitted`;
 }
@@ -354,16 +353,16 @@ export function formatFailureAttribution(
     causeText.length <= FAILURE_CAUSE_MAX_CHARS
       ? `review: runtime failed: ${causeText}`
       : `review: runtime failed: ${causeText.slice(0, FAILURE_CAUSE_MAX_CHARS - 1)}…`;
-  // No disposition to add: the cause alone IS the block — still bounded, so a
+  // why: No disposition to add: the cause alone IS the block — still bounded, so a
   // pathologically long cause cannot evict itself from the Worker's tail.
   if (entries.length === 0) return causeLine;
   const head = `\nreview: chain attribution (configured): `;
-  // Each entry is bounded FIRST, so an oversized one is truncated rather than
+  // why: Each entry is bounded FIRST, so an oversized one is truncated rather than
   // folded away — the fold is for a count of entries, not for one long message.
   const bounded = entries.map((entry) =>
     entry.length <= FAILURE_ENTRY_MAX_CHARS ? entry : `${entry.slice(0, FAILURE_ENTRY_MAX_CHARS - 1)}…`,
   );
-  // The LONGEST prefix whose folded form still fits: the fold's own length
+  // why: The LONGEST prefix whose folded form still fits: the fold's own length
   // depends on the count it states, so it is recomputed at every step.
   const assemble = (count: number): string => {
     const omitted = bounded.length - count;
@@ -375,7 +374,7 @@ export function formatFailureAttribution(
     const candidate = assemble(count);
     if (candidate.length <= budgetChars) return candidate;
   }
-  // Not even the bare fold fits (a pathologically long cause): keep the cause
+  // why: Not even the bare fold fits (a pathologically long cause): keep the cause
   // and state the omission without an entry — never drop the fold itself.
   return assemble(0);
 }

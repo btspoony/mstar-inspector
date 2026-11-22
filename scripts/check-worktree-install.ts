@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * check-worktree-install.ts — refuse a baseline comparison measured inside a
+ * why: check-worktree-install.ts — refuse a baseline comparison measured inside a
  * feature worktree whose install is not proven to be the worktree's own.
  *
  * Usage:
@@ -51,7 +51,7 @@ function reasonOf(error: unknown): string {
 }
 
 /**
- * What a path is, as the filesystem answers: a directory, a file, absent, or
+ * note: What a path is, as the filesystem answers: a directory, a file, absent, or
  * unanswerable. `ENOENT`/`ENOTDIR` mean "nothing at this spelling" and callers
  * continue; every other error (a permission-restricted parent, a symlink loop)
  * means the question was not answered, and a can't-answer must never be read as
@@ -74,7 +74,7 @@ function probe(path: string): Probe {
 }
 
 /**
- * Whether a `node_modules` directory holds anything that could be a package.
+ * note: Whether a `node_modules` directory holds anything that could be a package.
  * A dot entry (`.bin`, `.package-lock.json`, `.cache`) is a manager's bookkeeping,
  * not an installed package; a scoped package lives under `@scope/`, which is
  * neither hidden nor empty.
@@ -117,7 +117,7 @@ export function inheritedInstall(dir: string): AncestorInstall {
   }
 }
 
-/** Lockfiles a repository may commit, and the manager each one names. */
+/** note: Lockfiles a repository may commit, and the manager each one names. */
 const LOCKFILES: readonly (readonly [string, string])[] = [
   ["bun.lock", "bun"],
   ["bun.lockb", "bun"],
@@ -131,8 +131,8 @@ const LOCKFILES: readonly (readonly [string, string])[] = [
  * only provenance a filesystem read can see.
  *
  * shortcut: bun leaves no marker inside node_modules, so a bun-installed tree in
- * a repository whose lockfiles name only npm is not reported as foreign; add a
- * marker read if a second manager ever installs into this repo.
+ * a repository whose lockfiles name only npm is not reported as foreign;
+ * upgrade: add a marker read once a second manager installs into this repo.
  */
 const INSTALL_MARKERS: readonly (readonly [string, string])[] = [
   [".package-lock.json", "npm"],
@@ -140,7 +140,7 @@ const INSTALL_MARKERS: readonly (readonly [string, string])[] = [
   [".modules.yaml", "pnpm"],
 ];
 
-/** The nearest directory at or above `dir` holding a `.git` entry. */
+/** note: The nearest directory at or above `dir` holding a `.git` entry. */
 function repositoryRoot(dir: string): string {
   for (let current = dir; ; current = dirname(current)) {
     const git = probe(join(current, ".git"));
@@ -149,7 +149,7 @@ function repositoryRoot(dir: string): string {
   }
 }
 
-/** The managers this directory's lockfiles name, with the file that named each. */
+/** note: The managers this directory's lockfiles name, with the file that named each. */
 function lockfileManagers(dir: string): Map<string, string> {
   const found = new Map<string, string>();
   for (const [file, manager] of LOCKFILES) {
@@ -160,7 +160,7 @@ function lockfileManagers(dir: string): Map<string, string> {
 }
 
 /**
- * A local `node_modules` that exists: what it proves, or why it proves nothing.
+ * why: A local `node_modules` that exists: what it proves, or why it proves nothing.
  * Existence is not the guarantee — the tree must resolve inside the inspected
  * directory, hold packages, and not contradict the repository's lockfiles.
  */
@@ -171,7 +171,7 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
   } catch (error) {
     return { kind: "uninspectable", target, path: modules, reason: reasonOf(error) };
   }
-  // Containment by SEGMENTS, not by string prefix: a directory named "..deps"
+  // why: Containment by SEGMENTS, not by string prefix: a directory named "..deps"
   // is inside the worktree, while ".." as a segment is not.
   const within = relative(target, real);
   if (within === "" || isAbsolute(within) || within.split(sep).includes("..")) {
@@ -197,7 +197,7 @@ function inspectLocal(target: string, modules: string): InstallVerdict {
       reason: `it holds no packages (empty, or only a manager's dot entries)${also}`
     };
   }
-  // Every marker present counts: a tree written by two managers, or by one the
+  // why: Every marker present counts: a tree written by two managers, or by one the
   // lockfiles do not name, is not the tree the lockfiles describe — a first
   // match must not shadow a later foreign marker.
   const found: { manager: string; path: string }[] = [];

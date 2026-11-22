@@ -1,5 +1,5 @@
 /**
- * Live smoke evidence capture: run one real review (quick tier,
+ * note: Live smoke evidence capture: run one real review (quick tier,
  * single seat) through the omp AgentRuntime, save the mstar.review/v1
  * envelope to a temp file, and report whether validateMstarReviewV1 accepts
  * it. Requires HARNESS_PLUGIN_ROOT + a configured provider key + a PR clone
@@ -21,7 +21,7 @@ import { createInMemoryAuthStorage } from "../packages/runner/src/runner";
 import { ompAgentRuntime, parseModelSelectors } from "../packages/runner/src/runtime-omp";
 
 const worktreePath = process.argv[2] ?? process.cwd();
-// The smoke runs an App's own selector: the provider comes from the selector
+// why: The smoke runs an App's own selector: the provider comes from the selector
 // prefix and its key from the conventional `<PROVIDER>_API_KEY` env var. The
 // per-review models.yml carries no image-declared provider — a built-in one
 // resolves from the SDK's catalog, a custom one would be declared here.
@@ -36,12 +36,12 @@ if (provider === "" || providerKey === undefined || providerKey.trim() === "") {
 const agentDir = await writePerReviewModelsYaml([]);
 const authStorage = await createInMemoryAuthStorage();
 try {
-  // An explicit `login` row — never an implicit lookup: an EMPTY store fails
+  // safety: An explicit `login` row — never an implicit lookup: an EMPTY store fails
   // loud here rather than letting the SDK discover a credential file.
   await authStorage.credentials.set(provider, [
     { type: "api_key" as const, key: providerKey, source: "login" as const },
   ]);
-  // runReview resolves { envelope, recheck } — the smoke captures
+  // note: runReview resolves { envelope, recheck } — the smoke captures
   // the envelope only (the optional recheck document rides its own file).
   const { envelope } = await ompAgentRuntime.runReview({
     level: "quick",

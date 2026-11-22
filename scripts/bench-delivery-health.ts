@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createReviewBotsStore } from "../src/dashboard/apps-store";
 import { createMigratedTestD1, execMigrationScript } from "../tests/store/helpers";
 
-// Run from the repository root: bun scripts/bench-delivery-health.ts [baseline-ref]
+// note: Run from the repository root: bun scripts/bench-delivery-health.ts [baseline-ref]
 // Main immediately before the delivery-health rewrite; stable after this PR merges.
 const baselineRef = process.argv[2] ?? "3c9e829e54401a7d45415417dd3ee8f0908aef69";
 const baselineSha = execFileSync("git", ["rev-parse", "--verify", baselineRef], {
@@ -94,7 +94,7 @@ for (const rows of [3000, 15000, 60000]) {
     const old = measure(before, "before");
     execMigrationScript(db, migration);
     assertHealthIndexes(true);
-    // Capture the store's own statements rather than maintaining a second rewrite.
+    // why: Capture the store's own statements rather than maintaining a second rewrite.
     const after: string[] = [];
     await createReviewBotsStore({
       ...handle,
