@@ -1609,7 +1609,9 @@ export async function captureLineComments(
  * read-only discovery the intent allows. A batch marked UNRESOLVABLE by the
  * discovery bound is not returned at all: it can never resolve, so leaving it
  * in the bounded selection would only starve newer batches. Within the
- * resolvable set the order stays oldest-first.
+ * resolvable set the order stays oldest-first. The selection is driven from
+ * the few uncaptured threads (idx_thread_uncaptured), not from the whole
+ * applied-publication history.
  */
 export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: number): Promise<PublicationRow[]> {
   const rows = await db
@@ -1618,7 +1620,7 @@ export async function listLineBatchRecovery(db: D1Like, nowMs: number, limit: nu
         WHERE p.phase = 'applied'
           AND p.line_unresolvable_ms IS NULL
           AND (p.lease_until_ms IS NULL OR p.lease_until_ms <= ?)
-          AND EXISTS (SELECT 1 FROM review_threads t WHERE t.publication_id = p.id AND t.review_id IS NULL)
+          AND p.id IN (SELECT t.publication_id FROM review_threads t WHERE t.review_id IS NULL)
         ORDER BY COALESCE(p.applied_ms, p.updated_ms), p.id
         LIMIT ?`,
     )
