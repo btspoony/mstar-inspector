@@ -163,6 +163,8 @@ export type CheckAttempt = {
    */
   correctionDesired: Exclude<CheckDesired, "in_progress"> | null;
   correctionGeneration: number | null;
+  /** When the owed revision was dispatched; NULL while it provably has not left. */
+  correctionDispatchedMs: number | null;
   /**
    * When this attempt was ADMITTED. The proof wait uses it to attribute a
    * publication: only a journal row staged at or after this instant can be the
@@ -450,6 +452,7 @@ function attemptOf(row: ReviewCheckRow): CheckAttempt {
     terminalFailureStatus: row.terminal_failure_status as CheckFailureStatus | null,
     correctionDesired: row.correction_desired as Exclude<CheckDesired, "in_progress"> | null,
     correctionGeneration: row.correction_generation,
+    correctionDispatchedMs: row.correction_dispatched_ms,
     createdAtMs: row.created_ms,
   };
 }
@@ -1437,6 +1440,10 @@ export async function setCheckCreateState(
  * The intent deliberately outlives `terminal_ms`: the late correction re-sends
  * on a terminal row once — and only once — because its own dispatch resolved
  * and cleared the mark.
+ *
+ * A dispatch recorded while a §7.9a correction is OWED also stamps the debt's
+ * own `correction_dispatched_ms`: from then on that revision may be on GitHub
+ * and can only be read back, never rewritten (see `replaceCheckCorrection`).
  */
 export async function recordTerminalDispatch(
   db: D1Like,
@@ -1447,16 +1454,24 @@ export async function recordTerminalDispatch(
   const result = await db
     .prepare(
       `UPDATE review_checks
-          SET terminal_dispatch_ms = ?, updated_ms = ?
+          SET terminal_dispatch_ms = ?,
+              correction_dispatched_ms = CASE
+                WHEN correction_desired IS NULL THEN correction_dispatched_ms
+                ELSE COALESCE(correction_dispatched_ms, ?) END,
+              updated_ms = ?
         WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
           AND terminal_dispatch_ms IS NULL`,
     )
-    .bind(nowMs, nowMs, id, lease.holder, lease.epoch, lease.untilMs)
+    .bind(nowMs, nowMs, nowMs, id, lease.holder, lease.epoch, lease.untilMs)
     .run();
   return result.meta.changes === 1;
 }
 
-/** Clear the dispatch intent after a refusal PROVEN not to have left the Worker. */
+/**
+ * Clear the dispatch intent after a refusal PROVEN not to have left the Worker.
+ * The owed revision's own dispatch bit goes with it for the same reason: the
+ * request it recorded was never sent, so the revision is still rewritable.
+ */
 export async function clearTerminalDispatch(
   db: D1Like,
   id: string,
@@ -1466,7 +1481,7 @@ export async function clearTerminalDispatch(
   const result = await db
     .prepare(
       `UPDATE review_checks
-          SET terminal_dispatch_ms = NULL, updated_ms = ?
+          SET terminal_dispatch_ms = NULL, correction_dispatched_ms = NULL, updated_ms = ?
         WHERE id = ? AND holder = ? AND lease_epoch = ? AND lease_until_ms = ?
           AND terminal_dispatch_ms IS NOT NULL`,
     )
@@ -1850,7 +1865,8 @@ export async function recordCheckObservation(
             next_attempt_ms = CASE WHEN ? THEN NULL ELSE next_attempt_ms END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END,
             correction_desired = CASE WHEN ? THEN NULL ELSE correction_desired END,
-            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END`,
+            correction_generation = CASE WHEN ? THEN NULL ELSE correction_generation END,
+            correction_dispatched_ms = CASE WHEN ? THEN NULL ELSE correction_dispatched_ms END`,
     [
       observed,
       remote.id,
@@ -1868,6 +1884,7 @@ export async function recordCheckObservation(
       agrees ? 1 : 0,
       // Clear together only on a settling response; an unsettled debt keeps
       // both its conclusion and its target generation for the next pass.
+      settles ? 1 : 0,
       settles ? 1 : 0,
       settles ? 1 : 0,
     ],
@@ -1962,6 +1979,7 @@ export async function reopenTerminalCorrection(
              next_attempt_ms = NULL, last_error = NULL, holder = NULL,
              lease_until_ms = NULL,
              correction_desired = ?, correction_generation = generation,
+             correction_dispatched_ms = NULL,
              updated_ms = ?
        WHERE id = ? AND terminal_ms IS NOT NULL
          AND recovery_state = 'remote-unconfirmed'
@@ -1972,6 +1990,41 @@ export async function reopenTerminalCorrection(
     .bind(conclusion, nowMs, id, publicationId)
     .run();
   return result.meta.changes === 1;
+}
+
+/**
+ * Re-decide an owed revision IN PLACE — the authorization to correct the
+ * original failure is separate from the conclusion it currently owes, and only
+ * a send consumes the authorization.
+ *
+ * Used when the same linked proof now decides a different conclusion (an
+ * operator lowered or raised the score floor) and the revision has provably not
+ * left the Worker: rewriting it cannot double a request. The generation is
+ * unchanged (the debt still targets this row); the frozen intent is overwritten
+ * with the new conclusion because the old one was never sent, and the guard
+ * refuses the write the moment `correction_dispatched_ms` is set.
+ */
+export async function replaceCheckCorrection(
+  db: D1Like,
+  id: string,
+  lease: Lease,
+  conclusion: CheckConclusion,
+  nowMs: CheckClock,
+): Promise<boolean> {
+  const title = frozenTitle(conclusion.title);
+  const summary = boundText(conclusion.summary, CHECK_SUMMARY_MAX_CHARS);
+  return runFenced(
+    db,
+    id,
+    lease,
+    `correction_desired = ?, correction_dispatched_ms = NULL,
+            desired = ?, desired_title = ?, desired_summary = ?, terminal_failure_status = ?,
+            terminal_dispatch_ms = NULL,
+            recovery_state = 'pending', next_attempt_ms = NULL, last_error = NULL`,
+    [conclusion.desired, conclusion.desired, title, summary, conclusion.failureStatus ?? null],
+    nowMs,
+    "correction_desired IS NOT NULL AND correction_dispatched_ms IS NULL",
+  );
 }
 
 /**
