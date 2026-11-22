@@ -110,6 +110,14 @@ beforeEach(() => {
  * note: The seeded D1 + this case's doubles, assembled by hand. `share` carries the
  * pieces a RESTART keeps: the same database and the same container, but fresh
  * maps — the host resolves the App again, and nothing in-memory survives.
+ *
+ * One `deps` is reused across prepare → review → collect ON PURPOSE: it models ONE
+ * invocation (the inline route), which is exactly the production shape of the
+ * three consecutive phases — the host channel (`runnerConfigs`, the minted token
+ * in `credentials`) is that invocation's own memory, and consuming it in a later
+ * phase of the SAME invocation is what the module's phase rule allows. Every
+ * restart case builds a SECOND deps over the same database instead
+ * (`makeDeps({ db })`), so nothing in-memory crosses the boundary there.
  */
 async function makeDeps(
   share?: { db: Awaited<ReturnType<typeof createSeededTestD1>> },
@@ -2858,8 +2866,62 @@ describe("the SEC-01 publish gate", () => {
     };
     const inline = payload.lineIntents.map((intent) => intent.body).join("\n");
     expect(payload.lineIntents.length).toBeGreaterThan(0);
-    expect(inline).not.toContain("```suggestion");
+    // The PATCH ITSELF is gone from both carriers — not merely its fence marker: a
+    // path that stripped the fence and kept the code would still leak the change.
+    const artifact = (
+      JSON.parse(publication.payload_json) as {
+        artifact: { payload: { findings: Array<{ body: string }> } };
+      }
+    ).artifact.payload.findings[0]!.body;
+    for (const text of [artifact, inline]) {
+      expect(text).not.toContain("const key =");
+      expect(text).not.toContain("```");
+    }
     expect(inline).toContain("after");
+  });
+
+  test("the inline render counts its generated heading against the same body budget", async () => {
+    // note: The artifact body carries the explanation alone, so it may use the whole
+    // budget; the inline comment prefixes a generated heading (title + merge-class
+    // tag), and that heading is spent from the SAME budget — the retained explanation
+    // is shorter, and the text never exceeds the limit.
+    h.sandbox.diffStdout = VALID_DIFF;
+    const { deps, db, ref, prepared } = await reviewedEcho("plain text", false);
+    const explanation = "Z".repeat(FINDING_BODY_MAX - 10);
+    const suggestion = '```suggestion\nconst key = "sk-test";\n```';
+    const launch = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT_ID) as { result_json: string };
+    const execution = JSON.parse(launch.result_json) as { run: { stdout: string; exitCode: number } };
+    const output = JSON.parse(execution.run.stdout) as typeof VALID_OUTPUT;
+    output.findings[0]!.body = `${suggestion}\n${explanation}`;
+    execution.run.stdout = JSON.stringify(output);
+    db.raw
+      .prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?")
+      .run(JSON.stringify(execution), ATTEMPT_ID);
+
+    const collected = await collectAttempt(deps, ref, prepared);
+    if (collected.kind !== "collected") throw new Error(`collect did not hand off: ${collected.kind}`);
+    const publication = db.raw
+      .prepare("SELECT payload_json FROM review_publications WHERE id = ?")
+      .get(collected.collected.publicationId) as { payload_json: string };
+    const payload = JSON.parse(publication.payload_json) as {
+      artifact: { payload: { findings: Array<{ body: string }> } };
+      lineIntents: Array<{ body: string }>;
+    };
+
+    const artifactBody = payload.artifact.payload.findings[0]!.body;
+    expect(artifactBody).toBe(explanation);
+    expect(artifactBody.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+
+    expect(payload.lineIntents.length).toBeGreaterThan(0);
+    const inline = payload.lineIntents.map((intent) => intent.body).join("\n");
+    // The heading is inside the budget, so the inline text fills it and clamps the
+    // explanation the artifact kept whole.
+    expect(inline.length).toBeLessThanOrEqual(FINDING_BODY_MAX);
+    expect(inline).toContain(explanation.slice(0, 200));
+    expect(inline.includes(explanation)).toBe(false);
+    expect(inline.endsWith("…")).toBe(true);
   });
 
   test("the suggestion is dropped before the clamp, so the explanation stays intact", async () => {
