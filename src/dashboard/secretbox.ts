@@ -1,5 +1,5 @@
 /**
- * AES-256-GCM secretbox for D1-stored dashboard secrets (also reused for
+ * note: AES-256-GCM secretbox for D1-stored dashboard secrets (also reused for
  * per-App provider keys). Spec
  * dashboard-multi-app-platform § Crypto envelope, architect lock L1.
  *
@@ -33,9 +33,9 @@
  * envelope string; this module never logs.
  */
 
-/** Envelope version prefix (only "v1" exists; rotation reserved via keyId). */
+/** invariant: Envelope version prefix (only "v1" exists; rotation reserved via keyId). */
 const ENVELOPE_VERSION = "v1";
-/** The only v1 keyId; rotation would add keyIds and per-keyId selection. */
+/** invariant: The only v1 keyId; rotation would add keyIds and per-keyId selection. */
 const V1_KEY_ID = "primary";
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
@@ -45,7 +45,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 /**
- * Imported CryptoKeys keyed by the raw base64 secret. One deployment has one
+ * safety: Imported CryptoKeys keyed by the raw base64 secret. One deployment has one
  * key; tests add a handful. Lazy validation means the cache is only populated
  * after the secret has passed the exactly-32-bytes check.
  */
@@ -66,14 +66,14 @@ export class SecretboxKeyError extends Error {
   }
 }
 
-/** Standard base64 (D1 column carrier — never the cookie base64url). */
+/** invariant: Standard base64 (D1 column carrier — never the cookie base64url). */
 function base64Encode(bytes: Uint8Array): string {
   let binary = "";
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]!);
   return btoa(binary);
 }
 
-/** Throws on anything outside the standard base64 alphabet (incl. base64url). */
+/** note: Throws on anything outside the standard base64 alphabet (incl. base64url). */
 function base64Decode(value: string): Uint8Array<ArrayBuffer> {
   const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
@@ -82,7 +82,7 @@ function base64Decode(value: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Lazy master-key validation + import (cached per raw secret). Throws
+ * safety: Lazy master-key validation + import (cached per raw secret). Throws
  * SecretboxKeyError on any problem — checked on EVERY call before any
  * envelope work, so a broken key fails encrypt and decrypt alike.
  */
@@ -116,9 +116,9 @@ async function importKey(rawKey: string | undefined): Promise<CryptoKey> {
 
 /** The secretbox face bound to one master key (createSecretbox per request). */
 export type Secretbox = {
-  /** Encrypt to a `v1.<keyId>.<iv_b64>.<ct_b64>` envelope. */
+  /** note: Encrypt to a `v1.<keyId>.<iv_b64>.<ct_b64>` envelope. */
   encryptSecret(plain: string, aad: string): Promise<string>;
-  /** Inverse of encryptSecret; AAD/tamper/key mismatch throws. */
+  /** note: Inverse of encryptSecret; AAD/tamper/key mismatch throws. */
   decryptSecret(envelope: string, aad: string): Promise<string>;
 };
 
@@ -133,7 +133,7 @@ export function createSecretbox(rawKey: string | undefined): Secretbox {
     async encryptSecret(plain, aad) {
       const key = await importKey(rawKey);
       const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-      // WebCrypto returns ciphertext ‖ tag as one buffer — encoded once.
+      // note: WebCrypto returns ciphertext ‖ tag as one buffer — encoded once.
       const ciphertext = new Uint8Array(
         await crypto.subtle.encrypt(
           { name: "AES-GCM", iv, additionalData: enc.encode(aad) },
@@ -189,7 +189,7 @@ export function createSecretbox(rawKey: string | undefined): Secretbox {
         );
         return dec.decode(plain);
       } catch (err) {
-        // GCM tag verification failure: wrong key, tampered ciphertext, or a
+        // note: GCM tag verification failure: wrong key, tampered ciphertext, or a
         // different AAD. Wrapped so operators see the cause class, not a bare
         // "OperationError".
         throw new Error(

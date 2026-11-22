@@ -1,5 +1,5 @@
 /**
- * Shared date helpers for the insights surface (QC W-C): the ONE
+ * note: Shared date helpers for the insights surface (QC W-C): the ONE
  * copy of the UTC date math used by the insights store test, the JSON
  * route test, and the HTML panel test — previously duplicated verbatim
  * in all three files.
@@ -48,13 +48,13 @@ export function mondayOf(dt: string): string {
   return new Date(Date.UTC(y!, m! - 1, d! - daysToMonday)).toISOString().slice(0, 10);
 }
 
-/** Epoch ms of the current UTC date at midnight. */
+/** note: Epoch ms of the current UTC date at midnight. */
 function utcTodayMs(): number {
   const now = new Date();
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
 }
 
-/** `YYYY-MM-DD` for an epoch-ms UTC midnight. */
+/** note: `YYYY-MM-DD` for an epoch-ms UTC midnight. */
 function isoDate(ms: number): string {
   return new Date(ms).toISOString().slice(0, 10);
 }

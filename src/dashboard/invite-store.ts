@@ -1,5 +1,5 @@
 /**
- * Workspace invitation store — the one write/read authority for
+ * note: Workspace invitation store — the one write/read authority for
  * `workspace_invites` (migration 0028 is the DDL single source).
  *
  * An invite is the only way into a workspace besides owning it by creation: a
@@ -100,7 +100,7 @@ export type AcceptInviteOutcome =
   | { kind: "gone" }
   | { kind: "member_cap"; limit: number };
 
-/** Narrow D1 face: reads plus the invite write paths' batched statements. */
+/** note: Narrow D1 face: reads plus the invite write paths' batched statements. */
 type InviteStoreStatement = {
   bind(...values: unknown[]): InviteStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -118,7 +118,7 @@ type InviteStoreD1 = {
   >;
 };
 
-/** UNIQUE-constraint detection that tolerates bun:sqlite and D1 error shapes. */
+/** note: UNIQUE-constraint detection that tolerates bun:sqlite and D1 error shapes. */
 function isUniqueConstraintError(err: unknown): boolean {
   if (err instanceof Error) {
     if ("code" in err && typeof err.code === "string" && err.code.includes("UNIQUE")) return true;
@@ -128,7 +128,7 @@ function isUniqueConstraintError(err: unknown): boolean {
 }
 
 /**
- * Bind one statement by NAME: its `:name` tokens become D1's `?N` placeholders,
+ * note: Bind one statement by NAME: its `:name` tokens become D1's `?N` placeholders,
  * numbered in first-appearance order, and the values follow that same order.
  * Each guard therefore carries its own values, and appending or reordering a
  * guard cannot shift another guard's parameter — no statement's position is
@@ -164,7 +164,7 @@ function bindNamed(
 }
 
 /**
- * The write-path flip: every invite write path runs it FIRST, in the same
+ * note: The write-path flip: every invite write path runs it FIRST, in the same
  * batch as its own write. The sweep's bulk flip ({@link expireLapsedInvites})
  * is the other producer.
  */
@@ -212,11 +212,11 @@ export async function expireLapsedInvites(
   return result.meta.changes;
 }
 
-/** Live-invite read predicate — lazy expiry, so every read filters it. */
+/** why: Live-invite read predicate — lazy expiry, so every read filters it. */
 const LIVE = `status = 'pending' AND expires_at > ?`;
 
 /**
- * The seat guard, as a SQL condition the insert carries: members plus live
+ * note: The seat guard, as a SQL condition the insert carries: members plus live
  * pending invites below the plan's included seats. Re-reading the count inside
  * the insert is what closes the read-then-write window — two concurrent creates
  * both pass the route's fast-fail read, and the second one's condition is false,
@@ -231,7 +231,7 @@ const SEAT_GUARD_SQL = `(SELECT
           WHERE workspace_id = :workspaceId AND status = 'pending' AND expires_at > :now)) < :limit`;
 
 /**
- * The acceptance's free-slot ALLOW predicate, as a SQL condition the membership
+ * note: The acceptance's free-slot ALLOW predicate, as a SQL condition the membership
  * insert carries: true only when the TARGET workspace is on a paid plan, or the
  * accepting login holds no live free membership yet — the same join rule as
  * `countFreeMembershipsForLogin`. Re-reading it inside the insert is what closes
@@ -253,7 +253,7 @@ const ACCEPT_FREE_SLOT_GUARD_SQL = `(EXISTS (
              AND (s.plan_id IS NULL OR s.plan_id = :freePlanId)) < 1)`;
 
 /**
- * The acceptance's seat condition, as a SQL condition its membership insert
+ * note: The acceptance's seat condition, as a SQL condition its membership insert
  * carries: the target workspace's MEMBERS below the plan's included seats.
  * Re-reading the count inside the insert is what closes the read-then-write
  * window — two accepts racing past the same pre-read cannot both land.
@@ -282,7 +282,7 @@ const INVITE_COLUMNS = `id, workspace_id, github_login, role, status, invited_by
        created_at, expires_at, accepted_at`;
 
 /**
- * The invite row insert without the seat condition. `createInvite` appends
+ * note: The invite row insert without the seat condition. `createInvite` appends
  * {@link SEAT_GUARD_SQL} only for a numeric seat limit: a NULL limit means no
  * cap, and binding NULL into `:limit` would make `count < NULL` evaluate to
  * NULL, so the insert would write no row and mint a spurious refusal.
@@ -332,7 +332,7 @@ export async function createInvite(
     expires_at: input.expiresAt,
     accepted_at: null,
   };
-  // `seats: null` says the guarded insert below IS the authority: the verdict
+  // note: `seats: null` says the guarded insert below IS the authority: the verdict
   // never refuses, and it carries the plan so the limit is bound from one read.
   const verdict = await checkEntitlement({
     db,
@@ -351,7 +351,7 @@ export async function createInvite(
     now: row.created_at,
     expiresAt: row.expires_at,
   };
-  // The seat condition is appended (and only then is `:limit` supplied): an
+  // invariant: The seat condition is appended (and only then is `:limit` supplied): an
   // unlimited plan omits it entirely rather than binding NULL into it.
   const guarded = limit === null ? INVITE_INSERT_SQL : `${INVITE_INSERT_SQL}\n            WHERE ${SEAT_GUARD_SQL}`;
   const insert = bindNamed(guarded, limit === null ? values : { ...values, limit });
@@ -365,7 +365,7 @@ export async function createInvite(
     if (isUniqueConstraintError(err)) throw new InvitePendingExistsError(input.login);
     throw err;
   }
-  // The guard refused: no invite row was written (the flip above only ever
+  // invariant: The guard refused: no invite row was written (the flip above only ever
   // expires already-lapsed rows, so it changed no seat). A null limit has no
   // guard, so it can never reach this refusal.
   if (limit !== null && results[1]!.meta.changes === 0) {
@@ -384,7 +384,7 @@ export async function listPendingInvites(
   workspaceId: string,
   now: string,
 ): Promise<WorkspaceInviteRow[]> {
-  // The predicate filters lapsed rows, so a row that expires between the sweep
+  // why: The predicate filters lapsed rows, so a row that expires between the sweep
   // runs is never listed (and holds no seat) while its stored status is still
   // `pending`.
   const { results } = await db
@@ -552,7 +552,7 @@ export async function acceptInvite(
     .prepare(`SELECT ${INVITE_COLUMNS} FROM workspace_invites WHERE id = ?`)
     .bind(inviteId)
     .first<WorkspaceInviteRow>();
-  // A login mismatch is the same 404 as an unknown invite: no tenant-existence
+  // note: A login mismatch is the same 404 as an unknown invite: no tenant-existence
   // oracle, and the accept route is the only surface that reads this.
   if (invite === null || invite.github_login.toLowerCase() !== login.toLowerCase()) {
     return { kind: "not_found" };
@@ -561,7 +561,7 @@ export async function acceptInvite(
 
   const memberRole = await memberRoleOf(db, invite.workspace_id, login);
   if (invite.status === "accepted") {
-    // Repeat accept: the membership row already exists, so return it. Accepted
+    // why: Repeat accept: the membership row already exists, so return it. Accepted
     // is not in the plan's 410 set (only revoked/expired are), so an invite
     // whose membership has since been removed falls to the "neither" branch:
     // 404, with zero writes.
@@ -571,14 +571,14 @@ export async function acceptInvite(
   }
 
   if (invite.expires_at <= now) {
-    // The invite expired before any write reached it: flip it to its terminal
+    // note: The invite expired before any write reached it: flip it to its terminal
     // state so the repeat attempt answers 410 (the write-path invariant, still
     // one batch).
     await db.batch([db.prepare(FLIP_LAPSED_SQL).bind(invite.workspace_id, now)]);
     return { kind: "expired" };
   }
 
-  // Both guards append their own NAME tokens; `bindNamed` numbers each
+  // note: Both guards append their own NAME tokens; `bindNamed` numbers each
   // statement's placeholders from the text itself, so neither guard's parameter
   // position depends on which conditions are present. A condition that is inert
   // is OMITTED from the SQL (and its value from the map), never bound as NULL:
@@ -611,7 +611,7 @@ export async function acceptInvite(
   for (const condition of conditions) Object.assign(bindings, condition.binds);
   const guard = conditions.map((condition) => `\n            AND ${condition.allow}`).join("");
 
-  // The refusal classifier runs INSIDE the same batch, so it evaluates both
+  // why: The refusal classifier runs INSIDE the same batch, so it evaluates both
   // allow predicates on the transaction snapshot the insert's own guards read —
   // no window between the refusal and its classification. Precedence when both
   // refuse is the free-slot class: it is the one the invitee can clear alone,
@@ -661,7 +661,7 @@ export async function acceptInvite(
   ];
   const results = await db.batch(statements);
 
-  // Classify by re-read: a membership row proves the batch admitted (or had
+  // note: Classify by re-read: a membership row proves the batch admitted (or had
   // already admitted) this login; a terminal row means it lost the race.
   const admitted = await memberRoleOf(db, invite.workspace_id, login);
   if (admitted !== null) {
@@ -674,7 +674,7 @@ export async function acceptInvite(
   if (after === null || after.status === "revoked" || after.status === "expired") {
     return { kind: "gone" };
   }
-  // Still pending with no membership written: a guard inside the insert
+  // note: Still pending with no membership written: a guard inside the insert
   // refused, and statement (3) only consumes the invite for an admitted login,
   // so the invite stays pending either way. WHICH guard is whatever the batch's
   // own classifier reported — the same snapshot the guards evaluated.
@@ -685,7 +685,7 @@ export async function acceptInvite(
   throw new FreeWorkspaceSlotError(INVITE_FREE_SLOT_REFUSAL);
 }
 
-/** The login's role in one workspace, or null when they are not a member. */
+/** why: The login's role in one workspace, or null when they are not a member. */
 async function memberRoleOf(
   db: InviteStoreD1,
   workspaceId: string,

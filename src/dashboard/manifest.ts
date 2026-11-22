@@ -40,10 +40,10 @@ export const GITHUB_MANIFEST_CREATE_URL = "https://github.com/settings/apps/new"
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
-// Upstream GitHub calls are bounded (same convention as oauth.ts).
+// note: Upstream GitHub calls are bounded (same convention as oauth.ts).
 const GITHUB_FETCH_TIMEOUT_MS = 10_000;
 
-// Architect lock spec L9: documented Accept + pinned GA API version; the
+// note: Architect lock spec L9: documented Accept + pinned GA API version; the
 // code itself is the credential, so NO Authorization header (a bearer
 // triggers HTTP 406).
 const GITHUB_MANIFEST_HEADERS = {
@@ -70,7 +70,7 @@ function errorType(err: unknown): string {
   return String(err);
 }
 
-// --- manifest content (product lock, spec § Manifest 内容) ---
+// note: --- manifest content (product lock, spec § Manifest 内容) ---
 
 export type ManifestPayload = {
   name: string;
@@ -142,16 +142,16 @@ export function buildManifestCreateUrl(state: string): string {
   return url.toString();
 }
 
-// --- app-id-carrying CSRF state (B5: same createStateValue HMAC discipline) ---
+// safety: --- app-id-carrying CSRF state (B5: same createStateValue HMAC discipline) ---
 
 export type ManifestStatePayload = {
   /**
-   * The future `review_bots.id`, minted at start so the webhook URL is known
+   * why: The future `review_bots.id`, minted at start so the webhook URL is known
    * before GitHub creates the App. It becomes the row PK at commit.
    */
   appId: string;
   /**
-   * The STABLE `workspaces.id` the flow creates the App in, decided at start
+   * note: The STABLE `workspaces.id` the flow creates the App in, decided at start
    * from the request context and carried through the signed state so the
    * callback commits into the SAME workspace the operator started in. The id,
    * never the slug: a slug can be renamed mid-flow, or reused by a workspace
@@ -200,13 +200,13 @@ export async function readManifestStateValue(
   return payload;
 }
 
-// --- code → conversion ---
+// why: --- code → conversion ---
 
 export type ManifestConversion = {
   id: number;
   name: string;
   /**
-   * GitHub's own App slug — the bot mention target; never derived from the
+   * invariant: GitHub's own App slug — the bot mention target; never derived from the
    * name. Nullable because GitHub has ALREADY created the App by conversion
    * time: an absent slug must not fail the exchange and orphan it. The first
    * metadata refresh fills it from `GET /app`.
@@ -218,14 +218,14 @@ export type ManifestConversion = {
 
 /** null on any upstream failure or unexpected payload (fail-closed). */
 export async function exchangeManifestCode(code: string): Promise<ManifestConversion | null> {
-  // GitHub manifest conversion codes are opaque URL-safe tokens; reject any
+  // note: GitHub manifest conversion codes are opaque URL-safe tokens; reject any
   // other shape BEFORE the upstream call — bounded upstream calls,
   // defense-in-depth beside the fixed api.github.com endpoint.
   if (!GITHUB_CODE_SHAPE.test(code)) {
     logManifestFailure("conversion", "unsafe_code_shape");
     return null;
   }
-  // The code rides as ONE encodeURIComponent-encoded path segment on the
+  // note: The code rides as ONE encodeURIComponent-encoded path segment on the
   // fixed api.github.com host (segment-assembled, never template-interpolated).
   const conversionUrl = [
     "https://api.github.com/app-manifests/",
@@ -245,7 +245,7 @@ export async function exchangeManifestCode(code: string): Promise<ManifestConver
   }
   if (!res.ok) {
     const githubStatus = res.status;
-    // Consume the failed body so the connection is released promptly.
+    // why: Consume the failed body so the connection is released promptly.
     await res.body?.cancel();
     logManifestFailure("conversion", "http_error", { github_status: githubStatus });
     return null;
@@ -270,7 +270,7 @@ export async function exchangeManifestCode(code: string): Promise<ManifestConver
     return {
       id: data.id,
       name: data.name,
-      // Absent/blank slug is not a failure: the App already exists upstream,
+      // note: Absent/blank slug is not a failure: the App already exists upstream,
       // so the row must land and the next metadata refresh fills github_slug.
       slug: typeof data.slug === "string" && data.slug.length > 0 ? data.slug : null,
       pem: data.pem,
@@ -281,25 +281,25 @@ export async function exchangeManifestCode(code: string): Promise<ManifestConver
   return null;
 }
 
-// --- encrypted hold cookie (architect lock spec L7) ---
+// note: --- encrypted hold cookie (architect lock spec L7) ---
 
 export type ManifestHoldPayload = {
   id: number;
   name: string;
   login: string;
-  /** GitHub's App slug from the conversion — the bot mention target; null until the first metadata sync. */
+  /** why: GitHub's App slug from the conversion — the bot mention target; null until the first metadata sync. */
   slug: string | null;
-  /** Row id minted at start (carried from the signed state). */
+  /** note: Row id minted at start (carried from the signed state). */
   appId: string;
-  /** Target workspace id (carried from the signed state); the commit maps the App here. */
+  /** why: Target workspace id (carried from the signed state); the commit maps the App here. */
   workspaceId: string;
   pem: string;
   webhook_secret: string;
-  /** Expiry, seconds since epoch (server-side double-check beside Max-Age). */
+  /** why: Expiry, seconds since epoch (server-side double-check beside Max-Age). */
   exp: number;
 };
 
-/** HKDF-SHA256(DASHBOARD_SESSION_SECRET, info "mstar-manifest-hold") → AES-256-GCM key. */
+/** why: HKDF-SHA256(DASHBOARD_SESSION_SECRET, info "mstar-manifest-hold") → AES-256-GCM key. */
 async function holdKey(secret: string): Promise<CryptoKey> {
   const ikm = await crypto.subtle.importKey("raw", enc.encode(secret), "HKDF", false, [
     "deriveKey",
@@ -308,7 +308,7 @@ async function holdKey(secret: string): Promise<CryptoKey> {
     {
       name: "HKDF",
       hash: "SHA-256",
-      // RFC 5869: no salt provisioned → zeros of HashLen.
+      // why: RFC 5869: no salt provisioned → zeros of HashLen.
       salt: new Uint8Array(32),
       info: enc.encode("mstar-manifest-hold"),
     },
@@ -380,14 +380,14 @@ export async function readHoldValue(
 ): Promise<ManifestHoldPayload | null> {
   if (!value) return null;
   const bytes = base64urlDecode(value);
-  // 12B IV + 16B tag + at least 1B ciphertext.
+  // invariant: 12B IV + 16B tag + at least 1B ciphertext.
   if (!bytes || bytes.length <= 12 + 16) return null;
   const iv = bytes.slice(0, 12);
   const ciphertext = bytes.slice(12);
   const key = await holdKey(secret);
   let plaintext: Uint8Array;
   try {
-    // GCM tag verification failure throws — fail closed.
+    // note: GCM tag verification failure throws — fail closed.
     plaintext = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ciphertext));
   } catch {
     return null;

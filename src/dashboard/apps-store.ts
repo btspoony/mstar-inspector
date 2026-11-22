@@ -1,5 +1,5 @@
 /**
- * D1 store for `review_bots` / `bot_installations` — the
+ * note: D1 store for `review_bots` / `bot_installations` — the
  * ONE write authority for multi-App rows. Spec
  * dashboard-multi-app-platform § Data model; migrations 0004/0005 are the
  * DDL single sources.
@@ -135,70 +135,70 @@ import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
 /** A row of `review_bots` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
   /**
-   * The local App UID — also the webhook URL's app segment
+   * note: The local App UID — also the webhook URL's app segment
    * (`/webhook/<workspace_id>/<id>`) and the secretbox AAD row key.
    */
   id: string;
   github_app_id: number;
   name: string;
-  /** secretbox envelope of the App PEM — opaque, never decrypted here. */
+  /** invariant: secretbox envelope of the App PEM — opaque, never decrypted here. */
   private_key_enc: string;
-  /** secretbox envelope of the App webhook secret — opaque, never decrypted here. */
+  /** safety: secretbox envelope of the App webhook secret — opaque, never decrypted here. */
   webhook_secret_enc: string;
-  /** GitHub login of the creating member (the manage rule is the workspace role). */
+  /** note: GitHub login of the creating member (the manage rule is the workspace role). */
   created_by: string;
   status: GithubAppStatus;
-  /** NULL = live row; a timestamp = soft-deleted (the only removal path). */
+  /** invariant: NULL = live row; a timestamp = soft-deleted (the only removal path). */
   deleted_at: string | null;
   /**
-   * Per-bot OPERATIONAL pause (migration 0008): 1 = running, 0 = paused. The
+   * note: Per-bot OPERATIONAL pause (migration 0008): 1 = running, 0 = paused. The
    * business pause users change lives on the target; both gate enqueue and the
    * in-flight consumer.
    */
   review_enabled: number;
   /**
-   * Cached GitHub App visibility (migration 0045): 'public' | 'private' |
+   * note: Cached GitHub App visibility (migration 0045): 'public' | 'private' |
    * 'unknown', written by the anonymous `GET /apps/{slug}` probe. The
    * metadata refresh is its only caller, and a no-answer skips the write and
    * keeps the stored value. NULL = never probed; getGithubVisibility reads it
    * as 'unknown' (cannot prove private).
    */
   github_visibility: GithubVisibility | null;
-  /** Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
+  /** invariant: Last verified (2xx) webhook delivery (migration 0008); NULL = never. */
   last_webhook_at: string | null;
   /**
-   * Cached GitHub-side App name (migration 0019); NULL = never
+   * invariant: Cached GitHub-side App name (migration 0019); NULL = never
    * synced. Distinct from the local `name` recorded at manifest commit.
    */
   github_name: string | null;
-  /** Cached GitHub App description (migration 0019); NULL = never synced or none upstream. */
+  /** invariant: Cached GitHub App description (migration 0019); NULL = never synced or none upstream. */
   github_description: string | null;
-  /** Cached GitHub App settings-page URL (migration 0019); NULL = never synced. */
+  /** invariant: Cached GitHub App settings-page URL (migration 0019); NULL = never synced. */
   github_html_url: string | null;
-  /** Cached App icon URL (`/in/<github_app_id>`, migration 0019); NULL = never synced. */
+  /** invariant: Cached App icon URL (`/in/<github_app_id>`, migration 0019); NULL = never synced. */
   github_avatar_url: string | null;
   /**
-   * GitHub's own App slug (migration 0036), cached from `GET /app`; NULL =
+   * note: GitHub's own App slug (migration 0036), cached from `GET /app`; NULL =
    * never synced. Mutable upstream and NOT derivable from `name`, which is why
    * it is its own column: the `<github_slug>[bot]` mention login and the
    * dashboard links read it, never the row id or the icon.
    */
   github_slug: string | null;
   /**
-   * Last successful GitHub metadata sync (migration 0019, datetime('now')
+   * note: Last successful GitHub metadata sync (migration 0019, datetime('now')
    * UTC — the last_webhook_at TEXT convention); NULL = never synced. The
    * settings read path's lazy 24h TTL refresh keys off this column.
    */
   github_metadata_synced_at: string | null;
   /**
-   * Last metadata fetch ATTEMPT that persisted no slug (migration 0037) —
+   * note: Last metadata fetch ATTEMPT that persisted no slug (migration 0037) —
    * failure, or a successful payload without one. The read path's NULL-slug
    * re-attempt keys off it so a permanently failing App costs at most one
    * fetch per TTL instead of one per settings read.
    */
   github_metadata_attempted_at: string | null;
   /**
-   * Selected sandbox runtime image (migration 0018): a registry id from
+   * note: Selected sandbox runtime image (migration 0018): a registry id from
    * src/contracts/sandbox-images.ts, default 'omp'. The value domain (only
    * ENABLED registry entries) is store-enforced — no DDL CHECK.
    */
@@ -206,13 +206,13 @@ export type GithubAppRow = {
   created_at: string;
   updated_at: string;
   /**
-   * The bot's scope (migration 0058): `owned` serves its own workspace only,
+   * invariant: The bot's scope (migration 0058): `owned` serves its own workspace only,
    * `shared` is offered platform-wide. Only `setBotScope` writes it, and
    * `targets-store.resolveByRepo` is its one review-path reader: a shared bot
    * reviews nothing until a workspace adds a repository target on it.
    */
   scope: BotScope;
-  /** Owning workspace (migration 0026); present on every execution-facing read. */
+  /** note: Owning workspace (migration 0026); present on every execution-facing read. */
   workspace_id?: string;
 };
 
@@ -237,7 +237,7 @@ export type GithubVisibility = "public" | "private" | "unknown";
 /** Input for createApp — encrypted payloads are built by the caller. */
 export type CreateAppInput = {
   /**
-   * Caller-supplied row PK (review pin): the caller encrypts
+   * note: Caller-supplied row PK (review pin): the caller encrypts
    * private_key_enc / webhook_secret_enc with secretbox AAD
    * `github_apps.<column>:<id>` BEFORE insert, so the id must exist first —
    * the encrypted columns' AAD rowKey always equals this primary key. Not
@@ -247,25 +247,25 @@ export type CreateAppInput = {
    */
   id: string;
   /**
-   * GitHub's App slug, when the caller already knows it. NULL is the honest
+   * why: GitHub's App slug, when the caller already knows it. NULL is the honest
    * default ("never synced") — the first metadata sync fills it.
    */
   githubSlug: string | null;
   githubAppId: number;
   name: string;
-  /** secretbox envelope of the App PEM (AAD `github_apps.private_key_enc:<id>`). */
+  /** note: secretbox envelope of the App PEM (AAD `github_apps.private_key_enc:<id>`). */
   privateKeyEnc: string;
-  /** secretbox envelope of the webhook secret (AAD `github_apps.webhook_secret_enc:<id>`). */
+  /** safety: secretbox envelope of the webhook secret (AAD `github_apps.webhook_secret_enc:<id>`). */
   webhookSecretEnc: string;
   createdBy: string;
   /**
-   * The workspace the App belongs to. Required: ownership is a caller input,
+   * invariant: The workspace the App belongs to. Required: ownership is a caller input,
    * never a store lookup, so a deployment with several workspaces can never
    * silently mis-home an App and no caller can leave the owner unstated.
    */
   workspaceId: string;
   /**
-   * The plan's `apps_per_workspace` cap for that workspace: the count this
+   * note: The plan's `apps_per_workspace` cap for that workspace: the count this
    * insert enforces. Required — an omitted cap would be a silent bypass, and
    * the caller already holds the plan from its own entitlement read. `null` is
    * no cap (including `self-hosted`, whose plan answers the unlimited
@@ -281,7 +281,7 @@ export type CreateAppInput = {
  * refusal surface; it is not a database fault and must not be retried as one.
  */
 export class AppCountExceededError extends Error {
-  /** The plan cap the insert compared against (never `null`: a null cap has no guard). */
+  /** invariant: The plan cap the insert compared against (never `null`: a null cap has no guard). */
   readonly limit: number;
 
   constructor(limit: number) {
@@ -294,10 +294,10 @@ export class AppCountExceededError extends Error {
 export type UpsertInstallationInput = {
   appId: string;
   installationId: number;
-  /** Absent/null → preserve the stored login (a bare touch must not wipe it). */
+  /** invariant: Absent/null → preserve the stored login (a bare touch must not wipe it). */
   accountLogin?: string | null;
   /**
-   * True when `accountLogin` is the installation's OWN account, as stated by an
+   * why: True when `accountLogin` is the installation's OWN account, as stated by an
    * `installation.*` event; false (default) when it is the review-path
    * inference from `repository.owner.login`. An authoritative value overwrites
    * whatever is stored; an inferred one only fills an empty column.
@@ -327,7 +327,7 @@ export type GithubAppMetadataInput = {
  */
 export type AppInstallationRow = {
   installation_id: number;
-  /** GitHub login of the installation account; NULL = never observed. */
+  /** invariant: GitHub login of the installation account; NULL = never observed. */
   account_login: string | null;
   seen_at: string;
 };
@@ -341,7 +341,7 @@ export type AppInstallationRow = {
 export type AppInstallationState = {
   installation_id: number;
   account_login: string | null;
-  /** NULL = GitHub still has it; a timestamp = observed absent (migration 0055). */
+  /** note: NULL = GitHub still has it; a timestamp = observed absent (migration 0055). */
   removed_at: string | null;
 };
 
@@ -369,7 +369,7 @@ export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
 export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skipped";
 
 /**
- * Outcome tier rank shared by BOTH delivery health faces: 0 = the row carries
+ * note: Outcome tier rank shared by BOTH delivery health faces: 0 = the row carries
  * a review verdict (`ok`, `paused`, `rejected`), 1 = `ignored`, which says
  * nothing about whether review is running (bypass events such as check_run,
  * and whitelisted events the classifier dropped). The event name cannot stand
@@ -377,7 +377,7 @@ export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skippe
  * magnitude, and a `pull_request` can legitimately land in `ignored` too. Both
  * faces rank by exactly this expression so they can never disagree.
  */
-// Also a key of idx_webhook_deliveries_bot_health (migration 0080). SQLite
+// note: Also a key of idx_webhook_deliveries_bot_health (migration 0080). SQLite
 // matches expression indexes only on identical expressions; changes need a new migration.
 const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
 
@@ -434,14 +434,14 @@ export const PULL_REQUEST_RETENTION_DAYS = 90;
 export const PULL_REQUEST_RETENTION_CAP = 500;
 
 /**
- * The ledger list's ONE ordering (newest activity, number as the total-order
+ * invariant: The ledger list's ONE ordering (newest activity, number as the total-order
  * tiebreak). Shared by the row statement and the aggregate window so the two
  * cannot drift apart.
  */
 const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 
 /**
- * The repository predicate `listPullRequests` carries. It rides INSIDE the
+ * note: The repository predicate `listPullRequests` carries. It rides INSIDE the
  * window — in the row statement's own WHERE and in both aggregate scopes —
  * never after the cap: a filter applied to the capped rows would hide every
  * repository whose PRs sit behind PULL_REQUEST_LIST_LIMIT.
@@ -468,7 +468,7 @@ export type LedgerScope =
   | { kind: "workspace"; workspaceId: string };
 
 /**
- * The tenant predicate for a ledger statement over `alias`, binding a CONSTANT
+ * note: The tenant predicate for a ledger statement over `alias`, binding a CONSTANT
  * number of values per scope kind — one for a workspace scope, two for a
  * target scope (its id and the workspace that must own it). Bind order is
  * `ledgerScopeBinds`'.
@@ -481,13 +481,13 @@ function ledgerScopeSql(alias: string, scope: LedgerScope): string {
   return `${target} = ? AND EXISTS (SELECT 1 FROM review_targets t WHERE t.id = ${target} AND t.workspace_id = ? AND t.deleted_at IS NULL)`;
 }
 
-/** The bind values `ledgerScopeSql` expects, in its own order. */
+/** note: The bind values `ledgerScopeSql` expects, in its own order. */
 function ledgerScopeBinds(scope: LedgerScope): string[] {
   return scope.kind === "workspace" ? [scope.workspaceId] : [scope.targetId, scope.workspaceId];
 }
 
 /**
- * The list's ONE bounded window. Used as the row statement's own predicate and
+ * note: The list's ONE bounded window. Used as the row statement's own predicate and
  * as the scope of both aggregate statements, so the payload is not merely
  * capped: the work is. A repository filter narrows the window ITSELF, so the
  * cap bounds the filtered set and the aggregates keep matching the rows.
@@ -499,7 +499,7 @@ function pullRequestWindowSql(repoPredicate: string, scope: LedgerScope): string
 }
 
 /**
- * Statement 0 of every record-section batch: is this PR on the ledger at all?
+ * note: Statement 0 of every record-section batch: is this PR on the ledger at all?
  * A section reader answers pages, not PR existence — `total: 0` covers both an
  * empty section and an unknown PR — so existence must be decided in the same
  * batch, and `null` (the route's 404) means "this target never received it".
@@ -510,13 +510,13 @@ function pullRequestExistsSql(scope: LedgerScope): string {
 }
 
 /**
- * Slice to `max` UTF-16 units without leaving half a surrogate pair behind
+ * note: Slice to `max` UTF-16 units without leaving half a surrogate pair behind
  * (a lone surrogate cannot round-trip through D1's TEXT as valid UTF-8).
  */
 function truncateBounded(value: string, max: number): string {
   if (value.length <= max) return value;
   const last = value.charCodeAt(max - 1);
-  // A high surrogate at the cut means its low half is the next unit: drop both.
+  // note: A high surrogate at the cut means its low half is the next unit: drop both.
   return value.slice(0, last >= 0xd800 && last <= 0xdbff ? max - 1 : max);
 }
 
@@ -524,16 +524,16 @@ function truncateBounded(value: string, max: number): string {
 export type RecordDeliveryInput = {
   appId: string;
   /**
-   * The x-github-event header; NULL when the header was absent. Truncated
+   * why: The x-github-event header; NULL when the header was absent. Truncated
    * to EVENT_NAME_MAX_LENGTH (64) chars at persist — the header is
    * attacker-influenced on the unauthenticated reject path.
    */
   eventName: string | null;
   outcome: DeliveryOutcome;
-  /** The classifier's status for rejected; NULL for every other outcome. */
+  /** note: The classifier's status for rejected; NULL for every other outcome. */
   statusCode: number | null;
   /**
-   * The delivery's source repository (`owner/name`, migration 0043) — NULL
+   * note: The delivery's source repository (`owner/name`, migration 0043) — NULL
    * when the payload carried no `repository` (an install / bypass event).
    * Truncated to REPOSITORY_FULL_NAME_MAX_LENGTH (160) chars at persist; see
    * that constant for the trust model (a verified-body field, bounded as
@@ -541,7 +541,7 @@ export type RecordDeliveryInput = {
    */
   repositoryFullName: string | null;
   /**
-   * The classifier's refusal reason, for a `rejected` delivery; NULL for every
+   * why: The classifier's refusal reason, for a `rejected` delivery; NULL for every
    * other outcome and for rows written before migration 0074. Bounded to
    * DELIVERY_REASON_MAX_LENGTH at persist.
    */
@@ -555,9 +555,9 @@ export type WebhookDeliveryRow = {
   event_name: string | null;
   outcome: DeliveryOutcome;
   status_code: number | null;
-  /** `owner/name` of the source repo (0043); NULL = unknown source. */
+  /** note: `owner/name` of the source repo (0043); NULL = unknown source. */
   repository_full_name: string | null;
-  /** The classifier's refusal reason (0074); NULL = not a reject / not recorded. */
+  /** why: The classifier's refusal reason (0074); NULL = not a reject / not recorded. */
   reason: string | null;
   created_at: string;
 };
@@ -593,9 +593,9 @@ export type DeliveryFilters = {
 export type DeliveryPage = {
   rows: WebhookDeliveryRow[];
   total: number;
-  /** The App's whole repository set — the filter's options, never narrowed. */
+  /** invariant: The App's whole repository set — the filter's options, never narrowed. */
   repos: string[];
-  /** The App's whole delivery-type set — the filter's options, never narrowed. */
+  /** invariant: The App's whole delivery-type set — the filter's options, never narrowed. */
   types: string[];
 };
 
@@ -603,7 +603,7 @@ export type DeliveryPage = {
 export type UpsertPullRequestInput = {
   appId: string;
   /**
-   * The review target the ledger row belongs to (`review_targets.id`).
+   * note: The review target the ledger row belongs to (`review_targets.id`).
    * REQUIRED: the ledger's identity is `(target_id, owner, repo, pr_number)`,
    * and a row written without it would be invisible to every tenant read.
    */
@@ -611,13 +611,13 @@ export type UpsertPullRequestInput = {
   owner: string;
   repo: string;
   prNumber: number;
-  /** Omitted/null keeps whatever the row already knows. */
+  /** why: Omitted/null keeps whatever the row already knows. */
   title?: string | null;
-  /** The payload's state, already promoted to 'merged' when `merged` was true. */
+  /** why: The payload's state, already promoted to 'merged' when `merged` was true. */
   state: string;
   headSha?: string | null;
   /**
-   * The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
+   * invariant: The payload's `pull_request.updated_at` (ISO 8601), so ordering follows
    * GitHub's clock rather than our arrival clock. Omitted/null → now.
    * It is ALSO the `head_at` delivery watermark (migration 0044): the stamp
    * the ledger keeps for the most recent stamped delivery of this PR — NOT
@@ -663,7 +663,7 @@ export type PullRequestRow = {
 };
 
 /**
- * Narrow D1 face, declared locally so this leaf module imports nothing
+ * why: Narrow D1 face, declared locally so this leaf module imports nothing
  * (prepare/bind/first/all/run plus batch — App creation writes the App row
  * and its workspace mapping in ONE transaction).
  */
@@ -677,7 +677,7 @@ type AppsStoreStatement = {
   }>;
 };
 
-/** One statement's result inside a `batch()` (order matches the input). */
+/** note: One statement's result inside a `batch()` (order matches the input). */
 type AppsStoreBatchResult = {
   results: unknown[];
   meta: { changes: number; last_row_id: number };
@@ -688,17 +688,17 @@ type AppsStoreD1 = {
   batch(statements: AppsStoreStatement[]): Promise<AppsStoreBatchResult[]>;
 };
 
-/** The `SELECT COUNT(*) AS n` row of a batch statement. */
+/** note: The `SELECT COUNT(*) AS n` row of a batch statement. */
 type CountRow = { n: number };
 
-/** One batch statement's `COUNT(*)` result. */
+/** note: One batch statement's `COUNT(*)` result. */
 function countOf(result: AppsStoreBatchResult): number {
   const [row] = result.results as CountRow[];
   return row?.n ?? 0;
 }
 
 /**
- * Tenant read face (migration 0026) — there is exactly one. Every
+ * invariant: Tenant read face (migration 0026) — there is exactly one. Every
  * execution-facing App read INNER JOINs `bot_workspaces`, so an App with no
  * workspace mapping is invisible to every face; the two resolution reads also
  * require the workspace itself to be live, so a soft-deleted tenant is
@@ -717,7 +717,7 @@ export const APP_READ_SQL = {
   getAppForWebhook: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.id = ? AND w.workspace_id = ?`,
   getAppByGithubId: `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?`,
   /**
-   * The shared-set-aware resolve: the bot the session workspace owns, else a
+   * why: The shared-set-aware resolve: the bot the session workspace owns, else a
    * `shared` bot it may use, else nothing. Non-deleted bots only. The owning
    * mapping wins the join when a bot carries both (the ORDER BY), so the
    * returned `workspace_id` is the caller's own whenever it has one and the
@@ -728,7 +728,7 @@ export const APP_READ_SQL = {
 } as const;
 
 /**
- * The workspace-scoped App resolve the target pages use: the bot the addressed
+ * note: The workspace-scoped App resolve the target pages use: the bot the addressed
  * workspace OWNS (its `bot_workspaces` mapping), or a bot it holds a live
  * target on. Both arms are the pre-0067 visibility rule, unchanged by the
  * repository keying — the second is the entitlement a target carries, and it
@@ -741,7 +741,7 @@ export const APP_READ_SQL = {
 const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN bot_workspaces w ON w.bot_id = g.id INNER JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL WHERE g.github_app_id = ?1 AND g.deleted_at IS NULL AND (w.workspace_id = ?2 OR EXISTS (SELECT 1 FROM review_targets t WHERE t.bot_id = g.id AND t.workspace_id = ?2 AND t.deleted_at IS NULL)) ORDER BY (w.workspace_id = ?2) DESC, w.workspace_id LIMIT 1`;
 
 /**
- * The two `upsertInstallation` statements. Which one runs is chosen BEFORE
+ * note: The two `upsertInstallation` statements. Which one runs is chosen BEFORE
  * `prepare` from `input.authoritative`, so no value ever enters the SQL text.
  *
  * A NULL `accountLogin` preserves whatever is stored in both. They differ only
@@ -754,7 +754,7 @@ const SCOPED_APP_SQL = `SELECT g.*, w.workspace_id FROM review_bots g INNER JOIN
  * review traffic.
  */
 const UPSERT_INSTALLATION_SQL = {
-  // An AUTHORITATIVE delivery is the installation's own statement, so it also
+  // why: An AUTHORITATIVE delivery is the installation's own statement, so it also
   // clears a removal stamp: a reinstall (`installation.created`) makes the row
   // visible again. An INFERRED login is ordinary review traffic and says
   // nothing about install state, so it never clears the stamp.
@@ -784,7 +784,7 @@ export type SharedBotRow = {
 };
 
 /**
- * Every live `shared` bot with that per-workspace count. `owned` and
+ * note: Every live `shared` bot with that per-workspace count. `owned` and
  * soft-deleted bots are not offered: the set is the platform-wide share, which
  * is the same for every workspace by contract. One D1 read, no GitHub call.
  */
@@ -799,7 +799,7 @@ const SHARED_BOT_LIST_SQL = `
 /** Create the review_bots / bot_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
   /**
-   * Bounded ledger retention (migration 0039). Terminal rows only: an open PR
+   * invariant: Bounded ledger retention (migration 0039). Terminal rows only: an open PR
    * is still a review target however stale its clock, so `state` gates the
    * predicate and age only orders what it already excluded. Capped per run so
    * a large backlog drains over successive sweeps instead of stalling one.
@@ -829,7 +829,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
   }
 
   /**
-   * BATCHED health-read face (QC wave 1, W-1): the Apps list
+   * note: BATCHED health-read face (QC wave 1, W-1): the Apps list
    * renders every row's health on each POST re-render, so the per-App
    * deliverySummary fan-out (2N statements) is replaced by exactly TWO
    * statements for any N: (a) the newest row per app — ranked by an outcome
@@ -900,7 +900,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
   }
 
   /**
-   * The workspace's live review locks, keyed by (owner, repo, pr_number) — or
+   * note: The workspace's live review locks, keyed by (owner, repo, pr_number) — or
    * `null` when the read failed, because a failed read IS the `unknown` wire
    * value (D16) and must not fail the whole PR face. That `null` is silent in
    * the payload, so the catch also emits one `dashboard_live_lock_read_failed`
@@ -935,7 +935,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
   return {
     /**
-     * Insert a new active app row (status 'active', deleted_at NULL) with
+     * note: Insert a new active app row (status 'active', deleted_at NULL) with
      * the CALLER-SUPPLIED id as the row PK (review pin — the caller's
      * secretbox AAD rowKey is this id), plus its `bot_workspaces` mapping to
      * the REQUIRED `input.workspaceId`. Ownership is never discovered: the
@@ -956,7 +956,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      */
     async createApp(input: CreateAppInput): Promise<GithubAppRow> {
       const id = input.id;
-      // Ownership is a caller input, never a lookup: the named workspace must
+      // invariant: Ownership is a caller input, never a lookup: the named workspace must
       // still be live (a soft-deleted one is refused identically to an unknown
       // id). A clean throw here leaves no half-written App.
       const liveWorkspace = await db
@@ -966,7 +966,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       if (!liveWorkspace) {
         throw new Error("apps-store: createApp target workspace is not live");
       }
-      // The cap is enforced BY the write: the insert carries the workspace's
+      // note: The cap is enforced BY the write: the insert carries the workspace's
       // live count, so two concurrent creations cannot both pass a read that
       // both saw under the limit. A NULL cap has no guard at all — binding NULL
       // would make `count < NULL` NULL and refuse every creation.
@@ -998,7 +998,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             input.workspaceId,
             ...(input.maxApps === null ? [] : [input.maxApps]),
           ),
-        // Conditional too, and bound to THIS batch's insert: `changes()` is the
+        // note: Conditional too, and bound to THIS batch's insert: `changes()` is the
         // row count of the statement above in this same transaction. A refused
         // (zero-row) insert therefore leaves this one matching nothing — while
         // an id lookup alone would find a CONCURRENT winner's bot under the
@@ -1011,7 +1011,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           )
           .bind(id, input.workspaceId),
       ]);
-      // Zero rows is the refusal, classified by its cause: the workspace
+      // note: Zero rows is the refusal, classified by its cause: the workspace
       // predicate refused because the tenant was soft-deleted between the read
       // above and this batch, or the cap predicate did. A genuine SQL/UNIQUE
       // error threw out of the batch instead and is never reclassified.
@@ -1024,7 +1024,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           throw new Error("apps-store: createApp target workspace is not live");
         }
         if (input.maxApps === null) {
-          // Unreachable: an uncapped insert for a live workspace always matches.
+          // invariant: Unreachable: an uncapped insert for a live workspace always matches.
           throw new Error("apps-store: createApp row vanished on read-back");
         }
         throw new AppCountExceededError(input.maxApps);
@@ -1037,7 +1037,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * How many Apps a workspace currently OWNS: `bot_workspaces` joined to the
+     * note: How many Apps a workspace currently OWNS: `bot_workspaces` joined to the
      * LIVE `review_bots` rows. A soft-deleted App keeps its mapping row, so the
      * join condition is what frees its slot. `createApp`'s insert re-checks
      * this same count in its own statement (the authority for a concurrent
@@ -1057,7 +1057,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By the webhook URL's two segments — the App row `id` must belong to the
+     * invariant: By the webhook URL's two segments — the App row `id` must belong to the
      * named workspace. Resolves soft-deleted and disabled App rows too
      * (callers filter), but NOT an App whose workspace is soft-deleted, and
      * never an App paired with a workspace it does not belong to.
@@ -1073,7 +1073,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By GitHub's numeric App id; same guards as getAppById (soft-deleted and
+     * note: By GitHub's numeric App id; same guards as getAppById (soft-deleted and
      * disabled rows resolve, a soft-deleted workspace does not).
      */
     async getAppByGithubId(githubAppId: number): Promise<GithubAppTenantRow | null> {
@@ -1084,7 +1084,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By GitHub's numeric App id, resolved against the shared set: the bot's
+     * note: By GitHub's numeric App id, resolved against the shared set: the bot's
      * own (live) mapping OR — when the bot is `shared` — any workspace, so a
      * tenant face can read a bot it does not own. `null` for a soft-deleted or
      * `owned` bot outside the caller's workspace.
@@ -1100,7 +1100,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The target pages' resolve: the workspace's own bot, or any bot it holds
+     * note: The target pages' resolve: the workspace's own bot, or any bot it holds
      * a live target on (the same visibility rule `resolveScopedApp` documents).
      * `null` for a soft-deleted bot, a bot with neither this workspace's
      * mapping nor a live target here, or a non-existent id.
@@ -1116,7 +1116,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The `shared` bots this workspace may create a target on, each carrying
+     * note: The `shared` bots this workspace may create a target on, each carrying
      * how many live targets the workspace already holds on it. The chooser's
      * list: a read, never a `review_bots` write.
      */
@@ -1126,21 +1126,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * By id; resolves soft-deleted and disabled App rows too (callers
+     * note: By id; resolves soft-deleted and disabled App rows too (callers
      * filter), but NOT an App whose workspace is soft-deleted.
      */
     async getAppById(id: string): Promise<GithubAppTenantRow | null> {
       return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppTenantRow>();
     },
 
-    /** Dashboard list: non-deleted rows, newest first (stable id tiebreak). */
+    /** note: Dashboard list: non-deleted rows, newest first (stable id tiebreak). */
     async listApps(): Promise<GithubAppRow[]> {
       const res = await db.prepare(APP_READ_SQL.listApps).all<GithubAppRow>();
       return res.results;
     },
 
     /**
-     * The App's stored sandbox image id (migration 0018). No tenant join: it
+     * note: The App's stored sandbox image id (migration 0018). No tenant join: it
      * returns a configuration value, never a tenant-facing field.
      */
     async getSandboxImageId(appId: string): Promise<string | null> {
@@ -1152,7 +1152,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The cached GitHub App visibility (migration 0045). Unknown id → null;
+     * why: The cached GitHub App visibility (migration 0045). Unknown id → null;
      * a never-probed App reads as 'unknown' (the column is NULL), which is
      * treated as "cannot prove private".
      */
@@ -1166,7 +1166,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Toggle 'active' | 'disabled'. Refuses soft-deleted rows (returns false,
+     * note: Toggle 'active' | 'disabled'. Refuses soft-deleted rows (returns false,
      * no write) — a deleted app can never be re-activated. Returns whether a
      * row changed (false also covers unknown ids).
      */
@@ -1182,7 +1182,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Toggle the per-App pause switch (spec 语义锁): 1 = the App's
+     * note: Toggle the per-App pause switch (spec 语义锁): 1 = the App's
      * PRs are reviewed, 0 = paused — webhook face 2xx-ignores with zero
      * enqueue, in-flight messages ack-skip. Writes review_enabled +
      * updated_at (an operator mutation, L5) and refuses soft-deleted rows
@@ -1201,7 +1201,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Cache the App's GitHub visibility (migration 0045) from the anonymous
+     * note: Cache the App's GitHub visibility (migration 0045) from the anonymous
      * probe (its one caller is the metadata refresh). Writes ONLY
      * github_visibility — deliberately
      * NOT updated_at, which stays the operator-mutation timestamp (the
@@ -1221,7 +1221,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Select the App's sandbox runtime image (migration 0018). The
+     * note: Select the App's sandbox runtime image (migration 0018). The
      * id must be an ENABLED entry of the src/contracts/sandbox-images.ts
      * registry — anything else throws BEFORE any write (this is the
      * store-enforced value domain the DDL deliberately leaves CHECK-less;
@@ -1275,7 +1275,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Record the App's most recent verified (2xx) webhook delivery (lock
+     * note: Record the App's most recent verified (2xx) webhook delivery (lock
      * L5). Writes ONLY last_webhook_at — deliberately NOT updated_at: this
      * touch runs per webhook (high-frequency), while updated_at must stay
      * the operator-mutation timestamp. An unknown id is a silent no-op (the
@@ -1290,7 +1290,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Persist one fetched GitHub profile (migrations 0019/0036) — the
+     * note: Persist one fetched GitHub profile (migrations 0019/0036) — the
      * SINGLE writer for the github_* metadata columns (the settings read
      * path's lazy 24h TTL refresh; no cron/queue retry exists by plan lock).
      * Writes ONLY the six new columns — deliberately NOT updated_at, which
@@ -1327,7 +1327,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Stamp `github_metadata_attempted_at` (migration 0037) after a fetch
+     * note: Stamp `github_metadata_attempted_at` (migration 0037) after a fetch
      * attempt that persisted no slug — the ONLY writer of that column, and,
      * like saveGithubMetadata and touchLastWebhook, deliberately NOT
      * updated_at. The read path's NULL-slug re-attempt reads it, so an App
@@ -1347,7 +1347,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Touch (or create) the (appId, installationId) installation row on any
+     * note: Touch (or create) the (appId, installationId) installation row on any
      * webhook carrying an installation_id. A null/absent accountLogin
      * preserves the stored login; otherwise `authoritative` decides the winner
      * (see UPSERT_INSTALLATION_SQL): an authoritative value overwrites, an
@@ -1362,7 +1362,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Install-health read face (settings panel): this App's
+     * note: Install-health read face (settings panel): this App's
      * installation rows, most recently seen first (stable installation_id
      * tiebreak). Read-only — the panel never mutates through this face.
      */
@@ -1378,7 +1378,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The target page's 已安装 tab: this bot's live installations, most
+     * note: The target page's 已安装 tab: this bot's live installations, most
      * recently seen first. An installation is app-level (D19), so nothing
      * binds it to a target and a removed one is the only exclusion. Empty for
      * a bot the addressed workspace may not use — its visible set is the
@@ -1401,7 +1401,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * One installation of this bot INCLUDING a removed one — the settings
+     * note: One installation of this bot INCLUDING a removed one — the settings
      * block's bound-state read. `removed_at IS NULL` is the present case; a
      * stamped row still answers, because a target keeps its binding through an
      * uninstall and the block has to say that reviews stopped.
@@ -1420,7 +1420,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The database's own UTC clock in the sub-second `YYYY-MM-DD HH:MM:SS.SSS`
+     * note: The database's own UTC clock in the sub-second `YYYY-MM-DD HH:MM:SS.SSS`
      * form (`strftime('%Y-%m-%d %H:%M:%f','now')`). A caller captures this
      * BEFORE an upstream read so `reconcileInstallations` can tell which rows
      * predate the snapshot.
@@ -1441,7 +1441,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Stamp one installation row as removed (`installation.deleted`). The row
+     * note: Stamp one installation row as removed (`installation.deleted`). The row
      * SURVIVES — the credential-routing and failure-attribution joins read
      * `bot_installations`, and the installation's historical reviews still
      * reference it. An unknown pair is a silent no-op: the delivery may
@@ -1467,7 +1467,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Reconcile this App's installation rows against GitHub's authoritative
+     * note: Reconcile this App's installation rows against GitHub's authoritative
      * list (`GET /app/installations`): stamp the active rows the list does not
      * contain and clear the stamp of a stored-removed row the list DOES
      * contain. This is what repairs rows whose `installation.deleted` delivery
@@ -1507,7 +1507,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       liveInstallationIds: readonly number[],
       observedAt: string,
     ): Promise<void> {
-      // One binding per statement: the `WITH` CTE keeps `json_each` (ids) and
+      // why: One binding per statement: the `WITH` CTE keeps `json_each` (ids) and
       // `json_extract` (the stamp) reading the same bound value.
       const snapshot = JSON.stringify({ ids: liveInstallationIds, observedAt });
       await db.batch([
@@ -1539,7 +1539,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Append one delivery row (AL-20-1) — the R2 diagnostics
+     * note: Append one delivery row (AL-20-1) — the R2 diagnostics
      * face. Fail-loud like the rest of this store: an off-vocabulary outcome
      * throws BEFORE any row is written (producer-side enforcement, 0010
      * FAILURE_STAGES precedent); FK violations (unknown appId) throw. The
@@ -1582,7 +1582,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Health read face: the App's newest review-verdict delivery row
+     * note: Health read face: the App's newest review-verdict delivery row
      * (outcome tier — see deliverySummaries) +
      * the count of `rejected` rows inside the trailing 24h window
      * (`created_at > datetime('now', '-24 hours')` — the sweep
@@ -1595,14 +1595,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return (await deliverySummaries([appId]))[appId]!;
     },
 
-    /** Batched variant of deliverySummary — see the local implementation above. */
+    /** note: Batched variant of deliverySummary — see the local implementation above. */
     deliverySummaries,
 
-    /** Bounded ledger retention — see the local implementation above. */
+    /** note: Bounded ledger retention — see the local implementation above. */
     sweepTerminalPullRequests,
 
     /**
-     * The delivery-status read face: THIS App's rows, filtered and paged in
+     * note: The delivery-status read face: THIS App's rows, filtered and paged in
      * the STORE, with the unpaged total beside the page.
      *
      * Ordering is the panel's original one — verdict tier first, newest first
@@ -1628,7 +1628,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         binds.push(filters.repo);
       }
       if (filters.sinceDays !== null) {
-        // The modifier is a validated integer, so this is not a bound value
+        // why: The modifier is a validated integer, so this is not a bound value
         // SQLite could reinterpret.
         predicates.push("created_at > datetime('now', ?)");
         binds.push(`-${filters.sinceDays} days`);
@@ -1676,7 +1676,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * Record one VERIFIED `pull_request` delivery (migration 0039) —
+     * note: Record one VERIFIED `pull_request` delivery (migration 0039) —
      * idempotent on the UNIQUE (bot_id, owner, repo, pr_number) tuple: a PR
      * that arrives several times (opened, synchronize, closed, …) keeps ONE
      * row and `title` / `state` / `head_sha` refresh only when the caller
@@ -1719,20 +1719,20 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      *   - an older stamp → both untouched.
      */
     async upsertPullRequest(input: UpsertPullRequestInput): Promise<void> {
-      // The target is the row's identity half. Refused here, before any bind,
+      // note: The target is the row's identity half. Refused here, before any bind,
       // so a caller that forgot it fails loudly instead of writing a row no
       // tenant read can ever reach (target_id is nullable in the DDL).
       if (typeof input.targetId !== "string" || input.targetId === "") {
         throw new Error("upsertPullRequest: targetId is required — the ledger key is (target_id, owner, repo, pr_number)");
       }
-      // The canonical UTC ISO-8601 spelling (`new Date(v).toISOString()`) is a
+      // note: The canonical UTC ISO-8601 spelling (`new Date(v).toISOString()`) is a
       // PRECONDITION of the column, which is ordered lexically — a numeric
       // offset would sort wrongly against the stored `Z` values. Enforced here
       // rather than documented for the caller: a second writer cannot store an
       // unorderable spelling. `null` is the EXPLICIT "no usable stamp"
       // fallback, where arrival time is the only clock left.
       const seenAt = normalizeRfc3339(input.updatedAt) ?? null;
-      // The pair below holds at the write: no sha, no stamp — otherwise a
+      // why: The pair below holds at the write: no sha, no stamp — otherwise a
       // delivery that carries a stamp but no sha would move the PR's delivery
       // watermark on behalf of a commit it never named.
       const headAt = input.headSha === undefined || input.headSha === null ? null : seenAt;
@@ -1777,7 +1777,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The PR's head watermark — `head_sha` plus the ledger's DELIVERY stamp
+     * note: The PR's head watermark — `head_sha` plus the ledger's DELIVERY stamp
      * (migration 0044: the `pull_request.updated_at` of the most recent
      * stamped delivery, not the sha's arrival time) — as ONE strongly
      * consistent point read on the ledger's own UNIQUE key. The queue consumer
@@ -1806,7 +1806,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * PR-ledger list face: the App's most recently active pull requests,
+     * note: PR-ledger list face: the App's most recently active pull requests,
      * newest first, plus the face's whole repository option set, plus each
      * row's D11 reviewing projection. FIVE statements per call regardless of
      * N — the rows, the newest review per (owner, repo, pr_number) via a
@@ -1861,21 +1861,21 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       scope: LedgerScope,
       filter?: { owner: string; repo: string },
     ): Promise<{ rows: PullRequestRow[]; repos: string[] }> {
-      // ONE suffix feeds the row statement and the window, so a change to the
+      // why: ONE suffix feeds the row statement and the window, so a change to the
       // window helper cannot leave the rows filtering after the cap.
       const repoPredicate = filter === undefined ? "" : PULL_REQUEST_REPO_PREDICATE;
-      // The tenant binds leading every statement — one for a workspace scope,
+      // note: The tenant binds leading every statement — one for a workspace scope,
       // two for a target scope (its id and the workspace that owns it).
       const scopeBinds = ledgerScopeBinds(scope);
       const window = pullRequestWindowSql(repoPredicate, scope);
-      // The window's own binds (tenant set, repo filter, cap), spliced after
+      // note: The window's own binds (tenant set, repo filter, cap), spliced after
       // each aggregate's own leading predicate.
       const windowBinds = [
         ...scopeBinds,
         ...(filter === undefined ? [] : [filter.owner, filter.repo]),
         PULL_REQUEST_LIST_LIMIT,
       ];
-      // The lock projection rides the same round trip: the ledger batch and
+      // note: The lock projection rides the same round trip: the ledger batch and
       // the App's live locks are independent reads, and only the first may
       // fail the payload.
       const [results, locks] = await Promise.all([
@@ -1934,7 +1934,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * ONE pull request's head row — the detail face's first read. The address
+     * note: ONE pull request's head row — the detail face's first read. The address
      * is the ledger's OWN key (target_id, owner, repo, pr_number): one target
      * can hold several repos, and a number is only unique WITHIN a repo, so a
      * number-only lookup would answer with a different repo's PR. A miss is
@@ -1985,7 +1985,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * The record totals — the head payload's `counts`. Every failure count on
+     * note: The record totals — the head payload's `counts`. Every failure count on
      * this face (this one, the list's `failure_count`, the failures section's
      * `total`) carries ONE rule: `ATTRIBUTION_EXCLUDED_STAGES` rows are per-round
      * ATTRIBUTION for reviews that continued (`recheck` a budget skip / dead
@@ -2050,7 +2050,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * One page of a PR's findings, newest LIFECYCLE ROW first, optionally
+     * note: One page of a PR's findings, newest LIFECYCLE ROW first, optionally
      * filtered by an exact `mergeClass` (the wire's `severity`). The `total` is
      * the FILTERED count — the pager's denominator. `null` means the App's
      * ledger does not hold this PR (the route's 404), decided in the same
@@ -2094,7 +2094,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestFindingRow> | null> {
       const unclassified = page.unclassified === true;
-      // `NOT IN` never matches a NULL column, yet a finding with no
+      // invariant: `NOT IN` never matches a NULL column, yet a finding with no
       // `mergeClass` lands in the catch-all bucket too (the SPA reads it as
       // ""), so the complement must admit NULL explicitly.
       const filter = unclassified
@@ -2143,7 +2143,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * One page of a PR's reviews, newest first — the history's first page is
+     * note: One page of a PR's reviews, newest first — the history's first page is
      * its latest verdict. `null` = the App's ledger does not hold this PR.
      *
      * Each row carries the round ORDINAL and that round's run facts. The
@@ -2200,7 +2200,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       ]);
       if (results[0]!.results.length === 0) return null;
       return {
-        // Nullable columns pass through AS THEY ARE: the store reports what
+        // note: Nullable columns pass through AS THEY ARE: the store reports what
         // the tables hold, and the route's wire mapping decides what the
         // client may receive (a NULL `provider` is a real, common row — the
         // v1 pipeline never records one).
@@ -2210,7 +2210,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * One page of a PR's review failures, newest first — the diagnostic
+     * note: One page of a PR's review failures, newest first — the diagnostic
      * payload this face exists for. COUNT and SELECT carry the SAME
      * `ATTRIBUTION_EXCLUDED_STAGES` predicate `countPullRequestRecords` applies, so
      * the tab's number, this `total` and the pager agree with the rendered
@@ -2280,22 +2280,22 @@ export type BotScopeRow = {
   scope: BotScope;
   shared_at: string | null;
   deleted_at: string | null;
-  /** The owning workspace's display name; NULL for an unmapped bot. */
+  /** note: The owning workspace's display name; NULL for an unmapped bot. */
   workspace_name: string | null;
-  /** 0/1: the bot's workspace IS the platform's official workspace. */
+  /** note: 0/1: the bot's workspace IS the platform's official workspace. */
   is_official: number;
-  /** Live `bot_installations` rows (`removed_at IS NULL`). */
+  /** note: Live `bot_installations` rows (`removed_at IS NULL`). */
   installation_count: number;
-  /** Live `review_targets` rows (`deleted_at IS NULL`). */
+  /** note: Live `review_targets` rows (`deleted_at IS NULL`). */
   live_target_count: number;
 };
 
-/** The state a transition starts from: the live bot and its current scope. */
+/** note: The state a transition starts from: the live bot and its current scope. */
 const BOT_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
 /**
- * The console's list. ONE statement for every bot: the workspace name, the
+ * note: The console's list. ONE statement for every bot: the workspace name, the
  * official-workspace comparison and the two counts are correlated subqueries,
  * never a read per row — the operator surface has no paging and a fan-out here
  * would be one round trip per bot.
@@ -2324,7 +2324,7 @@ const BOT_SCOPE_LIST_SQL = `
    ORDER BY b.name, b.id`;
 
 /**
- * The share's own guard, evaluated INSIDE the batch by both statements: the
+ * note: The share's own guard, evaluated INSIDE the batch by both statements: the
  * bot's workspace IS the official workspace right now, and that workspace is
  * live. Reading the designation before the batch would let a share commit
  * against a value an operator had already cleared or re-pointed, so the row is
@@ -2339,7 +2339,7 @@ const officialWorkspaceGuardSql = (botIdRef: string) => `EXISTS (
             WHERE w.bot_id = ${botIdRef})`;
 
 /**
- * Audit row + scope write, in ONE batch, both carrying the same guards: the bot
+ * note: Audit row + scope write, in ONE batch, both carrying the same guards: the bot
  * is live, its current scope is still the transition's FROM state (so two
  * identical transitions land once), and — for a share — it belongs to the live
  * official workspace. A refused write therefore appends nothing. `before` is a
@@ -2377,7 +2377,7 @@ const BOT_SCOPE_UNSHARE_AUDIT_SQL = `
                   WHERE b.id = ?3 AND b.deleted_at IS NULL AND b.scope <> 'owned')`;
 
 /**
- * Unsharing is NOT gated on the official workspace: a stale share must stay
+ * invariant: Unsharing is NOT gated on the official workspace: a stale share must stay
  * revocable by the only role that can revoke it. It is gated on the FROM state,
  * so a second revoke changes nothing.
  */
@@ -2405,7 +2405,7 @@ export async function setBotScope(
   if (current.scope === scope) return { outcome: "ok", scope, sharedAt: current.shared_at };
   if (scope === "owned" && input.confirm !== true) return { outcome: "confirm_required" };
 
-  // Every precondition is re-checked inside the batch, so the pre-read above
+  // why: Every precondition is re-checked inside the batch, so the pre-read above
   // only names the refusal early — it authorizes nothing.
   const [, write] =
     scope === "shared"
@@ -2424,7 +2424,7 @@ export async function setBotScope(
     return { outcome: "ok", scope, sharedAt: scope === "shared" ? now : null };
   }
 
-  // The guarded write changed nothing, so it appended no audit row either.
+  // why: The guarded write changed nothing, so it appended no audit row either.
   // Re-read to say why: a bot retired in between is "not found"; a row that
   // already holds the target scope means a concurrent identical transition won,
   // which is this call's outcome too, carrying the state that was persisted;
@@ -2449,7 +2449,7 @@ export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {
   return res.results;
 }
 
-/** The `pull_requests` columns the ledger reads (`number` = `pr_number`). */
+/** note: The `pull_requests` columns the ledger reads (`number` = `pr_number`). */
 type PullRequestBaseRow = {
   owner: string;
   repo: string;
@@ -2470,7 +2470,7 @@ export type PullRequestFindingRow = {
   file_path: string | null;
   line: number | null;
   body: string | null;
-  /** The stored ordinal of the round that first reported it (`review_findings.first_seen_round`). */
+  /** why: The stored ordinal of the round that first reported it (`review_findings.first_seen_round`). */
   review_round: number;
 };
 
@@ -2482,14 +2482,14 @@ export type PullRequestReviewDetailRow = {
   reviewed_at: string;
   head_sha: string;
   /**
-   * The stored publication round (`reviews.round`), which can skip ordinals.
+   * note: The stored publication round (`reviews.round`), which can skip ordinals.
    * Rows written before migration 0050 fall back to their position in the
    * PR's oldest-first review history (1 = first).
    */
   round: number;
-  /** Wall clock of the round in ms; NULL for rows written before the measurement. */
+  /** note: Wall clock of the round in ms; NULL for rows written before the measurement. */
   duration_ms: number | null;
-  /** Those findings per severity as JSON object text (`{"must-fix":2}`); `{}` when none. */
+  /** invariant: Those findings per severity as JSON object text (`{"must-fix":2}`); `{}` when none. */
   severity_counts: string;
 };
 
@@ -2507,7 +2507,7 @@ export type PullRequestHeadRow = PullRequestBaseRow & {
   reviewing: PullRequestReviewing;
 };
 
-/** One live `review_inflight` row, narrowed to what the projection carries. */
+/** note: One live `review_inflight` row, narrowed to what the projection carries. */
 type PullRequestLockRow = {
   owner: string;
   repo: string;
@@ -2516,13 +2516,13 @@ type PullRequestLockRow = {
   acquired_at: string;
 };
 
-/** The lock map's key. Folded: the lock stores lowercase, the ledger does not. */
+/** note: The lock map's key. Folded: the lock stores lowercase, the ledger does not. */
 function pullRequestKey(owner: string, repo: string, prNumber: number): string {
   return `${owner.toLowerCase()}\u0000${repo.toLowerCase()}\u0000${prNumber}`;
 }
 
 /**
- * One PR's projection from the App-wide lock map. A `null` map is the failed
+ * note: One PR's projection from the App-wide lock map. A `null` map is the failed
  * read, so the row reads `unknown` — never the idle `none`.
  */
 function reviewingOf(
@@ -2554,10 +2554,10 @@ export type PullRequestRecordCounts = {
 export type PullRequestPageRequest = {
   offset: number;
   limit: number;
-  /** `findings` only: exact `mergeClass`; absent/`null` is no filter. */
+  /** invariant: `findings` only: exact `mergeClass`; absent/`null` is no filter. */
   severity?: string | null;
   /**
-   * `findings` only: the complement of `severity` — rows whose `mergeClass` is
+   * invariant: `findings` only: the complement of `severity` — rows whose `mergeClass` is
    * outside `FINDING_SEVERITIES` (or absent). The route decides the
    * vocabulary; this store only excludes it.
    */
@@ -2568,7 +2568,7 @@ export type PullRequestPageRequest = {
 export type PullRequestRecordPage<T> = { items: T[]; total: number };
 
 /**
- * Join the ledger list's result sets in memory — the tuple
+ * note: Join the ledger list's result sets in memory — the tuple
  * (owner, repo, pr_number) is the key, and a PR with no review / no failure
  * reads `latest_review: null`, `failure_count: 0`. The live-inflight
  * projection joins the same tuple; its map being `null` (a failed read) reads

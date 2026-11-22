@@ -1,5 +1,5 @@
 /**
- * D1 store for per-App AI configuration: the `bot_provider_keys` BYOK key
+ * note: D1 store for per-App AI configuration: the `bot_provider_keys` BYOK key
  * POOLS (one row per (App, provider, key_id) — migration 0024) and the
  * `bot_custom_provider_keys` pools of the custom-provider declarations, plus
  * the model chains (`bot_model_chains` default + named chains and the
@@ -188,19 +188,19 @@ export type AppProviderKeyRow = {
   bot_id: string;
   provider: string;
   /**
-   * The key's identity inside the pool: the first 16 hex characters of
+   * note: The key's identity inside the pool: the first 16 hex characters of
    * SHA-256(plaintext). "" on a row migration 0024 carried across, until the
    * store promotes it (the plaintext-derived id needs the master key).
    */
   key_id: string;
-  /** secretbox envelope of the provider API key — opaque here (lock L1). */
+  /** note: secretbox envelope of the provider API key — opaque here (lock L1). */
   key_enc: string;
   created_at: string;
-  /** Last write time (migration 0012); NULL for rows written before 0012. */
+  /** note: Last write time (migration 0012); NULL for rows written before 0012. */
   updated_at: string | null;
-  /** Verification time (migration 0015); NULL = never verified. */
+  /** invariant: Verification time (migration 0015); NULL = never verified. */
   verified_at: string | null;
-  /** Verification outcome (VerifiedStatus, store-enforced; migration 0015); NULL = never verified. */
+  /** invariant: Verification outcome (VerifiedStatus, store-enforced; migration 0015); NULL = never verified. */
   verified_status: string | null;
 };
 
@@ -213,11 +213,11 @@ export type AppProviderKeyRow = {
  */
 export type AppModelChainRow = {
   bot_id: string;
-  /** Chain name; "default" is the reserved default-row name. */
+  /** note: Chain name; "default" is the reserved default-row name. */
   name: string;
-  /** Verbatim comma-separated selector chain — configuration, not a secret. */
+  /** safety: Verbatim comma-separated selector chain — configuration, not a secret. */
   chain: string;
-  /** 1 = the App's default chain (at most one per App); 0 = named chain. */
+  /** invariant: 1 = the App's default chain (at most one per App); 0 = named chain. */
   is_default: number;
   created_at: string;
   updated_at: string;
@@ -226,9 +226,9 @@ export type AppModelChainRow = {
 /** A row of `bot_model_chain_seats` (migration 0017, spec §4.4). Absent row = the seat uses the default chain. */
 export type AppModelChainSeatRow = {
   bot_id: string;
-  /** One of the MODEL_ROLE_IDS audit-seat agent names. */
+  /** note: One of the MODEL_ROLE_IDS audit-seat agent names. */
   role: string;
-  /** The referenced chain name; the reserved "default" name is never stored (blank = default = absent row). */
+  /** invariant: The referenced chain name; the reserved "default" name is never stored (blank = default = absent row). */
   chain_name: string;
 };
 /**
@@ -282,7 +282,7 @@ export type AppCustomProvider = {
   api: CustomProviderApi;
   model_ids: string[];
   /**
-   * What the owner stated about each model id, keyed by that id (migration
+   * note: What the owner stated about each model id, keyed by that id (migration
    * 0053). ABSENT means nothing was stated — the legacy declaration shape, and
    * the reason an existing row keeps its stored bytes. A field inside an entry
    * that is absent (or null) is unset too; zero is never an "unset" stand-in.
@@ -298,9 +298,9 @@ export type AppCustomProvider = {
  * storable while the settings form is the surface that requires the two sizes.
  */
 export type CustomProviderModelMeta = {
-  /** Tokens the model can hold — a positive whole count. */
+  /** note: Tokens the model can hold — a positive whole count. */
   contextWindow?: number;
-  /** Token cap one completion may spend — a positive whole count. */
+  /** safety: Token cap one completion may spend — a positive whole count. */
   maxTokens?: number;
   name?: string;
   reasoning?: boolean;
@@ -319,7 +319,7 @@ export type CustomProviderModelsMeta = Record<string, CustomProviderModelMeta>;
  * AppCustomProvider: has_keys is derived from the pool, never submitted.
  */
 export type AppCustomProviderRead = AppCustomProvider & {
-  /** True while bot_custom_provider_keys holds ≥1 row for (app, provider). */
+  /** note: True while bot_custom_provider_keys holds ≥1 row for (app, provider). */
   has_keys: boolean;
 };
 /**
@@ -335,13 +335,13 @@ export type CustomProviderConsumerConfig = {
   base_url: string;
   api: CustomProviderApi;
   model_ids: string[];
-  /** Absent when the declaration states nothing (the legacy input shape). */
+  /** why: Absent when the declaration states nothing (the legacy input shape). */
   models_meta?: CustomProviderModelsMeta;
   api_keys: string[];
 };
 
 /**
- * One row of the consumer face's declaration ⋈ pool read: the declaration's
+ * note: One row of the consumer face's declaration ⋈ pool read: the declaration's
  * columns plus ONE of its key rows, so the endpoint and the credentials it is
  * returned with come from ONE statement (ONE snapshot). The key columns are
  * NULL for a declaration whose pool is empty (LEFT JOIN).
@@ -390,15 +390,15 @@ export type AppProviderModelsRow = {
  * AGREES on (getVerifiedModels recomputes it on read).
  */
 export type VerifiedModels = {
-  /** The provider id the options are prefixed with. */
+  /** note: The provider id the options are prefixed with. */
   provider: string;
   /**
-   * The models EVERY credential the runtime may select can serve — the
+   * safety: The models EVERY credential the runtime may select can serve — the
    * intersection of the pool keys' own reports ([] = the pool's vocabulary
    * is unknown: a key has no report yet, or they share no model).
    */
   models: string[];
-  /** Freshest evidence write time feeding this entry (SQLite datetime('now') UTC). */
+  /** note: Freshest evidence write time feeding this entry (SQLite datetime('now') UTC). */
   fetched_at: string;
 };
 
@@ -413,7 +413,7 @@ export type VerifiedModels = {
 export const PROVIDER_IDS: readonly string[] = PROVIDER_IDS_BUILTIN;
 
 /**
- * Retired selector-prefix aliases still readable in OLD data. "ark-plan" was an
+ * note: Retired selector-prefix aliases still readable in OLD data. "ark-plan" was an
  * image-declared provider whose keys came from the App's "ark" pool; the image
  * declares no provider now. Reading folds the alias onto the real provider id;
  * WRITING never produces it again (keys and evidence store under "ark").
@@ -433,19 +433,19 @@ const RETIRED_PROVIDER_ALIASES: Readonly<Record<string, string>> = { "ark-plan":
  * URL carries one.
  */
 export type ProviderMirrorEntry = {
-  /** Human-readable provider label (picker/table). */
+  /** note: Human-readable provider label (picker/table). */
   label: string;
-  /** builtin = runner-consumable env-name entry; template = metadata + prefill only. */
+  /** invariant: builtin = runner-consumable env-name entry; template = metadata + prefill only. */
   tier: "builtin" | "template";
-  /** Default API base URL. Template entries may carry a {account_id} placeholder. */
+  /** note: Default API base URL. Template entries may carry a {account_id} placeholder. */
   baseUrl: string | null;
-  /** Custom-provider API protocol to materialize a template with (template tier only). */
+  /** invariant: Custom-provider API protocol to materialize a template with (template tier only). */
   api: string | null;
-  /** Representative model ids (display/prefill metadata). */
+  /** note: Representative model ids (display/prefill metadata). */
   models: readonly string[];
-  /** Provider docs URL. */
+  /** note: Provider docs URL. */
   doc: string | null;
-  /** Mixed-protocol providers only: every selectable protocol, the default
+  /** invariant: Mixed-protocol providers only: every selectable protocol, the default
    *  first. Absent = the row's own api/baseUrl/models are its one protocol. */
   protocols?: readonly {
     api: string;
@@ -491,7 +491,7 @@ export function parseModelChain(raw: string | undefined): string[] {
     .filter((selector) => selector.length > 0);
 }
 /**
- * Parse a stored TEXT JSON array of model ids — either column that stores
+ * note: Parse a stored TEXT JSON array of model ids — either column that stores
  * one (bot_custom_providers.model_ids, AL-23-1 DDL, or
  * bot_provider_models.models_json, migration 0015) — fail-loud on anything
  * that is not a JSON array of strings (the getAppConfig tamper convention):
@@ -508,14 +508,14 @@ function parseModelIdsJson(raw: string, source: string): string[] {
 }
 
 /**
- * One stored entry with its legacy `null` fields dropped — the READ boundary's
+ * note: One stored entry with its legacy `null` fields dropped — the READ boundary's
  * normalization to the canonical "unset = absent". Explicit `false`, `0`-free
  * numbers and empty arrays are statements and are preserved; only nulls go.
  */
 function normalizeModelMeta(value: unknown): unknown {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
   const normalized: Record<string, unknown> = {};
-  // EVERY non-null field is carried through — an unknown field must still
+  // invariant: EVERY non-null field is carried through — an unknown field must still
   // reach the shape rule and fail loud, never be dropped here.
   for (const [field, fieldValue] of Object.entries(value as Record<string, unknown>)) {
     if (fieldValue === null || fieldValue === undefined) continue;
@@ -524,7 +524,7 @@ function normalizeModelMeta(value: unknown): unknown {
   return normalized;
 }
 
-/** The fields one model's overlay entry may carry — anything else is a typo. */
+/** why: The fields one model's overlay entry may carry — anything else is a typo. */
 const CUSTOM_PROVIDER_MODEL_META_FIELDS: readonly string[] = [
   "contextWindow",
   "maxTokens",
@@ -534,7 +534,7 @@ const CUSTOM_PROVIDER_MODEL_META_FIELDS: readonly string[] = [
 ];
 
 /**
- * The ONE shape rule for one model's metadata entry: what is malformed about
+ * note: The ONE shape rule for one model's metadata entry: what is malformed about
  * it, or `null` when it is well-formed. Shared by the write gate (which turns
  * the reason into InvalidCustomProviderError) and the read path (which throws
  * it, the getAppConfig tamper convention), so a stored row can never be
@@ -552,7 +552,7 @@ function customProviderModelMetaProblem(modelId: string, value: unknown): string
       return `${named} metadata carries an unknown field ${JSON.stringify(field)}`;
     }
   }
-  // Canonical wire form: an unset fact is ABSENT. `null` is the legacy
+  // note: Canonical wire form: an unset fact is ABSENT. `null` is the legacy
   // spelling the read boundary normalizes away, so it is refused here — a
   // write may never introduce a second shape for "unset".
   for (const field of CUSTOM_PROVIDER_MODEL_META_FIELDS) {
@@ -580,7 +580,7 @@ function customProviderModelMetaProblem(modelId: string, value: unknown): string
 }
 
 /**
- * Parse a stored `bot_custom_providers.models_meta` overlay, fail-loud on a
+ * note: Parse a stored `bot_custom_providers.models_meta` overlay, fail-loud on a
  * tampered row: a non-object, a key that is not one of THIS declaration's
  * model ids, or an entry that breaks the shape rule throws here rather than
  * reaching a caller. An entry of JSON null is unset and is dropped; an overlay
@@ -609,7 +609,7 @@ function parseModelsMetaJson(
       );
     }
     if (value === null) continue;
-    // Legacy rows were written while `null` counted as unset. Normalize at
+    // note: Legacy rows were written while `null` counted as unset. Normalize at
     // THIS boundary so every consumer sees the one canonical form — an absent
     // key — and never a null that would render as "No reasoning" or throw on
     // an `input` spread. The canonical shape rule then judges the cleaned
@@ -617,7 +617,7 @@ function parseModelsMetaJson(
     const normalized = normalizeModelMeta(value) as Record<string, unknown>;
     const problem = customProviderModelMetaProblem(modelId, normalized);
     if (problem !== null) throw new Error(`app-config-store: ${source}: ${problem}`);
-    // An entry whose every field was null is itself unstated.
+    // note: An entry whose every field was null is itself unstated.
     if (Object.keys(normalized).length > 0) meta[modelId] = normalized as CustomProviderModelMeta;
   }
   return Object.keys(meta).length === 0 ? undefined : meta;
@@ -641,13 +641,13 @@ export const MAX_PROVIDER_KEY_LENGTH = 4096;
  */
 export const MAX_KEYS_PER_PROVIDER = 8;
 /**
- * The key id migration 0024 gives a row it carried across: SQL cannot derive
+ * invariant: The key id migration 0024 gives a row it carried across: SQL cannot derive
  * the real one (it needs the plaintext), so the row waits under this sentinel
  * until the store promotes it on first touch. A real key id is 16 hex
  * characters, so the empty string can never collide with one.
  */
 const LEGACY_KEY_ID = "";
-/** UTF-8 encoder for the SHA-256 key-id derivation (one per module, not per call). */
+/** note: UTF-8 encoder for the SHA-256 key-id derivation (one per module, not per call). */
 const keyIdEncoder = new TextEncoder();
 /**
  * Custom-provider declaration bounds (AL-23-2 verdict): provider id
@@ -834,7 +834,7 @@ export class InvalidModelSelectorError extends Error {
 }
 
 /**
- * Per-key secretbox AAD rowKey (migration 0024): the envelope is bound to the
+ * note: Per-key secretbox AAD rowKey (migration 0024): the envelope is bound to the
  * FULL primary key of the row — both composite-PK columns of 0006 PLUS the
  * per-key id — joined in DDL order. A row's ciphertext is therefore useless in
  * any other slot of the same pool.
@@ -843,7 +843,7 @@ function providerKeyAad(appId: string, provider: string, keyId: string): string 
   return `app_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
 }
 /**
- * The same form for bot_custom_provider_keys: the envelope is bound to the
+ * note: The same form for bot_custom_provider_keys: the envelope is bound to the
  * declaration's provider id and the per-key id, joined in DDL order —
  * `app_custom_provider_keys.key_enc:<app_id>:<provider>:<key_id>`. The
  * consumer decrypts with this exact string.
@@ -852,7 +852,7 @@ function customProviderKeyAad(appId: string, provider: string, keyId: string): s
   return `app_custom_provider_keys.key_enc:${appId}:${provider}:${keyId}`;
 }
 /**
- * The PRE-0024 (two-segment) AAD rowKeys, read-only. Kept ONLY for the
+ * invariant: The PRE-0024 (two-segment) AAD rowKeys, read-only. Kept ONLY for the
  * promotion path: a row migration 0024 carried across still holds its old
  * envelope until the store re-encrypts it. Key material is NEVER written
  * under these again.
@@ -864,7 +864,7 @@ function legacyCustomProviderAad(appId: string, providerId: string): string {
   return `app_custom_providers.api_key_enc:${appId}:${providerId}`;
 }
 /**
- * The key's identity inside one (App, provider) pool: the first 16 hex
+ * note: The key's identity inside one (App, provider) pool: the first 16 hex
  * characters of SHA-256(plaintext) over the UTF-8 bytes. Deterministic, so
  * re-submitting a key updates its own row; stored as a primary-key column AND
  * inside the AAD, so no row can be re-pointed at other key material. Plain
@@ -877,7 +877,7 @@ async function providerKeyId(plainKey: string): Promise<string> {
 }
 
 /**
- * Declaration-shape gate: every bound in the AL-23-1/AL-23-2
+ * note: Declaration-shape gate: every bound in the AL-23-1/AL-23-2
  * verdicts, checked BEFORE any crypto or write — an invalid declaration
  * throws InvalidCustomProviderError (or ProviderKeyTooLongError for an
  * over-length key, the addProviderKey convention) and touches zero rows.
@@ -994,7 +994,7 @@ function assertCustomProvider(decl: AppCustomProvider, plainKey: string): void {
   }
 }
 
-/** Role vocabulary gate: anything outside MODEL_ROLE_IDS is a caller bug. */
+/** note: Role vocabulary gate: anything outside MODEL_ROLE_IDS is a caller bug. */
 function assertModelRole(role: string): void {
   if (!MODEL_ROLE_IDS.includes(role)) {
     throw new UnknownModelRoleError(role);
@@ -1002,7 +1002,7 @@ function assertModelRole(role: string): void {
 }
 
 /**
- * Named-chain name gate (spec §4.4): the reserved "default"
+ * note: Named-chain name gate (spec §4.4): the reserved "default"
  * row name and any name outside the MODEL_CHAIN_NAME_PATTERN grammar are
  * rejected — the route answers 400 first; this is the backstop for direct
  * callers.
@@ -1017,7 +1017,7 @@ function assertModelChainName(name: string): void {
 }
 
 /**
- * The masked tail: the LAST 4 characters of the plaintext key — or NOTHING
+ * note: The masked tail: the LAST 4 characters of the plaintext key — or NOTHING
  * for a key of ≤4 characters, which the mask must never reveal whole.
  */
 function maskTail(plainKey: string): string {
@@ -1032,15 +1032,15 @@ function maskTail(plainKey: string): string {
  */
 export type ProviderKeySummary = {
   provider: string;
-  /** First 16 hex characters of the key's SHA-256 — stable across re-submission. */
+  /** note: First 16 hex characters of the key's SHA-256 — stable across re-submission. */
   keyId: string;
-  /** Last 4 plaintext characters; "" when the key is too short to mask safely. */
+  /** why: Last 4 plaintext characters; "" when the key is too short to mask safely. */
   last4: string;
-  /** Last write time (migration 0012); NULL = pre-0012 row (em dash in the view). */
+  /** note: Last write time (migration 0012); NULL = pre-0012 row (em dash in the view). */
   updatedAt: string | null;
-  /** Verification time (migration 0015); NULL = never verified. */
+  /** invariant: Verification time (migration 0015); NULL = never verified. */
   verifiedAt: string | null;
-  /** VerifiedStatus (store-enforced); NULL = never verified. */
+  /** invariant: VerifiedStatus (store-enforced); NULL = never verified. */
   verifiedStatus: string | null;
 };
 
@@ -1048,22 +1048,22 @@ export type ProviderKeySummary = {
 export type AppConfig = {
   appId: string;
   /**
-   * provider id → that provider's DECRYPTED keys, in pool order (created_at,
+   * why: provider id → that provider's DECRYPTED keys, in pool order (created_at,
    * then key_id). Only providers holding at least one key appear — the
    * fail-closed read contract the pipeline's assertAppConfigComplete relies
    * on. The arrays ARE the credential payload's per-provider pools, verbatim.
    */
   keys: Record<string, string[]>;
-  /** Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — AL-24-5). */
+  /** why: Verbatim stored chain; null = unset (missing/empty = that App's reviews fail closed — AL-24-5). */
   modelChain: string | null;
 };
 
 /** One chain as the settings face sees it (spec §4.4). */
 export type AppModelChain = {
   name: string;
-  /** Verbatim comma-separated selector chain — configuration, not a secret. */
+  /** safety: Verbatim comma-separated selector chain — configuration, not a secret. */
   chain: string;
-  /** True for the App's default chain row (the reserved "default" name). */
+  /** note: True for the App's default chain row (the reserved "default" name). */
   is_default: boolean;
   created_at: string;
   updated_at: string;
@@ -1121,7 +1121,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   const box = createSecretbox(encryptionKey);
 
   /**
-   * The two per-key tables are byte-identical (migration 0024), so every
+   * why: The two per-key tables are byte-identical (migration 0024), so every
    * read/write below is written ONCE against this spec and bound to one of
    * them; `legacyAad` builds the PRE-0024 rowKey the promotion path needs.
    */
@@ -1130,7 +1130,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     aad: (appId: string, provider: string, keyId: string) => string;
     legacyAad: (appId: string, provider: string) => string;
     /**
-     * The DECLARATION row that owns this pool, when one exists: a custom key
+     * why: The DECLARATION row that owns this pool, when one exists: a custom key
      * row is only written while its declaration row is still there, so a
      * declaration removal racing the write cannot leave an orphan credential
      * behind (the ownership gate lives in the write itself). Built-in pools
@@ -1150,14 +1150,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     owner: { table: "bot_custom_providers", column: "provider_id" },
   };
 
-  /** Byte-order compare — SQLite's BINARY collation for these ASCII columns. */
+  /** note: Byte-order compare — SQLite's BINARY collation for these ASCII columns. */
   function byAscii(left: string, right: string): number {
     if (left === right) return 0;
     return left < right ? -1 : 1;
   }
 
   /**
-   * Promote ONE row the 0024 migration could only carry across verbatim: the
+   * invariant: Promote ONE row the 0024 migration could only carry across verbatim: the
    * old two-segment envelope is decrypted, the key id derived from the
    * plaintext and the row rewritten UNDER ITS OWN id with the three-segment
    * AAD — this runs where the master key lives, and only here. Timestamps and
@@ -1186,7 +1186,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's — or one provider's — key rows in pool order, the single read
+   * note: The App's — or one provider's — key rows in pool order, the single read
    * path every face goes through so the 0024 promotion happens exactly once
    * per carried row and no caller ever sees the sentinel id. Order:
    * provider-ascending, then (created_at, key_id) — the order the consumer's
@@ -1214,7 +1214,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The admission predicate EVERY pool write shares: the statement writes a
+   * note: The admission predicate EVERY pool write shares: the statement writes a
    * row only while the pool has room OR the key is already in it. Evaluated
    * inside the statement, so two concurrent writers can never both pass a
    * read-then-write check — a zero-change result IS the refusal. The
@@ -1227,7 +1227,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The admission a NEW custom-provider declaration shares with its key: the
+   * note: The admission a NEW custom-provider declaration shares with its key: the
    * write lands only while it ADDS no counted row — the App holds fewer than
    * MAX_CUSTOM_PROVIDER_COUNT declarations, OR the row for this (app, provider)
    * already exists, which an upsert replaces in place. The second branch is
@@ -1246,7 +1246,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * One pool row's conditional upsert, prepared but NOT run: the cap, the
+   * note: One pool row's conditional upsert, prepared but NOT run: the cap, the
    * identity and (for an owned pool) the declaration's existence all live in
    * its WHERE, so an insert matching ZERO rows is a refusal, never a silent
    * no-op. A conflicting row is UPDATEd in place with the caller's
@@ -1276,14 +1276,14 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   ): AppConfigStatement {
     const verifiedAt = opts.verifiedStatus === null ? "NULL" : "(SELECT ts FROM now)";
     const verifiedStatus = opts.verifiedStatus === null ? "NULL" : `'${opts.verifiedStatus}'`;
-    // A declaration-OWNED pool additionally requires its declaration row, so a
+    // why: A declaration-OWNED pool additionally requires its declaration row, so a
     // declaration removal racing this write matches zero rows instead of
     // stranding an orphan credential a re-declaration would revive.
     let ownership = "";
     if (spec.owner !== undefined) {
       const declaration = `SELECT 1 FROM ${spec.owner.table} WHERE bot_id = ? AND ${spec.owner.column} = ?`;
       if (opts.endpoint === undefined) {
-        // A key riding a declaration CREATED BY THE SAME BATCH has no row to
+        // note: A key riding a declaration CREATED BY THE SAME BATCH has no row to
         // check yet (the declaration's own statement is gated on the same
         // predicates, so the batch still commits the key only with it).
         ownership = opts.newDeclaration === true ? "" : ` AND EXISTS (${declaration})`;
@@ -1317,7 +1317,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * A pool write that matched ZERO rows. A NEW key at MAX_KEYS_PER_PROVIDER is
+   * note: A pool write that matched ZERO rows. A NEW key at MAX_KEYS_PER_PROVIDER is
    * the common cause; for an OWNED pool the other causes are the declaration
    * vanishing between the caller's read and this write, or (when the statement
    * carried `endpoint`) that declaration now naming another endpoint — named
@@ -1338,7 +1338,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (decl === null) {
         throw new InvalidCustomProviderError(`custom provider ${JSON.stringify(provider)} is not declared for this app`);
       }
-      // With an endpoint predicate, an EXISTING declaration that still
+      // note: With an endpoint predicate, an EXISTING declaration that still
       // matches zero rows was pinned to another endpoint: the credential was
       // verified somewhere this pool no longer points. Same precedence as
       // throwCustomProviderRefusal — a full pool refuses the ninth key first.
@@ -1403,7 +1403,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * Add (or re-submit) ONE key in a pool whose declaration (when it has one)
+   * why: Add (or re-submit) ONE key in a pool whose declaration (when it has one)
    * already exists. Pass `models` to land THAT KEY's verified-model evidence
    * row in the SAME atomic batch (built-in providers only — custom providers
    * store no evidence row; their vocabulary is the declared model_ids). The
@@ -1428,7 +1428,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     if (plainKey.length > MAX_PROVIDER_KEY_LENGTH) {
       throw new ProviderKeyTooLongError();
     }
-    // Promote first: the cap must count real slots, and a re-submitted key must
+    // invariant: Promote first: the cap must count real slots, and a re-submitted key must
     // collapse onto its promoted row instead of opening a second one.
     await readKeyRows(spec, appId, provider);
     const keyId = await providerKeyId(plainKey);
@@ -1464,7 +1464,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     if (res[0]!.meta.changes === 0) await throwKeyRefusal(spec, appId, provider, opts.endpoint);
   }
 
-  /** Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
+  /** invariant: Mask one stored key row for a settings list face: decrypt, keep ONLY the tail. */
   async function summarizeKeyRow(spec: KeyTable, row: AppProviderKeyRow): Promise<ProviderKeySummary> {
     const plain = await box.decryptSecret(row.key_enc, spec.aad(row.bot_id, row.provider, row.key_id));
     return {
@@ -1478,7 +1478,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's default chain value (spec §4.4): the 'default' row of
+   * note: The App's default chain value (spec §4.4): the 'default' row of
    * bot_model_chains, or null when no default row exists (absent = unset =
    * that App's reviews fail closed — AL-24-5).
    */
@@ -1491,7 +1491,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's seat → chain-name map, role-ascending for deterministic key
+   * why: The App's seat → chain-name map, role-ascending for deterministic key
    * order; only REFERENCED roles appear (no row = the seat uses the default
    * chain — spec §4.4).
    */
@@ -1508,7 +1508,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
   }
 
   /**
-   * The App's per-role model overrides for the consumer (spec
+   * note: The App's per-role model overrides for the consumer (spec
    * §4.4): role → verbatim chain value, resolved through the seat → chain
    * mapping. Seats with NO reference row (absent = default) and seats
    * referencing the default chain are OMITTED — the runner input map only
@@ -1531,7 +1531,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     const chainByName = new Map(chains.results.map((row) => [row.name, row.chain]));
     const overrides: Record<string, string> = {};
     for (const seat of seats.results) {
-      if (seat.chain_name === DEFAULT_CHAIN_NAME) continue; // default-referenced seat omitted
+      if (seat.chain_name === DEFAULT_CHAIN_NAME) continue; // note: default-referenced seat omitted
       const chain = chainByName.get(seat.chain_name);
       if (chain === undefined) {
         throw new Error(
@@ -1543,12 +1543,12 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     return overrides;
   }
 
-  /** Prepared DELETE for one seat's reference row (run() or ride in a batch). */
+  /** note: Prepared DELETE for one seat's reference row (run() or ride in a batch). */
   function deleteModelChainSeatStatement(appId: string, role: string): AppConfigStatement {
     return db.prepare(`DELETE FROM bot_model_chain_seats WHERE bot_id = ? AND role = ?`).bind(appId, role);
   }
 
-  /** Prepared upsert of one seat's chain reference (run() or ride in a batch). */
+  /** note: Prepared upsert of one seat's chain reference (run() or ride in a batch). */
   function upsertModelChainSeatStatement(appId: string, role: string, chainName: string): AppConfigStatement {
     return db
       .prepare(
@@ -1560,17 +1560,17 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       .bind(appId, role, chainName);
   }
 
-  /** Delete one seat's reference row (idempotent — an unmapped seat deletes nothing). */
+  /** invariant: Delete one seat's reference row (idempotent — an unmapped seat deletes nothing). */
   async function deleteModelChainSeat(appId: string, role: string): Promise<void> {
     await deleteModelChainSeatStatement(appId, role).run();
   }
 
-  /** Upsert one seat's chain reference (one row per (bot_id, role) composite PK). */
+  /** note: Upsert one seat's chain reference (one row per (bot_id, role) composite PK). */
   async function upsertModelChainSeat(appId: string, role: string, chainName: string): Promise<void> {
     await upsertModelChainSeatStatement(appId, role, chainName).run();
   }
 
-  /** Fail-loud existence gate for a seat's chain reference (the route 400s first). */
+  /** note: Fail-loud existence gate for a seat's chain reference (the route 400s first). */
   async function assertChainExists(appId: string, chainName: string): Promise<void> {
     const row = await db
       .prepare(`SELECT name FROM bot_model_chains WHERE bot_id = ? AND name = ?`)
@@ -1581,7 +1581,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
 
   return {
     /**
-     * Store one provider key in the App's pool for (appId, provider):
+     * note: Store one provider key in the App's pool for (appId, provider):
      * encrypts INSIDE with the per-key AAD, then upserts THAT key's row. The
      * plaintext is never persisted, logged, or returned. Re-submitting the
      * same key updates its row in place: created_at is the key's entry time
@@ -1603,7 +1603,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Store one provider key AFTER successful verification: the VERIFIED
+     * note: Store one provider key AFTER successful verification: the VERIFIED
      * analogue of addProviderKey — encrypts with the SAME per-key AAD,
      * upserts that key's row with the verification bookkeeping (migration
      * 0015: verified_at = now + verified_status 'ok', or the weaker
@@ -1630,7 +1630,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete ONE key slot of a provider's pool — and, in the SAME atomic
+     * invariant: Delete ONE key slot of a provider's pool — and, in the SAME atomic
      * batch, THAT KEY's verified-model evidence row: the evidence is keyed by
      * the credential that produced it, so removing the credential removes only
      * what it reported and the surviving keys keep theirs (the read face
@@ -1644,7 +1644,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      * first in this very transaction, so a miss clears nothing).
      */
     async deleteProviderKey(appId: string, provider: string, keyId: string): Promise<boolean> {
-      // Promote the pool FIRST: a row 0024 carried across still wears the
+      // note: Promote the pool FIRST: a row 0024 carried across still wears the
       // sentinel id, so the derived id below matches nothing before promotion.
       await readKeyRows(PROVIDER_KEY_TABLE, appId, provider);
       const res = await db.batch([
@@ -1661,7 +1661,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The settings-page key list: one row per stored key — the provider, the
+     * note: The settings-page key list: one row per stored key — the provider, the
      * derived key id (the handle a per-key delete / re-verify call takes), the
      * masked tail and the per-key bookkeeping (migration 0012; NULL for rows
      * written before 0012 — the view's em dash placeholder).
@@ -1680,7 +1680,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * ONE stored key's plaintext, for the per-key usage probe: the built-in
+     * note: ONE stored key's plaintext, for the per-key usage probe: the built-in
      * pool first, then the declaration pool (a template provider's keys live
      * in `bot_custom_provider_keys`). Each row decrypts with ITS OWN AAD, so
      * one slot's ciphertext can never answer for another. `null` when neither
@@ -1709,7 +1709,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Store the App's default model chain VERBATIM (the route has already
+     * note: Store the App's default model chain VERBATIM (the route has already
      * validated ≥1 selector), or clear it: `null` AND any blank chain
      * (empty or whitespace-only — the route's 空 = 清除 semantics)
      * REMOVE the 'default' row (absent = unset; a chain-less
@@ -1748,13 +1748,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       ]);
     },
 
-    /** The stored chain verbatim, or null when unset (no row). */
+    /** why: The stored chain verbatim, or null when unset (no row). */
     getModelChain(appId: string): Promise<string | null> {
       return readModelChain(appId);
     },
 
     /**
-     * Decrypt the App's full configuration for the consumer (env assembly):
+     * note: Decrypt the App's full configuration for the consumer (env assembly):
      * provider id → that provider's plaintext keys in pool order (created_at,
      * then key_id — the order the credential payload's arrays follow), plus
      * the model chain. A provider holding at least one key ALWAYS
@@ -1774,7 +1774,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's verified models (the Interfaces read face): ONE entry per
+     * note: The App's verified models (the Interfaces read face): ONE entry per
      * BUILT-IN provider whose pool holds at least one key, provider-ascending
      * — the settings loader's dropdown source (one entry = one verified
      * provider whose options render as selector literal grammar
@@ -1802,7 +1802,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       const rows = await readKeyRows(PROVIDER_KEY_TABLE, appId);
       const byProvider = new Map<string, Map<string, string[]>>();
       for (const row of evidence.results) {
-        // Evidence written by the retired "ark-plan" alias belongs to the App's
+        // note: Evidence written by the retired "ark-plan" alias belongs to the App's
         // "ark" key pool — the alias was a selector prefix, never a separate
         // credential. Folding it here keeps the verified-model list complete
         // instead of silently dropping rows that no pool key matches.
@@ -1835,7 +1835,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's chains (settings face): every bot_model_chains
+     * note: The App's chains (settings face): every bot_model_chains
      * row, name-ascending ("default" sorts first). is_default is exposed as
      * a boolean. Decrypt-free by design — a model selector is
      * configuration, not a secret (the 0006 model_chain rationale).
@@ -1855,7 +1855,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Create or replace one NAMED chain (spec §4.4): the name
+     * note: Create or replace one NAMED chain (spec §4.4): the name
      * must pass assertModelChainName (the reserved "default" row name and
      * any name outside the MODEL_CHAIN_NAME_PATTERN grammar are rejected —
      * the route answers 400 first; this is the backstop) and the chain
@@ -1885,7 +1885,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete one NAMED chain — and every seat reference row pointing at it,
+     * note: Delete one NAMED chain — and every seat reference row pointing at it,
      * in ONE atomic batch (spec §4.4: a deleted chain's seats fall back to
      * the default chain). The reserved 'default' row cannot be removed here
      * (assertModelChainName rejects it — use setModelChain(null) to clear
@@ -1902,7 +1902,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's seat → chain-name map (settings face): role →
+     * why: The App's seat → chain-name map (settings face): role →
      * referenced chain name, only the REFERENCED roles appear; an App with
      * no reference rows yields `{}` (= every seat uses the default chain).
      * Decrypt-free by design — a chain reference is configuration, not a
@@ -1915,7 +1915,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Map (or replace) one seat's chain reference, or clear it: a BLANK
+     * note: Map (or replace) one seat's chain reference, or clear it: a BLANK
      * chain_name — or the reserved "default" name — DELETES the reference
      * row (absent = default chain, spec §4.4). The name is canonicalized
      * (whitespace-trimmed) BEFORE the clear/assert/upsert decisions, so a
@@ -1940,7 +1940,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Remove one seat's chain reference explicitly (idempotent — an
+     * invariant: Remove one seat's chain reference explicitly (idempotent — an
      * unmapped seat, like any role the vocabulary could never have stored,
      * is a no-op returning nothing).
      */
@@ -1950,7 +1950,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Bulk face for the settings single-save (the 4-row editor,
+     * note: Bulk face for the settings single-save (the 4-row editor,
      * now chain references): validates EVERY (role, chain_name)
      * entry BEFORE any write (one bad entry → typed throw, zero rows
      * touched), then applies the whole map as ONE atomic `db.batch`.
@@ -1996,7 +1996,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The App's per-role model overrides for the consumer (spec
+     * note: The App's per-role model overrides for the consumer (spec
      * §4.4): role → verbatim chain value, resolved through the seat →
      * chain mapping. Seats with NO reference row (absent = default) and
      * seats referencing the default chain are OMITTED — the runner input
@@ -2068,7 +2068,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
      */
     async upsertCustomProvider(appId: string, decl: AppCustomProvider, plainKey: string): Promise<void> {
       assertCustomProvider(decl, plainKey);
-      // The declaration AS STORED plus its pool, read before the write decides
+      // note: The declaration AS STORED plus its pool, read before the write decides
       // anything: the stored endpoint is what every retained credential was
       // verified against, and the promoted pool is what the endpoint lock, the
       // cap and the key identity below all measure.
@@ -2078,7 +2078,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
         .first<{ provider_id: string; base_url: string; api: string }>();
       const isNew = stored === null;
       const pool = await readKeyRows(CUSTOM_KEY_TABLE, appId, decl.provider_id);
-      // THE ENDPOINT LOCK: a retained key was verified against the stored
+      // note: THE ENDPOINT LOCK: a retained key was verified against the stored
       // endpoint, so rewriting base_url / api under a populated pool would send
       // it to an endpoint it was never verified for. Refused loudly with
       // nothing written — removing the credentials first re-declares freely.
@@ -2087,7 +2087,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       if (!isNew && pool.length > 0 && (stored.base_url !== decl.base_url || stored.api !== decl.api)) {
         throw new ProviderEndpointLockedError(decl.provider_id);
       }
-      // Growth-only cap: only a provider id with NO row yet can push the App
+      // invariant: Growth-only cap: only a provider id with NO row yet can push the App
       // past MAX_CUSTOM_PROVIDER_COUNT declarations (an upsert of an existing
       // id replaces the row in place — no count change). The pre-check answers
       // the common case; the conditional statement below is the race backstop.
@@ -2108,11 +2108,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           throw new InvalidCustomProviderError(`custom provider cap (${MAX_CUSTOM_PROVIDER_COUNT}) reached`);
         }
       }
-      // The key is encrypted BEFORE the batch, so a crypto failure (a missing /
+      // why: The key is encrypted BEFORE the batch, so a crypto failure (a missing /
       // malformed master key) leaves no declaration behind.
       const keyId = await providerKeyId(plainKey);
       const keyEnc = await box.encryptSecret(plainKey, CUSTOM_KEY_TABLE.aad(appId, decl.provider_id, keyId));
-      // ONE atomic batch: the declaration and its key commit together or not
+      // invariant: ONE atomic batch: the declaration and its key commit together or not
       // at all. Each statement carries the SAME pool-admission predicate AND
       // the endpoint condition (the two forms documented on keyInsertStatement),
       // so a refused key write (a ninth, or a create whose endpoint another save
@@ -2146,11 +2146,11 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               JSON.stringify(decl.model_ids),
               JSON.stringify(decl.models_meta ?? {}),
               appId,
-              // growth admission: the count and the same-id existence branch.
+              // note: growth admission: the count and the same-id existence branch.
               appId,
               decl.provider_id,
               ...admissionBinds,
-              // The ENDPOINT form of a create: no row to compare yet, so the
+              // why: The ENDPOINT form of a create: no row to compare yet, so the
               // gate reads "no declaration of this id disagrees with the
               // endpoint" — a concurrent save that won the id at ANOTHER
               // endpoint refuses this write instead of losing its endpoint.
@@ -2176,7 +2176,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               appId,
               decl.provider_id,
               ...admissionBinds,
-              // The endpoint lock, atomic: the row's own endpoint may only move
+              // invariant: The endpoint lock, atomic: the row's own endpoint may only move
               // while its pool is EMPTY (the pre-check above answers the common
               // case; this one the concurrent key write).
               decl.base_url,
@@ -2185,20 +2185,20 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
               decl.provider_id,
             );
       const key = keyInsertStatement(CUSTOM_KEY_TABLE, appId, decl.provider_id, keyId, keyEnc, {
-        // Fail-closed on state honesty: only a models endpoint KNOWN to reject
+        // invariant: Fail-closed on state honesty: only a models endpoint KNOWN to reject
         // a bogus key lets the probe's 2xx claim the key; anything else records
         // the weaker reachability.
         verifiedStatus: customProbeCanRejectKey(decl.base_url) ? "ok" : "reachable",
         newDeclaration: isNew,
         endpoint: { base_url: decl.base_url, api: decl.api },
       });
-      // ORDER: for a NEW declaration the KEY runs FIRST. Both statements
+      // note: ORDER: for a NEW declaration the KEY runs FIRST. Both statements
       // evaluate the declaration-count gate, so it must be read before the
       // declaration's own INSERT raises the count — otherwise a WON slot (the
       // row is ours) looks identical to a LOST one and a lost race would
       // commit its key under the concurrent winner's declaration.
       const res = isNew ? await db.batch([key, declaration]) : await db.batch([declaration, key]);
-      // The KEY statement is the batch's last gate in either order, and both
+      // note: The KEY statement is the batch's last gate in either order, and both
       // statements carry the SAME predicates (pool admission, the growth gate
       // for a create, the declaration-endpoint condition), so a zero-change key
       // IS the refusal: nothing was committed, and a lost race leaves neither a
@@ -2209,7 +2209,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete one custom-provider declaration — and EVERY key row of its pool,
+     * note: Delete one custom-provider declaration — and EVERY key row of its pool,
      * in ONE atomic batch (a leftover key row would be unreachable data, and
      * would resurface on a re-declaration of the same id). Returns whether
      * THIS call removed a declaration row (an undeclared provider id is an
@@ -2224,7 +2224,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Rewrite ONE declaration's model_ids IN PLACE — the settings face's
+     * note: Rewrite ONE declaration's model_ids IN PLACE — the settings face's
      * model-list editor. Only the vocabulary moves: base_url / api / the key
      * pool are untouched, so the endpoint lock does not apply (no retained
      * credential was verified against a model list) and created_at stays the
@@ -2260,7 +2260,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     ): Promise<void> {
       assertCustomProviderModelIds(modelIds);
       if (modelsMeta !== undefined) assertCustomProviderModelsMeta(modelsMeta, modelIds);
-      // ONE statement in both shapes: a read-then-write pair would let a
+      // note: ONE statement in both shapes: a read-then-write pair would let a
       // concurrent save of this declaration land between the read and the
       // write and be silently reverted by the carried snapshot. The carry-over
       // prune therefore rides the UPDATE itself, reading the row's live
@@ -2292,7 +2292,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * ONE declaration's base URL, by id: the usage probe only needs to know
+     * invariant: ONE declaration's base URL, by id: the usage probe only needs to know
      * WHERE a declaration points, so this read is decrypt-free AND parse-free —
      * unlike listCustomProviders, it never parses model_ids, so a corrupt
      * neighbour declaration cannot fail it. `null` = no declaration row.
@@ -2306,7 +2306,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The settings-page declaration list: every declaration for the
+     * note: The settings-page declaration list: every declaration for the
      * App, provider_id-ascending, as the decrypt-free AppCustomProviderRead
      * shape. model_ids is parsed from the stored TEXT JSON array; a malformed
      * row throws (fail-loud, the getAppConfig tamper convention). The keys of
@@ -2334,7 +2334,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           base_url: row.base_url,
           api: row.api as CustomProviderApi,
           model_ids: modelIds,
-          // Absent, never `{}`: a declaration that states no metadata keeps the
+          // invariant: Absent, never `{}`: a declaration that states no metadata keeps the
           // read shape it had before the column existed.
           ...(modelsMeta === undefined ? {} : { models_meta: modelsMeta }),
           has_keys: row.has_keys > 0,
@@ -2343,7 +2343,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * The settings-page key list of the custom-provider pools: the same
+     * note: The settings-page key list of the custom-provider pools: the same
      * per-key rows listCustomProviders' built-in counterpart serves —
      * provider + derived key id + masked tail + bookkeeping, ordered by
      * provider then pool order (created_at, key_id). `provider` scopes the
@@ -2359,7 +2359,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Add one key to a DECLARED custom provider's pool — the append face of a
+     * note: Add one key to a DECLARED custom provider's pool — the append face of a
      * verify-first route, so the row carries the verification bookkeeping:
      * verified_at = now with verified_status 'ok', or the weaker 'reachable'
      * unless the declared base URL derives a models endpoint KNOWN to reject a
@@ -2399,13 +2399,13 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Delete ONE key slot of a custom-provider pool. Returns whether THIS call
+     * note: Delete ONE key slot of a custom-provider pool. Returns whether THIS call
      * removed a row (an unknown key id — or an undeclared provider — is an
      * idempotent no-op returning false). Custom providers keep no model cache
      * row (0015), so there is nothing else to sweep.
      */
     async deleteCustomProviderKey(appId: string, providerId: string, keyId: string): Promise<boolean> {
-      // Promote the pool FIRST — same 0024 sentinel reason as deleteProviderKey.
+      // why: Promote the pool FIRST — same 0024 sentinel reason as deleteProviderKey.
       await readKeyRows(CUSTOM_KEY_TABLE, appId, providerId);
       const res = await db
         .prepare(`DELETE FROM bot_custom_provider_keys WHERE bot_id = ? AND provider = ? AND key_id = ?`)
@@ -2415,7 +2415,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
     },
 
     /**
-     * Decrypt the App's custom-provider declarations for the consumer
+     * note: Decrypt the App's custom-provider declarations for the consumer
      * (the models-synthesis face): the getAppConfig analogue for
      * bot_custom_providers — every declaration plus its DECRYPTED key pool,
      * provider_id-ascending and each pool in pool order (created_at, key_id).
@@ -2459,7 +2459,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
           };
           pools.set(row.provider_id, entry);
         }
-        // A declaration with an empty pool carries no key columns (LEFT JOIN).
+        // note: A declaration with an empty pool carries no key columns (LEFT JOIN).
         if (row.key_id === null) continue;
         entry.keys.push({
           bot_id: appId,
@@ -2474,7 +2474,7 @@ export function createAppConfigStore(db: AppConfigD1, encryptionKey: string | un
       }
       const out: CustomProviderConsumerConfig[] = [];
       for (const { decl, keys } of pools.values()) {
-        // Sorted AFTER promotion, so a 0024-carried row lands where its derived
+        // why: Sorted AFTER promotion, so a 0024-carried row lands where its derived
         // id puts it on every read (not where the empty sentinel sorted once).
         keys.sort((left, right) => byAscii(left.created_at, right.created_at) || byAscii(left.key_id, right.key_id));
         const apiKeys: string[] = [];

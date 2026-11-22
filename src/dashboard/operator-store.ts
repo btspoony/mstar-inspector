@@ -1,5 +1,5 @@
 /**
- * Platform-operator store — the one read/write authority for `support_grants`
+ * note: Platform-operator store — the one read/write authority for `support_grants`
  * and `audit_events` (migration 0029 is the DDL single source).
  *
  * The exports are the whole surface — two appends (`insertSupportGrant`,
@@ -66,7 +66,7 @@ export type AuditEventRow = {
   created_at: string;
 };
 
-/** Narrow D1 face: the statements these two tables need. */
+/** note: Narrow D1 face: the statements these two tables need. */
 type OperatorStoreStatement = {
   bind(...values: unknown[]): OperatorStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -77,14 +77,14 @@ type OperatorStoreStatement = {
   }>;
 };
 
-/** One statement's result inside a `batch()` (order matches input). */
+/** note: One statement's result inside a `batch()` (order matches input). */
 type OperatorStoreBatchResult = {
   results: unknown[];
   meta: { changes: number; last_row_id: number };
 };
 
 /**
- * `batch` is part of the face because a console grant write and its audit row
+ * why: `batch` is part of the face because a console grant write and its audit row
  * are ONE transaction; a face without `batch` throws before any statement runs
  * (nothing written), which is why the paired writes have no fallback.
  */
@@ -103,7 +103,7 @@ const AUDIT_INSERT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_logi
    VALUES (?, ?, ?, ?, ?)`;
 
 /**
- * The same audit append, with its workspace taken from the grant row inside the
+ * note: The same audit append, with its workspace taken from the grant row inside the
  * transaction — a batch fixes every bind at submit, so a prior statement's
  * result cannot be bound here. Ordered BEFORE the paired DELETE: after it the
  * subquery finds nothing and the append would be a silent no-op.
@@ -111,7 +111,7 @@ const AUDIT_INSERT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_logi
 const AUDIT_INSERT_FROM_GRANT_SQL = `INSERT INTO audit_events (id, workspace_id, actor_login, action, created_at)
  SELECT ?, g.workspace_id, ?, ?, ? FROM support_grants g WHERE g.id = ?`;
 
-/** The whole (workspace, operator) window, resolved from the row id in-SQL. */
+/** note: The whole (workspace, operator) window, resolved from the row id in-SQL. */
 const GRANT_PAIR_DELETE_SQL = `DELETE FROM support_grants
  WHERE workspace_id = (SELECT workspace_id FROM support_grants WHERE id = ?)
    AND operator_login = (SELECT operator_login FROM support_grants WHERE id = ?)`;

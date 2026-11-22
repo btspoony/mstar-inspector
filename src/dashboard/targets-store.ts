@@ -1,5 +1,5 @@
 /**
- * D1 store for `review_targets` — the workspace-owned review configuration.
+ * note: D1 store for `review_targets` — the workspace-owned review configuration.
  *
  * A bot (`review_bots`) is the execution identity: credentials, model chain,
  * sandbox image, installations, the operational pause. A target is ONE
@@ -70,14 +70,14 @@ export function parseTargetReviewLevel(value: unknown): ReviewLevel | null {
  * anything else before writing.
  */
 export type CheckGate = {
-  /** Integer score floor, 0..100 inclusive (the DDL CHECK's domain). */
+  /** note: Integer score floor, 0..100 inclusive (the DDL CHECK's domain). */
   minScore: number;
-  /** Verdicts that satisfy the gate; `["ship it"]` until saved otherwise. */
+  /** why: Verdicts that satisfy the gate; `["ship it"]` until saved otherwise. */
   passVerdicts: readonly PrVerdict[];
 };
 
 /**
- * The stored verdict array, or `null` when the stored value is unreadable
+ * why: The stored verdict array, or `null` when the stored value is unreadable
  * (bad JSON, not an array, or off-vocabulary). `null` is unreadable
  * CONFIGURATION, never "the default": the effective-settings reader fails
  * closed on a row it cannot read instead of admitting verdicts nobody stored.
@@ -89,7 +89,7 @@ function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
       return parsed as PrVerdict[];
     }
   } catch {
-    // unreadable — reported as null below
+    // note: unreadable — reported as null below
   }
   return null;
 }
@@ -102,18 +102,18 @@ export type ReviewTargetRow = {
   id: string;
   workspace_id: string;
   bot_id: string;
-  /** Legacy display column; a created target carries the repository name. */
+  /** note: Legacy display column; a created target carries the repository name. */
   name: string;
-  /** GitHub `repository.id` — the identity. NULL only on a migrated row awaiting a claim. */
+  /** invariant: GitHub `repository.id` — the identity. NULL only on a migrated row awaiting a claim. */
   repo_id: number | null;
-  /** Mutable display caches, refreshed by a delivery that sees a new spelling. */
+  /** note: Mutable display caches, refreshed by a delivery that sees a new spelling. */
   repo_owner: string | null;
   repo_name: string | null;
-  /** 1 = the workspace defaults answer every setting; 0 = this row's own columns. */
+  /** note: 1 = the workspace defaults answer every setting; 0 = this row's own columns. */
   follow_workspace_defaults: number;
-  /** Business pause: 1 = the workspace lets this target review, 0 = paused. */
+  /** note: Business pause: 1 = the workspace lets this target review, 0 = paused. */
   review_enabled: number;
-  /** 1 = a draft pull request is reviewed like any other, 0 = held until ready (0070). */
+  /** why: 1 = a draft pull request is reviewed like any other, 0 = held until ready (0070). */
   review_drafts: number;
   review_trigger_mode: ReviewTriggerMode;
   review_level: string | null;
@@ -133,9 +133,9 @@ export type ReviewTargetRow = {
 export type LiveTargetListRow = ReviewTargetRow & {
   app_name: string;
   last_reviewed_at: string | null;
-  /** Every review this target ever ran. */
+  /** note: Every review this target ever ran. */
   reviews_total: number;
-  /** The reviews of the last 7 days — the band's planning figure. */
+  /** note: The reviews of the last 7 days — the band's planning figure. */
   reviews_7d: number;
 };
 
@@ -148,10 +148,10 @@ export type WorkspaceReviewDefaults = {
   triggerMode: ReviewTriggerMode;
   level: ReviewLevel | null;
   checkMinScore: number;
-  /** Empty when the stored array is unreadable — see `checkPassVerdictsReadable`. */
+  /** why: Empty when the stored array is unreadable — see `checkPassVerdictsReadable`. */
   checkPassVerdicts: readonly PrVerdict[];
   /**
-   * False = the stored array is unreadable CONFIGURATION, not the legal empty
+   * note: False = the stored array is unreadable CONFIGURATION, not the legal empty
    * gate: the settings surface renders its read-only recovery notice instead
    * of an editable gate nobody stored.
    */
@@ -174,7 +174,7 @@ export type EffectiveTargetSettings = {
  * `WorkspaceReviewDefaults` and off the workspace-defaults payload.
  */
 export type EffectiveReviewTargetSettings = EffectiveTargetSettings & {
-  /** False = a draft pull request is held until it is marked ready. */
+  /** note: False = a draft pull request is held until it is marked ready. */
   reviewDrafts: boolean;
 };
 
@@ -190,7 +190,7 @@ export function checkGateOf(settings: EffectiveTargetSettings): CheckGate | null
     : null;
 }
 
-/** Narrow D1 face, declared locally so this leaf module imports nothing. */
+/** why: Narrow D1 face, declared locally so this leaf module imports nothing. */
 type TargetsStoreStatement = {
   bind(...values: unknown[]): TargetsStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -203,7 +203,7 @@ type TargetsStoreD1 = {
 };
 
 /**
- * The one write that must be atomic (a floor change plus its ledger row):
+ * invariant: The one write that must be atomic (a floor change plus its ledger row):
  * `batch` runs the statements as ONE transaction, same as D1.
  */
 type TargetsStoreBatchD1 = TargetsStoreD1 & {
@@ -214,7 +214,7 @@ type TargetsStoreBatchD1 = TargetsStoreD1 & {
 export type CreateTargetInput = {
   workspaceId: string;
   botId: string;
-  /** GitHub numeric `repository.id`: the identity every runtime path binds. */
+  /** note: GitHub numeric `repository.id`: the identity every runtime path binds. */
   repoId: number;
   repoOwner: string;
   repoName: string;
@@ -240,13 +240,13 @@ export type TargetReviewConfig = {
   checkMinScore?: number;
   checkPassVerdicts?: readonly PrVerdict[];
   /**
-   * The target-owned draft switch (0070): false holds a draft pull request
+   * note: The target-owned draft switch (0070): false holds a draft pull request
    * until it is ready. Written like any other named column — it changes neither
    * `follow_workspace_defaults` nor the inherited policy columns.
    */
   reviewDrafts?: boolean;
   /**
-   * `0` = this row answers with these columns, not the workspace defaults. An
+   * note: `0` = this row answers with these columns, not the workspace defaults. An
    * explicit save must say so in the SAME statement: a settings control that
    * wrote a column while `follow_workspace_defaults = 1` would be inert.
    */
@@ -254,14 +254,14 @@ export type TargetReviewConfig = {
 };
 
 /**
- * The live-target predicate every tenant read/write carries. `id = ?` alone
+ * note: The live-target predicate every tenant read/write carries. `id = ?` alone
  * would let a route check (or a bug in one) reach another workspace's row;
  * `deleted_at IS NULL` keeps a soft-deleted target out of every face.
  */
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
 /**
- * The duplicate rule, shared by every create: a live row of this BOT holding
+ * note: The duplicate rule, shared by every create: a live row of this BOT holding
  * the same `repo_id` (0068 — one repository belongs to one workspace per bot,
  * so a sibling workspace's row is the same claim), OR the same owner/name
  * while still unclaimed — a migrated row IS the same repository (D15). This
@@ -275,7 +275,7 @@ const DUPLICATE_REPO = `t.bot_id = ?3 AND t.deleted_at IS NULL
             AND t.repo_name = ?6 COLLATE NOCASE))`;
 
 /**
- * The guarded insert behind `create`: ONE statement decides and writes, so a
+ * why: The guarded insert behind `create`: ONE statement decides and writes, so a
  * concurrent add of the same repository writes nothing instead of racing the
  * read-then-insert. `follow_workspace_defaults = 1` is the UI-create rule (J4):
  * a new repository inherits the workspace's answers, and the row's own policy
@@ -320,7 +320,7 @@ export async function getWorkspaceReviewDefaults(
       checkPassVerdictsReadable: true,
     };
   }
-  // Unreadable stored verdicts admit nothing: an empty set fails closed,
+  // note: Unreadable stored verdicts admit nothing: an empty set fails closed,
   // where a permissive fallback would let a review through nobody configured.
   const verdicts = storedPassVerdicts(row.default_check_pass_verdicts);
   return {
@@ -350,7 +350,7 @@ export type WorkspaceReviewDefaultPatch = {
 };
 
 /**
- * The ledger's `before` is the floor the workspace actually RAN with: a trusted
+ * safety: The ledger's `before` is the floor the workspace actually RAN with: a trusted
  * integer records itself, while the absent state and every untrusted value
  * record `null` — the platform default is a fallback, never a floor anything
  * stored, so naming it would attribute a value that was never in effect.
@@ -454,7 +454,7 @@ export async function setWorkspaceReviewDefaults(
 }
 
 /**
- * The four policy columns a non-inheriting row answers with, plus the
+ * note: The four policy columns a non-inheriting row answers with, plus the
  * target-owned draft switch. Split out because `readEffectiveTargetSettings`
  * decides the inheritance branch BEFORE the defaults read, and must not need a
  * defaults object to say so.
@@ -467,7 +467,7 @@ function ownTargetSettings(target: ReviewTargetRow): EffectiveReviewTargetSettin
     checkMinScore: isCheckMinScoreValue(target.check_min_score)
       ? target.check_min_score
       : DEFAULT_CHECK_MIN_SCORE,
-    // An unreadable stored verdict array fails closed (empty), like the
+    // note: An unreadable stored verdict array fails closed (empty), like the
     // workspace side; `checkPassVerdictsReadable` keeps the two apart.
     checkPassVerdicts: [...(verdicts ?? [])],
     checkPassVerdictsReadable: verdicts !== null,
@@ -566,7 +566,7 @@ export async function setInheritance(
 export function createTargetsStore(db: TargetsStoreD1) {
   return {
     /**
-     * Insert one repository target for a bot and read it back. The duplicate
+     * note: Insert one repository target for a bot and read it back. The duplicate
      * rule refuses a live row of the same BOT for that repository (an
      * already-added one, here or in a sibling workspace, or a migrated row
      * still unclaimed) with nothing written.
@@ -574,7 +574,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     async create(input: CreateTargetInput): Promise<CreateTargetOutcome> {
       const repoOwner = input.repoOwner.trim();
       const repoName = input.repoName.trim();
-      // Identity at the trust boundary: a target that cannot be resolved by
+      // safety: Identity at the trust boundary: a target that cannot be resolved by
       // `repo_id` or by the owner/name fallback would be unreachable.
       if (!Number.isInteger(input.repoId) || input.repoId <= 0) {
         throw new Error(
@@ -598,7 +598,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       return { outcome: "created", target: row };
     },
 
-    /** One live target of this workspace; another workspace's id reads null. */
+    /** note: One live target of this workspace; another workspace's id reads null. */
     async getInWorkspace(workspaceId: string, targetId: string): Promise<ReviewTargetRow | null> {
       return db
         .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
@@ -606,7 +606,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .first<ReviewTargetRow>();
     },
 
-    /** How many live targets this workspace holds — the list's count pill. */
+    /** note: How many live targets this workspace holds — the list's count pill. */
     async countLive(workspaceId: string): Promise<number> {
       const row = await db
         .prepare(
@@ -618,7 +618,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       return row?.n ?? 0;
     },
 
-    /** The workspace's live targets, newest first (stable id tiebreak). */
+    /** note: The workspace's live targets, newest first (stable id tiebreak). */
     async listLive(workspaceId: string): Promise<ReviewTargetRow[]> {
       const res = await db
         .prepare(
@@ -632,7 +632,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The repository list's ONE read (product spec J1): each live target with
+     * note: The repository list's ONE read (product spec J1): each live target with
      * the bot's display name, its newest review stamp and its review volume.
      * A join beats a per-row App read, and all three review subqueries ride
      * `idx_reviews_target_reviewed_at` — never a scan of every workspace's
@@ -663,7 +663,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The bot's live targets in creation order (`idx_review_targets_bot_id`).
+     * note: The bot's live targets in creation order (`idx_review_targets_bot_id`).
      * The caller filters by workspace: the index answers `bot_id` alone, and a
      * bot can hold one target per workspace.
      */
@@ -680,7 +680,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The target a delivery acts on, by the contract's three steps:
+     * note: The target a delivery acts on, by the contract's three steps:
      *
      *   1. `repo.id` known → the live row holding it for this bot; a changed
      *      owner/name refreshes the caches (a rename must not orphan a row).
@@ -708,7 +708,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       repo: { id: number | null; owner: string; name: string },
     ): Promise<ReviewTargetRow | null> {
       if (repo.id !== null) {
-        // The bot/repository unique index (0068) makes this at most one row.
+        // invariant: The bot/repository unique index (0068) makes this at most one row.
         const hit = await db
           .prepare(
             `SELECT * FROM review_targets
@@ -718,7 +718,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
           .bind(botId, repo.id)
           .first<ReviewTargetRow>();
         if (hit) {
-          // The stored spelling is only a cache: a delivery that spells the
+          // invariant: The stored spelling is only a cache: a delivery that spells the
           // repository differently (a rename, or other case) refreshes it.
           if (hit.repo_owner === repo.owner && hit.repo_name === repo.name) return hit;
           await db
@@ -731,7 +731,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
           return { ...hit, repo_owner: repo.owner, repo_name: repo.name };
         }
       }
-      // LIMIT 2, not 1: an owner/name pair two unclaimed rows both answer is
+      // note: LIMIT 2, not 1: an owner/name pair two unclaimed rows both answer is
       // ambiguous, and the delivery is refused instead of attributed by
       // created_at. The ORDER BY still makes a single hit deterministic.
       const unclaimed = await db
@@ -747,7 +747,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       if (unclaimed.results.length > 1) return null;
       const legacy = unclaimed.results[0];
       if (legacy) {
-        // A payload without an id has nothing to claim; the row still reviews.
+        // note: A payload without an id has nothing to claim; the row still reviews.
         if (repo.id === null) return legacy;
         const claimed = await db
           .prepare(
@@ -767,7 +767,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
           .first<ReviewTargetRow>();
       }
       if (repo.id === null) return null;
-      // Step 3: ONE guarded UPDATE claims the bot's lone all-NULL row. The
+      // note: Step 3: ONE guarded UPDATE claims the bot's lone all-NULL row. The
       // count guard is what keeps two placeholders from being guessed between.
       const firstDelivery = await db
         .prepare(
@@ -798,7 +798,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * One target by id — the EXECUTION read a queue message makes. The job
+     * note: One target by id — the EXECUTION read a queue message makes. The job
      * already names the target the webhook resolved, so there is nothing to
      * re-decide and no workspace to bind: the queue is not a tenant face. A
      * soft-deleted row reads absent, exactly like every other face.
@@ -811,7 +811,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * The business pause: 1 = the workspace's reviews run, 0 = paused.
+     * note: The business pause: 1 = the workspace's reviews run, 0 = paused.
      * Writes review_enabled + updated_at (an operator mutation) and refuses a
      * soft-deleted or foreign target. Returns whether a row changed.
      */
@@ -831,7 +831,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * Write the review configuration columns a caller names. Every value is
+     * note: Write the review configuration columns a caller names. Every value is
      * validated BEFORE any write — an off-vocabulary mode/level or an
      * out-of-domain score/verdict throws and leaves the row untouched (the
      * settings route answers 400 first; the DDL CHECK is the last line).
@@ -883,13 +883,13 @@ export function createTargetsStore(db: TargetsStoreD1) {
         assignments.push("check_pass_verdicts = ?");
         values.push(JSON.stringify(config.checkPassVerdicts));
       }
-      // A target-owned column beside the four policy answers: naming it never
+      // invariant: A target-owned column beside the four policy answers: naming it never
       // touches `follow_workspace_defaults` and never snapshots a default.
       if (config.reviewDrafts !== undefined) {
         assignments.push("review_drafts = ?");
         values.push(config.reviewDrafts ? 1 : 0);
       }
-      // First, so the row's own columns are the ones the caller just wrote —
+      // why: First, so the row's own columns are the ones the caller just wrote —
       // one statement, no second write and no window where the save is inert.
       if (config.follow !== undefined) {
         assignments.unshift("follow_workspace_defaults = ?");
@@ -907,7 +907,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
     },
 
     /**
-     * Soft delete (the only removal path): stamps deleted_at once — a second
+     * invariant: Soft delete (the only removal path): stamps deleted_at once — a second
      * call is a no-op returning false and the first timestamp wins. Refuses a
      * foreign target (zero rows). Returns whether THIS call performed the
      * delete.

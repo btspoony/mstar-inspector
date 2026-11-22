@@ -1,5 +1,5 @@
 /**
- * The quota card's read — one workspace's UTC month in RP, the profile that
+ * note: The quota card's read — one workspace's UTC month in RP, the profile that
  * judges it and the ceiling that profile sets for the workspace's plan.
  *
  * Nothing here is a second aggregation: the month's RP comes from
@@ -20,16 +20,16 @@ import type { DashboardD1 } from "./users";
 /** What the workspace card's credit block renders, all of it integer RP. */
 export type WorkspaceQuota = {
   usedRp: number;
-  /** NULL = no monthly limit on this plan. */
+  /** note: NULL = no monthly limit on this plan. */
   limitRp: number | null;
-  /** The source split. Its parts sum to `usedRp` only for rows that recorded one. */
+  /** invariant: The source split. Its parts sum to `usedRp` only for rows that recorded one. */
   sharedRp: number;
   byokRp: number;
   rpPerCredit: number;
   profileVersion: number;
-  /** The judging profile's own start, `YYYY-MM-DD`. */
+  /** note: The judging profile's own start, `YYYY-MM-DD`. */
   profileFrom: string;
-  /** The first instant of the next UTC month — the banner's reset, `YYYY-MM-DD`. */
+  /** note: The first instant of the next UTC month — the banner's reset, `YYYY-MM-DD`. */
   resetOn: string;
 };
 

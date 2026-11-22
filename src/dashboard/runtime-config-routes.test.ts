@@ -1,5 +1,5 @@
 /**
- * The two runtime-configuration write surfaces, through the real worker mount:
+ * note: The two runtime-configuration write surfaces, through the real worker mount:
  *
  *   - `PUT /dashboard/<ref>/api/settings/concurrency` — the workspace cap.
  *     Membership is the gate and owner/admin is the role: an outsider, a plain
@@ -85,7 +85,7 @@ function seedMembership(
   );
 }
 
-/** `ws-acme` (owner `dana`, admin `erin`, member `frank`), plus the operator login. */
+/** note: `ws-acme` (owner `dana`, admin `erin`, member `frank`), plus the operator login. */
 function fixture() {
   const db = createMigratedTestD1();
   const dana = seedUser(db, "dana");
@@ -99,7 +99,7 @@ function fixture() {
   return { db };
 }
 
-/** The stored workspace column, read raw so a refused write is observable. */
+/** why: The stored workspace column, read raw so a refused write is observable. */
 function storedWorkspace(db: TestD1): number | null {
   const row = db.raw
     .prepare("SELECT max_concurrent_reviews AS value FROM workspaces WHERE id = 'ws-acme'")
@@ -107,7 +107,7 @@ function storedWorkspace(db: TestD1): number | null {
   return row?.value ?? null;
 }
 
-/** The stored system value, read raw. */
+/** note: The stored system value, read raw. */
 function storedSystem(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.concurrency.system'")
@@ -126,7 +126,7 @@ function auditRows(db: TestD1): AuditRow[] {
     .all() as AuditRow[];
 }
 
-/** Seed the system cap straight into the store's table. */
+/** note: Seed the system cap straight into the store's table. */
 function seedSystemCap(db: TestD1, value: number): void {
   seed(
     db,
@@ -137,7 +137,7 @@ function seedSystemCap(db: TestD1, value: number): void {
   );
 }
 
-/** The documented absent-row check budgets as the operator API reports them. */
+/** note: The documented absent-row check budgets as the operator API reports them. */
 const DEFAULT_CHECK_BUDGETS = {
   terminalizeMs: 10_000,
   updateMs: 5_000,
@@ -148,7 +148,7 @@ const DEFAULT_CHECK_BUDGETS = {
   degraded: false,
 };
 
-/** The documented absent-row comment-claim settings as the operator API reports them. */
+/** why: The documented absent-row comment-claim settings as the operator API reports them. */
 const DEFAULT_COMMENT_CLAIM = {
   retryMs: 300_000,
   maxAttempts: 3,
@@ -184,7 +184,7 @@ const SWEEP_OVERRIDES = {
   inviteLapseCap: 250,
 };
 
-/** Both stored budget rows, raw, keyed by PK. */
+/** note: Both stored budget rows, raw, keyed by PK. */
 function storedBudgets(db: TestD1): Record<string, string> {
   const rows = db.raw
     .prepare("SELECT key, value FROM review_runtime_settings ORDER BY key")
@@ -192,14 +192,14 @@ function storedBudgets(db: TestD1): Record<string, string> {
   return Object.fromEntries(rows.map((row) => [row.key, row.value]));
 }
 
-/** The documented absent-row default review level as the operator API reports it. */
+/** note: The documented absent-row default review level as the operator API reports it. */
 const DEFAULT_REVIEW_LEVEL = {
   value: "default",
   levels: ["quick", "default", "deep"],
   degraded: false,
 };
 
-/** The documented absent-row recheck ask budget as the operator API reports it. */
+/** note: The documented absent-row recheck ask budget as the operator API reports it. */
 const DEFAULT_RECHECK_ASSIGNMENT = {
   maxBytes: 65_536,
   min: 8_192,
@@ -207,7 +207,7 @@ const DEFAULT_RECHECK_ASSIGNMENT = {
   degraded: false,
 };
 
-/** The empty trailing-24h admission-drop read: every reason present at zero. */
+/** why: The empty trailing-24h admission-drop read: every reason present at zero. */
 const DEFAULT_ADMISSION_DROPS = {
   "pr-held": 0,
   "system-cap": 0,
@@ -215,13 +215,13 @@ const DEFAULT_ADMISSION_DROPS = {
   error: 0,
 };
 
-/** The fixture queue's live gauge as `GET /api/runtime` reports it. */
+/** note: The fixture queue's live gauge as `GET /api/runtime` reports it. */
 const DEFAULT_QUEUE = { backlogCount: 0, backlogBytes: 0, oldestMessageTimestamp: null };
 
-/** The documented absent-row maintenance window: the platform is open. */
+/** note: The documented absent-row maintenance window: the platform is open. */
 const DEFAULT_MAINTENANCE = { enabled: false, reason: null, since: null, unreadable: false };
 
-/** The stored recheck ask-budget row, raw so a refused write is observable. */
+/** why: The stored recheck ask-budget row, raw so a refused write is observable. */
 function storedRecheckBudget(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.recheck.assignment_max_bytes'")
@@ -229,7 +229,7 @@ function storedRecheckBudget(db: TestD1): string | null {
   return row?.value ?? null;
 }
 
-/** The stored default-level row, raw so a refused write is observable. */
+/** why: The stored default-level row, raw so a refused write is observable. */
 function storedLevel(db: TestD1): string | null {
   const row = db.raw
     .prepare("SELECT value FROM review_runtime_settings WHERE key = 'review.level.default'")
@@ -304,7 +304,7 @@ async function runtimeApi(
     body?: string;
     login?: string | null;
     mode?: "saas" | "self-hosted";
-    /** Replaces the queue binding for the degraded-gauge cases. */
+    /** note: Replaces the queue binding for the degraded-gauge cases. */
     queue?: unknown;
   },
 ): Promise<Response> {
@@ -345,20 +345,20 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
 
   test("a plain member, an outsider and an unknown ref all answer the same 404", async () => {
     const { db } = fixture();
-    // `frank` is a member of ws-acme — member, not manager.
+    // note: `frank` is a member of ws-acme — member, not manager.
     const member = await putConcurrency(db, "ws-acme", "frank", { concurrency: 4 });
     expect(member.status).toBe(404);
-    // No cookie at all is the login redirect, never a write.
+    // invariant: No cookie at all is the login redirect, never a write.
     const anonymous = await putConcurrency(db, "ws-acme", null, { concurrency: 4 });
     expect(anonymous.status).toBe(302);
-    // An admin of one workspace is not an admin of another.
+    // note: An admin of one workspace is not an admin of another.
     expect((await putConcurrency(db, "ws-missing", "erin", { concurrency: 4 })).status).toBe(404);
     expect(storedWorkspace(db)).toBeNull();
     expect(auditRows(db)).toEqual([]);
   });
 
   test("a value above the system quota is still accepted, with no system data exposed", async () => {
-    // Refusing on the quota would let a tenant binary-search the platform number
+    // note: Refusing on the quota would let a tenant binary-search the platform number
     // through accepted and refused writes. The quota applies at admission.
     const { db } = fixture();
     seedSystemCap(db, 8);
@@ -369,7 +369,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
   });
 
   test("a corrupt platform row degrades the admin face but not the tenant's own value", async () => {
-    // The tenant face never reads the platform row: a value it cannot see or
+    // invariant: The tenant face never reads the platform row: a value it cannot see or
     // repair must not blank a workspace whose own column is readable.
     const { db } = fixture();
     seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
@@ -399,7 +399,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
   });
 
   test("a corrupt workspace column degrades the tenant read, not a normal number", async () => {
-    // The face must not present the conservative fallback as this workspace's
+    // invariant: The face must not present the conservative fallback as this workspace's
     // setting: `degraded` is what lets it render the warning instead.
     const { db } = fixture();
     seed(db, "UPDATE workspaces SET max_concurrent_reviews = 'abc' WHERE id = ?", "ws-acme");
@@ -437,7 +437,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
     for (const login of ["dana", "erin"]) {
       const res = await getConcurrency(db, "ws-acme", login);
       expect(res.status, login).toBe(200);
-      // No `system` field: the platform cap is not the tenant's data.
+      // note: No `system` field: the platform cap is not the tenant's data.
       expect(await res.json()).toEqual({
         concurrency: 8,
         min: 1,
@@ -659,7 +659,7 @@ describe("PATCH /_internal_admin/api/runtime checkBudgets", () => {
       JSON.stringify({ checkBudgets: { terminalizeMs: 10_000, updateMs: 15_001 } }),
       JSON.stringify({ checkBudgets: { terminalizeMs: "10000", updateMs: 5_000 } }),
       JSON.stringify({ checkBudgets: { terminalizeMs: 10_000 } }),
-      // Relation rule: the inline wait must exceed the bounded send.
+      // invariant: Relation rule: the inline wait must exceed the bounded send.
       JSON.stringify({ checkBudgets: { terminalizeMs: 1_000, updateMs: 1_000 } }),
       JSON.stringify({ checkBudgets: null }),
     ]) {
@@ -837,7 +837,7 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
   });
 
   test("the group the GET reports is a valid save body", async () => {
-    // The console saves what it displayed: the read group also carries `levels`
+    // note: The console saves what it displayed: the read group also carries `levels`
     // and `degraded`, and a save must not refuse it for saying so.
     const { db } = fixture();
     const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
@@ -863,7 +863,7 @@ describe("PATCH /_internal_admin/api/runtime reviewLevel", () => {
       JSON.stringify({ reviewLevel: { value: "QUICK" } }),
       JSON.stringify({ reviewLevel: { value: 5 } }),
       JSON.stringify({ reviewLevel: { value: "" } }),
-      // The bare string is the shape the two sides used to disagree on.
+      // note: The bare string is the shape the two sides used to disagree on.
       JSON.stringify({ reviewLevel: "deep" }),
       JSON.stringify({ reviewLevel: {} }),
       JSON.stringify({ reviewLevel: null }),
@@ -986,7 +986,7 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
     expect(await res.json()).toEqual({
       maintenance: { enabled: false, reason: null, since: null, unreadable: false },
     });
-    // Only the off flag survives: no stale window outlives the close.
+    // invariant: Only the off flag survives: no stale window outlives the close.
     expect(storedBudgets(db)).toEqual({ "platform.maintenance.enabled": "0" });
     expect(auditRows(db)).toHaveLength(2);
   });
@@ -1028,7 +1028,7 @@ describe("PATCH /_internal_admin/api/runtime maintenance", () => {
 });
 
 describe("workspace default review-gate floor", () => {
-  /** The workspace column, raw so a refused write is observable. */
+  /** why: The workspace column, raw so a refused write is observable. */
   const storedFloor = (db: TestD1): number | null =>
     (
       db.raw

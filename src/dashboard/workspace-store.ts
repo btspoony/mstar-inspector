@@ -1,5 +1,5 @@
 /**
- * Workspace (tenant) resolution for the dashboard request path — the read-only
+ * invariant: Workspace (tenant) resolution for the dashboard request path — the read-only
  * companion of `apps-store`'s tenant read face. Migrations 0026/0027 are the
  * DDL single sources; this module owns no write path and only answers the two
  * questions the routing layer needs: which workspace does this path ref (id or
@@ -28,7 +28,7 @@ export type WorkspaceRow = {
   id: string;
   slug: string;
   name: string;
-  /** ISO stamp — one of the four fields the support view may expose (AC2). */
+  /** safety: ISO stamp — one of the four fields the support view may expose (AC2). */
   created_at: string;
 };
 
@@ -40,7 +40,7 @@ export type WorkspaceMemberRow = {
   created_at: string;
 };
 
-/** Narrow D1 face: reads plus the workspace-creation batch's statements. */
+/** note: Narrow D1 face: reads plus the workspace-creation batch's statements. */
 type WorkspaceStoreStatement = {
   bind(...values: unknown[]): WorkspaceStoreStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -188,11 +188,11 @@ export type WorkspaceAccess = {
   id: string;
   slug: string;
   role: WorkspaceRole | null;
-  /** The login's `users` row identity; null when the login has no row. */
+  /** why: The login's `users` row identity; null when the login has no row. */
   user: { id: string; github_login: string } | null;
 };
 
-/** The access join's row shape (the login's users row may be absent). */
+/** note: The access join's row shape (the login's users row may be absent). */
 type WorkspaceAccessRow = {
   id: string;
   slug: string;
@@ -397,7 +397,7 @@ export async function listWorkspaceMembershipOptions(
   return rows.results;
 }
 
-/** The creation write face: prepared statements run as ONE `batch`. */
+/** note: The creation write face: prepared statements run as ONE `batch`. */
 type WorkspaceStoreWriteD1 = {
   prepare(query: string): WorkspaceStoreStatement;
   batch(statements: WorkspaceStoreStatement[]): Promise<
@@ -406,7 +406,7 @@ type WorkspaceStoreWriteD1 = {
 };
 
 /**
- * The free-slot guard, as a SQL condition every insert of the creation batch
+ * note: The free-slot guard, as a SQL condition every insert of the creation batch
  * carries: "this login holds no live free membership yet". Re-reading it inside
  * the batch is what closes the read-then-write window — two concurrent
  * creations both pass the route's fast-fail read, and the second one's
@@ -471,7 +471,7 @@ export async function createWorkspace(
   ] as const;
   const guarded = mode === "saas";
   const slotGuard = guarded ? ` WHERE ${FREE_SLOT_GUARD_SQL}` : "";
-  // Without the guard the workspace and membership inserts reference `?1`–`?4`
+  // note: Without the guard the workspace and membership inserts reference `?1`–`?4`
   // only; the subscription still binds the plan id as `?6` (indexes 2 and 5
   // stay bound but unused, as SQLite requires every index up to the highest).
   const slotBinds: readonly unknown[] = guarded ? binds : binds.slice(0, 4);
@@ -498,11 +498,11 @@ export async function createWorkspace(
         .bind(...binds),
     ]);
   } catch (err) {
-    // The batch aborts as a unit, so a taken slug leaves no orphan membership.
+    // why: The batch aborts as a unit, so a taken slug leaves no orphan membership.
     if (err instanceof Error && /UNIQUE constraint failed/i.test(err.message)) return false;
     throw err;
   }
-  // The guard refused: every statement wrote zero rows, so nothing to undo.
+  // why: The guard refused: every statement wrote zero rows, so nothing to undo.
   // Self-hosted has no guard, so it can never reach this refusal.
   if (guarded && results[1]!.meta.changes === 0) {
     throw new FreeWorkspaceSlotError(FREE_SLOT_REFUSAL);
@@ -511,7 +511,7 @@ export async function createWorkspace(
 }
 
 /**
- * Rename one workspace — the label the top-bar switcher shows. ONE guarded
+ * note: Rename one workspace — the label the top-bar switcher shows. ONE guarded
  * UPDATE: a row retired between the caller's resolution and this write changes
  * nothing and answers null, the same 404 an unknown ref gets. `name` carries no
  * uniqueness guard, so there is no conflict branch, and `RETURNING` is the row

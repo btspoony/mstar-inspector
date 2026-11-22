@@ -49,7 +49,7 @@ export type ReviewUsageMonth = { month: string; start: string; end: string };
 export function reviewUsageMonth(now: Date): ReviewUsageMonth {
   const year = now.getUTCFullYear();
   const month = now.getUTCMonth();
-  // `YYYY-MM-DD HH:MM:SS` is the stamp format `reviews.reviewed_at` stores.
+  // note: `YYYY-MM-DD HH:MM:SS` is the stamp format `reviews.reviewed_at` stores.
   const stamp = (at: Date) => at.toISOString().slice(0, 19).replace("T", " ");
   const start = stamp(new Date(Date.UTC(year, month, 1)));
   return {
@@ -60,7 +60,7 @@ export function reviewUsageMonth(now: Date): ReviewUsageMonth {
 }
 
 /**
- * The one aggregation. Binds `?1`/`?2` the month's half-open bounds and `?3`
+ * note: The one aggregation. Binds `?1`/`?2` the month's half-open bounds and `?3`
  * the workspace id (`NULL` = every live workspace, still in this one shape).
  *
  * `LEFT JOIN` on both the target and the window: a live workspace with no
@@ -92,7 +92,7 @@ const REVIEW_USAGE_SQL = `
    GROUP BY w.id, w.name, w.slug
    ORDER BY shared_reviews DESC, own_reviews DESC, w.name ASC, w.id ASC`;
 
-/** The statement's row shape (SQLite's snake_case aliases). */
+/** note: The statement's row shape (SQLite's snake_case aliases). */
 type ReviewUsageRow = {
   workspace_id: string;
   workspace_name: string;

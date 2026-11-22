@@ -1,5 +1,5 @@
 /**
- * Dashboard signed-cookie sessions (architect decision Q1).
+ * note: Dashboard signed-cookie sessions (architect decision Q1).
  *
  * Cookie value format: `base64url(payload).base64url(sig)` where
  * sig = HMAC-SHA256(payload, DASHBOARD_SESSION_SECRET) via WebCrypto
@@ -18,7 +18,7 @@ const dec = new TextDecoder();
 
 export const SESSION_COOKIE = "__Host-mstar-session";
 export const OAUTH_STATE_COOKIE = "__Host-mstar-oauth-state";
-export const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7; // 7d
+export const SESSION_MAX_AGE_SEC = 60 * 60 * 24 * 7; // note: 7d
 export const OAUTH_STATE_MAX_AGE_SEC = 600;
 /**
  * One-shot carrier of "this sign-in created the instance's first account"
@@ -29,19 +29,19 @@ export const OAUTH_STATE_MAX_AGE_SEC = 600;
  */
 export const FIRST_INSTANCE_COOKIE = "__Host-mstar-first-instance";
 export const FIRST_INSTANCE_MAX_AGE_SEC = 120;
-/** Purpose binding inside the marker payload — the session cookie shares the secret. */
+/** safety: Purpose binding inside the marker payload — the session cookie shares the secret. */
 const FIRST_INSTANCE_KIND = "first-instance";
 
 export type SessionPayload = {
   login: string;
   name?: string;
-  /** Issued-at, seconds since epoch. */
+  /** why: Issued-at, seconds since epoch. */
   iat: number;
-  /** Expiry, seconds since epoch. */
+  /** why: Expiry, seconds since epoch. */
   exp: number;
 };
 
-// --- base64url (runtime-pure: btoa/atob exist in workers + Bun) ---
+// note: --- base64url (runtime-pure: btoa/atob exist in workers + Bun) ---
 
 export function base64urlEncode(bytes: Uint8Array): string {
   let binary = "";
@@ -103,7 +103,7 @@ export async function verifyValue(value: string, secret: string): Promise<string
   return dec.decode(payloadBytes);
 }
 
-// --- session payload ---
+// note: --- session payload ---
 
 export async function createSessionValue(
   login: string,
@@ -142,7 +142,7 @@ export async function readSessionValue(
   return payload;
 }
 
-// --- first-account marker (self-hosted empty-instance guidance) ---
+// note: --- first-account marker (self-hosted empty-instance guidance) ---
 
 /**
  * Mint the marker for the login that just created this instance's first
@@ -155,7 +155,7 @@ export async function createFirstInstanceValue(
   nowMs = Date.now(),
 ): Promise<string> {
   const nowSec = Math.floor(nowMs / 1000);
-  // `kind` purpose-binds the payload: same secret as the session cookie, so
+  // safety: `kind` purpose-binds the payload: same secret as the session cookie, so
   // without it a copied session value would pass every check below.
   return signValue(
     JSON.stringify({ kind: FIRST_INSTANCE_KIND, login, iat: nowSec, exp: nowSec + FIRST_INSTANCE_MAX_AGE_SEC }),
@@ -185,7 +185,7 @@ export async function readFirstInstanceValue(
   return payload.exp > Math.floor(nowMs / 1000);
 }
 
-// --- OAuth CSRF state ---
+// safety: --- OAuth CSRF state ---
 /** Random token via crypto.getRandomValues (a security red line). */
 export function randomToken(byteLength = 16): string {
   const bytes = new Uint8Array(byteLength);
@@ -212,7 +212,7 @@ export async function verifyStateValue(
   return (await verifyValue(cookieValue, secret)) !== null;
 }
 
-// --- cookie serialization (__Host- attribute set is fixed on purpose) ---
+// note: --- cookie serialization (__Host- attribute set is fixed on purpose) ---
 
 export function serializeCookie(name: string, value: string, maxAgeSec: number): string {
   return `${name}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAgeSec}`;

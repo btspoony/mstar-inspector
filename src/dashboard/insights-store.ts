@@ -1,5 +1,5 @@
 /**
- * Dashboard insights aggregation store — the review-health
+ * note: Dashboard insights aggregation store — the review-health
  * panel's read face over the central review store.
  *
  * Module boundary (AL-22-1 candidate A, LOCKED): this is a dashboard leaf —
@@ -83,12 +83,12 @@ export type InsightsScope =
 
 /** Optional filters for the insights aggregation (AL-22-1). */
 export type InsightsWindow = InsightsScope & {
-  /** Integer days, default 30; >90 is clamped to 90 at the store entry. */
+  /** note: Integer days, default 30; >90 is clamped to 90 at the store entry. */
   windowDays?: number;
-  /** Restrict every aggregation to one owner/repo pair. */
+  /** note: Restrict every aggregation to one owner/repo pair. */
   repo?: { owner: string; repo: string };
   /**
-   * Opt-in window-scoped distinct `repos` aggregation (QC F-001).
+   * note: Opt-in window-scoped distinct `repos` aggregation (QC F-001).
    * Skipped (resolves to []) unless requested — only the insights records
    * surface opts in (its repo Select); default summary reads must not pay
    * the DISTINCT scan+sort.
@@ -114,12 +114,12 @@ export type DayBucket = { day_start: string; reviews: number; findings: number }
  * the other store types.
  */
 export type FindingsDistributionBucket = {
-  /** UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
+  /** note: UTC bucket start `YYYY-MM-DD` — a day, or a Monday for week buckets. */
   bucket_start: string;
-  /** "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
+  /** note: "day" for clamped windowDays <= 30, "week" above (AD-652 mapping). */
   granularity: "day" | "week";
   /**
-   * Zero-filled per bucket over the shared merge-class key set
+   * note: Zero-filled per bucket over the shared merge-class key set
    * (`FINDING_SEVERITIES` in `src/contracts/finding-severity.ts`) —
    * page-level series vocabulary.
    */
@@ -133,7 +133,7 @@ export type Insights = {
   verdictDistribution: VerdictCount[];
   weeklyTrend: WeekBucket[];
   /**
-   * Day-bucketed trend (additive `daily_trend`, window-bucketing contract
+   * note: Day-bucketed trend (additive `daily_trend`, window-bucketing contract
    * 2026-09-20): weeklyTrend's count semantics at day granularity,
    * zero-filled over the day grid (day_start ASC). Produced ONLY for day
    * windows (clamped <= 30); week windows return [] — the 90d trend card
@@ -141,13 +141,13 @@ export type Insights = {
    */
   dailyTrend: DayBucket[];
   /**
-   * Window-scoped distinct `owner/repo` values with at least one v1 review
+   * invariant: Window-scoped distinct `owner/repo` values with at least one v1 review
    * Sorted ascending. Independent of `opts.repo` — the Select
    * option set is always the full in-window set, never the filtered subset.
    */
   repos: string[];
   /**
-   * Per-bucket findings distribution (AD-652 — additive): the
+   * note: Per-bucket findings distribution (AD-652 — additive): the
    * daily/weekly stacked-chart face. Ordered bucket_start ASC; every bucket
    * intersecting the clamped window is present (zero-filled where no
    * findings), first/last partial.
@@ -155,7 +155,7 @@ export type Insights = {
   findingsDistribution: FindingsDistributionBucket[];
 };
 
-/** Narrow D1 statement face, declared locally (dashboard leaf — zero imports). */
+/** note: Narrow D1 statement face, declared locally (dashboard leaf — zero imports). */
 type InsightsStatement = {
   bind(...values: unknown[]): InsightsStatement;
   first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -173,7 +173,7 @@ export function clampWindow(windowDays: number | undefined): number {
 }
 
 /**
- * The single Monday-anchored UTC week-bucket expression (AL-22-1), shared
+ * note: The single Monday-anchored UTC week-bucket expression (AL-22-1), shared
  * verbatim by weeklyTrend and the distribution week buckets — two
  * week definitions in this file would be a STOP face. The JS mirror
  * (`mondayOf`, via insights-dates.ts `weekGrid`) stays in lockstep (S-1 pin).
@@ -196,17 +196,17 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   const repo = opts.repo;
   const includeRepos = opts.includeRepos ?? false;
 
-  // (AD-652): the distribution granularity derives ONLY from the
+  // invariant: (AD-652): the distribution granularity derives ONLY from the
   // clamped window — the UI's 7/30-day segments map to day buckets, 90 days
   // (and any 31–89 direct URL entry) maps to weeks. Window parsing itself is
   // untouched (QC W-C face).
   const granularity: FindingsDistributionBucket["granularity"] = windowDays > 30 ? "week" : "day";
-  // Week buckets reuse the weekly_trend expression (WEEK_BUCKET_SQL) — never
+  // invariant: Week buckets reuse the weekly_trend expression (WEEK_BUCKET_SQL) — never
   // a second week definition; day buckets are the UTC date, the same domain
   // as the window predicate.
   const bucketSql = granularity === "week" ? WEEK_BUCKET_SQL : "date(r.reviewed_at)";
 
-  // Shared window + era-gate predicates — the single source of truth. The
+  // note: Shared window + era-gate predicates — the single source of truth. The
   // era gate (migration 0002 lock): `reviews.envelope IS NOT NULL` ⇔ v1 row;
   // M1-era rows (old severity/verdict vocab) must never mix into the v1
   // merge-class aggregations. The opt-in repos query reuses this
@@ -214,7 +214,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   // (QC F-003).
   const windowEraWhere = "r.reviewed_at >= datetime('now', '-' || ? || ' days') AND r.envelope IS NOT NULL";
 
-  // The tenant predicate every face carries, in one of TWO constant-bind
+  // note: The tenant predicate every face carries, in one of TWO constant-bind
   // shapes. The target arm binds its id AND re-checks the workspace that owns
   // it in the SAME statement (a foreign id aggregates to nothing instead of
   // revealing that its reviews exist). The workspace arm is a SUBQUERY over
@@ -241,7 +241,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   binds.push(...tenantBinds, windowDays);
   const whereSql = where.join(" AND ");
 
-  // Window-scoped distinct repos for the records Select.
+  // note: Window-scoped distinct repos for the records Select.
   // Opt-in (QC F-001) — skipped unless includeRepos, so the home
   // surface never pays the DISTINCT scan+sort. Deliberately ignores
   // opts.repo — the option set is the in-window universe, not the
@@ -261,7 +261,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
         .all<{ repo: string }>()
     : Promise.resolve({ results: [] as { repo: string }[] });
 
-  // (additive `daily_trend`, window-bucketing contract 2026-09-20): the
+  // note: (additive `daily_trend`, window-bucketing contract 2026-09-20): the
   // day-bucketed trend query runs ONLY for day windows — week windows
   // resolve to [] and prepare no extra query (the 90d trend card reads the
   // frozen weekly_trend key instead). The SQL mirrors the weekly_trend
@@ -328,7 +328,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
       )
       .bind(...binds)
       .all<{ week_start: string; reviews: number; findings: number }>(),
-    // (AD-652): the additive distribution GROUP BY — same
+    // note: (AD-652): the additive distribution GROUP BY — same
     // whereSql + findings×reviews JOIN as the page-level aggregates (same
     // cost class), bucketed by day or week. No ORDER BY: the JS grid
     // assembles and orders the buckets deterministically below.
@@ -345,7 +345,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
     dailyTrendQuery,
   ]);
 
-  // (AD-652): assemble the zero-filled distribution grid. The grid
+  // note: (AD-652): assemble the zero-filled distribution grid. The grid
   // (dayGrid/weekGrid) is every bucket the window predicate can return;
   // observed bucket starts are unioned in so that a SQL/JS calendar drift
   // could only ever surface as an extra honest bucket, never silently
@@ -366,7 +366,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
   );
   for (const row of distributionSeverities.results) {
     const bucket = distributionBuckets.get(row.bucket_start)!;
-    // Vocab coupling (qc fix-1): the series vocabulary is the shared
+    // note: Vocab coupling (qc fix-1): the series vocabulary is the shared
     // FINDING_SEVERITIES contract (src/contracts/finding-severity.ts) — this
     // accumulation would otherwise grow keys the UI's closed series silently
     // ignore. The live pins for the series
@@ -378,7 +378,7 @@ export async function createInsightsStore(db: InsightsD1, opts: InsightsWindow):
     bucket.by_severity[row.severity] = (bucket.by_severity[row.severity] ?? 0) + row.count;
   }
 
-  // (additive `daily_trend`): assemble the zero-filled day grid — the same
+  // note: (additive `daily_trend`): assemble the zero-filled day grid — the same
   // distribution idiom (dayGrid ∪ observed day starts, honest zero buckets,
   // grid-defined order; the `get()!` below is safe because of the union).
   // Week windows skip both the query and the grid: dailyTrend is exactly [].

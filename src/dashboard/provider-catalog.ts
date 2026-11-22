@@ -1,5 +1,5 @@
 import { PROVIDER_IDS, PROVIDER_META } from "./app-config-store";
-// Display-only picker grouping (AD-547). Never a mechanics input —
+// invariant: Display-only picker grouping (AD-547). Never a mechanics input —
 // the runner BYOK allowlist stays PROVIDER_IDS_BUILTIN / PROVIDER_ENV_NAMES.
 import { PROVIDER_IDS_COMMON } from "../contracts/provider-catalog.generated";
 import { MODEL_LIMITS, MODEL_LIMITS_SNAPSHOT } from "../contracts/provider-model-limits.generated";
@@ -10,7 +10,7 @@ let catalog: Promise<{ json: string; version: string }> | undefined;
 
 export function providerCatalog() {
   return catalog ??= (async () => {
-    // Builtin ids in PROVIDER_IDS order, then the template tier (the
+    // note: Builtin ids in PROVIDER_IDS order, then the template tier (the
     // hand-curated workers-ai entry followed by the snapshot's key order).
     // `verifiable: false` marks the console-only providers (no probeable
     // endpoint: azure-openai / ai-gateway); templates verify via the custom
@@ -30,13 +30,13 @@ export function providerCatalog() {
           base_url: meta.baseUrl,
           api: meta.api,
           models: [...meta.models],
-          // The row's own endpoint: the SPA applies the same base-URL
+          // note: The row's own endpoint: the SPA applies the same base-URL
           // predicate the Worker does before it trusts `model_limits`.
           // The per-model sizes the vendor directory states, keyed by model
           // id. The model dialog pre-fills its blank fields from here and
           // posts no override for a value the operator leaves untouched.
           model_limits: MODEL_LIMITS[id] ?? {},
-          // Mixed-protocol rows only: the protocol choice the add form
+          // invariant: Mixed-protocol rows only: the protocol choice the add form
           // offers, default first. Absent = a single-protocol row.
           ...(meta.protocols === undefined
             ? {}
@@ -76,7 +76,7 @@ export function providerCatalog() {
           display_group: PROVIDER_IDS_COMMON.includes(id) ? ("common" as const) : ("catalog" as const),
         })),
     ];
-    // The model dialog names this vendor snapshot beside a catalog-supplied
+    // note: The model dialog names this vendor snapshot beside a catalog-supplied
     // size so the operator can judge how fresh it is.
     const json = JSON.stringify({ provider_catalog, model_limits_snapshot: MODEL_LIMITS_SNAPSHOT });
     const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));

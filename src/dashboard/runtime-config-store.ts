@@ -1,5 +1,5 @@
 /**
- * Runtime configuration store — the system and workspace review-concurrency
+ * note: Runtime configuration store — the system and workspace review-concurrency
  * caps (migration 0040: `review_runtime_settings` + the nullable
  * `workspaces.max_concurrent_reviews` column).
  *
@@ -126,7 +126,7 @@ export const CHECK_TERMINALIZE_MAX = 30_000;
 /** Range of a stored update budget. */
 export const CHECK_UPDATE_MIN = 500;
 export const CHECK_UPDATE_MAX = 15_000;
-/** The audit ledger's target id for the pair (one operator save, one row). */
+/** note: The audit ledger's target id for the pair (one operator save, one row). */
 const CHECK_BUDGETS_TARGET = "review.check.budgets";
 
 /** PK of the comment-claim outbox retry window (migration 0048). */
@@ -150,7 +150,7 @@ export const COMMENT_CLAIM_ATTEMPTS_MAX = 10;
 /** Range of a stored outbox batch size. */
 export const COMMENT_CLAIM_OUTBOX_MIN = 1;
 export const COMMENT_CLAIM_OUTBOX_MAX = 100;
-/** The audit ledger's target id for the trio (one operator save, one row). */
+/** note: The audit ledger's target id for the trio (one operator save, one row). */
 const COMMENT_CLAIM_TARGET = "review.comment_claim.budgets";
 
 /** PK of the operator default review-depth row. */
@@ -158,7 +158,7 @@ export const REVIEW_LEVEL_KEY = "review.level.default";
 /** Absent row: the tier every App without its own depth inherits. */
 export const REVIEW_LEVEL_DEFAULT: ReviewLevel = "default";
 
-/** Integer in min..max — the one predicate every write and every read re-parses with. */
+/** why: Integer in min..max — the one predicate every write and every read re-parses with. */
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
@@ -169,7 +169,7 @@ export function isConcurrencyValue(value: unknown, max: number): value is number
 }
 
 /**
- * Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
+ * note: Parse one stored value in min..max. `undefined` = the row/column is ABSENT,
  * so the caller's default applies; `NaN` = the value is present but not a
  * trusted in-range integer, which no reader may treat as a default. Only a
  * number or a string counts: D1's declared column types do not constrain what
@@ -184,7 +184,7 @@ function parseInRange(value: unknown, min: number, max: number): number | undefi
 }
 
 /**
- * The workspace column's parse. A value ABOVE the per-workspace maximum is
+ * note: The workspace column's parse. A value ABOVE the per-workspace maximum is
  * clamped to it rather than treated as untrusted: migration 0043 lowers the
  * rows that exist when it applies, but the window between "migrations applied"
  * and "new Worker live" lets the previously deployed API store one more
@@ -211,12 +211,12 @@ export type DegradedReason = "read-failed" | "malformed" | "untrusted";
 export type ConcurrencyRead = {
   concurrency: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
+  /** note: The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
 /**
- * One cap from one result row. Only `row === null` is an absent setting, so the
+ * invariant: One cap from one result row. Only `row === null` is an absent setting, so the
  * caller's default applies; a present row whose selected field is missing is a
  * malformed result — untrusted, never absent.
  */
@@ -259,11 +259,11 @@ export type EffectiveConcurrency = {
   workspace: number;
   effective: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
+  /** note: The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
-/** One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
+/** why: One `review_runtime_settings` row. The declared `value` type constrains nothing a row actually carries. */
 type RuntimeSettingRow = { value?: unknown };
 
 /**
@@ -310,7 +310,7 @@ export async function getWorkspaceConcurrency(
 }
 
 /**
- * The untrusted-read answer: serial, flagged with its cause.
+ * safety: The untrusted-read answer: serial, flagged with its cause.
  */
 function degradedConcurrency(reason: DegradedReason): EffectiveConcurrency {
   return {
@@ -342,7 +342,7 @@ export async function getEffectiveConcurrency(
       )
       .bind(SYSTEM_CONCURRENCY_KEY, workspaceId)
       .first<{ system_value?: unknown; workspace_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
+    // invariant: This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, not that both settings are absent. A present row whose
     // selected fields are missing is untrusted for the same reason — only a NULL
     // column means the setting is absent.
@@ -380,18 +380,18 @@ const trustedIntSql = (value: string, untrusted: string, min: number, max: numbe
       THEN CAST(${value} AS INTEGER) ELSE ${untrusted} END`;
 
 /**
- * The stored system cap as SQL — the audit `before` value, under the ledger's
+ * note: The stored system cap as SQL — the audit `before` value, under the ledger's
  * canonical-digits rule.
  */
 const storedSystemCapSql = (keyParam: string, untrusted: string) =>
   `(SELECT ${trustedIntSql("value", untrusted, CONCURRENCY_MIN, SYSTEM_CONCURRENCY_MAX)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
-/** One stored check budget as SQL — the audit `before` value. */
+/** note: One stored check budget as SQL — the audit `before` value. */
 const storedBudgetSql = (keyParam: string, untrusted: string, min: number, max: number) =>
   `(SELECT ${trustedIntSql("value", untrusted, min, max)} FROM review_runtime_settings WHERE key = ${keyParam})`;
 
 /**
- * Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
+ * note: Audit row + `review_runtime_settings` upsert, in that order, in ONE batch.
  * `before` carries the stored value only under the readers' trust rule, so a
  * corrupt row is recorded as `null` — a bare `CAST` would report `0` for
  * `'abc'` and a number no reader or write predicate ever used for `' 8'`.
@@ -413,7 +413,7 @@ const SYSTEM_UPSERT_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
- * The workspace cap as the ledger sees a stored value: the same clamp the
+ * note: The workspace cap as the ledger sees a stored value: the same clamp the
  * reader applies (canonical digits above the maximum record the maximum),
  * so `before` cannot disagree with the cap the workspace was running.
  */
@@ -425,7 +425,7 @@ const workspaceAuditCapSql = (value: string) => `CASE
       ELSE NULL END`;
 
 /**
- * The ledger row carries the UPDATE's own guard — the target exists — so a
+ * why: The ledger row carries the UPDATE's own guard — the target exists — so a
  * refused write appends nothing. It computes `before` with a subquery against
  * the not-yet-updated row: a bind cannot read the old value after the write.
  * That subquery uses the workspace clamp above, so a corrupt stored value is
@@ -442,7 +442,7 @@ const WORKSPACE_AUDIT_SQL = `
    WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?3 AND deleted_at IS NULL)`;
 
 /**
- * The workspace value is bounded by its own maximum only. The system quota is
+ * invariant: The workspace value is bounded by its own maximum only. The system quota is
  * NOT part of this predicate: refusing on it would let a tenant binary-search
  * the platform number, and the quota already applies at admission as
  * `min(system, workspace)`.
@@ -500,7 +500,7 @@ export async function setWorkspaceConcurrency(
   ]);
   if (update?.meta.changes === 1) return value;
 
-  // Zero rows: the target is not a live workspace, so nothing was written.
+  // why: Zero rows: the target is not a live workspace, so nothing was written.
   throw new UnknownWorkspaceError(workspaceId);
 }
 
@@ -513,11 +513,11 @@ export async function setWorkspaceConcurrency(
 export type CheckMinScoreRead = {
   minScore: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
+  /** note: The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
-/** The untrusted/failed-read answer: the platform default, flagged with its cause. */
+/** safety: The untrusted/failed-read answer: the platform default, flagged with its cause. */
 function degradedCheckMinScore(reason: DegradedReason): CheckMinScoreRead {
   return { minScore: DEFAULT_CHECK_MIN_SCORE, degraded: true, reason };
 }
@@ -573,14 +573,14 @@ export type CheckBudgets = {
   terminalizeMs: number;
   updateMs: number;
   degraded: boolean;
-  /** The degradation's cause; absent from a trustworthy read. */
+  /** note: The degradation's cause; absent from a trustworthy read. */
   reason?: DegradedReason;
 };
 
 /** The pair an accepted write carries. */
 export type CheckBudgetValues = { terminalizeMs: number; updateMs: number };
 
-/** The untrusted/failed-read answer: the documented defaults, flagged with its cause. */
+/** safety: The untrusted/failed-read answer: the documented defaults, flagged with its cause. */
 function degradedCheckBudgets(reason: DegradedReason): CheckBudgets {
   return {
     terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
@@ -607,7 +607,7 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
       )
       .bind(CHECK_TERMINALIZE_KEY, CHECK_UPDATE_KEY)
       .first<{ terminalize_value?: unknown; update_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
+    // invariant: This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, and a missing field is malformed rather than absent.
     if (row === null) return degradedCheckBudgets("malformed");
     if (row.terminalize_value === undefined || row.update_value === undefined) {
@@ -633,7 +633,7 @@ export async function getCheckBudgets(db: DashboardD1): Promise<CheckBudgets> {
 }
 
 /**
- * One operator save, one audit row: `before` carries each stored value under
+ * note: One operator save, one audit row: `before` carries each stored value under
  * the readers' trust rule (a corrupt row is `null`), `after` the accepted pair.
  * The two upserts share this batch, so a refused write appends nothing.
  */
@@ -669,7 +669,7 @@ export async function setCheckBudgets(
       `check update budget must be an integer in ${CHECK_UPDATE_MIN}..${CHECK_UPDATE_MAX}`,
     );
   }
-  // The inline wait must contain the send it bounds. The refusal states the
+  // invariant: The inline wait must contain the send it bounds. The refusal states the
   // RELATION only — echoing the other stored value would disclose a number the
   // caller did not supply.
   if (value.terminalizeMs <= value.updateMs) {
@@ -715,7 +715,7 @@ export type CommentClaimSettings = {
 /** The trio an accepted write carries. */
 export type CommentClaimValues = { retryMs: number; maxAttempts: number; outboxCap: number };
 
-/** The untrusted/failed-read answer: the documented defaults, flagged. */
+/** safety: The untrusted/failed-read answer: the documented defaults, flagged. */
 function degradedCommentClaimSettings(): CommentClaimSettings {
   return {
     retryMs: COMMENT_CLAIM_RETRY_DEFAULT,
@@ -743,7 +743,7 @@ export async function getCommentClaimSettings(db: DashboardD1): Promise<CommentC
       )
       .bind(COMMENT_CLAIM_RETRY_KEY, COMMENT_CLAIM_ATTEMPTS_KEY, COMMENT_CLAIM_OUTBOX_KEY)
       .first<{ retry_value?: unknown; attempts_value?: unknown; outbox_value?: unknown }>();
-    // This query always yields exactly one row; no row means the answer itself
+    // invariant: This query always yields exactly one row; no row means the answer itself
     // is untrustworthy, and a missing field is malformed rather than absent.
     if (row === null) return degradedCommentClaimSettings();
     if (
@@ -801,7 +801,7 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
       .bind(RECHECK_ASSIGNMENT_KEY)
       .first<RuntimeSettingRow>();
     if (row === null) return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: false };
-    // This query yields one row per stored key; a row without `value` is
+    // note: This query yields one row per stored key; a row without `value` is
     // malformed rather than absent.
     if (row === undefined || row.value === undefined) {
       return { maxBytes: RECHECK_ASSIGNMENT_DEFAULT, degraded: true };
@@ -815,7 +815,7 @@ export async function getRecheckAssignmentMaxBytes(db: DashboardD1): Promise<Rec
 }
 
 /**
- * One operator save, one audit row: `before` carries each stored value under
+ * note: One operator save, one audit row: `before` carries each stored value under
  * the readers' trust rule (a corrupt row is `null`), `after` the accepted trio.
  * The three upserts share this batch, so a refused write appends nothing.
  */
@@ -881,7 +881,7 @@ export async function setCommentClaimSettings(
 }
 
 /**
- * One operator save, one audit row: `before` carries the stored value under
+ * note: One operator save, one audit row: `before` carries the stored value under
  * the readers' trust rule (a corrupt row is `null`), `after` the accepted one.
  */
 const RECHECK_ASSIGNMENT_AUDIT_SQL = `
@@ -934,7 +934,7 @@ export async function readDefaultReviewLevel(db: DashboardD1): Promise<DefaultRe
       .bind(REVIEW_LEVEL_KEY)
       .first<RuntimeSettingRow>();
     if (row === null) return { value: REVIEW_LEVEL_DEFAULT, degraded: false };
-    // A present row whose value is missing is malformed, not absent.
+    // note: A present row whose value is missing is malformed, not absent.
     return isReviewLevel(row.value)
       ? { value: row.value, degraded: false }
       : { value: REVIEW_LEVEL_DEFAULT, degraded: true };
@@ -944,7 +944,7 @@ export async function readDefaultReviewLevel(db: DashboardD1): Promise<DefaultRe
 }
 
 /**
- * One operator save, one audit row: `before` carries the stored level only when
+ * invariant: One operator save, one audit row: `before` carries the stored level only when
  * it is on the vocabulary (a corrupt row is `null`), `after` the accepted one.
  */
 const REVIEW_LEVEL_AUDIT_SQL = `
@@ -984,7 +984,7 @@ export async function setDefaultReviewLevel(
   return value;
 }
 
-/** Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
+/** why: Defaults apply to absent rows. The row caps also preserve the per-run write ceiling. */
 const SWEEP_RULES = {
   failureThreshold: { key: "platform.sweep.failure_threshold", fallback: QUEUE_MAX_ATTEMPTS + 1, min: 1, max: 10_000 },
   windowHours: { key: "platform.sweep.window_hours", fallback: 24, min: 1, max: 168 },
@@ -1090,11 +1090,11 @@ export const OFFICIAL_WORKSPACE_KEY = "platform.official_workspace_id";
  */
 export const RUNTIME_SETTING_DOMAINS = ["review.", "platform."] as const;
 
-/** One key segment: lowercase, digits and underscore, never empty. */
+/** invariant: One key segment: lowercase, digits and underscore, never empty. */
 const SETTING_SEGMENT = "[a-z0-9_]+";
 
 /**
- * `<registered domain><segment>(.<segment>)*`. The domains are interpolated
+ * note: `<registered domain><segment>(.<segment>)*`. The domains are interpolated
  * from the registry above, so adding one is a single edit and the bare
  * `review` / `platform` / `platform.` forms stay refused.
  */
@@ -1108,11 +1108,11 @@ export function isRuntimeSettingKey(key: unknown): key is string {
   return typeof key === "string" && RUNTIME_SETTING_KEY_PATTERN.test(key);
 }
 
-/** An id the `workspaces` table can hold (the same grammar a slug uses). */
+/** note: An id the `workspaces` table can hold (the same grammar a slug uses). */
 const OFFICIAL_WORKSPACE_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
 /**
- * The official workspace, resolved against live tenants: a stored id naming a
+ * note: The official workspace, resolved against live tenants: a stored id naming a
  * live workspace is that id, and an absent row, an unknown id, a soft-deleted
  * workspace or an unusable value all read `null`. Degrading rather than
  * refusing is deliberate — only the write path refuses, so a tenant retired
@@ -1133,7 +1133,7 @@ export async function readOfficialWorkspaceId(db: DashboardD1): Promise<string |
 }
 
 /**
- * One operator save, one audit row, in ONE batch. The `before` value is read by
+ * note: One operator save, one audit row, in ONE batch. The `before` value is read by
  * a subquery against the not-yet-written row, and both statements carry the
  * write's own guard — the target names a live workspace — so a refused write
  * appends neither row.
@@ -1159,7 +1159,7 @@ const OFFICIAL_WORKSPACE_SET_SQL = `
     updated_by = excluded.updated_by`;
 
 /**
- * Clearing is a DELETE of the key, never an insert of an empty value, and it is
+ * invariant: Clearing is a DELETE of the key, never an insert of an empty value, and it is
  * idempotent: the audit statement's own `WHERE EXISTS` makes an absent row
  * append nothing.
  */
@@ -1196,7 +1196,7 @@ export async function setOfficialWorkspace(
     return null;
   }
 
-  // An id is matched trimmed, so a console field's stray whitespace is not a
+  // why: An id is matched trimmed, so a console field's stray whitespace is not a
   // different workspace; a malformed one cannot name a workspace and is refused
   // without a round trip. The batch's own guard covers a workspace retired in
   // between.
@@ -1216,7 +1216,7 @@ export const MAINTENANCE_ENABLED_KEY = "platform.maintenance.enabled";
 export const MAINTENANCE_REASON_KEY = "platform.maintenance.reason";
 /** When it closed, ISO-8601 UTC. Absent = never closed. */
 export const MAINTENANCE_SINCE_KEY = "platform.maintenance.since";
-/** The audit ledger's target id for the trio (one operator save, one row). */
+/** note: The audit ledger's target id for the trio (one operator save, one row). */
 const MAINTENANCE_TARGET = "platform.maintenance";
 
 /**
@@ -1279,7 +1279,7 @@ export async function getMaintenanceMode(db: DashboardD1): Promise<MaintenanceMo
 }
 
 /**
- * One operator save, one audit row, in ONE batch. `before` reads the three
+ * note: One operator save, one audit row, in ONE batch. `before` reads the three
  * rows as the getter would state them, `after` is the accepted window.
  */
 const MAINTENANCE_AUDIT_SQL = `
@@ -1313,7 +1313,7 @@ export async function setMaintenanceMode(
 ): Promise<void> {
   const { enabled, actor } = input;
   const reason = enabled ? (input.reason?.trim() || null) : null;
-  /** Upsert a value, or DELETE the row when there is none to state. */
+  /** why: Upsert a value, or DELETE the row when there is none to state. */
   const put = (key: string, value: string | null) =>
     value === null
       ? db.prepare(MAINTENANCE_CLEAR_SQL).bind(key)

@@ -1,5 +1,5 @@
 /**
- * Workspace entitlement — one workspace's plan limits and THE one function every
+ * note: Workspace entitlement — one workspace's plan limits and THE one function every
  * "may this workspace do X under its plan" question goes through:
  * {@link checkEntitlement}, whose `kind` names the question (a seat, the free
  * workspace slot, the shared-bot capability, the App cap, the monthly RP
@@ -65,21 +65,21 @@ export type PlanLimits = {
   includedMembers: number | null;
   sharedBotAllowed: boolean;
   /**
-   * How many Apps this workspace may own (migration 0031's column, seeded
+   * note: How many Apps this workspace may own (migration 0031's column, seeded
    * 1/10 by 0063). NULL is no cap, exactly like `includedMembers`: a consumer
    * must branch on it, never fall back to 0.
    */
   appsPerWorkspace: number | null;
 };
 
-/** The read's row shape: SQLite carries the capability as a 0/1 INTEGER. */
+/** note: The read's row shape: SQLite carries the capability as a 0/1 INTEGER. */
 type PlanLimitsRow = Omit<PlanLimits, "sharedBotAllowed"> & {
   workspaceId?: string;
   sharedBotAllowed: number;
 };
 
 /**
- * One row → the limits the decisions read, converting the column's 0/1 into
+ * why: One row → the limits the decisions read, converting the column's 0/1 into
  * the boolean at the boundary.
  */
 function planLimits(row: PlanLimitsRow): PlanLimits {
@@ -108,7 +108,7 @@ export function isFreeTierPlan(planId: string | null | undefined): boolean {
 }
 
 /**
- * `self-hosted` resolves to this — the seeded `unlimited` row mirrored as a
+ * note: `self-hosted` resolves to this — the seeded `unlimited` row mirrored as a
  * constant so the mode answers BEFORE any DB read (spec §2 rule 1). The name
  * mirrors migration 0032; self-hosted never renders the plan card (spec §4).
  */
@@ -116,17 +116,17 @@ const UNLIMITED_LIMITS: PlanLimits = {
   id: UNLIMITED_PLAN_ID,
   name: "Unlimited",
   includedMembers: null,
-  // The tier includes the shared bot, and this constant is what makes
+  // note: The tier includes the shared bot, and this constant is what makes
   // `self-hosted` answer before any read: the capability never consults a
   // column in that mode.
   sharedBotAllowed: true,
-  // No App cap in this mode: the constant answers before any read, which is
+  // note: No App cap in this mode: the constant answers before any read, which is
   // what makes `self-hosted` never consult the column (spec §4).
   appsPerWorkspace: null,
 };
 
 /**
- * Ids per subscription read: D1 refuses a statement binding more than 100
+ * note: Ids per subscription read: D1 refuses a statement binding more than 100
  * parameters, and the read binds one placeholder per id.
  */
 const PLAN_QUERY_CHUNK = 100;
@@ -197,7 +197,7 @@ export async function resolveWorkspacePlans(
       .bind(...chunk)
       .all<PlanLimitsRow & { workspaceId: string }>();
     for (const row of subscribed.results) {
-      // `workspaceId` is the key, not part of the limits.
+      // note: `workspaceId` is the key, not part of the limits.
       resolved.set(row.workspaceId, planLimits(row));
     }
   }
@@ -232,11 +232,11 @@ export type EntitlementKind =
   | "app-count"
   | "review-quota";
 
-/** What every question is asked about: one workspace, one deployment mode. */
+/** note: What every question is asked about: one workspace, one deployment mode. */
 type Base = { db: WorkspaceStoreD1; mode: DeploymentMode; workspaceId: string };
 
 /**
- * The free-workspace-slot question. Two things make it the odd kind.
+ * note: The free-workspace-slot question. Two things make it the odd kind.
  *
  * `workspaceId: null` is the "no workspace yet" form — the creation route (the
  * workspace does not exist) and the SPA boot's create affordance (no workspace
@@ -280,7 +280,7 @@ export type EntitlementCtx =
   | (Base & { kind: "app-count"; liveAppCount: () => Promise<number> })
   | (Base & {
       kind: "review-quota";
-      /** The ceiling's read lives in `quota-store`, whose face is `D1Like`. */
+      /** note: The ceiling's read lives in `quota-store`, whose face is `D1Like`. */
       db: WorkspaceStoreD1 & D1Like;
       monthStart: string;
       usedRp: number;
@@ -315,7 +315,7 @@ export type FreeSlotVerdict =
   | { ok: true }
   | {
       ok: false;
-      /** The named workspace's plan, or `null` when the question named none. */
+      /** why: The named workspace's plan, or `null` when the question named none. */
       plan: PlanLimits | null;
       refusal: { kind: "free-workspace-slot" };
     };
@@ -339,7 +339,7 @@ export function checkEntitlement(
 export async function checkEntitlement(
   ctx: EntitlementCtx,
 ): Promise<EntitlementVerdict | FreeSlotVerdict> {
-  // The plan is read ONCE per call and only by a branch that needs it: every
+  // invariant: The plan is read ONCE per call and only by a branch that needs it: every
   // `self-hosted` answer, and the free-slot question that names no workspace,
   // cost no read at all. The free-slot branch resolves it late enough to sit
   // AFTER its own "does this workspace even have a free tier" test.
@@ -350,7 +350,7 @@ export async function checkEntitlement(
   switch (ctx.kind) {
     case "member-slot": {
       const limits = await plan(ctx.workspaceId);
-      // `seats: null` and a NULL limit both mean no verdict to mint: the guarded
+      // note: `seats: null` and a NULL limit both mean no verdict to mint: the guarded
       // insert counts, or the plan has no cap to exceed.
       if (
         ctx.seats === null ||
@@ -362,7 +362,7 @@ export async function checkEntitlement(
       return { ok: false, plan: limits, refusal: { kind: "member-slot", limit: limits.includedMembers, seats: ctx.seats } };
     }
     case "free-workspace-slot": {
-      // No named workspace → the per-login rule alone, with no plan read: the
+      // why: No named workspace → the per-login rule alone, with no plan read: the
       // creation route creates a workspace that resolves to `free` by
       // construction, and the SPA boot asks only about the login.
       if (ctx.workspaceId === null) {
@@ -370,7 +370,7 @@ export async function checkEntitlement(
           ? { ok: true }
           : { ok: false, plan: null, refusal: { kind: "free-workspace-slot" } };
       }
-      // A named target is only gated when it resolves to the free tier, and a
+      // invariant: A named target is only gated when it resolves to the free tier, and a
       // paid one never pays the counter.
       const limits = await plan(ctx.workspaceId);
       if (!isFreeTierPlan(limits.id)) return { ok: true };
@@ -386,7 +386,7 @@ export async function checkEntitlement(
     }
     case "app-count": {
       const limits = await plan(ctx.workspaceId);
-      // The count is read only for a plan that HAS a cap, so an uncapped plan
+      // invariant: The count is read only for a plan that HAS a cap, so an uncapped plan
       // (and `self-hosted`, which answers the unlimited constant) pays nothing
       // — the pre-consolidation behaviour, kept because the count touches the
       // Apps tables and a workspace with no plan row must not need them.
@@ -398,10 +398,10 @@ export async function checkEntitlement(
     }
     case "review-quota": {
       const limits = await plan(ctx.workspaceId);
-      // The ceiling and the plan id come from ONE plan read, which is why this
+      // why: The ceiling and the plan id come from ONE plan read, which is why this
       // kind is the one whose shape forces the whole function to be async.
       const { monthlyRp } = await resolveMonthlyQuota(ctx.db, ctx.monthStart, limits.id);
-      // ONE predicate for the whole system (`quotaSpent`): `used + cost > limit`
+      // note: ONE predicate for the whole system (`quotaSpent`): `used + cost > limit`
       // refuses. A review whose cost exactly fits the remaining headroom
       // (`used + cost == limit`) is admitted; everything above it is refused,
       // and a month already AT its ceiling refuses every review, since
@@ -427,7 +427,7 @@ export async function checkEntitlement(
 export type SharedBotRefusal = { kind: "shared-bot-not-included"; planId: string };
 
 /**
- * The `shared-bot` branch's body, and nothing more: `null` = the plan includes
+ * note: The `shared-bot` branch's body, and nothing more: `null` = the plan includes
  * the shared bot. Private on purpose — both surfaces (`targetsStore.
  * createOnSharedBot` and the webhook enqueue) ask {@link checkEntitlement}, so a
  * second spelling of the rule has nowhere to appear.
@@ -460,7 +460,7 @@ export function sharedBotAvailability(limits: PlanLimits, sharedBotExists: boole
 }
 
 /**
- * One free workspace per login, so the second free membership is the last. The
+ * why: One free workspace per login, so the second free membership is the last. The
  * `free-workspace-slot` branch's body, and private for that reason.
  */
 function freeSlotAvailable(freeMembershipCount: number): boolean {
@@ -468,7 +468,7 @@ function freeSlotAvailable(freeMembershipCount: number): boolean {
 }
 
 /**
- * The plan's included members are the cap; a pending invite counts as taken.
+ * note: The plan's included members are the cap; a pending invite counts as taken.
  * A NULL limit is no cap, so the answer is always yes and no caller can read
  * the absence as "zero seats".
  */

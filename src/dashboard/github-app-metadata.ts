@@ -66,7 +66,7 @@ const GITHUB_APP_API_URL = "https://api.github.com/app";
 const GITHUB_APPS_PUBLIC_URL = "https://api.github.com/apps";
 const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
 /**
- * Pagination bound for the installation list: 100 per page, so ten pages is
+ * why: Pagination bound for the installation list: 100 per page, so ten pages is
  * 1000 installations for ONE App — far past any real installation count and a
  * hard stop for a `Link` header that never ends. Reaching it with a next page
  * still pending is `{ ok: false }`: a truncated list must never reach the
@@ -76,26 +76,26 @@ const GITHUB_APP_INSTALLATIONS_URL = "https://api.github.com/app/installations";
  */
 const MAX_INSTALLATION_PAGES = 10;
 /**
- * ONE wall-clock budget for the whole listing leg, shared by its pages: each
+ * note: ONE wall-clock budget for the whole listing leg, shared by its pages: each
  * request's signal is what is left of it, so N pages cost at most this and not
  * N times the profile call's 5s. Exhausting it is `{ ok: false }` — the leg
  * must never hand back the subset it managed to collect.
  */
 const LISTING_BUDGET_MS = 5_000;
-/** Upstream budget (AD-531 lock): 5 seconds, zero retries. */
+/** note: Upstream budget (AD-531 lock): 5 seconds, zero retries. */
 const FETCH_TIMEOUT_MS = 5_000;
 /**
- * Visibility probe budget: an anonymous GET answers from the public App
+ * note: Visibility probe budget: an anonymous GET answers from the public App
  * listing, so a miss is cheap — 3 seconds, zero retries, and any non-answer
  * is `null`, which neither caller writes: the last stored value stands.
  */
 const VISIBILITY_TIMEOUT_MS = 3_000;
 /**
- * JWT lifetime — well under GitHub's 10-minute App-JWT cap (no refresh
+ * note: JWT lifetime — well under GitHub's 10-minute App-JWT cap (no refresh
  * path exists: one fetch, one token, zero retries).
  */
 const JWT_TTL_SEC = 8 * 60;
-/** Backdate iat for clock drift (the GitHub App auth docs' recommendation). */
+/** safety: Backdate iat for clock drift (the GitHub App auth docs' recommendation). */
 const JWT_CLOCK_SKEW_SEC = 60;
 
 const enc = new TextEncoder();
@@ -133,12 +133,12 @@ export function isGithubMetadataStale(
   return ageMs < 0 || ageMs >= GITHUB_METADATA_TTL_MS;
 }
 
-/** Standard base64 → bytes (PEM body decoding; the private-key.ts helper). */
+/** why: Standard base64 → bytes (PEM body decoding; the private-key.ts helper). */
 function base64ToBytes(b64: string): Uint8Array<ArrayBuffer> {
   return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
 }
 
-/** Bytes → base64url (JWT segments carry no padding). */
+/** why: Bytes → base64url (JWT segments carry no padding). */
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
@@ -155,7 +155,7 @@ function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Mint one GitHub App JWT (RS256, `iss` = the numeric GitHub App id) from
+ * note: Mint one GitHub App JWT (RS256, `iss` = the numeric GitHub App id) from
  * the decrypted App PEM. Throws on any key problem — the caller's
  * catch-all turns that into `{ ok: false }`.
  */
@@ -246,7 +246,7 @@ export async function fetchAppMetadata(
       headers,
     });
     if (!res.ok) {
-      // Consume the failed body so the connection is released promptly
+      // why: Consume the failed body so the connection is released promptly
       // (the manifest.ts convention).
       await res.body?.cancel();
       return { ok: false };
@@ -257,7 +257,7 @@ export async function fetchAppMetadata(
       html_url?: unknown;
       slug?: unknown;
     } | null;
-    // Shape gate: `name` is the identity field — without it the payload is
+    // note: Shape gate: `name` is the identity field — without it the payload is
     // not the GET /app shape (STOP clause: a structural change degrades,
     // never breaks). Every other field degrades per-item into the nullable
     // columns (the SPA renders local fields when they read NULL). The URL
@@ -271,7 +271,7 @@ export async function fetchAppMetadata(
       typeof data.html_url === "string" && data.html_url.startsWith("https://")
         ? data.html_url
         : null;
-    // `slug` is the authoritative source; html_url derivation covers a
+    // note: `slug` is the authoritative source; html_url derivation covers a
     // payload that drops it, and the fallback reads the scheme-gated URL only.
     const slug =
       typeof data.slug === "string" && data.slug.length > 0
@@ -288,7 +288,7 @@ export async function fetchAppMetadata(
       },
     };
   } catch {
-    // Total catch-all (AD-531): normalizePrivateKey throw (OpenSSH format),
+    // note: Total catch-all (AD-531): normalizePrivateKey throw (OpenSSH format),
     // import/sign errors, network failure, abort timeout — one shape.
     return { ok: false };
   }
@@ -305,7 +305,7 @@ export type FetchAppInstallationsResult =
   | { ok: false };
 
 /**
- * What a `Link` header says about the next page. Three states, because
+ * why: What a `Link` header says about the next page. Three states, because
  * "no next page" and "a next page we refuse to follow" must not collapse:
  * `unusable` is an answer the caller cannot reconcile against, while `none`
  * means the list is complete.
@@ -313,7 +313,7 @@ export type FetchAppInstallationsResult =
 type NextInstallationsPage = { kind: "none" } | { kind: "next"; url: string } | { kind: "unusable" };
 
 /**
- * Parse the `Link: <…>; rel="next"` target. Only a URL under `allowedPrefix`
+ * invariant: Parse the `Link: <…>; rel="next"` target. Only a URL under `allowedPrefix`
  * is followed: the header comes from GitHub over TLS, but a listing must never
  * be steered at another host, and a rejected target makes the collected list
  * untrustworthy rather than complete (it may be missing every later page).
@@ -363,7 +363,7 @@ export async function fetchAppInstallations(
     let url: string | null = `${GITHUB_APP_INSTALLATIONS_URL}?per_page=100`;
     const deadline = Date.now() + LISTING_BUDGET_MS;
     for (let page = 0; url !== null; page++) {
-      // A next page we have no budget left to fetch: the collected ids are a
+      // note: A next page we have no budget left to fetch: the collected ids are a
       // strict subset of GitHub's, and a subset must never be treated as the
       // authoritative set.
       if (page >= MAX_INSTALLATION_PAGES) return { ok: false };
@@ -375,7 +375,7 @@ export async function fetchAppInstallations(
         headers,
       });
       if (!res.ok) {
-        // Release the failed body promptly (the fetchAppMetadata convention).
+        // note: Release the failed body promptly (the fetchAppMetadata convention).
         await res.body?.cancel();
         return { ok: false };
       }
@@ -383,7 +383,7 @@ export async function fetchAppInstallations(
       if (!Array.isArray(data)) return { ok: false };
       for (const entry of data) {
         const id = (entry as { id?: unknown } | null)?.id;
-        // An entry without a numeric id is not the GET /app/installations
+        // note: An entry without a numeric id is not the GET /app/installations
         // shape: the list would be untrustworthy, and an untrustworthy
         // authoritative list could stamp rows GitHub still has.
         if (typeof id !== "number") return { ok: false };
@@ -395,7 +395,7 @@ export async function fetchAppInstallations(
     }
     return { ok: true, installationIds };
   } catch {
-    // Total catch-all (the fetchAppMetadata rule): key/import/sign errors,
+    // note: Total catch-all (the fetchAppMetadata rule): key/import/sign errors,
     // network failure, abort timeout — one shape, caller writes nothing.
     return { ok: false };
   }
@@ -411,13 +411,13 @@ export type InstallationRepository = { repo_id: number; owner: string; name: str
 export type FetchInstallationRepositoriesResult = InstallationRepository[] | null;
 
 /**
- * The installation-token face of the repository listing: an installation
+ * safety: The installation-token face of the repository listing: an installation
  * access token is what `GET /installation/repositories` accepts — the App JWT
  * only authenticates the `/app*` mint.
  */
 const GITHUB_INSTALLATION_REPOSITORIES_URL = "https://api.github.com/installation/repositories";
 /**
- * Page bound for ONE installation's repository list (100 per page): 5 pages /
+ * note: Page bound for ONE installation's repository list (100 per page): 5 pages /
  * 500 repositories, the contract's cap. Reaching it with a next page still
  * pending stops the walk — a dialog offering 500 of 900 repositories is
  * degraded, never silently truncated.
@@ -489,7 +489,7 @@ export async function fetchInstallationRepositories(
     let url: string | null = `${base}?per_page=100`;
     const deadline = Date.now() + LISTING_BUDGET_MS;
     for (let page = 0; url !== null; page++) {
-      // Stopping WITH a next page pending is an incomplete answer, not a short
+      // note: Stopping WITH a next page pending is an incomplete answer, not a short
       // one: returning what was read would offer a partial repository list as
       // if it were the installation's. `null` makes the caller say degraded.
       if (page >= MAX_REPOSITORY_PAGES) return null;
@@ -505,7 +505,7 @@ export async function fetchInstallationRepositories(
         return null;
       }
       const data = (await res.json().catch(() => null)) as unknown;
-      // `GET /installation/repositories` answers an envelope, not a bare array
+      // note: `GET /installation/repositories` answers an envelope, not a bare array
       // ({ total_count, repositories }) — anything else is not this endpoint.
       if (typeof data !== "object" || data === null || !("repositories" in data)) return null;
       const pageRepositories = data.repositories;
@@ -515,7 +515,7 @@ export async function fetchInstallationRepositories(
         const repoId = row?.id;
         const name = row?.name;
         const owner = row?.owner?.login;
-        // A row without the three facts the dialog posts cannot become a
+        // invariant: A row without the three facts the dialog posts cannot become a
         // target, so it is a partial answer rather than an option.
         if (typeof repoId !== "number" || typeof name !== "string" || typeof owner !== "string") return null;
         repositories.push({ repo_id: repoId, owner, name });
@@ -565,14 +565,14 @@ export async function fetchAppVisibility(slug: string): Promise<GithubAppVisibil
         "User-Agent": "mstar-inspector",
       },
     });
-    // The payload is irrelevant — only the status carries the fact. Release
+    // invariant: The payload is irrelevant — only the status carries the fact. Release
     // the connection in every branch (the failed-body convention above).
     await res.body?.cancel();
     if (res.status === 200) return "public";
     if (res.status === 404) return "private";
     return null;
   } catch {
-    // Network failure / timeout / malformed response — one shape: "no
+    // note: Network failure / timeout / malformed response — one shape: "no
     // answer", which the caller weighs (keep the stored value, or `unknown`).
     return null;
   }

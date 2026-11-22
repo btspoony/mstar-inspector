@@ -1,5 +1,5 @@
 /**
- * Selector membership + dropdown composition for the provider-first
+ * note: Selector membership + dropdown composition for the provider-first
  * settings flow (spec §6.3). Pure functions over the
  * verified-model cache and custom-provider declarations — dashboard-side,
  * zero pipeline/review imports (Q2).
