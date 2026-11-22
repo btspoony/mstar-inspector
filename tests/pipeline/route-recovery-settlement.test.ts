@@ -726,16 +726,23 @@ describe("a rejection is not an observation", () => {
 // ---------------------------------------------------------------------------
 
 /**
- * note: The same database with its settle-once MARK write unavailable — the seam
- * between the failure row and the fact that records it. Everything else (the
- * insert, the reads, the KV) still works.
+ * note: The same database whose settle-once MARK write refuses AT EXECUTION, not at
+ * preparation: the batch's INSERT has already run when the mark throws, so the only
+ * way the assertions below can find neither is D1's transaction rolling the insert
+ * back. Everything else (reads, the insert itself, the KV) still works.
  */
 function withoutMarkWrites(db: TestD1): TestD1 {
-  return {
-    prepare(sql: string) {
-      if (/UPDATE review_attempt_handoffs/.test(sql)) throw new Error("D1 mark write unavailable");
-      return db.prepare(sql);
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (/UPDATE review_attempt_handoffs/.test(sql)) throw new Error("D1 mark write failed");
+      return st.run();
     },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
     batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
     raw: db.raw,
   } as TestD1;
@@ -913,19 +920,24 @@ describe("a persisted launch that never staged a publication", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
-    // note: The settle-once mark cannot be written — the seam between the failure row
-    // and the fact that records it. One persistence step means neither lands: a row
-    // without its fact could never be recognized by a later pass.
+    // note: The settle-once mark throws WHILE the batch executes — after its INSERT has
+    // run. One persistence step means the transaction takes the insert down with it:
+    // a row without its fact could never be recognized by a later pass.
     await reconcileReviewRoute(
       { ...env, DB: withoutMarkWrites(db) as never, REVIEW_QUEUE: queue as never },
       WINDOW_CLOSED_AT,
     );
     expect(failureRows(db)).toHaveLength(0);
     expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(unpublishedSettlement(db).settled_effects).toBeNull();
 
+    // note: The healthy retry lands both, once — and a repeated pass adds nothing.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
     expect(failureRows(db)).toHaveLength(1);
     expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
+    expect(failureRows(db)).toHaveLength(1);
   });
 
   test("a staged publication keeps the outcome with the publication lane", async () => {
