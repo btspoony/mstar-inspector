@@ -2419,6 +2419,24 @@ describe("the SEC-01 publish gate", () => {
     expect(resumed.credentials.size).toBe(0);
   });
 
+  test("a persisted launch is collected even when the App config no longer resolves", async () => {
+    // note: The review step's output was never recorded (it died after the paid
+    // result became durable), so the platform re-runs that step against an
+    // already-persisted launch — on a host whose App config can no longer
+    // complete. The replay owns no credentials and needs no config: collect
+    // finishes on the sealed set, and nothing is settled as a failure.
+    const paidKey = "sk-paid-session-1";
+    const { db, resumed, ref, steps } = await paidWorkflowThenResumed("plain text", paidKey);
+    db.raw.prepare("DELETE FROM bot_provider_keys").run();
+    const replay = new Map([...steps].filter(([name]) => name === "prepare"));
+
+    await runReviewAttemptWorkflow(resumed, ref, stepStore(replay), async () => {});
+
+    expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(1);
+    expect(resumed.runnerConfigs.size).toBe(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures WHERE head_sha = ?").get(SHA)).toMatchObject({ n: 0 });
+  });
+
   test("a sealing fault fails the paid step and records no unsealed attempt", async () => {
     // note: A deployment whose envelope key is unusable cannot protect an outgoing
     // body. The paid step fails BEFORE it spends, through the existing failure

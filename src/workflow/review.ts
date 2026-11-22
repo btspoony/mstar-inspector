@@ -33,7 +33,7 @@ import {
   type CleanupInput,
   type ProcessDeps,
 } from "../pipeline/review-attempt-execution";
-import { MovedHeadError } from "../pipeline/review-attempt";
+import { MovedHeadError, launchVerdict, readReviewLaunch } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
   beginAttemptSettlement,
@@ -97,9 +97,14 @@ export async function runReviewAttemptWorkflow(
         timeout: remainingMs + POST_RUNNER_READ_BUDGET_MS,
       },
       // The prepare step may be checkpointed on a host that never ran it, so
-      // the step that pays resolves (or reuses) the config itself.
+      // the step that pays resolves (or reuses) the config itself — but ONLY
+      // when it still has to pay. A replayed step can find the paid result
+      // already durable, and collect then finishes from the attempt's sealed
+      // credential set: resolving today's config for it would make an
+      // already-paid result depend on configuration that may have been removed,
+      // and a resolution fault would settle the attempt as a failure.
       async () => {
-        await ensureRunnerConfig(ref.payload, deps);
+        if (!(await paidResultDurable(deps, ref))) await ensureRunnerConfig(ref.payload, deps);
         return reviewAttempt(deps, ref, prepared.prepared);
       },
     );
@@ -176,6 +181,15 @@ export class ReviewWorkflow extends WorkflowEntrypoint<ReviewWorkflowEnv, Attemp
 async function ensureHostChannel(deps: ProcessDeps, ref: AttemptRef): Promise<"ready" | "paused"> {
   if (deps.appCommenters.has(ref.payload.botRef.appId)) return "ready";
   return hydrateAttemptHost(ref.payload, deps);
+}
+
+/**
+ * Whether this attempt's paid result is already durable — the fence every later
+ * phase resumes from. Read before any config resolution, so a replay never
+ * depends on the App's current configuration.
+ */
+async function paidResultDurable(deps: ProcessDeps, ref: AttemptRef): Promise<boolean> {
+  return launchVerdict(await readReviewLaunch(deps.env.DB, ref.attemptId)).kind === "persisted";
 }
 
 /** The phase wrapper's cause, when the cause is a moved head. */
