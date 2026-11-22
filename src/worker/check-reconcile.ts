@@ -46,6 +46,7 @@
 
 import type { ScheduledEnv } from "./env";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
+import { clearCheckOwed, clearConcludedCheckOwed, deferCheckWithOwed } from "../pipeline/review-attempt";
 import type { D1Like } from "../store/types";
 import {
   attachCheckRunId,
@@ -59,8 +60,6 @@ import {
   type CheckAttempt,
   type CheckConclusion,
   type CheckRemote,
-  deferCheckForPendingPublication,
-  deferCheckRecovery,
   getCheckAttempt,
   getCheckOwnership,
   listCheckReconcileBatch,
@@ -68,10 +67,12 @@ import {
   markCheckLocalError,
   readPublicationProof,
   readPublishedReview,
+  readTerminalDispatch,
   recordCheckObservation,
   reenableChecksForApps,
   releaseCheckClaim,
   releaseExpiredCheckClaim,
+  reopenTerminalCorrection,
   setCheckDesired,
   suspendCheckForPause,
   suspendCheckRecovery,
@@ -85,7 +86,6 @@ import {
   isRequestNotDispatched,
   type ChecksAdapter,
   type ReviewGate,
-  type UnconfirmedCause,
 } from "../pipeline/checks";
 import type { ReviewCommenter } from "../pipeline/comment";
 import { createReviewCommenter } from "../pipeline/comment";
@@ -505,6 +505,10 @@ export async function reconcileReviewChecks(
     await reenableHealthyAppChecks(env, db, now, budget, credentials, transport, log, checkBudgets.updateMs);
 
     // 1. Due attempts, ONE bound nowMs at every predicate position.
+    // Retry path for the owed-Check marks: a clear that faulted, or a holder
+    // that concluded the Check itself, leaves a mark whose Check is terminal.
+    // One idempotent statement per pass, so the obligation cannot stay set.
+    await clearConcludedCheckOwed(db).catch(() => {});
     const rows = await listCheckReconcileBatch(db, now(), CHECK_MAX_ATTEMPTS, CHECK_RECONCILE_LIMIT);
     for (const row of rows) {
       summary.examined += 1;
@@ -777,9 +781,68 @@ async function reenableProbe(
 }
 
 /**
+ * §7.9a late correction: a Check that was already published as an unconfirmed
+ * failure is revised once when ITS OWN publication later confirms.
+ *
+ * The ordinary publish path freezes the unconfirmed fallback and links the
+ * staged publication, so the Check reaches GitHub saying the outcome is
+ * unknown. When that publication confirms moments later, the record asserts an
+ * outcome the evidence now contradicts — so the record is not proof and must be
+ * correctable. `reopenTerminalCorrection` is the guarded transition: it only
+ * matches a terminal row still marked as an unconfirmed failure and linked to
+ * THIS publication, and it clears that mark in the same statement, so the
+ * revision happens exactly once.
+ *
+ * The proof is read through the row's OWN link first — a confirmation of any
+ * other publication is not evidence about this row — and a pair that D1 cannot
+ * use never reopens a terminal record (the record waits, unmutated, until the
+ * App is healthy again). The reopened row then takes the ordinary path, which
+ * re-decides the conclusion from the proof and sends it on the same owned run.
+ */
+async function reopenTerminalCheck(
+  env: ScheduledEnv,
+  db: D1Like,
+  now: () => number,
+  budget: RunBudget,
+  transport: CheckTransport,
+  credentials: CheckCredentialFactory,
+  credentialCache: Map<string, Promise<CheckCredentialResolution>>,
+  row: CheckAttempt,
+  log: CheckReconcileLog,
+  summary: CheckReconcileSummary,
+  updateBudgetMs: number | undefined,
+): Promise<void> {
+  const attemptId = row.identity.attemptId;
+  const scope = row.identity.scope;
+  // A marked row always carries its link; without one no publication could ever
+  // confirm what this record asserts.
+  const publicationId = row.publicationId;
+  if (publicationId === null) return;
+  const proofRead = await readProof(db, row.identity, publicationId);
+  // Not confirmed yet: the terminal record stands exactly as published, and
+  // this pass writes nothing at all.
+  if (proofRead.kind !== "read") return;
+  if ((await pairUnusableReason(db, scope)) !== null) return;
+  if (!(await reopenTerminalCorrection(db, attemptId, publicationId, now()))) return;
+  log.info(
+    { event: "ops_check_terminal_correction_reopened", attempt_id: attemptId, publication_id: publicationId },
+    "terminal Check reopened for its own publication's confirmed outcome — one revision",
+  );
+  const reopened = await getCheckAttempt(db, attemptId);
+  if (reopened === null) return;
+  await reconcileCheckAttempt(
+    env, db, now, budget, transport, credentials, credentialCache, reopened, log, summary, updateBudgetMs,
+    true,
+  );
+}
+
+/**
  * One due attempt, §7.11.2 steps 1–5 in order. Ownership is only ever granted
  * by `claimCheckRecovery`; everything after it is fenced on that lease, and
  * every exit leaves the row in a state its next run can continue from.
+ *
+ * A TERMINAL row takes the §7.9a late-correction path instead (see
+ * `reopenTerminalCheck`); every other row is nonterminal by construction.
  *
  * Two exits deliberately give the claim BACK (`releaseCheckClaim`) instead of
  * settling the row as a failed attempt, because in neither case did a recovery
@@ -802,9 +865,21 @@ async function reconcileCheckAttempt(
   log: CheckReconcileLog,
   summary: CheckReconcileSummary,
   updateBudgetMs: number | undefined,
+  /**
+   * This call is the second half of a §7.9a late correction: the terminal row
+   * was just reopened from its OWN confirmed publication, so the proof wait is
+   * skipped. The proof exists, and a newer same-head publication's pending
+   * proof must not defer the revision of this row.
+   */
+  correction = false,
 ): Promise<void> {
   const attemptId = row.identity.attemptId;
   const scope = row.identity.scope;
+
+  if (row.terminalMs !== null) {
+    await reopenTerminalCheck(env, db, now, budget, transport, credentials, credentialCache, row, log, summary, updateBudgetMs);
+    return;
+  }
 
   // §7.11.2 step 2a — the publication-proof WAIT, decided BEFORE any credential
   // work: a row that is only waiting must not mint GitHub requests, and it must
@@ -852,7 +927,7 @@ async function reconcileCheckAttempt(
   // settlement's `neutral` (§7.9): that conclusion is final, nothing can
   // correct it and it owes no publication, so waiting for a proof that will
   // never exist would leave the run open for the whole window.
-  if (beforeDeadline && row.desired !== "neutral") {
+  if (!correction && beforeDeadline && row.desired !== "neutral") {
     // The D1 half of the pair gate runs BEFORE the wait (spec §7.6, §7.11.2
     // step 2): a row whose App is disabled/deleted or whose installation
     // mapping vanished must take the durable suspension path, never loop with
@@ -883,7 +958,16 @@ async function reconcileCheckAttempt(
       // would only delay a proof that already exists. The deadline clamps it:
       // the wait never outlives the attempt's own hard stop.
       const nextAttemptMs = Math.min(now() + CHECK_BACKOFF_MS[0]!, row.executionDeadlineMs);
-      if (!(await deferCheckForPendingPublication(db, attemptId, waitingLease, nextAttemptMs, now()))) return;
+      // One call owns BOTH writes: the Check's next_attempt_ms and the owed
+      // obligation's due instant move together or not at all.
+      const rearmed = await deferCheckWithOwed(db, {
+        checkAttemptId: attemptId,
+        lease: waitingLease,
+        nextAttemptMs,
+        nowMs: now(),
+        kind: "proof-wait",
+      });
+      if (!rearmed) return;
       summary.deferred += 1;
       log.info(
         {
@@ -946,16 +1030,27 @@ async function reconcileCheckAttempt(
     readRecoveryGate(db, scope),
     readRecoveryReview(db, owned, proof?.publicationId ?? null),
   ]);
-  const conclusion = terminalConclusion(
-    owned,
-    proof,
-    gate,
-    review,
-    beforeDeadline ? undefined : deadlineCause(pending, proofSourceId, proofRead),
-  );
+  const conclusion = terminalConclusion(owned, proof, gate, review);
+  // The approved wording no longer names which evidence the deadline could not
+  // read, so that attribution lands where the operator reads diagnosis: one log
+  // line per unconfirmed conclusion, never a user-visible field.
+  if (proof === null && !beforeDeadline) {
+    log.info(
+      {
+        event: "check_recovery_unconfirmed",
+        attempt_id: attemptId,
+        cause: deadlineCause(pending, proofSourceId, proofRead),
+      },
+      "check recovery concluding unconfirmed — the evidence the deadline could not read",
+    );
+  }
 
   // Intent BEFORE any remote update: the persisted row is the only source the
-  // send reads, so the frozen text cannot be swapped after this point.
+  // send reads, so the frozen text cannot be swapped after this point. The wait
+  // attribution is NOT pinned as this attempt's link (an abandoned attempt
+  // keeps its own `publication_id` NULL); a row that already links its own
+  // publication keeps that link, which is what a proof-free conclusion must
+  // stay correctable from (§7.9a).
   await setCheckDesired(db, attemptId, lease, conclusion, proof?.publicationId ?? null, now());
   const intent = await getCheckOwnership(db, attemptId, lease, now());
   if (intent === null) return;
@@ -973,6 +1068,7 @@ async function reconcileCheckAttempt(
     desired: intent.desired,
     title: intent.desiredTitle,
     summary: intent.desiredSummary,
+    ...(intent.terminalFailureStatus === null ? {} : { failureStatus: intent.terminalFailureStatus }),
   };
 
   // 3. Known remote id → GET/validate ownership before any update; otherwise
@@ -1138,14 +1234,71 @@ async function reconcileCheckAttempt(
     return;
   }
   if (fetched.remote.status === "completed") {
-    const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary);
-    if (recorded === "mismatch") {
-      await settleFailedAttempt(
-        db, now, attemptsBefore, row, lease,
-        `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
-        log, summary,
+    if (fetched.remote.conclusion !== frozen.desired) {
+      // A different CONCLUSION is not a wording gap: overwriting it here would
+      // replace an outcome this lane never recorded. Reported honestly and
+      // left to the attempt ladder, exactly as before — EXCEPT on the §7.9a
+      // correction path, where that published conclusion IS this row's own
+      // unconfirmed record (`reopenTerminalCorrection` matched exactly that
+      // row and cleared its mark once, in the same statement), and this row's
+      // own publication now contradicts it. There the new conclusion must
+      // reach THAT run — refusing GitHub's existing failure would leave the
+      // correction local, which is the same defect one layer later.
+      if (!correction) {
+        await settleFailedAttempt(
+          db, now, attemptsBefore, row, lease,
+          `remote run concluded ${fetched.remote.conclusion ?? "null"}, persisted intent is ${frozen.desired}`,
+          log, summary,
+        );
+        return;
+      }
+      log.info(
+        { event: "ops_check_terminal_correction_replaces", attempt_id: attemptId, publication_id: proof?.publicationId ?? null },
+        `terminal Check run carries the unconfirmed ${fetched.remote.conclusion ?? "null"} this row published — replacing it with the proof's ${frozen.desired}`,
       );
+    } else if (fetched.remote.summary === frozen.summary) {
+      // The conclusion AND the approved text already match this attempt's
+      // frozen intent: an earlier send LANDED and only its reply was lost.
+      // Reading it back is reconciliation — re-sending the same text would
+      // spend a request to prove what this read already proved.
+      const recorded = await recordTerminal(db, attemptId, lease, fetched.remote, frozen, now, summary, proof === null);
+      if (recorded === "mismatch") {
+        await settleFailedAttempt(
+          db, now, attemptsBefore, row, lease,
+          "the reread run is not the persisted terminal intent",
+          log, summary,
+        );
+      }
+      return;
     }
+    // A conclusion-only match is not delivery (spec §7.9): the run is finished
+    // with the right conclusion but carries no — or different — approved text,
+    // so the wording never reached the user. Fall through and send the frozen
+    // intent to THAT run; a landed update is never replaced by a new one.
+  }
+
+  // §7.9a: an already-DISPATCHED terminal update is discovery, never permission
+  // to send again. The fetch above is the readback; a run that has not reached
+  // the intended state yet does not prove the earlier request failed to land,
+  // and sending the same update twice is exactly the double it would cause.
+  if ((await readTerminalDispatch(db, attemptId)) !== null) {
+    if (beforeDeadline) {
+      // Its outcome may still arrive: wait without spending an attempt.
+      await releaseCheckClaim(db, attemptId, lease, now());
+      log.info(
+        { event: "ops_check_reconcile_dispatch_pending", detail: `attempt=${attemptId}` },
+        "a terminal update was already dispatched — readback only, no second send",
+      );
+      return;
+    }
+    // Past the deadline nothing more can prove it: charge the attempt so the
+    // ladder ends honestly (local-error with the remote id retained) instead of
+    // re-reading forever.
+    await settleFailedAttempt(
+      db, now, attemptsBefore, row, lease,
+      "a terminal update was dispatched and could not be confirmed by readback — never re-sent",
+      log, summary,
+    );
     return;
   }
 
@@ -1172,7 +1325,7 @@ async function reconcileCheckAttempt(
     await settleFailedAttempt(db, now, attemptsBefore, row, lease, completed.reason, log, summary);
     return;
   }
-  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary);
+  const recorded = await recordTerminal(db, attemptId, lease, completed.remote, frozen, now, summary, proof === null);
   if (recorded === "mismatch") {
     await settleFailedAttempt(
       db, now, attemptsBefore, row, lease,
@@ -1188,6 +1341,11 @@ async function reconcileCheckAttempt(
  * row, so an old-epoch response (the row has moved on) writes nothing.
  * Returns `mismatch` when the payload is a different outcome than intended,
  * `lost` when the fence no longer belongs to this invocation.
+ *
+ * `conclusionUnproven` says this send carried a conclusion decided WITHOUT a
+ * publication proof: the record is then published-but-unconfirmed and stays
+ * correctable once by its own publication's confirmation (§7.9a) — the same
+ * mark the consumer's terminalize records.
  */
 async function recordTerminal(
   db: D1Like,
@@ -1197,11 +1355,22 @@ async function recordTerminal(
   frozen: CheckConclusion,
   now: () => number,
   summary: CheckReconcileSummary,
+  conclusionUnproven: boolean,
 ): Promise<"recorded" | "mismatch" | "lost"> {
-  const agrees = remote.status === "completed" && remote.conclusion === frozen.desired;
+  // Delivery needs the frozen conclusion AND the frozen text (spec §7.9): a
+  // reply whose output is absent or different proves nothing about what the
+  // user reads, so it is a miss and the same run is sent again next pass.
+  const agrees =
+    remote.status === "completed" &&
+    remote.conclusion === frozen.desired &&
+    remote.summary === frozen.summary;
   if (!agrees) return "mismatch";
-  const written = await recordCheckObservation(db, attemptId, lease, remote, now());
+  const written = await recordCheckObservation(db, attemptId, lease, remote, now(), { conclusionUnproven });
   if (!written) return "lost";
+  // The Check is concluded: clear the attempt row's owed flag so this lane
+  // stops selecting it. Bookkeeping only — the conclusion is already durable,
+  // so a fault here is a warn, never a failed pass.
+  await clearCheckOwed(db, attemptId).catch(() => {});
   summary.completed += 1;
   return "recorded";
 }
@@ -1264,6 +1433,8 @@ async function settleFailedAttempt(
     const line = giveUpLine(row.identity.scope, attemptId, attemptsAfter, reason);
     const marked = await markCheckLocalError(db, attemptId, lease, line, now());
     if (marked) {
+      // Settled as `local-error`: the attempt no longer owes a settlement.
+      await clearCheckOwed(db, attemptId).catch(() => {});
       summary.gaveUp += 1;
       log.warn({ event: "ops_check_reconcile_gave_up", detail: line }, "check recovery gave up at the attempt cap");
     } else {
@@ -1273,13 +1444,19 @@ async function settleFailedAttempt(
     }
     return;
   }
-  const deferred = await deferCheckRecovery(
-    db,
-    attemptId,
+  const nextAttemptMs = now() + backoffFor(attemptsAfter);
+  // One call owns BOTH writes: the Check's backoff and the obligation's due
+  // instant move together, so a repeatedly failing row backs off instead of
+  // cycling.
+  const deferred = await deferCheckWithOwed(db, {
+    checkAttemptId: attemptId,
     lease,
-    { state: "remote-unconfirmed", nextAttemptMs: now() + backoffFor(attemptsAfter), reason },
-    now(),
-  );
+    nextAttemptMs,
+    nowMs: now(),
+    kind: "recovery",
+    state: "remote-unconfirmed",
+    reason,
+  });
   if (deferred) summary.unconfirmed += 1;
   summary.errors += 1;
 }
@@ -1389,7 +1566,7 @@ async function pairUnusableReason(db: D1Like, scope: Scope): Promise<CheckCreden
 /**
  * The proof of the publication THIS attempt owns — the one its own intent write
  * linked into `publication_id` (spec §7.9). The outcome distinguishes WHY it is
- * not a proof, because the deadline conclusion names the missing evidence:
+ * not a proof so the deadline path can LOG which evidence was missing:
  * `unlinked` (no publication row was staged for this attempt), `unproven` (the
  * linked row carries no proof), `unreadable` (the read itself failed).
  *
@@ -1567,16 +1744,16 @@ async function probePendingPublication(db: D1Like, attempt: CheckAttempt): Promi
 
 /**
  * Which evidence the deadline was missing, from the wait probe's answer and
- * this attempt's own proof read. Three causes — an attribution, not a
- * taxonomy: nothing was staged for this attempt (`none` plus no link), a staged
- * row whose proof never landed, or a read that failed (the journal's or the
- * proof's). A readable proof never reaches here: it decides.
+ * this attempt's own proof read. Three causes — an attribution for the LOG, not
+ * a taxonomy the user sees: nothing was staged for this attempt (`none` plus no
+ * link), a staged row whose proof never landed, or a read that failed (the
+ * journal's or the proof's). A readable proof never reaches here: it decides.
  */
 function deadlineCause(
   pending: PendingPublication,
   publicationId: string | null,
   read: ProofRead,
-): UnconfirmedCause {
+): "unstaged" | "unproven" | "unreadable" {
   if (pending.kind === "unknown" || read.kind === "unreadable") return "unreadable";
   if (waitIsTerminal(pending, publicationId)) return "unstaged";
   return "unproven";
@@ -1587,11 +1764,11 @@ function deadlineCause(
  * publication proof decides the conclusion against the App gate — a normal
  * publication only succeeds when the applied review meets it — regardless of
  * how the attempt expired. The no-proof branch runs only once the wait above
- * has ended: the execution deadline passed, which makes the honest unconfirmed
- * `failure` the conclusion, and `unconfirmedCause` names the evidence that was
- * missing. An intent the consumer already persisted is preserved verbatim
- * unless a proof-derived correction applies. `gate` is the App's stored gate;
- * `null` means it could not be read, so a proof-derived conclusion fails closed
+ * has ended: the execution deadline passed, which makes the unconfirmed
+ * `failure` the conclusion. An intent the consumer already persisted is
+ * preserved verbatim — including its approved failure category — unless a
+ * proof-derived correction applies. `gate` is the App's stored gate; `null`
+ * means it could not be read, so a proof-derived conclusion fails closed
  * instead of assuming a default.
  */
 function terminalConclusion(
@@ -1599,22 +1776,16 @@ function terminalConclusion(
   proof: PublicationProof | null,
   gate: ReviewGate | null,
   review: PublishedReview | null,
-  unconfirmedCause?: UnconfirmedCause,
 ): CheckConclusion {
   if (proof !== null) return decideConclusion({ proof, outcome: "expired", gate, review });
   if (owned.desired === "in_progress") {
-    return decideConclusion({
-      proof: null,
-      outcome: "expired",
-      gate,
-      review,
-      ...(unconfirmedCause === undefined ? {} : { unconfirmedCause }),
-    });
+    return decideConclusion({ proof: null, outcome: "expired", gate, review });
   }
   return {
     desired: owned.desired,
     title: owned.desiredTitle ?? CHECK_NAME,
     summary: owned.desiredSummary ?? CHECK_SUMMARIES.unconfirmed,
+    ...(owned.terminalFailureStatus === null ? {} : { failureStatus: owned.terminalFailureStatus }),
   };
 }
 

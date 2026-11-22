@@ -45,6 +45,14 @@ async function seedApp(db: TestD1, mode: "open" | "every_push" | "manual"): Prom
        VALUES (?, 'default', ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
     .run(`target-${id}`, id, id, 5000, "btspoony", "mstar-inspector", mode);
+  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // default per spec § Deployment gate; this suite exercises the ledger).
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+       VALUES ('review.route.workflow', 'on', datetime('now'))`,
+    )
+    .run();
   return id;
 }
 

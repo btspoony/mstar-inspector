@@ -84,6 +84,19 @@
       "database_id": "7a737173-e202-430f-8b47-e087d5e885c4"
     }
   ],
+  // 2026-11: the review execution route. One Cloudflare Workflow instance per
+  // admitted review attempt; the queue handler creates it with the attempt UUID
+  // as the instance id, so a redelivery of the same admitted attempt addresses
+  // the same instance. The class is exported by `main`
+  // (src/worker/entry.ts); the paid step's non-retryable declaration lives in
+  // src/workflow/review.ts.
+  "workflows": [
+    {
+      "name": "mstar-inspector-review-attempt",
+      "binding": "REVIEW_WORKFLOW",
+      "class_name": "ReviewWorkflow"
+    }
+  ],
   // 06: Sandbox container binding. Sandbox SDK 1.0 migration (containers
   // guide, migrate-to-durable-object-scheduling-policy): a container
   // application canNOT change its scheduling policy in place or attach to a
@@ -228,6 +241,15 @@
           "binding": "DB",
           "database_name": "mstar-inspector-prod-db",
           "database_id": "7c06fce1-6126-49e9-aeac-e92d527ff1c4"
+        }
+      ],
+      // Named environments do NOT inherit `workflows` (wrangler schema), so the
+      // execution route is restated here against its own Workflow name.
+      "workflows": [
+        {
+          "name": "mstar-inspector-production-review-attempt",
+          "binding": "REVIEW_WORKFLOW",
+          "class_name": "ReviewWorkflow"
         }
       ],
       // Same 1.0 container as the top level (same Dockerfile, same

@@ -8,7 +8,7 @@
  * audit row, so this screen owns no ledger logic. Each field is a local draft
  * over the loaded value, so a reload cannot leave a stale value on screen.
  */
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import {
   Button,
   CardContent,
@@ -18,6 +18,7 @@ import {
 } from "@design-system";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
 import { SWEEP_FIELDS, type SweepField, type SweepConfig, type SweepValues } from "../../contracts/sweep-settings";
+import { DURATION_REPORT_CAP_MAX_MS, DURATION_REPORT_CAP_MIN_MS } from "../../contracts/duration-report";
 import { APP_VERSION } from "../../version";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard, SectionCardTitle } from "../components/SectionCard";
@@ -27,8 +28,10 @@ import { concurrencySubmitBlocked } from "../pages/data";
 import { formatRelativeTime } from "../relative-time";
 import {
   AdminWriteError,
+  readDurationReport,
   readRuntime,
   saveSweepSettings,
+  setAttemptCap,
   setCheckBudgets,
   setCommentClaimSettings,
   setMaintenance,
@@ -36,8 +39,10 @@ import {
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
+  type AttemptCapConfig,
   type CheckBudgetConfig,
   type CommentClaimConfig,
+  type DurationPercentiles,
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
@@ -89,6 +94,196 @@ function CardOutcome({
   );
 }
 
+/**
+ * The duration analysis card — the evidence for choosing the attempt cap.
+ *
+ * It renders what the server measured and nothing more: percentiles are `null`
+ * when the window completed nothing (an empty sample, never zeros), and the
+ * candidate read is an observation about the same sample, not a prediction.
+ */
+function DurationReportCard({ locale }: { locale: Locale }) {
+  const [candidate, setCandidate] = useState("");
+  const [capMs, setCapMs] = useState<number | null>(null);
+  const read = useMemo(() => () => readDurationReport(capMs), [capMs]);
+  const { state, reload } = useLoaded(read);
+  const candidateValue = Number(candidate);
+  // The route refuses anything outside this range with a 4xx, which would turn
+  // the whole card into a load failure. The same range is checked here so an
+  // unusable candidate never leaves the distribution unrendered.
+  const candidateValid =
+    candidate.trim() !== "" &&
+    Number.isInteger(candidateValue) &&
+    candidateValue >= DURATION_REPORT_CAP_MIN_MS &&
+    candidateValue <= DURATION_REPORT_CAP_MAX_MS;
+  const formatMs = (value: number | null): string => (value === null ? "—" : `${Math.round(value)} ms`);
+
+  return (
+    <SectionCard tier="secondary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "admin.runtime.durationTitle")}</SectionCardTitle>
+      </CardHeader>
+      <CardContent>
+        {state.status === "loading" ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "common.loading")}</p>
+        ) : state.status === "error" ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <p className="text-sm text-muted-foreground">{t(locale, "common.loadFailed")}</p>
+            <Button type="button" variant="secondary" onClick={reload}>
+              {t(locale, "common.retry")}
+            </Button>
+          </div>
+        ) : (
+          (() => {
+            const report = state.data;
+            const rows: ReadonlyArray<{ key: string; label: DictionaryKey; value: DurationPercentiles | null }> = [
+              { key: "total", label: "admin.runtime.durationTotal", value: report.total },
+              { key: "queue-wait", label: "admin.runtime.durationQueueWait", value: report.phases.queueWait },
+              { key: "execution", label: "admin.runtime.durationExecution", value: report.phases.execution },
+              { key: "publication", label: "admin.runtime.durationPublication", value: report.phases.publication },
+            ];
+            const cutoff = report.cutoff;
+            const excluded = report.excluded;
+            const excludedTotal =
+              excluded["check-open-at-settle"] +
+              excluded["no-settlement-record"] +
+              excluded["no-boundary"] +
+              excluded.unsettled +
+              excluded["pre-prepare"];
+            const excludedParams = {
+              checkOpen: excluded["check-open-at-settle"],
+              recordMissing: excluded["no-settlement-record"],
+              noBoundary: excluded["no-boundary"],
+              unsettled: excluded.unsettled,
+              prePrepare: excluded["pre-prepare"],
+            };
+            return (
+              <>
+                <p className="text-sm text-muted-foreground" data-duration="description">
+                  {t(locale, "admin.runtime.durationDescription", { days: report.window.days })}
+                </p>
+                {report.sampleSize === 0 ? (
+                  <p className="mt-4 text-sm font-medium" data-duration="empty">
+                    {excludedTotal === 0
+                      ? t(locale, "admin.runtime.durationEmpty")
+                      : t(locale, "admin.runtime.durationEmptyExcluded", {
+                          n: excludedTotal,
+                          ...excludedParams,
+                        })}
+                  </p>
+                ) : (
+                  <>
+                    <p className="mt-2 text-xs text-muted-foreground" data-duration="sample">
+                      {t(locale, "admin.runtime.durationSample", { n: report.sampleSize })}
+                    </p>
+                    <table className="mt-3 w-full text-sm">
+                      <thead>
+                        <tr className="text-left text-muted-foreground">
+                          <th className="py-1 font-normal" />
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationP50")}</th>
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationP90")}</th>
+                          <th className="py-1 font-normal">{t(locale, "admin.runtime.durationMax")}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {rows.map((row) => (
+                          <tr key={row.key} className="border-t border-(--border-subtle)">
+                            <td className="py-1 text-muted-foreground">{t(locale, row.label)}</td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-p50`}>
+                              {formatMs(row.value?.p50Ms ?? null)}
+                            </td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-p90`}>
+                              {formatMs(row.value?.p90Ms ?? null)}
+                            </td>
+                            <td className="py-1 font-medium" data-duration={`${row.key}-max`}>
+                              {formatMs(row.value?.maxMs ?? null)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationBuckets")}
+                    </p>
+                    <p className="mt-3 text-xs text-muted-foreground" data-duration="excluded">
+                      {t(locale, "admin.runtime.durationExcluded", excludedParams)}
+                    </p>
+                  </>
+                )}
+                <p className="mt-2 text-xs text-muted-foreground" data-duration="failure-tail">
+                  {t(locale, "admin.runtime.durationFailureTail")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground" data-duration="settlement-basis">
+                  {t(locale, "admin.runtime.durationSettlementBasis")}
+                </p>
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (candidateValid) setCapMs(candidateValue);
+                  }}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="duration-candidate-cap">
+                      {t(locale, "admin.runtime.durationCandidateLabel")}
+                    </label>
+                    <Input
+                      id="duration-candidate-cap"
+                      className="w-48"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      value={candidate}
+                      onChange={(event) => setCandidate(event.target.value)}
+                    />
+                    {candidate.trim() !== "" && !candidateValid ? (
+                      <p className="text-xs text-(--tone-warn-fg)" data-duration="candidate-range">
+                        {t(locale, "admin.runtime.durationCandidateRange", {
+                          min: DURATION_REPORT_CAP_MIN_MS,
+                          max: DURATION_REPORT_CAP_MAX_MS,
+                        })}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Button type="submit" variant="secondary" disabled={!candidateValid}>
+                    {t(locale, "admin.runtime.durationCandidateApply")}
+                  </Button>
+                </form>
+                {cutoff === null ? null : (
+                  <div className="mt-3 text-sm" data-duration="cutoff">
+                    {report.sampleSize === 0 ? (
+                      <p>{t(locale, "admin.runtime.durationCutoffEmpty")}</p>
+                    ) : cutoff.over === 0 ? (
+                      <p>{t(locale, "admin.runtime.durationCutoffNone", { cap: cutoff.capMs })}</p>
+                    ) : (
+                      <p>
+                        {t(locale, "admin.runtime.durationCutoff", {
+                          cap: cutoff.capMs,
+                          over: cutoff.over,
+                          n: report.sampleSize,
+                          share: cutoff.share === null ? "—" : `${(cutoff.share * 100).toFixed(1)}%`,
+                        })}
+                      </p>
+                    )}
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationCrossed", {
+                        queueWait: cutoff.crossed.queueWait,
+                        execution: cutoff.crossed.execution,
+                        publication: cutoff.crossed.publication,
+                      })}
+                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t(locale, "admin.runtime.durationCaveat")}
+                    </p>
+                  </div>
+                )}
+              </>
+            );
+          })()
+        )}
+      </CardContent>
+    </SectionCard>
+  );
+}
+
 export function RuntimePage({ locale }: { locale: Locale }) {
   const { state, reload, update } = useLoaded(readRuntime);
   /** Only what the operator typed is local; the display falls back to the stored value. */
@@ -100,6 +295,31 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [outboxDraft, setOutboxDraft] = useState<string | null>(null);
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
+  const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
+  /**
+   * A save is in flight, or accepted and not yet read back. While true the card
+   * renders no number and blocks editing: once the request leaves, this page's
+   * last number — and the request's own echo — are values the row may not hold.
+   */
+  const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
+  /**
+   * The save's outcome is unknown (network error, timeout, 5xx): the write may
+   * have landed. The card stays unconfirmed and says so, rather than reporting a
+   * failure the store may not have had.
+   */
+  const [attemptCapSaveUnknown, setAttemptCapSaveUnknown] = useState(false);
+  /**
+   * The last CONFIRMED save's echo — what a later re-read is compared with.
+   * `null` after an uncertain failure: that save's fate is unknown, so the
+   * read may not be described as "someone else changed it".
+   */
+  const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
+  /**
+   * The store's value when the confirming re-read disagreed with the echo:
+   * another operator wrote the row while this page was open. The card keeps
+   * showing the store's number and says so until the next save.
+   */
+  const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
   /** The window's pending state: `null` = untouched, so the stored one shows. */
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
@@ -112,6 +332,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const commentClaimSignal = useSaveSignal();
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
+  const attemptCapSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   // A save's outcome is reported INSIDE the card it belongs to, so a refusal —
   // the terminalize/update relation included — reads as that field's error
@@ -125,6 +346,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "commentClaim"
       | "sweep"
       | "recheckAssignment"
+      | "attemptCap"
       | "maintenance";
   } | null>(null);
 
@@ -343,6 +565,103 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   /**
+   * Read the stored cap back. `echo` is the confirmed save's value, or `null`
+   * when the save's outcome is unknown — then a differing read is just the
+   * store's answer, never "another save changed it". Answers false when the
+   * read did not answer, leaving the card in its unconfirmed state: neither
+   * the echo nor a guess is rendered as the effective value.
+   */
+  async function confirmAttemptCap(echo: number | null): Promise<boolean> {
+    const fresh = await readRuntime().catch(() => null);
+    if (!fresh?.attemptCap) return false;
+    update(() => fresh);
+    setAttemptCapConfirming(false);
+    setAttemptCapSaveUnknown(false);
+    setAttemptCapEcho(null);
+    setAttemptCapChangedElsewhere(
+      echo === null || fresh.attemptCap.degraded || fresh.attemptCap.capMs === echo
+        ? null
+        : fresh.attemptCap.capMs,
+    );
+    return true;
+  }
+
+  async function onRetryAttemptCap(): Promise<void> {
+    if (busy || !attemptCapConfirming) return;
+    setBusy(true);
+    try {
+      // A failed retry leaves the unconfirmed state and its button in place.
+      await confirmAttemptCap(attemptCapEcho);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onSaveAttemptCap(
+    event: FormEvent<HTMLFormElement>,
+    stored: AttemptCapConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return; // in-flight guard — no double submit
+    if (concurrencySubmitBlocked(stored.degraded, attemptCapDraft)) return;
+    // Same browser-side parsing as the sibling fields: the server's range gate
+    // is the only validator.
+    const capMs = Number((attemptCapDraft ?? String(stored.capMs)).trim());
+    setBusy(true);
+    setNotice(null);
+    attemptCapSignal.start();
+    // The row may already be committed — and overwritten — while the request is
+    // in flight, so the number on screen stops being a claim the moment it
+    // leaves. Enter the unconfirmed state BEFORE dispatching, not on the reply.
+    setAttemptCapConfirming(true);
+    setAttemptCapSaveUnknown(false);
+    try {
+      const saved = await setAttemptCap(capMs, stored);
+      // The write landed. The VALUE still is not shown: the echo is what this
+      // request wrote, not what the row holds now, so the card stays
+      // unconfirmed until the re-read answers.
+      setAttemptCapDraft(null);
+      setAttemptCapEcho(saved.capMs);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.attemptCapSaved"),
+        source: "attemptCap",
+      });
+      attemptCapSignal.succeed();
+      // A failed confirmation is not a failed save: the unconfirmed state and
+      // its retry are the whole report, so this read never reaches the catch.
+      await confirmAttemptCap(saved.capMs);
+    } catch (error) {
+      if (error instanceof AdminWriteError && error.status >= 400 && error.status < 500) {
+        // A DEFINITE refusal: THIS write did not land. It says nothing about
+        // the row another operator may have written since this page read it,
+        // so the pre-save number is not restored — the store is re-read, and
+        // until that read answers no effective value is shown.
+        setAttemptCapSaveUnknown(false);
+        setAttemptCapEcho(null);
+        const generic = t(locale, "admin.runtime.attemptCapFailed");
+        setNotice({
+          kind: "error",
+          message: `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`,
+          source: "attemptCap",
+        });
+        attemptCapSignal.fail();
+        await confirmAttemptCap(null);
+      } else {
+        // UNCERTAIN (network error, timeout, 5xx): the write may have landed, so
+        // neither outcome is claimed. The card stays unconfirmed with no number,
+        // and the retry reads the store back. No echo to compare against: this
+        // save's fate is unknown, so a differing read is not "changed elsewhere".
+        setAttemptCapSaveUnknown(true);
+        setAttemptCapEcho(null);
+        attemptCapSignal.fail();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /**
    * Close or reopen the platform. `enabled` is the state the operator asked
    * for; the reason rides only a close (the store drops it on reopen, so
    * sending it then would be dead input).
@@ -407,6 +726,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const sweep = data.sweep;
           // And for the recheck seat's ask budget.
           const recheck = data.recheckAssignment;
+          // And the platform's one end-to-end attempt cap.
+          const attemptCap = data.attemptCap;
           // And for the admission-drop counts.
           const drops = data.admissionDrops24h;
           // The live queue gauge; `null` is "not readable", never an empty queue.
@@ -581,6 +902,127 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 )}
               </CardContent>
             </SectionCard>
+            {attemptCap === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.attemptCapTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.attemptCapDescription")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground" data-attempt-cap="range">
+                  {t(locale, "admin.runtime.attemptCapRange", {
+                    min: attemptCap.min,
+                    max: attemptCap.max,
+                    minMinutes: Math.round(attemptCap.min / 60_000),
+                    maxMinutes: Math.round(attemptCap.max / 60_000),
+                  })}
+                </p>
+                {notice?.source === "attemptCap" ? (
+                  <CardOutcome notice={notice} status={attemptCapSignal.status} />
+                ) : null}
+                {attemptCap.degraded ? (
+                  // While the row is unreadable admission refuses every
+                  // delivery, so no effective value is claimed and the form
+                  // starts empty; a typed value or Retry repairs the state.
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.attemptCapUnreadable")} />
+                  </div>
+                ) : attemptCapConfirming ? (
+                  // A save is in flight or landed, but the row has not been read
+                  // back: no echo is shown, and nothing is editable until a read
+                  // answers.
+                  <div className="mt-4" data-attempt-cap="confirming">
+                    {attemptCapSaveUnknown ? (
+                      // The write may or may not have landed: say the outcome is
+                      // unknown, never that it failed.
+                      <p className="text-sm text-(--tone-warn-fg)" data-attempt-cap="unknown">
+                        {t(locale, "admin.runtime.attemptCapUnknown")}
+                      </p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        {t(locale, "admin.runtime.attemptCapConfirming")}
+                      </p>
+                    )}
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      className="mt-2"
+                      data-attempt-cap="retry"
+                      disabled={busy}
+                      onClick={() => void onRetryAttemptCap()}
+                    >
+                      {t(locale, "common.retry")}
+                    </Button>
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveAttemptCap(event, attemptCap)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="attempt-cap-ms">
+                      {t(locale, "admin.runtime.attemptCapLabel")}
+                    </label>
+                    <Input
+                      id="attempt-cap-ms"
+                      type="number"
+                      min={attemptCap.min}
+                      max={attemptCap.max}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      disabled={busy || attemptCapConfirming}
+                      value={
+                        attemptCapConfirming
+                          ? ""
+                          : (attemptCapDraft ?? (attemptCap.degraded ? "" : String(attemptCap.capMs)))
+                      }
+                      onChange={(event) => setAttemptCapDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    disabled={busy || attemptCapConfirming}
+                    status={attemptCapSignal.status === "idle" ? undefined : attemptCapSignal.status}
+                  >
+                    {t(locale, "admin.runtime.attemptCapSave")}
+                  </Button>
+                  <SaveInFlight show={attemptCapSignal.status === "loading"} locale={locale} />
+                  {attemptCap.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {attemptCap.degraded || attemptCapConfirming ? null : (
+                  // The two copies are the whole point: a stored value says so,
+                  // and an absent row says "default — nothing saved".
+                  <>
+                    <p className="mt-2 text-xs text-muted-foreground" data-attempt-cap="effective">
+                      {t(
+                        locale,
+                        attemptCap.saved
+                          ? "admin.runtime.attemptCapCurrentSaved"
+                          : "admin.runtime.attemptCapCurrentDefault",
+                        { value: attemptCap.capMs },
+                      )}
+                    </p>
+                    {attemptCapChangedElsewhere === null ? null : (
+                      // Persistent, not a notice that disappears: the operator
+                      // must know the number they just sent is not the one in force.
+                      <p className="mt-1 text-xs text-(--tone-warn-fg)" data-attempt-cap="changed-elsewhere">
+                        {t(locale, "admin.runtime.attemptCapChangedElsewhere", {
+                          value: attemptCapChangedElsewhere,
+                        })}
+                      </p>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
             {budgets === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>
@@ -943,6 +1385,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 </dl>
               </CardContent>
             </SectionCard>
+            <DurationReportCard locale={locale} />
           </div>
           );
         }}

@@ -30,6 +30,7 @@ import { idemKey } from "../../src/contracts/idem";
 import type { ReviewOutput } from "../../src/review/schema";
 import { createTestD1, mapAppToDefaultWorkspace } from "../store/helpers";
 import { APP_CREDENTIAL_RESOLUTION_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
+import { inlineWorkflowStarter } from "../helpers/workflow-route";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -117,6 +118,15 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
+  claimMarker: mock(async () => "written" as const),
+  runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
+    kind: "ran" as const,
+    ...(await fakeSandbox.runCommand(cmd, opts)),
+  })),
+  destroyMarked: mock(async () => {
+    await fakeSandbox.destroy();
+    return "destroyed" as const;
+  }),
   destroy: mock(async () => {}),
 };
 
@@ -179,6 +189,9 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
     postLineComments: mock(async () => {
       throw new Error("unexpected: no qualifying findings → no line comments");
     }),
+    recoverLineComments: mock(async () => {
+      throw new Error("unexpected: no dispatched line batch → no discovery");
+    }),
     // Discussion capture + resolution: no open lifecycle
     // rows in these fixtures → never triggered.
     listDiscussion: mock(async () => {
@@ -196,6 +209,7 @@ const appCommenterFactory = mock((cred: CommenterEnv): ReviewCommenter => {
 const testOverrides = {
   createAppCommenter: appCommenterFactory,
   getSandbox: async () => fakeSandbox,
+  startAttempt: inlineWorkflowStarter([]),
 };
 
 // --- consumer under test (dynamic import: mocks must be registered first) ---
@@ -718,7 +732,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     // Pause → ack-skip; the cache is untouched (no rebuild, no eviction).
     await store.setReviewEnabled(appX.id, false);
     await consumer(makeBatch(makePayload({ pr_number: 43, botRef: { appId: appX.id }, targetId: appX.targetId })));
-    expect(ackIds).toEqual(["m0"]); // batch-local message ids restart at m0
+    // Two acks: PR 42 handed off to its Workflow instance and PR 43 was the
+    // paused skip (batch-local message ids restart at m0).
+    expect(ackIds).toEqual(["m0", "m0"]);
     expect(factoryCreds).toHaveLength(1);
 
     // Resume → the VERY NEXT review runs (恢复后下一次 review 生效), served

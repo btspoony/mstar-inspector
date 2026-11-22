@@ -65,6 +65,13 @@ function fixture(): TestD1 {
     OPERATOR,
     "2026-10-01T00:00:00.000Z",
   );
+  // The route's operating switch: ON here (the acceptance gate is OFF by
+  // default per spec § Deployment gate; this suite exercises the preview).
+  seed(
+    db,
+    `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+     VALUES ('review.route.workflow', 'on', datetime('now'))`,
+  );
   return db;
 }
 

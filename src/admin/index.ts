@@ -28,6 +28,8 @@ import {
   CONCURRENCY_MIN,
   RECHECK_ASSIGNMENT_MAX,
   RECHECK_ASSIGNMENT_MIN,
+  REVIEW_ATTEMPT_CAP_MAX_MS,
+  REVIEW_ATTEMPT_CAP_MIN_MS,
   RuntimeConfigError,
   SWEEP_LIMITS,
   SYSTEM_CONCURRENCY_MAX,
@@ -36,6 +38,7 @@ import {
   getCommentClaimSettings,
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
+  getReviewAttemptCapSetting,
   getSweepSettings,
   getSystemConcurrency,
   isConcurrencyValue,
@@ -47,6 +50,7 @@ import {
   setMaintenanceMode,
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
+  setReviewAttemptCap,
   setSweepSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -61,6 +65,11 @@ import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
+import {
+  DURATION_REPORT_CAP_MAX_MS,
+  DURATION_REPORT_CAP_MIN_MS,
+} from "../contracts/duration-report";
+import { readReviewDurationReport } from "./duration-report";
 import {
   findDataUpgrade,
   listDataUpgrades,
@@ -220,6 +229,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     sweep,
     level,
     recheck,
+    attemptCap,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
@@ -231,6 +241,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     getSweepSettings(db),
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
+    getReviewAttemptCapSetting(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
@@ -278,6 +289,15 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: RECHECK_ASSIGNMENT_MAX,
       degraded: recheck.degraded,
     },
+    // The one end-to-end attempt cap. `saved` separates a stored value from
+    // the absent-row default, so the console never shows a default as a save.
+    attemptCap: {
+      capMs: attemptCap.capMs,
+      saved: attemptCap.saved,
+      min: REVIEW_ATTEMPT_CAP_MIN_MS,
+      max: REVIEW_ATTEMPT_CAP_MAX_MS,
+      degraded: attemptCap.degraded,
+    },
     // Admission drops the pipeline already records as `review_failures` rows,
     // grouped by the reason token of the drop prefix over the last 24h — the
     // sub-threshold signal the failure sweep cannot page on.
@@ -292,6 +312,35 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     // what `/dashboard/*` is answering rather than echoing its own last save.
     maintenance: await getMaintenanceMode(db),
   });
+}
+
+/**
+ * The duration analysis report (`GET /api/runtime/duration-report`): the
+ * observed distribution an operator reads before choosing the attempt cap.
+ * `capMs` is a candidate for the "what would this cut off" read only — this
+ * handler writes nothing and owns no configuration key. The report module owns
+ * the window, the sample and the exclusions.
+ */
+async function readDurationReport(c: AdminContext): Promise<Response> {
+  const login = await operatorLogin(c);
+  if (!login) return c.notFound();
+  const db = c.env.DB;
+  if (!db) return c.notFound();
+  const rawCap = c.req.query("capMs");
+  let capMs: number | null = null;
+  if (rawCap !== undefined) {
+    const parsed = Number(rawCap);
+    if (!Number.isInteger(parsed) || parsed < DURATION_REPORT_CAP_MIN_MS || parsed > DURATION_REPORT_CAP_MAX_MS) {
+      return c.json(
+        {
+          error: `capMs must be an integer in ${DURATION_REPORT_CAP_MIN_MS}..${DURATION_REPORT_CAP_MAX_MS}`,
+        },
+        400,
+      );
+    }
+    capMs = parsed;
+  }
+  return c.json(await readReviewDurationReport(db, { nowMs: Date.now(), capMs }));
 }
 
 /** The accepted `commentClaim` body shape; the store owns the accepted ranges. */
@@ -347,6 +396,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawSweep: unknown;
   let rawLevel: unknown;
   let rawRecheck: unknown;
+  let rawAttemptCap: unknown;
   let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
@@ -356,6 +406,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       sweep?: unknown;
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
+      attemptCap?: unknown;
       maintenance?: unknown;
     };
     concurrency = body.concurrency;
@@ -364,6 +415,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawSweep = body.sweep;
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
+    rawAttemptCap = body.attemptCap;
     rawMaintenance = body.maintenance;
   } catch {
     // malformed body → the shape gate's 400, never a 500
@@ -371,14 +423,21 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   // One save writes one parameter: a body carrying more than one is a shape
   // error, so a refused half can never leave another half written.
   if (
-    [concurrency, rawBudgets, rawClaim, rawSweep, rawLevel, rawRecheck, rawMaintenance].filter(
-      (value) => value !== undefined,
-    ).length > 1
+    [
+      concurrency,
+      rawBudgets,
+      rawClaim,
+      rawSweep,
+      rawLevel,
+      rawRecheck,
+      rawAttemptCap,
+      rawMaintenance,
+    ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reviewLevel | recheckAssignment | attemptCap | maintenance",
       },
       400,
     );
@@ -431,6 +490,22 @@ async function setRuntime(c: AdminContext): Promise<Response> {
           maxBytes: await setRecheckAssignmentMaxBytes(db, maxBytes, login),
         },
       });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawAttemptCap !== undefined) {
+    const capMs =
+      typeof rawAttemptCap === "object" && rawAttemptCap !== null && "capMs" in rawAttemptCap
+        ? rawAttemptCap.capMs
+        : undefined;
+    if (typeof capMs !== "number") {
+      return c.json({ error: "body must be { attemptCap: { capMs } }" }, 400);
+    }
+    try {
+      // The store owns the accepted range and names it in the refusal.
+      return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;
@@ -1041,6 +1116,7 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },
+  { method: "get", path: "/api/runtime/duration-report", handler: readDurationReport },
   { method: "patch", path: "/api/runtime", handler: setRuntime },
   { method: "get", path: "/api/workspaces", handler: readWorkspaces },
   { method: "get", path: "/api/users", handler: readUsers },
