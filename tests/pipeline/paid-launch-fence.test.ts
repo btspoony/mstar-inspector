@@ -14,6 +14,7 @@ import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { MarkedRun } from "../../src/pipeline/sandbox";
 import type { D1Like } from "../../src/store/types";
+import { secretTransforms } from "../../src/pipeline/redact";
 import { failingDb } from "../helpers/consumer-fixtures";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -454,7 +455,7 @@ describe("no runner output reaches durable storage before redaction", () => {
     });
 
     expect(execution.run.stdout).not.toContain(secret);
-    expect(execution.run.stdout).toContain("[REDACTED]");
+    expect(execution.run.stdout).toContain("[redacted]");
     expect(execution.report?.overview).not.toContain(secret);
     expect(execution.report?.overview).toContain("[REDACTED]");
     // The durable copy — what a later collect and a later host can read — is
@@ -469,6 +470,101 @@ describe("no runner output reaches durable storage before redaction", () => {
     };
     expect(row.run.stdout).toBe(execution.run.stdout);
     expect(row.report?.overview).toBe(execution.report?.overview);
+  });
+
+  test("every transformed echo of the key is gone from the stored payload", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const secret = "sk-live/9f2a44c1d3";
+    const forms = secretTransforms(secret);
+    const echoes = [forms.raw, forms.urlEncoded, forms.base64, forms.base64url, forms.hex];
+    // The escaped echo is a JSON escape in the serialized envelope, so only
+    // decoding (not a substring form) can recover the raw character.
+    const stdout =
+      `{"schema":"mstar.review/v1","target":{"head_sha":"${SHA}"},"attempt_id":"${ATTEMPT}",` +
+      `"score":0.5,"blocked":false,"echoes":${JSON.stringify(echoes)},` +
+      `"escaped":"sk-live\\u002f9f2a44c1d3"}`;
+
+    const execution = await runReviewAttempt({
+      ...executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db),
+      appCfg: { keys: { ark: [secret] }, modelChain: "ark/deepseek-v4-flash" },
+    });
+
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    // Stored shape is the module's own `encodeExecution` contract.
+    const row = JSON.parse(stored.result_json) as { run: { stdout: string; exitCode: number } };
+    const envelope = JSON.parse(row.run.stdout) as {
+      target: { head_sha: string };
+      attempt_id: string;
+      score: number;
+      blocked: boolean;
+      echoes: string[];
+      escaped: string;
+    };
+    expect(envelope.echoes).toEqual(Array(5).fill("[redacted]"));
+    expect(envelope.escaped).toBe("[redacted]");
+    // Host-written identity and non-string leaves are the unredacted bytes.
+    expect(envelope.target.head_sha).toBe(SHA);
+    expect(envelope.attempt_id).toBe(ATTEMPT);
+    expect(envelope.score).toBe(0.5);
+    expect(envelope.blocked).toBe(false);
+    expect(row.run.exitCode).toBe(0);
+    expect(execution.run.stdout).toBe(row.run.stdout);
+    // The stored bytes did change — that is the point — but they are still a
+    // serialized envelope this build can parse.
+    expect(row.run.stdout).not.toBe(stdout);
+  });
+
+  test("a short credential is counted once, not once per retained document", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const warns: Record<string, unknown>[] = [];
+    const capture = {
+      info: () => {},
+      warn: (fields: Record<string, unknown>) => {
+        warns.push(fields);
+      },
+    };
+
+    await runReviewAttempt({
+      ...executionInput(sandboxDouble({ marker: "present", paidStdout: '{"note":"abc"}' }), db),
+      deps: { log: capture, env: { DB: db } },
+      appCfg: { keys: { ark: ["abc"] }, modelChain: "ark/deepseek-v4-flash" },
+    });
+
+    const skipWarn = warns.find((fields) => "skipped_credentials" in fields);
+    expect(skipWarn?.skipped_credentials).toBe(1);
+  });
+
+  test("a payload carrying no secret serializes byte-identically", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const stdout = JSON.stringify({
+      schema: "mstar.review/v1",
+      target: { head_sha: SHA },
+      attempt_id: ATTEMPT,
+      score: 1,
+      blocked: false,
+    });
+
+    // The only evidence the envelope is not reshaped: its own bytes round-trip.
+    expect(JSON.stringify(JSON.parse(stdout))).toBe(stdout);
+
+    await runReviewAttempt(executionInput(sandboxDouble({ marker: "present", paidStdout: stdout }), db));
+
+    const stored = db.raw
+      .prepare("SELECT result_json FROM review_launches WHERE attempt_id = ?")
+      .get(ATTEMPT) as { result_json: string };
+    expect(stored.result_json).toBe(
+      JSON.stringify({
+        run: { stdout, exitCode: 0 },
+        recheck: null,
+        report: null,
+        appliedProvider: null,
+      }),
+    );
   });
 });
 

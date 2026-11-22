@@ -45,6 +45,253 @@ export function redactExactSecrets(text: string, values: readonly string[]): str
   return out;
 }
 
+/** Marker replacing every transformed occurrence of a secret. */
+const TRANSFORMED_REDACTED = "[redacted]";
+
+/** Stands in for an existing marker while secrets are replaced; restored after. */
+const MARKER_SENTINEL = "\u0000marker\u0000";
+
+// why: a value shorter than a credential cannot be redacted safely — it would
+// match ordinary text (and a 3-char secret matches inside a SHA).
+const MIN_SECRET_LENGTH = 8;
+
+/** A retained document whose host-written identity paths are protected. */
+export type RetainedDocument = "run" | "recheck" | "report" | "text";
+
+/**
+ * The identity paths, per document. Protection is STRUCTURAL — by position, not
+ * by key name — because a key name is model-forgeable: through this table a
+ * value under `target.head_sha` is host-written, while the same text nested
+ * inside `summary_md` is model output and stays redactable.
+ *
+ * `*` matches any array index. A path that is absent is simply absent.
+ */
+const IDENTITY_PATHS: Record<RetainedDocument, readonly (readonly string[])[]> = {
+  run: [
+    ["target", "head_sha"],
+    ["target", "headSha"],
+    ["attempt_id"],
+    ["run_id"],
+    ["launch_id"],
+  ],
+  recheck: [
+    ["doc", "headSha"],
+    ["status", "headSha"],
+    ["doc", "results", "*", "rowId"],
+    // The recheck wire's evidence is one object per result, not a list.
+    ["doc", "results", "*", "evidence", "sliceId"],
+  ],
+  // The report wire's only host-bound field; it carries no checkKey/generation.
+  report: [["headSha"]],
+  text: [],
+};
+
+/**
+ * The BOUNDED transform set of one secret: the forms a session can echo when it
+ * encodes a credential it holds. JSON escaping is NOT here — the envelope is
+ * parsed before matching, so `\u002f`, `\/` and `\n` are already decoded.
+ */
+export type SecretTransforms = {
+  raw: string;
+  urlEncoded: string;
+  base64: string;
+  /** RFC 4648 §5: `-`/`_` alphabet, padding stripped. */
+  base64url: string;
+  hex: string;
+};
+
+/** The transforms of one secret. Pure; the transform set IS this function. */
+export function secretTransforms(secret: string): SecretTransforms {
+  const bytes = new TextEncoder().encode(secret);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  const base64 = btoa(binary);
+  return {
+    raw: secret,
+    urlEncoded: encodeURIComponent(secret),
+    base64,
+    base64url: base64.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, ""),
+    hex: [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(""),
+  };
+}
+
+/** What one document redaction changed. */
+export type RedactionOutcome<T> = {
+  value: T;
+  /** Occurrences replaced across every string leaf. */
+  replaced: number;
+};
+
+/** Mutable counter one walk threads through its leaves. */
+type RedactionState = { replaced: number };
+
+/** The applicable credential forms, longest first. */
+function applicableForms(secrets: readonly string[]): string[] {
+  const forms = new Set<string>();
+  for (const secret of new Set(secrets)) {
+    if (secret === "" || secret.length < MIN_SECRET_LENGTH) continue;
+    for (const form of Object.values(secretTransforms(secret))) {
+      if (form !== "") forms.add(form);
+    }
+  }
+  // A shorter form that is a substring of a longer one must not shred the
+  // longer match first.
+  return [...forms].sort((left, right) => right.length - left.length);
+}
+
+/**
+ * Credentials this pass will NOT apply, counted ONCE per distinct value: a skip
+ * is a property of the secret list, not of a document count, so four documents
+ * with one short value report 1. Empty values are not credentials.
+ */
+export function skippedSecrets(secrets: readonly string[]): number {
+  let skipped = 0;
+  for (const secret of new Set(secrets)) {
+    if (secret !== "" && secret.length < MIN_SECRET_LENGTH) skipped += 1;
+  }
+  return skipped;
+}
+
+/**
+ * Redact ONE retained document root.
+ *
+ * Identity is protected by explicit path (`IDENTITY_PATHS` for `document`), not
+ * by key name: each value found at a host-written path is parked behind a
+ * sentinel, the whole document is redacted, and the value is restored. A path
+ * the document does not carry is simply absent. Forged model text — e.g. a
+ * `summary_md` containing `{"head_sha": …}` — is at no protected path, so it is
+ * redacted like any other text.
+ *
+ * A string document that parses as JSON (after trimming) is worked on as a
+ * structure: `\u002f`, `\/` and `\n` are decoded before matching, and the result
+ * is serialized again ONLY when a replacement happened — an untouched document
+ * keeps its exact bytes, surrounding whitespace included. A changed one loses
+ * that padding. Any other string is redacted as text.
+ *
+ * Every string leaf at every depth is redacted; non-string leaves, object keys
+ * and container shape pass through. Idempotence is structural: an existing
+ * `[redacted]` marker is parked before secret replacement and restored after, so
+ * a second pass is a no-op and a model-printed marker shields nothing.
+ *
+ * Shape patterns (`redactSecrets`) stay OUT: their long-hex rule rewrites a
+ * host-written `head_sha`.
+ */
+// limit: a credential split across two leaves, or one the model double-escaped (it decodes to literal `\uXXXX` text), is missed.
+export function redactDocument<T>(
+  value: T,
+  secrets: readonly string[],
+  document: RetainedDocument,
+): RedactionOutcome<T> {
+  const forms = applicableForms(secrets);
+  const state: RedactionState = { replaced: 0 };
+  if (forms.length === 0) return { value, replaced: 0 };
+  const redacted = redactRoot(value, forms, state, IDENTITY_PATHS[document]);
+  return { value: redacted as T, replaced: state.replaced };
+}
+
+function redactRoot(
+  value: unknown,
+  forms: readonly string[],
+  state: RedactionState,
+  paths: readonly (readonly string[])[],
+): unknown {
+  const saved = new Map<string, string>();
+  if (typeof value === "string") {
+    const parsed = parseDocument(value);
+    if (parsed === undefined) return redactText(value, forms, state);
+    const protectedDoc = protectIdentity(parsed, paths, saved);
+    const redacted = redactAny(protectedDoc, forms, state);
+    // Untouched document: return the original bytes, trimming included.
+    return state.replaced === 0 ? value : JSON.stringify(restoreIdentity(redacted, saved));
+  }
+  return restoreIdentity(redactAny(protectIdentity(value, paths, saved), forms, state), saved);
+}
+
+/** Every string leaf at every depth; no key is exempt at this stage. */
+function redactAny(value: unknown, forms: readonly string[], state: RedactionState): unknown {
+  if (typeof value === "string") return redactText(value, forms, state);
+  // A Set is not walked by `Object.entries`: `attempt.recheck.rejected` is one.
+  if (value instanceof Set) return new Set([...value].map((item) => redactAny(item, forms, state)));
+  if (Array.isArray(value)) return value.map((item) => redactAny(item, forms, state));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, redactAny(item, forms, state)]),
+    );
+  }
+  return value;
+}
+
+/**
+ * One text leaf: park every existing marker, replace every form of every
+ * secret, restore the markers. Parking is what makes a second pass a no-op and
+ * stops a model-printed `[redacted]` from shielding anything.
+ */
+function redactText(text: string, forms: readonly string[], state: RedactionState): string {
+  const parked = text.split(TRANSFORMED_REDACTED).join(MARKER_SENTINEL);
+  let out = parked;
+  for (const form of forms) {
+    const parts = out.split(form);
+    if (parts.length === 1) continue;
+    state.replaced += parts.length - 1;
+    out = parts.join(TRANSFORMED_REDACTED);
+  }
+  return out === parked ? text : out.split(MARKER_SENTINEL).join(TRANSFORMED_REDACTED);
+}
+
+/** Parsed object/array of an optionally whitespace-padded JSON document. */
+function parseDocument(text: string): unknown {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Replace each protected path's string value with a sentinel, remembering it. */
+function protectIdentity(
+  value: unknown,
+  paths: readonly (readonly string[])[],
+  saved: Map<string, string>,
+): unknown {
+  const walk = (node: unknown, at: readonly string[]): unknown => {
+    if (typeof node === "string") {
+      // `*` in a table path matches an array index; everything else exactly.
+      const protectedPath = paths.some(
+        (path) => path.length === at.length && path.every((segment, index) => segment === at[index]),
+      );
+      if (!protectedPath) return node;
+      const token = `\u0000id:${saved.size}\u0000`;
+      saved.set(token, node);
+      return token;
+    }
+    if (node instanceof Set) return new Set([...node].map((item) => walk(item, [...at, "*"])));
+    if (Array.isArray(node)) return node.map((item) => walk(item, [...at, "*"]));
+    if (node !== null && typeof node === "object") {
+      return Object.fromEntries(
+        Object.entries(node).map(([key, item]) => [key, walk(item, [...at, key])]),
+      );
+    }
+    return node;
+  };
+  return walk(value, []);
+}
+
+/** Put every parked identity value back. */
+function restoreIdentity(value: unknown, saved: ReadonlyMap<string, string>): unknown {
+  if (typeof value === "string") return saved.get(value) ?? value;
+  if (value instanceof Set) return new Set([...value].map((item) => restoreIdentity(item, saved)));
+  if (Array.isArray(value)) return value.map((item) => restoreIdentity(item, saved));
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, restoreIdentity(item, saved)]),
+    );
+  }
+  return value;
+}
+
 /** The model-controlled `incomplete` fact (declared cause + unscanned scope). */
 type IncompleteFact = NonNullable<ReviewOutput["incomplete"]>;
 

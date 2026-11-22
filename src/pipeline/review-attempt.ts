@@ -20,7 +20,7 @@ import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
-import { redactExactSecrets, redactSecrets } from "./redact";
+import { redactDocument, redactExactSecrets, redactSecrets, skippedSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like } from "../store/types";
@@ -893,32 +893,6 @@ function encodeExecution(execution: ReviewAttemptExecution): string {
     report: execution.report,
     appliedProvider: execution.appliedProvider,
   });
-}
-
-/**
- * The paid result with every string it carries made safe to store: the exact
- * values this session's exec was given are removed from the stdout envelope,
- * the recheck document and status, and the report. The walk is over the WHOLE
- * value rather than a field list, so a field added later is covered without an
- * edit here; it runs ONCE, before both the durable write and the return, so a
- * caller cannot publish the raw stream either.
- *
- * Exact-only, deliberately: `redactSecrets` would also rewrite the envelope's
- * long hex `head_sha` and turn valid output into a parse failure (R3-1 in the
- * plan-QC fix report). `[REDACTED]` carries no quote, backslash or control
- * character, so a replaced value can never invalidate the document.
- */
-function redactExecution<T>(value: T, secrets: readonly string[]): T {
-  if (secrets.length === 0) return value;
-  if (typeof value === "string") return redactExactSecrets(value, secrets) as T;
-  if (value instanceof Set) return new Set([...value].map((item) => redactExecution(item, secrets))) as T;
-  if (Array.isArray(value)) return value.map((item) => redactExecution(item, secrets)) as T;
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, item]) => [key, redactExecution(item, secrets)]),
-    ) as T;
-  }
-  return value;
 }
 
 function decodeExecution(attemptId: string, json: string): ReviewAttemptExecution {
@@ -2453,18 +2427,32 @@ export async function runReviewAttempt(input: {
   // rejected write is explicitly unknown: it may have landed.
   //
   // NO runner output crosses the persistence boundary unredacted. The exact
-  // values this session's own exec received are removed HERE, on the host that
-  // holds them; the stored and the returned value are this one sanitized
-  // object, so nothing downstream can publish the raw stream either.
-  const execution = redactExecution(
-    {
-      run: { stdout: run.stdout, stderr: "", exitCode: run.exitCode },
-      recheck,
-      report,
-      appliedProvider,
-    },
-    progress.secretValues,
-  );
+  // values this session's own exec received, and every bounded transform of
+  // them, are removed HERE, on the host that holds them; the stored and the
+  // returned value are this one sanitized object, so nothing downstream can
+  // publish the raw stream either. Each retained document is redacted as its
+  // own root, with its host-written identity protected BY PATH — a forged
+  // `{"head_sha": …}` in model text is at no protected path and is redacted.
+  const secretValues = progress.secretValues;
+  const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");
+  const recheckRedaction = redactDocument(recheck, secretValues, "recheck");
+  const reportRedaction = redactDocument(report, secretValues, "report");
+  const providerRedaction = redactDocument(appliedProvider, secretValues, "text");
+  const skipped = skippedSecrets(secretValues);
+  if (skipped > 0) {
+    // Visible, never silent: these credentials were NOT applied (each was
+    // shorter than a credential), so a text echo of one would survive.
+    deps.log.warn(
+      { ...fields, skipped_credentials: skipped },
+      "credential redaction skipped a value shorter than a credential",
+    );
+  }
+  const execution = {
+    run: { stdout: stdoutRedaction.value, stderr: "", exitCode: run.exitCode },
+    recheck: recheckRedaction.value,
+    report: reportRedaction.value,
+    appliedProvider: providerRedaction.value,
+  };
   let recorded = false;
   try {
     recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());
