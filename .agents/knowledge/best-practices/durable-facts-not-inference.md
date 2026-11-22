@@ -42,3 +42,20 @@ The first production framing was "we need more than 900 s". The actual defect wa
 - A stranded container has no verified absolute reclamation bound.
 - Exact-value redaction misses a transformed echo; a shape pass corrupts the envelope.
 - A settlement replayer grown under review pressure needs a design pass, not another patch.
+
+## Corollary: a surface may not claim more than its evidence
+
+The same rule applies to what an operator *reads*, not only to what the system stores. Three shapes recurred across the duration report and its write control:
+
+| Shape | What it looked like | What replaced it |
+|---|---|---|
+| A distribution that silently drops what it cannot measure | percentiles over a cohort whose end boundary was written early | five counted exclusions with a tested accounting identity, disclosed on the surface |
+| A number the store may not hold | the card rendering its own save echo | re-read after save; on any doubt show *that it does not know*, never a candidate value |
+| A statement broader than the record | "obligations are proven closed" / "every sample has a concluded Check" | the conditional the code actually implements |
+
+Two rules fall out, both cheap to apply and expensive to skip:
+
+1. **A rejection is not an observation.** A 4xx proves the store did not change *this time*; it says nothing about what happened between the last read and now. Re-read, or show unknown.
+2. **A sentence must be derivable from the selection code.** If a claim needs a condition the code does not enforce, the sentence is wrong — not the code. "Where the attempt has a frozen Check" is honest; "every sample has a concluded Check" is not, even when most do.
+
+The failure mode this prevents is quiet: nothing errors, no test turns red, and an operator makes a costly decision on a number that was never true.
