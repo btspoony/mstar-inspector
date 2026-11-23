@@ -81,7 +81,7 @@ const HELPER_STORE_PROBE = `
 import { createInMemoryAuthStorage } from "./packages/runner/src/runner";
 const storage = await createInMemoryAuthStorage();
 await storage.credentials.set("openai", [{ type: "api_key", key: "__KEY__", source: "login" }]);
-console.log("KEY=" + (await storage.getApiKey("openai")));
+console.log("KEY=" + (await storage.keys.get("openai")));
 storage.close();
 `;
 
@@ -1171,7 +1171,7 @@ describe("runner entry — transported credential pool", () => {
     expect(log).toEqual({ event: "credential_pool", provider: "ark", pool_size: 2 });
     expect(stderr).not.toContain(sk("pool-one"));
     expect(stderr).not.toContain(sk("pool-two"));
-    expect(await (runStores.at(-1) as AuthStorage).getApiKey("ark")).toBe(sk("pool-one"));
+    expect(await (runStores.at(-1) as AuthStorage).keys.get("ark")).toBe(sk("pool-one"));
   });
 
   test("custom providers pool under their own id, in payload order", async () => {
@@ -1344,7 +1344,7 @@ describe("runner entry — transported credential pool", () => {
     const log = JSON.parse(stderr) as { event: string; provider: string; pool_size: number };
     expect(log).toEqual({ event: "credential_pool", provider: "openai", pool_size: 1 });
     expect(stderr).not.toContain(sk("builtin-one"));
-    expect(await (runStores.at(-1) as AuthStorage).getApiKey("openai")).toBe(sk("builtin-one"));
+    expect(await (runStores.at(-1) as AuthStorage).keys.get("openai")).toBe(sk("builtin-one"));
     expect(readFileSync(join(preservedAgentDir(), "models.yml"), "utf8")).toBe("providers:\n");
   });
 
@@ -1410,7 +1410,7 @@ describe("runner entry — transported credential pool", () => {
       seeded.close();
 
       const storage = await AuthStorage.create(dbPath);
-      await storage.reload();
+      await storage.credentials.reload();
       const registry = new ModelRegistry(storage, join(dir, "models.yml"));
       expect(await registry.getApiKeyForProvider("openai")).toBeUndefined();
       expect(existsSync(marker)).toBe(true);
@@ -1526,7 +1526,7 @@ describe("runner entry — transported credential pool", () => {
         await storage.credentials.set("probe", [
           { type: "api_key", key: sk("probe-key"), source: "login" },
         ]);
-        expect(await storage.getApiKey("probe")).toBe(sk("probe-key"));
+        expect(await storage.keys.get("probe")).toBe(sk("probe-key"));
         expect(paths).toEqual([":memory:"]);
       } finally {
         storage.close();
@@ -1550,7 +1550,7 @@ describe("runner entry — transported credential pool", () => {
     expect(storage.credentials.list("ark").map((row) => row.credential)).toEqual([
       { type: "api_key", key: sk("mem-only-key"), source: "login" },
     ]);
-    expect(await storage.getApiKey("ark")).toBe(sk("mem-only-key"));
+    expect(await storage.keys.get("ark")).toBe(sk("mem-only-key"));
     expect(stderr).not.toContain(sk("mem-only-key"));
 
     expect(existsSync(join(preservedAgentDir(), "agent.db"))).toBe(false);
