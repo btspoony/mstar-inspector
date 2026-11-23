@@ -339,7 +339,7 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
 
   test("the Apps list health column reads only the caller's repositories on a shared bot", async () => {
     db = sharedWorld();
-    async function listHealth(ref: string, login: string) {
+    async function listHealth(ref: string, login: string, botId: string) {
       const session = await createSessionValue(login, null, SESSION_SECRET);
       const res = await worker.fetch(
         new Request("https://worker.local/dashboard/" + ref + "/api/apps", {
@@ -351,15 +351,30 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
       const body = (await res.json()) as {
         apps: Array<{ bot_id: string; health: { latest: { event_name: string | null } | null; rejected24h: number } }>;
       };
-      return body.apps.find((row) => row.bot_id === "bot-home")!.health;
+      return body.apps.find((row) => row.bot_id === botId)!.health;
     }
 
-    const consumer = await listHealth(OTHER, "erin");
+    seedOwnedBot(db, "bot-third", 8199, OFFICIAL);
+    setScope(db, "bot-third", "shared");
+    seedTarget(db, "bot-third", { workspaceId: OTHER, repoOwner: "acme", repoName: "gadgets" });
+    const delivery = db.raw.prepare(
+      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+       VALUES (?, 'bot-third', ?, ?, ?, ?, NULL)`,
+    );
+    delivery.run("d-third-gadgets", "check_run", "rejected", 401, "acme/gadgets");
+    delivery.run("d-third-globex", "pull_request", "ok", null, "globex/secret-repo");
+
+    const consumer = await listHealth(OTHER, "erin", "bot-home");
     expect(consumer.rejected24h).toBe(0);
     expect(consumer.latest).toEqual(expect.objectContaining({ event_name: "pull_request", outcome: "ok" }));
+    const consumerThird = await listHealth(OTHER, "erin", "bot-third");
+    expect(consumerThird.rejected24h).toBe(1);
+    expect(consumerThird.latest).toEqual(expect.objectContaining({ event_name: "check_run", outcome: "rejected" }));
 
-    const owner = await listHealth(OFFICIAL, "dana");
+    const owner = await listHealth(OFFICIAL, "dana", "bot-home");
     expect(owner.rejected24h).toBe(1);
+    const ownerThird = await listHealth(OFFICIAL, "dana", "bot-third");
+    expect(ownerThird.latest).toEqual(expect.objectContaining({ event_name: "pull_request", outcome: "ok" }));
   });
 
   test("the owning workspace still reads the whole App", async () => {
