@@ -444,6 +444,42 @@ export async function fetchInstallationRepositories(
   }
 }
 
+/** The GitHub account an installation is installed on. */
+export type InstallationAccount = { login: string; type: string };
+
+/**
+ * One installation's account — `GET /app/installations/{id}` with the App JWT.
+ * `null` is "no usable answer"; zero retries, nothing thrown.
+ */
+export async function fetchInstallationAccount(
+  installationId: number,
+  appJwt: string,
+): Promise<InstallationAccount | null> {
+  try {
+    const res = await fetch(`${GITHUB_APP_INSTALLATIONS_URL}/${installationId}`, {
+      method: "GET",
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers: {
+        Authorization: `Bearer ${appJwt}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "mstar-inspector",
+      },
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return null;
+    }
+    const data = (await res.json().catch(() => null)) as { account?: { login?: unknown; type?: unknown } } | null;
+    const login = data?.account?.login;
+    const type = data?.account?.type;
+    if (typeof login !== "string" || login === "" || typeof type !== "string") return null;
+    return { login, type };
+  } catch {
+    return null;
+  }
+}
+
 /** Mint the App JWT these installation reads share (throws on an unusable key). */
 export async function mintInstallationJwt(githubAppId: number, decryptedPem: string): Promise<string> {
   return mintAppJwt(githubAppId, decryptedPem);
