@@ -508,6 +508,11 @@ export function AppInstallSection({
         setBindFailed(true);
         return;
       }
+      const body = JSON.parse(res.body) as { authorize_url?: unknown };
+      if (typeof body.authorize_url === "string") {
+        window.location.assign(body.authorize_url);
+        return;
+      }
       await onReload({ background: true });
     } catch {
       setBindFailed(true);

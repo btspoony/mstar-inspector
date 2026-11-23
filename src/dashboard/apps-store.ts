@@ -111,6 +111,9 @@ export type AppInstallationRow = {
   seen_at: string;
 };
 
+/** The outcome of binding one installation to a workspace. */
+export type BindInstallationOutcome = "bound" | "bound_elsewhere" | "unknown";
+
 /**
  * One installation INCLUDING a removed one — the bound-state read. Unlike
  * `AppInstallationRow` (the install-health panel's PRESENT rows), a removed
@@ -781,12 +784,68 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return res.results;
     },
 
+    /**
+     * The live installations bound to one workspace — the only rows a shared
+     * bot's repository walk, target creation and bind may read for that
+     * workspace, since the bot's other rows belong to other customers.
+     */
+    async listInstallationsBoundTo(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
+      const res = await db
+        .prepare(
+          `SELECT installation_id, account_login, seen_at FROM bot_installations
+           WHERE bot_id = ? AND bound_workspace_id = ? AND removed_at IS NULL
+           ORDER BY seen_at DESC, installation_id`,
+        )
+        .bind(appId, workspaceId)
+        .all<AppInstallationRow>();
+      return res.results;
+    },
+
+    async getInstallationBinding(
+      appId: string,
+      installationId: number,
+    ): Promise<{ bound_workspace_id: string | null; removed_at: string | null } | null> {
+      return db
+        .prepare(
+          `SELECT bound_workspace_id, removed_at FROM bot_installations
+           WHERE bot_id = ? AND installation_id = ?`,
+        )
+        .bind(appId, installationId)
+        .first<{ bound_workspace_id: string | null; removed_at: string | null }>();
+    },
+
+    /**
+     * Bind a live installation to a workspace. First binder wins: a row already
+     * bound to another workspace is never rebound here.
+     */
+    async bindInstallation(
+      appId: string,
+      installationId: number,
+      workspaceId: string,
+    ): Promise<BindInstallationOutcome> {
+      const res = await db
+        .prepare(
+          `UPDATE bot_installations SET bound_workspace_id = ?3
+           WHERE bot_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
+             AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3)`,
+        )
+        .bind(appId, installationId, workspaceId)
+        .run();
+      if (res.meta.changes > 0) return "bound";
+      const row = await db
+        .prepare(`SELECT removed_at FROM bot_installations WHERE bot_id = ? AND installation_id = ?`)
+        .bind(appId, installationId)
+        .first<{ removed_at: string | null }>();
+      return row !== null && row.removed_at === null ? "bound_elsewhere" : "unknown";
+    },
+
     async listPendingInstallations(appId: string, workspaceId: string): Promise<AppInstallationRow[]> {
       const res = await db
         .prepare(
           `SELECT i.installation_id, i.account_login, i.seen_at FROM bot_installations i
              JOIN review_bots b ON b.id = i.bot_id
             WHERE i.bot_id = ?1 AND i.removed_at IS NULL
+              AND (i.bound_workspace_id IS NULL OR i.bound_workspace_id = ?2)
               AND (b.scope = 'shared'
                    OR EXISTS (SELECT 1 FROM bot_workspaces w
                                WHERE w.bot_id = b.id AND w.workspace_id = ?2))

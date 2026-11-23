@@ -685,6 +685,7 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(written.n).toBe(0);
 
     seedTarget(db, sharedId, { workspaceId: "default", repoId: 1302, repoOwner: "acme", repoName: "web" });
+    expect(await createReviewBotsStore(db).bindInstallation(sharedId, INSTALLATION, "default")).toBe("bound");
     const accepted = await post(db, "/dashboard/default/api/targets", "mallory", body);
     expect(accepted.status).toBe(201);
     const acceptedBody = (await accepted.json()) as { created: Array<{ repo_id: number }>; duplicates: unknown[] };

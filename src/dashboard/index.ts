@@ -4,7 +4,14 @@ import { orderedReads } from "./ordered-reads";
 import { providerCatalog } from "./provider-catalog";
 import { PR_VERDICTS, type PrVerdict } from "@mstar-harness/engine";
 import { deploymentModeOf, type DeploymentMode, type Env } from "../worker/env";
-import { buildAuthorizeUrl, exchangeCodeForToken, fetchGitHubUser, logOAuthFailure } from "./oauth";
+import {
+  BIND_OAUTH_SCOPE,
+  buildAuthorizeUrl,
+  exchangeCodeForToken,
+  fetchGitHubUser,
+  isGitHubOrgAdmin,
+  logOAuthFailure,
+} from "./oauth";
 import {
   FIRST_INSTANCE_COOKIE,
   FIRST_INSTANCE_MAX_AGE_SEC,
@@ -16,9 +23,13 @@ import {
   createSessionValue,
   createStateValue,
   expireCookie,
+  randomToken,
   readSessionValue,
   serializeCookie,
+  signValue,
+  timingSafeEqual,
   verifyStateValue,
+  verifyValue,
   type SessionPayload,
 } from "./session";
 import {
@@ -116,6 +127,7 @@ import {
   fetchAppVisibility,
   fetchInstallationRepositories,
   isGithubMetadataStale,
+  fetchInstallationAccount,
   mintInstallationAccessToken,
   mintInstallationJwt,
   type InstallationRepository,
@@ -874,6 +886,10 @@ dashboardApp.post("/login", startOAuthLogin);
 dashboardApp.get("/oauth/callback", async (c) => {
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const bindCookie = getCookie(c, BIND_STATE_COOKIE);
+  if (bindCookie !== undefined && bindCookie === c.req.query("state")) {
+    return completeInstallationBind(c, secrets, bindCookie);
+  }
   c.header("Set-Cookie", expireCookie(OAUTH_STATE_COOKIE));
   const stateOk = await verifyStateValue(
     getCookie(c, OAUTH_STATE_COOKIE),
@@ -4003,6 +4019,73 @@ async function requireTargetManagerJson(
   };
 }
 
+/**
+ * The installation rows a workspace may walk for one App. A shared App (or any
+ * App the caller's workspace does not own) is installed on other customers'
+ * accounts too, so only the rows bound to the caller's workspace count.
+ */
+function installationsVisibleTo(
+  apps: ReturnType<typeof createReviewBotsStore>,
+  app: Pick<GithubAppRow, "id" | "scope" | "workspace_id">,
+  workspaceId: string,
+) {
+  return app.scope === "shared" || app.workspace_id !== workspaceId
+    ? apps.listInstallationsBoundTo(app.id, workspaceId)
+    : apps.listInstallations(app.id);
+}
+
+const BIND_STATE_COOKIE = "__Host-mstar-bind-state";
+const BIND_STATE_MAX_AGE_SEC = 600;
+const BIND_STATE_KIND = "installation-bind";
+
+type BindStatePayload = {
+  kind: typeof BIND_STATE_KIND;
+  nonce: string;
+  login: string;
+  workspaceId: string;
+  botId: string;
+  installationId: number;
+  returnTo: string;
+  exp: number;
+};
+
+async function readBindState(
+  cookieValue: string,
+  stateParam: string | undefined,
+  secret: string,
+): Promise<BindStatePayload | null> {
+  if (!stateParam) return null;
+  const enc = new TextEncoder();
+  if (!timingSafeEqual(enc.encode(cookieValue), enc.encode(stateParam))) return null;
+  const raw = await verifyValue(cookieValue, secret);
+  if (raw === null) return null;
+  let payload: Partial<BindStatePayload>;
+  try {
+    payload = JSON.parse(raw) as Partial<BindStatePayload>;
+  } catch {
+    return null;
+  }
+  if (payload.kind !== BIND_STATE_KIND) return null;
+  if (typeof payload.exp !== "number" || payload.exp <= Math.floor(Date.now() / 1000)) return null;
+  if (
+    typeof payload.login !== "string" ||
+    typeof payload.workspaceId !== "string" ||
+    typeof payload.botId !== "string" ||
+    typeof payload.installationId !== "number" ||
+    typeof payload.returnTo !== "string" ||
+    !payload.returnTo.startsWith("/dashboard/")
+  ) {
+    return null;
+  }
+  return payload as BindStatePayload;
+}
+
+/**
+ * Start binding one pending installation of a shared App to the caller's
+ * workspace. Nothing is written here: the caller is sent through a GitHub
+ * OAuth step-up (`read:org`), and the callback binds only after the user's own
+ * token proves they administer the installation's account.
+ */
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -4017,13 +4100,116 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   if (!Number.isSafeInteger(installationId) || installationId <= 0) {
     return c.json({ error: "installationId required" }, 400);
   }
-  const pending = await apps.listInstallations(app.id);
+  const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
   if (!pending.some((row) => row.installation_id === installationId)) {
     return c.json({ error: "unknown installation" }, 404);
   }
-  await apps.upsertInstallation({ appId: app.id, installationId });
-  return c.json({ botId: app.id, installationId });
+  const binding = await apps.getInstallationBinding(app.id, installationId);
+  if (binding?.bound_workspace_id === member.scope.workspaceId) {
+    return c.json({ botId: app.id, installationId, bound: true });
+  }
+  const secrets = dashboardSecrets(c.env);
+  if (!secrets) return c.text("dashboard OAuth is not configured", 500);
+  const workspaceRef = c.req.param("workspaceRef") ?? member.scope.workspaceId;
+  const payload: BindStatePayload = {
+    kind: BIND_STATE_KIND,
+    nonce: randomToken(),
+    login: member.session.login,
+    workspaceId: member.scope.workspaceId,
+    botId: app.id,
+    installationId,
+    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=settings`,
+    exp: Math.floor(Date.now() / 1000) + BIND_STATE_MAX_AGE_SEC,
+  };
+  const state = await signValue(JSON.stringify(payload), secrets.sessionSecret);
+  c.header("Set-Cookie", serializeCookie(BIND_STATE_COOKIE, state, BIND_STATE_MAX_AGE_SEC));
+  const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
+  return c.json({
+    botId: app.id,
+    installationId,
+    bound: false,
+    authorize_url: buildAuthorizeUrl(secrets.clientId, callbackUri, state, BIND_OAUTH_SCOPE),
+  });
 };
+
+/**
+ * The OAuth callback half of the bind: the state must be this session's own
+ * bind cookie, the GitHub user must be the signed-in user and still a manager
+ * of the workspace, and their token must show they administer the account the
+ * installation is installed on (the user themself, or an org they are an
+ * active admin of). Only then is the installation bound to the workspace.
+ */
+async function completeInstallationBind(
+  c: DashboardContext,
+  secrets: NonNullable<ReturnType<typeof dashboardSecrets>>,
+  bindCookie: string,
+): Promise<Response> {
+  c.header("Set-Cookie", expireCookie(BIND_STATE_COOKIE));
+  const locale = requestLocale(c);
+  const fail = (key: Parameters<typeof t>[1], status: 400 | 403 | 404 | 409 | 500 | 502, reason: string) => {
+    logOAuthFailure("installation_bind", reason);
+    return c.html(errorPage(t(locale, key), locale), status);
+  };
+  const state = await readBindState(bindCookie, c.req.query("state"), secrets.sessionSecret);
+  if (state === null) return fail("common.oauth.stateInvalid", 400, "state_mismatch");
+  const session = await readSessionValue(getCookie(c, SESSION_COOKIE), secrets.sessionSecret);
+  if (!session || session.login.toLowerCase() !== state.login.toLowerCase()) {
+    return fail("common.oauth.stateInvalid", 400, "session_mismatch");
+  }
+  const code = c.req.query("code");
+  if (!code) return fail("common.oauth.missingCode", 400, "missing_code");
+  if (!GITHUB_CODE_SHAPE.test(code)) return fail("common.oauth.codeRejected", 400, "unsafe_code_shape");
+  const callbackUri = `${new URL(c.req.url).origin}/dashboard/oauth/callback`;
+  const token = await exchangeCodeForToken(code, secrets.clientId, secrets.clientSecret, callbackUri);
+  if (!token) return fail("common.oauth.codeRejected", 502, "token_exchange");
+  const user = await fetchGitHubUser(token);
+  if (!user) return fail("common.oauth.profileFailed", 502, "user_fetch");
+  if (user.login.toLowerCase() !== session.login.toLowerCase()) {
+    return fail("common.oauth.bindDenied", 403, "user_mismatch");
+  }
+  const db = dashboardD1(c.env);
+  if (!db) return c.text("dashboard storage is not configured", 500);
+  const access = await getWorkspaceAccessById(db, state.workspaceId, session.login);
+  if (access === null || !canManageRole(access.role)) {
+    return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
+  }
+  const apps = createReviewBotsStore(db);
+  const named = await apps.getAppById(state.botId);
+  const app =
+    named === null || named.deleted_at !== null
+      ? null
+      : await apps.getScopedAppByGithubId(named.github_app_id, state.workspaceId);
+  if (app === null || app.scope !== "shared") return fail("common.oauth.bindUnavailable", 404, "unknown_app");
+  const binding = await apps.getInstallationBinding(app.id, state.installationId);
+  if (binding === null || binding.removed_at !== null) {
+    return fail("common.oauth.bindUnavailable", 404, "unknown_installation");
+  }
+  if (binding.bound_workspace_id !== null && binding.bound_workspace_id !== state.workspaceId) {
+    return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  }
+  if (!c.env.DASHBOARD_ENCRYPTION_KEY) return c.text("dashboard encryption is not configured", 500);
+  let account: Awaited<ReturnType<typeof fetchInstallationAccount>>;
+  try {
+    const pem = await createSecretbox(c.env.DASHBOARD_ENCRYPTION_KEY).decryptSecret(
+      app.private_key_enc,
+      `github_apps.private_key_enc:${app.id}`,
+    );
+    account = await fetchInstallationAccount(state.installationId, await mintInstallationJwt(app.github_app_id, pem));
+  } catch (err) {
+    logSettingsFailure("installation_bind_key", app.id, err);
+    account = null;
+  }
+  if (account === null) return fail("common.oauth.bindUnavailable", 502, "installation_fetch");
+  const administers =
+    account.type === "User"
+      ? account.login.toLowerCase() === user.login.toLowerCase()
+      : account.type === "Organization" && (await isGitHubOrgAdmin(token, account.login));
+  if (!administers) return fail("common.oauth.bindDenied", 403, "not_account_admin");
+  const outcome = await apps.bindInstallation(app.id, state.installationId, state.workspaceId);
+  if (outcome === "bound_elsewhere") return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
+  if (outcome === "unknown") return fail("common.oauth.bindUnavailable", 404, "unknown_installation");
+  return c.redirect(state.returnTo, 302);
+}
 
 function pullRequestWireColumns(row: {
   title: string | null;
@@ -4267,6 +4453,7 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
 async function walkInstallationRepositories(
   db: DashboardDb,
   app: GithubAppRow,
+  workspaceId: string,
   encryptionKey: string | undefined,
 ): Promise<{
   byRepoId: Map<number, InstallationRepository>;
@@ -4285,7 +4472,7 @@ async function walkInstallationRepositories(
     logSettingsFailure("installation_repositories_key", app.id, err);
     return null;
   }
-  const installations = await createReviewBotsStore(db).listInstallations(app.id);
+  const installations = await installationsVisibleTo(createReviewBotsStore(db), app, workspaceId);
   const byRepoId = new Map<number, InstallationRepository>();
   let failures = 0;
   for (const installation of installations) {
@@ -4316,7 +4503,12 @@ const appInstallationRepositoriesRoute = async (c: DashboardContext): Promise<Re
   );
   if (!app) return c.json({ error: "unknown app" }, 404);
   if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
-  const walked = await walkInstallationRepositories(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const walked = await walkInstallationRepositories(
+    member.db,
+    app,
+    member.scope.workspaceId,
+    c.env.DASHBOARD_ENCRYPTION_KEY,
+  );
   if (walked === null || (walked.installations > 0 && walked.failures === walked.installations)) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
   }
@@ -4377,7 +4569,12 @@ const targetCreateRoute = async (c: DashboardContext): Promise<Response> => {
   if (!named || named.deleted_at !== null) return c.json({ error: "unknown app" }, 404);
   const app = await resolveScopedApp(apps, String(named.github_app_id), member.scope);
   if (!app) return c.json({ error: "unknown app" }, 404);
-  const walked = await walkInstallationRepositories(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const walked = await walkInstallationRepositories(
+    member.db,
+    app,
+    member.scope.workspaceId,
+    c.env.DASHBOARD_ENCRYPTION_KEY,
+  );
   if (walked === null || walked.failures > 0) {
     return c.json({ error: "installation_repositories_unavailable" }, 502);
   }

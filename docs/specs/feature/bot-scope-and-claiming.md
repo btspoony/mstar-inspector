@@ -36,6 +36,13 @@ and offers the bind action for each one this target has not bound yet. There is
 no pre-install intent table and no callback route: the app-creation manifest sets
 no `setup_url`, so GitHub never redirects to one.
 
+A shared bot is installed on many customers' accounts, so each of its
+installations is bound to at most one workspace (`bot_installations.bound_workspace_id`,
+migration 0104). The bind writes that column only after the signed-in manager's
+own GitHub user token shows they administer the installation's account; the
+webhook never writes it. For a shared bot the repository walk, target creation
+and the bind read only installations bound to the caller's workspace.
+
 Migration 0081 drops `install_claims`; migration 0067 dropped the target-keyed
 variant before it.
 
@@ -71,6 +78,7 @@ verdict per delivery, recorded once.
 
 - `shared` is platform-authorized and batch-verified against the current designation.
 - The bind writes only an installation the bot already reported: the pending read is the gate, so an id the bot never saw attaches nothing.
+- A shared bot's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another workspace is never rebound (first binder wins).
 - A wrong installation is repaired at the installation level; no per-target binding column exists to clear.
 - The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
 - A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
@@ -95,9 +103,11 @@ A workspace may read a target when it holds that live target: the repository cla
 
 ### Pending installations and binding
 
-`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded), and is empty unless the bot is `shared` or mapped to the addressed workspace.
+`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded) and that are unbound or bound to the addressed workspace, and is empty unless the bot is `shared` or mapped to the addressed workspace.
 
-`POST /api/apps/:appId/bind-installation` (manager, `access: write`) upserts `bot_installations` directly — the webhook's own conflict-tolerant `ON CONFLICT (bot_id, installation_id)` upsert. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared` (nothing written); malformed id → 400; id absent from the pending read → 404 `unknown installation`.
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) writes nothing itself. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared`; malformed id → 400; id absent from the pending read (including one bound to another workspace) → 404 `unknown installation`; already bound here → `200 { bound: true }`. Otherwise it sets a signed, short-lived bind-state cookie and answers `200 { bound: false, authorize_url }`, a GitHub OAuth step-up with `read:user read:org`.
+
+The OAuth callback recognises that state and binds only when every check holds, else it renders an error page and binds nothing: the state matches this browser's cookie and is unexpired; the GitHub user is the signed-in user and still manages the workspace; the installation is live and not bound elsewhere (409); and the installation's account (`GET /app/installations/{id}`, App JWT) is either that same user or an organization where `GET /user/memberships/orgs/{org}` with the user's token is `active` + `admin` (else 403). The write is `UPDATE … SET bound_workspace_id` guarded by `bound_workspace_id IS NULL OR = caller`. The user token is used for these reads only and is never stored.
 
 ### Derived Blocked state
 

@@ -2,6 +2,8 @@
 import { GITHUB_CODE_SHAPE } from "./github-code-shape";
 
 export const OAUTH_SCOPE = "read:user";
+/** The step-up scope the installation bind asks for: org admin roles are under `read:org`. */
+export const BIND_OAUTH_SCOPE = "read:user read:org";
 
 const GITHUB_HEADERS = {
   Accept: "application/vnd.github+json",
@@ -16,7 +18,7 @@ const GITHUB_FETCH_TIMEOUT_MS = 10_000;
  * stages, reasons, and upstream statuses are not secrets.
  */
 export function logOAuthFailure(
-  stage: "state_verify" | "callback" | "token_exchange" | "user_fetch" | "sign_in",
+  stage: "state_verify" | "callback" | "token_exchange" | "user_fetch" | "sign_in" | "installation_bind",
   reason: string,
   extra: Record<string, unknown> = {},
 ): void {
@@ -28,11 +30,16 @@ function errorType(err: unknown): string {
   return String(err);
 }
 
-export function buildAuthorizeUrl(clientId: string, redirectUri: string, state: string): string {
+export function buildAuthorizeUrl(
+  clientId: string,
+  redirectUri: string,
+  state: string,
+  scope: string = OAUTH_SCOPE,
+): string {
   const url = new URL("https://github.com/login/oauth/authorize");
   url.searchParams.set("client_id", clientId);
   url.searchParams.set("redirect_uri", redirectUri);
-  url.searchParams.set("scope", OAUTH_SCOPE);
+  url.searchParams.set("scope", scope);
   url.searchParams.set("state", state);
   return url.toString();
 }
@@ -112,4 +119,26 @@ export async function fetchGitHubUser(accessToken: string): Promise<GitHubUser |
   }
   logOAuthFailure("user_fetch", "unexpected_payload");
   return null;
+}
+
+/**
+ * Whether the token's user is an active admin of the GitHub organization —
+ * `GET /user/memberships/orgs/{org}` with the user's own token (needs
+ * `read:org`). Any failure, a pending membership or a non-admin role is false.
+ */
+export async function isGitHubOrgAdmin(accessToken: string, org: string): Promise<boolean> {
+  try {
+    const res = await fetch(`https://api.github.com/user/memberships/orgs/${encodeURIComponent(org)}`, {
+      signal: AbortSignal.timeout(GITHUB_FETCH_TIMEOUT_MS),
+      headers: { ...GITHUB_HEADERS, Authorization: `Bearer ${accessToken}` },
+    });
+    if (!res.ok) {
+      await res.body?.cancel();
+      return false;
+    }
+    const data = (await res.json().catch(() => null)) as { state?: unknown; role?: unknown } | null;
+    return data?.state === "active" && data.role === "admin";
+  } catch {
+    return false;
+  }
 }
