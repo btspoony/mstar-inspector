@@ -1185,6 +1185,18 @@ export const en = {
         "The save's outcome is unknown: the request did not answer, so it may or may not have been stored. Retry reads the stored value back; no number is shown until it does.",
       attemptCapUnreadable:
         "The stored maximum duration could not be read, so no new review is admitted until it is readable again or a new value is saved.",
+      lostReplyTitle: "Lost reply window",
+      lostReplyDescription:
+        "How long a review may sit with its paid step launched and no reply before the scheduled pass settles it as a lost reply. The review is then terminal, its capacity is released and its Check reports a failure; re-trigger the review to run it again.",
+      lostReplyLabel: "Window (ms)",
+      lostReplyRange:
+        "Accepted range: {min}–{max} ms ({minMinutes}–{maxMinutes} minutes). A value outside it is refused.",
+      lostReplySave: "Save",
+      lostReplySaved: "Saved.",
+      lostReplyFailed: "Could not change the lost reply window.",
+      lostReplyCurrent: "Effective on the next pass: {value} ms after the launch.",
+      lostReplyUnreadable:
+        "The stored lost reply window could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       routeWorkflowTitle: "Review route",
       routeWorkflowDescription:
         "Whether a queued review delivery creates a Workflow instance. Off refuses every delivery; a change applies to the next batch.",

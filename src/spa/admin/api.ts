@@ -142,6 +142,17 @@ export type AttemptCapConfig = {
 };
 
 /**
+ * The lost-reply observation window as the operator API reports it: how long a
+ * launched row may stay outcome-less before the recovery pass settles it.
+ */
+export type LostReplySettleConfig = {
+  settleMs: number;
+  min: number;
+  max: number;
+  degraded: boolean;
+};
+
+/**
  * The review route's operating switch as the operator API reports it: the
  * gate's own answer (`mode`) plus what the stored row holds behind it. A
  * hand-edited row the read path refuses answers `off` with `degraded: true`,
@@ -197,6 +208,7 @@ export type RuntimeConfig = {
   reconcile: ReconcileConfig | null;
   recheckAssignment: RecheckAssignmentConfig | null;
   attemptCap: AttemptCapConfig | null;
+  lostReplySettle: LostReplySettleConfig | null;
   routeWorkflow: RouteWorkflowConfig | null;
   maintenance: MaintenanceConfig | null;
   admissionDrops24h: AdmissionDropCounts | null;
@@ -297,6 +309,18 @@ function parseAttemptCap(row: Json): AttemptCapConfig | null {
   };
 }
 
+function parseLostReplySettle(row: Json): LostReplySettleConfig | null {
+  const raw = row.lostReplySettle;
+  if (raw === undefined) return null;
+  const window = map(raw, "runtime lostReplySettle");
+  return {
+    settleMs: num(window, "settleMs"),
+    min: num(window, "min"),
+    max: num(window, "max"),
+    degraded: bool(window, "degraded"),
+  };
+}
+
 function routeWorkflowGate(raw: unknown): RouteWorkflowConfig | null {
   if (typeof raw !== "object" || raw === null) return null;
   const gate = raw as Json;
@@ -378,6 +402,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     reconcile: parseReconcile(body),
     recheckAssignment: parseRecheckAssignment(body),
     attemptCap: parseAttemptCap(body),
+    lostReplySettle: parseLostReplySettle(body),
     routeWorkflow: parseRouteWorkflow(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
@@ -617,6 +642,30 @@ export async function setAttemptCap(capMs: number, stored: AttemptCapConfig): Pr
     }
   }
   return { ...stored, capMs, saved: true, degraded: false };
+}
+
+/**
+ * Save the lost-reply observation window, answering the value the server
+ * stored. Same rule as `setAttemptCap`: the echo is the stored number, and a
+ * 2xx with an unreadable body still landed, so the request value stands in.
+ */
+export async function setLostReplySettleMs(
+  settleMs: number,
+  stored: LostReplySettleConfig,
+): Promise<LostReplySettleConfig> {
+  const answer = await write("PATCH", "/runtime", { lostReplySettle: { settleMs } });
+  if (typeof answer === "object" && answer !== null && "lostReplySettle" in answer) {
+    const saved = answer.lostReplySettle;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "settleMs" in saved &&
+      typeof saved.settleMs === "number"
+    ) {
+      return { ...stored, settleMs: saved.settleMs, degraded: false };
+    }
+  }
+  return { ...stored, settleMs, degraded: false };
 }
 
 /**

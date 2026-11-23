@@ -3,6 +3,7 @@ import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "./helper
 import {
   deliveryKeyOf,
   landFailureEffect,
+  listLostReplyLaunchSettlements,
   listUnpublishedLaunchSettlements,
   markAttemptSettled,
   reserveAttemptHandoff,
@@ -58,6 +59,54 @@ function effectsOf(db: TestD1, attemptId: string): { settled_ms: number | null; 
     .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
     .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
 }
+
+describe("the lost-reply selector", () => {
+  async function seedLaunched(db: TestD1, attemptId: string, launchedAtMs: number): Promise<void> {
+    const payload = payloadFor(attemptId);
+    await reserveAttemptHandoff(db, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId,
+      payload,
+      nowMs: NOW - 900_000,
+      createdMs: NOW - 900_000,
+      enqueuedMs: 0,
+      deadlineMs: NOW,
+    });
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms)
+         VALUES (?, 'launched', ?, ?)`,
+      )
+      .run(attemptId, NOW - 900_000, launchedAtMs);
+  }
+
+  test("only a launched row past the bound with no failure record is selected", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT_ID, 424242);
+    seedTarget(db, BOT_ID, { id: TARGET_ID });
+    await seedLaunched(db, "attempt-old", NOW - 900_000);
+    await seedLaunched(db, "attempt-new", NOW - 1);
+    await seedLaunched(db, "attempt-recorded", NOW - 900_000);
+    // A row another producer already recorded: the anti-join keeps it out.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, 123, 'acme', 'widgets', 7, ?, 'pipeline', 'recorded', 'review.paid.reply_lost', ?, 'recorded', datetime('now'))`,
+      )
+      .run("attempt-recorded", TARGET_ID, "a".repeat(40), "attempt-recorded");
+    // A persisted row is not a lost reply: that lane owns it.
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES ('attempt-persisted', 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run(NOW - 900_000, NOW - 800_000, NOW - 700_000);
+
+    const selected = await listLostReplyLaunchSettlements(db, { launchedBeforeMs: NOW - 600_000, limit: 25 });
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+  });
+});
 
 describe("the unpublished-launch selector's failure-row exclusion", () => {
   test("only a failure-row without a landed claim stamp leaves the lane", async () => {

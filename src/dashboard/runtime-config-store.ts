@@ -619,6 +619,86 @@ export async function getReviewAttemptCap(db: DashboardD1): Promise<ReviewAttemp
 /** The review route's operating switch: `on` admits a queue delivery to a Workflow. */
 export const REVIEW_ROUTE_WORKFLOW_KEY = "review.route.workflow";
 
+/** PK of the lost-reply observation window (the paid exec's reply never arrived). */
+export const LOST_REPLY_SETTLE_KEY = "review.lostReply.settle_ms";
+/**
+ * Absent row: 15 minutes from the launch instant. The longest runner budget is
+ * the deep tier's 646 s (`RUNNER_MAX_BUDGET_MS`) plus the 5 s kill grace, so a
+ * lost reply's child is bounded by ~651 s; 15 minutes leaves ~250 s of headroom
+ * for a slow sandbox hand-off before the row is called lost. This is the only
+ * liveness proxy the pass has, so the default must never be shorter than that.
+ */
+export const LOST_REPLY_SETTLE_DEFAULT_MS = 900_000;
+/**
+ * Range of a stored window. Below 660 s the window could settle a row whose
+ * runner is still inside its own budget, which would declare a live review
+ * lost; one hour is the most capacity one attempt may hold unobserved.
+ */
+export const LOST_REPLY_SETTLE_MIN_MS = 660_000;
+export const LOST_REPLY_SETTLE_MAX_MS = 3_600_000;
+
+/** The window and whether the stored value could be trusted. */
+export type LostReplySettleRead = { settleMs: number; degraded: boolean; reason?: DegradedReason };
+
+/**
+ * The lost-reply window on its own. Only an absent row is the default; an
+ * untrusted stored value or a read failure answers the default with
+ * `degraded: true` and never throws — the reconciliation pass must still run.
+ */
+export async function getLostReplySettleMs(db: DashboardD1): Promise<LostReplySettleRead> {
+  try {
+    const row = await db
+      .prepare(`SELECT value FROM review_runtime_settings WHERE key = ?1`)
+      .bind(LOST_REPLY_SETTLE_KEY)
+      .first<RuntimeSettingRow>();
+    if (row === null) return { settleMs: LOST_REPLY_SETTLE_DEFAULT_MS, degraded: false };
+    if (row.value === undefined) {
+      return { settleMs: LOST_REPLY_SETTLE_DEFAULT_MS, degraded: true, reason: "malformed" };
+    }
+    const parsed = parseInRange(row.value, LOST_REPLY_SETTLE_MIN_MS, LOST_REPLY_SETTLE_MAX_MS);
+    if (Number.isNaN(parsed)) {
+      return { settleMs: LOST_REPLY_SETTLE_DEFAULT_MS, degraded: true, reason: "untrusted" };
+    }
+    return { settleMs: parsed ?? LOST_REPLY_SETTLE_DEFAULT_MS, degraded: false };
+  } catch {
+    return { settleMs: LOST_REPLY_SETTLE_DEFAULT_MS, degraded: true, reason: "read-failed" };
+  }
+}
+
+const LOST_REPLY_SETTLE_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.lost_reply_settle.set', 'runtime', ?3,
+          json_object('before', json_object('settleMs', ${storedBudgetSql("?5", "NULL", LOST_REPLY_SETTLE_MIN_MS, LOST_REPLY_SETTLE_MAX_MS)}),
+                      'after', json_object('settleMs', ?4)),
+          ?6)`;
+
+/**
+ * Set the lost-reply window. A value outside its range refuses the write
+ * (`invalid_value`) with no row and no audit entry; an accepted value is
+ * audited with the actor in ONE batch and returned.
+ */
+export async function setLostReplySettleMs(
+  db: DashboardD1,
+  value: number,
+  actor: string,
+): Promise<number> {
+  if (!isIntegerIn(value, LOST_REPLY_SETTLE_MIN_MS, LOST_REPLY_SETTLE_MAX_MS)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `the lost-reply window must be an integer in ${LOST_REPLY_SETTLE_MIN_MS}..${LOST_REPLY_SETTLE_MAX_MS} ms`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(LOST_REPLY_SETTLE_AUDIT_SQL)
+      .bind(crypto.randomUUID(), actor, LOST_REPLY_SETTLE_KEY, value, LOST_REPLY_SETTLE_KEY, now),
+    db.prepare(SYSTEM_UPSERT_SQL).bind(LOST_REPLY_SETTLE_KEY, String(value), now, actor),
+  ]);
+  return value;
+}
+
 /**
  * The gate's answer. `off` is the answer for an ABSENT row, a stored `off`, an
  * untrusted value and an unreadable row alike — the modes are deliberately not

@@ -19,7 +19,7 @@ import { providerEnvName } from "./provider-catalog";
 import { redactDocument, redactExactSecrets, redactSecrets } from "./redact";
 import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
-import type { D1Like } from "../store/types";
+import type { D1Like, D1StatementLike } from "../store/types";
 import {
   attemptKey,
   deferCheckForPendingPublication,
@@ -427,6 +427,30 @@ UPDATE review_launches
 SET state = 'failed', failed_at_ms = ?, result_outcome = 'failed'
 WHERE attempt_id = ? AND state = 'launched'
 `;
+
+/**
+ * The same conditional write as a STATEMENT, for a caller that must land it in
+ * ONE batch beside the durable failure row it stands for (the lost-reply
+ * settlement): a row may never be authorised as settled ahead of the fact it
+ * records, and a half-applied settlement must not exist.
+ */
+export function recordReviewFailureStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
+  return db.prepare(RECORD_LAUNCH_FAILURE_SQL).bind(nowMs, attemptId);
+}
+
+/**
+ * The REVOCATION as a statement (see `markAttemptRevoked`), for a settlement
+ * that must clear the attempt's capacity hold in the same batch: an expired
+ * admission row keeps holding its slot while its attempt is activated and never
+ * revoked, and a window that proved no live child is exactly the evidence
+ * `revoke()` would have given. Idempotent: an already-revoked row matches zero.
+ */
+export function markAttemptRevokedStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
+  return db
+    .prepare(`UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ? AND revoked_ms IS NULL`)
+    .bind(nowMs, attemptId);
+}
+
 
 const ABANDON_LAUNCH_SQL = `
 INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id)

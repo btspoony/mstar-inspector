@@ -530,7 +530,16 @@ export async function settlementStatementForEffects(
  */
 export async function landFailureEffect(
   db: D1Like,
-  input: AttemptSettlementInput & { failure: ReviewFailureInput },
+  input: AttemptSettlementInput & {
+    failure: ReviewFailureInput;
+    /**
+     * Statements that must land in the SAME batch, before the row and its fact:
+     * a settlement that also moves the attempt's own state (the lost-reply
+     * pass clears `launched`) may never be half-applied — either state alone
+     * would hide the attempt from every lane that could finish it.
+     */
+    statementsBefore?: readonly D1StatementLike[];
+  },
   nowMs: number,
 ): Promise<{ landed: boolean; owned: boolean }> {
   const landed: SettlementEffect[] = input.landed.includes("failure-row")
@@ -538,7 +547,13 @@ export async function landFailureEffect(
     : [...input.landed, "failure-row"];
   const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
   if (mark === null) return { landed: false, owned: false };
-  const [insert] = await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
+  const results = await db.batch([
+    ...(input.statementsBefore ?? []),
+    settlementFailureRowStatement(db, input.failure, input.attemptId),
+    mark,
+  ]);
+  // The row insert is second-to-last; the mark always closes the batch.
+  const insert = results[results.length - 2];
   return { landed: true, owned: (insert?.meta.changes ?? 0) === 1 };
 }
 
@@ -810,6 +825,49 @@ export async function listUnpublishedLaunchSettlements(
         LIMIT ?`,
     )
     .bind(input.deadlineBeforeMs, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
+ * The lost-reply observation window (I-000694): the paid exec was issued, its
+ * reply never arrived, and the window that bounds the child has now elapsed.
+ * `settleAttemptFailure` leaves exactly this shape on purpose — `launched` with
+ * no `result_outcome` and `containerStateUnknown: true`, because a paid child
+ * may still be running — but nothing used to move the row afterwards, so the
+ * attempt held capacity forever and its Check never terminalized.
+ *
+ * `launched_at_ms + window <= now` is the ONLY liveness proxy there is: the
+ * runner budget plus the kill grace bound a live child, so a row past a window
+ * comfortably longer than that pair has no live child left to protect. The
+ * anti-join on `review_failures` is the idempotence guard: the failure row is
+ * keyed by the attempt, so a row that already settled once is never selected
+ * again and a concurrent pass can never mint a second one.
+ *
+ * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
+ * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
+ * moves the row to `failed` it stops matching both, so this pass is the ONE
+ * mechanism that releases the hold — no second time bound is added there.
+ */
+export async function listLostReplyLaunchSettlements(
+  db: D1Like,
+  input: { launchedBeforeMs: number; limit: number },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_launches l ON l.attempt_id = h.attempt_id
+        WHERE l.state = 'launched' AND l.result_outcome IS NULL
+          AND l.launched_at_ms IS NOT NULL AND l.launched_at_ms <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
+          )
+        ORDER BY l.launched_at_ms, h.delivery_key
+        LIMIT ?`,
+    )
+    .bind(input.launchedBeforeMs, input.limit)
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }
