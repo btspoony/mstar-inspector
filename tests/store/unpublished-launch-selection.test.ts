@@ -8,6 +8,7 @@ import {
   markAttemptSettled,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
+import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const NOW = 1_000_000;
@@ -95,19 +96,6 @@ describe("the lost-reply selector", () => {
     // A frozen deadline older than the bound is selected; one inside it is not.
     await seedLaunched(db, "attempt-old", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
     await seedLaunched(db, "attempt-new", { launchedAtMs: NOW - 1, deadlineMs: NOW - 300_000 });
-    // An unanchored row is never this lane's — even when ancient: settling on a
-    // synthesized `created_ms + cap` could stop a live child whose admitted cap
-    // was larger than this pass's read.
-    await seedLaunched(db, "attempt-unanchored-ancient", {
-      launchedAtMs: NOW - 900_000,
-      deadlineMs: null,
-      createdMs: NOW - 1_800_000,
-    });
-    await seedLaunched(db, "attempt-unanchored", {
-      launchedAtMs: NOW - 900_000,
-      deadlineMs: null,
-      createdMs: NOW - 500_000,
-    });
     await seedLaunched(db, "attempt-recorded", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
 
     // A row another producer already recorded: the anti-join keeps it out.
@@ -143,6 +131,62 @@ describe("the lost-reply selector", () => {
       limit: 25,
     });
     expect(insideWindow).toEqual([]);
+  });
+
+  test("a pre-column row with no frozen deadline settles only past the cap ceiling plus the window", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT_ID, 424242);
+    seedTarget(db, BOT_ID, { id: TARGET_ID });
+    const windowMs = 600_000;
+    const ceilingBound = NOW - windowMs - REVIEW_ATTEMPT_CAP_MAX_MS;
+    // Old enough: its hard stop (created + cap) is at worst `launched + the cap
+    // ceiling`, so a launch past that plus the grace has no live child left.
+    await seedLaunched(db, "legacy-stale", {
+      launchedAtMs: ceilingBound - 1,
+      deadlineMs: null,
+      createdMs: ceilingBound - 1_001,
+    });
+    // Exactly at the bound is inside the bound (`<=`), like the anchored branch.
+    await seedLaunched(db, "legacy-at-bound", {
+      launchedAtMs: ceilingBound,
+      deadlineMs: null,
+      createdMs: ceilingBound - 1_000,
+    });
+    // Older than the window but younger than the ceiling: a paid child admitted
+    // under a large cap could still be live, so this one is left alone.
+    await seedLaunched(db, "legacy-inside-ceiling", {
+      launchedAtMs: NOW - windowMs - 1,
+      deadlineMs: null,
+      createdMs: NOW - windowMs - 1_001,
+    });
+
+    const selected = await listLostReplyLaunchSettlements(db, {
+      deadlineBeforeMs: NOW - windowMs,
+      limit: 25,
+    });
+    // Both legacy rows carry a NULL deadline, so they order by delivery key.
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["legacy-at-bound", "legacy-stale"]);
+    // The legacy rows carry no anchor: the pass must fall back to the ceiling.
+    expect(selected.map((handoff) => handoff.deadlineMs)).toEqual([null, null]);
+  });
+
+  test("a row with neither a deadline nor a launch instant is skipped", async () => {
+    const db = createMigratedTestD1();
+    seedBot(db, BOT_ID, 424242);
+    seedTarget(db, BOT_ID, { id: TARGET_ID });
+    await seedLaunched(db, "legacy-no-launch-instant", { launchedAtMs: NOW, deadlineMs: null });
+    // The schema's own CHECK couples `launched` to its instant; this row is the
+    // malformed shape the selector still has to refuse, so the constraint is
+    // lifted just for the insert.
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
+    db.raw.prepare("UPDATE review_launches SET launched_at_ms = NULL WHERE attempt_id = ?").run("legacy-no-launch-instant");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
+
+    const selected = await listLostReplyLaunchSettlements(db, {
+      deadlineBeforeMs: NOW + REVIEW_ATTEMPT_CAP_MAX_MS * 2,
+      limit: 25,
+    });
+    expect(selected).toEqual([]);
   });
 });
 

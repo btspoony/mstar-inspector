@@ -5,7 +5,7 @@ import {
   IDEMPOTENCY_SECONDS,
   idemKey,
 } from "../contracts/idem";
-import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
+import { getLostReplySettleMs, REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
@@ -218,7 +218,9 @@ async function ensureRecheckAccounting(
  * row `launched` with no outcome, because a paid child MAY still be running,
  * and `PAID_STATE_UNKNOWN` is what holds the container and the capacity slot.
  * Only the attempt's own hard stop plus a post-deadline grace can say the
- * child is gone, and this pass is where that judgement lands.
+ * child is gone, and this pass is where that judgement lands. An anchored row
+ * uses its frozen `deadline_ms`; a pre-column row with none uses the maximum
+ * attempt cap as an upper bound on that stop.
  *
  * The guarded move to `failed` is the GATE: every other write in this pass is
  * issued only when its `changes` says this pass won the row — a row that
@@ -247,9 +249,13 @@ async function settleLostReplies(
     return;
   }
   for (const handoff of candidates) {
-    // The selector admits only a frozen deadline; an unanchored row is another lane's.
+    // An anchored row settles at its frozen deadline; a pre-column legacy row has
+    // none and settles at the selector's cap-ceiling bound.
     const deadlineMs = handoff.deadlineMs;
-    if (deadlineMs === null) continue;
+    const detail =
+      deadlineMs === null
+        ? `a pre-column legacy attempt carries no frozen deadline; its launch is older than the maximum attempt cap (${REVIEW_ATTEMPT_CAP_MAX_MS} ms) plus ${windowMs} ms of grace, and no reply ever arrived`
+        : `attempt deadline ${new Date(deadlineMs).toISOString()} passed more than ${windowMs} ms ago, and no reply ever arrived`;
     let moved: D1Result[];
     try {
       moved = await env.DB.batch([
@@ -267,7 +273,7 @@ async function settleLostReplies(
         env,
         handoff,
         new Set<SettlementEffect>(handoff.settledEffects ?? []),
-        `attempt deadline ${new Date(deadlineMs).toISOString()} passed more than ${windowMs} ms ago, and no reply ever arrived`,
+        detail,
         nowMs,
         {
           code: "review.paid.reply_lost",
@@ -275,7 +281,7 @@ async function settleLostReplies(
       );
       log?.info?.(
         { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
-        `lost reply settled ${windowMs} ms past its attempt deadline — capacity released, the attempt is terminal`,
+        `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`,
       );
     } catch (err) {
       // The guarded batch above already made the row terminal (`failed`, revoked,
@@ -383,8 +389,9 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // path every other settled failure takes, and moving the launch row to
   // `failed` is what releases the hold. The window is read once per pass, never
   // cached: an operator change applies to the next sweep. No attempt cap is read
-  // here: the lane settles only rows that froze their own `deadline_ms`, so a
-  // cap resolved now can never move a live child's stop earlier.
+  // here either: an anchored row settles from its frozen `deadline_ms`, and a
+  // pre-column row from the cap's constant validation ceiling, so neither can
+  // move a live child's stop earlier.
   const lostReply = await getLostReplySettleMs(env.DB);
   await settleLostReplies(env, lostReply.settleMs, nowMs, env.log);
   // A claim whose delivery died before recording anything. The state transition

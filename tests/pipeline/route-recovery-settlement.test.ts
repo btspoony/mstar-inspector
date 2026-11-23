@@ -17,7 +17,7 @@ import {
 } from "../../src/store/review-route-store";
 import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
-import { LOST_REPLY_SETTLE_MIN_MS } from "../../src/dashboard/runtime-config-store";
+import { LOST_REPLY_SETTLE_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -1181,21 +1181,30 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(faultLine?.fields.head_sha).toBe(payload.head_sha!);
   });
 
-  test("a row with no frozen deadline is never settled, even when ancient", async () => {
+  test("a pre-column row with no frozen deadline settles once the cap ceiling plus the window has passed", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-unanchored";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    // note: A pre-column row: nothing proves when its paid exec was killed, and a
-    // cap resolved in this pass may be smaller than the one it was admitted under.
+    // note: A pre-column row: it froze no deadline, so the only bound that can
+    // prove its child dead is the cap's own validation ceiling above its launch.
     db.raw.prepare("UPDATE review_attempt_handoffs SET deadline_ms = NULL WHERE attempt_id = ?").run(attemptId);
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
+    const bound = LAUNCHED_AT + REVIEW_ATTEMPT_CAP_MAX_MS + WINDOW_MS;
 
-    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 3_600_000);
-
+    // note: Older than the window but younger than the ceiling: a paid child
+    // admitted under a large cap may still be live, so it is left alone.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, bound - 1);
     expect(failureRows(db)).toHaveLength(0);
     expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, bound);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
+    expect(String(failureRows(db)[0]!.error)).toContain("no frozen deadline");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
   test("a row that terminalized between the selector and the batch writes nothing", async () => {

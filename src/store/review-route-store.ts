@@ -18,6 +18,7 @@
  * worker imports.
  */
 import type { KVNamespace } from "@cloudflare/workers-types";
+import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
@@ -844,19 +845,29 @@ export async function listUnpublishedLaunchSettlements(
  * afterwards, so the attempt held capacity forever and its Check never
  * terminalized.
  *
- * `deadline_ms + window <= now` is the ONLY liveness proxy there is: the
- * attempt's hard stop is the instant its paid exec is killed, so a row whose
- * deadline passed longer than the grace ago has no live child left to protect.
- * The row's FROZEN `deadline_ms` is that instant and nothing else is: a
- * `created_ms + cap` synthesis would read a cap resolved in THIS pass, which
- * either degrades to the default while the row was admitted under a stored
- * larger cap or shrinks when an operator lowers the cap afterwards — both
- * settle a live paid child early. So an unanchored row (`deadline_ms IS NULL`)
- * is simply not this lane's: it belongs to the incomplete-settlement lane,
- * which needs no deadline to act. The anti-join on `review_failures` is the
- * idempotence guard: the failure row is keyed by the attempt, so a row that
- * already settled once is never selected again and a concurrent pass can
- * never mint a second one.
+ * `deadline_ms + window <= now` is the liveness proxy there is: the attempt's
+ * hard stop is the instant its paid exec is killed, so a row whose deadline
+ * passed longer than the grace ago has no live child left to protect. The row's
+ * FROZEN `deadline_ms` is that instant and nothing else is: a `created_ms + cap`
+ * synthesis would read a cap resolved in THIS pass, which either degrades to
+ * the default while the row was admitted under a stored larger cap or shrinks
+ * when an operator lowers the cap afterwards — both settle a live paid child
+ * early. So an anchored row is settled from `deadline_ms` alone.
+ *
+ * The pre-column legacy set (`deadline_ms IS NULL`, written before migration
+ * 0084) has no frozen anchor and no other lane reaches it: the incomplete-
+ * settlement lane selects `settling_ms IS NOT NULL`, which a row that never
+ * started a settlement cannot match. Its bound is the CAP's own validation
+ * ceiling instead: an attempt's hard stop is `created_ms + cap` and `cap` can
+ * never exceed `REVIEW_ATTEMPT_CAP_MAX_MS`, so the launched row cannot have a
+ * live child later than `launched_at_ms + REVIEW_ATTEMPT_CAP_MAX_MS` (the
+ * launch never precedes the create). That ceiling is a constant upper bound,
+ * not a tunable read, so neither a degraded read nor a lowered cap can move it
+ * earlier. A row with no `launched_at_ms` matches neither branch.
+ *
+ * The anti-join on `review_failures` is the idempotence guard: the failure row
+ * is keyed by the attempt, so a row that already settled once is never selected
+ * again and a concurrent pass can never mint a second one.
  *
  * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
  * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
@@ -874,15 +885,21 @@ export async function listLostReplyLaunchSettlements(
          FROM review_attempt_handoffs h
          JOIN review_launches l ON l.attempt_id = h.attempt_id
         WHERE l.state = 'launched' AND l.result_outcome IS NULL
-          AND h.deadline_ms IS NOT NULL
-          AND h.deadline_ms <= ?
+          AND (
+            (h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?1)
+            OR (h.deadline_ms IS NULL AND l.launched_at_ms <= ?2)
+          )
           AND NOT EXISTS (
             SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
           )
         ORDER BY h.deadline_ms, h.delivery_key
-        LIMIT ?`,
+        LIMIT ?3`,
     )
-    .bind(input.deadlineBeforeMs, input.limit)
+    .bind(
+      input.deadlineBeforeMs,
+      input.deadlineBeforeMs - REVIEW_ATTEMPT_CAP_MAX_MS,
+      input.limit,
+    )
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }
