@@ -112,15 +112,20 @@ export async function reviewAttemptSandbox(
   if (activation === null || !activation.activated) {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: it has not won the activation transition, so no container may be addressed for it`,
+      "unavailable",
     );
   }
   if (activation.revoked) {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: a successor revoked it, so nothing may start for it again`,
+      "retired",
     );
   }
   if (activation.sandboxId === null) {
-    throw new AttemptUnknownError(`attempt ${attemptId}: its provisioning row carries no minted container id`);
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its provisioning row carries no minted container id`,
+      "unavailable",
+    );
   }
   try {
     return await deps.getSandbox(deps.env.SANDBOX, activation.sandboxId);
@@ -128,6 +133,7 @@ export async function reviewAttemptSandbox(
     const detail = redactSecrets(err instanceof Error ? err.message : String(err));
     throw new AttemptUnknownError(
       `attempt ${attemptId}: its container handle could not be resolved (${detail}) — the container's state is unknown`,
+      "unavailable",
     );
   }
 }
@@ -157,6 +163,7 @@ export async function readAttemptActivation(db: D1Like, attemptId: string): Prom
     const detail = redactSecrets(err instanceof Error ? err.message : String(err));
     throw new AttemptUnknownError(
       `attempt ${attemptId}: its activation could not be read (${detail}) — nothing may be concluded about its container`,
+      "reply-lost",
     );
   }
   if (row === null) return null;
@@ -207,7 +214,11 @@ export async function markAttemptRevoked(db: D1Like, attemptId: string, nowMs: n
  * evidence; the outcome is `unknown` — neither a failure nor a success.
  */
 export class AttemptUnknownError extends Error {
-  constructor(message: string) {
+  /** The cause the throw site observed — never inferred from the phase later. */
+  constructor(
+    message: string,
+    readonly reason: "reply-lost" | "unavailable" | "retired",
+  ) {
     super(message);
     this.name = "AttemptUnknownError";
   }
@@ -972,6 +983,7 @@ function decodeExecution(attemptId: string, json: string): ReviewAttemptExecutio
   if (typeof stored?.run?.exitCode !== "number" || typeof stored.run.stdout !== "string") {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: its recorded result cannot be read back — nothing was launched`,
+      "unavailable",
     );
   }
   return {
@@ -1136,6 +1148,7 @@ async function boundedRead(
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
       `the attempt container could not be read (${read.kind}) — its result is not collected`,
+      "reply-lost",
     );
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
@@ -1636,10 +1649,12 @@ async function runReviewEntryCommand(
     case "reply-lost":
       throw new AttemptUnknownError(
         `the attempt container could not be read at the review step (${read.kind}) — nothing may be concluded`,
+        "reply-lost",
       );
     case "retired":
       throw new AttemptUnknownError(
         "the attempt's slot is retired — nothing may run on it and nothing is charged",
+        "retired",
       );
     default:
       return noMarkedOutcome(read);
@@ -1674,6 +1689,7 @@ async function runPaidCommand(
     case "reply-lost":
       throw new AttemptUnknownError(
         "the paid exec was issued and its reply was lost — the process may still be running",
+        "reply-lost",
       );
     default:
       return noMarkedOutcome(read);
@@ -1827,6 +1843,7 @@ export async function prepareReviewAttempt(input: {
     );
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the provisioning claim could not be read back (${detail}) — nothing is provisioned for it`,
+      "unavailable",
     );
   }
   const gate = await readProvisionGate(deps.env.DB, attemptId);
@@ -1838,6 +1855,7 @@ export async function prepareReviewAttempt(input: {
   if (gate !== "may-provision") {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: its launch row is ${gate}, so no container may be provisioned for it`,
+      "unavailable",
     );
   }
   if (sandbox === null) {
@@ -1966,6 +1984,7 @@ export async function runReviewAttempt(input: {
     deps.log.warn({ ...fields, error: detail }, "launch row unreadable — the paid step is not taken");
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch row could not be read — the paid step is not taken`,
+      "unavailable",
     );
   }
   switch (entry.kind) {
@@ -1977,22 +1996,27 @@ export async function runReviewAttempt(input: {
     case "paid-unknown":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: its paid step was already launched and its result is not durable — refusing a second launch`,
+        "reply-lost",
       );
     case "paid-failed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: its paid step returned a failure — refusing a second launch`,
+        "unavailable",
       );
     case "owned-by-cleanup":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: a cleanup owns this container's destruction — refusing to run the paid step on it`,
+        "unavailable",
       );
     case "unrecognised":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: its launch row is in a state this build cannot interpret — refusing the paid step`,
+        "reply-lost",
       );
     case "never-claimed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: it holds no provisioning claim — nothing was launched for it`,
+        "unavailable",
       );
     default:
       return noLaunchState(entry);
@@ -2090,6 +2114,7 @@ export async function runReviewAttempt(input: {
     deps.log.warn({ ...fields, error: detail }, "launch claim failed — the paid step is not taken");
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch claim could not be read back — the paid step is not taken`,
+      "unavailable",
     );
   }
   if (!launch.ok) {
@@ -2099,6 +2124,7 @@ export async function runReviewAttempt(input: {
     }
     throw new AttemptUnknownError(
       `attempt ${attemptId}: another entry owns the paid step (${launch.reason}) — refusing a second launch`,
+      "reply-lost",
     );
   }
   const capStop = (reason: string): BudgetExhaustedError =>
@@ -2233,6 +2259,7 @@ export async function runReviewAttempt(input: {
   if (!recorded) {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the paid result could not be recorded as durable — completion is not confirmed`,
+      "reply-lost",
     );
   }
   return execution;

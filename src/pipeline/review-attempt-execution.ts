@@ -2356,6 +2356,7 @@ async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promis
      const detail = err instanceof Error ? err.message : String(err);
      throw new AttemptUnknownError(
        `attempt ${attemptId}: its frozen Check identity could not be read (${detail}) — no send authority can be established`,
+       "reply-lost",
      );
    }
    if (identity === null) return undefined;
@@ -2368,6 +2369,7 @@ async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promis
      const detail = err instanceof Error ? err.message : String(err);
      throw new AttemptUnknownError(
        `attempt ${attemptId}: its Check row could not be read (${detail}) — no send authority can be established`,
+       "reply-lost",
      );
    }
  }
@@ -2575,19 +2577,15 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
   }
   if (err instanceof AttemptUnknownError || err instanceof AttemptRetiredError) {
     // `AttemptRetiredError` is a slot that can never start, so nothing paid can
-    // be lost. For the rest, the record must not infer liveness from the phase:
-    // `ctx.runnerReturned === false` with the row already `launched` is exactly
-    // the case that may hide a live child. The settlement re-checks the row, so
-    // this flag is only the record's own observation.
-    const retired = err instanceof AttemptRetiredError;
-    const containerStateUnknown = !retired && (ctx.runnerReturned || ctx.phase !== "prepare");
-    // `reason` is what the operator-facing code reads; it is derived from the
-    // SAME facts `containerStateUnknown` uses, so the two never disagree.
-    const reason = retired
-      ? "retired"
-      : containerStateUnknown
-        ? "reply-lost"
-        : "unavailable";
+    // be lost. For the rest, the reason comes from the throw site's own cause,
+    // never from the phase: a retired slot in `prepare` must not render as a
+    // retryable environment fault, and a read that may hide a live paid child
+    // must not render as "nothing was paid". The record must not infer liveness
+    // from the phase either: `ctx.runnerReturned === false` with the row already
+    // `launched` is exactly the case that may hide a live child. The settlement
+    // re-checks the row, so this flag is only the record's own observation.
+    const reason = err instanceof AttemptUnknownError ? err.reason : "retired";
+    const containerStateUnknown = !(err instanceof AttemptRetiredError) && (ctx.runnerReturned || ctx.phase !== "prepare");
     return { ...base, class: "unknown", containerStateUnknown, reason };
   }
   if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
@@ -2615,6 +2613,7 @@ async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promis
     case "paid-failed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
+        "reply-lost",
       );
     default:
       return noLaunchState(verdict);
@@ -2634,6 +2633,7 @@ async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<
     case "paid-failed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
+        "reply-lost",
       );
     default:
       return noLaunchState(verdict);
@@ -3491,6 +3491,7 @@ export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId:
   } catch (err) {
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch fence could not be read (${err instanceof Error ? err.message : String(err)}) — the paid outcome is unconfirmed`,
+      "reply-lost",
     );
   }
   switch (verdict.kind) {
@@ -3532,6 +3533,7 @@ export async function reviewAttempt(
     // an ordinary failure).
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch row records a non-payable outcome — no paid step may be taken`,
+      "unavailable",
     );
   }
   const runner = requireRunnerConfig(deps, payload);

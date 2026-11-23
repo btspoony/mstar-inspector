@@ -73,15 +73,15 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.github.cleanup_limited":
     "GitHub rate-limited cleanup of an older review comment. The review itself was published; an older comment may remain.",
   "review.admission.refused":
-    "This commit was not reviewed: another review already holds a slot for this pull request, or the workspace's limit on concurrent reviews was reached. Nothing was charged.",
+    "This commit was not reviewed: another review holds a slot for this pull request, or a concurrent-review limit (workspace or platform) was reached. Nothing was charged.",
   "review.delivery.deferred":
     "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
   "review.delivery.quota_exhausted":
-    "This commit was not reviewed: the workspace's review quota for this period is used up. Nothing was charged.",
+    "This commit was not reviewed: the workspace's remaining review quota for this period is less than this review needs. Nothing was charged.",
   "review.delivery.entitlement_unreadable":
     "This commit was not reviewed: the bot could not confirm its access to this repository. Nothing was charged.",
   "review.metering.unrecorded":
-    "The review's usage row was recorded late or more than once. Usage figures may be off; the review itself is unaffected and nothing extra was charged.",
+    "The review's usage row could not be confirmed: it may be missing or written more than once. Usage figures may be off; nothing extra was charged, and the review itself is unaffected.",
   "review.recheck.unaccounted":
     "A follow-up check could not be reconciled. Nothing extra was charged; the check may need a manual re-run.",
   "review.internal.unclassified":

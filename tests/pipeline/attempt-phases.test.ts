@@ -3625,7 +3625,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
 
   test("a cause with a throwing enumerable getter cannot break the record", () => {
     // The record is built from KNOWN fields, never `Object.entries(cause)`.
-    const hostile = new AttemptUnknownError("the container could not be read");
+    const hostile = new AttemptUnknownError("the container could not be read", "reply-lost");
     Object.defineProperty(hostile, "boom", {
       enumerable: true,
       get() {
@@ -3662,10 +3662,36 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
       changedLines: null,
       sendAttemptPublicationId: null,
     };
-    const prePaid = phaseFailureRecord({ ...ctx, phase: "prepare" }, new AttemptUnknownError("unreadable"));
-    const postPaid = phaseFailureRecord({ ...ctx, phase: "collect" }, new AttemptUnknownError("unreadable"));
+    const prePaid = phaseFailureRecord(
+      { ...ctx, phase: "prepare" },
+      new AttemptUnknownError("unavailable", "unavailable"),
+    );
+    const postPaid = phaseFailureRecord(
+      { ...ctx, phase: "collect" },
+      new AttemptUnknownError("unreadable", "reply-lost"),
+    );
     expect(prePaid).toMatchObject({ class: "unknown", containerStateUnknown: false, reason: "unavailable" });
     expect(postPaid).toMatchObject({ class: "unknown", containerStateUnknown: true, reason: "reply-lost" });
+  });
+
+  test("a retired slot is never rendered as retryable-unavailable", () => {
+    // The cause the throw site observed drives the record: a slot that can never
+    // run again must not reach `review.container.unavailable` just because the
+    // failure happened in `prepare`.
+    const record = phaseFailureRecord(
+      {
+        phase: "prepare",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: false,
+        tier: "default",
+        budgetMs: 0,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      new AttemptUnknownError("the attempt's slot is retired", "retired"),
+    );
+    expect(record).toMatchObject({ class: "unknown", containerStateUnknown: false, reason: "retired" });
   });
 
   test("a budget stop in prepare settles with the record's own window", async () => {
