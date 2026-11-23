@@ -2050,7 +2050,10 @@ function blockedReasonFor(
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
  * Owned bots form one App-wide batch; shared bots the workspace does not own
- * form a second batch scoped to its target repositories, so at most four.
+ * form a second batch scoped to its target repositories. Each batch is split
+ * into chunks of up to 90 bots to stay under D1's bound-parameter cap, so the
+ * cost is two statements per chunk: four for any workspace under 90 Apps of
+ * each kind.
  * A request lists the workspace's own bots plus every `shared` bot it holds a
  * live target on (`targetedBotIds`) — the target is the entitlement, so a
  * target created on an official bot does not vanish from this list.
