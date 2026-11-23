@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1, execMigrationScript } from "../store/helpers";
+import { createMigratedTestD1, createTestD1, execMigrationScript, seedTarget } from "../store/helpers";
 import { AppCountExceededError, createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import type { D1Like } from "../../src/store/types";
@@ -1029,6 +1029,28 @@ describe("apps-store delivery read faces (consumption)", () => {
     expect(summaries[apps[2]!.id]).toEqual({ latest: null, rejected24h: 0 });
     expect(summaries[apps[0]!.id]!.latest!.id).toBe("delivery-296");
     expect(summaries[apps[1]!.id]!.latest!.id).toBe("delivery-299");
+  });
+
+  test("deliverySummaries splits a large scoped batch under the D1 bound-parameter cap", async () => {
+    const db = createMigratedD1();
+    const app = await seedApp(db, { githubAppId: 123470 });
+    seedTarget(db, app.id, { workspaceId: "default", repoOwner: "acme", repoName: "widgets" });
+    const insert = db.raw.prepare(
+      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name)
+       VALUES (?, ?, 'pull_request', ?, ?, ?)`,
+    );
+    insert.run("visible", app.id, "rejected", 401, "acme/widgets");
+    insert.run("hidden", app.id, "ok", null, "globex/secret-repo");
+    const ids = [...Array.from({ length: 149 }, (_, index) => `missing-${index}`), app.id];
+
+    const before = db.boundValueCounts!.length;
+    const summaries = await store(db).deliverySummaries(ids, "default");
+
+    expect(Math.max(...db.boundValueCounts!.slice(before))).toBeLessThanOrEqual(100);
+    expect(Object.keys(summaries)).toHaveLength(150);
+    expect(summaries[app.id]!.latest!.id).toBe("visible");
+    expect(summaries[app.id]!.rejected24h).toBe(1);
+    expect(summaries["missing-148"]).toEqual({ latest: null, rejected24h: 0 });
   });
 
   test("deliverySummaries uses health indexes without sorting delivery history", async () => {

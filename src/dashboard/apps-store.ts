@@ -154,6 +154,9 @@ const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'reject
  * reads only its own repositories' deliveries; rows without a repository
  * (installation, ping) belong to the owner alone. One `?`: the workspace id.
  */
+/** D1 caps a statement at 100 bound parameters; one id per bot plus the optional workspace id. */
+const DELIVERY_SUMMARY_CHUNK = 90;
+
 const DELIVERY_WORKSPACE_REPO_SQL = `EXISTS (SELECT 1 FROM review_targets t
   WHERE t.bot_id = webhook_deliveries.bot_id AND t.workspace_id = ? AND t.deleted_at IS NULL
     AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
@@ -479,6 +482,14 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     workspaceId: string | null = null,
   ): Promise<Record<string, DeliverySummary>> {
     if (appIds.length === 0) return {};
+    if (appIds.length > DELIVERY_SUMMARY_CHUNK) {
+      const chunks: string[][] = [];
+      for (let at = 0; at < appIds.length; at += DELIVERY_SUMMARY_CHUNK) {
+        chunks.push(appIds.slice(at, at + DELIVERY_SUMMARY_CHUNK));
+      }
+      const parts = await Promise.all(chunks.map((chunk) => deliverySummaries(chunk, workspaceId)));
+      return Object.assign({}, ...parts);
+    }
     const placeholders = appIds.map(() => "?").join(", ");
     const scopeSql = workspaceId === null ? "" : `AND ${DELIVERY_WORKSPACE_REPO_SQL}`;
     const scopeBinds = workspaceId === null ? [] : [workspaceId];
