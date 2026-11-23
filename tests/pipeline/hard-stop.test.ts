@@ -155,17 +155,12 @@ describe("the paid exec at the frozen deadline", () => {
       expect(step.prepared.budget.cutoff_ms).toBe(clock.now + CAP_MS - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT));
       expect(step.prepared.runnerDeadlineMs).toBe(clock.now + 600_000);
 
-      let thrown: unknown;
-      try {
-        await reviewAttempt(deps, ref, step.prepared);
-      } catch (err) {
-        thrown = err;
-      }
-      expect(thrown).toBeInstanceOf(Error);
-      const failure = thrown as { cause?: unknown };
-      const cause = failure.cause;
-      expect(cause).toBeInstanceOf(BudgetExhaustedError);
-      expect((cause as BudgetExhaustedError).outcome.cause).toBe("sandbox-kill");
+      const reviewed = await reviewAttempt(deps, ref, step.prepared);
+      if (!("failure" in reviewed)) throw new Error("the budget stop was not classified");
+      expect(reviewed.failure.class).toBe("budget");
+      if (reviewed.failure.class !== "budget") throw new Error("unreachable");
+      expect(reviewed.failure.window).toBe("runner");
+      expect(reviewed.failure.outcome.cause).toBe("sandbox-kill");
 
       const runnerCall = h.sandbox.calls.find((call) => call.cmd.includes("--input"));
       expect(runnerCall).toBeDefined();
@@ -174,9 +169,7 @@ describe("the paid exec at the frozen deadline", () => {
       const written: { outerDeadlineEpochMs?: number } = JSON.parse(h.sandbox.writtenInputJson!);
       expect(written.outerDeadlineEpochMs).toBe(runnerOpts.deadlineEpochMs);
 
-      const ref2 = ref;
-      const cleanup = {};
-      expect(await settleAttemptFailure(deps, ref2, thrown, cleanup)).toEqual({
+      expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toEqual({
         kind: "budget-exhausted",
         outcome: expect.objectContaining({ kind: "budget-exhausted", cause: "sandbox-kill" }),
       });
@@ -208,24 +201,18 @@ describe("the paid exec at the frozen deadline", () => {
       const step = await prepareFor(deps, ref);
       if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
 
-      let thrown: unknown;
-      try {
-        await reviewAttempt(deps, ref, step.prepared);
-      } catch (err) {
-        thrown = err;
-      }
-      const failure = thrown as { cause?: unknown };
-      const cause = failure.cause;
-      expect(cause).toBeInstanceOf(AttemptUnknownError);
+      const reviewed = await reviewAttempt(deps, ref, step.prepared);
+      if (!("failure" in reviewed)) throw new Error("the lost reply was not classified");
+      expect(reviewed.failure.class).toBe("unknown");
 
-      const cleanup = {};
-      expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toEqual({ kind: "unknown" });
+      expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toEqual({ kind: "unknown" });
       expect(failureRows(db)).toHaveLength(0);
       expect(terminalizeCalls).toBe(0);
-      expect(cleanup).toEqual({ headSha: SHA, unproven: true });
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
 
-      expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "unknown" });
+      // A `launched` row is the veto cleanup reads for itself: no proof that
+      // nothing paid could be lost, so the slot is left alone.
+      expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "unknown" });
       expect(h.sandbox.destroyCalls).toBe(0);
     });
   });
@@ -471,15 +458,11 @@ describe("the launch claim is part of the attempt's clock", () => {
         ...deps.env,
         DB: claimSpendingDb(deps.env.DB, step.prepared.runnerDeadlineMs - clock.now, clock) as never,
       };
-      let thrown: unknown;
-      try {
-        await reviewAttempt(deps, ref, step.prepared);
-      } catch (err) {
-        thrown = err;
-      }
-      const failure = thrown as { cause?: unknown };
-      expect(failure.cause).toBeInstanceOf(BudgetExhaustedError);
-      expect((failure.cause as BudgetExhaustedError).outcome).toMatchObject({
+      const reviewed = await reviewAttempt(deps, ref, step.prepared);
+      if (!("failure" in reviewed)) throw new Error("the cap stop was not classified");
+      expect(reviewed.failure.class).toBe("budget");
+      if (reviewed.failure.class !== "budget") throw new Error("unreachable");
+      expect(reviewed.failure.outcome).toMatchObject({
         kind: "budget-exhausted",
         cause: "consumer-deadline",
         budgetWindow: "runner",
@@ -489,10 +472,11 @@ describe("the launch claim is part of the attempt's clock", () => {
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 
-      const cleanup = {};
-      expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toMatchObject({ kind: "budget-exhausted" });
+      expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toMatchObject({
+        kind: "budget-exhausted",
+      });
       expect(failureRows(db)).toHaveLength(1);
-      expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "retained" });
+      expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "retained" });
       expect(h.sandbox.destroyCalls).toBe(1);
     });
   });
@@ -584,15 +568,11 @@ describe("a container-side deadline refusal is a confirmed stop", () => {
       const step = await prepareFor(deps, ref);
       if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
 
-      let thrown: unknown;
-      try {
-        await reviewAttempt(deps, ref, step.prepared);
-      } catch (err) {
-        thrown = err;
-      }
-      const failure = thrown as { cause?: unknown };
-      expect(failure.cause).toBeInstanceOf(BudgetExhaustedError);
-      expect((failure.cause as BudgetExhaustedError).outcome).toMatchObject({
+      const reviewed = await reviewAttempt(deps, ref, step.prepared);
+      if (!("failure" in reviewed)) throw new Error("the cap stop was not classified");
+      expect(reviewed.failure.class).toBe("budget");
+      if (reviewed.failure.class !== "budget") throw new Error("unreachable");
+      expect(reviewed.failure.outcome).toMatchObject({
         kind: "budget-exhausted",
         cause: "consumer-deadline",
         budgetWindow: "runner",
@@ -602,10 +582,11 @@ describe("a container-side deadline refusal is a confirmed stop", () => {
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 
-      const cleanup = {};
-      expect(await settleAttemptFailure(deps, ref, thrown, cleanup)).toMatchObject({ kind: "budget-exhausted" });
+      expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toMatchObject({
+        kind: "budget-exhausted",
+      });
       expect(failureRows(db)).toHaveLength(1);
-      expect(await cleanupAttempt(deps, ref, cleanup)).toEqual({ retention: "retained" });
+      expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "retained" });
       expect(h.sandbox.destroyCalls).toBe(1);
     });
   });

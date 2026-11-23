@@ -26,7 +26,7 @@ import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
-const { AttemptPhaseError, cleanupAttempt, settleAttemptFailure } = await import(
+const { cleanupAttempt, settleAttemptFailure } = await import(
   "../../src/pipeline/review-attempt-execution"
 );
 const { BudgetExhaustedError, claimReviewAttempt, claimReviewLaunch } = await import(
@@ -546,10 +546,19 @@ describe("a rejection is not an observation", () => {
     const outcome = await settleAttemptFailure(
       await makeDeps(db),
       ref,
-      new Error("the review step timed out waiting for the reply"),
-      {},
+      {
+        class: "failure",
+        phase: "review",
+        stage: "pipeline",
+        headSha: null,
+        runnerReturned: false,
+        message: "the review step timed out waiting for the reply",
+        sendAttemptPublicationId: null,
+      },
+      null,
     );
 
+    // The row is `launched` and the paid state was never observed: unobservable.
     expect(outcome).toEqual({ kind: "unknown" });
     expect(failureRows(db)).toHaveLength(0);
     expect(launchState(db)).toBe("launched");
@@ -564,8 +573,15 @@ describe("a rejection is not an observation", () => {
     const deps = await makeDeps(db);
     deps.env = { ...deps.env, DB: unreadableLaunchDb(db) as never };
 
-    const err = new BudgetExhaustedError(
-      {
+    const phase = {
+      class: "budget",
+      phase: "review",
+      stage: "runner",
+      headSha: null,
+      runnerReturned: true,
+      message: "runner signalled budget exhaustion",
+      window: "runner",
+      outcome: {
         kind: "budget-exhausted",
         cause: "runner-deadline",
         tier: "default",
@@ -575,24 +591,10 @@ describe("a rejection is not an observation", () => {
         seatsStopped: 1,
         changedLines: null,
       },
-      "runner signalled budget exhaustion",
-    );
-    const phase = new AttemptPhaseError(
-      {
-        phase: "review",
-        stage: "runner",
-        headSha: null,
-        secretValues: [],
-        runnerStartedAt: 1,
-        runnerReturned: true,
-        runnerEffectiveBudgetMs: 600_000,
-        changedLines: null,
-        sendAttemptPublicationId: null,
-      },
-      err,
-    );
+      sendAttemptPublicationId: null,
+    } as const;
 
-    const outcome = await settleAttemptFailure(deps, ref, phase, {});
+    const outcome = await settleAttemptFailure(deps, ref, phase, null);
 
     expect(outcome).toEqual({ kind: "unknown" });
     expect(failureRows(db)).toHaveLength(0);
@@ -604,8 +606,15 @@ describe("a rejection is not an observation", () => {
     const db = await createSeededTestD1();
     const ref = makeRef(makePayload());
     await launchedAttempt(db);
-    const err = new BudgetExhaustedError(
-      {
+    const phase = {
+      class: "budget",
+      phase: "review",
+      stage: "runner",
+      headSha: null,
+      runnerReturned: true,
+      message: "runner signalled budget exhaustion",
+      window: "runner",
+      outcome: {
         kind: "budget-exhausted",
         cause: "runner-deadline",
         tier: "default",
@@ -615,24 +624,10 @@ describe("a rejection is not an observation", () => {
         seatsStopped: 1,
         changedLines: null,
       },
-      "runner signalled budget exhaustion",
-    );
-    const phase = new AttemptPhaseError(
-      {
-        phase: "review",
-        stage: "runner",
-        headSha: null,
-        secretValues: [],
-        runnerStartedAt: 1,
-        runnerReturned: true,
-        runnerEffectiveBudgetMs: 600_000,
-        changedLines: null,
-        sendAttemptPublicationId: null,
-      },
-      err,
-    );
+      sendAttemptPublicationId: null,
+    } as const;
 
-    const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, {});
+    const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, null);
 
     expect(outcome.kind).toBe("budget-exhausted");
     expect(failureRows(db)).toHaveLength(1);

@@ -142,6 +142,9 @@ import {
   runReviewAttempt,
   readGateSecretsEnvelope,
   AttemptUnknownError,
+  AttemptRetiredError,
+  ContainerLostAfterClaimError,
+  ContainerLostBeforePaidError,
   discardReviewAttempt,
   type ReviewAttemptExecution,
   type ReviewAttemptProgress,
@@ -1751,34 +1754,45 @@ export type RunnerConfig = {
   customProviders: readonly CustomProviderConsumerConfig[] | undefined;
 };
 
+export type AttemptPhase = "prepare" | "review" | "collect" | "publish";
+
 /**
- * One phase's failure, carrying the AL-6/SEC-01 facts as DATA: the stage in
- * flight, the session's exact secret values, the runner's observed start and
- * return, and the publication a send was attempted for. A resumed settlement
- * therefore reads what the failing phase knew instead of a phase local.
+ * One phase's failed outcome as DATA — the return value of a `step.do`
+ * callback, never a thrown error (design D6). It is plain and JSON-safe: every
+ * field is a primitive, so the platform's checkpoint keeps it verbatim across a
+ * resume and a rebuilt error never has to carry facts. No secret value enters
+ * it: error text is redacted where it is produced.
+ *
+ * One member per settlement branch. Members carry the facts settlement used to
+ * read off an error object — the stage, the checkout sha, whether the paid
+ * state was observed, and the publication a send was attempted for; the rest
+ * (`runnerEffectiveMs`, `changedLines`) settlement reads from the `prepare`
+ * checkpoint.
  */
-export type FailureFacts = {
-  phase: "prepare" | "review" | "collect" | "publish";
+type PhaseFailureBase = {
+  phase: AttemptPhase;
   stage: FailureStage;
   headSha: string | null;
-  secretValues: string[];
-  runnerStartedAt: number | undefined;
+  /** The paid state was observed: a budget outcome or a returned paid exec. */
   runnerReturned: boolean;
-  runnerEffectiveBudgetMs: number | undefined;
-  changedLines: number | null;
-  sendAttemptPublicationId: string | null;
+  message: string;
 };
 
-/** A phase failure: the cause stays intact for the settlement's typed branches. */
-export class AttemptPhaseError extends Error {
-  constructor(
-    readonly facts: FailureFacts,
-    readonly cause: unknown,
-  ) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "AttemptPhaseError";
-  }
-}
+export type PhaseFailure =
+  | (PhaseFailureBase & {
+      class: "budget";
+      /** Required: a budget stop always names the window it spent (D7). */
+      window: BudgetExhaustedOutcome["budgetWindow"];
+      outcome: BudgetExhaustedOutcome;
+      sendAttemptPublicationId: string | null;
+    })
+  | (PhaseFailureBase & { class: "unknown" })
+  | (PhaseFailureBase & { class: "moved-head"; phase: "prepare" })
+  | (PhaseFailureBase & { class: "container-lost"; phase: "review" })
+  | (PhaseFailureBase & { class: "failure"; sendAttemptPublicationId: string | null });
+
+/** A phase wrapper's terminal return: the Workflow turns this into a signal. */
+export type PhaseFailureStep = { kind: "failed"; failure: PhaseFailure };
 
 
 /**
@@ -1873,10 +1887,13 @@ export type PreparedAttempt = {
   budgetExcluded: string[];
 };
 
-export type PrepareStep = { kind: "prepared"; prepared: PreparedAttempt } | SettledAttempt;
+export type PrepareStep = { kind: "prepared"; prepared: PreparedAttempt } | SettledAttempt | PhaseFailureStep;
 
-/** The paid step's durable outcome: the launch row's own state. */
-export type ReviewOutcome = { state: "persisted"; persistedAtMs: number };
+/**
+ * The paid step's durable outcome: the launch row's own state, or the
+ * classified terminal failure that ended it (design D6).
+ */
+export type ReviewOutcome = { state: "persisted"; persistedAtMs: number } | PhaseFailureStep;
 
 /**
  * What `collect` hands `publish`: the durable reference. The staged journal row
@@ -1885,7 +1902,7 @@ export type ReviewOutcome = { state: "persisted"; persistedAtMs: number };
  */
 export type CollectedAttempt = { publicationId: string };
 
-export type CollectStep = { kind: "collected"; collected: CollectedAttempt } | SettledAttempt;
+export type CollectStep = { kind: "collected"; collected: CollectedAttempt } | SettledAttempt | PhaseFailureStep;
 
 /** What `cleanup` concluded about the container, from durable facts only. */
 export type CleanupOutcome = { retention: "no-paid-work" | "retained" | "unknown" };
@@ -2402,12 +2419,76 @@ function attemptFields(
   };
 }
 
-function phaseFailure(
-  phase: FailureFacts["phase"],
-  err: unknown,
-  facts: Omit<FailureFacts, "phase">,
-): AttemptPhaseError {
-  return new AttemptPhaseError({ phase, ...facts }, err);
+/** Strips a rebuilt error's `"<name>: "` prefix; the ledger text stays readable. */
+function strippedMessage(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  return text.replace(/^[A-Za-z][\w.]*Error: /, "");
+}
+
+/** What one phase wrapper knows when it classifies its own failure. */
+export type PhaseFailureContext = {
+  phase: AttemptPhase;
+  stage: FailureStage;
+  headSha: string | null;
+  runnerReturned: boolean;
+  tier: ReviewLevel;
+  budgetMs: number;
+  changedLines: number | null;
+  sendAttemptPublicationId: string | null;
+};
+
+/**
+ * The D6 classifier: a phase wrapper's terminal outcome becomes a `PhaseFailure`
+ * record, everything else stays a THROW so the platform retries the step.
+ * "Terminal" is read off the closed error set A1 throws plus the budget stops;
+ * an ordinary error (clone failed, D1 fault) is transient by default.
+ */
+export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): PhaseFailure | null {
+  const base = {
+    phase: ctx.phase,
+    stage: ctx.stage,
+    headSha: ctx.headSha,
+    runnerReturned: ctx.runnerReturned,
+    message: strippedMessage(err),
+  };
+  if (err instanceof BudgetExhaustedError) {
+    return {
+      ...base,
+      class: "budget",
+      window: err.outcome.budgetWindow,
+      outcome: err.outcome,
+      sendAttemptPublicationId: ctx.sendAttemptPublicationId,
+    };
+  }
+  if (err instanceof RoundBudgetSpent) {
+    // The window is the record's own field (D7): settlement never infers it.
+    return {
+      ...base,
+      class: "budget",
+      window: err.window,
+      outcome: {
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        tier: ctx.tier,
+        budgetWindow: err.window,
+        budgetMs: ctx.budgetMs,
+        seatsDispatched: 0,
+        seatsStopped: 0,
+        changedLines: ctx.changedLines,
+      },
+      sendAttemptPublicationId: ctx.sendAttemptPublicationId,
+    };
+  }
+  if (err instanceof AttemptUnknownError || err instanceof AttemptRetiredError) {
+    return { ...base, class: "unknown" };
+  }
+  if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
+    return { ...base, class: "container-lost", phase: "review" };
+  }
+  if (err instanceof MovedHeadError && ctx.phase === "prepare") {
+    return { ...base, class: "moved-head", phase: "prepare" };
+  }
+  return null;
 }
 
 async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promise<ReviewOutcome> {
@@ -2463,16 +2544,28 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
   try {
     return await preparePhase(deps, ref, progress, observed);
   } catch (err) {
-    throw phaseFailure("prepare", err, {
-      stage: progress.failureStage,
-      headSha: observed.headSha,
-      secretValues: progress.secretValues,
-      runnerStartedAt: progress.runnerStartedAt,
-      runnerReturned: progress.runnerReturned,
-      runnerEffectiveBudgetMs: observed.runnerEffectiveBudgetMs,
-      changedLines: null,
-      sendAttemptPublicationId: null,
-    });
+    const failure = phaseFailureRecord(
+      {
+        phase: "prepare",
+        stage: progress.failureStage,
+        headSha: observed.headSha,
+        runnerReturned: progress.runnerReturned,
+        tier: ref.level,
+        budgetMs:
+          observed.runnerEffectiveBudgetMs ??
+          deriveReviewBudget({
+            roundStartMs: ref.budgetStartMs,
+            deadlineMs: ref.deadlineMs,
+            terminalizeMs: ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT,
+            level: ref.level,
+          }).preparationBudgetMs,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      err,
+    );
+    if (failure === null) throw err;
+    return { kind: "failed", failure };
   }
 }
 
@@ -3344,16 +3437,22 @@ export async function reviewAttempt(
       attemptId,
     });
   } catch (err) {
-    throw phaseFailure("review", err, {
-      stage: progress.failureStage,
-      headSha: prepared.headSha,
-      secretValues: progress.secretValues,
-      runnerStartedAt: progress.runnerStartedAt,
-      runnerReturned: progress.runnerReturned,
-      runnerEffectiveBudgetMs: prepared.runnerEffectiveMs,
-      changedLines: prepared.observedChangedLines,
-      sendAttemptPublicationId: null,
-    });
+    const failure = phaseFailureRecord(
+      {
+        phase: "review",
+        stage: progress.failureStage,
+        headSha: prepared.headSha,
+        runnerReturned: progress.runnerReturned,
+        tier: ref.level,
+        budgetMs: prepared.runnerEffectiveMs,
+        changedLines: prepared.observedChangedLines,
+        sendAttemptPublicationId: null,
+      },
+      err,
+    );
+    // `retries: 0` on this step: every classified outcome is its return value.
+    if (failure === null) throw err;
+    return { kind: "failed", failure };
   }
   return readPersistedLaunch(deps, attemptId);
 }
@@ -3374,16 +3473,21 @@ export async function collectAttempt(
   try {
     return await collectPhase(deps, ref, prepared, progress);
   } catch (err) {
-    throw phaseFailure("collect", err, {
-      stage: progress.failureStage,
-      headSha: prepared.headSha,
-      secretValues: progress.secretValues,
-      runnerStartedAt: progress.runnerStartedAt,
-      runnerReturned: progress.runnerReturned,
-      runnerEffectiveBudgetMs: prepared.runnerEffectiveMs,
-      changedLines: prepared.observedChangedLines,
-      sendAttemptPublicationId: null,
-    });
+    const failure = phaseFailureRecord(
+      {
+        phase: "collect",
+        stage: progress.failureStage,
+        headSha: prepared.headSha,
+        runnerReturned: progress.runnerReturned,
+        tier: ref.level,
+        budgetMs: prepared.runnerEffectiveMs,
+        changedLines: prepared.observedChangedLines,
+        sendAttemptPublicationId: null,
+      },
+      err,
+    );
+    if (failure === null) throw err;
+    return { kind: "failed", failure };
   }
 }
 
@@ -3459,27 +3563,25 @@ async function settleGateRefusal(
   progress: ReviewAttemptProgress,
   refusal: Error,
 ): Promise<"settled" | "unknown"> {
-  const wrapped = phaseFailure("collect", refusal, {
-    stage: "pipeline",
-    headSha: prepared.headSha,
-    secretValues: progress.secretValues,
-    runnerStartedAt: undefined,
-    runnerReturned: true,
-    runnerEffectiveBudgetMs: prepared.runnerEffectiveMs,
-    changedLines: prepared.observedChangedLines,
-    sendAttemptPublicationId: null,
-  });
   const deliveryKey = deliveryKeyOf(ref.payload);
   if ((await readAttemptHandoff(deps.env.DB, deliveryKey)) !== null) {
     await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
   }
-  let settlement: ProcessOutcome | null = null;
-  try {
-    settlement = await settleAttemptFailure(deps, ref, wrapped, { headSha: prepared.headSha });
-  } catch (err) {
-    if (err !== refusal) throw err;
-  }
-  return settlement?.kind === "unknown" ? "unknown" : "settled";
+  const settlement = await settleAttemptFailure(
+    deps,
+    ref,
+    {
+      class: "failure",
+      phase: "collect",
+      stage: "pipeline",
+      headSha: prepared.headSha,
+      runnerReturned: true,
+      message: strippedMessage(refusal),
+      sendAttemptPublicationId: null,
+    },
+    prepared,
+  );
+  return settlement.kind === "unknown" ? "unknown" : "settled";
 }
 
 async function collectPhase(
@@ -4023,22 +4125,27 @@ export async function publishAttempt(
   deps: ProcessDeps,
   ref: AttemptRef,
   publicationId: string,
-): Promise<ProcessOutcome> {
+): Promise<ProcessOutcome | PhaseFailureStep> {
   const progress = beginProgress();
   const sent: { publicationId: string | null } = { publicationId: null };
   try {
     return await publishPhase(deps, ref, publicationId, progress, sent);
   } catch (err) {
-    throw phaseFailure("publish", err, {
-      stage: progress.failureStage,
-      headSha: null,
-      secretValues: progress.secretValues,
-      runnerStartedAt: progress.runnerStartedAt,
-      runnerReturned: progress.runnerReturned,
-      runnerEffectiveBudgetMs: undefined,
-      changedLines: null,
-      sendAttemptPublicationId: sent.publicationId,
-    });
+    const failure = phaseFailureRecord(
+      {
+        phase: "publish",
+        stage: progress.failureStage,
+        headSha: null,
+        runnerReturned: progress.runnerReturned,
+        tier: ref.level,
+        budgetMs: 0,
+        changedLines: null,
+        sendAttemptPublicationId: sent.publicationId,
+      },
+      err,
+    );
+    if (failure === null) throw err;
+    return { kind: "failed", failure };
   }
 }
 
@@ -4448,23 +4555,41 @@ async function publishPhase(
 }
 
 /**
- * The attempt's failure settlement: every throw past admission lands here —
- * the exhaustion stop, an unprovable container, or an infra failure. It
+ * The attempt's sealed credential set, read from D1 at settlement time. The
+ * redaction never travels in a handoff (design D6 rule 3): the envelope is the
+ * durable copy, and an attempt that never sealed one (or whose envelope cannot
+ * be opened) redacts with the empty set instead of failing the settlement.
+ */
+async function sealedSecretValues(deps: ProcessDeps, attemptId: string): Promise<string[]> {
+  try {
+    const sealed = await readGateSecretsEnvelope(deps.env.DB, attemptId);
+    if (sealed === null) return [];
+    return openGateSecrets(deps.env.DASHBOARD_ENCRYPTION_KEY, attemptId, sealed);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The attempt's failure settlement: every terminal phase outcome lands here —
+ * the exhaustion stop, an unprovable container, or an ordinary failure. It
  * records the durable outcome, resolves the Check's conclusion from it and
  * decides whether this delivery may be retried. An unproven container is never
  * a failure: it changes nothing and is left to the reconciler.
+ *
+ * `failure` is the `step.do` RETURN VALUE (design D6), so nothing here depends
+ * on a thrown object's prototype after a retry boundary. `prepared` is the
+ * `prepare` checkpoint when one exists: it carries the facts the record no
+ * longer repeats (`runnerEffectiveMs`, `changedLines`).
  */
 export async function settleAttemptFailure(
   deps: ProcessDeps,
   ref: AttemptRef,
-  thrown: unknown,
-  cleanup: CleanupInput,
+  failure: PhaseFailure,
+  prepared: PreparedAttempt | null,
 ): Promise<ProcessOutcome> {
   const { payload, level, attemptId, githubAppId } = ref;
-  const failure = thrown instanceof AttemptPhaseError ? thrown : undefined;
-  const facts = failure?.facts;
-  const err = failure?.cause ?? thrown;
-  const detail = err instanceof Error ? err.message : String(err);
+  const detail = failure.message;
   const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
     try {
       await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed }, Date.now());
@@ -4475,41 +4600,24 @@ export async function settleAttemptFailure(
       );
     }
   };
-  if (err instanceof MovedHeadError) {
+  if (failure.class === "moved-head") {
     await markSettled(["skip"]);
     return { kind: "ok" };
   }
-  const progress: ReviewAttemptProgress = {
-    failureStage: facts?.stage ?? "pipeline",
-    secretValues: facts?.secretValues ?? [],
-    runnerStartedAt: facts?.runnerStartedAt,
-    runnerReturned: facts?.runnerReturned ?? false,
-  };
+  const headSha = failure.headSha;
   const sandboxId = attemptSandboxId(attemptId);
-  const headSha = facts?.headSha ?? null;
-  if (cleanup.headSha === undefined) cleanup.headSha = headSha;
-  if (facts !== undefined && facts.runnerStartedAt !== undefined && !facts.runnerReturned) {
-    cleanup.unproven = true;
-  }
   const fields = headSha === null ? undefined : attemptFields(payload, level, attemptId, headSha);
   const baseFields: ConsumerLogFields | undefined = undefined;
   const lifecycleScope = scopeOf(payload);
   const sendAttempt =
-    facts?.sendAttemptPublicationId === null || facts?.sendAttemptPublicationId === undefined
-      ? null
-      : { publicationId: facts.sendAttemptPublicationId };
-  const observedChangedLines = facts?.changedLines ?? null;
-  const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
-  const roundBudget = deriveReviewBudget({
-    roundStartMs: ref.budgetStartMs,
-    deadlineMs: ref.deadlineMs,
-    terminalizeMs: terminalizeBudgetMs,
-    level,
-  });
+    "sendAttemptPublicationId" in failure && failure.sendAttemptPublicationId !== null
+      ? { publicationId: failure.sendAttemptPublicationId }
+      : null;
+  const observedChangedLines = prepared?.observedChangedLines ?? null;
   const check = maybeSettlement(deps, attemptId);
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const sandboxMayExist = launch !== null;
-  const paidStateObserved = progress.runnerReturned;
+  const paidStateObserved = failure.runnerReturned;
   const launchJudgement = launchVerdict(launch);
   const outcomeUnobservable =
     launchJudgement.kind === "unrecognised" ||
@@ -4522,27 +4630,11 @@ export async function settleAttemptFailure(
       },
       `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
-    cleanup.unproven = true;
     return { kind: "unknown" };
   }
   let durableOutcome = false;
-  if (err instanceof BudgetExhaustedError || err instanceof RoundBudgetSpent) {
-    const budgetOutcome: BudgetExhaustedOutcome =
-      err instanceof BudgetExhaustedError
-        ? err.outcome
-        : {
-            kind: "budget-exhausted",
-            cause: "consumer-deadline",
-            tier: level!,
-            budgetWindow: err.window,
-            budgetMs:
-              err.window === "runner"
-                ? (facts?.runnerEffectiveBudgetMs ?? roundBudget.preparationBudgetMs)
-                : roundBudget.preparationBudgetMs,
-            seatsDispatched: 0,
-            seatsStopped: 0,
-            changedLines: observedChangedLines,
-          };
+  if (failure.class === "budget") {
+    const budgetOutcome = failure.outcome;
     if (
       deps.checks !== undefined &&
       check !== undefined &&
@@ -4554,7 +4646,7 @@ export async function settleAttemptFailure(
       check.claimAttempted = true;
       await check.begin(lifecycleScope, githubAppId, headSha);
     }
-    const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${err instanceof Error ? err.message : String(err)}`;
+    const budgetDetail = `budget-exhausted: ${JSON.stringify(budgetOutcome)} — ${detail}`;
     deps.log.error(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -4565,7 +4657,6 @@ export async function settleAttemptFailure(
               runner_timeout_ms: runnerTimeoutMs(level),
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
-        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
         budget_outcome: budgetOutcome,
       },
       `review failed: ${budgetDetail}`,
@@ -4578,8 +4669,8 @@ export async function settleAttemptFailure(
         repo: payload.repo,
         pr_number: payload.pr_number,
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
-        stage: progress.failureStage,
-        error: redactExactSecrets(redactSecrets(budgetDetail), progress.secretValues),
+        stage: failure.stage,
+        error: redactExactSecrets(redactSecrets(budgetDetail), await sealedSecretValues(deps, attemptId)),
       });
       durableOutcome = true;
     } catch (recordErr) {
@@ -4600,15 +4691,13 @@ export async function settleAttemptFailure(
                 runner_timeout_ms: runnerTimeoutMs(level),
                 orchestration: level === "deep" ? "parent" : "bun-fanout",
               }),
-          ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
           event: "review_unresolved",
         },
         `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
       );
-        cleanup.unproven = true;
-        return { kind: "unknown" };
-      }
-      if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+      return { kind: "unknown" };
+    }
+    if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
     const checkAttemptId = check?.handle?.attemptId;
     if (checkAttemptId !== undefined) await freezeKnownStop(deps, payload, checkAttemptId, budgetOutcome);
@@ -4616,7 +4705,7 @@ export async function settleAttemptFailure(
     return { kind: "budget-exhausted", outcome: budgetOutcome };
   }
 
-  if (err instanceof AttemptUnknownError) {
+  if (failure.class === "unknown") {
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -4627,14 +4716,12 @@ export async function settleAttemptFailure(
               runner_timeout_ms: runnerTimeoutMs(level),
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
-        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
         event: "review_unresolved",
       },
-      `review unresolved: ${err.message} — nothing was collected, destroyed or reclaimed`,
+      `review unresolved: ${detail} — nothing was collected, destroyed or reclaimed`,
     );
-      cleanup.unproven = true;
-      return { kind: "unknown" };
-    }
+    return { kind: "unknown" };
+  }
   deps.log.error(
     {
       ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -4645,13 +4732,12 @@ export async function settleAttemptFailure(
             runner_timeout_ms: runnerTimeoutMs(level),
             orchestration: level === "deep" ? "parent" : "bun-fanout",
           }),
-      ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
     },
     `review failed: ${detail}`,
   );
 
   const persistedDetail =
-    classifyGithubRateLimit(err) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
+    classifyGithubRateLimit(new Error(detail)) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
   try {
     await deps.failureStore.record({
       target_id: payload.targetId,
@@ -4660,8 +4746,8 @@ export async function settleAttemptFailure(
       repo: payload.repo,
       pr_number: payload.pr_number,
       head_sha: fields?.head_sha ?? payload.head_sha ?? "",
-      stage: progress.failureStage,
-      error: redactExactSecrets(redactSecrets(persistedDetail), progress.secretValues),
+      stage: failure.stage,
+      error: redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId)),
     });
     durableOutcome = true;
   } catch (recordErr) {
@@ -4682,17 +4768,15 @@ export async function settleAttemptFailure(
               runner_timeout_ms: runnerTimeoutMs(level),
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
-        ...(progress.runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - progress.runnerStartedAt }),
         event: "review_unresolved",
       },
       `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
     );
-      cleanup.unproven = true;
-      return { kind: "unknown" };
-    }
-    if (paidStateObserved && durableOutcome) {
-      await recordReviewFailure(deps.env.DB, attemptId, Date.now());
-    }
+    return { kind: "unknown" };
+  }
+  if (paidStateObserved && durableOutcome) {
+    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+  }
   if (sendAttempt !== null) {
     await check?.terminalize(sendAttempt.publicationId, "publication-unknown");
   } else {
@@ -4727,7 +4811,7 @@ export async function settleAttemptFailure(
   if (durableOutcome) effects.push("failure-row");
   if (claimStampLanded) effects.push("claim-stamp");
   await markSettled(effects);
-  throw err;
+  return { kind: "ok" };
 }
 /**
  * Phase 5 — cleanup. Destroy only the proven container, once its result or a
@@ -4736,7 +4820,6 @@ export async function settleAttemptFailure(
  * unknown container state, and cleanup never replaces collection.
  */
 export type CleanupInput = {
-  unproven?: boolean;
   headSha?: string | null;
 };
 
@@ -4789,7 +4872,7 @@ export async function cleanupAttempt(
         return noLaunchState(verdict);
     }
   }
-  let containerUnproven = retention === undefined || input.unproven === true;
+  let containerUnproven = retention === undefined;
   if (containerUnproven) {
     deps.log.warn(
       {
@@ -4797,14 +4880,15 @@ export async function cleanupAttempt(
         sandbox_id: sandboxId,
         event: "sandbox_teardown_unproven",
       },
-      input.unproven === true
-        ? "sandbox not destroyed: the failure left the container's state unknown — capacity held, nothing released"
-        : "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
+      "sandbox not destroyed: no durable outcome to justify it — capacity held, nothing released",
     );
   } else if (containerMayExist) {
     try {
       const sandbox = await reviewAttemptSandbox(deps, attemptId);
-      if ((await discardReviewAttempt(sandbox, attemptId, retention!)) !== "destroyed") {
+      // `destroyed` and `stopped` both END the slot (both fence it), so both
+      // release capacity: the platform having stopped it is equivalent.
+      const discarded = await discardReviewAttempt(sandbox, attemptId, retention!);
+      if (discarded === "unknown") {
         containerUnproven = true;
         deps.log.warn(
           {
