@@ -44,7 +44,7 @@ Deployment shape that matters: **SaaS multi-tenant (`DEPLOYMENT_MODE=saas`)** **
 - Per-App webhook HMAC verification, body size limit, soft-deleted/disabled App 404, maintenance 503.
 - Secretbox AES-GCM with AAD binding ciphertext to `table.column:rowId`.
 - Credential payload to runner only over stdin; never env/argv/logs (`packages/shared/src/credential-payload.ts`); secret-shape and exact-value redaction (`src/pipeline/redact.ts`).
-- Workspace gate classifies principal (member / invitee / outsider / operator-granted / operator-denied) before dispatch; support grants are time-boxed and read-only; the workspace gate records audit events for operator access (`support.read`, `support.forbidden`, `support.denied`), not for ordinary member requests; but SPA shell loads (`serveSpaIndex`, `src/worker/spa-dispatch.ts`) check support access without recording an audit event.
+- Workspace gate classifies principal (member / invitee / outsider / operator-granted / operator-denied) before dispatch; support grants are time-boxed and read-only; the workspace gate records audit events for operator access (`support.read`, `support.forbidden`, `support.denied`), not for ordinary member requests. SPA shell loads (`serveSpaIndex`, `src/worker/spa-dispatch.ts`) check support access without recording an audit event.
 - Fail-closed when bindings or secrets are missing; safe same-origin Referer redirects.
 - One-shot sandbox per attempt, no secrets baked into the image.
 
