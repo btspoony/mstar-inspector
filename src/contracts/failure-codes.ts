@@ -26,7 +26,7 @@ export const FAILURE_CODES = [
   "review.output.degraded_published",
   "review.publish.deadline_spent",
   "review.github.rate_limited",
-  "review.github.unavailable",
+  "review.github.cleanup_limited",
   "review.admission.refused",
   "review.delivery.deferred",
   "review.delivery.quota_exhausted",
@@ -70,8 +70,8 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
     "The review finished its analysis, but there was no time left to publish it. Nothing was published.",
   "review.github.rate_limited":
     "GitHub asked the bot to slow down before the review could be published. Nothing was published; the next review may go through.",
-  "review.github.unavailable":
-    "GitHub could not be reached while the review was being published. Nothing was published; it will be retried.",
+  "review.github.cleanup_limited":
+    "GitHub rate-limited cleanup of an older review comment. The review itself was published; an older comment may remain.",
   "review.admission.refused":
     "This commit was not reviewed: another review already holds a slot for this pull request, or the workspace's limit on concurrent reviews was reached. Nothing was charged.",
   "review.delivery.deferred":
@@ -83,7 +83,7 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.metering.unrecorded":
     "The review's usage row was recorded late or more than once. Usage figures may be off; the review itself is unaffected and nothing extra was charged.",
   "review.recheck.unaccounted":
-    "A follow-up check could not be reconciled. The review result stands and nothing extra was charged; the check may need a manual re-run.",
+    "A follow-up check could not be reconciled. Nothing extra was charged; the check may need a manual re-run.",
   "review.internal.unclassified":
     "The review stopped for a reason that has not been classified yet. Whether anything was charged is unknown; an operator can look it up by this code.",
 };

@@ -1803,9 +1803,15 @@ export type PhaseFailure =
    * The outcome could not be observed. `containerStateUnknown` says WHICH kind:
    * true means a paid step may be running on a slot nobody can read (hold
    * capacity); false means the attempt never got far enough to pay and the
-   * launch row proves it (release and fence).
+   * launch row proves it (release and fence). `reason` names why the outcome is
+   * unobservable, which is what the operator-facing code is read from —
+   * `containerStateUnknown` keeps driving capacity alone.
    */
-  | (PhaseFailureBase & { class: "unknown"; containerStateUnknown: boolean })
+  | (PhaseFailureBase & {
+      class: "unknown";
+      containerStateUnknown: boolean;
+      reason: "retired" | "reply-lost" | "unavailable";
+    })
   | (PhaseFailureBase & { class: "moved-head"; phase: "prepare" })
   | (PhaseFailureBase & { class: "container-lost"; phase: "review" })
   | (PhaseFailureBase & { class: "config-unresolved" })
@@ -2573,9 +2579,16 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
     // `ctx.runnerReturned === false` with the row already `launched` is exactly
     // the case that may hide a live child. The settlement re-checks the row, so
     // this flag is only the record's own observation.
-    const containerStateUnknown =
-      !(err instanceof AttemptRetiredError) && (ctx.runnerReturned || ctx.phase !== "prepare");
-    return { ...base, class: "unknown", containerStateUnknown };
+    const retired = err instanceof AttemptRetiredError;
+    const containerStateUnknown = !retired && (ctx.runnerReturned || ctx.phase !== "prepare");
+    // `reason` is what the operator-facing code reads; it is derived from the
+    // SAME facts `containerStateUnknown` uses, so the two never disagree.
+    const reason = retired
+      ? "retired"
+      : containerStateUnknown
+        ? "reply-lost"
+        : "unavailable";
+    return { ...base, class: "unknown", containerStateUnknown, reason };
   }
   if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
     return { ...base, class: "container-lost", phase: "review" };
@@ -4705,9 +4718,9 @@ async function publishPhase(
             pr_number: payload.pr_number,
             head_sha: headSha,
             stage: "rate-limit",
-            code: "review.github.rate_limited",
+            code: "review.github.cleanup_limited",
             trackId: attemptId,
-            message: FAILURE_SUMMARIES["review.github.rate_limited"],
+            message: FAILURE_SUMMARIES["review.github.cleanup_limited"],
             error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
           });
         } catch (recordErr) {
@@ -4779,6 +4792,19 @@ export function failureCodeOf(failure: PhaseFailure): FailureCode {
         : "review.container.lost_before_paid";
     case "config-unresolved":
       return "review.config.unresolved";
+    case "unknown":
+      // Three different incidents share the unobservable outcome; the record's
+      // own `reason` is the only fact that tells them apart.
+      switch (failure.reason) {
+        case "retired":
+          return "review.container.retired";
+        case "reply-lost":
+          return "review.paid.reply_lost";
+        case "unavailable":
+          return "review.container.unavailable";
+        default:
+          return "review.internal.unclassified";
+      }
     default:
       return "review.internal.unclassified";
   }

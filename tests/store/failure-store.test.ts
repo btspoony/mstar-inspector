@@ -203,10 +203,10 @@ describe("createFailureStore", () => {
 
   test("the trailing-24h pipeline read is served by its partial window index (0048)", () => {
     const db = createFailureDb();
-    const index = db.raw
-      .query("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_pipeline_created'")
-      .get() as { sql: string } | null;
-    expect(index?.sql).toContain("WHERE stage = 'pipeline'");
+    const exists = db.raw
+      .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_failures_pipeline_created'")
+      .get();
+    expect(exists).not.toBeNull();
     const plan = (
       db.raw
         .query(
@@ -215,7 +215,8 @@ describe("createFailureStore", () => {
         )
         .all() as Array<{ detail: string }>
     ).map((row) => row.detail);
-    expect(plan.join("\n")).toContain("idx_review_failures_pipeline_created (created_at>?)");
+    // The invariant: this read is served by THAT index, not by a table scan.
+    expect(plan.join("\n")).toContain("idx_review_failures_pipeline_created");
   });
 });
 

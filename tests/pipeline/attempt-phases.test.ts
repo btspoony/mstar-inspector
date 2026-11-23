@@ -3664,8 +3664,8 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     };
     const prePaid = phaseFailureRecord({ ...ctx, phase: "prepare" }, new AttemptUnknownError("unreadable"));
     const postPaid = phaseFailureRecord({ ...ctx, phase: "collect" }, new AttemptUnknownError("unreadable"));
-    expect(prePaid).toMatchObject({ class: "unknown", containerStateUnknown: false });
-    expect(postPaid).toMatchObject({ class: "unknown", containerStateUnknown: true });
+    expect(prePaid).toMatchObject({ class: "unknown", containerStateUnknown: false, reason: "unavailable" });
+    expect(postPaid).toMatchObject({ class: "unknown", containerStateUnknown: true, reason: "reply-lost" });
   });
 
   test("a budget stop in prepare settles with the record's own window", async () => {

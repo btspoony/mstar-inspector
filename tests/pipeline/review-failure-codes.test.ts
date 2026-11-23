@@ -35,7 +35,13 @@ function failureOf(over: Partial<PhaseFailure> & Pick<PhaseFailure, "class">): P
   if (over.class === "failure") {
     return { ...base, class: "failure", phase: "review", sendAttemptPublicationId: null } as PhaseFailure;
   }
-  return { ...base, class: "unknown", phase: "review" } as PhaseFailure;
+  return {
+    ...base,
+    class: "unknown",
+    phase: "review",
+    containerStateUnknown: false,
+    reason: "unavailable",
+  } as PhaseFailure;
 }
 
 describe("failureCodeOf — the single classification point", () => {
@@ -68,8 +74,20 @@ describe("failureCodeOf — the single classification point", () => {
 
   test("an ordinary or inconclusive stop classifies as unclassified, never as a made-up code", () => {
     expect(failureCodeOf(failureOf({ class: "failure" }))).toBe("review.internal.unclassified");
-    expect(failureCodeOf(failureOf({ class: "unknown" }))).toBe("review.internal.unclassified");
     expect(failureCodeOf(failureOf({ class: "moved-head" }))).toBe("review.internal.unclassified");
+  });
+
+  test("an unobservable outcome names WHICH incident it was, off the record's own reason", () => {
+    const unknown = (reason: "retired" | "reply-lost" | "unavailable"): PhaseFailure => ({
+      ...BASE,
+      class: "unknown",
+      phase: "review",
+      containerStateUnknown: reason === "reply-lost",
+      reason,
+    });
+    expect(failureCodeOf(unknown("retired"))).toBe("review.container.retired");
+    expect(failureCodeOf(unknown("reply-lost"))).toBe("review.paid.reply_lost");
+    expect(failureCodeOf(unknown("unavailable"))).toBe("review.container.unavailable");
   });
 
   test("the mapping is total: every class yields a member of the closed set", () => {

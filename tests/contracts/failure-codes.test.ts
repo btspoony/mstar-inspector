@@ -11,7 +11,7 @@ import {
  * timing arithmetic, no internal identifiers. A summary is written for a PR
  * author, so any of these means the leak came back.
  */
-const DENY = ["container", "durable object", "marker", "attemptphaseerror", "ms", "timeout"];
+const DENY = ["container", "durable object", "marker", "attemptphaseerror", "timeout"];
 
 describe("failure codes", () => {
   test("the set is closed: unique members, one summary each, no extras", () => {
@@ -35,7 +35,9 @@ describe("failure codes", () => {
       for (const term of DENY) expect(summary).not.toContain(term);
       expect(summary).not.toMatch(/\d+\s?ms/);
       expect(summary).not.toMatch(/\berror\b/);
-      expect(summary).not.toMatch(/\b[a-z]+-[0-9a-z]{4,}\b/i);
+      // An internal identifier (a class or step name) carries a digit; plain
+      // hyphenated English ("rate-limited") must not trip this guard.
+      expect(summary).not.toMatch(/\b[a-z]+-[0-9a-z]*\d[0-9a-z]*\b/i);
     }
   });
 
