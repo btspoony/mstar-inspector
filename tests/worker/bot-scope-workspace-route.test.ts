@@ -373,6 +373,12 @@ describe("GET a shared bot's settings face from a workspace that does not own it
          VALUES ('d-globex', 'bot-home', 'pull_request', 'rejected', 401, 'globex/secret-repo', NULL)`,
       )
       .run();
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+         VALUES ('d-acme', 'bot-home', 'pull_request', 'ok', 202, 'ACME/Widgets', NULL)`,
+      )
+      .run();
     const session = await createSessionValue("erin", null, SESSION_SECRET);
     const res = await worker.fetch(
       new Request("https://worker.local/dashboard/" + OTHER + "/api/apps/" + HOME_BOT + "/settings", {
@@ -386,12 +392,15 @@ describe("GET a shared bot's settings face from a workspace that does not own it
       installations: unknown[];
       keys: unknown[];
       custom_providers: unknown[];
-      delivery_summary: { latest: unknown; rejected24h: number };
+      delivery_summary: { latest: { outcome: string; status_code: number | null } | null; rejected24h: number };
     };
     expect(body.can_configure_bot).toBe(false);
     expect(body.installations).toEqual([]);
     expect(body.keys).toEqual([]);
     expect(body.custom_providers).toEqual([]);
-    expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
+    expect(body.delivery_summary).toEqual({
+      latest: expect.objectContaining({ outcome: "ok", status_code: 202 }),
+      rejected24h: 0,
+    });
   });
 });
