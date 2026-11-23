@@ -46,7 +46,7 @@ describe("terminal pull_requests retention sweep", () => {
     await createReviewBotsStore(capturing(db, captured)).sweepTerminalPullRequests(RETENTION);
     const sql = captured.find((s) => s.includes("DELETE FROM pull_requests"));
     expect(sql).toBeDefined();
-    const detail = (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all() as Array<{ detail: string }>)
+    const detail = (db.raw.query(`EXPLAIN QUERY PLAN ${sql}`).all(`-${RETENTION.days} days`, RETENTION.cap) as Array<{ detail: string }>)
       .map(({ detail }) => detail)
       .join("\n");
     expect(detail).toMatch(/SEARCH pull_requests USING (COVERING )?INDEX idx_pull_requests_terminal_seen \(last_seen_at<\?\)/);
