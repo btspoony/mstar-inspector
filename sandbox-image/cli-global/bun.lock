@@ -4,7 +4,7 @@
   "workspaces": {
     "": {
       "dependencies": {
-        "@mstar-harness/cli": "4.8.2",
+        "@mstar-harness/cli": "4.8.4",
       },
     },
   },
@@ -13,7 +13,7 @@
 
     "@modelcontextprotocol/server": ["@modelcontextprotocol/server@2.4.0", "", { "dependencies": { "@modelcontextprotocol/core": "2.4.0", "zod": "^4.2.0" } }, "sha512-rgR9yxSaAJ+bcsi/XroT/S2AfPiIWloXAnrdfYSCms9ivVju0ishu/wW0J21Ho6+ZOR1r7RyeRbjiRuF87ix5Q=="],
 
-    "@mstar-harness/cli": ["@mstar-harness/cli@4.8.2", "", { "dependencies": { "@modelcontextprotocol/server": "2.4.0", "commander": "^15.1.0", "picocolors": "^1.1.1", "zod": "^4.2.0" }, "bin": { "mstar": "dist/mstar-harness.js", "mstar-harness": "dist/mstar-harness.js" } }, "sha512-gPMLhERAlgA2Pd/qdvGT57FR4TZjdNcIbZREC7CM7WvjdhBn6LjPq63uo7RwX1rt01LwBgFXsdd0aeheI0GzKQ=="],
+    "@mstar-harness/cli": ["@mstar-harness/cli@4.8.4", "", { "dependencies": { "@modelcontextprotocol/server": "2.4.0", "commander": "^15.1.0", "picocolors": "^1.1.1", "zod": "^4.2.0" }, "bin": { "mstar": "dist/mstar-harness.js", "mstar-harness": "dist/mstar-harness.js" } }, "sha512-0ByAw2W7221qa4yCuAGy7p/RlBaILixtOX238mIeVqmqzj53MDvC8/oGfvvqS4Tn88hyMkDaClZdek74SlDndw=="],
 
     "commander": ["commander@15.1.0", "", {}, "sha512-cgnQ88TRrWcC7pVq46RzJVRMktu3W2RcbnoidnfBsl1bmDCBwJS/udcIZpKoCrbAYYaCqsz1yZCVIgbIaU3ddQ=="],
 
