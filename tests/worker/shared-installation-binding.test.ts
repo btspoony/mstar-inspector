@@ -186,6 +186,7 @@ async function bindThroughOAuth(
   workspace: string,
   login: string,
   installationId: number,
+  beforeCallback: () => void = () => {},
 ): Promise<Response> {
   const started = await postBind(db, workspace, login, installationId);
   expect(started.status).toBe(200);
@@ -195,6 +196,7 @@ async function bindThroughOAuth(
   expect(authorize.searchParams.get("scope")).toContain("read:org");
   const state = authorize.searchParams.get("state")!;
   expect(started.headers.get("set-cookie")).toContain(`${BIND_COOKIE}=${state}`);
+  beforeCallback();
   return call(db, `/dashboard/oauth/callback?code=abc123&state=${encodeURIComponent(state)}`, {
     method: "GET",
     headers: await headers(login, `${BIND_COOKIE}=${state}`),
@@ -309,5 +311,59 @@ describe("shared bot installations are bound to one workspace", () => {
     await apps.upsertInstallation({ appId: SHARED_BOT, installationId: 99, accountLogin: "org-z", authoritative: true });
     expect(boundTo(db, INSTALLATION_A)).toBe(WS_A);
     expect(boundTo(db, 99)).toBeNull();
+  });
+
+  test("a bound installation is no longer pending, and re-binding it here is a no-op", async () => {
+    const db = await twoTenantWorld();
+    stubGithub(world());
+    expect((await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A)).status).toBe(302);
+    const pending = await createReviewBotsStore(db).listPendingInstallations(SHARED_BOT, WS_A);
+    expect(pending.map((row) => row.installation_id)).toEqual([INSTALLATION_B]);
+    const again = await postBind(db, WS_A, "alice", INSTALLATION_A);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ botId: SHARED_BOT, installationId: INSTALLATION_A, bound: true });
+  });
+
+  test("a binding whose workspace was deleted no longer holds the installation", async () => {
+    const db = await twoTenantWorld();
+    const apps = createReviewBotsStore(db);
+    expect(await apps.bindInstallation(SHARED_BOT, INSTALLATION_A, WS_A)).toBe("bound");
+    db.raw.prepare("UPDATE workspaces SET deleted_at = datetime('now') WHERE id = ?").run(WS_A);
+    expect((await apps.listPendingInstallations(SHARED_BOT, WS_B)).map((r) => r.installation_id)).toContain(
+      INSTALLATION_A,
+    );
+    stubGithub(world({ oauthUser: "bob", adminOf: ["org-a"] }));
+    expect((await bindThroughOAuth(db, WS_B, "bob", INSTALLATION_A)).status).toBe(302);
+    expect(boundTo(db, INSTALLATION_A)).toBe(WS_B);
+  });
+
+  test("a manager who loses the role during the GitHub round trip binds nothing", async () => {
+    const db = await twoTenantWorld();
+    stubGithub(world());
+    const res = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A, () => {
+      db.raw
+        .prepare(
+          `UPDATE workspace_members SET role = 'member'
+            WHERE workspace_id = ? AND user_id = (SELECT id FROM users WHERE github_login = 'alice')`,
+        )
+        .run(WS_A);
+    });
+    expect(res.status).toBe(403);
+    expect(boundTo(db, INSTALLATION_A)).toBeNull();
+  });
+
+  test("a maintenance window opened during the GitHub round trip binds nothing", async () => {
+    const db = await twoTenantWorld();
+    stubGithub(world());
+    const res = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A, () => {
+      db.raw
+        .prepare(
+          `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+           VALUES ('platform.maintenance.enabled', '1', datetime('now'))`,
+        )
+        .run();
+    });
+    expect(res.status).toBe(503);
+    expect(boundTo(db, INSTALLATION_A)).toBeNull();
   });
 });

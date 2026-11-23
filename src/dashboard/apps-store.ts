@@ -801,14 +801,16 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return res.results;
     },
 
+    /** The installation's live binding; a deleted workspace's binding reads as NULL. */
     async getInstallationBinding(
       appId: string,
       installationId: number,
     ): Promise<{ bound_workspace_id: string | null; removed_at: string | null } | null> {
       return db
         .prepare(
-          `SELECT bound_workspace_id, removed_at FROM bot_installations
-           WHERE bot_id = ? AND installation_id = ?`,
+          `SELECT w.id AS bound_workspace_id, i.removed_at FROM bot_installations i
+             LEFT JOIN workspaces w ON w.id = i.bound_workspace_id AND w.deleted_at IS NULL
+           WHERE i.bot_id = ? AND i.installation_id = ?`,
         )
         .bind(appId, installationId)
         .first<{ bound_workspace_id: string | null; removed_at: string | null }>();
@@ -816,7 +818,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     /**
      * Bind a live installation to a workspace. First binder wins: a row already
-     * bound to another workspace is never rebound here.
+     * bound to another live workspace is never rebound here; a binding whose
+     * workspace was deleted counts as unbound.
      */
     async bindInstallation(
       appId: string,
@@ -827,7 +830,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .prepare(
           `UPDATE bot_installations SET bound_workspace_id = ?3
            WHERE bot_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
-             AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3)`,
+             AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
+                  OR NOT EXISTS (SELECT 1 FROM workspaces w
+                                  WHERE w.id = bot_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
         )
         .bind(appId, installationId, workspaceId)
         .run();
@@ -845,7 +850,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           `SELECT i.installation_id, i.account_login, i.seen_at FROM bot_installations i
              JOIN review_bots b ON b.id = i.bot_id
             WHERE i.bot_id = ?1 AND i.removed_at IS NULL
-              AND (i.bound_workspace_id IS NULL OR i.bound_workspace_id = ?2)
+              AND NOT EXISTS (SELECT 1 FROM workspaces bw
+                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
               AND (b.scope = 'shared'
                    OR EXISTS (SELECT 1 FROM bot_workspaces w
                                WHERE w.bot_id = b.id AND w.workspace_id = ?2))

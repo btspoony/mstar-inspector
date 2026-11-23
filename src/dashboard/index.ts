@@ -4100,13 +4100,13 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
   if (!Number.isSafeInteger(installationId) || installationId <= 0) {
     return c.json({ error: "installationId required" }, 400);
   }
+  const binding = await apps.getInstallationBinding(app.id, installationId);
+  if (binding?.removed_at === null && binding.bound_workspace_id === member.scope.workspaceId) {
+    return c.json({ botId: app.id, installationId, bound: true });
+  }
   const pending = await apps.listPendingInstallations(app.id, member.scope.workspaceId);
   if (!pending.some((row) => row.installation_id === installationId)) {
     return c.json({ error: "unknown installation" }, 404);
-  }
-  const binding = await apps.getInstallationBinding(app.id, installationId);
-  if (binding?.bound_workspace_id === member.scope.workspaceId) {
-    return c.json({ botId: app.id, installationId, bound: true });
   }
   const secrets = dashboardSecrets(c.env);
   if (!secrets) return c.text("dashboard OAuth is not configured", 500);
@@ -4169,10 +4169,11 @@ async function completeInstallationBind(
   }
   const db = dashboardD1(c.env);
   if (!db) return c.text("dashboard storage is not configured", 500);
-  const access = await getWorkspaceAccessById(db, state.workspaceId, session.login);
-  if (access === null || !canManageRole(access.role)) {
-    return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
-  }
+  const stillManager = async () => {
+    const access = await getWorkspaceAccessById(db, state.workspaceId, session.login);
+    return access !== null && canManageRole(access.role);
+  };
+  if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   const apps = createReviewBotsStore(db);
   const named = await apps.getAppById(state.botId);
   const app =
@@ -4205,6 +4206,9 @@ async function completeInstallationBind(
       ? account.login.toLowerCase() === user.login.toLowerCase()
       : account.type === "Organization" && (await isGitHubOrgAdmin(token, account.login));
   if (!administers) return fail("common.oauth.bindDenied", 403, "not_account_admin");
+  const maintenance = await getMaintenanceMode(db);
+  if (maintenanceClosed(maintenance)) return maintenanceResponse(c, maintenance);
+  if (!(await stillManager())) return fail("common.oauth.bindDenied", 403, "not_workspace_manager");
   const outcome = await apps.bindInstallation(app.id, state.installationId, state.workspaceId);
   if (outcome === "bound_elsewhere") return fail("common.oauth.bindConflict", 409, "bound_elsewhere");
   if (outcome === "unknown") return fail("common.oauth.bindUnavailable", 404, "unknown_installation");

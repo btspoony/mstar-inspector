@@ -78,7 +78,7 @@ verdict per delivery, recorded once.
 
 - `shared` is platform-authorized and batch-verified against the current designation.
 - The bind writes only an installation the bot already reported: the pending read is the gate, so an id the bot never saw attaches nothing.
-- A shared bot's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another workspace is never rebound (first binder wins).
+- A shared bot's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another live workspace is never rebound (first binder wins). A deleted workspace's binding counts as unbound.
 - A wrong installation is repaired at the installation level; no per-target binding column exists to clear.
 - The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
 - A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
@@ -103,11 +103,11 @@ A workspace may read a target when it holds that live target: the repository cla
 
 ### Pending installations and binding
 
-`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded) and that are unbound or bound to the addressed workspace, and is empty unless the bot is `shared` or mapped to the addressed workspace.
+`GET`-side payload field `pending_installations` lists live `bot_installations` of the target's bot that no live target references (`removed_at` excluded) and that are bound to no live workspace (a deleted workspace's binding counts as unbound), and is empty unless the bot is `shared` or mapped to the addressed workspace.
 
-`POST /api/apps/:appId/bind-installation` (manager, `access: write`) writes nothing itself. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared`; malformed id → 400; id absent from the pending read (including one bound to another workspace) → 404 `unknown installation`; already bound here → `200 { bound: true }`. Otherwise it sets a signed, short-lived bind-state cookie and answers `200 { bound: false, authorize_url }`, a GitHub OAuth step-up with `read:user read:org`.
+`POST /api/apps/:appId/bind-installation` (manager, `access: write`) writes nothing itself. Guard order: unknown or foreign app → 404; non-manager → 403; bot not `shared` → 404 `bot is not shared`; malformed id → 400; already bound here → `200 { bound: true }`; id absent from the pending read (including one bound to another workspace) → 404 `unknown installation`. Otherwise it sets a signed, short-lived bind-state cookie and answers `200 { bound: false, authorize_url }`, a GitHub OAuth step-up with `read:user read:org`.
 
-The OAuth callback recognises that state and binds only when every check holds, else it renders an error page and binds nothing: the state matches this browser's cookie and is unexpired; the GitHub user is the signed-in user and still manages the workspace; the installation is live and not bound elsewhere (409); and the installation's account (`GET /app/installations/{id}`, App JWT) is either that same user or an organization where `GET /user/memberships/orgs/{org}` with the user's token is `active` + `admin` (else 403). The write is `UPDATE … SET bound_workspace_id` guarded by `bound_workspace_id IS NULL OR = caller`. The user token is used for these reads only and is never stored.
+The OAuth callback recognises that state and binds only when every check holds, else it renders an error page and binds nothing: the state matches this browser's cookie and is unexpired; the GitHub user is the signed-in user and still manages the workspace (re-checked immediately before the write); no maintenance window is closed (503); the installation is live and not bound elsewhere (409); and the installation's account (`GET /app/installations/{id}`, App JWT) is either that same user or an organization where `GET /user/memberships/orgs/{org}` with the user's token is `active` + `admin` (else 403). The write is `UPDATE … SET bound_workspace_id` guarded by `bound_workspace_id IS NULL OR = caller`. The user token is used for these reads only and is never stored.
 
 ### Derived Blocked state
 
