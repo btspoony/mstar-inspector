@@ -2067,10 +2067,14 @@ async function appsListWithHealth(
       (app.scope === "shared" && targetedBotIds.has(app.id)),
   );
   const owned = rows.filter((app) => canWriteBotScope(app, scope));
-  const summaries = await apps.deliverySummaries(owned.map((app) => app.id));
-  for (const app of rows) {
-    if (!canWriteBotScope(app, scope)) summaries[app.id] = await apps.deliverySummary(app.id, scope.workspaceId);
-  }
+  const consumed = rows.filter((app) => !canWriteBotScope(app, scope));
+  const [summaries, consumedSummaries] = await Promise.all([
+    apps.deliverySummaries(owned.map((app) => app.id)),
+    Promise.all(consumed.map((app) => apps.deliverySummary(app.id, scope.workspaceId))),
+  ]);
+  consumed.forEach((app, index) => {
+    summaries[app.id] = consumedSummaries[index]!;
+  });
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
