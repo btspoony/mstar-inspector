@@ -20,19 +20,19 @@ Deployment shape that matters: **SaaS multi-tenant (`DEPLOYMENT_MODE=saas`)** **
 | Infrastructure | `wrangler.jsonc`, `.github/workflows/**`, `migrations/**` | Deploy pipeline |
 
 ## Entry points and who reaches them
-- `/dashboard/*` and its API: anyone who signs in with GitHub; existing users can always sign in; while the `signup_open` flag is on, any new GitHub login can create an account **(owner: anyone with a GitHub login can sign up)**, except logins removed from the platform, which are refused at sign-in; a user without memberships lands on the workspace-creation screen, and creating a workspace is a separate request gated by the `workspace_creation_open` flag. Roles per workspace: owner, admin, member; invitees; outsiders get 404.
+- `/dashboard/*` and its API: anyone who signs in with GitHub; existing users can always sign in; while the `signup_open` flag is on, any new GitHub login can create an account **(owner: anyone with a GitHub login can sign up)**, except logins removed from the platform, which are refused at sign-in; a user without memberships lands on the workspace-creation screen, and creating a workspace is a separate request (`POST /dashboard/api/workspaces`) gated by the `workspace_creation_open` flag and, in saas, the free-workspace-slot entitlement. Sign-in itself never creates or joins a workspace. Roles per workspace: owner, admin, member; invitees; outsiders get 404.
 - `POST /webhook/:workspaceId/:appId`: internet-reachable; authenticated by HMAC with the App's decrypted webhook secret.
 - PR content (diff, titles, comments, @mentions) from authors on repos where an App is installed reaches the review agent inside the sandbox.
 - `/_internal_admin/*`: only logins in `PLATFORM_OPERATORS` (`src/admin/gate.ts`); others get an indistinguishable 404.
 - Cron and queue handlers: internal.
 
-## Assets (all named critical by the owner)
+## Assets (items marked (owner) were named critical by the owner)
 - **BYOK provider API keys, GitHub App private keys (PEM) and webhook secrets** **(owner)** — AES-GCM secretbox with per-field AAD (`src/dashboard/secretbox.ts`), key `DASHBOARD_ENCRYPTION_KEY`.
 - **Cross-workspace data isolation** — Apps, targets, review findings, insights, members, invites **(owner)**.
 - **Source code of reviewed repositories / installation tokens** **(owner)** — tokens passed to git via `GIT_CONFIG_*` env (`src/pipeline/gitops.ts`).
 - **Integrity of review results and Check Runs**, including prompt injection from PR content **(owner)** — `src/pipeline/checks.ts`, `comment.ts`, `review-threads.ts`, publication proof.
 - **Operator admin surface and support grants** **(owner)** — `src/admin/support-grants.ts`, audit_events.
-- Session secret `DASHBOARD_SESSION_SECRET`, OAuth client secret.
+- Session secret `DASHBOARD_SESSION_SECRET`, OAuth client secret (listed from the code; not rated by the owner).
 
 ## Attacker profiles that matter
 1. **Signed-in user of another workspace** (anyone with a GitHub account can become one) **(owner)** — primary attacker for IDOR, privilege escalation (member→admin/owner), cross-tenant reads/writes.
