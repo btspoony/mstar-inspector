@@ -2046,9 +2046,11 @@ function blockedReasonFor(
  * verified delivery" stamp (display-only, no computed health).
  *
  * The summaries come from the store's BATCHED deliverySummaries face
- * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
+ * (QC wave 1, W-1): two D1 statements per batch for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
+ * Owned bots form one App-wide batch; shared bots the workspace does not own
+ * form a second batch scoped to its target repositories, so at most four.
  * A request lists the workspace's own bots plus every `shared` bot it holds a
  * live target on (`targetedBotIds`) — the target is the entitlement, so a
  * target created on an official bot does not vanish from this list.
@@ -2068,13 +2070,11 @@ async function appsListWithHealth(
   );
   const owned = rows.filter((app) => canWriteBotScope(app, scope));
   const consumed = rows.filter((app) => !canWriteBotScope(app, scope));
-  const [summaries, consumedSummaries] = await Promise.all([
+  const [ownedSummaries, consumedSummaries] = await Promise.all([
     apps.deliverySummaries(owned.map((app) => app.id)),
-    Promise.all(consumed.map((app) => apps.deliverySummary(app.id, scope.workspaceId))),
+    apps.deliverySummaries(consumed.map((app) => app.id), scope.workspaceId),
   ]);
-  consumed.forEach((app, index) => {
-    summaries[app.id] = consumedSummaries[index]!;
-  });
+  const summaries = { ...ownedSummaries, ...consumedSummaries };
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 

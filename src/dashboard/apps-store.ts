@@ -473,9 +473,15 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     return row !== null;
   }
 
-  async function deliverySummaries(appIds: string[]): Promise<Record<string, DeliverySummary>> {
+  /** `workspaceId` non-null scopes every summary to that workspace's target repositories. */
+  async function deliverySummaries(
+    appIds: string[],
+    workspaceId: string | null = null,
+  ): Promise<Record<string, DeliverySummary>> {
     if (appIds.length === 0) return {};
     const placeholders = appIds.map(() => "?").join(", ");
+    const scopeSql = workspaceId === null ? "" : `AND ${DELIVERY_WORKSPACE_REPO_SQL}`;
+    const scopeBinds = workspaceId === null ? [] : [workspaceId];
     const [latestRes, rejectedRes] = await Promise.all([
       db
         .prepare(
@@ -483,22 +489,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
            SELECT bot_id, id, event_name, outcome, status_code, repository_full_name, created_at
            FROM webhook_deliveries WHERE rowid IN (
              SELECT (SELECT rowid FROM webhook_deliveries
-                     WHERE bot_id = requested.bot_id
+                     WHERE bot_id = requested.bot_id ${scopeSql}
                      ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
                      LIMIT 1)
              FROM requested
            )`,
         )
-        .bind(...appIds)
+        .bind(...appIds, ...scopeBinds)
         .all<WebhookDeliveryRow>(),
       db
         .prepare(
           `SELECT bot_id, COUNT(*) AS n FROM webhook_deliveries
            WHERE bot_id IN (${placeholders}) AND outcome = 'rejected'
-             AND created_at > datetime('now', '-24 hours')
+             AND created_at > datetime('now', '-24 hours') ${scopeSql}
            GROUP BY bot_id`,
         )
-        .bind(...appIds)
+        .bind(...appIds, ...scopeBinds)
         .all<{ bot_id: string; n: number }>(),
     ]);
     const byApp: Record<string, DeliverySummary> = {};
