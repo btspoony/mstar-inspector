@@ -1283,6 +1283,33 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.text).not.toContain("9f2c1d4e-aaaa-bbbb-cccc-000000000001");
   });
 
+  test("a row carrying a code this build no longer knows still renders its own message and error", async () => {
+    // `review.github.unavailable` left the closed set; a stale row must still
+    // render its stored sentence and its mechanism detail, never blank the tab
+    // or fall back to a code lookup that yields nothing.
+    const stale = {
+      stage: "pipeline" as const,
+      error: "gh: unavailable — the App token could not be minted",
+      message: "The review environment could not be started. Nothing was charged; it will be retried.",
+      error_code: "review.github.unavailable",
+      track_id: null,
+      created_at: "2026-11-05 00:00:00",
+    };
+    const read = await withMarkup(
+      face({ findings: page([]), reviews: page([]), failures: page([stale]) }),
+      (container) => ({
+        rows: container.querySelectorAll('[role="tabpanel"] li[data-tone="danger"]').length,
+        firstLine: container.querySelector('[role="tabpanel"] li[data-tone="danger"] p')?.textContent ?? "",
+        detail: container.querySelector('[role="tabpanel"] pre')?.textContent ?? "",
+      }),
+    );
+    expect(read.rows).toBe(1);
+    expect(read.firstLine).toBe(
+      "The review environment could not be started. Nothing was charged; it will be retried.",
+    );
+    expect(read.detail).toBe("gh: unavailable — the App token could not be minted");
+  });
+
   test("a historical failure (no code) renders its first line exactly as before", async () => {
     const historical = {
       stage: "sandbox" as const,

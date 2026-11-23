@@ -40,7 +40,7 @@ function failureOf(over: Partial<PhaseFailure> & Pick<PhaseFailure, "class">): P
     class: "unknown",
     phase: "review",
     containerStateUnknown: false,
-    reason: "unavailable",
+    code: "review.container.unavailable",
   } as PhaseFailure;
 }
 
@@ -77,17 +77,25 @@ describe("failureCodeOf — the single classification point", () => {
     expect(failureCodeOf(failureOf({ class: "moved-head" }))).toBe("review.internal.unclassified");
   });
 
-  test("an unobservable outcome names WHICH incident it was, off the record's own reason", () => {
-    const unknown = (reason: "retired" | "reply-lost" | "unavailable"): PhaseFailure => ({
+  test("an unobservable outcome names WHICH incident it was, off the code the throw site chose", () => {
+    const unknown = (code: FailureCode, containerStateUnknown = false): PhaseFailure => ({
       ...BASE,
       class: "unknown",
       phase: "review",
-      containerStateUnknown: reason === "reply-lost",
-      reason,
+      containerStateUnknown,
+      code,
     });
-    expect(failureCodeOf(unknown("retired"))).toBe("review.container.retired");
-    expect(failureCodeOf(unknown("reply-lost"))).toBe("review.paid.reply_lost");
-    expect(failureCodeOf(unknown("unavailable"))).toBe("review.container.unavailable");
+    expect(failureCodeOf(unknown("review.container.retired"))).toBe("review.container.retired");
+    expect(failureCodeOf(unknown("review.paid.reply_lost", true))).toBe("review.paid.reply_lost");
+    expect(failureCodeOf(unknown("review.container.unavailable"))).toBe("review.container.unavailable");
+    // The four branches this round told apart, each reachable from a record alone.
+    expect(failureCodeOf(unknown("review.container.lost_after_claim", true))).toBe(
+      "review.container.lost_after_claim",
+    );
+    expect(failureCodeOf(unknown("review.container.lost_before_paid"))).toBe(
+      "review.container.lost_before_paid",
+    );
+    expect(failureCodeOf(unknown("review.internal.unclassified"))).toBe("review.internal.unclassified");
   });
 
   test("the mapping is total: every class yields a member of the closed set", () => {

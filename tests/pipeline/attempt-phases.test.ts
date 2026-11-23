@@ -3625,7 +3625,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
 
   test("a cause with a throwing enumerable getter cannot break the record", () => {
     // The record is built from KNOWN fields, never `Object.entries(cause)`.
-    const hostile = new AttemptUnknownError("the container could not be read", "reply-lost");
+    const hostile = new AttemptUnknownError("the container could not be read", "review.paid.reply_lost");
     Object.defineProperty(hostile, "boom", {
       enumerable: true,
       get() {
@@ -3664,14 +3664,22 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     };
     const prePaid = phaseFailureRecord(
       { ...ctx, phase: "prepare" },
-      new AttemptUnknownError("unavailable", "unavailable"),
+      new AttemptUnknownError("unavailable", "review.container.unavailable"),
     );
     const postPaid = phaseFailureRecord(
       { ...ctx, phase: "collect" },
-      new AttemptUnknownError("unreadable", "reply-lost"),
+      new AttemptUnknownError("unreadable", "review.paid.reply_lost"),
     );
-    expect(prePaid).toMatchObject({ class: "unknown", containerStateUnknown: false, reason: "unavailable" });
-    expect(postPaid).toMatchObject({ class: "unknown", containerStateUnknown: true, reason: "reply-lost" });
+    expect(prePaid).toMatchObject({
+      class: "unknown",
+      containerStateUnknown: false,
+      code: "review.container.unavailable",
+    });
+    expect(postPaid).toMatchObject({
+      class: "unknown",
+      containerStateUnknown: true,
+      code: "review.paid.reply_lost",
+    });
   });
 
   test("a retired slot is never rendered as retryable-unavailable", () => {
@@ -3689,9 +3697,9 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
         changedLines: null,
         sendAttemptPublicationId: null,
       },
-      new AttemptUnknownError("the attempt's slot is retired", "retired"),
+      new AttemptUnknownError("the attempt's slot is retired", "review.container.retired"),
     );
-    expect(record).toMatchObject({ class: "unknown", containerStateUnknown: false, reason: "retired" });
+    expect(record).toMatchObject({ class: "unknown", containerStateUnknown: false, code: "review.container.retired" });
   });
 
   test("a budget stop in prepare settles with the record's own window", async () => {

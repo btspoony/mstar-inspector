@@ -11,6 +11,7 @@ import "../helpers/cloudflare-workers-mock";
 
 const {
   AttemptUnknownError,
+  recordReviewFailure,
   ContainerNotRunningError,
   ContainerUnavailableError,
   attemptMarker,
@@ -223,7 +224,10 @@ describe("the paid step is taken at most once per attempt", () => {
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
 
     const retry = sandboxDouble();
-    await expect(runReviewAttempt(executionInput(retry, db))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(retry, db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.paid.reply_lost",
+    });
     expect(retry.counts.paidCalls).toBe(0);
     expect(retry.events).toEqual([]);
   });
@@ -255,7 +259,10 @@ describe("the paid step is taken at most once per attempt", () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble();
 
-    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_before_paid",
+    });
     expect(sandbox.events).toEqual([]);
     expect(await readReviewLaunch(db, ATTEMPT)).toBeNull();
   });
@@ -381,6 +388,53 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
     ).rejects.toThrow();
 
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
+});
+
+describe("an unpayable row's code names the history that made it unpayable", () => {
+  test("a paid call that returned a failure says a paid step ran, not that a reply was lost", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
+    expect(await recordReviewFailure(db, ATTEMPT, Date.now())).toBe(true);
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_after_claim",
+    });
+  });
+
+  test("a persisted result that cannot be decoded never claims that nothing ran", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
+    expect(
+      await completeReviewLaunch(
+        db,
+        ATTEMPT,
+        { run: { stdout: "", stderr: "", exitCode: 0 }, recheck: null, report: null, appliedProvider: null },
+        Date.now(),
+      ),
+    ).toBe(true);
+    db.prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?").bind("not json", ATTEMPT).run();
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.internal.unclassified",
+    });
+  });
+
+  test("a cleanup-owned or unrecognised row stays before-paid: nothing was charged", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    db.prepare("UPDATE review_launches SET state = 'abandoned', abandoned_at_ms = ? WHERE attempt_id = ?")
+      .bind(Date.now(), ATTEMPT)
+      .run();
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_before_paid",
+    });
   });
 });
 

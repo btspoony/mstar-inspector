@@ -1803,14 +1803,14 @@ export type PhaseFailure =
    * The outcome could not be observed. `containerStateUnknown` says WHICH kind:
    * true means a paid step may be running on a slot nobody can read (hold
    * capacity); false means the attempt never got far enough to pay and the
-   * launch row proves it (release and fence). `reason` names why the outcome is
-   * unobservable, which is what the operator-facing code is read from —
-   * `containerStateUnknown` keeps driving capacity alone.
+   * launch row proves it (release and fence). `code` is the throw site's own
+   * operator-facing classification — `containerStateUnknown` keeps driving
+   * capacity alone.
    */
   | (PhaseFailureBase & {
       class: "unknown";
       containerStateUnknown: boolean;
-      reason: "retired" | "reply-lost" | "unavailable";
+      code: FailureCode;
     })
   | (PhaseFailureBase & { class: "moved-head"; phase: "prepare" })
   | (PhaseFailureBase & { class: "container-lost"; phase: "review" })
@@ -2356,7 +2356,7 @@ async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promis
      const detail = err instanceof Error ? err.message : String(err);
      throw new AttemptUnknownError(
        `attempt ${attemptId}: its frozen Check identity could not be read (${detail}) — no send authority can be established`,
-       "reply-lost",
+       "review.internal.unclassified",
      );
    }
    if (identity === null) return undefined;
@@ -2369,7 +2369,7 @@ async function ownedCheckAttemptId(deps: ProcessDeps, attemptId: string): Promis
      const detail = err instanceof Error ? err.message : String(err);
      throw new AttemptUnknownError(
        `attempt ${attemptId}: its Check row could not be read (${detail}) — no send authority can be established`,
-       "reply-lost",
+       "review.internal.unclassified",
      );
    }
  }
@@ -2577,16 +2577,17 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
   }
   if (err instanceof AttemptUnknownError || err instanceof AttemptRetiredError) {
     // `AttemptRetiredError` is a slot that can never start, so nothing paid can
-    // be lost. For the rest, the reason comes from the throw site's own cause,
-    // never from the phase: a retired slot in `prepare` must not render as a
-    // retryable environment fault, and a read that may hide a live paid child
-    // must not render as "nothing was paid". The record must not infer liveness
-    // from the phase either: `ctx.runnerReturned === false` with the row already
-    // `launched` is exactly the case that may hide a live child. The settlement
-    // re-checks the row, so this flag is only the record's own observation.
-    const reason = err instanceof AttemptUnknownError ? err.reason : "retired";
+    // be lost. For the rest, the code is the throw site's own classification,
+    // never an inference from the phase: a retired slot in `prepare` must not
+    // render as a retryable environment fault, and a read that may hide a live
+    // paid child must not render as "nothing was paid". The record must not
+    // infer liveness from the phase either: `ctx.runnerReturned === false` with
+    // the row already `launched` is exactly the case that may hide a live child.
+    // The settlement re-checks the row, so this flag is only the record's own
+    // observation.
+    const code: FailureCode = err instanceof AttemptUnknownError ? err.code : "review.container.retired";
     const containerStateUnknown = !(err instanceof AttemptRetiredError) && (ctx.runnerReturned || ctx.phase !== "prepare");
-    return { ...base, class: "unknown", containerStateUnknown, reason };
+    return { ...base, class: "unknown", containerStateUnknown, code };
   }
   if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
     return { ...base, class: "container-lost", phase: "review" };
@@ -2613,7 +2614,7 @@ async function readPersistedLaunch(deps: ProcessDeps, attemptId: string): Promis
     case "paid-failed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
-        "reply-lost",
+        unpayableCodeOf(verdict.kind),
       );
     default:
       return noLaunchState(verdict);
@@ -2633,7 +2634,7 @@ async function readPaidExecution(deps: ProcessDeps, attemptId: string): Promise<
     case "paid-failed":
       throw new AttemptUnknownError(
         `attempt ${attemptId}: the paid result is not durable (${verdict.kind}) — nothing may be published from it`,
-        "reply-lost",
+        unpayableCodeOf(verdict.kind),
       );
     default:
       return noLaunchState(verdict);
@@ -3482,16 +3483,39 @@ export type PaidFence =
   /** No durable outcome yet and the row can still be paid once. */
   | { kind: "payable" }
   /** The row records a terminal non-payable state: never pay, never resolve config. */
-  | { kind: "unpayable" };
+  | { kind: "unpayable"; code: FailureCode };
+
+/**
+ * The operator-facing code for a verdict that leaves this attempt permanently
+ * unpayable. Three different histories share "cannot be paid again": one where
+ * the paid step was SENT and its reply was lost, one where it ran and failed,
+ * and one where nothing was ever charged and a fresh attempt is the answer.
+ */
+function unpayableCodeOf(kind: "never-claimed" | "never-paid" | "owned-by-cleanup" | "unrecognised" | "paid-unknown" | "paid-failed"): FailureCode {
+  switch (kind) {
+    case "paid-unknown":
+      return "review.paid.reply_lost";
+    case "paid-failed":
+      return "review.container.lost_after_claim";
+    case "never-claimed":
+    case "never-paid":
+    case "owned-by-cleanup":
+    case "unrecognised":
+      return "review.container.lost_before_paid";
+  }
+}
 
 export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId: string): Promise<PaidFence> {
   let verdict: ReturnType<typeof launchVerdict>;
   try {
     verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
   } catch (err) {
+    // An undecodable persisted result is already classified: keep its code
+    // rather than calling a proven paid result a lost reply.
+    if (err instanceof AttemptUnknownError) throw err;
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch fence could not be read (${err instanceof Error ? err.message : String(err)}) — the paid outcome is unconfirmed`,
-      "reply-lost",
+      "review.paid.reply_lost",
     );
   }
   switch (verdict.kind) {
@@ -3499,17 +3523,17 @@ export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId:
       return { kind: "persisted", persistedAtMs: verdict.persistedAtMs };
     case "never-claimed":
       // No row at all: this attempt cannot be paid, so no config or mint work.
-      return { kind: "unpayable" };
+      return { kind: "unpayable", code: unpayableCodeOf(verdict.kind) };
     case "never-paid":
       // Provisioned and still releasable: the paid entry may proceed.
       return { kind: "payable" };
     case "paid-failed":
     case "owned-by-cleanup":
     case "unrecognised":
-      return { kind: "unpayable" };
+      return { kind: "unpayable", code: unpayableCodeOf(verdict.kind) };
     case "paid-unknown":
       // Sent, but no durable outcome: the paid-entry fence refuses a second pay.
-      return { kind: "unpayable" };
+      return { kind: "unpayable", code: unpayableCodeOf(verdict.kind) };
     default:
       return noLaunchState(verdict);
   }
@@ -3533,7 +3557,7 @@ export async function reviewAttempt(
     // an ordinary failure).
     throw new AttemptUnknownError(
       `attempt ${attemptId}: the launch row records a non-payable outcome — no paid step may be taken`,
-      "unavailable",
+      fence.code,
     );
   }
   const runner = requireRunnerConfig(deps, payload);
@@ -4795,18 +4819,9 @@ export function failureCodeOf(failure: PhaseFailure): FailureCode {
     case "config-unresolved":
       return "review.config.unresolved";
     case "unknown":
-      // Three different incidents share the unobservable outcome; the record's
-      // own `reason` is the only fact that tells them apart.
-      switch (failure.reason) {
-        case "retired":
-          return "review.container.retired";
-        case "reply-lost":
-          return "review.paid.reply_lost";
-        case "unavailable":
-          return "review.container.unavailable";
-        default:
-          return "review.internal.unclassified";
-      }
+      // Several incidents share the unobservable outcome; the throw site named
+      // which one, and the record carries that answer verbatim.
+      return failure.code;
     default:
       return "review.internal.unclassified";
   }
