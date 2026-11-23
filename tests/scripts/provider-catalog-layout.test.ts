@@ -82,16 +82,21 @@ describe("provider-catalog directory contract", () => {
   test("a tree whose snapshot date differs still satisfies the contract", () => {
     const movedFiles = (date: string): string[] =>
       files.map((file) => file.replace(/models\.dev-\d{4}-\d{2}-\d{2}\.json/, `models.dev-${date}.json`));
+    const current = files
+      .map((file) => /models\.dev-(\d{4}-\d{2}-\d{2})\.json$/.exec(file)?.[1])
+      .find((date) => date !== undefined);
+    expect(current, "the tree carries one dated snapshot").toBeDefined();
+    const otherDays = ["1999-01-01", "2999-12-31"].filter((date) => date !== current);
 
-    for (const date of ["2026-11-18", "2999-12-31"]) {
+    for (const date of otherDays) {
       const listing = movedFiles(date);
       expect(listing, date).not.toEqual(files);
       expect(tableMatches(README, listing), date).toBe(true);
     }
 
-    const pinned = README.replace(/models\.dev-<date>\.json/g, "models.dev-2026-11-13.json");
+    const pinned = README.replace(/models\.dev-<date>\.json/g, `models.dev-${current}.json`);
     expect(pinned).not.toBe(README);
-    expect(tableMatches(pinned, movedFiles("2026-11-18"))).toBe(false);
+    expect(tableMatches(pinned, movedFiles(otherDays[0]!))).toBe(false);
     expect(tableMatches(pinned, files)).toBe(true);
 
     expect(tablePaths()).toContain("inputs/models.dev-<date>.json");

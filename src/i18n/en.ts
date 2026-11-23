@@ -1152,6 +1152,9 @@ export const en = {
       sweepFailed: "Could not save the sweep settings.",
       sweepUnreadable:
         "Some sweep settings could not be read. Webhook and closed/merged PR retention are paused. Retry the read or enter and save all eight settings to restore them.",
+      sweepInvalidRows:
+        "Stored value invalid for: {fields}. Webhook and closed/merged PR retention are paused until you enter a valid value in each marked field and save.",
+      sweepInvalidField: "Stored value is invalid. Enter a new one.",
       recheckTitle: "Recheck assignment budget",
       recheckDescription:
         "How much of a round the prior-findings seat is asked with, in UTF-8 bytes. Every prior finding and the discussion always ride; evidence slices ride until this budget is spent.",

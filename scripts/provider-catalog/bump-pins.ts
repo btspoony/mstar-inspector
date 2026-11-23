@@ -27,7 +27,10 @@
  * bump runs a real `bun install` for the root and for the runner copy, then
  * checks the INSTALLED tree's version against the manifest pin (a lock row is
  * not evidence an install happened), and finally proves the committed lock is
- * self-consistent with `bun install --frozen-lockfile`. Any failure aborts the
+ * self-consistent with `bun install --frozen-lockfile`. An installed version
+ * is still not a loadable one (a release can ship a module that imports a file
+ * its tarball omits), so the bump finally imports every SDK specifier the
+ * runner's source loads at runtime, in the bumped tree. Any failure aborts the
  * bump — no fallback.
  *
  * Each lock is regenerated from the COMMITTED one, so only the pin's rows move;
@@ -39,7 +42,7 @@
  * Every rewrite is anchored on the current pin, so a surface that already moved
  * by hand fails the run instead of silently doing nothing.
  */
-import { copyFileSync, cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -158,6 +161,41 @@ export function installAndVerify(dir: string, expected: Expected[], modes: strin
     }
     console.log(`verified ${name}@${actual} installed in ${dir} (pin ${caret ? "^" : ""}${version})`);
   }
+}
+
+/** The value (non-`import type`) specifiers of `packages` that the runner's
+ *  source imports — what the image actually loads from the SDK at runtime. */
+export function runtimeSpecifiers(root: string, packages: readonly string[]): string[] {
+  const dir = path.join(root, "packages/runner/src");
+  const found = new Set<string>();
+  for (const name of readdirSync(dir, { recursive: true }).map(String)) {
+    if (!name.endsWith(".ts")) continue;
+    const text = readFileSync(path.join(dir, name), "utf8");
+    for (const match of text.matchAll(/^import\s+(type\s)?[^;]*?\sfrom\s+"([^"]+)"/gms)) {
+      const specifier = match[2]!;
+      if (match[1] !== undefined) continue;
+      if (packages.some((pkg) => specifier === pkg || specifier.startsWith(`${pkg}/`))) found.add(specifier);
+    }
+  }
+  return [...found].sort();
+}
+
+/** Import each specifier in a fresh `bun` process rooted at `dir`. Throws with
+ *  the loader's own error when any of them fails to load, and when there is
+ *  nothing to import (an empty list proves nothing). The bump proves both the
+ *  root tree (the repo's tooling) and the runner's exact-pin tree (the image). */
+export function proveLoads(dir: string, specifiers: readonly string[]): void {
+  if (specifiers.length === 0) {
+    throw new Error(`no runtime SDK import found under packages/runner/src — nothing to prove the bump loads in ${dir}`);
+  }
+  const script = specifiers.map((specifier) => `await import(${JSON.stringify(specifier)});`).join("\n");
+  const proc = Bun.spawnSync(["bun", "-e", script], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) {
+    throw new Error(
+      `the bumped tree in ${dir} installs but does not load (${specifiers.join(", ")}): ${proc.stderr.toString().trim()}`,
+    );
+  }
+  console.log(`verified ${specifiers.length} runtime SDK import(s) load in ${dir}`);
 }
 
 function regenerateLock(dir: string, root: string = ROOT): void {
@@ -288,6 +326,11 @@ export async function runBump(
 
   regenerateLock("", root);
   installAndVerify(root, expectedInstalls(edits, "package.json"), [[], ["--frozen-lockfile"]]);
+  const runnerDeps = JSON.parse(readFileSync(path.join(root, "packages/runner/package.json"), "utf8")) as {
+    dependencies?: Record<string, string>;
+  };
+  const specifiers = runtimeSpecifiers(root, Object.keys(runnerDeps.dependencies ?? {}));
+  proveLoads(root, specifiers);
   hooks.afterRootInstall?.();
 
   if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
@@ -306,6 +349,7 @@ export async function runBump(
         [],
         ["--frozen-lockfile"],
       ]);
+      proveLoads(tmp, specifiers);
       copyFileSync(path.join(tmp, "bun.lock"), path.join(root, "packages/runner/bun.lock"));
     } finally {
       rmSync(tmp, { recursive: true, force: true });
