@@ -340,14 +340,20 @@ describe("shared bot installations are bound to one workspace", () => {
   test("a manager who loses the role during the GitHub round trip binds nothing", async () => {
     const db = await twoTenantWorld();
     stubGithub(world());
-    const res = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A, () => {
-      db.raw
-        .prepare(
-          `UPDATE workspace_members SET role = 'member'
-            WHERE workspace_id = ? AND user_id = (SELECT id FROM users WHERE github_login = 'alice')`,
-        )
-        .run(WS_A);
-    });
+    const github = globalThis.fetch;
+    // Demote alice while GitHub answers the membership read — after the first role check.
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes("/user/memberships/orgs/")) {
+        db.raw
+          .prepare(
+            `UPDATE workspace_members SET role = 'member'
+              WHERE workspace_id = ? AND user_id = (SELECT id FROM users WHERE github_login = 'alice')`,
+          )
+          .run(WS_A);
+      }
+      return github(input as RequestInfo, init);
+    }) as typeof fetch;
+    const res = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A);
     expect(res.status).toBe(403);
     expect(boundTo(db, INSTALLATION_A)).toBeNull();
   });
