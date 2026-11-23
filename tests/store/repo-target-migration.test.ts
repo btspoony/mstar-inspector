@@ -227,7 +227,7 @@ describe("migration 0068: one repository, one workspace per bot", () => {
     insert("t-unclaimed", "default", "bot-2", null);
     insert("t-unclaimed-2", "other", "bot-2", null);
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(5);
-    db.raw.exec("DROP INDEX review_targets_bot_repo_unique");
+    db.raw.run("DROP INDEX review_targets_bot_repo_unique");
     insert("t-second", "default", "bot-1", 501);
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
   });

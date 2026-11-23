@@ -89,7 +89,7 @@ for (const rows of [3000, 15000, 60000]) {
       };
     }
 
-    db.exec(`PRAGMA foreign_keys = ${foreignKeys}`);
+    db.run(`PRAGMA foreign_keys = ${foreignKeys}`);
     assertHealthIndexes(false);
     const old = measure(before, "before");
     execMigrationScript(db, migration);
@@ -108,7 +108,7 @@ for (const rows of [3000, 15000, 60000]) {
     deepStrictEqual(improved.results, old.results);
     console.log(`${rows}\t${old.ms.toFixed(3)}\t${improved.ms.toFixed(3)}\t${(old.ms / improved.ms).toFixed(1)}x; results identical`);
   } finally {
-    db.exec(`PRAGMA foreign_keys = ${foreignKeys}`);
+    db.run(`PRAGMA foreign_keys = ${foreignKeys}`);
     db.close();
   }
 }

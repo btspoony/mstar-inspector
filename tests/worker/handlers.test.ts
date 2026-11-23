@@ -291,7 +291,7 @@ describe("handleReviewJob — durable comment-trigger claim (no head_sha)", () =
     const { queue, sent } = makeQueueStub();
     const log = makeLog();
     const db = createMigratedTestD1() as unknown as D1Database;
-    (db as unknown as TestD1).raw.exec(`
+    (db as unknown as TestD1).raw.run(`
       CREATE TABLE comment_trigger_claims_v2 (
         installation_id INTEGER NOT NULL, owner TEXT NOT NULL, repo TEXT NOT NULL,
         pr_number INTEGER NOT NULL, comment_id INTEGER NOT NULL,

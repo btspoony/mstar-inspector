@@ -808,9 +808,9 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
 
   test("an untrusted stored floor is ledgered as absent, not as the default", async () => {
     const db = createMigratedTestD1();
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 150 WHERE id = ?").run(WS);
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
 
     await setWorkspaceReviewDefaults(db, WS, { checkMinScore: 75 }, "operator");
 

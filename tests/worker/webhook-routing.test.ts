@@ -1865,7 +1865,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
   test("ignore delivery never depends on the review_global flag → 2xx ignored + delivery row recorded", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    db.raw.exec("DROP TABLE server_flags");
+    db.raw.run("DROP TABLE server_flags");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify({ ...PR_PAYLOAD, action: "closed" });
@@ -2307,7 +2307,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
   test("the target's business pause suppresses the enqueue without reading the global flag", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewEnabled: 0 }] });
-    db.raw.exec("DROP TABLE server_flags");
+    db.raw.run("DROP TABLE server_flags");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
     const body = JSON.stringify(PR_PAYLOAD);

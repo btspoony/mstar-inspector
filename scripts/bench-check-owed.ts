@@ -35,7 +35,7 @@ for (const attempts of [5_000, 20_000, 80_000]) {
   const launch = db.prepare(`INSERT INTO review_launches
     (attempt_id, attempt_key, attempt_generation, state, claimed_at_ms, check_key, check_generation, check_owed_ms)
     VALUES (?, ?, 1, 'provisioned', ?, ?, ?, ?)`);
-  db.exec("BEGIN");
+  db.run("BEGIN");
   for (let i = 0; i < attempts; i++) {
     const open = i >= attempts - waiting;
     const key = `key-${i}`;
@@ -44,7 +44,7 @@ for (const attempts of [5_000, 20_000, 80_000]) {
     const owed = i >= attempts - marked;
     launch.run(`attempt-${i}`, key, now - 1000, owed ? key : null, owed ? 1 : null, owed ? now - 1 : null);
   }
-  db.exec("COMMIT");
+  db.run("COMMIT");
 
   async function measure(): Promise<{ ms: number; ids: string[] }> {
     let ids: string[] = [];

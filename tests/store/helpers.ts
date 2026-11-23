@@ -54,7 +54,7 @@ export function migrationsAfter(
 const ALL_MIGRATIONS = migrationsAfter(0);
 
 function applyMigration(db: Database, migrations: readonly string[]): void {
-  db.exec("PRAGMA foreign_keys = ON;");
+  db.run("PRAGMA foreign_keys = ON;");
   for (const name of migrations) {
     execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
   }
@@ -130,7 +130,7 @@ export function splitSqlStatements(script: string): string[] {
  * everywhere else, and a fixture would silently come up half-migrated.
  */
 export function execMigrationScript(db: Database, script: string): void {
-  for (const statement of splitSqlStatements(script)) db.exec(statement);
+  for (const statement of splitSqlStatements(script)) db.run(statement);
 }
 
 function counter(db: Database, sql: string): number {
@@ -193,16 +193,16 @@ function wrapDb(db: Database): TestD1 {
       });
     },
     async batch(statements: D1StatementLike[]): Promise<D1BatchResult[]> {
-      db.exec("BEGIN");
+      db.run("BEGIN");
       try {
         const results: D1BatchResult[] = [];
         for (const stmt of statements) {
           results.push(await stmt.run());
         }
-        db.exec("COMMIT");
+        db.run("COMMIT");
         return results;
       } catch (error) {
-        db.exec("ROLLBACK");
+        db.run("ROLLBACK");
         throw error;
       }
     },

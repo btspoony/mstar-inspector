@@ -545,7 +545,7 @@ describe("per-App webhook face — best-effort delivery recording", () => {
       applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
     } else {
       applyMigrations(db, WEBHOOK_DELIVERIES_TAIL);
-      db.raw.exec("DROP TABLE webhook_deliveries");
+      db.raw.run("DROP TABLE webhook_deliveries");
     }
     return db;
   }

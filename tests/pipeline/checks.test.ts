@@ -1582,7 +1582,7 @@ describe("empty increment inheritance (spec §7.9)", () => {
     envelope = JSON.stringify(scorePct === null ? { verdict } : { verdict, tally: { scorePct } }),
     corruptEnvelope = false,
   ): void {
-    if (corruptEnvelope) db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    if (corruptEnvelope) db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw
       .prepare(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, envelope)

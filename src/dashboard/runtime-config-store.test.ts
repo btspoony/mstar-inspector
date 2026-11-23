@@ -880,9 +880,9 @@ describe("workspace check_min_score default", () => {
 
   test("an untrusted stored value reads the platform default, flagged", async () => {
     const db = fixture();
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'maybe' WHERE id = ?").run(WS);
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
     expect(await getWorkspaceCheckMinScore(db, WS)).toEqual({
       minScore: 60,
       degraded: true,

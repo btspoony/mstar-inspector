@@ -880,7 +880,7 @@ describe("runSweep — paging audit window", () => {
     const log = captureLog().log;
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
 
-    db.raw.exec("DELETE FROM platform_audit_events");
+    db.raw.run("DELETE FROM platform_audit_events");
     seedAlert(db, new Date(Date.now() - (SWEEP_WINDOW_HOURS + 1) * 3_600_000).toISOString());
 
     const breach = await runSweep(db, { alertUrl: "https://ops.example/hook", fetchImpl, log });

@@ -107,7 +107,7 @@ describe("attributionVerdict", () => {
       expect(orphaned.count).toBe(countOf(independent, db));
       expect(orphaned.message).toContain("workspace-backfill.sql");
 
-      db.raw.exec(REPAIR_SQL);
+      db.raw.run(REPAIR_SQL);
       expect(verdictFor(ZERO_ORPHAN_SQL, db)).toEqual({
         ok: true,
         count: 0,

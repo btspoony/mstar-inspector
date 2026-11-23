@@ -1649,7 +1649,7 @@ describe("target attribution follows the repository", () => {
       artifactPayload: enginePayload({ findings: manyFindings }),
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
-    db.raw.exec(
+    db.raw.run(
       "CREATE TRIGGER boom BEFORE INSERT ON review_finding_rounds BEGIN SELECT RAISE(ABORT, 'boom'); END",
     );
     await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
@@ -1659,7 +1659,7 @@ describe("target attribution follows the repository", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_findings").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT DISTINCT target_id FROM reviews").all()).toEqual([{ target_id: TARGET_ID }]);
 
-    db.raw.exec("DROP TRIGGER boom");
+    db.raw.run("DROP TRIGGER boom");
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
 
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
@@ -1687,14 +1687,14 @@ describe("target attribution follows the repository", () => {
       lifecycle: lifecycleRound({ seen: [seenEntry("row-1", "f-1")] }),
     });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
-    db.raw.exec(
+    db.raw.run(
       "CREATE TRIGGER boom BEFORE INSERT ON findings WHEN (SELECT COUNT(*) FROM findings) >= 24 BEGIN SELECT RAISE(ABORT, 'boom'); END",
     );
     await expect(applyPublishedLifecycle(db, "pub-1", lease, 2000)).rejects.toThrow(/boom/);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 24 });
 
-    db.raw.exec("DROP TRIGGER boom");
+    db.raw.run("DROP TRIGGER boom");
     expect(await applyPublishedLifecycle(db, "pub-1", lease, 3000)).toBe(true);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM reviews").get()).toEqual({ n: 1 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM findings").get()).toEqual({ n: 30 });
@@ -1766,7 +1766,7 @@ describe("target attribution follows the repository", () => {
     }));
     const pay = payload({ artifact: artifactDoc({ payload: enginePayload({ findings: twoFindings }) }) });
     const lease = await stageClaimProve(db, "pub-1", pay, 1000);
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER rival_after_review AFTER INSERT ON reviews BEGIN
          UPDATE review_publications SET holder = 'rival', lease_epoch = lease_epoch + 1 WHERE id = 'pub-1';
        END`,

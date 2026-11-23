@@ -2153,9 +2153,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
   test("an unreadable workspace default fails the commit closed, then retries once the stored floor is repaired", async () => {
     const env = commitEnv();
     const db = dbOf(env);
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'abc' WHERE id = 'default'").run();
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
 
     const holdValue = await createHoldValue(CONVERSION, "octocat", SESSION_SECRET, START_APP_ID, "default");
 
@@ -2182,9 +2182,9 @@ describe("/dashboard manifest commit (manifest → D1, zero CF API)", () => {
     stubGitHubConversionOnly();
     const env = commitEnv();
     const db = dbOf(env);
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET check_min_score = 'abc' WHERE id = 'default'").run();
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
     const session = await createSessionValue("octocat", null, SESSION_SECRET);
     const state = await createManifestStateValue(SESSION_SECRET, START_APP_ID, "default");
 
@@ -2686,11 +2686,11 @@ function createDashboardTestD1(
   through: number = DASHBOARD_MIGRATION_SEQUENCE.length,
 ): DashboardD1 & { raw: Database } {
   const db = new Database(":memory:");
-  db.exec("PRAGMA foreign_keys = ON;");
+  db.run("PRAGMA foreign_keys = ON;");
   for (const [index, name] of DASHBOARD_MIGRATION_SEQUENCE.entries()) {
     if (index >= through) break;
     if (index === 2) {
-      db.exec(
+      db.run(
         `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md)
          VALUES ('review-1', 123, 'acme', 'widgets', 42, '0123456789abcdef0123456789abcdef01234567', 'comment', 'No blocking issues.')`,
       );
@@ -2728,14 +2728,14 @@ function createDashboardTestD1(
     },
     async batch(statements: DashboardD1Statement[]): Promise<DashboardD1BatchResult[]> {
       const run = batchQueue.then(async () => {
-        db.exec("BEGIN");
+        db.run("BEGIN");
         try {
           const results: DashboardD1BatchResult[] = [];
           for (const stmt of statements) results.push(await stmt.run());
-          db.exec("COMMIT");
+          db.run("COMMIT");
           return results;
         } catch (error) {
-          db.exec("ROLLBACK");
+          db.run("ROLLBACK");
           throw error;
         }
       });
@@ -3011,10 +3011,10 @@ describe("migrations/0023_removed_logins.sql", () => {
     expect(await isLoginRemoved(db, "octocat")).toBe(true);
     expect(await isLoginRemoved(db, "OCTOCAT")).toBe(true);
     expect(removedRows(db).map((r) => r.github_login)).toEqual(["OctoCat"]);
-    db.raw.exec("DELETE FROM removed_logins");
-    db.raw.exec("INSERT INTO removed_logins (github_login, removed_at) VALUES ('octocat', 't1')");
+    db.raw.run("DELETE FROM removed_logins");
+    db.raw.run("INSERT INTO removed_logins (github_login, removed_at) VALUES ('octocat', 't1')");
     expect(() =>
-      db.raw.exec("INSERT INTO removed_logins (github_login, removed_at) VALUES ('OCTOCAT', 't2')"),
+      db.raw.run("INSERT INTO removed_logins (github_login, removed_at) VALUES ('OCTOCAT', 't2')"),
     ).toThrow(/UNIQUE constraint failed/);
     db.raw
       .prepare(
@@ -3065,7 +3065,7 @@ describe("dashboard users store (users.ts)", () => {
 
   test("createUser with no workspace row still succeeds (no tenant read at all)", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM workspaces");
+    db.raw.run("DELETE FROM workspaces");
     const user = await createUser(db, { login: "hubot", role: "member" });
     expect((await getUserByLogin(db, "hubot"))?.id).toBe(user.id);
     expect(membershipRoles(db)).toEqual({});
@@ -3376,7 +3376,7 @@ describe("/dashboard/oauth/callback sign-in", () => {
 
   test("empty users table + any login → 302, session cookie, a member row, no membership (AC1)", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     stubGitHubIdentity("deployer");
     const res = await oauthCallback("deployer", makeDbEnv(db));
     expect(res.status).toBe(302);
@@ -3745,7 +3745,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
 
   test("creates the workspace, its owner membership and its free subscription, returning the ref", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     const user = await createUser(db, { login: "deployer", role: "member" });
 
     const res = await createWorkspaceRequest(db, "deployer", { name: "  Acme  " });
@@ -3806,7 +3806,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
 
   test("a second free workspace for the same login is refused with the exact 409 body and writes nothing", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
 
     const first = await createWorkspaceRequest(db, "deployer", { name: "First" }, "saas");
@@ -3828,7 +3828,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
 
   test("self-hosted allows a second workspace: nothing resolves to free there", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
 
     expect((await createWorkspaceRequest(db, "deployer", { name: "First" })).status).toBe(201);
@@ -3841,7 +3841,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
 
   test("owning a pro workspace does not consume the free slot", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     const user = await createUser(db, { login: "deployer", role: "member" });
     const now = new Date().toISOString();
     db.raw
@@ -3870,7 +3870,7 @@ describe("POST /dashboard/api/workspaces — workspace creation", () => {
 
   test("a soft-deleted workspace frees the slot: the next creation succeeds", async () => {
     const db = createDashboardTestD1();
-    db.raw.exec("DELETE FROM users");
+    db.raw.run("DELETE FROM users");
     await createUser(db, { login: "deployer", role: "member" });
     const first = await createWorkspaceRequest(db, "deployer", { name: "Workspace 1" }, "saas");
     expect(first.status).toBe(201);

@@ -33,7 +33,7 @@ describe("line-batch recovery on review_threads (EXPLAIN QUERY PLAN)", () => {
 
   test("a full-history publication index does not displace the partial one", async () => {
     const db = createMigratedTestD1();
-    db.raw.exec("CREATE INDEX IF NOT EXISTS idx_thread_publication ON review_threads (publication_id, review_id)");
+    db.raw.run("CREATE INDEX IF NOT EXISTS idx_thread_publication ON review_threads (publication_id, review_id)");
     const detail = await linePlan(db);
     expect(detail).toMatch(/USING COVERING INDEX idx_thread_uncaptured/);
     expect(detail).not.toMatch(/^SCAN p\b/m);

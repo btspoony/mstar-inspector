@@ -89,7 +89,7 @@ describe("migration 0031 (plans + workspace_subscriptions + usage_events)", () =
   test("the file is not re-runnable: a second apply fails on the existing tables", () => {
     const db = createMigratedTestD1();
     const sql = readFileSync(join(import.meta.dir, "../../migrations", MIGRATION), "utf8");
-    expect(() => db.raw.exec(sql)).toThrow(/already exists/);
+    expect(() => db.raw.run(sql)).toThrow(/already exists/);
     db.raw.close();
   });
 });

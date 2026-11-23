@@ -1058,7 +1058,7 @@ describe("apps-store delivery read faces (consumption)", () => {
 
   test("deliverySummaries propagates database read errors", async () => {
     const db = createMigratedD1();
-    db.raw.exec("DROP TABLE webhook_deliveries");
+    db.raw.run("DROP TABLE webhook_deliveries");
     await expect(store(db).deliverySummaries(["missing-app"])).rejects.toThrow("no such table");
   });
 
