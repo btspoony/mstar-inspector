@@ -4,7 +4,7 @@
 -- `recheck` shipped-failure row and its attribution line. Collect performs them,
 -- and this table is what makes them recoverable when it cannot:
 --
--- * `review_recheck_duties` — one row per attempt+round while the accounting is
+-- * `review_recheck_duties` — one row per attempt while the accounting is
 --   owed. It carries everything a replay needs to finish the round without the
 --   dead host's memory: the head, the (already sanitized) shipped-failure detail
 --   and the seat's outcome. Written BEFORE any effect, cleared only once both
@@ -19,7 +19,7 @@
 --   emitted at-least-once (a crash between the log call and this insert may
 --   deliver it twice, which the sink accepts); its EXISTENCE is the correctness
 --   evidence that the round was accounted to the log.
-CREATE TABLE review_recheck_duties (
+CREATE TABLE IF NOT EXISTS review_recheck_duties (
   attempt_id TEXT PRIMARY KEY,
   head_sha TEXT NOT NULL,
   -- The sanitized `recheck` shipped-failure detail; NULL = the round owes no row
@@ -31,12 +31,12 @@ CREATE TABLE review_recheck_duties (
   created_ms INTEGER NOT NULL
 );
 
-CREATE TABLE review_recheck_attributions (
+CREATE TABLE IF NOT EXISTS review_recheck_attributions (
   attempt_id TEXT PRIMARY KEY,
   created_ms INTEGER NOT NULL
 );
 
-CREATE TABLE review_refusal_pending (
+CREATE TABLE IF NOT EXISTS review_refusal_pending (
   attempt_id TEXT PRIMARY KEY,
   created_ms INTEGER NOT NULL
 );
