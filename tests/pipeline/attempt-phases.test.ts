@@ -20,7 +20,7 @@ import {
 } from "../helpers/consumer-fixtures";
 import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
-import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
+import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { FINDING_BODY_MAX } from "../../src/review/schema";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
@@ -56,6 +56,8 @@ import type {
   ProcessDeps,
 } from "../../src/pipeline/review-attempt-execution";
 
+const { phaseFailureRecord } = await import("../../src/pipeline/review-attempt-execution");
+const { AttemptUnknownError } = await import("../../src/pipeline/review-attempt");
 const {
   cleanupAttempt,
   collectAttempt,
@@ -63,6 +65,7 @@ const {
   prepareAttempt,
   publishAttempt,
   reviewAttempt,
+  settleAttemptFailure,
 } = await import("../../src/pipeline/review-attempt-execution");
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
@@ -304,6 +307,7 @@ describe("the restart round trip", () => {
 
     const { deps: resumed } = await makeDeps({ db });
     const reviewed = await reviewAttempt(resumed, ref, prepared);
+    if (!("state" in reviewed)) throw new Error(`review did not persist: ${reviewed.failure.message}`);
     expect(reviewed.state).toBe("persisted");
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("persisted");
 
@@ -839,7 +843,8 @@ describe("the owed Check mark", () => {
     const { handle } = await seedOwnedCheck(db);
     deps.checks = { begin: async () => handle, terminalize: async () => {} };
 
-    await expect(prepareAttempt(deps, ref)).rejects.toMatchObject({ cause: expect.any(MovedHeadError) });
+    const movedStep = await prepareAttempt(deps, ref);
+    expect(movedStep).toMatchObject({ kind: "failed", failure: { class: "moved-head" } });
 
     const row = db.raw
       .prepare("SELECT attempt_key FROM review_launches WHERE attempt_id = ?")
@@ -1059,9 +1064,11 @@ describe("a first publication past the frozen instant", () => {
 
     const { deps: publishing } = await makeDeps({ db });
     const late = { ...ref, deadlineMs: Date.now() - 1 };
-    await expect(publishAttempt(publishing, late, collected.collected.publicationId)).rejects.toThrow(
-      /no first publication/,
-    );
+    // A budget stop is TERMINAL, so it crosses the step boundary as a record.
+    expect(await publishAttempt(publishing, late, collected.collected.publicationId)).toMatchObject({
+      kind: "failed",
+      failure: { class: "budget", window: "runner", phase: "publish" },
+    });
 
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared")).toHaveLength(0);
     expect((await readPublication(db as never, collected.collected.publicationId))?.phase).toBe("prepared");
@@ -1155,8 +1162,9 @@ describe("a first publication past the frozen instant", () => {
       "create comment: the attempt's frozen deadline passed 5ms ago — nothing was sent",
     );
     const { deps: collecting } = await makeDeps({ db });
-    await expect(collectAttempt(collecting, ref, prepared)).rejects.toMatchObject({
-      cause: expect.any(RoundBudgetSpent),
+    expect(await collectAttempt(collecting, ref, prepared)).toMatchObject({
+      kind: "failed",
+      failure: { class: "budget", window: "runner", phase: "collect" },
     });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(1);
   });
@@ -1175,9 +1183,10 @@ describe("a first publication past the frozen instant", () => {
     await reviewAttempt(reviewing, ref, prepared);
 
     const { deps: collecting } = await makeDeps({ db });
-    await expect(collectAttempt(collecting, { ...ref, deadlineMs: Date.now() - 1 }, prepared)).rejects.toThrow(
-      /no first publication/,
-    );
+    expect(await collectAttempt(collecting, { ...ref, deadlineMs: Date.now() - 1 }, prepared)).toMatchObject({
+      kind: "failed",
+      failure: { class: "budget", window: "runner", message: expect.stringContaining("no first publication") },
+    });
     expect(h.commenterCalls.filter((call) => call.op === "post-prepared-degraded")).toHaveLength(0);
   });
 });
@@ -1270,9 +1279,12 @@ describe("an unreadable activation fact is unknown, never a review failure", () 
     expect(concluded).toEqual([]);
     const failures = db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get() as { n: number };
     expect(failures.n).toBe(0);
-    expect(h.sandbox.destroyCalls).toBe(0);
+    // The launch row still proves `no-paid-work`, so cleanup releases capacity
+    // and fences the slot: an unknown outcome holds nothing when D1 shows that
+    // nothing paid could be lost (design D6, "behaviour change to note").
+    expect(h.sandbox.destroyCalls).toBe(1);
     const inflight = db.raw.prepare("SELECT attempt_id FROM review_inflight").all() as Array<{ attempt_id: string }>;
-    expect(inflight).toEqual([{ attempt_id: ATTEMPT_ID }]);
+    expect(inflight).toEqual([]);
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).not.toBe("failed");
   });
 });
@@ -3515,5 +3527,212 @@ describe("the SEC-01 publish gate", () => {
       limit: 10,
     });
     expect(pending.some((row) => row.attemptId === ATTEMPT_ID)).toBe(true);
+  });
+});
+
+describe("design D6 — a terminal outcome crosses the step boundary as data", () => {
+  /**
+   * note: The step double replays a cached `failed` record: the callback never
+   * runs again, so a replay sees the SAME record and no phase work.
+   */
+  function replayStep(store: Map<string, unknown>, onRun: (name: string) => void): WorkflowStep {
+    return {
+      do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+        if (store.has(name)) return store.get(name);
+        onRun(name);
+        const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+        const output = await callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+        store.set(name, output);
+        return output;
+      },
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async (): Promise<never> => {
+        throw new Error("the replay step store does not wait for events");
+      },
+    } as unknown as WorkflowStep;
+  }
+
+  test("a cached `failed` record replays without re-invoking the phase, and cleanup decides from the row", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = "not a verdict";
+    h.commenterState.preparedDegradedError = new PublicationDeadlineSpent(
+      "create comment: the attempt's frozen deadline passed 5ms ago — nothing was sent",
+    );
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    const prepared = await prepareAttempt(deps, ref);
+    if (prepared.kind !== "prepared") throw new Error(`prepare did not hand off: ${prepared.kind}`);
+    const reviewed = await reviewAttempt(deps, ref, prepared.prepared);
+    if ("failure" in reviewed) throw new Error("the paid step failed unexpectedly");
+    // The collect's budget stop is the record that will be replayed.
+    const failed = await collectAttempt(deps, ref, prepared.prepared);
+    if (!("failure" in failed)) throw new Error(`collect did not fail: ${failed.kind}`);
+    expect(failed.failure.class).toBe("budget");
+
+    const store = new Map<string, unknown>([
+      ["prepare", prepared],
+      ["review", reviewed],
+      ["collect", failed],
+    ]);
+    const ran: string[] = [];
+    const { deps: first } = await makeDeps({ db });
+    await runReviewAttemptWorkflow(first, ref, replayStep(store, (name) => ran.push(name)), async () => {});
+    expect(ran).toEqual(["settle-failure", "cleanup"]);
+    const budgetRows = failureRows(db).filter((row) => String(row.error).includes("budget-exhausted:"));
+    expect(budgetRows).toHaveLength(1);
+
+    // The engine died before the settlement's checkpoint: the SAME step store
+    // replays, and no phase is re-invoked. (The mark itself is owed a claim
+    // stamp this branch does not write, so `settle-failure` re-runs — what the
+    // record owns is that the phases below it never do.)
+    const reran: string[] = [];
+    const { deps: resumed } = await makeDeps({ db });
+    const uncheckpointed = new Map([...store].filter(([name]) => name !== "cleanup"));
+    await runReviewAttemptWorkflow(resumed, ref, replayStep(uncheckpointed, (name) => reran.push(name)), async () => {});
+    expect(reran).toEqual(["cleanup"]);
+    // The cleanup decision is the ROW's, identical to the uninterrupted run.
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("persisted");
+  });
+
+  test("a failure whose row proves no paid work releases capacity; a launched row holds it", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    // No launch row at all: nothing paid could be lost, so cleanup releases.
+    expect(await cleanupAttempt(deps, ref)).toEqual({ retention: "no-paid-work" });
+    expect(h.sandbox.destroyCalls).toBe(0);
+
+    // A `launched` row proves the paid step was SENT: capacity is held.
+    const launched = { ...ref, attemptId: "attempt-d6-launched" };
+    expect(await claimReviewAttempt(db as never, launched.attemptId, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, launched.attemptId, Date.now())).toEqual({ ok: true });
+    expect(await cleanupAttempt(deps, launched)).toEqual({ retention: "unknown" });
+  });
+
+  test("a cause with a throwing enumerable getter cannot break the record", () => {
+    // The record is built from KNOWN fields, never `Object.entries(cause)`.
+    const hostile = new AttemptUnknownError("the container could not be read");
+    Object.defineProperty(hostile, "boom", {
+      enumerable: true,
+      get() {
+        throw new Error("getter must never run");
+      },
+    });
+    const record = phaseFailureRecord(
+      {
+        phase: "collect",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: true,
+        tier: "default",
+        budgetMs: 0,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      hostile,
+    );
+    expect(record).toMatchObject({ class: "unknown", message: "the container could not be read" });
+    expect(JSON.parse(JSON.stringify(record))).toEqual(record);
+  });
+
+  test("a budget stop in prepare settles with the record's own window", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const concluded: string[] = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async (input: { outcome: string }) => {
+        concluded.push(input.outcome);
+      },
+    };
+    // The Check this attempt's prepare entry would have opened: settlement
+    // concludes THAT run rather than claiming a new one.
+    const check = createCheckSettlement({
+      deps,
+      payload,
+      attemptId: ATTEMPT_ID,
+      checkBudgets: null,
+      deadlineMs: Date.now() + 900_000,
+    });
+    check.handle = HANDLE;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    // The frozen window is already spent by the post-runner reserve.
+    const createdMs = Date.now() - 100_000;
+    const ref = { ...makeRef(payload), budgetStartMs: createdMs, deadlineMs: createdMs + 233_000 };
+
+    const step = await prepareAttempt(deps, ref);
+    if (!("failure" in step)) throw new Error(`prepare did not refuse: ${step.kind}`);
+    expect(step.failure).toMatchObject({ class: "budget", phase: "prepare", window: "preparation" });
+
+    expect(await settleAttemptFailure(deps, ref, step.failure, null)).toMatchObject({
+      kind: "budget-exhausted",
+      outcome: { budgetWindow: "preparation" },
+    });
+    expect(concluded).toEqual(["budget-exhausted"]);
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("budget-exhausted:");
+    // The refusal is the FIRST entry's: nothing was provisioned.
+    expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("no secret value appears in any step return value", async () => {
+    const paidKey = "sk-step-boundary-secret-1";
+    const { deps, db } = await makeDeps();
+    deps.runnerConfigs.set(TEST_APP_ID, {
+      appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
+      modelOverrides: undefined,
+      customProviders: undefined,
+    });
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerStdout = "";
+    h.sandbox.runnerStderr = `authentication failed for ${paidKey}`;
+    h.sandbox.runnerExitCode = 3;
+    const ref = makeRef(payload);
+
+    const store = new Map<string, unknown>();
+    const returns: unknown[] = [];
+    const recording: WorkflowStep = {
+      do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+        const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+        const output = await callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+        store.set(name, output);
+        returns.push(output);
+        return output;
+      },
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async (): Promise<never> => {
+        throw new Error("the recording step store does not wait for events");
+      },
+    } as unknown as WorkflowStep;
+    // An unclassified error (a plain runner failure) is rethrown once its
+    // effects are durable, exactly as before — a fresh delivery may retry it.
+    await expect(runReviewAttemptWorkflow(deps, ref, recording, async () => {})).rejects.toThrow(/runner failed/);
+
+    const serialized = JSON.stringify(returns);
+    expect(serialized).not.toContain(paidKey);
+    // The row that settlement did write is redacted where the text is produced.
+    const rows = failureRows(db);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(String(row.error)).not.toContain(paidKey);
   });
 });
