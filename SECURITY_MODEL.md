@@ -20,7 +20,7 @@ Deployment shape that matters: **SaaS multi-tenant (`DEPLOYMENT_MODE=saas`)** **
 | Infrastructure | `wrangler.jsonc`, `.github/workflows/**`, `migrations/**` | Deploy pipeline |
 
 ## Entry points and who reaches them
-- `/dashboard/*` and its API: anyone who signs in with GitHub; sign-in is open to any GitHub login while the `signup_open` flag is on **(owner: anyone with a GitHub login can sign up)**; a user without memberships lands on the workspace-creation screen, and creating a workspace is a separate request gated by the `workspace_creation_open` flag. Roles per workspace: owner, admin, member; invitees; outsiders get 404.
+- `/dashboard/*` and its API: anyone who signs in with GitHub; existing users can always sign in; while the `signup_open` flag is on, any new GitHub login can create an account **(owner: anyone with a GitHub login can sign up)**, except logins removed from the platform, which are refused at sign-in; a user without memberships lands on the workspace-creation screen, and creating a workspace is a separate request gated by the `workspace_creation_open` flag. Roles per workspace: owner, admin, member; invitees; outsiders get 404.
 - `POST /webhook/:workspaceId/:appId`: internet-reachable; authenticated by HMAC with the App's decrypted webhook secret.
 - PR content (diff, titles, comments, @mentions) from authors on repos where an App is installed reaches the review agent inside the sandbox.
 - `/_internal_admin/*`: only logins in `PLATFORM_OPERATORS` (`src/admin/gate.ts`); others get an indistinguishable 404.
@@ -44,7 +44,7 @@ Deployment shape that matters: **SaaS multi-tenant (`DEPLOYMENT_MODE=saas`)** **
 - Per-App webhook HMAC verification, body size limit, soft-deleted/disabled App 404, maintenance 503.
 - Secretbox AES-GCM with AAD binding ciphertext to `table.column:rowId`.
 - Credential payload to runner only over stdin; never env/argv/logs (`packages/shared/src/credential-payload.ts`); secret-shape and exact-value redaction (`src/pipeline/redact.ts`).
-- Workspace gate classifies principal (member / invitee / outsider / operator-granted / operator-denied) before dispatch; support grants are time-boxed and read-only; requests dispatched through the workspace gate are audited, but SPA shell loads (`serveSpaIndex`, `src/worker/spa-dispatch.ts`) check support access without recording an audit event.
+- Workspace gate classifies principal (member / invitee / outsider / operator-granted / operator-denied) before dispatch; support grants are time-boxed and read-only; the workspace gate records audit events for operator access (`support.read`, `support.forbidden`, `support.denied`), not for ordinary member requests; but SPA shell loads (`serveSpaIndex`, `src/worker/spa-dispatch.ts`) check support access without recording an audit event.
 - Fail-closed when bindings or secrets are missing; safe same-origin Referer redirects.
 - One-shot sandbox per attempt, no secrets baked into the image.
 
