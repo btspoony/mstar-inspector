@@ -82,7 +82,7 @@ const fakeSandbox = {
     }
     return { stdout: "", stderr: "", exitCode: 0 };
   }),
-  claimMarker: mock(async () => "written" as const),
+  provision: mock(async () => ({ kind: "provisioned" as const })),
   runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => ({
     kind: "ran" as const,
     ...(await fakeSandbox.runCommand(cmd, opts)),

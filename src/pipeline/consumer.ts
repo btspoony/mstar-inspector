@@ -105,6 +105,7 @@ import {
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
+import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
@@ -439,6 +440,9 @@ async function handleGuardHeld(
       pr_number: message.body.pr_number,
       head_sha: headSha,
       stage: "pipeline",
+      code: "review.admission.refused",
+      trackId: `${message.body.owner}/${message.body.repo}#${message.body.pr_number}@${headSha}`,
+      message: FAILURE_SUMMARIES["review.admission.refused"],
       error: `${restoreFailure !== null ? `review dropped: ${restoreFailure}; admission refused` : `review dropped after ${delays.length} refused retries`}: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
         headSha === "" ? "unresolved (comment trigger, no sha in payload)" : headSha
       }${heldNote}`,
@@ -980,6 +984,9 @@ export function createReviewConsumer(
             pr_number: body.pr_number,
             head_sha: body.head_sha ?? "",
             stage: MAINTENANCE_DEFERRED_STAGE,
+            code: "review.delivery.deferred",
+            trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
+            message: FAILURE_SUMMARIES["review.delivery.deferred"],
             error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
           })
           .catch((err: unknown) => {
@@ -1477,6 +1484,10 @@ async function processMessage(
       attemptId,
       payload,
       nowMs: Date.now(),
+      // The SAME instant `deadlineMs` counted its cap from: the row stores the
+      // origin, and every later delivery reads it back instead of this one's
+      // clock — one origin per attempt, not one per delivery.
+      createdMs: roundStartedAt,
       deadlineMs,
       enqueuedMs: queueSentAtMs,
     });
@@ -1514,6 +1525,10 @@ async function processMessage(
       payload,
       level,
       roundStartedAt,
+      // Both read from the ROW, never re-derived from this delivery's clock:
+      // the origin and the instant it anchored are one pair, frozen by the
+      // first writer.
+      budgetStartMs: handoff.createdMs,
       deadlineMs: handoff.deadlineMs ?? deadlineMs,
       githubAppId,
       usageWorkspaceId,
@@ -1558,6 +1573,11 @@ async function processMessage(
   } catch (err) {
     if (handedOff) throw err;
     const detail = err instanceof Error ? err.message : String(err);
+    // The one cause this path can name from evidence: a GitHub rate limit, read
+    // by the classifier the row's own prefix already uses. The error TEXT stays
+    // as it was (operator counters read its prefix); the code rides beside it.
+    const code: FailureCode =
+      classifyGithubRateLimit(err) === null ? "review.internal.unclassified" : "review.github.rate_limited";
     deps.log.error(
       {
         ...(baseFields ?? payloadIdentityFields(payload)),
@@ -1569,6 +1589,8 @@ async function processMessage(
               runner_timeout_ms: runnerTimeoutMs(level),
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review failed: ${detail}`,
     );
@@ -1583,6 +1605,9 @@ async function processMessage(
         pr_number: payload.pr_number,
         head_sha: baseFields?.head_sha ?? payload.head_sha ?? "",
         stage: "pipeline",
+        code,
+        trackId: attemptId,
+        message: FAILURE_SUMMARIES[code],
         error: redactExactSecrets(redactSecrets(persistedDetail), []),
       });
     } catch (recordErr) {

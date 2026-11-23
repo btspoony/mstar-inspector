@@ -294,6 +294,8 @@ export const zhCN: Dictionary = {
     foldLabel: "{action} — {record} · #{position}",
     foldLabelBare: "{action} — #{position}",
     failureRemainingOutput: "其余输出",
+    failureFirstLine: "{summary} · {code} · {track}",
+    failureTrackLabel: "跟踪号 {track}",
     copyError: "复制错误",
     copyCopied: "已复制",
     copyFailed: "复制失败",
@@ -1098,6 +1100,17 @@ export const zhCN: Dictionary = {
         "保存结果未知：请求没有回应，可能已存储也可能没有。点“重试”可回读存储中的值；在回读之前不显示任何数值。",
       attemptCapUnreadable:
         "无法读取已存储的审查最长时长，因此在重新可读或保存新值之前，不会准入任何新审查。",
+      lostReplyTitle: "回执丢失窗口",
+      lostReplyDescription:
+        "审查的付费步骤已发出但一直没有回执时，可以保持多久再由定时巡检判定为回执丢失。判定后该次审查即终止：容量释放，Check 报告失败；如需再跑请重新触发审查。",
+      lostReplyLabel: "窗口（毫秒）",
+      lostReplyRange: "允许范围：{min}–{max} 毫秒（{minMinutes}–{maxMinutes} 分钟）。超出范围的值会被拒绝。",
+      lostReplySave: "保存",
+      lostReplySaved: "已保存。",
+      lostReplyFailed: "修改回执丢失窗口失败。",
+      lostReplyCurrent: "下一次巡检生效值：该次审查 deadline 后 {value} 毫秒。",
+      lostReplyUnreadable:
+        "无法读取已存储的回执丢失窗口，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
       routeWorkflowTitle: "审查路由",
       routeWorkflowDescription:
         "队列中的审查投递是否创建 Workflow 实例。关闭时拒绝所有投递；改动从下一批开始生效。",

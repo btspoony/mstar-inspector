@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { t, type DictionaryKey, type Locale } from "../../src/i18n";
+import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { formatRelativeTime } from "../../src/spa/relative-time";
 import {
   CATCH_ALL_SEVERITY,
@@ -1207,7 +1208,7 @@ describe("pull request detail face (static SSR)", () => {
       face({
         findings: page([]),
         reviews: page([]),
-        failures: page([{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }]),
+        failures: page([{ stage: "sandbox", error, message: null, error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
       });
     const multiline = failureText("a\nb");
     expect(multiline).toContain(t("en", "pullRequests.failureRemainingOutput"));
@@ -1234,7 +1235,7 @@ describe("pull request detail face (static SSR)", () => {
       face({
         findings: page([]),
         reviews: page([]),
-        failures: page([{ stage: "", error: "boom", created_at: "2026-10-31 23:00:00" }]),
+        failures: page([{ stage: "", error: "boom", message: null, error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
       }),
       (container) => {
         const entry = [...container.querySelectorAll<HTMLElement>('[data-slot="activity-entry"]')].find((row) =>
@@ -1251,6 +1252,82 @@ describe("pull request detail face (static SSR)", () => {
     expect(read.stageChip).toBe(false);
     expect(read.labels).toContain(t("en", "pullRequests.timelineFailureNoStage"));
     expect(read.labels.filter((label) => /^\s*·|·\s*$/.test(label))).toEqual([]);
+  });
+
+  test("a classified failure's first line carries its summary, code and shortened track id", async () => {
+    const classified = {
+      stage: "runner" as const,
+      error: `budget-exhausted: {"budgetWindow":"runner"} — mechanism text`,
+      message: FAILURE_SUMMARIES["review.budget.runner_spent"],
+      error_code: "review.budget.runner_spent",
+      track_id: "9f2c1d4e-aaaa-bbbb-cccc-000000000001",
+      created_at: "2026-11-02 00:00:00",
+    };
+    const read = await withMarkup(
+      face({ findings: page([]), reviews: page([]), failures: page([classified]) }),
+      (container) => {
+        const block = container.querySelector('[role="tabpanel"] li[data-tone="danger"]');
+        return {
+          firstLine: block?.querySelector("p")?.textContent ?? "",
+          detail: container.querySelector('[role="tabpanel"] pre')?.textContent ?? "",
+          text: block?.textContent ?? "",
+        };
+      },
+    );
+    expect(read.firstLine).toBe(
+      `${FAILURE_SUMMARIES["review.budget.runner_spent"]} · review.budget.runner_spent · track 9f2c1d4e`,
+    );
+    // The mechanism text never reaches the first line; it stays in the disclosure.
+    expect(read.firstLine).not.toContain("mechanism text");
+    expect(read.detail).toContain("mechanism text");
+    expect(read.text).not.toContain("9f2c1d4e-aaaa-bbbb-cccc-000000000001");
+  });
+
+  test("a row carrying a code this build no longer knows still renders its own message and error", async () => {
+    // `review.github.unavailable` left the closed set; a stale row must still
+    // render its stored sentence and its mechanism detail, never blank the tab
+    // or fall back to a code lookup that yields nothing.
+    const stale = {
+      stage: "pipeline" as const,
+      error: "gh: unavailable — the App token could not be minted",
+      message: "The review environment could not be started. Nothing was charged; it will be retried.",
+      error_code: "review.github.unavailable",
+      track_id: null,
+      created_at: "2026-11-05 00:00:00",
+    };
+    const read = await withMarkup(
+      face({ findings: page([]), reviews: page([]), failures: page([stale]) }),
+      (container) => ({
+        rows: container.querySelectorAll('[role="tabpanel"] li[data-tone="danger"]').length,
+        firstLine: container.querySelector('[role="tabpanel"] li[data-tone="danger"] p')?.textContent ?? "",
+        detail: container.querySelector('[role="tabpanel"] pre')?.textContent ?? "",
+      }),
+    );
+    expect(read.rows).toBe(1);
+    expect(read.firstLine).toBe(
+      "The review environment could not be started. Nothing was charged; it will be retried.",
+    );
+    expect(read.detail).toBe("gh: unavailable — the App token could not be minted");
+  });
+
+  test("a historical failure (no code) renders its first line exactly as before", async () => {
+    const historical = {
+      stage: "sandbox" as const,
+      error: "the attempt container could not be proven\nsecond line",
+      message: null,
+      error_code: null,
+      track_id: null,
+      created_at: "2026-10-31 23:00:00",
+    };
+    const read = await withMarkup(
+      face({ findings: page([]), reviews: page([]), failures: page([historical]) }),
+      (container) => ({
+        firstLine: container.querySelector('[role="tabpanel"] li[data-tone="danger"] p')?.textContent ?? "",
+        detail: container.querySelector('[role="tabpanel"] pre')?.textContent ?? "",
+      }),
+    );
+    expect(read.firstLine).toBe("the attempt container could not be proven");
+    expect(read.detail).toBe("second line");
   });
 
   test("a finding body id encodes punctuation, so distinct ids never collide", async () => {

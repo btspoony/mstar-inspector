@@ -34,6 +34,9 @@ let execResult: { stdout: ArrayBuffer; stderr: ArrayBuffer; exitCode: number } =
   exitCode: 0,
 };
 let running = false;
+let containerRunning = false;
+/** The fake incarnation disk: gone whenever the container stops. */
+let markerBytes: string | null = null;
 let execError: Error | undefined;
 let destroyError: Error | undefined;
 let execStdin: "reader" | "error-on-write" | "gated-write" | "delayed-write" | undefined;
@@ -58,12 +61,12 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
 function makeContainer(): FakeContainer {
   return {
     get running() {
-      return running;
+      return containerRunning;
     },
     images: { sandbox: "registry.example/review-sandbox@sha256:abc" },
     start: mock((opts: Record<string, unknown>) => {
       startCalls.push(opts);
-      running = true;
+      containerRunning = true;
     }),
     setInactivityTimeout: mock(async (ms: number) => {
       inactivityCalls.push(ms);
@@ -71,6 +74,16 @@ function makeContainer(): FakeContainer {
     exec: mock(async (cmd: string[], opts?: unknown) => {
       execCalls.push({ cmd, opts });
       if (execError) throw execError;
+      const line = cmd[cmd.length - 1] ?? "";
+      if (line.includes("/tmp/mstar-review-attempt")) {
+        if (line.includes("printf")) {
+          markerBytes = (opts as { env?: Record<string, string> } | undefined)?.env?.["MSTAR_ATTEMPT_MARKER"] ?? "";
+          return { output: async () => ({ stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 }), stdin: null };
+        }
+        return markerBytes === null
+          ? { output: async () => ({ stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 3 }), stdin: null }
+          : { output: async () => ({ stdout: bytes(markerBytes!), stderr: new ArrayBuffer(0), exitCode: 0 }), stdin: null };
+      }
       if (execStdin === undefined) return { output: async () => execResult, stdin: null };
       const chunks: Uint8Array[] = [];
       let eof = false;
@@ -129,7 +142,8 @@ function makeContainer(): FakeContainer {
     destroy: mock(async () => {
       destroyCalls.push("container");
       if (destroyError) throw destroyError;
-      running = false;
+      containerRunning = false;
+      markerBytes = null;
     }),
   };
 }
@@ -141,17 +155,22 @@ const {
   SandboxV1,
   getSandbox,
   EXEC_DEADLINE_WRAPPER,
+  EXEC_DEADLINE_REFUSED_SENTINEL,
   DEFAULT_EXEC_TIMEOUT_MS,
   MAX_EXEC_COMMAND_BYTES,
   MAX_EXEC_ENV_VALUE_BYTES,
   MAX_EXEC_STDIN_BYTES,
   shellCommand,
+  ContainerNotRunningError,
 } = await import("../../src/pipeline/sandbox");
 import type { ReviewSandbox } from "../../src/pipeline/sandbox";
 
 const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+const MARKER = "mstar.review-attempt/v1:abc\n";
 
-function makeDo(): { sandbox: ReviewSandbox; container: FakeContainer } {
+/** Default: a slot that is already running — `runCommand` never starts one. */
+function makeDo(running = true): { sandbox: ReviewSandbox; container: FakeContainer } {
+  containerRunning = running;
   const container = makeContainer();
   const ctx = {
     container,
@@ -169,6 +188,7 @@ function reset() {
   destroyCalls.length = 0;
   execResult = { stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 };
   running = false;
+  markerBytes = null;
   execError = undefined;
   destroyError = undefined;
   execStdin = undefined;
@@ -181,12 +201,12 @@ function reset() {
 }
 
 describe("SandboxV1 Durable Object", () => {
-  test("runCommand starts the container once, keeps the basic instance, internet on, and bounds the idle lifetime", async () => {
+  test("provision starts a stopped slot once, keeps the basic instance, internet on, and bounds the idle lifetime", async () => {
     reset();
-    const { sandbox, container } = makeDo();
+    const { sandbox } = makeDo(false);
+    const deadlineEpochMs = Date.now() + 120_000;
 
-    await sandbox.runCommand(shellCommand("echo hi"));
-    await sandbox.runCommand(shellCommand("echo hi again"));
+    expect(await sandbox.provision(MARKER, { deadlineEpochMs })).toEqual({ kind: "provisioned" });
 
     expect(startCalls).toEqual([
       {
@@ -195,12 +215,104 @@ describe("SandboxV1 Durable Object", () => {
         enableInternet: true,
       },
     ]);
-    expect(inactivityCalls).toEqual([
-      INACTIVITY_TIMEOUT_MS,
-      INACTIVITY_TIMEOUT_MS,
-    ]);
-    expect(container.start).toHaveBeenCalledTimes(1);
+    expect(inactivityCalls).toEqual([INACTIVITY_TIMEOUT_MS]);
     expect(INACTIVITY_TIMEOUT_MS).toBeGreaterThan(14 * 60 * 1000);
+    // the marker write happened, and the read-back proves the slot carries it
+    expect(execCalls.some((call) => (call.cmd[call.cmd.length - 1] ?? "").includes("printf"))).toBe(true);
+    expect(execCalls[execCalls.length - 1]!.cmd.join(" ")).toContain("cat --");
+    expect(markerBytes).toBe(MARKER);
+  });
+
+  test("provision on a running slot with the matching marker writes nothing", async () => {
+    reset();
+    markerBytes = MARKER;
+    const { sandbox } = makeDo(true);
+
+    expect(await sandbox.provision(MARKER, { deadlineEpochMs: Date.now() + 120_000 })).toEqual({
+      kind: "provisioned",
+    });
+
+    // One read to decide, one read to prove what the slot now carries.
+    expect(execCalls.map((call) => call.cmd[call.cmd.length - 1])).toEqual([
+      `[ -f '/tmp/mstar-review-attempt' ] || exit 3; cat -- '/tmp/mstar-review-attempt'`,
+      `[ -f '/tmp/mstar-review-attempt' ] || exit 3; cat -- '/tmp/mstar-review-attempt'`,
+    ]);
+    expect(startCalls).toEqual([]);
+  });
+
+  test("provision on a running slot with a foreign marker rewrites it (never repairs by leaving it)", async () => {
+    reset();
+    markerBytes = "mstar.review-attempt/v1:someone-else\n";
+    const { sandbox } = makeDo(true);
+
+    expect(await sandbox.provision(MARKER, { deadlineEpochMs: Date.now() + 120_000 })).toEqual({
+      kind: "provisioned",
+    });
+
+    expect(markerBytes).toBe(MARKER);
+    expect(startCalls).toEqual([]);
+  });
+
+  test("runMarked on a stopped slot answers not-running and starts NOTHING", async () => {
+    reset();
+    const { sandbox } = makeDo(false);
+
+    expect(await sandbox.runMarked(MARKER, shellCommand("cat result.json"))).toEqual({ kind: "not-running" });
+    expect(startCalls).toEqual([]);
+    expect(execCalls).toEqual([]);
+  });
+
+  test("an exec whose dispatch never answers is a LOST REPLY, never 'nothing ran'", async () => {
+    // A dispatched exec may have run even when its answer never arrives. The
+    // pre-exec refusal guard needs a deadline past KILL_GRACE_MS, so this case
+    // costs that grace and no more.
+    reset();
+    const { sandbox, container } = makeDo(true);
+    markerBytes = MARKER;
+    let dispatched = 0;
+    container.exec = mock(async (cmd: string[]) => {
+      execCalls.push({ cmd });
+      const line = cmd[cmd.length - 1] ?? "";
+      if (line.includes("/tmp/mstar-review-attempt")) {
+        return { stdin: null, output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }) };
+      }
+      dispatched += 1;
+      return Promise.withResolvers<{ output: () => Promise<ExecOutput>; stdin: null }>().promise;
+    });
+
+    const started = Date.now();
+    const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+      // KILL_GRACE_MS is 5 s; the pre-exec guard refuses anything closer.
+      // The mock exec never resolves, so the wait stays bounded by the deadline.
+      deadlineEpochMs: started + 5_000 + 2_000,
+    });
+
+    expect(dispatched).toBe(1);
+    expect(read).toEqual({ kind: "reply-lost" });
+  }, 15_000);
+
+  test("a marker write that never resolves answers unavailable AT the caller's deadline, not after a fixed wait", async () => {
+    reset();
+    const { sandbox, container } = makeDo(false);
+    container.exec = mock(async (cmd: string[]) => {
+      execCalls.push({ cmd });
+      return { stdin: null, output: () => Promise.withResolvers<ExecOutput>().promise };
+    });
+
+    const started = Date.now();
+    const result = await sandbox.provision(MARKER, { deadlineEpochMs: started + 50 });
+
+    expect(result).toEqual({ kind: "unavailable" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("runCommand never starts a container: a stopped slot is a transient ContainerNotRunningError", async () => {
+    reset();
+    const { sandbox } = makeDo(false);
+
+    await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toBeInstanceOf(ContainerNotRunningError);
+    expect(startCalls).toEqual([]);
+    expect(execCalls).toEqual([]);
   });
 
   test("runCommand wraps the command string into the single /bin/sh sink under the default 600s bound", async () => {
@@ -244,23 +356,22 @@ describe("SandboxV1 Durable Object", () => {
 
   test("a restarted DO re-arms the inactivity timeout in its constructor when the container is already running", () => {
     reset();
-    running = true;
-    const { container } = makeDo();
+    const { container } = makeDo(true);
 
     expect(inactivityCalls).toEqual([INACTIVITY_TIMEOUT_MS]);
     expect(startCalls).toEqual([]);
     expect(container.setInactivityTimeout).toHaveBeenCalledTimes(1);
   });
 
-  test("constructor leaves a stopped container alone (the request path starts it)", () => {
+  test("constructor leaves a stopped container alone (provision starts it)", () => {
     reset();
-    const { container } = makeDo();
+    const { container } = makeDo(false);
 
     expect(inactivityCalls).toEqual([]);
     expect(container.setInactivityTimeout).toHaveBeenCalledTimes(0);
   });
 
-  test("a missing container image key fails loud (wrangler/DO drift, not a silent no-op)", async () => {
+  test("a missing container image key fails loud at provisioning (wrangler/DO drift, not a silent no-op)", async () => {
     reset();
     const container = { ...makeContainer(), images: {} };
     const ctx = {
@@ -268,11 +379,14 @@ describe("SandboxV1 Durable Object", () => {
     storage: { get: async () => undefined, put: async () => {} },
     blockConcurrencyWhile: (fn: () => Promise<unknown>) => fn(),
   };
+    containerRunning = false;
     const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 
-    await expect(sandbox.runCommand(shellCommand("echo hi"))).rejects.toThrow(
-      'container image "sandbox" is not configured',
-    );
+    // Setup drift, not weather: `misconfigured` is terminal, never retried as
+    // a transient `unavailable`.
+    expect(await sandbox.provision(MARKER, { deadlineEpochMs: Date.now() + 120_000 })).toEqual({
+      kind: "misconfigured",
+    });
     expect(execCalls).toEqual([]);
   });
 
@@ -323,6 +437,36 @@ describe("SandboxV1 Durable Object", () => {
     expect(result).toEqual({ stdout: "", stderr: "Terminated\n", exitCode: 124 });
   });
 
+  test("a command that exits 125 on its own is NOT a deadline refusal (no sentinel)", async () => {
+    // `timeout` also exits 125 when it cannot run the command, and any command
+    // may `exit 125`; only the wrapper's own sentinel marks the pre-exec refusal.
+    reset();
+    execResult = { stdout: new ArrayBuffer(0), stderr: bytes("my own 125\n"), exitCode: 125 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("exit 125"), { timeout: 5_000 });
+
+    expect(result).toEqual({ stdout: "", stderr: "my own 125\n", exitCode: 125 });
+  });
+
+  test("the wrapper's own refusal (exit 125 WITH the sentinel) is a deadline-spent", async () => {
+    reset();
+    markerBytes = MARKER;
+    containerRunning = true;
+    execResult = {
+      stdout: new ArrayBuffer(0),
+      stderr: bytes(`${EXEC_DEADLINE_REFUSED_SENTINEL}\n`),
+      exitCode: 125,
+    };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runMarked(MARKER, shellCommand("bun run x"), {
+      deadlineEpochMs: Date.now() + 60_000,
+    });
+
+    expect(result).toEqual({ kind: "deadline-spent", remainingMs: 0 });
+  });
+
   test("runCommand propagates container errors (caller decides retry/DLQ)", async () => {
     reset();
     execError = new Error("container unavailable");
@@ -370,8 +514,8 @@ describe("getSandbox", () => {
     reset();
     const names: string[] = [];
     const stub: ReviewSandbox = {
+      provision: async () => ({ kind: "provisioned" }),
       runCommand: async () => ({ stdout: "out", stderr: "", exitCode: 0 }),
-      claimMarker: async () => "written",
       runMarked: async () => ({ kind: "ran", stdout: "out", stderr: "", exitCode: 0 }),
       destroyMarked: async () => "destroyed",
       destroy: async () => {},
@@ -596,13 +740,10 @@ describe("SandboxV1 exec argv/env bounds", () => {
 });
 
 describe("SandboxV1 absolute exec deadline", () => {
-  const MARKER = "mstar.review-attempt/v1:abc\n";
-
   function proofSpendingContainer(proofSpentMs: number, clock: { now: number }) {
-    const { sandbox, container } = makeDo();
-    const realExec = container.exec;
+    const { sandbox, container } = makeDo(true);
     container.exec = mock(async (cmd: string[], opts?: unknown) => {
-      if (cmd[5]?.includes("cat --")) {
+      if (cmd[cmd.length - 1]?.includes("cat --")) {
         clock.now += proofSpentMs;
         execCalls.push({ cmd, opts });
         return {
@@ -610,7 +751,11 @@ describe("SandboxV1 absolute exec deadline", () => {
           output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
         };
       }
-      return realExec(cmd, opts);
+      execCalls.push({ cmd, opts });
+      return {
+        stdin: null,
+        output: async () => ({ stdout: new ArrayBuffer(0), stderr: new ArrayBuffer(0), exitCode: 0 }),
+      };
     });
     return { sandbox, container };
   }
@@ -626,7 +771,7 @@ describe("SandboxV1 absolute exec deadline", () => {
       expect(result).toEqual({ kind: "deadline-spent", remainingMs: 0 });
     });
     expect(execCalls).toHaveLength(1);
-    expect(execCalls[0]!.cmd[5]).toContain("cat --");
+    expect(execCalls[0]!.cmd[execCalls[0]!.cmd.length - 1]).toContain("cat --");
   });
 
   test("the argv carries the container-side computation, not a frozen duration", async () => {
@@ -641,7 +786,7 @@ describe("SandboxV1 absolute exec deadline", () => {
       });
       expect(result.kind).toBe("ran");
     });
-    const child = execCalls.find((call) => call.cmd[0] === "/bin/sh")!;
+    const child = execCalls.find((call) => call.cmd[call.cmd.length - 1] === "bun run x")!;
     expect(child.cmd.slice(0, 3)).toEqual(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER]);
     expect(child.cmd[2]).toContain("$(date +%s)");
     expect(child.cmd[2]).toContain("exec timeout --kill-after=$grace_s");
@@ -650,10 +795,12 @@ describe("SandboxV1 absolute exec deadline", () => {
     expect(child.cmd).not.toContain("timeout");
   });
 
-  test("a container clock past the deadline exits 124 without running the runner", () => {
+  test("a container clock past the deadline REFUSES with 125 and does not run the runner", () => {
+    // 125 is the wrapper's own refusal (nothing started). 124 stays the
+    // platform timeout kill, which is a different fact about a running command.
     const past = Math.floor(Date.now() / 1000) - 60;
     const result = Bun.spawnSync(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER, "mstar-deadline", String(past), "5000", "echo ran"]);
-    expect(result.exitCode).toBe(124);
+    expect(result.exitCode).toBe(125);
     expect(result.stdout.toString()).toBe("");
   });
 });

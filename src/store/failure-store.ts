@@ -47,6 +47,7 @@ import {
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../contracts/failure-stages";
+import type { FailureCode } from "../contracts/failure-codes";
 import type { D1Like, D1StatementLike } from "./types";
 
 export const QUEUE_MAX_ATTEMPTS = 6;
@@ -111,11 +112,32 @@ export type ReviewFailureInput = {
   head_sha: string;
   stage: FailureStage;
   error: string;
+  /**
+   * The closed operator-facing code (`src/contracts/failure-codes.ts`).
+   * REQUIRED: a NULL code now means "recorded before classification existed",
+   * so a new row that omits one would be indistinguishable from a historical
+   * row and unfindable by its incident code.
+   */
+  code: FailureCode;
+  /**
+   * The attempt id the failure belongs to (the Workflow instance id), or a
+   * caller-chosen id for a failure that never reached an attempt. Absent, the
+   * row's own id is the track id.
+   */
+  trackId?: string;
+  /**
+   * The PR author's one-sentence summary for `code`. Lives beside `error`, not
+   * inside it: `error` stays the raw mechanism text every operator counter and
+   * exact-text read already depends on. REQUIRED for the same reason as `code`.
+   */
+  message: string;
 };
 
-/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010). */
-export type ReviewFailureRow = ReviewFailureInput & {
+/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0106). */
+export type ReviewFailureRow = Omit<ReviewFailureInput, "code" | "trackId"> & {
   id: string;
+  error_code: string | null;
+  track_id: string | null;
   created_at: string;
 };
 
@@ -143,6 +165,12 @@ export type AdmissionDropCounts = Record<AdmissionDropReason, number>;
 
 export type FailureStore = {
   record(input: ReviewFailureInput): Promise<void>;
+  /**
+   * Rewrite a row's CLASSIFICATION after the fact (code + author sentence) when
+   * a step recorded it before the outcome was known. Append-only would leave a
+   * summary that contradicts what actually happened.
+   */
+  reclassify(input: { id: string; code: FailureCode; message: string }): Promise<void>;
   listRecent(limit?: number): Promise<ReviewFailureRow[]>;
   countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
@@ -204,8 +232,8 @@ export function settlementFailureRowStatement(
   assertFailureStage(input.stage);
   return db
     .prepare(
-      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
@@ -218,12 +246,21 @@ export function settlementFailureRowStatement(
       input.head_sha,
       input.stage,
       input.error,
+      input.code ?? null,
+      input.trackId ?? rowId,
+      input.message ?? null,
     );
 }
 
 /** Create the failure store over one D1 handle. */
 export function createFailureStore(db: D1Like): FailureStoreWithCounts {
   return {
+    async reclassify(input: { id: string; code: FailureCode; message: string }): Promise<void> {
+      await db
+        .prepare("UPDATE review_failures SET error_code = ?, message = ? WHERE id = ?")
+        .bind(input.code, input.message, input.id)
+        .run();
+    },
     async record(input: ReviewFailureInput): Promise<void> {
       if (!FAILURE_STAGES.includes(input.stage)) {
         throw new Error(
@@ -237,13 +274,17 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
         await settlementFailureRowStatement(db, input, input.id).run();
         return;
       }
+      // An explicit identity is required for reclassification; without one the
+      // row's own id IS the track id: one value, written twice, so a failure
+      // that never reached an attempt is still locatable.
+      const rowId = crypto.randomUUID();
       await db
         .prepare(
-          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          crypto.randomUUID(),
+          rowId,
           input.target_id,
           input.installation_id,
           input.owner,
@@ -252,6 +293,9 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
           input.head_sha,
           input.stage,
           input.error,
+          input.code ?? null,
+          input.trackId ?? rowId,
+          input.message ?? null,
         )
         .run();
     },

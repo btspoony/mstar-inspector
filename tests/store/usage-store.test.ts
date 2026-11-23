@@ -73,6 +73,29 @@ describe("recordUsageEvent", () => {
     ]);
   });
 
+  test("the same execution token is recorded once: a replay is a no-op, the next token still mints seq 2", async () => {
+    const db = createMigratedTestD1();
+    const input = {
+      reviewId: "review-a",
+      executionToken: "token-a1",
+      workspaceId: "default",
+      occurredAt: AT,
+      rp: 60,
+      source: "shared" as const,
+    };
+    await recordUsageEvent(db, input);
+    await recordUsageEvent(db, input);
+    await recordUsageEvent(db, { ...input, executionToken: "token-a2", rp: 2 });
+
+    const rows = db.raw
+      .query("SELECT seq, execution_token FROM usage_events WHERE review_id = 'review-a' ORDER BY seq")
+      .all();
+    expect(rows).toEqual([
+      { seq: 1, execution_token: "token-a1" },
+      { seq: 2, execution_token: "token-a2" },
+    ]);
+  });
+
   test("an unknown workspace is rejected by the FK", async () => {
     const db = createMigratedTestD1();
     await expect(

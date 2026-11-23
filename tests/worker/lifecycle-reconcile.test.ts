@@ -469,6 +469,7 @@ describe("publication lane — confirmed apply", () => {
       attemptId,
       payload,
       nowMs: T0,
+      createdMs: T0,
       enqueuedMs: T0 - 2_000,
       deadlineMs: T0 + 600_000,
     });
@@ -524,6 +525,7 @@ describe("publication lane — confirmed apply", () => {
       attemptId,
       payload,
       nowMs: T0,
+      createdMs: T0,
       enqueuedMs: T0 - 2_000,
       deadlineMs: T0 + 600_000,
     });

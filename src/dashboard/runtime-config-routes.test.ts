@@ -202,6 +202,13 @@ const DEFAULT_ATTEMPT_CAP = {
 
 const DEFAULT_ROUTE_WORKFLOW = { mode: "off", saved: false, degraded: false };
 
+const DEFAULT_LOST_REPLY_SETTLE = {
+  settleMs: 900_000,
+  min: 180_000,
+  max: 3_600_000,
+  degraded: false,
+};
+
 const DEFAULT_ADMISSION_DROPS = {
   "pr-held": 0,
   "system-cap": 0,
@@ -383,6 +390,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
+      lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -482,6 +490,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
+      lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,
@@ -502,6 +511,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
+      lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
       admissionDrops24h: DEFAULT_ADMISSION_DROPS,
       githubRateLimited24h: 0,
       queue: DEFAULT_QUEUE,

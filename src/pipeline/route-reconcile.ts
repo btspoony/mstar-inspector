@@ -1,20 +1,25 @@
-import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement, D1Result, KVNamespace, Queue } from "@cloudflare/workers-types";
+import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
   idemKey,
 } from "../contracts/idem";
-import { readReviewLaunch } from "./review-attempt";
+import { getLostReplySettleMs, REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
+import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
 import { settlementFailureRowStatement } from "../store/failure-store";
+
 import {
+  beginAttemptSettlementStatement,
   landFailureEffect,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
   clearRefusalPending,
   clearRecheckDuty,
   listIncompleteSettlements,
+  listLostReplyLaunchSettlements,
   readRefusalPending,
   readRecheckAttribution,
   readRecheckDuty,
@@ -62,6 +67,12 @@ export type ReviewRouteEnv = {
  * commits them in a single D1 batch): no interruption and no second pass can see
  * the row without the fact, and the insert is attempt-keyed so a concurrent pass
  * adds nothing.
+ *
+ * `failure.code` defaults to the unclassified crash-window code; a caller that
+ * knows why it settled names it. `failure.statements` are extra writes that must
+ * land in that same batch first — the lost-reply pass uses them to move a
+ * `launched` row to `failed` AND revoke it, which is what releases both arms of
+ * the capacity hold.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -69,6 +80,7 @@ async function landSettlementEffects(
   landed: Set<SettlementEffect>,
   detail: string,
   nowMs: number,
+  failure: { code?: FailureCode } = {},
 ): Promise<void> {
   // The refused round's accounting comes FIRST: its writes are not part of any
   // claim (F6), so a fault here leaves the duty for the next pass without ever
@@ -78,6 +90,7 @@ async function landSettlementEffects(
   // that lost the insert race owns nothing and must not touch it.
   let owned = false;
   if (!landed.has("failure-row")) {
+    const code = failure.code ?? "review.internal.unclassified";
     const recorded = await landFailureEffect(
       env.DB,
       {
@@ -91,6 +104,9 @@ async function landSettlementEffects(
           pr_number: handoff.payload.pr_number,
           head_sha: handoff.payload.head_sha ?? "",
           stage: "pipeline",
+          code,
+          trackId: handoff.attemptId,
+          message: FAILURE_SUMMARIES[code],
           error: detail,
         },
       },
@@ -165,6 +181,9 @@ async function ensureRecheckAccounting(
         pr_number: handoff.payload.pr_number,
         head_sha: duty.headSha,
         stage: "recheck",
+        code: "review.recheck.unaccounted",
+        trackId: handoff.attemptId,
+        message: FAILURE_SUMMARIES["review.recheck.unaccounted"],
         error: duty.failureError,
       },
       `${duty.attemptId}:recheck`,
@@ -194,7 +213,95 @@ async function ensureRecheckAccounting(
 }
 
 /**
- * Deliver what the route owes./**
+ * Settle a row whose paid reply was lost and whose grace past its own deadline
+ * has elapsed (I-000694). The live settlement cannot do this: it must leave the
+ * row `launched` with no outcome, because a paid child MAY still be running,
+ * and `PAID_STATE_UNKNOWN` is what holds the container and the capacity slot.
+ * Only the attempt's own hard stop plus a post-deadline grace can say the
+ * child is gone, and this pass is where that judgement lands. An anchored row
+ * uses its frozen `deadline_ms`; a pre-column row with none uses the maximum
+ * attempt cap as an upper bound on that stop.
+ *
+ * The guarded move to `failed` is the GATE: every other write in this pass is
+ * issued only when its `changes` says this pass won the row — a row that
+ * terminalized between the selector and the batch (its paid result persisted
+ * and still publishable) gets no failure record and no revocation. The revoke
+ * rides in front of the move because its own `state = 'launched'` predicate
+ * can only match there, and the settlement-start mark trails the move (guarded
+ * by `changes() > 0`) so a crash before the failure record still leaves the
+ * row inside `listIncompleteSettlements`' lane. The settlement path itself is
+ * the NEIGHBOURING one (`landSettlementEffects`), so the Check lane and the
+ * head-wide claim behave exactly as they do for every other settled failure.
+ */
+async function settleLostReplies(
+  env: ReviewRouteEnv,
+  windowMs: number,
+  nowMs: number,
+  log: Pick<NonNullable<ReviewRouteEnv["log"]>, "info"> | undefined,
+): Promise<void> {
+  let candidates: AttemptHandoff[] = [];
+  try {
+    candidates = await listLostReplyLaunchSettlements(env.DB, {
+      deadlineBeforeMs: nowMs - windowMs,
+      limit: ROUTE_RECOVERY_LIMIT,
+    });
+  } catch {
+    return;
+  }
+  for (const handoff of candidates) {
+    // An anchored row settles at its frozen deadline; a pre-column legacy row has
+    // none and settles at the selector's cap-ceiling bound.
+    const deadlineMs = handoff.deadlineMs;
+    const detail =
+      deadlineMs === null
+        ? `a pre-column legacy attempt carries no frozen deadline; its launch is older than the maximum attempt cap (${REVIEW_ATTEMPT_CAP_MAX_MS} ms) plus ${windowMs} ms of grace, and no reply ever arrived`
+        : `attempt deadline ${new Date(deadlineMs).toISOString()} passed more than ${windowMs} ms ago, and no reply ever arrived`;
+    let moved: D1Result[];
+    try {
+      moved = await env.DB.batch([
+        markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs),
+        recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
+        beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
+      ] as D1PreparedStatement[]);
+    } catch {
+      // The batch is atomic: nothing moved, the row is untouched and the next pass retries it.
+      continue;
+    }
+    if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
+    try {
+      await landSettlementEffects(
+        env,
+        handoff,
+        new Set<SettlementEffect>(handoff.settledEffects ?? []),
+        detail,
+        nowMs,
+        {
+          code: "review.paid.reply_lost",
+        },
+      );
+      log?.info?.(
+        { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
+        `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`,
+      );
+    } catch (err) {
+      // The guarded batch above already made the row terminal (`failed`, revoked,
+      // settlement started), so this lane cannot retry it: only the
+      // incomplete-settlement lane can finish the failure row and the claim.
+      // Log the fault so it is observable instead of silently dropped.
+      log?.info?.(
+        {
+          ...payloadIdentityFields(handoff.payload),
+          attempt_id: handoff.attemptId,
+          error_cause: err instanceof Error ? err.message : String(err),
+        },
+        "lost-reply settlement faulted after the attempt became terminal — the incomplete-settlement lane owes the rest",
+      );
+    }
+  }
+}
+
+
+/**
  * Deliver what the route owes. Per-row faults are isolated: one bad row never
  * stops the pass, and the row stays owed for the next one.
  */
@@ -273,6 +380,20 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       // Stays selected; the next pass retries it.
     }
   }
+  // The lost-reply observation window (I-000694). The live settlement must
+  // leave a lost reply `launched` with no outcome — a paid child may still be
+  // running, and that is exactly what holds the container and the capacity
+  // slot — so nothing moved the row afterwards: capacity stayed held and the
+  // Check never terminalized. The attempt's own deadline plus a post-deadline
+  // grace retires that last uncertainty; the settlement then takes the SAME
+  // path every other settled failure takes, and moving the launch row to
+  // `failed` is what releases the hold. The window is read once per pass, never
+  // cached: an operator change applies to the next sweep. No attempt cap is read
+  // here either: an anchored row settles from its frozen `deadline_ms`, and a
+  // pre-column row from the cap's constant validation ceiling, so neither can
+  // move a live child's stop earlier.
+  const lostReply = await getLostReplySettleMs(env.DB);
+  await settleLostReplies(env, lostReply.settleMs, nowMs, env.log);
   // A claim whose delivery died before recording anything. The state transition
   // is the exclusive hand-back (a second pass finds it `queued`), and sending
   // AFTER it means a failed send is still owned by the comment outbox lane,

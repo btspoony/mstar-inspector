@@ -1429,7 +1429,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
           .bind(...scopeBinds, owner, repo, prNumber),
         db
           .prepare(
-            `SELECT f.stage, f.error, f.created_at
+            `SELECT f.stage, f.error, f.message, f.error_code, f.track_id, f.created_at
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
                AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
@@ -1629,7 +1629,20 @@ export type PullRequestReviewDetailRow = {
   severity_counts: string;
 };
 
-export type PullRequestFailureDetailRow = { stage: string; error: string; created_at: string };
+/**
+ * One `review_failures` row as the detail face reads it. `error` carries the
+ * mechanism detail an operator needs; `error_code`/`track_id` are NULL on rows
+ * recorded before 0106, which the UI renders exactly as it always did.
+ */
+export type PullRequestFailureDetailRow = {
+  stage: string;
+  error: string;
+  /** The PR author's sentence (migration 0107); NULL on older rows. */
+  message: string | null;
+  error_code: string | null;
+  track_id: string | null;
+  created_at: string;
+};
 
 /**
  * The detail head: the ledger row plus its newest review (whole row, nullable)

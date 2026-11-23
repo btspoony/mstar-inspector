@@ -2,7 +2,11 @@
 import { describe, expect, jest, mock, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { getSweepSettings, setSweepSettings } from "../../src/dashboard/runtime-config-store";
-import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
+import {
+  createFailureStore,
+  QUEUE_MAX_ATTEMPTS,
+  type ReviewFailureInput,
+} from "../../src/store/failure-store";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import {
   ALERT_MAINTENANCE_AUDIT_ACTION,
@@ -54,6 +58,14 @@ const BASE = {
   head_sha: "0123456789abcdef0123456789abcdef01234567",
 };
 
+const failureRow = (stage: ReviewFailureInput["stage"], error: string): ReviewFailureInput => ({
+  ...BASE,
+  stage,
+  code: "review.internal.unclassified",
+  message: "the review did not complete",
+  error,
+});
+
 type WarnCall = {
   fields:
     | SweepAlertFields
@@ -75,7 +87,7 @@ function captureLog(): { log: SweepLog; calls: WarnCall[] } {
 async function seedInWindow(db: D1Like, count: number): Promise<void> {
   const store = createFailureStore(db);
   for (let i = 0; i < count; i++) {
-    await store.record({ ...BASE, stage: "runner", error: `boom-${i}` });
+    await store.record(failureRow("runner", `boom-${i}`));
   }
 }
 
@@ -551,7 +563,7 @@ describe("runSweep", () => {
     const db = failureDb();
     const store = createFailureStore(db);
     for (const stage of ["parse", "runner", "sandbox", "pipeline"] as const) {
-      await store.record({ ...BASE, stage, error: `boom-${stage}` });
+      await store.record(failureRow(stage, `boom-${stage}`));
     }
     seedOutsideWindow(db);
 
@@ -565,7 +577,7 @@ describe("runSweep", () => {
       const db = failureDb();
       const store = createFailureStore(db);
       for (let i = 0; i < 6; i++) {
-        await store.record({ ...BASE, stage, error: `degraded-${i}` });
+        await store.record(failureRow(stage, `degraded-${i}`));
       }
       const { log, calls } = captureLog();
       const quiet = await runSweep(db, { log });
@@ -574,7 +586,7 @@ describe("runSweep", () => {
       expect(calls).toHaveLength(0);
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 6 });
 
-      await store.record({ ...BASE, stage: "runner", error: "boom" });
+      await store.record(failureRow("runner", "boom"));
       const counted = await runSweep(db, { log: captureLog().log });
       expect(counted.failures24h).toBe(1);
       expect(counted.thresholdBreached).toBe(false);
@@ -584,8 +596,8 @@ describe("runSweep", () => {
   test("a quota refusal does not page ops while a sandbox failure does, and the breakdown names it", async () => {
     const db = failureDb();
     const store = createFailureStore(db);
-    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
-    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+    await store.record(failureRow("quota", "quota exceeded"));
+    await store.record(failureRow("sandbox", "container acquisition failed"));
 
     const { log, calls } = captureLog();
     const quiet = await runSweep(db, { log });
@@ -599,7 +611,7 @@ describe("runSweep", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
 
     for (let i = 0; i < SWEEP_FAILURE_THRESHOLD; i++) {
-      await store.record({ ...BASE, stage: "sandbox", error: `boom-${i}` });
+      await store.record(failureRow("sandbox", `boom-${i}`));
     }
     const { log: breachLog, calls: breachCalls } = captureLog();
     await runSweep(db, { log: breachLog });
@@ -619,11 +631,13 @@ describe("runSweep", () => {
     seedTarget(db, "bot-sweep", { id: "target-sweep-two", workspaceId: "ws-two" });
     const store = createFailureStore(db);
     for (let i = 0; i < 4; i++) {
-      await store.record({ ...BASE, stage: "quota", error: `quota-a-${i}` });
+      await store.record(failureRow("quota", `quota-a-${i}`));
       await store.record({
         ...BASE,
         target_id: "target-sweep-two",
         stage: "quota",
+        code: "review.internal.unclassified",
+        message: "the review did not complete",
         error: `quota-b-${i}`,
       });
     }
@@ -642,12 +656,12 @@ describe("runSweep", () => {
     const db = failureDb();
     const store = createFailureStore(db);
     for (let i = 0; i < 5; i++) {
-      await store.record({ ...BASE, stage: "sandbox", error: `sandbox-${i}` });
+      await store.record(failureRow("sandbox", `sandbox-${i}`));
     }
     for (let i = 0; i < 3; i++) {
-      await store.record({ ...BASE, stage: "parse", error: `parse-${i}` });
+      await store.record(failureRow("parse", `parse-${i}`));
     }
-    await store.record({ ...BASE, stage: "quota", error: "quota exceeded" });
+    await store.record(failureRow("quota", "quota exceeded"));
 
     const { log, calls } = captureLog();
     await runSweep(db, { log });
@@ -662,8 +676,8 @@ describe("runSweep", () => {
   test("a maintenance_deferred row is a separate existence signal, never part of the infrastructure total", async () => {
     const db = failureDb();
     const store = createFailureStore(db);
-    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
-    await store.record({ ...BASE, stage: "sandbox", error: "container acquisition failed" });
+    await store.record(failureRow("maintenance_deferred", "maintenance_window"));
+    await store.record(failureRow("sandbox", "container acquisition failed"));
 
     const { log, calls } = captureLog();
     const result = await runSweep(db, { log });
@@ -679,7 +693,7 @@ describe("runSweep", () => {
   test("a maintenance_deferred row rides the breach payload under its own key, leaving the total alone", async () => {
     const db = failureDb();
     const store = createFailureStore(db);
-    await store.record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await store.record(failureRow("maintenance_deferred", "maintenance_window"));
     await seedInWindow(db, SWEEP_FAILURE_THRESHOLD + 1);
 
     const { log, calls } = captureLog();
@@ -1070,7 +1084,7 @@ describe("runSweep — maintenance audit window", () => {
   }
 
   async function seedDeferral(db: TestD1): Promise<void> {
-    await createFailureStore(db).record({ ...BASE, stage: "maintenance_deferred", error: "maintenance_window" });
+    await createFailureStore(db).record(failureRow("maintenance_deferred", "maintenance_window"));
   }
 
   function sink(): { fetchImpl: typeof fetch; bodies: () => string[] } {
@@ -1108,7 +1122,7 @@ describe("runSweep — maintenance audit window", () => {
     await seedInWindow(db, 3);
     await seedDeferral(db);
     for (const stage of ["runner", "maintenance_deferred"] as const) {
-      await createFailureStore(db).record({ ...BASE, stage, error: "old" });
+      await createFailureStore(db).record(failureRow(stage, "old"));
     }
     db.raw.run("UPDATE review_failures SET created_at = datetime('now', '-8 hours') WHERE error = 'old'");
     const oldStamp = new Date(Date.now() - 8 * 3_600_000).toISOString();

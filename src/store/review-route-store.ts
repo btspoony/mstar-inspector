@@ -18,6 +18,7 @@
  * worker imports.
  */
 import type { KVNamespace } from "@cloudflare/workers-types";
+import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
@@ -31,15 +32,17 @@ export type AttemptHandoff = {
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
   /**
-   * The attempt's absolute hard stop, frozen when this row was first written:
-   * the claiming delivery's time plus the operator's end-to-end cap. Every
-   * replay of the same attempt reads it instead of re-deriving it. `null` only
-   * on a row written before the column existed — "not yet anchored"; the next
-   * admission anchors it ONCE from `createdMs` (the only instant that attempt
-   * actually had), never from a later delivery's clock.
+   * The attempt's hard stop, frozen when this row was first written: the
+   * claiming delivery's `createdMs` (its entry instant) plus the operator's
+   * end-to-end cap. Every replay of the same attempt reads it instead of
+   * re-deriving it. `null` only on a row written before the column existed —
+   * "not yet anchored"; the next admission anchors it ONCE from `createdMs`
+   * (the only instant that attempt actually had), never from a later
+   * delivery's clock.
    */
   deadlineMs: number | null;
   enqueuedMs: number | null;
+  /** The origin `deadlineMs` counted its cap from — the ONE round-clock origin. */
   createdMs: number;
   settledMs: number | null;
   settledEffects: SettlementEffect[] | null;
@@ -218,7 +221,14 @@ export async function attemptCheckIsOpen(db: D1Like, attemptId: string): Promise
  * concurrent attempts to reserve the same delivery harmless: both read back the
  * one row, and the caller uses ITS attempt id.
  *
- * `deadlineMs` is frozen by the FIRST writer: a conflicting insert changes
+ * `createdMs` is the ORIGIN of `deadlineMs` — the instant the claiming delivery
+ * froze its cap from — and the FIRST writer binds it to `created_ms` in the same
+ * insert. `created_ms` is therefore never "when the row was inserted": every
+ * later delivery reads the origin back from the row (`budgetStartMs`), so no two
+ * deliveries of one attempt can derive two origins for one deadline. `nowMs` is
+ * the write's own clock and lands on `updated_ms` only.
+ *
+ * `deadlineMs` is frozen by the FIRST writer too: a conflicting insert changes
  * nothing, and the conditional UPDATE only fills the column a pre-migration row
  * left NULL. So a redelivery, a concurrent duplicate or a recovery re-enqueue
  * can never move the attempt's hard stop. The caller derives the candidate for
@@ -234,6 +244,7 @@ export async function reserveAttemptHandoff(
     attemptId: string;
     payload: ReviewJobPayload;
     nowMs: number;
+    createdMs: number;
     deadlineMs: number;
     enqueuedMs: number | null;
   },
@@ -251,7 +262,7 @@ export async function reserveAttemptHandoff(
       JSON.stringify(input.payload),
       input.deadlineMs,
       input.enqueuedMs,
-      input.nowMs,
+      input.createdMs,
       input.nowMs,
     )
     .run();
@@ -520,7 +531,9 @@ export async function settlementStatementForEffects(
  */
 export async function landFailureEffect(
   db: D1Like,
-  input: AttemptSettlementInput & { failure: ReviewFailureInput },
+  input: AttemptSettlementInput & {
+    failure: ReviewFailureInput;
+  },
   nowMs: number,
 ): Promise<{ landed: boolean; owned: boolean }> {
   const landed: SettlementEffect[] = input.landed.includes("failure-row")
@@ -528,7 +541,12 @@ export async function landFailureEffect(
     : [...input.landed, "failure-row"];
   const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
   if (mark === null) return { landed: false, owned: false };
-  const [insert] = await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
+  const results = await db.batch([
+    settlementFailureRowStatement(db, input.failure, input.attemptId),
+    mark,
+  ]);
+  // The row insert is second-to-last; the mark always closes the batch.
+  const insert = results[results.length - 2];
   return { landed: true, owned: (insert?.meta.changes ?? 0) === 1 };
 }
 
@@ -648,10 +666,24 @@ function settlementStatement(
  * not failed yet — and therefore recoverable by the route's pass.
  */
 export async function beginAttemptSettlement(db: D1Like, deliveryKey: string, nowMs: number): Promise<void> {
-  await db
-    .prepare(`UPDATE review_attempt_handoffs SET settling_ms = COALESCE(settling_ms, ?) WHERE delivery_key = ?`)
-    .bind(nowMs, deliveryKey)
-    .run();
+  await db.prepare(BEGIN_SETTLEMENT_SQL).bind(nowMs, deliveryKey).run();
+}
+
+const BEGIN_SETTLEMENT_SQL = `UPDATE review_attempt_handoffs SET settling_ms = COALESCE(settling_ms, ?) WHERE delivery_key = ?`;
+
+/**
+ * The settlement-start mark as a batchable statement. `changes() > 0` reads the
+ * row count of the statement placed IMMEDIATELY before it in the same batch —
+ * it must follow the guarded write whose match proves this pass owns the
+ * settlement, so a pass that lost its terminal move never enters
+ * `listIncompleteSettlements` claiming work it never began.
+ */
+export function beginAttemptSettlementStatement(
+  db: D1Like,
+  deliveryKey: string,
+  nowMs: number,
+): D1StatementLike {
+  return db.prepare(`${BEGIN_SETTLEMENT_SQL} AND changes() > 0`).bind(nowMs, deliveryKey);
 }
 
 /**
@@ -800,6 +832,74 @@ export async function listUnpublishedLaunchSettlements(
         LIMIT ?`,
     )
     .bind(input.deadlineBeforeMs, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
+ * The lost-reply observation window (I-000694): the paid exec was issued, its
+ * reply never arrived, and the grace past the attempt's own deadline has now
+ * elapsed. `settleAttemptFailure` leaves exactly this shape on purpose —
+ * `launched` with no `result_outcome` and `containerStateUnknown: true`,
+ * because a paid child may still be running — but nothing used to move the row
+ * afterwards, so the attempt held capacity forever and its Check never
+ * terminalized.
+ *
+ * `deadline_ms + window <= now` is the liveness proxy there is: the attempt's
+ * hard stop is the instant its paid exec is killed, so a row whose deadline
+ * passed longer than the grace ago has no live child left to protect. The row's
+ * FROZEN `deadline_ms` is that instant and nothing else is: a `created_ms + cap`
+ * synthesis would read a cap resolved in THIS pass, which either degrades to
+ * the default while the row was admitted under a stored larger cap or shrinks
+ * when an operator lowers the cap afterwards — both settle a live paid child
+ * early. So an anchored row is settled from `deadline_ms` alone.
+ *
+ * The pre-column legacy set (`deadline_ms IS NULL`, written before migration
+ * 0084) has no frozen anchor and no other lane reaches it: the incomplete-
+ * settlement lane selects `settling_ms IS NOT NULL`, which a row that never
+ * started a settlement cannot match. Its bound is the CAP's own validation
+ * ceiling instead: an attempt's hard stop is `created_ms + cap` and `cap` can
+ * never exceed `REVIEW_ATTEMPT_CAP_MAX_MS`, so the launched row cannot have a
+ * live child later than `launched_at_ms + REVIEW_ATTEMPT_CAP_MAX_MS` (the
+ * launch never precedes the create). That ceiling is a constant upper bound,
+ * not a tunable read, so neither a degraded read nor a lowered cap can move it
+ * earlier. A row with no `launched_at_ms` matches neither branch.
+ *
+ * The anti-join on `review_failures` is the idempotence guard: the failure row
+ * is keyed by the attempt, so a row that already settled once is never selected
+ * again and a concurrent pass can never mint a second one.
+ *
+ * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
+ * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
+ * moves the row to `failed` it stops matching both, so this pass is the ONE
+ * mechanism that releases the hold — no second time bound is added there.
+ */
+export async function listLostReplyLaunchSettlements(
+  db: D1Like,
+  input: { deadlineBeforeMs: number; limit: number },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_launches l ON l.attempt_id = h.attempt_id
+        WHERE l.state = 'launched' AND l.result_outcome IS NULL
+          AND (
+            (h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?1)
+            OR (h.deadline_ms IS NULL AND l.launched_at_ms <= ?2)
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
+          )
+        ORDER BY h.deadline_ms, h.delivery_key
+        LIMIT ?3`,
+    )
+    .bind(
+      input.deadlineBeforeMs,
+      input.deadlineBeforeMs - REVIEW_ATTEMPT_CAP_MAX_MS,
+      input.limit,
+    )
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }

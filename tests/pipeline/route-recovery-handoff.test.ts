@@ -81,6 +81,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
       attemptId: "attempt-recovered",
       payload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -124,6 +125,7 @@ describe("claim 1 — a consumed claim never strands a recorded attempt", () => 
         attemptId: `attempt-${state}`,
         payload,
         nowMs: 1_000,
+        createdMs: 1_000,
         enqueuedMs: 0,
         deadlineMs: Date.now() + 600_000,
       });

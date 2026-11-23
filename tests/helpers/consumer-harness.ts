@@ -3,7 +3,7 @@ import type { MessageBatch } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { AttemptStarter, ConsumerLog, PipelineEnv } from "../../src/pipeline/consumer";
 import { inlineWorkflowStarter } from "./workflow-route";
-import type { ReviewSandbox } from "../../src/pipeline/sandbox";
+import type { MarkedRun, ReviewSandbox } from "../../src/pipeline/sandbox";
 import type { ReviewCommenter } from "../../src/pipeline/comment";
 import type { TestD1 } from "../store/helpers";
 import type { CommenterCall, FakeCommenterState } from "./review-commenter";
@@ -61,13 +61,9 @@ export type ConsumerHarness = {
   fakeSandbox: {
     state: FakeSandboxState;
     runCommand: (cmd: string, opts?: unknown) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
-    claimMarker: (marker: string) => Promise<"written" | "matched" | "unknown">;
-    runMarked: (
-      marker: string,
-      cmd: string,
-      opts?: unknown,
-    ) => Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number } | { kind: "unknown" }>;
-    destroyMarked: (marker: string) => Promise<"destroyed" | "unknown">;
+    provision: (marker: string, opts?: unknown) => Promise<{ kind: "provisioned" | "unavailable" | "retired" }>;
+    runMarked: (marker: string, cmd: string, opts?: unknown) => Promise<MarkedRun>;
+    destroyMarked: (marker: string) => Promise<"destroyed" | "stopped" | "unknown">;
     destroy: () => Promise<void>;
   };
   sandbox: FakeSandboxState;

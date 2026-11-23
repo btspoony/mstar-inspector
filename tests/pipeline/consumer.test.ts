@@ -64,6 +64,7 @@ import { checkGateOf, readEffectiveTargetSettings, type ReviewTargetRow } from "
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
+import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
@@ -122,6 +123,7 @@ import {
   makePayload,
 } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
+import { AttemptUnknownError, ContainerUnavailableError } from "../../src/pipeline/review-attempt";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import {
@@ -201,7 +203,7 @@ function clockSpendingSandbox(needle: string, spentMs: number, clock: { now: num
         return h.fakeSandbox.runCommand(cmd, opts);
       },
       destroy: h.fakeSandbox.destroy,
-      claimMarker: h.fakeSandbox.claimMarker,
+      provision: h.fakeSandbox.provision,
       runMarked: h.fakeSandbox.runMarked,
       destroyMarked: h.fakeSandbox.destroyMarked,
     }),
@@ -687,6 +689,10 @@ describe("createReviewConsumer", () => {
       pr_number: 42,
       head_sha: SHA,
       stage: "parse",
+      // The row is written BEFORE publishing (so a crash keeps the diagnostic)
+      // and reclassified once the degraded notice is confirmed applied.
+      error_code: "review.output.degraded_published",
+      message: FAILURE_SUMMARIES["review.output.degraded_published"],
       error: "not valid ReviewOutput JSON",
     });
     expect(h.messageAckCalls).toHaveLength(1);
@@ -723,6 +729,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -749,6 +756,8 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(failureRows(db)).toHaveLength(1);
+    // Nothing was published, so the row keeps the "nothing was published" code.
+    expect(failureRows(db)[0]).toMatchObject({ error_code: "review.output.invalid" });
     expect(h.messageAckCalls).toHaveLength(1);
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication unknown"));
     expect(warn).toBeDefined();
@@ -790,7 +799,9 @@ describe("createReviewConsumer", () => {
 
   test("an unproven collection leaves the container, capacity and Check state alone and acks", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    h.sandbox.markedUnknown = true;
+    // an unreadable marker is the explicit unknown; a mismatch at the pre-paid
+    // entry would instead be a confirmed nothing-was-charged loss.
+    h.sandbox.marked = "marker-unreadable";
     const db = await createSeededTestD1();
     let terminalized = 0;
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
@@ -938,18 +949,21 @@ describe("createReviewConsumer", () => {
     expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });
 
-  test("a rejected marker claim is unknown: nothing settled, nothing destroyed, capacity held", async () => {
+  test("a provisioning that cannot answer is transient: the step is retried, nothing is settled", async () => {
     const db = await createSeededTestD1();
-    const check = attachedCheck("attempt-marker-claim-lost");
-    h.sandbox.markerError = new Error("marker claim reply lost");
+    const check = attachedCheck("attempt-provisioning-unavailable");
+    h.sandbox.provisionOutcome = "unavailable";
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       checks: check.hooks,
     });
 
-    await consumer(h.makeBatch(makePayload()));
+    // the D1 row still proves nothing paid, so the retry re-provisions.
+    // (Boundary classification — which failures are terminal — is A3's; here the
+    // error class and the fact that nothing was paid are what A1 owns.)
+    await expect(consumer(h.makeBatch(makePayload()))).rejects.toBeInstanceOf(ContainerUnavailableError);
 
-    expectUnknownOutcome(db, check.state.terminalized);
+    expect(h.sandbox.provisionCalls).toBe(1);
     expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });
 
@@ -972,7 +986,7 @@ describe("createReviewConsumer", () => {
 
   test("a refused destroy proof after a matching collection keeps capacity and retries nothing", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
-    h.sandbox.destroyMarkedUnknown = true;
+    h.sandbox.destroyMarked = "unknown";
     const db = await createSeededTestD1();
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -1227,6 +1241,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -1689,7 +1704,9 @@ describe("createReviewConsumer", () => {
 
     await expect(consumer(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
-    expect(h.sandbox.calls).toHaveLength(2);
+    // the spent preparation window declines the FIRST entry, before provisioning
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.sandbox.provisionCalls).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
     expect(String(failureRows(db)[0]!.error)).toContain('"cause":"consumer-deadline"');
@@ -1727,6 +1744,7 @@ describe("createReviewConsumer", () => {
         },
       },
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -1884,7 +1902,7 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
+          provision: h.fakeSandbox.provision,
           runMarked: h.fakeSandbox.runMarked,
           destroyMarked: h.fakeSandbox.destroyMarked,
         }),
@@ -1931,7 +1949,7 @@ describe("createReviewConsumer", () => {
               return h.fakeSandbox.runMarked(marker, cmd, opts);
             },
             destroy: h.fakeSandbox.destroy,
-            claimMarker: h.fakeSandbox.claimMarker,
+            provision: h.fakeSandbox.provision,
             destroyMarked: h.fakeSandbox.destroyMarked,
           };
         },
@@ -1972,7 +1990,7 @@ describe("createReviewConsumer", () => {
               return h.fakeSandbox.runMarked(marker, cmd, opts);
             },
             destroy: h.fakeSandbox.destroy,
-            claimMarker: h.fakeSandbox.claimMarker,
+            provision: h.fakeSandbox.provision,
             destroyMarked: h.fakeSandbox.destroyMarked,
           };
         },
@@ -2016,7 +2034,7 @@ describe("createReviewConsumer", () => {
               return h.fakeSandbox.runMarked(marker, cmd, opts);
             },
             destroy: h.fakeSandbox.destroy,
-            claimMarker: h.fakeSandbox.claimMarker,
+            provision: h.fakeSandbox.provision,
             destroyMarked: h.fakeSandbox.destroyMarked,
           };
         },
@@ -2078,7 +2096,7 @@ describe("createReviewConsumer", () => {
               return h.fakeSandbox.runMarked(marker, cmd, opts);
             },
             destroy: h.fakeSandbox.destroy,
-            claimMarker: h.fakeSandbox.claimMarker,
+            provision: h.fakeSandbox.provision,
             destroyMarked: h.fakeSandbox.destroyMarked,
           };
         },
@@ -2106,7 +2124,7 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
+          provision: h.fakeSandbox.provision,
           runMarked: h.fakeSandbox.runMarked,
           destroyMarked: h.fakeSandbox.destroyMarked,
         }),
@@ -2172,7 +2190,7 @@ describe("createReviewConsumer", () => {
               return h.fakeSandbox.runMarked(marker, cmd, opts);
             },
             destroy: h.fakeSandbox.destroy,
-            claimMarker: h.fakeSandbox.claimMarker,
+            provision: h.fakeSandbox.provision,
             destroyMarked: h.fakeSandbox.destroyMarked,
           };
         },
@@ -2254,7 +2272,7 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
+          provision: h.fakeSandbox.provision,
           runMarked: h.fakeSandbox.runMarked,
           destroyMarked: h.fakeSandbox.destroyMarked,
         }),
@@ -2297,7 +2315,7 @@ describe("createReviewConsumer", () => {
             return h.fakeSandbox.runCommand(cmd, opts);
           },
           destroy: h.fakeSandbox.destroy,
-          claimMarker: h.fakeSandbox.claimMarker,
+          provision: h.fakeSandbox.provision,
           runMarked: h.fakeSandbox.runMarked,
           destroyMarked: h.fakeSandbox.destroyMarked,
         }),
@@ -4515,6 +4533,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -6370,7 +6389,7 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
           return h.fakeSandbox.runCommand(cmd, opts);
         },
         destroy: h.fakeSandbox.destroy,
-        claimMarker: h.fakeSandbox.claimMarker,
+        provision: h.fakeSandbox.provision,
         runMarked: h.fakeSandbox.runMarked,
         destroyMarked: h.fakeSandbox.destroyMarked,
       }),
@@ -9230,26 +9249,32 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(0);
   });
 
-  test("a genuine retry mints the next seq with ITS OWN rp", async () => {
+  test("a replay of a terminal attempt bills nothing a second time", async () => {
+    // note: A redelivery replays the SAME attempt id (the handoff row), and the
+    // design's D1 gate refuses to prepare a row that is no longer `provisioned`.
+    // Billing a second execution of one review would charge for work that can
+    // never run, so the only correct answer is the refusal.
     const db = await createSeededTestD1();
     h.sandbox.runnerExitCode = 1;
     h.sandbox.runnerStderr = "review: session failed: boom\n";
     const first = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
     await first(h.makeBatch(makePayload())).catch(() => undefined);
     expect(usageRows(db)).toHaveLength(1);
+    h.sandbox.provisionCalls = 0;
 
     setAppReviewLevel(db, TEST_APP_ID, "quick");
     h.sandbox.runnerExitCode = 0;
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.calls.length = 0;
     const second = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
-    await second(h.makeBatch(makePayload()));
+    await expect(second(h.makeBatch(makePayload()))).resolves.toBeUndefined();
 
-    expect(usageRows(db).map((row) => ({ seq: row.seq, rp: row.rp }))).toEqual([
-      { seq: 1, rp: 2 },
-      { seq: 2, rp: 1 },
-    ]);
+    // the row is `failed`, so no container is addressed and nothing is billed again
+    expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
+    expect(h.sandbox.provisionCalls).toBe(0);
+    expect(usageRows(db).map((row) => ({ seq: row.seq, rp: row.rp }))).toEqual([{ seq: 1, rp: 2 }]);
     const month = quotaMonth(new Date());
-    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(3);
+    expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(2);
   });
 
   test("a shared bot meters the source multiplier: deep × shared records 60 RP", async () => {

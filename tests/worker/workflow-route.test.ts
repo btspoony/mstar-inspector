@@ -311,6 +311,7 @@ describe("review route — every handoff is a durable record", () => {
       attemptId: "attempt-stranded",
       payload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: 1_200_000,
     });

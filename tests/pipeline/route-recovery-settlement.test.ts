@@ -17,7 +17,9 @@ import {
 } from "../../src/store/review-route-store";
 import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import { LOST_REPLY_SETTLE_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
+import { acquireInflight } from "../../src/store/inflight-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
@@ -26,7 +28,7 @@ import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
-const { AttemptPhaseError, cleanupAttempt, settleAttemptFailure } = await import(
+const { cleanupAttempt, settleAttemptFailure } = await import(
   "../../src/pipeline/review-attempt-execution"
 );
 const { BudgetExhaustedError, claimReviewAttempt, claimReviewLaunch } = await import(
@@ -45,6 +47,7 @@ function makeRef(payload: ReturnType<typeof makePayload>): AttemptRef {
     payload,
     level: "default",
     roundStartedAt: Date.now(),
+    budgetStartMs: Date.now(),
     deadlineMs: Date.now() + 900_000,
     githubAppId: 424242,
     usageWorkspaceId: "default",
@@ -102,6 +105,7 @@ async function seedHandoff(db: TestD1, payload: ReturnType<typeof makePayload>):
     attemptId: ATTEMPT_ID,
     payload,
     nowMs: 1_000,
+    createdMs: 1_000,
     enqueuedMs: 0,
     deadlineMs: Date.now() + 900_000,
   });
@@ -351,6 +355,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-unknown",
       payload: unknownPayload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -370,6 +375,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-skip",
       payload: skipPayload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -427,6 +433,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: identity.attemptId,
       payload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -541,10 +548,19 @@ describe("a rejection is not an observation", () => {
     const outcome = await settleAttemptFailure(
       await makeDeps(db),
       ref,
-      new Error("the review step timed out waiting for the reply"),
-      {},
+      {
+        class: "failure",
+        phase: "review",
+        stage: "pipeline",
+        headSha: null,
+        runnerReturned: false,
+        message: "the review step timed out waiting for the reply",
+        sendAttemptPublicationId: null,
+      },
+      null,
     );
 
+    // The row is `launched` and the paid state was never observed: unobservable.
     expect(outcome).toEqual({ kind: "unknown" });
     expect(failureRows(db)).toHaveLength(0);
     expect(launchState(db)).toBe("launched");
@@ -559,8 +575,15 @@ describe("a rejection is not an observation", () => {
     const deps = await makeDeps(db);
     deps.env = { ...deps.env, DB: unreadableLaunchDb(db) as never };
 
-    const err = new BudgetExhaustedError(
-      {
+    const phase = {
+      class: "budget",
+      phase: "review",
+      stage: "runner",
+      headSha: null,
+      runnerReturned: true,
+      message: "runner signalled budget exhaustion",
+      window: "runner",
+      outcome: {
         kind: "budget-exhausted",
         cause: "runner-deadline",
         tier: "default",
@@ -570,24 +593,10 @@ describe("a rejection is not an observation", () => {
         seatsStopped: 1,
         changedLines: null,
       },
-      "runner signalled budget exhaustion",
-    );
-    const phase = new AttemptPhaseError(
-      {
-        phase: "review",
-        stage: "runner",
-        headSha: null,
-        secretValues: [],
-        runnerStartedAt: 1,
-        runnerReturned: true,
-        runnerEffectiveBudgetMs: 600_000,
-        changedLines: null,
-        sendAttemptPublicationId: null,
-      },
-      err,
-    );
+      sendAttemptPublicationId: null,
+    } as const;
 
-    const outcome = await settleAttemptFailure(deps, ref, phase, {});
+    const outcome = await settleAttemptFailure(deps, ref, phase, null);
 
     expect(outcome).toEqual({ kind: "unknown" });
     expect(failureRows(db)).toHaveLength(0);
@@ -599,8 +608,15 @@ describe("a rejection is not an observation", () => {
     const db = await createSeededTestD1();
     const ref = makeRef(makePayload());
     await launchedAttempt(db);
-    const err = new BudgetExhaustedError(
-      {
+    const phase = {
+      class: "budget",
+      phase: "review",
+      stage: "runner",
+      headSha: null,
+      runnerReturned: true,
+      message: "runner signalled budget exhaustion",
+      window: "runner",
+      outcome: {
         kind: "budget-exhausted",
         cause: "runner-deadline",
         tier: "default",
@@ -610,24 +626,10 @@ describe("a rejection is not an observation", () => {
         seatsStopped: 1,
         changedLines: null,
       },
-      "runner signalled budget exhaustion",
-    );
-    const phase = new AttemptPhaseError(
-      {
-        phase: "review",
-        stage: "runner",
-        headSha: null,
-        secretValues: [],
-        runnerStartedAt: 1,
-        runnerReturned: true,
-        runnerEffectiveBudgetMs: 600_000,
-        changedLines: null,
-        sendAttemptPublicationId: null,
-      },
-      err,
-    );
+      sendAttemptPublicationId: null,
+    } as const;
 
-    const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, {});
+    const outcome = await settleAttemptFailure(await makeDeps(db), ref, phase, null);
 
     expect(outcome.kind).toBe("budget-exhausted");
     expect(failureRows(db)).toHaveLength(1);
@@ -689,6 +691,7 @@ describe("a persisted launch that never staged a publication", () => {
       attemptId,
       payload,
       nowMs: WINDOW_CLOSED_AT - 900_000,
+      createdMs: WINDOW_CLOSED_AT - 900_000,
       enqueuedMs: 0,
       deadlineMs: WINDOW_CLOSED_AT - 1,
     });
@@ -938,6 +941,374 @@ describe("a persisted launch that never staged a publication", () => {
 });
 
 // note: ---------------------------------------------------------------------------
+// The lost-reply observation window (I-000694)
+// ---------------------------------------------------------------------------
+
+describe("a launched attempt whose paid reply was lost", () => {
+  const CREATED_AT = 19_400_000;
+  const LAUNCHED_AT = 20_000_000;
+  const CAP_MS = 1_200_000;
+  const DEADLINE_MS = CREATED_AT + CAP_MS;
+  const WINDOW_MS = 900_000;
+  const SETTLES_AT = DEADLINE_MS + WINDOW_MS;
+
+  /**
+   * The reported shape: the paid exec was issued, its reply never arrived, and
+   * the live settlement deliberately left the row `launched` with no outcome —
+   * because a paid child may still be running. `check` carries the attempt's
+   * frozen Check identity when the attempt had one.
+   */
+  async function seedLaunched(
+    db: TestD1,
+    payload: ReturnType<typeof makePayload>,
+    options: { attemptId: string; launchedAtMs: number; check?: { attempt_key: string; generation: number } },
+  ): Promise<void> {
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: options.attemptId,
+      payload,
+      nowMs: CREATED_AT,
+      createdMs: CREATED_AT,
+      enqueuedMs: 0,
+      deadlineMs: DEADLINE_MS,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run(options.attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, activated_ms, attempt_key, attempt_generation)
+         VALUES (?, 'launched', ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        options.attemptId,
+        CREATED_AT,
+        options.launchedAtMs,
+        CREATED_AT,
+        options.check?.attempt_key ?? null,
+        options.check?.generation ?? null,
+      );
+  }
+
+  /** The attempt's Check row, claimed the way the consumer claims it. */
+  async function openCheck(
+    db: TestD1,
+    payload: ReturnType<typeof makePayload>,
+    nowMs: number,
+  ): Promise<{ attempt_key: string; generation: number; id: string }> {
+    const claimed = await claimAttempt(db as never, {
+      scope: {
+        appId: payload.botRef!.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      githubAppId: 424242,
+      headSha: payload.head_sha!,
+      triggeredBy: "octocat",
+      action: "opened",
+      holder: "consumer-run",
+      nowMs,
+      executionDeadlineMs: nowMs + 900_000,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`expected a claimed Check row, got ${claimed.kind}`);
+    const id = claimed.attempt.identity.attemptId;
+    const row = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(id) as { attempt_key: string; generation: number };
+    // note: Released, as the dead host's invocation leaves it.
+    db.raw.prepare("UPDATE review_checks SET holder = NULL, lease_until_ms = NULL WHERE id = ?").run(id);
+    return { ...row, id };
+  }
+
+  function launchRow(db: TestD1, attemptId: string): { state: string; result_outcome: string | null } {
+    return db.raw
+      .prepare("SELECT state, result_outcome FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { state: string; result_outcome: string | null };
+  }
+
+  test("a row past the window settles once as a lost reply, and the launch row stops holding capacity", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    // note: The attempt's own admission row, expired by TTL: before the settlement
+    // the launch row's `launched`/no-outcome shape keeps it holding its slot.
+    const holdKey = {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      workspace_id: "default",
+    };
+    const admission = {
+      systemCap: 32,
+      workspaceCap: 16,
+      ttlSeconds: 600,
+      headSha: payload.head_sha ?? null,
+      now: new Date(SETTLES_AT).toISOString(),
+    };
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(
+        holdKey.installation_id,
+        holdKey.owner,
+        holdKey.repo,
+        holdKey.pr_number,
+        attemptId,
+        payload.head_sha ?? "",
+        new Date(LAUNCHED_AT - 600_000).toISOString(),
+        new Date(SETTLES_AT - 1).toISOString(),
+      );
+    // note: Held: an expired TTL is not enough while the launch row reads `launched`
+    // with no outcome, so a fresh admission for the same PR is refused.
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-refused" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: Visible and terminal: the failure row carries the approved code, its
+    // record names the raw observation, and the launch row left `launched` — which
+    // is what stops `PAID_STATE_UNKNOWN` holding the capacity slot.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
+    expect(failureRows(db)[0]!.track_id).toBe(attemptId);
+    expect(String(failureRows(db)[0]!.error)).toBe(
+      `attempt deadline ${new Date(DEADLINE_MS).toISOString()} passed more than ${WINDOW_MS} ms ago, and no reply ever arrived`,
+    );
+    expect(failureRows(db)[0]!.message).toContain("never came back");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    // note: That move IS the capacity release. Both arms of the hold are gone: the
+    // launch row no longer reads `launched` with no outcome, and it is revoked, so
+    // the expired admission row stops counting even though the attempt activated.
+    const settledLaunch = db.raw
+      .prepare("SELECT activated_ms, revoked_ms FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { activated_ms: number | null; revoked_ms: number | null };
+    expect(settledLaunch.revoked_ms).toEqual(expect.any(Number));
+    // note: The takeover a successor performs for that freed slot succeeds.
+    expect(await acquireInflight(db as never, holdKey, {
+      ...admission,
+      attemptId: "attempt-fresh",
+      priorStopped: { attemptId },
+    })).toEqual({ ok: true });
+    // note: The Check keeps its obligation: the lane that concludes it owns the
+    // terminal update, and this pass only made the attempt terminal.
+    const checkRow = db.raw
+      .prepare("SELECT terminal_ms, desired FROM review_checks WHERE id = ?")
+      .get(check.id) as { terminal_ms: number | null; desired: string };
+    expect(checkRow.terminal_ms).toBeNull();
+
+    // note: Completed: a second pass writes nothing new — the failure row is
+    // attempt-keyed and the launch row no longer matches the selector.
+    const settled = failureRows(db);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toEqual(settled);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+  });
+
+  test("a row past its deadline but inside the post-deadline grace is left alone", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-young";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The deadline passed but the grace has not elapsed: a paid child may
+    // still be finishing its post-runner reads, and the live settlement's hold
+    // is exactly what protects it.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT - 1);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
+  test("a row at the floor window with its deadline still ahead is left alone", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-live-deadline";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.lostReply.settle_ms', ?, ?)`,
+      )
+      .run(String(LOST_REPLY_SETTLE_MIN_MS), new Date().toISOString());
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: Well past `launched + min` — where the launch-anchored window used to
+    // settle — but one ms short of the attempt's deadline: the child is still
+    // live, so nothing is declared lost.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, DEADLINE_MS - 1);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
+  test("a settlement fault after the batch is logged, and the row stays terminal", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fault-after-batch";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // note: The fault lands AFTER the guarded batch committed `failed`/revoked:
+    // the head-wide claim stamp is the first effect that writes KV.
+    h.kvState.putError = new Error("kv unavailable");
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const before = h.logLines.length;
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never, log: h.testLog }, SETTLES_AT);
+
+    // note: The attempt is already terminal — only the incomplete-settlement lane
+    // can finish it — so the fault must be visible, not swallowed.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    const faultLine = h.logLines.slice(before).find((line) => line.fields.attempt_id === attemptId);
+    expect(faultLine?.msg).toContain("incomplete-settlement lane owes the rest");
+    expect(faultLine?.fields.error_cause).toBe("kv unavailable");
+    expect(faultLine?.fields.head_sha).toBe(payload.head_sha!);
+  });
+
+  test("a pre-column row with no frozen deadline settles once the cap ceiling plus the window has passed", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-unanchored";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // note: A pre-column row: it froze no deadline, so the only bound that can
+    // prove its child dead is the cap's own validation ceiling above its launch.
+    db.raw.prepare("UPDATE review_attempt_handoffs SET deadline_ms = NULL WHERE attempt_id = ?").run(attemptId);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const bound = LAUNCHED_AT + REVIEW_ATTEMPT_CAP_MAX_MS + WINDOW_MS;
+
+    // note: Older than the window but younger than the ceiling: a paid child
+    // admitted under a large cap may still be live, so it is left alone.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, bound - 1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, bound);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
+    expect(String(failureRows(db)[0]!.error)).toContain("no frozen deadline");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+  });
+
+  test("a row that terminalized between the selector and the batch writes nothing", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-persisted";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    // note: The paid exec's result lands between the SELECT and the settlement
+    // batch: the launch row terminalizes to `persisted` just before the guarded
+    // move runs. No failure record may be written and nothing may be revoked —
+    // the persisted result stays publishable.
+    let raced = false;
+    const racingDb = new Proxy(db as unknown as D1Like, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== "batch" || raced) return value;
+        raced = true;
+        return async (statements: D1StatementLike[]) => {
+          db.raw
+            .prepare(
+              `UPDATE review_launches SET state = 'persisted', result_outcome = 'persisted', persisted_at_ms = ?, result_json = '{}'
+                WHERE attempt_id = ? AND state = 'launched'`,
+            )
+            .run(SETTLES_AT, attemptId);
+          return db.batch(statements);
+        };
+      },
+    });
+    const env = await h.makeEnv({ DB: racingDb as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    expect(failureRows(db)).toHaveLength(0);
+    const untouched = db.raw
+      .prepare("SELECT state, result_outcome, revoked_ms FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { state: string; result_outcome: string | null; revoked_ms: number | null };
+    expect(untouched).toEqual({ state: "persisted", result_outcome: "persisted", revoked_ms: null });
+    const settlement = db.raw
+      .prepare("SELECT settled_ms, settling_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settling_ms: number | null };
+    expect(settlement.settled_ms).toBeNull();
+    expect(settlement.settling_ms).toBeNull();
+  });
+
+  test("the window is the operator setting, read per pass", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-configured";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    const longer = DEADLINE_MS + 1_800_000;
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.lostReply.settle_ms', ?, ?)`,
+      )
+      .run(String(1_800_000), new Date().toISOString());
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: Inside the DEFAULT window but short of the saved one — the stored
+    // value is what the pass judges from.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    expect(failureRows(db)).toHaveLength(0);
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, longer);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
+  });
+
+  test("a row that already produced a failure record is never settled twice", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-recorded";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // note: Another producer already recorded this attempt's failure; the selector's
+    // anti-join must treat it as settled and mint nothing.
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.paid.reply_lost', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+  });
+});
+
+// note: ---------------------------------------------------------------------------
 // The recorded failure's retry entry (I-000684)
 // ---------------------------------------------------------------------------
 
@@ -951,6 +1322,7 @@ describe("the recorded publication failure leaves the head re-triggerable", () =
       attemptId: "attempt-4d-retryable",
       payload,
       nowMs: 9_100_000,
+      createdMs: 9_100_000,
       enqueuedMs: 0,
       deadlineMs: 9_999_999,
     });
@@ -1084,6 +1456,7 @@ describe("the publication-failure settlement under QC scrutiny", () => {
       attemptId,
       payload,
       nowMs: NOW - 900_000,
+      createdMs: NOW - 900_000,
       enqueuedMs: 0,
       deadlineMs: NOW - 1,
     });

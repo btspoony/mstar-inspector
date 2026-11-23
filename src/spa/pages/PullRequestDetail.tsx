@@ -912,7 +912,20 @@ export function PullRequestDetailView({
                   <ul className="flex flex-col gap-2">
                     {failuresPage.items.map((failure, index) => {
                       const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
-                      const firstLine = lines[0] ?? "";
+                      // `error` stays the raw mechanism text every operator surface
+                      // reads by prefix; a classified row carries its PR-author
+                      // sentence in `message`, and older rows fall back to it.
+                      const summary = failure.message ?? lines[0] ?? "";
+                      const code = failure.error_code;
+                      const track = failure.track_id;
+                      const firstLine =
+                        code === null || track === null
+                          ? summary
+                          : t(locale, "pullRequests.failureFirstLine", {
+                              summary,
+                              code,
+                              track: t(locale, "pullRequests.failureTrackLabel", { track: track.slice(0, 8) }),
+                            });
                       const failureKey = `${failure.created_at}-${index}`;
                       const outcome = copyOutcome[failureKey];
                       return (
@@ -939,13 +952,13 @@ export function PullRequestDetailView({
                               {firstLine}
                             </p>
                           )}
-                          {lines.length > 1 ? (
+                          {lines.length > 1 || failure.message !== null ? (
                             <details>
                               <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
                                 {t(locale, "pullRequests.failureRemainingOutput")}
                               </summary>
                               <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
-                                {lines.slice(1).join("\n")}
+                                {failure.message === null ? lines.slice(1).join("\n") : failure.error}
                               </pre>
                             </details>
                           ) : null}
@@ -965,7 +978,11 @@ export function PullRequestDetailView({
                                 }
                                 let write: Promise<void>;
                                 try {
-                                  write = clipboard.writeText(failure.error);
+                                  write = clipboard.writeText(
+                                    code === null || track === null
+                                      ? failure.error
+                                      : `${code}\n${track}\n${failure.error}`,
+                                  );
                                 } catch {
                                   announceCopy(failureKey, "failed");
                                   return;

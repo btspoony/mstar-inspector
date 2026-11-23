@@ -26,6 +26,7 @@ import {
   saveReconcileSettings,
   setCheckBudgets,
   setCommentClaimSettings,
+  setLostReplySettleMs,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
   setRouteWorkflow,
@@ -36,6 +37,7 @@ import {
   type CheckBudgetConfig,
   type CommentClaimConfig,
   type DurationPercentiles,
+  type LostReplySettleConfig,
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
@@ -293,6 +295,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [reconcileDraft, setReconcileDraft] = useState<Partial<Record<ReconcileField, string>>>({});
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
+  const [lostReplyDraft, setLostReplyDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
   const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
   const [attemptCapSaveUnknown, setAttemptCapSaveUnknown] = useState(false);
@@ -308,6 +311,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const reconcileSignal = useSaveSignal();
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
+  const lostReplySignal = useSaveSignal();
   const attemptCapSignal = useSaveSignal();
   const routeWorkflowSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
@@ -321,6 +325,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "sweep"
       | "reconcile"
       | "recheckAssignment"
+      | "lostReplySettle"
       | "attemptCap"
       | "routeWorkflow"
       | "maintenance";
@@ -558,6 +563,43 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveLostReply(
+    event: SubmitEvent<HTMLFormElement>,
+    stored: LostReplySettleConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return;
+    if (concurrencySubmitBlocked(stored.degraded, lostReplyDraft)) return;
+    const settleMs = Number((lostReplyDraft ?? String(stored.settleMs)).trim());
+    setBusy(true);
+    setNotice(null);
+    lostReplySignal.start();
+    try {
+      const saved = await setLostReplySettleMs(settleMs, stored);
+      update((data) => ({ ...data, lostReplySettle: saved }));
+      setLostReplyDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.lostReplySaved"),
+        source: "lostReplySettle",
+      });
+      lostReplySignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.lostReplyFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "lostReplySettle",
+      });
+      lostReplySignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function confirmAttemptCap(echo: number | null): Promise<boolean> {
     const fresh = await readRuntime().catch(() => null);
     if (!fresh?.attemptCap) return false;
@@ -726,6 +768,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const reconcile = data.reconcile;
           const recheck = data.recheckAssignment;
           const attemptCap = data.attemptCap;
+          const lostReplySettle = data.lostReplySettle;
           const routeWorkflow = data.routeWorkflow;
           const drops = data.admissionDrops24h;
           const queue = data.queue;
@@ -994,6 +1037,73 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                       </p>
                     )}
                   </>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {lostReplySettle === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.lostReplyTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.lostReplyDescription")}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground" data-lost-reply="range">
+                  {t(locale, "admin.runtime.lostReplyRange", {
+                    min: lostReplySettle.min,
+                    max: lostReplySettle.max,
+                    minMinutes: Math.round(lostReplySettle.min / 60_000),
+                    maxMinutes: Math.round(lostReplySettle.max / 60_000),
+                  })}
+                </p>
+                {notice?.source === "lostReplySettle" ? (
+                  <CardOutcome notice={notice} status={lostReplySignal.status} />
+                ) : null}
+                {lostReplySettle.degraded ? (
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.lostReplyUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveLostReply(event, lostReplySettle)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="lost-reply-settle-ms">
+                      {t(locale, "admin.runtime.lostReplyLabel")}
+                    </label>
+                    <Input
+                      id="lost-reply-settle-ms"
+                      type="number"
+                      min={lostReplySettle.min}
+                      max={lostReplySettle.max}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      value={lostReplyDraft ?? (lostReplySettle.degraded ? "" : String(lostReplySettle.settleMs))}
+                      onChange={(event) => setLostReplyDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={lostReplySignal.status === "idle" ? undefined : lostReplySignal.status}
+                  >
+                    {t(locale, "admin.runtime.lostReplySave")}
+                  </Button>
+                  <SaveInFlight show={lostReplySignal.status === "loading"} locale={locale} />
+                  {lostReplySettle.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {lostReplySettle.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground" data-lost-reply="current">
+                    {t(locale, "admin.runtime.lostReplyCurrent", { value: lostReplySettle.settleMs })}
+                  </p>
                 )}
               </CardContent>
             </SectionCard>

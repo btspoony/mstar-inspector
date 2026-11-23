@@ -413,13 +413,13 @@ export type FakeSandboxState = {
   runnerError: Error | undefined;
   destroyCalls: number;
   destroyError: Error | undefined;
-  markerClaim: "written" | "matched" | "unknown";
-  markerError: Error | undefined;
-  markedUnknown: boolean;
+  provisionOutcome: "provisioned" | "unavailable" | "retired";
+  provisionCalls: number;
+  marked: "ran" | "reply-lost" | "not-running" | "marker-mismatch" | "marker-unreadable" | "retired";
   markedCalls: string[];
   markedError: Error | undefined;
   markedErrorFromCall: number;
-  destroyMarkedUnknown: boolean;
+  destroyMarked: "destroyed" | "stopped" | "unknown";
   probe: (() => void) | undefined;
   gate: { released: Promise<void>; markReached: () => void } | undefined;
 };
@@ -474,13 +474,13 @@ export function initialFakeSandboxState(): FakeSandboxState {
     runnerError: undefined,
     destroyCalls: 0,
     destroyError: undefined,
-    markerClaim: "written",
-    markerError: undefined,
-    markedUnknown: false,
+    provisionOutcome: "provisioned",
+    provisionCalls: 0,
+    marked: "ran",
     markedCalls: [],
     markedError: undefined,
     markedErrorFromCall: 1,
-    destroyMarkedUnknown: false,
+    destroyMarked: "destroyed",
     probe: undefined,
     gate: undefined,
   };
@@ -626,7 +626,7 @@ export function markerGate(sandbox: {
   destroy: () => Promise<void>;
 }) {
   return {
-    claimMarker: async () => "written" as const,
+    provision: async () => ({ kind: "provisioned" as const }),
     runMarked: async (_marker: string, cmd: string, opts?: unknown) => ({
       kind: "ran" as const,
       ...(await sandbox.runCommand(cmd, opts)),
@@ -656,21 +656,21 @@ export function createFakeSandbox(state: FakeSandboxState = initialFakeSandboxSt
       }
       return answerCommand(cmd, opts, state);
     }),
-    claimMarker: mock(async (_marker: string) => {
-      if (state.markerError !== undefined) throw state.markerError;
-      return state.markerClaim;
+    provision: mock(async (_marker: string, _opts?: unknown) => {
+      state.provisionCalls += 1;
+      return { kind: state.provisionOutcome } as const;
     }),
     runMarked: mock(async (_marker: string, cmd: string, opts?: unknown) => {
       state.markedCalls.push(cmd);
       if (state.markedError !== undefined && state.markedCalls.length >= state.markedErrorFromCall) {
         throw state.markedError;
       }
-      return state.markedUnknown
-        ? { kind: "unknown" as const }
-        : { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) };
+      return state.marked === "ran"
+        ? { kind: "ran" as const, ...(await sandbox.runCommand(cmd, opts)) }
+        : { kind: state.marked } as const;
     }),
     destroyMarked: mock(async (_marker: string) => {
-      if (state.destroyMarkedUnknown) return "unknown" as const;
+      if (state.destroyMarked !== "destroyed") return state.destroyMarked;
       await sandbox.destroy();
       return "destroyed" as const;
     }),

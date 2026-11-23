@@ -10,6 +10,7 @@ import {
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { SharedBotRefusal } from "../dashboard/entitlement";
 import { CHECK_SUMMARIES } from "../pipeline/checks";
+import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import { createFailureStore, type FailureStage } from "../store/failure-store";
 import type { Env } from "./env";
 
@@ -173,12 +174,29 @@ export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
   }
 }
 
+/**
+ * The closed code a refusal is recorded under: the shared-bot kinds are the
+ * deferred delivery the author reads, while a quota refusal and an unreadable
+ * gate each say what actually happened.
+ */
+export function deliveryRefusalCode(refusal: DeliveryRefusal): FailureCode {
+  switch (refusal.kind) {
+    case "quota-exhausted":
+      return "review.delivery.quota_exhausted";
+    case "entitlement-unreadable":
+      return "review.delivery.entitlement_unreadable";
+    case "shared-bot-not-included":
+      return "review.delivery.deferred";
+  }
+}
+
 async function refuseDelivery(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
   fields: WorkerEventLog,
   refusal: DeliveryRefusal,
 ): Promise<HandleOutcome> {
+  const code = deliveryRefusalCode(refusal);
   await runBeforeEnqueue(
     payload,
     deps,
@@ -195,6 +213,9 @@ async function refuseDelivery(
       pr_number: payload.pr_number,
       head_sha: payload.head_sha ?? "",
       stage: deliveryRefusalStage(refusal),
+      code,
+      trackId: `${payload.owner}/${payload.repo}#${payload.pr_number}@${payload.head_sha ?? ""}`,
+      message: FAILURE_SUMMARIES[code],
       error: CHECK_SUMMARIES.skippedByDelivery(deliveryRefusalReason(refusal)),
     });
   } catch (err) {

@@ -15,6 +15,8 @@ import {
   COMMENT_CLAIM_RETRY_MAX,
   COMMENT_CLAIM_RETRY_MIN,
   CONCURRENCY_MIN,
+  LOST_REPLY_SETTLE_MAX_MS,
+  LOST_REPLY_SETTLE_MIN_MS,
   RECHECK_ASSIGNMENT_MAX,
   RECHECK_ASSIGNMENT_MIN,
   REVIEW_ATTEMPT_CAP_MAX_MS,
@@ -25,6 +27,7 @@ import {
   UnknownWorkspaceError,
   getCheckBudgets,
   getCommentClaimSettings,
+  getLostReplySettleMs,
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
@@ -39,6 +42,7 @@ import {
   setCheckBudgets,
   setCommentClaimSettings,
   setDefaultReviewLevel,
+  setLostReplySettleMs,
   setMaintenanceMode,
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
@@ -188,6 +192,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     recheck,
     attemptCap,
     routeWorkflow,
+    lostReplySettle,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
@@ -202,6 +207,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
     getReviewRouteWorkflowGate(db),
+    getLostReplySettleMs(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
@@ -256,6 +262,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       degraded: attemptCap.degraded,
     },
     routeWorkflow,
+    lostReplySettle: {
+      settleMs: lostReplySettle.settleMs,
+      min: LOST_REPLY_SETTLE_MIN_MS,
+      max: LOST_REPLY_SETTLE_MAX_MS,
+      degraded: lostReplySettle.degraded,
+    },
     admissionDrops24h,
     githubRateLimited24h,
     queue,
@@ -338,6 +350,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawLevel: unknown;
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
+  let rawLostReply: unknown;
   let rawRouteWorkflow: unknown;
   let rawMaintenance: unknown;
   try {
@@ -350,6 +363,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       reviewLevel?: unknown;
       recheckAssignment?: unknown;
       attemptCap?: unknown;
+      lostReplySettle?: unknown;
       routeWorkflow?: unknown;
       maintenance?: unknown;
     };
@@ -361,6 +375,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawLevel = body.reviewLevel;
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
+    rawLostReply = body.lostReplySettle;
     rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
   } catch {
@@ -375,6 +390,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawLevel,
       rawRecheck,
       rawAttemptCap,
+      rawLostReply,
       rawRouteWorkflow,
       rawMaintenance,
     ].filter((value) => value !== undefined).length > 1
@@ -382,7 +398,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | routeWorkflow | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | routeWorkflow | maintenance",
       },
       400,
     );
@@ -456,6 +472,21 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     }
     try {
       return c.json({ attemptCap: { capMs: await setReviewAttemptCap(db, capMs, login) } });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawLostReply !== undefined) {
+    const settleMs =
+      typeof rawLostReply === "object" && rawLostReply !== null && "settleMs" in rawLostReply
+        ? rawLostReply.settleMs
+        : undefined;
+    if (typeof settleMs !== "number") {
+      return c.json({ error: "body must be { lostReplySettle: { settleMs } }" }, 400);
+    }
+    try {
+      return c.json({ lostReplySettle: { settleMs: await setLostReplySettleMs(db, settleMs, login) } });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;

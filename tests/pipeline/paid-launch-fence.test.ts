@@ -1,7 +1,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import type { MarkedRun } from "../../src/pipeline/sandbox";
+import type { DestroyOutcome, MarkedRun, ProvisionOutcome } from "../../src/pipeline/sandbox";
 import type { D1Like } from "../../src/store/types";
 import { secretTransforms } from "../../src/pipeline/redact";
 import { TEST_KEY, failingDb } from "../helpers/consumer-fixtures";
@@ -11,6 +11,9 @@ import "../helpers/cloudflare-workers-mock";
 
 const {
   AttemptUnknownError,
+  recordReviewFailure,
+  ContainerNotRunningError,
+  ContainerUnavailableError,
   attemptMarker,
   claimReviewAttempt,
   claimReviewLaunch,
@@ -58,10 +61,10 @@ function progress() {
 type SandboxDouble = {
   events: string[];
   counts: { paidCalls: number };
-  claimMarker(marker: string): Promise<"written" | "matched" | "unknown">;
+  provision(marker: string, opts: { deadlineEpochMs: number }): Promise<ProvisionOutcome>;
   runMarked(marker: string, command: string): Promise<MarkedRun>;
   runCommand(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  destroyMarked(): Promise<"destroyed" | "unknown">;
+  destroyMarked(): Promise<DestroyOutcome>;
   destroy(): Promise<void>;
 };
 
@@ -83,12 +86,15 @@ function sandboxDouble(
   return {
     events,
     counts,
-    async claimMarker(marker: string) {
-      events.push(`claim:${marker}`);
-      if (decision.markerClaimThrows === true) throw new Error("marker claim reply lost");
-      if (decision.marker === "foreign") return "unknown" as const;
+    async provision(marker: string) {
+      events.push(`provision:${marker}`);
+      if (decision.markerClaimThrows === true) return { kind: "unavailable" as const };
+      if (decision.marker === "foreign") {
+        container.marked = false;
+        return { kind: "provisioned" as const };
+      }
       container.marked = true;
-      return "written" as const;
+      return { kind: "provisioned" as const };
     },
     async runMarked(_marker: string, command: string) {
       events.push(`marked:${command}`);
@@ -103,9 +109,9 @@ function sandboxDouble(
       ) {
         throw new Error("guarded read reply lost");
       }
-      if (!container.marked) return { kind: "unknown" as const };
+      if (!container.marked) return { kind: "not-running" as const };
       if (decision.vanishAfterProof === true) {
-        if (container.proofServed) return { kind: "unknown" as const };
+        if (container.proofServed) return { kind: "marker-mismatch" as const };
         container.proofServed = true;
       }
       return {
@@ -189,6 +195,7 @@ function prepareInput(db: TestD1, sandbox: SandboxDouble | null, envDb: D1Like =
     sandbox: sandbox as never,
     onSandbox: () => {},
     progress: progress(),
+    runnerCutoffMs: Date.now() + 120_000,
   };
 }
 
@@ -213,11 +220,14 @@ describe("the paid step is taken at most once per attempt", () => {
 
     await expect(
       runReviewAttempt(executionInput(sandboxDouble({ marker: "present", lostReply: true }), db)),
-    ).rejects.toThrow("container exec reply lost");
+    ).rejects.toThrow(/reply was lost/);
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
 
     const retry = sandboxDouble();
-    await expect(runReviewAttempt(executionInput(retry, db))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(retry, db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.paid.reply_lost",
+    });
     expect(retry.counts.paidCalls).toBe(0);
     expect(retry.events).toEqual([]);
   });
@@ -249,7 +259,10 @@ describe("the paid step is taken at most once per attempt", () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble();
 
-    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toBeInstanceOf(AttemptUnknownError);
+    await expect(runReviewAttempt(executionInput(sandbox, db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_before_paid",
+    });
     expect(sandbox.events).toEqual([]);
     expect(await readReviewLaunch(db, ATTEMPT)).toBeNull();
   });
@@ -375,6 +388,53 @@ describe("a terminal row cannot authorise anything without its coupled outcome",
     ).rejects.toThrow();
 
     expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("launched");
+  });
+});
+
+describe("an unpayable row's code names the history that made it unpayable", () => {
+  test("a paid call that returned a failure says a paid step ran, not that a reply was lost", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
+    expect(await recordReviewFailure(db, ATTEMPT, Date.now())).toBe(true);
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_after_claim",
+    });
+  });
+
+  test("a persisted result that cannot be decoded never claims that nothing ran", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    expect(await claimReviewLaunch(db, ATTEMPT, Date.now())).toEqual({ ok: true });
+    expect(
+      await completeReviewLaunch(
+        db,
+        ATTEMPT,
+        { run: { stdout: "", stderr: "", exitCode: 0 }, recheck: null, report: null, appliedProvider: null },
+        Date.now(),
+      ),
+    ).toBe(true);
+    db.prepare("UPDATE review_launches SET result_json = ? WHERE attempt_id = ?").bind("not json", ATTEMPT).run();
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.internal.unclassified",
+    });
+  });
+
+  test("a cleanup-owned or unrecognised row stays before-paid: nothing was charged", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    db.prepare("UPDATE review_launches SET state = 'abandoned', abandoned_at_ms = ? WHERE attempt_id = ?")
+      .bind(Date.now(), ATTEMPT)
+      .run();
+
+    await expect(runReviewAttempt(executionInput(sandboxDouble(), db))).rejects.toMatchObject({
+      name: "AttemptUnknownError",
+      code: "review.container.lost_before_paid",
+    });
   });
 });
 
@@ -517,71 +577,46 @@ describe("no runner output reaches durable storage before redaction", () => {
   });
 });
 
-describe("a replayed prepare never provisions a second container", () => {
-  test("the first entry writes the marker and every later entry only proves it", async () => {
+describe("every prepare entry re-provisions the slot from scratch", () => {
+  test("the first entry provisions and clones; a later entry provisions again instead of proving", async () => {
     const db = createMigratedTestD1();
     const first = sandboxDouble();
     await prepareReviewAttempt(prepareInput(db, first));
-    expect(first.events.filter((event) => event.startsWith("claim:"))).toHaveLength(1);
+    expect(first.events.filter((event) => event.startsWith("provision:"))).toHaveLength(1);
     expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
 
-    const replacement = sandboxDouble({ marker: "absent" });
-    await expect(prepareReviewAttempt(prepareInput(db, replacement))).rejects.toBeInstanceOf(
-      AttemptUnknownError,
-    );
-    expect(replacement.events.filter((event) => event.startsWith("claim:"))).toEqual([]);
-    expect(replacement.events).toEqual([`marked:true`]);
-
-    const same = sandboxDouble({ marker: "present" });
-    await expect(prepareReviewAttempt(prepareInput(db, same))).resolves.toMatchObject({ headSha: SHA });
-    expect(same.events.filter((event) => event.startsWith("claim:"))).toEqual([]);
+    const second = sandboxDouble({ marker: "present" });
+    await expect(prepareReviewAttempt(prepareInput(db, second))).resolves.toMatchObject({ headSha: SHA });
+    expect(second.events.filter((event) => event.startsWith("provision:"))).toHaveLength(1);
+    // prepare's own steps are unguarded execs on the slot provision just declared
+    expect(second.events.filter((event) => event.startsWith("marked:"))).toEqual([]);
+    expect(second.events.filter((event) => event.startsWith("run:"))).toHaveLength(2);
   });
 
-  test("the marker is written by the entry that claimed the row, before any checkout", async () => {
+  test("the marker is written by provision, before any checkout command", async () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble();
 
     await prepareReviewAttempt(prepareInput(db, sandbox));
 
-    expect(sandbox.events[0]).toBe(`claim:${attemptMarker(ATTEMPT)}`);
+    expect(sandbox.events[0]).toBe(`provision:${attemptMarker(ATTEMPT)}`);
     expect(await readReviewLaunch(db, ATTEMPT)).not.toBeNull();
   });
 
-  test("a container replaced between the replay's proof and its commands runs nothing", async () => {
+  test("a slot that stops mid-prepare is a transient failure, not an unknown", async () => {
     const db = createMigratedTestD1();
-    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
+    const sandbox = sandboxDouble({ marker: "present" });
+    const stopped = new ContainerNotRunningError("the attempt container is not running");
+    sandbox.runCommand = async (command: string) => {
+      sandbox.events.push(`run:${command}`);
+      throw stopped;
+    };
 
-    const replaced = sandboxDouble({ marker: "present", vanishAfterProof: true });
-    await expect(prepareReviewAttempt(prepareInput(db, replaced))).rejects.toBeInstanceOf(
-      AttemptUnknownError,
+    await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toBeInstanceOf(
+      ContainerNotRunningError,
     );
-
-    expect(replaced.events.some((event) => event.startsWith("run:"))).toBe(false);
-    expect(replaced.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
-  });
-
-  test("a rejected replay proof is unknown and nothing runs", async () => {
-    const db = createMigratedTestD1();
-    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
-
-    const rejected = sandboxDouble({ marker: "present", guardedThrows: "proof" });
-    await expect(prepareReviewAttempt(prepareInput(db, rejected))).rejects.toBeInstanceOf(
-      AttemptUnknownError,
-    );
-    expect(rejected.events.some((event) => event.startsWith("run:"))).toBe(false);
-    expect(rejected.events.filter((event) => event.startsWith("marked:"))).toHaveLength(1);
-  });
-
-  test("a rejected guarded command after the proof is unknown and nothing runs", async () => {
-    const db = createMigratedTestD1();
-    await prepareReviewAttempt(prepareInput(db, sandboxDouble()));
-
-    const rejected = sandboxDouble({ marker: "present", guardedThrows: "command" });
-    await expect(prepareReviewAttempt(prepareInput(db, rejected))).rejects.toBeInstanceOf(
-      AttemptUnknownError,
-    );
-    expect(rejected.events.some((event) => event.startsWith("run:"))).toBe(false);
-    expect(rejected.events.filter((event) => event.startsWith("marked:"))).toHaveLength(2);
+    // nothing was charged, and the row still authorises the next entry to start
+    expect(await readReviewLaunch(db, ATTEMPT)).toMatchObject({ state: "provisioned" });
   });
 
   test("a rejected provisioning claim is unknown and provisions nothing", async () => {
@@ -597,13 +632,13 @@ describe("a replayed prepare never provisions a second container", () => {
   });
 });
 
-describe("a lost marker reply is unknown", () => {
-  test("the first entry's marker claim rejects: nothing runs and the row stays provisioned", async () => {
+describe("a provisioning that cannot answer is transient", () => {
+  test("an unavailable provision runs nothing and leaves the row provisioned for the retry", async () => {
     const db = createMigratedTestD1();
     const sandbox = sandboxDouble({ markerClaimThrows: true });
 
     await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toBeInstanceOf(
-      AttemptUnknownError,
+      ContainerUnavailableError,
     );
 
     expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);

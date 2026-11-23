@@ -722,7 +722,7 @@ describe("pull request detail reads", () => {
     const failures = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, page);
     expect(failures!.total).toBe(1);
     expect(failures!.items).toEqual([
-      { stage: "sandbox", error: "timeout", created_at: expect.any(String) },
+      { stage: "sandbox", error: "timeout", message: null, error_code: null, track_id: null, created_at: expect.any(String) },
     ]);
   });
 

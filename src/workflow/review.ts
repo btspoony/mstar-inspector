@@ -6,7 +6,6 @@ import {
   hydrateAttemptHost,
 } from "../pipeline/consumer";
 import {
-  AttemptPhaseError,
   cleanupAttempt,
   collectAttempt,
   prepareAttempt,
@@ -14,13 +13,19 @@ import {
   reviewAttempt,
   readDurablePaid,
   settleAttemptFailure,
+  phaseFailureRecord,
+  PhaseTransientError,
+  transientFactsOf,
   settleSkippedRow,
   payloadIdentityFields,
   type AttemptRef,
   type CleanupInput,
+  type AttemptPhase,
+  type PhaseFailure,
+  type PreparedAttempt,
   type ProcessDeps,
 } from "../pipeline/review-attempt-execution";
-import { MovedHeadError } from "../pipeline/review-attempt";
+import { ConfigUnresolvedError } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
   beginAttemptSettlement,
@@ -40,6 +45,18 @@ export type ReviewWorkflowEnv = Env & PipelineEnv;
 export type SuccessorQueue = (payload: ReviewJobPayload) => Promise<void>;
 
 /**
+ * A phase's classified terminal failure, raised INSIDE the Workflow (never
+ * inside a `step.do` callback) so the existing try/catch/finally shape keeps
+ * running while the facts themselves crossed the step boundary as data.
+ */
+export class PhaseFailed extends Error {
+  constructor(readonly failure: PhaseFailure) {
+    super(failure.message);
+    this.name = "PhaseFailed";
+  }
+}
+
+/**
  * Compose the attempt's five phases as durable steps. Exported (not only a
  * method) so the whole route can be driven with a step double: the phases are
  * the same calls either way.
@@ -51,19 +68,48 @@ export async function runReviewAttemptWorkflow(
   enqueueSuccessor: SuccessorQueue,
 ): Promise<void> {
   const cleanup: CleanupInput = {};
+  let prepared: PreparedAttempt | null = null;
+  let inPhase: AttemptPhase = "prepare";
   try {
     if ((await ensureHostChannel(deps, ref)) === "paused") {
       await settleSkippedRow(deps, ref.payload, ref.payload.head_sha, "review paused", { paused: true });
       return;
     }
-    const prepared = await step.do("prepare", async () => {
-      await ensureRunnerConfig(ref.payload, deps);
+    const step1 = await step.do("prepare", async () => {
+      // A per-App config fault is a KNOWN, terminal refusal: retrying it only
+      // burns the step's budget. It is classified here, inside the step, so the
+      // outcome crosses the boundary as the same record every other terminal
+      // failure uses.
+      try {
+        await ensureRunnerConfig(ref.payload, deps);
+      } catch (err) {
+        const failure = phaseFailureRecord(
+          {
+            phase: "prepare",
+            stage: "pipeline",
+            headSha: null,
+            runnerReturned: false,
+            tier: ref.level,
+            budgetMs: 0,
+            changedLines: null,
+            sendAttemptPublicationId: null,
+          },
+          new ConfigUnresolvedError(err instanceof Error ? err.message : String(err)),
+        );
+        if (failure !== null) return { kind: "failed" as const, failure };
+        throw err;
+      }
       return prepareAttempt(deps, ref);
     });
-    if (prepared.kind === "settled") return;
-    cleanup.headSha = prepared.prepared.headSha;
-    const remainingMs = Math.max(1, prepared.prepared.runnerDeadlineMs - Date.now());
-    await step.do(
+    if (step1.kind === "settled") return;
+    // A terminal outcome is a RETURN VALUE; the signal is raised here, outside
+    // the callback, so replaying the cached step re-raises the same one.
+    if (step1.kind === "failed") throw new PhaseFailed(step1.failure);
+    prepared = step1.prepared;
+    const handoff = prepared;
+    cleanup.headSha = handoff.headSha;
+    const remainingMs = Math.max(1, handoff.runnerDeadlineMs - Date.now());
+    const reviewed = await step.do(
       "review",
       {
         retries: { limit: 0, delay: 0 },
@@ -83,17 +129,53 @@ export async function runReviewAttemptWorkflow(
         if ((await readDurablePaid(deps, ref.attemptId)).kind === "payable") {
           await ensureRunnerConfig(ref.payload, deps);
         }
-        return reviewAttempt(deps, ref, prepared.prepared);
+        inPhase = "review";
+        return reviewAttempt(deps, ref, handoff);
       },
     );
-    const collected = await step.do("collect", () => collectAttempt(deps, ref, prepared.prepared));
+    if ("failure" in reviewed) throw new PhaseFailed(reviewed.failure);
+    inPhase = "collect";
+    const collected = await step.do("collect", () => collectAttempt(deps, ref, handoff));
     if (collected.kind === "settled") return;
-    await step.do("publish", () => publishAttempt(deps, ref, collected.collected.publicationId));
+    if (collected.kind === "failed") throw new PhaseFailed(collected.failure);
+    inPhase = "publish";
+    const published = await step.do("publish", () =>
+      publishAttempt(deps, ref, collected.collected.publicationId),
+    );
+    if ("failure" in published) throw new PhaseFailed(published.failure);
   } catch (err) {
-    const facts = err instanceof AttemptPhaseError ? err.facts : undefined;
-    if (facts?.headSha !== undefined) cleanup.headSha = facts.headSha;
-    if (facts?.runnerStartedAt !== undefined && !facts.runnerReturned) cleanup.unproven = true;
-    const moved = movedHeadOf(err);
+    // A classified error thrown OUTSIDE a phase wrapper (this file's own host
+    // and fence probes) is turned into the same record; only an unclassified
+    // one stays a throw, settled as ordinary and retried by a fresh delivery.
+    // An unclassified throw carries the stage its own step observed (a clone
+    // failure is `sandbox`, a runner failure `runner`); only a throw raised HERE
+    // — this file's host and fence probes — has no step to ask.
+    // A Workflows retry rebuilds the thrown error without its prototype, so the
+    // facts are read off the own property, never through `instanceof`.
+    const transient = transientFactsOf(err);
+    const failure =
+      err instanceof PhaseFailed
+        ? err.failure
+        : phaseFailureRecord(
+            {
+              phase: inPhase,
+              stage: transient?.stage ?? "pipeline",
+              headSha: transient?.headSha ?? prepared?.headSha ?? null,
+              runnerReturned: transient?.runnerReturned ?? prepared !== null,
+              tier: ref.level,
+              budgetMs: prepared?.runnerEffectiveMs ?? 0,
+              changedLines: prepared?.observedChangedLines ?? null,
+              sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
+            },
+            err instanceof PhaseTransientError ? err.cause : err,
+          );
+    if (failure?.headSha !== undefined && failure.headSha !== null) cleanup.headSha = failure.headSha;
+    // The settlement concluded "unknown": no proof of what runs on the slot
+    // exists, and the D1 row cannot express that (it proves only that nothing
+    // was paid). The veto therefore rides the cleanup input, computed HERE from
+    // the record so a replay of the settle step cannot lose it.
+    if (failure?.class === "unknown" && failure.containerStateUnknown) cleanup.unproven = true;
+    const moved = failure?.class === "moved-head" ? { headSha: failure.headSha } : null;
     await step.do(
       "settle-failure",
       { retries: { limit: 1, delay: 1 }, timeout: "5 minutes" },
@@ -102,7 +184,28 @@ export async function runReviewAttemptWorkflow(
         const handoff = await readAttemptHandoff(deps.env.DB, deliveryKey);
         if (handoff !== null && handoff.settledMs !== null) return { settled: true };
         if (handoff !== null) await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
-        await settleAttemptFailure(deps, ref, err, cleanup);
+        const outcome = await settleAttemptFailure(
+          deps,
+          ref,
+          // A thrown, unclassified error has no record: it settles as the
+          // ordinary failure its message describes (D6 "after retries run out").
+          failure ??
+            ordinaryFailure(
+              err instanceof PhaseTransientError ? err.cause : err,
+              inPhase,
+              prepared,
+              transient,
+            ),
+          prepared,
+        );
+        // An UNCLASSIFIED throw is transient: it rethrows here so the step's
+        // own retry (and, exhausted, the platform) retries the delivery. The
+        // second attempt sees the settled mark and returns. `unknown` is not a
+        // retry: the attempt holds capacity and its container on evidence
+        // nobody observed, and a replay would settle it a second time.
+        if (failure === null && outcome.kind !== "unknown") {
+          throw (err instanceof PhaseTransientError ? err.cause : err);
+        }
         return { settled: true };
       },
     );
@@ -118,6 +221,36 @@ export async function runReviewAttemptWorkflow(
       return { cleaned: true };
     });
   }
+}
+
+/**
+ * A thrown error with no failure record: the rebuilt object is used for its
+ * MESSAGE only — extracted without `instanceof`, with a leading `"<name>: "`
+ * stripped — and settled as the ordinary branch those errors take.
+ */
+function ordinaryFailure(
+  err: unknown,
+  phase: AttemptPhase,
+  prepared: PreparedAttempt | null,
+  transient?: PhaseTransientError["facts"],
+): PhaseFailure {
+  const raw = err instanceof Error ? err.message : String(err);
+  return {
+    class: "failure",
+    phase,
+    // The stage the failing step reported, so a clone failure is not flattened
+    // into the same `pipeline` a Workflow-level fault records.
+    stage: transient?.stage ?? "pipeline",
+    headSha: transient?.headSha ?? prepared?.headSha ?? null,
+    // Only the step that observed the runner outranks the row. A rebuilt throw
+    // from the engine (a step that timed out) observed nothing, so the record
+    // must not claim the runner returned: the settlement's `paid-unknown` guard
+    // reads this field to decide whether an unconfirmed row may be concluded.
+    runnerReturned: transient?.runnerReturned ?? false,
+    message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
+    sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
+    rateLimited: transient?.rateLimited ?? null,
+  };
 }
 
 /**
@@ -138,13 +271,6 @@ export class ReviewWorkflow extends WorkflowEntrypoint<ReviewWorkflowEnv, Attemp
 async function ensureHostChannel(deps: ProcessDeps, ref: AttemptRef): Promise<"ready" | "paused"> {
   if (deps.appCommenters.has(ref.payload.botRef.appId)) return "ready";
   return hydrateAttemptHost(ref.payload, deps);
-}
-
-function movedHeadOf(err: unknown): { headSha: string | null } | null {
-  const cause = err instanceof AttemptPhaseError ? err.cause : err;
-  if (!(cause instanceof MovedHeadError)) return null;
-  const headSha = err instanceof AttemptPhaseError ? err.facts.headSha : null;
-  return { headSha };
 }
 
 async function recordSuccessor(
