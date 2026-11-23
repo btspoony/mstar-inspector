@@ -2844,8 +2844,9 @@ behave.
   value is invalid. After a read failure, retry the read in Admin → Runtime to
   confirm access has recovered; deletion resumes on the next successful
   sweep with valid settings. An invalid row keeps the other valid values in
-  effect and uses the default for the invalid field. To restore deletion in
-  that case, enter and save all six settings in the admin form.
+  effect and uses the default for the invalid field. The admin form keeps the
+  valid values filled and marks each invalid field; to restore deletion, enter
+  a valid value in every marked field and save.
 
 - Alert transport: structured `ops_sweep_alert` log event
   (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +
