@@ -326,7 +326,7 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
           ? warnDetail(issue.error, deps.alertUrl)
           : issue.keys.join(", "),
       },
-      `${reason}; webhook retention skipped — check the admin runtime sweep settings`,
+      `${reason}; webhook and pull-request retention skipped — check the admin runtime sweep settings`,
     );
   } else {
     try {
@@ -347,17 +347,20 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "webhook_deliveries retention sweep failed — continuing",
       );
     }
-  }
-  try {
-    const deleted = await createReviewBotsStore(db).sweepTerminalPullRequests();
-    if (deleted > 0) {
-      log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
+    try {
+      const deleted = await createReviewBotsStore(db).sweepTerminalPullRequests({
+        days: settings.pullRequestRetentionDays,
+        cap: settings.pullRequestRetentionCap,
+      });
+      if (deleted > 0) {
+        log.warn({ event: "pull_request_retention_swept", deleted }, "pull_requests retention sweep");
+      }
+    } catch (error) {
+      log.warn(
+        { event: "pull_request_retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
+        "pull_requests retention sweep failed — continuing",
+      );
     }
-  } catch (error) {
-    log.warn(
-      { event: "pull_request_retention_swept_failed", detail: warnDetail(error, deps.alertUrl) },
-      "pull_requests retention sweep failed — continuing",
-    );
   }
   let invitesExpired: number | null = null;
   try {

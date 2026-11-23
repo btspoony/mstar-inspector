@@ -511,6 +511,8 @@ describe("Runtime screen", () => {
     retentionDays: { min: 1, max: 365 },
     retentionCap: { min: 1, max: 500 },
     inviteLapseCap: { min: 1, max: 500 },
+    pullRequestRetentionDays: { min: 1, max: 365 },
+    pullRequestRetentionCap: { min: 1, max: 500 },
   };
   const SWEEP_STORED = {
     failureThreshold: 7,
@@ -519,6 +521,8 @@ describe("Runtime screen", () => {
     retentionDays: 30,
     retentionCap: 200,
     inviteLapseCap: 100,
+    pullRequestRetentionDays: 60,
+    pullRequestRetentionCap: 250,
   };
   const sweepInput = (surface: Surface, field: string) =>
     surface.container.querySelector(`#sweep-${field}`) as unknown as HTMLInputElement;

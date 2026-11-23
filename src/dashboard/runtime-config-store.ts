@@ -1160,6 +1160,8 @@ const SWEEP_RULES = {
   retentionDays: { key: "platform.sweep.retention_days", fallback: 30, min: 1, max: 365 },
   retentionCap: { key: "platform.sweep.retention_cap", fallback: 500, min: 1, max: 500 },
   inviteLapseCap: { key: "platform.sweep.invite_lapse_cap", fallback: 500, min: 1, max: 500 },
+  pullRequestRetentionDays: { key: "platform.sweep.pull_request_retention_days", fallback: 90, min: 1, max: 365 },
+  pullRequestRetentionCap: { key: "platform.sweep.pull_request_retention_cap", fallback: 500, min: 1, max: 500 },
 } satisfies Record<SweepField, { key: string; fallback: number; min: number; max: number }>;
 
 export const SWEEP_LIMITS = Object.fromEntries(

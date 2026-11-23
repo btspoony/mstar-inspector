@@ -1141,7 +1141,7 @@ export const en = {
       reconcileUnreadable: "Some settings could not be trusted. Recovery continues with all documented defaults. Retry the read or enter and save all settings.",
       sweepTitle: "Scheduled failure sweep",
       sweepDescription:
-        "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries.",
+        "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries and closed or merged pull requests.",
       sweepFields: {
         failureThreshold: "Failure threshold",
         windowHours: "Alert window (hours)",
@@ -1149,14 +1149,16 @@ export const en = {
         retentionDays: "Webhook retention (days)",
         retentionCap: "Webhook deletions per sweep",
         inviteLapseCap: "Invite expirations per sweep",
+        pullRequestRetentionDays: "Closed/merged PR retention (days)",
+        pullRequestRetentionCap: "Closed/merged PR deletions per sweep",
       },
       sweepSave: "Save sweep settings",
       sweepSaved: "Sweep settings saved.",
       sweepFailed: "Could not save the sweep settings.",
       sweepUnreadable:
-        "Some sweep settings could not be read. Webhook retention is paused. Retry the read or enter and save all six settings to restore it.",
+        "Some sweep settings could not be read. Webhook and closed/merged PR retention are paused. Retry the read or enter and save all eight settings to restore them.",
       sweepInvalidRows:
-        "Stored value invalid for: {fields}. Webhook retention is paused until you enter a valid value in each marked field and save.",
+        "Stored value invalid for: {fields}. Webhook and closed/merged PR retention are paused until you enter a valid value in each marked field and save.",
       sweepInvalidField: "Stored value is invalid. Enter a new one.",
       recheckTitle: "Recheck assignment budget",
       recheckDescription:

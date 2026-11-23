@@ -40,6 +40,8 @@ const SWEEP_OVERRIDE = {
   retentionDays: 60,
   retentionCap: 1,
   inviteLapseCap: 2,
+  pullRequestRetentionDays: 30,
+  pullRequestRetentionCap: 1,
 };
 
 function failureDb(): TestD1 {
@@ -47,6 +49,15 @@ function failureDb(): TestD1 {
   seedBot(db, "bot-sweep", 9301);
   seedTarget(db, "bot-sweep", { id: BASE.target_id });
   return db;
+}
+
+function insertLedgerPr(db: TestD1, id: string, prNumber: number, state: string, ageDays: number): void {
+  db.raw
+    .query(
+      `INSERT INTO pull_requests (id, bot_id, owner, repo, pr_number, state, last_seen_at)
+       VALUES (?, 'bot-sweep', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
+    )
+    .run(id, prNumber, state, `-${ageDays} days`);
 }
 
 const BASE = {
@@ -141,6 +152,8 @@ describe("runSweep", () => {
         retentionDays: 30,
         retentionCap: 500,
         inviteLapseCap: 500,
+        pullRequestRetentionDays: 90,
+        pullRequestRetentionCap: 500,
       },
     });
   });
@@ -468,24 +481,10 @@ describe("runSweep", () => {
 
   test("PR-ledger retention drops only TERMINAL rows older than the window", async () => {
     const db = failureDb();
-    db.raw
-      .query(
-        `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
-         VALUES ('app-1', 'ledger-app', 9001, 'ledger-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
-      )
-      .run();
-    const insertPr = (id: string, number: number, state: string, ageDays: number): void => {
-      db.raw
-        .query(
-          `INSERT INTO pull_requests (id, bot_id, owner, repo, pr_number, state, last_seen_at)
-           VALUES (?, 'app-1', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
-        )
-        .run(id, number, state, `-${ageDays} days`);
-    };
-    insertPr("pr-merged-old", 1, "merged", 120);
-    insertPr("pr-closed-old", 2, "closed", 91);
-    insertPr("pr-open-old", 3, "open", 120);
-    insertPr("pr-merged-fresh", 4, "merged", 1);
+    insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
+    insertLedgerPr(db, "pr-closed-old", 2, "closed", 91);
+    insertLedgerPr(db, "pr-open-old", 3, "open", 120);
+    insertLedgerPr(db, "pr-merged-fresh", 4, "merged", 1);
 
     const { log, calls } = captureLog();
     await runSweep(db, { log });
@@ -494,6 +493,34 @@ describe("runSweep", () => {
       .all() as Array<{ id: string }>;
     expect(remaining.map((row) => row.id)).toEqual(["pr-merged-fresh", "pr-open-old"]);
     expect(calls[0]!.fields).toEqual({ event: "pull_request_retention_swept", deleted: 2 });
+  });
+
+  test.each([
+    { name: "defaults", settings: null, deleted: 2, kept: ["pr-closed-middle", "pr-merged-fresh", "pr-open-old"] },
+    {
+      name: "operator days",
+      settings: { ...SWEEP_OVERRIDE, pullRequestRetentionCap: 500 },
+      deleted: 3,
+      kept: ["pr-merged-fresh", "pr-open-old"],
+    },
+    { name: "operator cap", settings: SWEEP_OVERRIDE, deleted: 1, kept: null },
+  ])("PR-ledger retention applies the operator days and row cap ($name)", async ({ settings, deleted, kept }) => {
+    const db = failureDb();
+    if (settings) await setSweepSettings(db, settings, "operator");
+    insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
+    insertLedgerPr(db, "pr-closed-old", 2, "closed", 95);
+    insertLedgerPr(db, "pr-closed-middle", 3, "closed", 40);
+    insertLedgerPr(db, "pr-open-old", 4, "open", 120);
+    insertLedgerPr(db, "pr-merged-fresh", 5, "merged", 1);
+
+    const { log, calls } = captureLog();
+    await runSweep(db, { log });
+    const remaining = (db.raw.query("SELECT id FROM pull_requests ORDER BY id").all() as Array<{ id: string }>)
+      .map((row) => row.id);
+    expect(calls.map((call) => call.fields)).toContainEqual({ event: "pull_request_retention_swept", deleted });
+    expect(remaining).toHaveLength(5 - deleted);
+    expect(remaining).toEqual(expect.arrayContaining(["pr-merged-fresh", "pr-open-old"]));
+    if (kept) expect(remaining).toEqual([...kept]);
   });
 
   test("retention failure degrades to a warn and the failure-sweep still runs (breach alert fires)", async () => {
@@ -520,12 +547,13 @@ describe("runSweep", () => {
     });
   });
 
-  test("corrupt settings cannot delete deliveries using a fallback retention policy", async () => {
+  test("corrupt settings cannot delete deliveries or ledger rows using a fallback retention policy", async () => {
     const db = failureDb();
     await setSweepSettings(db, SWEEP_OVERRIDE, "operator");
     db.raw.run("UPDATE review_runtime_settings SET value = 'bad' WHERE key = 'platform.sweep.retention_days'");
     db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
                 VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
+    insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
     await seedInWindow(db, 3);
     const { log, calls } = captureLog();
     expect(await runSweep(db, { log })).toMatchObject({ failures24h: 3, thresholdBreached: true });
@@ -533,14 +561,16 @@ describe("runSweep", () => {
       event: "ops_sweep_settings_unreadable",
       detail: "platform.sweep.retention_days",
     });
-    expect(calls[0]?.msg).toContain("Invalid settings rows; webhook retention skipped");
+    expect(calls[0]?.msg).toContain("Invalid settings rows; webhook and pull-request retention skipped");
     expect(db.raw.query("SELECT id FROM webhook_deliveries").get()).toEqual({ id: "delivery" });
+    expect(db.raw.query("SELECT id FROM pull_requests").get()).toEqual({ id: "pr-merged-old" });
   });
 
-  test("a failed settings read reports the redacted D1 error and skips webhook retention", async () => {
+  test("a failed settings read reports the redacted D1 error and skips both retention deletes", async () => {
     const db = failureDb();
     db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
                 VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
+    insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
     const alertUrl = "https://ops.example/local-alert";
     const wrapped: D1Like = {
       prepare(query: string): D1StatementLike {
@@ -555,8 +585,9 @@ describe("runSweep", () => {
       event: "ops_sweep_settings_unreadable",
       detail: "database unavailable: [REDACTED]",
     });
-    expect(calls[0]?.msg).toContain("D1 settings read failed; webhook retention skipped");
+    expect(calls[0]?.msg).toContain("D1 settings read failed; webhook and pull-request retention skipped");
     expect(db.raw.query("SELECT id FROM webhook_deliveries").get()).toEqual({ id: "delivery" });
+    expect(db.raw.query("SELECT id FROM pull_requests").get()).toEqual({ id: "pr-merged-old" });
   });
 
   test("counts only in-window rows, across the infra-failure stages (parse + runner/sandbox/pipeline)", async () => {

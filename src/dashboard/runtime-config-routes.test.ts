@@ -157,6 +157,8 @@ const DEFAULT_SWEEP = {
     retentionDays: 30,
     retentionCap: 500,
     inviteLapseCap: 500,
+    pullRequestRetentionDays: 90,
+    pullRequestRetentionCap: 500,
   },
   limits: SWEEP_LIMITS,
   degraded: false,
@@ -170,6 +172,8 @@ const SWEEP_OVERRIDES = {
   retentionDays: 60,
   retentionCap: 200,
   inviteLapseCap: 250,
+  pullRequestRetentionDays: 45,
+  pullRequestRetentionCap: 150,
 };
 
 function storedBudgets(db: TestD1): Record<string, string> {
@@ -779,6 +783,8 @@ describe("PATCH /_internal_admin/api/runtime sweep", () => {
       "platform.sweep.retention_days": "60",
       "platform.sweep.retention_cap": "200",
       "platform.sweep.invite_lapse_cap": "250",
+      "platform.sweep.pull_request_retention_days": "45",
+      "platform.sweep.pull_request_retention_cap": "150",
     });
     const rows = db.raw.query(
       "SELECT actor_login, detail_json FROM platform_audit_events WHERE action = 'platform.sweep.set' ORDER BY rowid",
@@ -815,6 +821,10 @@ describe("PATCH /_internal_admin/api/runtime sweep", () => {
     for (const input of [
       { sweep: { ...SWEEP_OVERRIDES, retentionCap: 501 } },
       { sweep: { ...SWEEP_OVERRIDES, inviteLapseCap: 501 } },
+      { sweep: { ...SWEEP_OVERRIDES, pullRequestRetentionDays: 0 } },
+      { sweep: { ...SWEEP_OVERRIDES, pullRequestRetentionDays: 366 } },
+      { sweep: { ...SWEEP_OVERRIDES, pullRequestRetentionCap: 0 } },
+      { sweep: { ...SWEEP_OVERRIDES, pullRequestRetentionCap: 501 } },
       { sweep: { ...SWEEP_OVERRIDES, windowHours: "12" } },
       { sweep: { ...SWEEP_OVERRIDES, webhookTimeoutMs: 1_200.5 } },
       { sweep: { windowHours: 6 } },
