@@ -100,6 +100,7 @@ function makeRef(payload: ReviewJobPayload, deadlineMs: number): AttemptRef {
     payload,
     level: "default",
     roundStartedAt: Date.now(),
+    budgetStartMs: Date.now(),
     deadlineMs,
     githubAppId: 424242,
     usageWorkspaceId: "default",

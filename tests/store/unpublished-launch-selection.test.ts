@@ -38,6 +38,7 @@ async function seedWindow(db: TestD1, attemptId: string): Promise<ReviewJobPaylo
     attemptId,
     payload,
     nowMs: NOW - 900_000,
+    createdMs: NOW - 900_000,
     enqueuedMs: 0,
     deadlineMs: NOW - 1,
   });

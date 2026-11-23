@@ -14,7 +14,11 @@ import { CHECK_TERMINALIZE_DEFAULT, REVIEW_ATTEMPT_CAP_DEFAULT_MS } from "../../
 import type { TestD1 } from "../store/helpers";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 
+// note: Loaded after the workerd shim above: `sandbox.ts` imports
+// `cloudflare:workers`, and a bare specifier resolves at LINK time — a static
+// import here would fail before `mock.module` could register the module.
 const { EXEC_DEADLINE_WRAPPER } = await import("../../src/pipeline/sandbox");
+const { boundedStepTimeout, readReviewLaunch, RoundBudgetSpent } = await import("../../src/pipeline/review-attempt");
 const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 
 let h = createConsumerHarness();
@@ -256,5 +260,158 @@ describe("claim 10 — a delayed delivery is anchored on its claim, not its enqu
     // (an unlaunched row ends `provisioned` or `abandoned`), so no paid work ran.
     const launch = await readReviewLaunch(db as never, "attempt-spent");
     expect(launch?.state === "provisioned" || launch?.state === "abandoned").toBe(true);
+  });
+});
+
+/**
+ * note: D5 — the round clock has ONE origin. The cap is frozen at first
+ * admission from the delivery's ENTRY instant, and the row stores that same
+ * instant as `created_ms`; a redelivery hours later reads both back from the
+ * row instead of deriving an origin of its own. Two origins against one frozen
+ * deadline is what produced the staging refusals with a deadline still in the
+ * future.
+ */
+describe("claim 11 — one origin for the round clock", () => {
+  test("the first admission stores its ENTRY instant as created_ms, not the reservation's", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await withFrozenClock(async (clock) => {
+      // note: Entry at `t0`; the cap read is the first await after the entry
+      // sample, and the clock advances 3s while it is in flight — so the
+      // reservation's own `Date.now()` is a LATER instant. `created_ms` must
+      // still be the entry instant, because that is what the cap was frozen
+      // from.
+      const t0 = clock.now;
+      const slowAdmission = dbAnchoringOnCapRead(db, () => {
+        clock.now = t0 + 3_000;
+      });
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: slowAdmission as never }), h.testLog, h.overrides);
+      await consumer(h.makeBatch(payload));
+
+      const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+      expect(handoff?.createdMs).toBe(t0);
+      expect(handoff?.deadlineMs).toBe(t0 + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
+    });
+  });
+
+  test("a redelivery 400s later builds the SAME origin and deadline from the row", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    await withFrozenClock(async (clock) => {
+      // note: What the first admission wrote: origin `t0`, deadline
+      // `t0 + cap`. The delivery happens 400s later — long enough that an
+      // origin taken from ITS clock would put the window far past the frozen
+      // deadline.
+      const t0 = clock.now;
+      const deadlineMs = t0 + REVIEW_ATTEMPT_CAP_DEFAULT_MS;
+      db.raw
+        .prepare(
+          `INSERT INTO review_attempt_handoffs
+             (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
+           VALUES (?, ?, ?, 'owed', ?, ?, ?)`,
+        )
+        .run(key, "attempt-redelivered", JSON.stringify(payload), deadlineMs, t0, t0);
+      clock.now = t0 + 400_000;
+
+      const seen: Array<{ roundStartedAt: number; budgetStartMs: number; deadlineMs: number }> = [];
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+        ...h.overrides,
+        startAttempt: async (_deps, ref) => {
+          seen.push({
+            roundStartedAt: ref.roundStartedAt,
+            budgetStartMs: ref.budgetStartMs,
+            deadlineMs: ref.deadlineMs,
+          });
+        },
+      });
+      await consumer(h.makeBatch(payload));
+
+      expect(seen).toHaveLength(1);
+      // note: Both the origin and the instant it anchored come OFF THE ROW.
+      expect(seen[0]!.budgetStartMs).toBe(t0);
+      expect(seen[0]!.deadlineMs).toBe(deadlineMs);
+      // note: `roundStartedAt` still names this delivery, and only logging uses it.
+      expect(seen[0]!.roundStartedAt).toBe(t0 + 400_000);
+      // note: One frozen window, the same one the first delivery would derive
+      // from the same pair — that pair is what both `deriveReviewBudget` sites
+      // are called with.
+      const budget = deriveReviewBudget({
+        roundStartMs: seen[0]!.budgetStartMs,
+        deadlineMs: seen[0]!.deadlineMs,
+        terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+        level: "default",
+      });
+      expect(budget.runnerCutoffMs).toBe(deadlineMs - postRunnerReserveMs(CHECK_TERMINALIZE_DEFAULT));
+      expect(budget.preparationBudgetMs).toBe(budget.runnerCutoffMs - t0);
+      expect(budget.preparationBudgetMs).toBeGreaterThan(0);
+    });
+  });
+
+  test("a spent preparation window is refused on the FIRST prepare entry, with no negative millisecond number", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    await withFrozenClock(async (clock) => {
+      // note: The frozen DEADLINE is still in the future — the post-runner
+      // reserve is what makes the preparation window spent. The old derivation
+      // read this delivery's clock as the origin, saw a live window and
+      // proceeded until the diff stage refused it minutes later; the frozen
+      // origin refuses at the entry.
+      const createdMs = clock.now - 100_000;
+      const deadlineMs = createdMs + 233_000;
+      expect(deadlineMs).toBeGreaterThan(clock.now);
+      expect(
+        deriveReviewBudget({
+          roundStartMs: createdMs,
+          deadlineMs,
+          terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
+          level: "default",
+        }).preparationBudgetMs,
+      ).toBeLessThanOrEqual(0);
+      db.raw
+        .prepare(
+          `INSERT INTO review_attempt_handoffs
+             (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
+           VALUES (?, ?, ?, 'owed', ?, ?, ?)`,
+        )
+        .run(key, "attempt-spent-preparation", JSON.stringify(payload), deadlineMs, createdMs, createdMs);
+
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+      await consumer(h.makeBatch(payload));
+    });
+
+    // note: One ack, no retry: the refusal is terminal, and it is the FIRST
+    // prepare entry's — nothing was provisioned and no Check was claimed.
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.sandbox.calls).toHaveLength(0);
+    // note: The durable proof no paid work ran: cleanup's abandon leaves the
+    // row `abandoned` (a row that was never claimed, here, so no row at all)
+    // and nothing ever reached `launched`.
+    const paid = db.raw
+      .query("SELECT COUNT(*) AS n FROM review_launches WHERE launched_at_ms IS NOT NULL")
+      .get() as { n: number };
+    expect(paid.n).toBe(0);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    const error = String(failureRows(db)[0]!.error);
+    expect(error).toContain("budget-exhausted:");
+    // note: The operator text names no raw negative remainder.
+    expect(error).not.toMatch(/-\d+ms/);
+  });
+
+  test("the spent-window refusal names the step without a remainder", () => {
+    let thrown: unknown;
+    try {
+      boundedStepTimeout(Date.now() - 60_000, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(RoundBudgetSpent);
+    const spent = thrown as InstanceType<typeof RoundBudgetSpent>;
+    expect(spent.window).toBe("preparation");
+    expect(spent.message).toContain("diff capture");
+    expect(spent.message).not.toMatch(/-\d+ms/);
   });
 });

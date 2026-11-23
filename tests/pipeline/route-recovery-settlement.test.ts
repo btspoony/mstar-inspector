@@ -45,6 +45,7 @@ function makeRef(payload: ReturnType<typeof makePayload>): AttemptRef {
     payload,
     level: "default",
     roundStartedAt: Date.now(),
+    budgetStartMs: Date.now(),
     deadlineMs: Date.now() + 900_000,
     githubAppId: 424242,
     usageWorkspaceId: "default",
@@ -102,6 +103,7 @@ async function seedHandoff(db: TestD1, payload: ReturnType<typeof makePayload>):
     attemptId: ATTEMPT_ID,
     payload,
     nowMs: 1_000,
+    createdMs: 1_000,
     enqueuedMs: 0,
     deadlineMs: Date.now() + 900_000,
   });
@@ -351,6 +353,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-unknown",
       payload: unknownPayload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -370,6 +373,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: "attempt-skip",
       payload: skipPayload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -427,6 +431,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
       attemptId: identity.attemptId,
       payload,
       nowMs: 1_000,
+      createdMs: 1_000,
       enqueuedMs: 0,
       deadlineMs: Date.now() + 600_000,
     });
@@ -689,6 +694,7 @@ describe("a persisted launch that never staged a publication", () => {
       attemptId,
       payload,
       nowMs: WINDOW_CLOSED_AT - 900_000,
+      createdMs: WINDOW_CLOSED_AT - 900_000,
       enqueuedMs: 0,
       deadlineMs: WINDOW_CLOSED_AT - 1,
     });
@@ -951,6 +957,7 @@ describe("the recorded publication failure leaves the head re-triggerable", () =
       attemptId: "attempt-4d-retryable",
       payload,
       nowMs: 9_100_000,
+      createdMs: 9_100_000,
       enqueuedMs: 0,
       deadlineMs: 9_999_999,
     });
@@ -1084,6 +1091,7 @@ describe("the publication-failure settlement under QC scrutiny", () => {
       attemptId,
       payload,
       nowMs: NOW - 900_000,
+      createdMs: NOW - 900_000,
       enqueuedMs: 0,
       deadlineMs: NOW - 1,
     });

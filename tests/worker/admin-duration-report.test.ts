@@ -698,6 +698,7 @@ describe("admission records the Queue send stamp once", () => {
       attemptId: "attempt-1",
       payload: PAYLOAD,
       nowMs: 5_000,
+      createdMs: 5_000,
       deadlineMs: 905_000,
       enqueuedMs: 1_234,
     });
@@ -708,6 +709,7 @@ describe("admission records the Queue send stamp once", () => {
       attemptId: "attempt-2",
       payload: PAYLOAD,
       nowMs: 6_000,
+      createdMs: 6_000,
       deadlineMs: 906_000,
       enqueuedMs: 4_321,
     });
@@ -719,6 +721,7 @@ describe("admission records the Queue send stamp once", () => {
       attemptId: "attempt-3",
       payload: PAYLOAD,
       nowMs: 7_000,
+      createdMs: 7_000,
       deadlineMs: 907_000,
       enqueuedMs: null,
     });
