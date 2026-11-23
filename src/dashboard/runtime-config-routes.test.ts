@@ -160,6 +160,7 @@ const DEFAULT_SWEEP = {
   },
   limits: SWEEP_LIMITS,
   degraded: false,
+  invalid: [],
 };
 
 const SWEEP_OVERRIDES = {
@@ -777,13 +778,24 @@ describe("PATCH /_internal_admin/api/runtime sweep", () => {
     expect(JSON.parse(rows[1]!.detail_json)).toEqual({ before: DEFAULT_SWEEP.values, after: SWEEP_OVERRIDES });
   });
 
-  test("GET marks invalid sweep settings degraded without returning internal diagnostics", async () => {
+  test("GET marks invalid sweep settings degraded and names the invalid fields without internal diagnostics", async () => {
     const { db } = fixture();
-    seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)",
-      "platform.sweep.retention_days", "invalid", new Date().toISOString());
+    const now = new Date().toISOString();
+    for (const [key, value] of [
+      ["platform.sweep.window_hours", "48"],
+      ["platform.sweep.retention_days", "invalid"],
+      ["platform.sweep.retention_cap", "200"],
+    ] as const) {
+      seed(db, "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES (?, ?, ?)", key, value, now);
+    }
     const response = await runtimeApi(db, { method: "GET" });
     expect(response.status).toBe(200);
-    expect(await response.json()).toHaveProperty("sweep", { ...DEFAULT_SWEEP, degraded: true });
+    expect(await response.json()).toHaveProperty("sweep", {
+      ...DEFAULT_SWEEP,
+      values: { ...DEFAULT_SWEEP.values, windowHours: 48, retentionCap: 200 },
+      degraded: true,
+      invalid: ["retentionDays"],
+    });
   });
 
   test("non-operators, invalid values and mixed writes cannot change any row", async () => {

@@ -235,7 +235,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       degraded: claim.degraded,
     },
     reconcile: { values: reconcile.values, limits: RECONCILE_LIMITS, degraded: reconcile.issue !== null },
-    sweep: { values: sweep.values, limits: SWEEP_LIMITS, degraded: sweep.issue !== null },
+    sweep: {
+      values: sweep.values,
+      limits: SWEEP_LIMITS,
+      degraded: sweep.issue !== null,
+      invalid: sweep.issue?.kind === "invalid_rows" ? sweep.issue.fields : [],
+    },
     reviewLevel: { value: level.value, levels: REVIEW_LEVELS, degraded: level.degraded },
     recheckAssignment: {
       maxBytes: recheck.maxBytes,

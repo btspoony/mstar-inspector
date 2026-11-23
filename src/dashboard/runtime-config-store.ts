@@ -1090,7 +1090,7 @@ const SWEEP_KEYS = SWEEP_FIELDS.map((field) => SWEEP_RULES[field].key);
 
 type SweepSettingsIssue =
   | { kind: "read_failed"; error: unknown }
-  | { kind: "invalid_rows"; keys: string[] };
+  | { kind: "invalid_rows"; keys: string[]; fields: SweepField[] };
 
 export async function getSweepSettings(
   db: DashboardD1,
@@ -1107,15 +1107,17 @@ export async function getSweepSettings(
     issue = { kind: "read_failed", error };
   }
   const values = {} as SweepValues;
-  const invalidKeys: string[] = [];
+  const invalidFields: SweepField[] = [];
   for (const field of SWEEP_FIELDS) {
     const { key, fallback, min, max } = SWEEP_RULES[field];
     const stored = parseInRange(rows.get(key), min, max);
     const trusted = stored !== undefined && !Number.isNaN(stored);
-    if (rows.has(key) && !trusted) invalidKeys.push(key);
+    if (rows.has(key) && !trusted) invalidFields.push(field);
     values[field] = trusted ? stored : fallback;
   }
-  if (invalidKeys.length > 0) issue = { kind: "invalid_rows", keys: invalidKeys };
+  if (invalidFields.length > 0) {
+    issue = { kind: "invalid_rows", keys: invalidFields.map((field) => SWEEP_RULES[field].key), fields: invalidFields };
+  }
   return { values, issue };
 }
 
