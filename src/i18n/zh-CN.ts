@@ -1105,7 +1105,7 @@ export const zhCN: Dictionary = {
       lostReplySave: "保存",
       lostReplySaved: "已保存。",
       lostReplyFailed: "修改回执丢失窗口失败。",
-      lostReplyCurrent: "下一次巡检生效值：发出后 {value} 毫秒。",
+      lostReplyCurrent: "下一次巡检生效值：该次审查 deadline 后 {value} 毫秒。",
       lostReplyUnreadable:
         "无法读取已存储的回执丢失窗口，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
       routeWorkflowTitle: "审查路由",

@@ -1194,7 +1194,7 @@ export const en = {
       lostReplySave: "Save",
       lostReplySaved: "Saved.",
       lostReplyFailed: "Could not change the lost reply window.",
-      lostReplyCurrent: "Effective on the next pass: {value} ms after the launch.",
+      lostReplyCurrent: "Effective on the next pass: {value} ms past the attempt's deadline.",
       lostReplyUnreadable:
         "The stored lost reply window could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       routeWorkflowTitle: "Review route",

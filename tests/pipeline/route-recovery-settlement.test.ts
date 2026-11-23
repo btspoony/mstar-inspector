@@ -17,6 +17,7 @@ import {
 } from "../../src/store/review-route-store";
 import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import { LOST_REPLY_SETTLE_MIN_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -944,9 +945,12 @@ describe("a persisted launch that never staged a publication", () => {
 // ---------------------------------------------------------------------------
 
 describe("a launched attempt whose paid reply was lost", () => {
+  const CREATED_AT = 19_400_000;
   const LAUNCHED_AT = 20_000_000;
+  const CAP_MS = 1_200_000;
+  const DEADLINE_MS = CREATED_AT + CAP_MS;
   const WINDOW_MS = 900_000;
-  const SETTLES_AT = LAUNCHED_AT + WINDOW_MS;
+  const SETTLES_AT = DEADLINE_MS + WINDOW_MS;
 
   /**
    * The reported shape: the paid exec was issued, its reply never arrived, and
@@ -963,10 +967,10 @@ describe("a launched attempt whose paid reply was lost", () => {
       deliveryKey: deliveryKeyOf(payload),
       attemptId: options.attemptId,
       payload,
-      nowMs: LAUNCHED_AT - 600_000,
-      createdMs: LAUNCHED_AT - 600_000,
+      nowMs: CREATED_AT,
+      createdMs: CREATED_AT,
       enqueuedMs: 0,
-      deadlineMs: LAUNCHED_AT + 60_000,
+      deadlineMs: DEADLINE_MS,
     });
     db.raw
       .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
@@ -979,9 +983,9 @@ describe("a launched attempt whose paid reply was lost", () => {
       )
       .run(
         options.attemptId,
-        LAUNCHED_AT - 600_000,
+        CREATED_AT,
         options.launchedAtMs,
-        LAUNCHED_AT - 600_000,
+        CREATED_AT,
         options.check?.attempt_key ?? null,
         options.check?.generation ?? null,
       );
@@ -1081,7 +1085,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
     expect(failureRows(db)[0]!.track_id).toBe(attemptId);
     expect(String(failureRows(db)[0]!.error)).toBe(
-      `launched at ${new Date(LAUNCHED_AT).toISOString()}, no reply within ${WINDOW_MS}`,
+      `attempt deadline ${new Date(DEADLINE_MS).toISOString()} passed more than ${WINDOW_MS} ms ago, and no reply ever arrived`,
     );
     expect(failureRows(db)[0]!.message).toContain("never came back");
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
@@ -1113,7 +1117,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
-  test("a row younger than the window is left alone", async () => {
+  test("a row past its deadline but inside the post-deadline grace is left alone", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-young";
@@ -1122,12 +1126,80 @@ describe("a launched attempt whose paid reply was lost", () => {
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
-    // note: One millisecond short of the window: a paid child may still be
-    // running, and the live settlement's hold is exactly what protects it.
+    // note: The deadline passed but the grace has not elapsed: a paid child may
+    // still be finishing its post-runner reads, and the live settlement's hold
+    // is exactly what protects it.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT - 1);
 
     expect(failureRows(db)).toHaveLength(0);
     expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
+  test("a row at the floor window with its deadline still ahead is left alone", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-live-deadline";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    db.raw
+      .prepare(
+        `INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.lostReply.settle_ms', ?, ?)`,
+      )
+      .run(String(LOST_REPLY_SETTLE_MIN_MS), new Date().toISOString());
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: Well past `launched + min` — where the launch-anchored window used to
+    // settle — but one ms short of the attempt's deadline: the child is still
+    // live, so nothing is declared lost.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, DEADLINE_MS - 1);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
+  test("a row that terminalized between the selector and the batch writes nothing", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-persisted";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    // note: The paid exec's result lands between the SELECT and the settlement
+    // batch: the launch row terminalizes to `persisted` just before the guarded
+    // move runs. No failure record may be written and nothing may be revoked —
+    // the persisted result stays publishable.
+    let raced = false;
+    const racingDb = new Proxy(db as unknown as D1Like, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== "batch" || raced) return value;
+        raced = true;
+        return async (statements: D1StatementLike[]) => {
+          db.raw
+            .prepare(
+              `UPDATE review_launches SET state = 'persisted', result_outcome = 'persisted', persisted_at_ms = ?, result_json = '{}'
+                WHERE attempt_id = ? AND state = 'launched'`,
+            )
+            .run(SETTLES_AT, attemptId);
+          return db.batch(statements);
+        };
+      },
+    });
+    const env = await h.makeEnv({ DB: racingDb as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    expect(failureRows(db)).toHaveLength(0);
+    const untouched = db.raw
+      .prepare("SELECT state, result_outcome, revoked_ms FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { state: string; result_outcome: string | null; revoked_ms: number | null };
+    expect(untouched).toEqual({ state: "persisted", result_outcome: "persisted", revoked_ms: null });
+    const settlement = db.raw
+      .prepare("SELECT settled_ms, settling_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settling_ms: number | null };
+    expect(settlement.settled_ms).toBeNull();
+    expect(settlement.settling_ms).toBeNull();
   });
 
   test("the window is the operator setting, read per pass", async () => {
@@ -1136,7 +1208,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     const attemptId = "attempt-lost-reply-configured";
     const check = await openCheck(db, payload, LAUNCHED_AT);
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
-    const longer = LAUNCHED_AT + 1_800_000;
+    const longer = DEADLINE_MS + 1_800_000;
     db.raw
       .prepare(
         `INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.lostReply.settle_ms', ?, ?)`,

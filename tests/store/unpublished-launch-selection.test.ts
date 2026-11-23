@@ -61,32 +61,54 @@ function effectsOf(db: TestD1, attemptId: string): { settled_ms: number | null; 
 }
 
 describe("the lost-reply selector", () => {
-  async function seedLaunched(db: TestD1, attemptId: string, launchedAtMs: number): Promise<void> {
+  async function seedLaunched(
+    db: TestD1,
+    attemptId: string,
+    options: { launchedAtMs: number; deadlineMs?: number | null; createdMs?: number },
+  ): Promise<void> {
     const payload = payloadFor(attemptId);
+    const createdMs = options.createdMs ?? NOW - 900_000;
     await reserveAttemptHandoff(db, {
       deliveryKey: deliveryKeyOf(payload),
       attemptId,
       payload,
-      nowMs: NOW - 900_000,
-      createdMs: NOW - 900_000,
+      nowMs: createdMs,
+      createdMs,
       enqueuedMs: 0,
-      deadlineMs: NOW,
+      deadlineMs: options.deadlineMs ?? NOW,
     });
+    if (options.deadlineMs === null) {
+      db.raw.prepare("UPDATE review_attempt_handoffs SET deadline_ms = NULL WHERE attempt_id = ?").run(attemptId);
+    }
     db.raw
       .prepare(
         `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms)
          VALUES (?, 'launched', ?, ?)`,
       )
-      .run(attemptId, NOW - 900_000, launchedAtMs);
+      .run(attemptId, createdMs, options.launchedAtMs);
   }
 
   test("only a launched row past the bound with no failure record is selected", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT_ID, 424242);
     seedTarget(db, BOT_ID, { id: TARGET_ID });
-    await seedLaunched(db, "attempt-old", NOW - 900_000);
-    await seedLaunched(db, "attempt-new", NOW - 1);
-    await seedLaunched(db, "attempt-recorded", NOW - 900_000);
+    // A deadline older than the bound is selected; one inside it is not.
+    await seedLaunched(db, "attempt-old", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
+    await seedLaunched(db, "attempt-new", { launchedAtMs: NOW - 1, deadlineMs: NOW - 300_000 });
+    // An unanchored row falls back to `created_ms + cap`: this one is too old.
+    await seedLaunched(db, "attempt-fallback-old", {
+      launchedAtMs: NOW - 900_000,
+      deadlineMs: null,
+      createdMs: NOW - 1_800_000,
+    });
+    // An unanchored row whose derived deadline is still inside the bound.
+    await seedLaunched(db, "attempt-fallback-new", {
+      launchedAtMs: NOW - 900_000,
+      deadlineMs: null,
+      createdMs: NOW - 500_000,
+    });
+    await seedLaunched(db, "attempt-recorded", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
+
     // A row another producer already recorded: the anti-join keeps it out.
     db.raw
       .prepare(
@@ -103,8 +125,12 @@ describe("the lost-reply selector", () => {
       )
       .run(NOW - 900_000, NOW - 800_000, NOW - 700_000);
 
-    const selected = await listLostReplyLaunchSettlements(db, { launchedBeforeMs: NOW - 600_000, limit: 25 });
-    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+    const selected = await listLostReplyLaunchSettlements(db, {
+      deadlineBeforeMs: NOW - 600_000,
+      capMs: 900_000,
+      limit: 25,
+    });
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-fallback-old", "attempt-old"]);
   });
 });
 

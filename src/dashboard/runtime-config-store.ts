@@ -622,19 +622,22 @@ export const REVIEW_ROUTE_WORKFLOW_KEY = "review.route.workflow";
 /** PK of the lost-reply observation window (the paid exec's reply never arrived). */
 export const LOST_REPLY_SETTLE_KEY = "review.lostReply.settle_ms";
 /**
- * Absent row: 15 minutes from the launch instant. The longest runner budget is
- * the deep tier's 646 s (`RUNNER_MAX_BUDGET_MS`) plus the 5 s kill grace, so a
- * lost reply's child is bounded by ~651 s; 15 minutes leaves ~250 s of headroom
- * for a slow sandbox hand-off before the row is called lost. This is the only
- * liveness proxy the pass has, so the default must never be shorter than that.
+ * Absent row: 15 minutes PAST the attempt's own deadline. The window anchors on
+ * the attempt's hard stop — the runner budget and the kill grace already live
+ * inside the deadline, so this default only buys a generous post-deadline
+ * grace; a longer window costs a slot held longer, never a live paid child.
  */
 export const LOST_REPLY_SETTLE_DEFAULT_MS = 900_000;
 /**
- * Range of a stored window. Below 660 s the window could settle a row whose
- * runner is still inside its own budget, which would declare a live review
- * lost; one hour is the most capacity one attempt may hold unobserved.
+ * Range of a stored window: the POST-DEADLINE grace only. The attempt deadline
+ * already kills the container, so the floor must cover just what may still run
+ * after it — the up-to-four 30 s post-runner reads (`POST_RUNNER_READ_TIMEOUT_MS`,
+ * kept as a literal because `review-budget` imports this module) plus a 60 s
+ * hand-off margin for this pass to reach the same store. Anything above the
+ * floor is harmless to a live child; one hour is the most grace an operator
+ * may want to grant.
  */
-export const LOST_REPLY_SETTLE_MIN_MS = 660_000;
+export const LOST_REPLY_SETTLE_MIN_MS = 180_000;
 export const LOST_REPLY_SETTLE_MAX_MS = 3_600_000;
 
 /** The window and whether the stored value could be trusted. */

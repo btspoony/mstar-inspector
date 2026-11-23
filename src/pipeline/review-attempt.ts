@@ -447,7 +447,10 @@ export function recordReviewFailureStatement(db: D1Like, attemptId: string, nowM
  */
 export function markAttemptRevokedStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
   return db
-    .prepare(`UPDATE review_launches SET revoked_ms = ? WHERE attempt_id = ? AND revoked_ms IS NULL`)
+    .prepare(
+      `UPDATE review_launches SET revoked_ms = ?
+        WHERE attempt_id = ? AND state = 'launched' AND result_outcome IS NULL AND revoked_ms IS NULL`,
+    )
     .bind(nowMs, attemptId);
 }
 
