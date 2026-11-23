@@ -28,13 +28,13 @@ for (const handoffs of [5_000, 20_000, 80_000]) {
     (delivery_key, attempt_id, payload_json, state, settled_ms, settling_ms, created_ms, updated_ms)
     VALUES (?, ?, ?, 'created', ?, ?, ?, ?)`);
   const old = now - 2 * HANDOFF_RECOVERY_AFTER_MS;
-  db.exec("BEGIN");
+  db.run("BEGIN");
   for (let i = 0; i < handoffs; i++) {
     const isStuck = i >= handoffs - stuck;
     const isLive = !isStuck && i >= handoffs - stuck - live;
     insert.run(`delivery-${i}`, `attempt-${i}`, payload, isStuck || isLive ? null : old + 1, isLive ? null : old, old, old);
   }
-  db.exec("COMMIT");
+  db.run("COMMIT");
 
   const input = { settlingBeforeMs: now - HANDOFF_RECOVERY_AFTER_MS, limit: ROUTE_RECOVERY_LIMIT };
   async function measure(): Promise<{ ms: number; keys: string[] }> {

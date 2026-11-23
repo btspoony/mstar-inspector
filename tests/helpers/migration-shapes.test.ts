@@ -103,9 +103,9 @@ describe("fixture migrations (fail-fast)", () => {
     const handed: string[] = [];
     const recording = {
       raw: {
-        exec: (sql: string) => {
+        run: (sql: string) => {
           handed.push(sql);
-          db.exec(sql);
+          db.run(sql);
         },
       },
     } as unknown as TestD1;

@@ -241,7 +241,7 @@ describe("migrations/0007_reviews_app_id_index.sql", () => {
            datetime('now'), datetime('now'))`,
       )
       .run();
-    db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-2'");
+    db.raw.run("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-2'");
 
     expect(() => applyMigrationFile(db, "0007_reviews_app_id_index.sql")).not.toThrow();
     const count = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
@@ -1611,7 +1611,7 @@ describe("migrations/0038_webhook_path_drop.sql (upgrade over live data)", () =>
     expect(childrenBefore.installations).toHaveLength(2);
     expect(childrenBefore.deliveries).toHaveLength(2);
 
-    db.raw.exec("PRAGMA foreign_keys = ON");
+    db.raw.run("PRAGMA foreign_keys = ON");
     const statements = statementsOf("0038_webhook_path_drop.sql");
     expect(statements.length).toBeGreaterThan(5);
     const atDrop: { foreign_keys?: number; defer_foreign_keys?: number } = {};
@@ -2403,7 +2403,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
       execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
     }
     insertGithubAppRow(db, { id: "app-1", name: "Acme Reviewer", githubAppId: 5001 });
-    db.raw.exec(
+    db.raw.run(
       `INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('app-1', 'default');
        INSERT INTO app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES ('inst-1', 'app-1', 123, 'acme', '2026-01-01 00:00:00');
@@ -2411,7 +2411,7 @@ describe("migrations/0056_review_bots_rename.sql", () => {
          VALUES ('app-1', 'acme', '2026-01-01 00:00:00');`,
     );
     insertReview(db);
-    db.raw.exec("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-1'");
+    db.raw.run("UPDATE reviews SET app_id = 'app-1' WHERE id = 'review-1'");
 
     const before = {
       bot: db.raw.query("SELECT * FROM github_apps").all(),
@@ -2541,7 +2541,7 @@ describe("migrations/0057_review_targets.sql", () => {
       )
       .run(0, "manual", null, 90, '["ship it"]', 0, null, "bot-b");
 
-    db.raw.exec(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default'), ('bot-b', 'default');
+    db.raw.run(`INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-a', 'default'), ('bot-b', 'default');
 
       INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES
         ('inst-a-live', 'bot-a', 123, 'acme', '2026-01-01T00:00:00Z', NULL),
@@ -2560,7 +2560,7 @@ describe("migrations/0057_review_targets.sql", () => {
     insertReview(db);
     insertReview(db, { id: "review-b", pr_number: 44 });
     insertReview(db, { id: "review-legacy", pr_number: 43 });
-    db.raw.exec(`UPDATE reviews SET bot_id = 'bot-a' WHERE id = 'review-1';
+    db.raw.run(`UPDATE reviews SET bot_id = 'bot-a' WHERE id = 'review-1';
                  UPDATE reviews SET bot_id = 'bot-b' WHERE id = 'review-b';`);
 
     insertClaim(

@@ -60,21 +60,21 @@ for (const withPublicationIndex of [false, true]) {
     const handle = createMigratedTestD1();
     const db = handle.raw;
     execMigrationScript(db, "PRAGMA foreign_keys = OFF;");
-    if (withPublicationIndex) db.exec("CREATE INDEX IF NOT EXISTS idx_thread_publication ON review_threads (publication_id, review_id)");
+    if (withPublicationIndex) db.run("CREATE INDEX IF NOT EXISTS idx_thread_publication ON review_threads (publication_id, review_id)");
     const publication = db.prepare(`INSERT INTO review_publications
       (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase, payload_json, recovery_state, created_ms, updated_ms, applied_ms)
       VALUES (?, 'bot', 1, 'acme', 'widgets', ?, ?, 'review', 'applied', ?, 'done', ?, ?, ?)`);
     const thread = db.prepare(`INSERT INTO review_threads
       (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number, original_sha, round, intent_json, resolution_state, created_ms, updated_ms, review_id)
       VALUES (?, ?, ?, 'bot', 1, 'acme', 'widgets', ?, 'sha', 1, '{}', 'resolved', ?, ?, ?)`);
-    db.exec("BEGIN");
+    db.run("BEGIN");
     for (let i = 0; i < publications; i++) {
       const at = now - (publications - i) * 1_000;
       publication.run(`pub-${i}`, i, `sha-${i}`, payload, at, at, at);
       const open = i >= publications - pending;
       for (let k = 0; k < 3; k++) thread.run(`thread-${i}-${k}`, `finding-${i}-${k}`, `pub-${i}`, i, at, at, open && k === 0 ? null : `review-${i}`);
     }
-    db.exec("COMMIT");
+    db.run("COMMIT");
 
     const production = (await listLineBatchRecovery(handle, now, limit)).map((row) => row.id);
     const after = await time(async () => (await handle.prepare(AFTER).bind(now, limit).all<{ id: string }>()).results.map((row) => row.id));

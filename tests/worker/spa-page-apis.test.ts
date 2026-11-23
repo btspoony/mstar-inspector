@@ -342,10 +342,10 @@ describe("membership stays enforcing outside locale", () => {
 
   test("the members-family 403 follows mstar_locale (workspace-scoped face)", async () => {
     const db = await seededWorld();
-    db.raw.exec(
+    db.raw.run(
       "INSERT INTO workspaces (id, slug, name, created_at) VALUES ('ws-locale', 'acme', 'Acme', '2026-01-01T00:00:00.000Z')",
     );
-    db.raw.exec(
+    db.raw.run(
       `INSERT INTO workspace_members (workspace_id, user_id, role, created_at)
        SELECT 'ws-locale', id, 'member', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'mallory'`,
     );

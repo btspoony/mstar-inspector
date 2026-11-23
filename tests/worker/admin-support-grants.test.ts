@@ -186,7 +186,7 @@ describe("POST /_internal_admin/api/support-grants", () => {
 
   test("a failed audit append leaves no live grant", async () => {
     const db = fixture();
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER fail_grant_audit BEFORE INSERT ON audit_events
        BEGIN SELECT RAISE(ABORT, 'audit append refused'); END;`,
     );
@@ -197,7 +197,7 @@ describe("POST /_internal_admin/api/support-grants", () => {
     expect(grantCount(db)).toBe(0);
     expect(auditRows(db)).toEqual([]);
 
-    db.raw.exec("DROP TRIGGER fail_grant_audit");
+    db.raw.run("DROP TRIGGER fail_grant_audit");
     expect((await supportView(db)).status).toBe(404);
   });
 });
@@ -237,7 +237,7 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
   test("a failed audit append rolls the revocation back — the window stays open", async () => {
     const db = fixture();
     const grant = await seedGrant(db, "ws-acme", DAY_MS);
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER fail_revoke_audit BEFORE INSERT ON audit_events
        BEGIN SELECT RAISE(ABORT, 'audit append refused'); END;`,
     );
@@ -248,14 +248,14 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     expect(auditRows(db)).toEqual([]);
     expect(grantCount(db)).toBe(1);
 
-    db.raw.exec("DROP TRIGGER fail_revoke_audit");
+    db.raw.run("DROP TRIGGER fail_revoke_audit");
     expect((await supportView(db)).status).toBe(200);
   });
 
   test("a failed revocation leaves no audit row claiming one", async () => {
     const db = fixture();
     const grant = await seedGrant(db, "ws-acme", DAY_MS);
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER fail_grant_delete BEFORE DELETE ON support_grants
        BEGIN SELECT RAISE(ABORT, 'grant delete refused'); END;`,
     );
@@ -266,7 +266,7 @@ describe("DELETE /_internal_admin/api/support-grants/:id", () => {
     expect(grantCount(db)).toBe(1);
     expect(auditRows(db)).toEqual([]);
 
-    db.raw.exec("DROP TRIGGER fail_grant_delete");
+    db.raw.run("DROP TRIGGER fail_grant_delete");
     expect((await supportView(db)).status).toBe(200);
   });
 });

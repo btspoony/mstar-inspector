@@ -495,7 +495,7 @@ describe("GET/PATCH /_internal_admin/api/flags", () => {
   test("a failed flag upsert appends no audit row", async () => {
     const db = createMigratedTestD1();
     insertUser(db, OPERATOR);
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER fail_flag_upsert BEFORE INSERT ON server_flags
        BEGIN SELECT RAISE(ABORT, 'flag upsert refused'); END;`,
     );

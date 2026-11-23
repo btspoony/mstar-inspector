@@ -152,7 +152,7 @@ describe("the maintenance replay route", () => {
 
     const unreadable = fixture();
     expect((await replay(unreadable, sent, { failSend: true })).status).toBe(202);
-    unreadable.raw.exec("DROP TABLE review_runtime_settings");
+    unreadable.raw.run("DROP TABLE review_runtime_settings");
     const whileUnreadable = await replay(unreadable, sent);
     expect(whileUnreadable.status).toBe(200);
     expect(await whileUnreadable.json()).toEqual({ failureId: FAILURE_ID, state: "requested" });
@@ -225,7 +225,7 @@ describe("the maintenance replay route", () => {
 
   test("an unreadable maintenance window refuses 503 rather than replaying", async () => {
     const db = fixture();
-    db.raw.exec("DROP TABLE review_runtime_settings");
+    db.raw.run("DROP TABLE review_runtime_settings");
     const sent: Sent = { payloads: [] };
     const res = await replay(db, sent);
     expect(res.status).toBe(503);

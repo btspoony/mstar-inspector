@@ -221,7 +221,7 @@ describe("pull_request delivery → PR ledger", () => {
   test("a store failure logs a warn and leaves the HTTP status untouched", async () => {
     const db = createMigratedTestD1();
     const appId = await seedApp(db, "every_push");
-    db.raw.exec("DROP TABLE pull_requests");
+    db.raw.run("DROP TABLE pull_requests");
     const warns: string[] = [];
     const originalWarn = console.warn;
     console.warn = (line: unknown) => {

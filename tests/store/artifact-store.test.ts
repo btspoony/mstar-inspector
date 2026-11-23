@@ -449,7 +449,7 @@ describe("createArtifactStore().put", () => {
 
   test("a findings failure mid-batch rolls back the review row (atomic put)", async () => {
     const db = createSeededTestD1();
-    db.raw.exec(
+    db.raw.run(
       `CREATE TRIGGER fail_findings BEFORE INSERT ON findings
        WHEN NEW.title = 'boom' BEGIN SELECT RAISE(ABORT, 'injected findings failure'); END;`,
     );

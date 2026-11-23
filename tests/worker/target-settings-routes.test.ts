@@ -318,9 +318,9 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
   test("a policy save is refused while the effective gate is unreadable", async () => {
     const { db, targetId } = await seededWorld();
     const before = targetRow(db, targetId);
-    db.raw.exec("PRAGMA ignore_check_constraints = ON");
+    db.raw.run("PRAGMA ignore_check_constraints = ON");
     db.raw.prepare("UPDATE workspaces SET default_check_pass_verdicts = 'not json' WHERE id = 'default'").run();
-    db.raw.exec("PRAGMA ignore_check_constraints = OFF");
+    db.raw.run("PRAGMA ignore_check_constraints = OFF");
 
     for (const body of [{ trigger_mode: "manual" }, { check_min_score: 70 }, { follow: 1 }]) {
       const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", body);

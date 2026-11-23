@@ -43,7 +43,7 @@ for (const threads of [5_000, 20_000, 80_000]) {
     (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number, original_sha,
      round, intent_json, review_id, thread_id, resolution_state, superseded_by_publication_id, created_ms, updated_ms)
     VALUES (?, ?, ?, 'bot', 1, 'acme', 'widgets', ?, 'sha', 1, '{}', ?, ?, 'pending', ?, 1, ?)`);
-  db.exec("BEGIN");
+  db.run("BEGIN");
   for (let i = 0; i < threads; i++) {
     // note: Two threads per finding; every other finding's older thread was superseded by a re-post.
     const finding = Math.floor(i / 2);
@@ -51,7 +51,7 @@ for (const threads of [5_000, 20_000, 80_000]) {
     insert.run(`thread-${i}`, `finding-${finding}`, `pub-${Math.floor(i / 8)}`, Math.floor(i / 50),
       i % 3 === 0 ? null : i, i % 3 === 0 ? null : `T_${i}`, superseded, i);
   }
-  db.exec("COMMIT");
+  db.run("COMMIT");
   const ids = Array.from({ length: findings }, (_, k) => `finding-${Math.floor(threads / 2) - 1 - k}`);
   const publication = `pub-${Math.floor((threads - 1) / 8)}`;
 
@@ -67,9 +67,9 @@ for (const threads of [5_000, 20_000, 80_000]) {
         if (normalize && !sql.includes("ORDER BY")) results.sort((a, b) => a.id.localeCompare(b.id));
         seen.push(...results);
       }
-      db.exec("SAVEPOINT round");
+      db.run("SAVEPOINT round");
       for (const id of ids) seen.push((await handle.prepare(supersede).bind("pub-new", 2, id, "pub-new").run()).meta.changes);
-      db.exec("ROLLBACK TO round; RELEASE round");
+      db.run("ROLLBACK TO round; RELEASE round");
       const state = await readLineBatchState(handle, publication);
       seen.push(state);
     };
