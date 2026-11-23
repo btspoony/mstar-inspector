@@ -2062,9 +2062,14 @@ function blockedReasonFor(
  * verified delivery" stamp (display-only, no computed health).
  *
  * The summaries come from the store's BATCHED deliverySummaries face
- * (QC wave 1, W-1): exactly TWO D1 statements for any N instead
+ * (QC wave 1, W-1): two D1 statements per batch for any N instead
  * of the per-App 2N fan-out — this helper runs on GET /api/apps (the SPA
  * JSON face), so the statement count must not scale with the App count.
+ * Owned bots form one App-wide batch; shared bots the workspace does not own
+ * form a second batch scoped to its target repositories. Each batch is split
+ * into chunks of up to 90 bots to stay under D1's bound-parameter cap, so the
+ * cost is two statements per chunk: four for any workspace under 90 Apps of
+ * each kind.
  * A request lists the workspace's own bots plus every `shared` bot it holds a
  * live target on (`targetedBotIds`) — the target is the entitlement, so a
  * target created on an official bot does not vanish from this list.
@@ -2082,7 +2087,13 @@ async function appsListWithHealth(
       app.workspace_id === scope.workspaceId ||
       (app.scope === "shared" && targetedBotIds.has(app.id)),
   );
-  const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
+  const owned = rows.filter((app) => canWriteBotScope(app, scope));
+  const consumed = rows.filter((app) => !canWriteBotScope(app, scope));
+  const [ownedSummaries, consumedSummaries] = await Promise.all([
+    apps.deliverySummaries(owned.map((app) => app.id)),
+    apps.deliverySummaries(consumed.map((app) => app.id), scope.workspaceId),
+  ]);
+  const summaries = { ...ownedSummaries, ...consumedSummaries };
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 
@@ -2547,20 +2558,33 @@ async function refreshGithubMetadataForRead(
   return refresh.row;
 }
 
-async function botScopedSections(db: DashboardDb, app: GithubAppRow, encryptionKey: string) {
+/**
+ * The App-wide read sections. A workspace that does not own the App (a shared
+ * bot's consumer) gets none of the App's installations, keys, chains or custom
+ * providers, and a delivery summary limited to its own target repositories.
+ */
+async function botScopedSections(
+  db: DashboardDb,
+  app: GithubAppRow,
+  encryptionKey: string,
+  scope: WorkspaceScope,
+) {
   const apps = createReviewBotsStore(db);
   const store = createAppConfigStore(db, encryptionKey);
+  const owner = canWriteBotScope(app, scope);
   const [installations, deliverySummary, maskedKeys, modelChain, modelChainSeats, modelChains, customProviders, customKeys] =
-    await orderedReads([
-      apps.listInstallations(app.id),
-      apps.deliverySummary(app.id),
-      store.listProviderKeys(app.id),
-      store.getModelChain(app.id),
-      store.getModelChainSeats(app.id),
-      store.getModelChains(app.id),
-      store.listCustomProviders(app.id),
-      store.listCustomProviderKeys(app.id),
-    ]);
+    owner
+      ? await orderedReads([
+          apps.listInstallations(app.id),
+          apps.deliverySummary(app.id),
+          store.listProviderKeys(app.id),
+          store.getModelChain(app.id),
+          store.getModelChainSeats(app.id),
+          store.getModelChains(app.id),
+          store.listCustomProviders(app.id),
+          store.listCustomProviderKeys(app.id),
+        ])
+      : [[], await apps.deliverySummary(app.id, scope.workspaceId), [], null, {}, [], [], []];
   const catalog = await providerCatalog();
   const keyRows = [...maskedKeys, ...customKeys];
   const ompRuntime = isOmpRuntimeImage(app.sandbox_image_id);
@@ -2751,7 +2775,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
       return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
     }
-    const botSections = await botScopedSections(gate.db, gate.app, c.env.DASHBOARD_ENCRYPTION_KEY);
+    const botSections = await botScopedSections(gate.db, gate.app, c.env.DASHBOARD_ENCRYPTION_KEY, gate.scope);
     return c.json({
       can_manage: true,
       ...base,
@@ -2793,7 +2817,7 @@ const appBotRoute = async (c: DashboardContext) => {
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
   }
-  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY);
+  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope);
   return c.json({
     can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
     app: {
@@ -2907,7 +2931,11 @@ const appDeliveriesRoute = async (c: DashboardContext) => {
   if (!app) return c.json({ error: "unknown app" }, 404);
   const query = parseDeliveryQuery(c);
   if (!query.ok) return c.json({ error: query.error }, 400);
-  const page = await createReviewBotsStore(member.db).listDeliveries(app.id, query.filters);
+  const page = await createReviewBotsStore(member.db).listDeliveries(
+    app.id,
+    query.filters,
+    canWriteBotScope(app, member.scope) ? null : member.scope.workspaceId,
+  );
   c.header("Cache-Control", "private, no-store");
   return c.json({
     deliveries: page.rows.map((row) => ({
