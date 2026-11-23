@@ -912,7 +912,20 @@ export function PullRequestDetailView({
                   <ul className="flex flex-col gap-2">
                     {failuresPage.items.map((failure, index) => {
                       const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
-                      const firstLine = lines[0] ?? "";
+                      // A classified row's first line IS its summary (0104 writes
+                      // `summary + "\n" + detail`); the mechanism detail stays in the
+                      // collapsed block for both shapes.
+                      const summary = lines[0] ?? "";
+                      const code = failure.error_code;
+                      const track = failure.track_id;
+                      const firstLine =
+                        code === null || track === null
+                          ? summary
+                          : t(locale, "pullRequests.failureFirstLine", {
+                              summary,
+                              code,
+                              track: t(locale, "pullRequests.failureTrackLabel", { track: track.slice(0, 8) }),
+                            });
                       const failureKey = `${failure.created_at}-${index}`;
                       const outcome = copyOutcome[failureKey];
                       return (
@@ -965,7 +978,11 @@ export function PullRequestDetailView({
                                 }
                                 let write: Promise<void>;
                                 try {
-                                  write = clipboard.writeText(failure.error);
+                                  write = clipboard.writeText(
+                                    code === null || track === null
+                                      ? failure.error
+                                      : `${code}\n${track}\n${failure.error}`,
+                                  );
                                 } catch {
                                   announceCopy(failureKey, "failed");
                                   return;

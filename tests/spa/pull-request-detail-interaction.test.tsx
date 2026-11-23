@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from "bun:test";
 import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
+import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
 import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
 import {
@@ -14,6 +15,13 @@ import {
   press,
   scene,
 } from "./pull-request-fixtures";
+
+/** A row recorded before 0104: no code, no track id, rendered exactly as before. */
+const historical = (row: Pick<PullRequestFailure, "stage" | "error" | "created_at">): PullRequestFailure => ({
+  ...row,
+  error_code: null,
+  track_id: null,
+});
 
 const failuresOnly = (failures: PullRequestFailure[] = FAILURES) =>
   scene({ findings: page([]), reviews: page([]), failures: page(failures) });
@@ -335,7 +343,7 @@ describe("pull request detail (mounted)", () => {
       duration_ms: null,
       severity_counts: {},
     }));
-    const failure = { stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" };
+    const failure = historical({ stage: "sandbox", error: "exit 1", created_at: "2026-11-02 00:00:00" });
     const { container, win, unmount } = await mountDetailView(
       scene({ reviews: page(corpus), failures: page([failure]) }),
     );
@@ -534,6 +542,35 @@ describe("pull request detail (mounted)", () => {
     }
   });
 
+  test("copying a classified failure writes code, full track id and the full error", async () => {
+    const classified = {
+      stage: "runner" as const,
+      error: `${FAILURE_SUMMARIES["review.budget.runner_spent"]}\nmechanism detail`,
+      error_code: "review.budget.runner_spent",
+      track_id: "9f2c1d4e-aaaa-bbbb-cccc-000000000001",
+      created_at: "2026-11-02 00:00:00",
+    };
+    const { container, win, unmount } = await mountDetailView(failuresOnly([classified]));
+    try {
+      const written: string[] = [];
+      Object.defineProperty(win.navigator, "clipboard", {
+        configurable: true,
+        value: {
+          writeText: (text: string) => {
+            written.push(text);
+            return Promise.resolve();
+          },
+        },
+      });
+      await press(win, container.querySelector('[data-slot="copy-error"]'));
+      expect(written).toEqual([
+        `review.budget.runner_spent\n${classified.track_id}\n${classified.error}`,
+      ]);
+    } finally {
+      await unmount();
+    }
+  });
+
   test("a clipboard write that throws synchronously reports the failure", async () => {
     const { container, win, unmount } = await mountDetailView(failuresOnly());
     Object.defineProperty(win.navigator, "clipboard", {
@@ -563,7 +600,7 @@ describe("pull request detail (mounted)", () => {
   test("a failure's remaining output is folded until the reader opens the disclosure", async () => {
     const error = "first line\nsecond line\nthird line";
     const { container, win, unmount } = await mountDetailView(
-      failuresOnly([{ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" }]),
+      failuresOnly([historical({ stage: "sandbox", error, created_at: "2026-10-31 23:00:00" })]),
     );
     try {
       const details = () => container.querySelector<HTMLDetailsElement>('[role="tabpanel"] details');
@@ -620,8 +657,8 @@ describe("pull request detail (mounted)", () => {
     jest.useFakeTimers();
     const { container, win, unmount } = await mountDetailView(
       failuresOnly([
-        { stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" },
-        { stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" },
+        historical({ stage: "sandbox", error: "first block", created_at: "2026-10-31 23:00:00" }),
+        historical({ stage: "review", error: "second block", created_at: "2026-10-30 23:00:00" }),
       ]),
     );
     try {

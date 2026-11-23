@@ -182,3 +182,86 @@ describe("createFailureStore", () => {
     expect(plan.join("\n")).toContain("idx_review_failures_pipeline_created (created_at>?)");
   });
 });
+
+describe("review_failures error_code / track_id (0104)", () => {
+  test("record persists the code and the attempt's track id", async () => {
+    const db = createFailureDb();
+    const store = createFailureStore(db);
+    await store.record({
+      ...BASE,
+      stage: "runner",
+      code: "review.budget.runner_spent",
+      trackId: "attempt-7",
+      error: "summary\nmechanism detail",
+    });
+    const row = db.raw.query("SELECT error_code, track_id, error FROM review_failures").get();
+    expect(row).toEqual({
+      error_code: "review.budget.runner_spent",
+      track_id: "attempt-7",
+      error: "summary\nmechanism detail",
+    });
+  });
+
+  test("a row keyed by its own id is its own track id, and one with no code keeps NULL", async () => {
+    const db = createFailureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, id: "attempt-9:parse", stage: "parse", error: "boom" });
+    expect(db.raw.query("SELECT id, error_code, track_id FROM review_failures").get()).toEqual({
+      id: "attempt-9:parse",
+      error_code: null,
+      track_id: "attempt-9:parse",
+    });
+
+    await store.record({ ...BASE, stage: "pipeline", error: "no identity, no code" });
+    const generated = db.raw
+      .query("SELECT id, error_code, track_id FROM review_failures WHERE id <> 'attempt-9:parse'")
+      .get() as { id: string; error_code: string | null; track_id: string };
+    expect(generated.error_code).toBeNull();
+    expect(generated.track_id).toBe(generated.id);
+  });
+
+  test("the settlement statement writes both columns too (replay-safe insert)", async () => {
+    const db = createFailureDb();
+    const { settlementFailureRowStatement } = await import("../../src/store/failure-store");
+    await settlementFailureRowStatement(
+      db,
+      {
+        ...BASE,
+        stage: "pipeline",
+        code: "review.internal.unclassified",
+        trackId: "attempt-settled",
+        error: "summary\ndetail",
+      },
+      "attempt-settled",
+    ).run();
+    const row = db.raw.query("SELECT error_code, track_id FROM review_failures").get();
+    expect(row).toEqual({ error_code: "review.internal.unclassified", track_id: "attempt-settled" });
+  });
+
+  test("0104 indexes (error_code, created_at) and both columns are nullable", async () => {
+    const db = createFailureDb();
+    const columns = (db.raw.query("PRAGMA index_info(idx_review_failures_code_created)").all() as Array<{ name: string }>)
+      .map((row) => row.name);
+    expect(columns).toEqual(["error_code", "created_at"]);
+    const declared = db.raw.query("PRAGMA table_info(review_failures)").all() as Array<{
+      name: string;
+      notnull: number;
+    }>;
+    for (const name of ["error_code", "track_id"]) {
+      expect(declared.find((column) => column.name === name)).toMatchObject({ notnull: 0 });
+    }
+  });
+
+  test("a historical row (code NULL) is still returned, unchanged, by listRecent and the detail read", async () => {
+    const db = createFailureDb();
+    const store = createFailureStore(db);
+    await store.record({ ...BASE, stage: "sandbox", error: "the old mechanism text" });
+    const recent = await store.listRecent();
+    expect(recent[0]).toMatchObject({
+      stage: "sandbox",
+      error: "the old mechanism text",
+      error_code: null,
+      track_id: recent[0]!.id,
+    });
+  });
+});

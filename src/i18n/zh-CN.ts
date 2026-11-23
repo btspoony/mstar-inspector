@@ -291,6 +291,8 @@ export const zhCN: Dictionary = {
     foldLabel: "{action} — {record} · #{position}",
     foldLabelBare: "{action} — #{position}",
     failureRemainingOutput: "其余输出",
+    failureFirstLine: "{summary} · {code} · {track}",
+    failureTrackLabel: "跟踪号 {track}",
     copyError: "复制错误",
     copyCopied: "已复制",
     copyFailed: "复制失败",

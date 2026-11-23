@@ -64,6 +64,7 @@ import { checkGateOf, readEffectiveTargetSettings, type ReviewTargetRow } from "
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
 import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
+import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
@@ -688,7 +689,8 @@ describe("createReviewConsumer", () => {
       pr_number: 42,
       head_sha: SHA,
       stage: "parse",
-      error: "not valid ReviewOutput JSON",
+      error_code: "review.output.invalid",
+      error: `${FAILURE_SUMMARIES["review.output.invalid"]}\nnot valid ReviewOutput JSON`,
     });
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);

@@ -105,6 +105,7 @@ import {
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
+import type { FailureCode } from "../contracts/failure-codes";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
@@ -1566,6 +1567,11 @@ async function processMessage(
   } catch (err) {
     if (handedOff) throw err;
     const detail = err instanceof Error ? err.message : String(err);
+    // The one cause this path can name from evidence: a GitHub rate limit, read
+    // by the classifier the row's own prefix already uses. The error TEXT stays
+    // as it was (operator counters read its prefix); the code rides beside it.
+    const code: FailureCode =
+      classifyGithubRateLimit(err) === null ? "review.internal.unclassified" : "review.github.rate_limited";
     deps.log.error(
       {
         ...(baseFields ?? payloadIdentityFields(payload)),
@@ -1577,6 +1583,8 @@ async function processMessage(
               runner_timeout_ms: runnerTimeoutMs(level),
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review failed: ${detail}`,
     );
@@ -1591,6 +1599,8 @@ async function processMessage(
         pr_number: payload.pr_number,
         head_sha: baseFields?.head_sha ?? payload.head_sha ?? "",
         stage: "pipeline",
+        code,
+        trackId: attemptId,
         error: redactExactSecrets(redactSecrets(persistedDetail), []),
       });
     } catch (recordErr) {

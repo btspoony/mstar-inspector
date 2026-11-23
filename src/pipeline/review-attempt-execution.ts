@@ -172,6 +172,10 @@ import {
   type PrContext,
 } from "../../packages/shared/src/report-wire";
 import {
+  FAILURE_SUMMARIES,
+  type FailureCode,
+} from "../contracts/failure-codes";
+import {
   buildPreparedDegradedBody,
   buildPreparedReviewBody,
   buildPublicationMarker,
@@ -344,6 +348,8 @@ export type ConsumerLogFields = {
   report_doc_error?: string;
   report_doc_head_sha?: string;
   budget_outcome?: BudgetExhaustedOutcome;
+  /** The classified code of a failed/unresolved review, so one query finds every occurrence. */
+  error_code?: FailureCode;
   stderr_tail?: string;
 };
 
@@ -3845,12 +3851,14 @@ async function collectPhase(
         pr_number: payload.pr_number,
         head_sha: headSha,
         stage: "parse",
+        code: "review.output.invalid",
+        trackId: attemptId,
         // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
         // model-emitted secret-shaped value (`verdict "ghp_…" is not one
         // of …`) — redactSecrets BEFORE the durable D1 row, same face as
         // buildDegradedBody's public-comment choke point. SEC-01 adds the
         // exact-value pass on top.
-        error: diagnostic,
+        error: `${FAILURE_SUMMARIES["review.output.invalid"]}\n${diagnostic}`,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -4571,6 +4579,33 @@ async function sealedSecretValues(deps: ProcessDeps, attemptId: string): Promise
 }
 
 /**
+ * The ONE classification point (design D10/§9.3): a phase failure's record
+ * becomes the operator-facing code its row is stored and searched by.
+ *
+ * Total by construction — the closed set's `review.internal.unclassified` is
+ * the fallthrough, so a new class (or a class this build cannot tell apart)
+ * still yields a member, never a made-up string and never a code derived from
+ * the error text. Only facts the record already carries are read: the budget
+ * stop's own `window` (D7: settlement never infers it) and the stage the
+ * failure was observed at, which is what tells a slot lost before the paid
+ * claim (`sandbox`) from one lost after it (`runner`).
+ */
+export function failureCodeOf(failure: PhaseFailure): FailureCode {
+  switch (failure.class) {
+    case "budget":
+      return failure.window === "preparation"
+        ? "review.budget.preparation_spent"
+        : "review.budget.runner_spent";
+    case "container-lost":
+      return failure.stage === "runner"
+        ? "review.container.lost_after_claim"
+        : "review.container.lost_before_paid";
+    default:
+      return "review.internal.unclassified";
+  }
+}
+
+/**
  * The attempt's failure settlement: every terminal phase outcome lands here —
  * the exhaustion stop, an unprovable container, or an ordinary failure. It
  * records the durable outcome, resolves the Check's conclusion from it and
@@ -4590,6 +4625,8 @@ export async function settleAttemptFailure(
 ): Promise<ProcessOutcome> {
   const { payload, level, attemptId, githubAppId } = ref;
   const detail = failure.message;
+  const code = failureCodeOf(failure);
+  const summary = FAILURE_SUMMARIES[code];
   const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
     try {
       await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed }, Date.now());
@@ -4627,6 +4664,8 @@ export async function settleAttemptFailure(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
         event: "review_unresolved",
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
@@ -4658,6 +4697,8 @@ export async function settleAttemptFailure(
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
         budget_outcome: budgetOutcome,
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review failed: ${budgetDetail}`,
     );
@@ -4670,7 +4711,9 @@ export async function settleAttemptFailure(
         pr_number: payload.pr_number,
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failure.stage,
-        error: redactExactSecrets(redactSecrets(budgetDetail), await sealedSecretValues(deps, attemptId)),
+        code,
+        trackId: attemptId,
+        error: redactExactSecrets(redactSecrets(`${summary}\n${budgetDetail}`), await sealedSecretValues(deps, attemptId)),
       });
       durableOutcome = true;
     } catch (recordErr) {
@@ -4692,6 +4735,8 @@ export async function settleAttemptFailure(
                 orchestration: level === "deep" ? "parent" : "bun-fanout",
               }),
           event: "review_unresolved",
+          error_code: code,
+          attempt_id: attemptId,
         },
         `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
       );
@@ -4717,6 +4762,8 @@ export async function settleAttemptFailure(
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
         event: "review_unresolved",
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review unresolved: ${detail} — nothing was collected, destroyed or reclaimed`,
     );
@@ -4732,6 +4779,8 @@ export async function settleAttemptFailure(
             runner_timeout_ms: runnerTimeoutMs(level),
             orchestration: level === "deep" ? "parent" : "bun-fanout",
           }),
+      error_code: code,
+      attempt_id: attemptId,
     },
     `review failed: ${detail}`,
   );
@@ -4747,7 +4796,9 @@ export async function settleAttemptFailure(
       pr_number: payload.pr_number,
       head_sha: fields?.head_sha ?? payload.head_sha ?? "",
       stage: failure.stage,
-      error: redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId)),
+      code,
+      trackId: attemptId,
+      error: redactExactSecrets(redactSecrets(`${summary}\n${persistedDetail}`), await sealedSecretValues(deps, attemptId)),
     });
     durableOutcome = true;
   } catch (recordErr) {
@@ -4769,6 +4820,8 @@ export async function settleAttemptFailure(
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
         event: "review_unresolved",
+        error_code: code,
+        attempt_id: attemptId,
       },
       `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
     );

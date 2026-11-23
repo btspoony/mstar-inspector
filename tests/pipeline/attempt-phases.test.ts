@@ -22,6 +22,7 @@ import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { FINDING_BODY_MAX } from "../../src/review/schema";
+import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
@@ -3686,8 +3687,67 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(concluded).toEqual(["budget-exhausted"]);
     const row = failureRows(db)[0]!;
     expect(String(row.error)).toContain("budget-exhausted:");
+    // The operator face: the code and track id are columns, the first line is the
+    // plain summary, and the mechanism text follows it in the same cell.
+    expect(row.error_code).toBe("review.budget.preparation_spent");
+    expect(row.track_id).toBe(ATTEMPT_ID);
+    expect(String(row.error).startsWith(`${FAILURE_SUMMARIES["review.budget.preparation_spent"]}\n`)).toBe(true);
+    const failed = h.logLines.find((line) => line.level === "error" && line.msg.startsWith("review failed:"));
+    expect(failed?.fields.error_code).toBe("review.budget.preparation_spent");
+    expect(failed?.fields.attempt_id).toBe(ATTEMPT_ID);
     // The refusal is the FIRST entry's: nothing was provisioned.
     expect(h.sandbox.calls).toHaveLength(0);
+  });
+
+  test("an unclassified ordinary failure still lands with its code, summary and structured log fields", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: false,
+        message: "the runner input write failed: exit 3",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    expect(settlement.kind).not.toBe("unknown");
+    const row = failureRows(db)[0]!;
+    expect(row.error_code).toBe("review.internal.unclassified");
+    expect(row.track_id).toBe(ATTEMPT_ID);
+    expect(String(row.error)).toBe(
+      `${FAILURE_SUMMARIES["review.internal.unclassified"]}\nthe runner input write failed: exit 3`,
+    );
+    const failed = h.logLines.find((line) => line.level === "error" && line.msg.startsWith("review failed:"));
+    expect(failed?.fields).toMatchObject({
+      error_code: "review.internal.unclassified",
+      attempt_id: ATTEMPT_ID,
+    });
+  });
+
+  test("a container lost after the claim is named apart from one lost before it", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "container-lost",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: false,
+        message: "the attempt container was lost after its launch was claimed (not-running)",
+      },
+      null,
+    );
+    expect(settlement.kind).not.toBe("unknown");
+    expect(failureRows(db)[0]!.error_code).toBe("review.container.lost_after_claim");
   });
 
   test("no secret value appears in any step return value", async () => {

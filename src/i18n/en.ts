@@ -319,6 +319,8 @@ export const en = {
     foldLabel: "{action} — {record} · #{position}",
     foldLabelBare: "{action} — #{position}",
     failureRemainingOutput: "Remaining output",
+    failureFirstLine: "{summary} · {code} · {track}",
+    failureTrackLabel: "track {track}",
     copyError: "Copy error",
     copyCopied: "Copied",
     copyFailed: "Copy failed",

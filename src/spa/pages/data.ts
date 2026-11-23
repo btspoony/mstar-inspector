@@ -1117,8 +1117,18 @@ export type PullRequestLatestReview = {
   head_sha: string;
 };
 
-/** One review-failure log row — the diagnostic payload this tab exists for. */
-export type PullRequestFailure = { stage: string; error: string; created_at: string };
+/**
+ * One review-failure log row — the diagnostic payload this tab exists for.
+ * `error_code` and `track_id` are NULL on rows recorded before migration 0104;
+ * such a row renders exactly as it did before the code existed.
+ */
+export type PullRequestFailure = {
+  stage: string;
+  error: string;
+  error_code: string | null;
+  track_id: string | null;
+  created_at: string;
+};
 
 export type PullRequestFinding = {
   finding_id: string;
@@ -1271,7 +1281,13 @@ function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
   ) {
     return null;
   }
-  return { stage: value.stage, error: value.error, created_at: value.created_at };
+  return {
+    stage: value.stage,
+    error: value.error,
+    error_code: typeof value.error_code === "string" ? value.error_code : null,
+    track_id: typeof value.track_id === "string" ? value.track_id : null,
+    created_at: value.created_at,
+  };
 }
 
 function parsePullRequestFinding(value: unknown): PullRequestFinding | null {

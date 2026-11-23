@@ -47,6 +47,7 @@ import {
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../contracts/failure-stages";
+import type { FailureCode } from "../contracts/failure-codes";
 import type { D1Like, D1StatementLike } from "./types";
 
 export const QUEUE_MAX_ATTEMPTS = 6;
@@ -111,11 +112,25 @@ export type ReviewFailureInput = {
   head_sha: string;
   stage: FailureStage;
   error: string;
+  /**
+   * The closed operator-facing code (`src/contracts/failure-codes.ts`). Absent
+   * for failures this build does not classify — the column stays NULL and the
+   * UI renders the row as a historical one.
+   */
+  code?: FailureCode;
+  /**
+   * The attempt id the failure belongs to (the Workflow instance id), or a
+   * caller-chosen id for a failure that never reached an attempt. Absent, the
+   * row's own id is the track id.
+   */
+  trackId?: string;
 };
 
-/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010). */
-export type ReviewFailureRow = ReviewFailureInput & {
+/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0104). */
+export type ReviewFailureRow = Omit<ReviewFailureInput, "code" | "trackId"> & {
   id: string;
+  error_code: string | null;
+  track_id: string | null;
   created_at: string;
 };
 
@@ -204,8 +219,8 @@ export function settlementFailureRowStatement(
   assertFailureStage(input.stage);
   return db
     .prepare(
-      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
@@ -218,6 +233,8 @@ export function settlementFailureRowStatement(
       input.head_sha,
       input.stage,
       input.error,
+      input.code ?? null,
+      input.trackId ?? rowId,
     );
 }
 
@@ -237,13 +254,16 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
         await settlementFailureRowStatement(db, input, input.id).run();
         return;
       }
+      // Without an explicit identity the row's own id IS the track id: one value,
+      // written twice, so a failure that never reached an attempt is still locatable.
+      const rowId = crypto.randomUUID();
       await db
         .prepare(
-          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
-          crypto.randomUUID(),
+          rowId,
           input.target_id,
           input.installation_id,
           input.owner,
@@ -252,6 +272,8 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
           input.head_sha,
           input.stage,
           input.error,
+          input.code ?? null,
+          input.trackId ?? rowId,
         )
         .run();
     },

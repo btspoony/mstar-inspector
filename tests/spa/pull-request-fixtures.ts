@@ -101,6 +101,8 @@ export const FAILURES: PullRequestFailure[] = [
   {
     stage: "sandbox",
     error: "exit 1: <script>alert(1)</script>",
+    error_code: null,
+    track_id: null,
     created_at: "2026-10-31 23:00:00",
   },
 ];
