@@ -1058,14 +1058,14 @@ export const zhCN: Dictionary = {
         retentionDays: "Webhook 保留期（天）",
         retentionCap: "每次巡检最多删除的投递记录",
         inviteLapseCap: "每次巡检最多标记过期的邀请",
-        pullRequestRetentionDays: "已关闭 PR 保留期（天）",
-        pullRequestRetentionCap: "每次巡检最多删除的已关闭 PR",
+        pullRequestRetentionDays: "已关闭或已合并 PR 保留期（天）",
+        pullRequestRetentionCap: "每次巡检最多删除的已关闭或已合并 PR",
       },
       sweepSave: "保存巡检设置",
       sweepSaved: "已保存巡检设置。",
       sweepFailed: "无法保存巡检设置。",
       sweepUnreadable:
-        "部分巡检设置无法读取，已暂停 Webhook 投递记录和已关闭 PR 的清理。请重试读取，或填写并保存全部八项设置以恢复清理。",
+        "部分巡检设置无法读取，已暂停 Webhook 投递记录和已关闭或已合并 PR 的清理。请重试读取，或填写并保存全部八项设置以恢复清理。",
       recheckTitle: "重审提问预算",
       recheckDescription:
         "历史发现重审席位单轮可索要的上下文大小（UTF-8 字节）。所有历史发现与讨论始终保留，证据切片在此预算内按序保留。",

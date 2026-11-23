@@ -1144,14 +1144,14 @@ export const en = {
         retentionDays: "Webhook retention (days)",
         retentionCap: "Webhook deletions per sweep",
         inviteLapseCap: "Invite expirations per sweep",
-        pullRequestRetentionDays: "Closed PR retention (days)",
-        pullRequestRetentionCap: "Closed PR deletions per sweep",
+        pullRequestRetentionDays: "Closed/merged PR retention (days)",
+        pullRequestRetentionCap: "Closed/merged PR deletions per sweep",
       },
       sweepSave: "Save sweep settings",
       sweepSaved: "Sweep settings saved.",
       sweepFailed: "Could not save the sweep settings.",
       sweepUnreadable:
-        "Some sweep settings could not be read. Webhook and closed-PR retention are paused. Retry the read or enter and save all eight settings to restore them.",
+        "Some sweep settings could not be read. Webhook and closed/merged PR retention are paused. Retry the read or enter and save all eight settings to restore them.",
       recheckTitle: "Recheck assignment budget",
       recheckDescription:
         "How much of a round the prior-findings seat is asked with, in UTF-8 bytes. Every prior finding and the discussion always ride; evidence slices ride until this budget is spent.",
