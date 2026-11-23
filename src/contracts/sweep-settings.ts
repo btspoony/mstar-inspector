@@ -5,6 +5,8 @@ export const SWEEP_FIELDS = [
   "retentionDays",
   "retentionCap",
   "inviteLapseCap",
+  "pullRequestRetentionDays",
+  "pullRequestRetentionCap",
 ] as const;
 
 export type SweepField = (typeof SWEEP_FIELDS)[number];

@@ -541,6 +541,8 @@ describe("listPullRequests repository filter + option set", () => {
 });
 
 describe("sweepTerminalPullRequests", () => {
+  const RETENTION = { days: 90, cap: 500 };
+
   test("an older `closed` cannot mark a reopened PR, and it survives retention", async () => {
     const db = createMigratedTestD1();
     seedApp(db);
@@ -554,7 +556,7 @@ describe("sweepTerminalPullRequests", () => {
     expect(row.state).toBe("open");
     expect(row.last_seen_at).toBe("2026-01-01 00:00:00");
 
-    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests(RETENTION)).toBe(0);
   });
 
   test("a newer `closed` after `open` DOES close it (and is not swept inside the window)", async () => {
@@ -567,7 +569,7 @@ describe("sweepTerminalPullRequests", () => {
       state: string;
     };
     expect(row.state).toBe("closed");
-    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests(RETENTION)).toBe(0);
   });
 
   test("drops terminal rows past the window and keeps open ones however old", async () => {
@@ -579,7 +581,7 @@ describe("sweepTerminalPullRequests", () => {
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 3, state: "open", updatedAt: old });
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, prNumber: 4, state: "closed" });
 
-    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(2);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests(RETENTION)).toBe(2);
     const remaining = db.raw
       .prepare("SELECT pr_number FROM pull_requests ORDER BY pr_number")
       .all() as Array<{ pr_number: number }>;
@@ -590,8 +592,8 @@ describe("sweepTerminalPullRequests", () => {
     const db = createMigratedTestD1();
     seedApp(db);
     await createReviewBotsStore(db).upsertPullRequest({ ...PR, state: "merged", updatedAt: "2020-01-01T00:00:00Z" });
-    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(1);
-    expect(await createReviewBotsStore(db).sweepTerminalPullRequests()).toBe(0);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests(RETENTION)).toBe(1);
+    expect(await createReviewBotsStore(db).sweepTerminalPullRequests(RETENTION)).toBe(0);
   });
 });
 

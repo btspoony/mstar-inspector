@@ -2825,9 +2825,9 @@ behave.
   increasing the attempt setting also makes pending due work eligible again.
 
 - Configure **Scheduled failure sweep** at `/_internal_admin/runtime`. A save
-  updates the six `platform.sweep.*` rows in `review_runtime_settings` and
+  updates the eight `platform.sweep.*` rows in `review_runtime_settings` and
   applies on the next sweep. The operator-only `PATCH /_internal_admin/api/runtime`
-  accepts `{ "sweep": { ... } }` with all six integer fields below.
+  accepts `{ "sweep": { ... } }` with all eight integer fields below.
 
   | API field | Absent-row default | Accepted range |
   |---|---:|---:|
@@ -2837,15 +2837,18 @@ behave.
   | `retentionDays` | 30 | 1–365 |
   | `retentionCap` | 500 delivery deletions per sweep | 1–500 |
   | `inviteLapseCap` | 500 invite expirations per sweep | 1–500 |
+  | `pullRequestRetentionDays` | 90; only `closed` / `merged` PR ledger rows are deleted, open PRs never | 1–365 |
+  | `pullRequestRetentionCap` | 500 PR ledger deletions per sweep | 1–500 |
 
   The alert retains the wire field `failures_24h` for compatibility; use
   `thresholds.window_hours` to interpret its actual counting interval.
-  Webhook delivery deletion pauses when the settings read fails or any stored
-  value is invalid. After a read failure, retry the read in Admin → Runtime to
-  confirm access has recovered; deletion resumes on the next successful
-  sweep with valid settings. An invalid row keeps the other valid values in
-  effect and uses the default for the invalid field. To restore deletion in
-  that case, enter and save all six settings in the admin form.
+  Webhook delivery and PR ledger deletion pause when the settings read fails
+  or any stored value is invalid. After a read failure, retry the read in
+  Admin → Runtime to confirm access has recovered; deletion resumes on the
+  next successful sweep with valid settings. An invalid row keeps the other
+  valid values in effect and uses the default for the invalid field. To
+  restore deletion in that case, enter and save all eight settings in the
+  admin form.
 
 - Alert transport: structured `ops_sweep_alert` log event
   (`{event, failures_24h, dlq_check: "skipped", thresholds, stages}`) +

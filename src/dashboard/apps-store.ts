@@ -190,15 +190,13 @@ export const DELIVERY_REASON_MAX_LENGTH = 200;
 export const PULL_REQUEST_LIST_LIMIT = 200;
 
 /**
- * Retention for the ledger: TERMINAL rows (`closed` / `merged`) whose last
- * activity is older than this window are swept. Open PRs are never swept —
- * a PR that is still open is still a live review target, however old — which
- * is why the predicate keys on `state`, not age alone.
+ * Ledger retention, read from the operator sweep settings: TERMINAL rows
+ * (`closed` / `merged`) whose last activity is older than `days` are swept, at
+ * most `cap` per run. Open PRs are never swept — a PR that is still open is
+ * still a live review target, however old — which is why the predicate keys on
+ * `state`, not age alone.
  */
-export const PULL_REQUEST_RETENTION_DAYS = 90;
-
-/** Retention row cap per run — bounded work per 15-min sweep (the 0035 rule). */
-export const PULL_REQUEST_RETENTION_CAP = 500;
+export type PullRequestRetention = { days: number; cap: number };
 
 const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 
@@ -433,16 +431,17 @@ const SHARED_BOT_LIST_SQL = `
 
 /** Create the review_bots / bot_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
-  async function sweepTerminalPullRequests(): Promise<number> {
+  async function sweepTerminalPullRequests({ days, cap }: PullRequestRetention): Promise<number> {
     const res = await db
       .prepare(
         `DELETE FROM pull_requests WHERE id IN (
            SELECT id FROM pull_requests
            WHERE state IN ('closed', 'merged')
-             AND last_seen_at < datetime('now', '-${PULL_REQUEST_RETENTION_DAYS} days')
-           LIMIT ${PULL_REQUEST_RETENTION_CAP}
+             AND last_seen_at < datetime('now', ?)
+           LIMIT ?
          )`,
       )
+      .bind(`-${days} days`, cap)
       .run();
     return res.meta.changes;
   }

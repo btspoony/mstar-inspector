@@ -1136,7 +1136,7 @@ export const en = {
       reconcileUnreadable: "Some settings could not be trusted. Recovery continues with all documented defaults. Retry the read or enter and save all settings.",
       sweepTitle: "Scheduled failure sweep",
       sweepDescription:
-        "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries.",
+        "Applies on the next sweep. Alerts fire above the failure threshold; the window covers both the count and repeat alerts. Retention permanently deletes old webhook deliveries and closed or merged pull requests.",
       sweepFields: {
         failureThreshold: "Failure threshold",
         windowHours: "Alert window (hours)",
@@ -1144,6 +1144,8 @@ export const en = {
         retentionDays: "Webhook retention (days)",
         retentionCap: "Webhook deletions per sweep",
         inviteLapseCap: "Invite expirations per sweep",
+        pullRequestRetentionDays: "Closed PR retention (days)",
+        pullRequestRetentionCap: "Closed PR deletions per sweep",
       },
       sweepSave: "Save sweep settings",
       sweepSaved: "Sweep settings saved.",

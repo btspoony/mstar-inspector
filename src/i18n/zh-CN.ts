@@ -1050,7 +1050,7 @@ export const zhCN: Dictionary = {
       reconcileUnreadable: "无法信任部分设置，恢复任务使用全部默认值继续执行。请重试读取，或填写并保存全部设置。",
       sweepTitle: "定时故障巡检",
       sweepDescription:
-        "在下一次巡检生效。失败次数超过阈值时触发告警；告警窗口用于统计失败次数和抑制重复告警。保留期清理会永久删除过期的 Webhook 投递记录。",
+        "在下一次巡检生效。失败次数超过阈值时触发告警；告警窗口用于统计失败次数和抑制重复告警。保留期清理会永久删除过期的 Webhook 投递记录和已关闭或已合并的 PR。",
       sweepFields: {
         failureThreshold: "失败告警阈值",
         windowHours: "告警窗口（小时）",
@@ -1058,6 +1058,8 @@ export const zhCN: Dictionary = {
         retentionDays: "Webhook 保留期（天）",
         retentionCap: "每次巡检最多删除的投递记录",
         inviteLapseCap: "每次巡检最多标记过期的邀请",
+        pullRequestRetentionDays: "已关闭 PR 保留期（天）",
+        pullRequestRetentionCap: "每次巡检最多删除的已关闭 PR",
       },
       sweepSave: "保存巡检设置",
       sweepSaved: "已保存巡检设置。",
