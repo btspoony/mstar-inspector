@@ -282,7 +282,8 @@ describe("SandboxV1 Durable Object", () => {
     const started = Date.now();
     const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
       // KILL_GRACE_MS is 5 s; the pre-exec guard refuses anything closer.
-      deadlineEpochMs: started + 5_000 + 60,
+      // The mock exec never resolves, so the wait stays bounded by the deadline.
+      deadlineEpochMs: started + 5_000 + 2_000,
     });
 
     expect(dispatched).toBe(1);

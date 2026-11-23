@@ -5,6 +5,9 @@ import "../helpers/cloudflare-workers-mock";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 import { createMigratedTestD1, seedBot, seedTarget } from "../store/helpers";
 import { defaultSweepLog } from "../../src/worker/sweep";
+import type { FailureCode } from "../../src/contracts/failure-codes";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
+import { handleReviewJob, type DeliveryRefusal, type HandlerDeps } from "../../src/worker/handlers";
 
 const { default: worker, Sandbox, SandboxV1 } = await import("../../src/worker/entry");
 import { APP_VERSION } from "../../src/version";
@@ -155,5 +158,57 @@ describe("worker entry scheduled wiring", () => {
     }
     const sweepFailure = warnCalls.find((call) => call.fields.event === "ops_sweep_failed");
     expect(sweepFailure?.fields.detail).toContain("d1 down");
+  });
+});
+
+describe("worker entry delivery refusals", () => {
+  const SHA = "0123456789abcdef0123456789abcdef01234567";
+  const TARGET_ID = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+
+  async function refusalCode(refusal: DeliveryRefusal): Promise<FailureCode> {
+    const db = createMigratedTestD1();
+    seedBot(db, "bot-entry-refusal", 9501);
+    seedTarget(db, "bot-entry-refusal", { id: TARGET_ID });
+    const payload: ReviewJobPayload = {
+      installation_id: 12345,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 7,
+      head_sha: SHA,
+      action: "opened",
+      triggered_by: "pull_request",
+      botRef: { appId: "11111111-2222-3333-4444-555555555555" },
+      targetId: TARGET_ID,
+    };
+    const { REVIEW_QUEUE, IDEMPOTENCY_KV } = makeEnv();
+    const deps: HandlerDeps = {
+      env: { IDEMPOTENCY_KV, REVIEW_QUEUE, DB: db as unknown as D1Database },
+      log: { info: () => {}, warn: () => {} },
+    };
+    const outcome = await handleReviewJob(payload, deps, refusal);
+    expect(outcome.kind).toBe("skipped");
+    // The bun:sqlite double returns an untyped row; the query selects one column.
+    const row = db.raw.query("SELECT error_code FROM review_failures").get() as {
+      error_code: FailureCode;
+    };
+    return row.error_code;
+  }
+
+  test("a quota refusal carries its own code", async () => {
+    expect(await refusalCode({ kind: "quota-exhausted", limit: 2000, used: 1999, cost: 60 })).toBe(
+      "review.delivery.quota_exhausted",
+    );
+  });
+
+  test("an unreadable entitlement carries its own code", async () => {
+    expect(await refusalCode({ kind: "entitlement-unreadable" })).toBe(
+      "review.delivery.entitlement_unreadable",
+    );
+  });
+
+  test("a shared-bot refusal keeps the deferred code", async () => {
+    expect(await refusalCode({ kind: "shared-bot-not-included", planId: "free" })).toBe(
+      "review.delivery.deferred",
+    );
   });
 });
