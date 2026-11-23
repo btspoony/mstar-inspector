@@ -29,6 +29,8 @@ export const FAILURE_CODES = [
   "review.github.unavailable",
   "review.admission.refused",
   "review.delivery.deferred",
+  "review.delivery.quota_exhausted",
+  "review.delivery.entitlement_unreadable",
   "review.metering.unrecorded",
   "review.recheck.unaccounted",
   "review.internal.unclassified",
@@ -71,11 +73,15 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.github.unavailable":
     "GitHub could not be reached while the review was being published. Nothing was published; it will be retried.",
   "review.admission.refused":
-    "This commit was not reviewed: another review already holds this pull request. Nothing was charged.",
+    "This commit was not reviewed: another review already holds a slot for this pull request, or the workspace's limit on concurrent reviews was reached. Nothing was charged.",
   "review.delivery.deferred":
     "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
+  "review.delivery.quota_exhausted":
+    "This commit was not reviewed: the workspace's review quota for this period is used up. Nothing was charged.",
+  "review.delivery.entitlement_unreadable":
+    "This commit was not reviewed: the bot could not confirm its access to this repository. Nothing was charged.",
   "review.metering.unrecorded":
-    "The review ran but its metering row could not be written, so usage may be lower than the work done. The review was not published.",
+    "The review's usage row was recorded late or more than once. Usage figures may be off; the review itself is unaffected and nothing extra was charged.",
   "review.recheck.unaccounted":
     "A follow-up check could not be reconciled. The review result stands and nothing extra was charged; the check may need a manual re-run.",
   "review.internal.unclassified":

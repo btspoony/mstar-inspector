@@ -114,8 +114,8 @@ export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Prom
   await db
     .prepare(
       `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
-       SELECT ?1, COALESCE(MAX(seq), 0) + 1, ?2, ?3, ?4, ?5, ?6 FROM usage_events WHERE review_id = ?1
-         AND NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
+       SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6
+       WHERE NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
     )
     .bind(
       input.reviewId,
