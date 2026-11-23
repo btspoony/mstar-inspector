@@ -18,9 +18,20 @@ import {
 import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
-import { carriesSecretForm, redactExactSecrets, redactReviewOutput, redactReviewOutputExact, redactSecrets } from "./redact";
+import {
+  carriesSecretForm,
+  redactExactSecrets,
+  redactLedgerText,
+  redactReviewOutput,
+  redactReviewOutputExact,
+  redactSecrets,
+} from "./redact";
 import { type D1ArtifactStore } from "../store/artifact-store";
-import { type FailureStage, type FailureStore } from "../store/failure-store";
+import {
+  settlementFailureRowStatement,
+  type FailureStage,
+  type FailureStore,
+} from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
   recordUsageEvent,
@@ -44,7 +55,13 @@ import {
 } from "../store/review-checks";
 import {
   beginAttemptSettlement,
+  clearRefusalPending,
+  clearRecheckDuty,
   deliveryKeyOf,
+  readRecheckAttribution,
+  markRefusalPending,
+  recordRecheckAttribution,
+  recordRecheckDuty,
   readAttemptCheckKey,
   readAttemptHandoff,
   recordSuccessorIntent,
@@ -121,7 +138,9 @@ import {
   MovedHeadError,
   noLaunchState,
   noteCheckOwed,
+  openGateSecrets,
   runReviewAttempt,
+  readGateSecretsEnvelope,
   AttemptUnknownError,
   discardReviewAttempt,
   type ReviewAttemptExecution,
@@ -1080,7 +1099,9 @@ function reconcileRecheckRound(input: {
   doc: RecheckDoc | null;
   status: RecheckStatus | null;
   discussion: Discussion;
-  output: ReviewOutput;
+  /** The round's capped main findings — empty for a degraded (unparseable) output. */
+  findings: readonly ReviewFinding[];
+  /** Stale lifecycle state (failed pending-journal apply or capture): no closure. */
   staleContext: boolean;
   catalogExcluded: ReadonlySet<string>;
   catalogBudgetExcluded: ReadonlySet<string>;
@@ -1101,7 +1122,7 @@ function reconcileRecheckRound(input: {
     doc,
     status,
     discussion,
-    output,
+    findings,
     staleContext,
     catalogExcluded,
     catalogBudgetExcluded,
@@ -1119,9 +1140,9 @@ function reconcileRecheckRound(input: {
     relatedCurrentFindingIndexes: [],
   });
 
-  const currentFingerprints = new Set(output.findings.map((f) => computeFindingFingerprint(f)));
+  const currentFingerprints = new Set(findings.map((f) => computeFindingFingerprint(f)));
   const currentComposites = new Set(
-    output.findings.map((f) => computeFindingFingerprint({ ...f, fingerprint_hint: null })),
+    findings.map((f) => computeFindingFingerprint({ ...f, fingerprint_hint: null })),
   );
   const answeredRowIds = new Set((doc?.results ?? []).map((row) => row.rowId));
 
@@ -1188,7 +1209,9 @@ function reconcileRecheckRound(input: {
       if (currentFingerprints.has(fingerprint) || currentComposites.has(composite)) {
         assessment = forceUnverifiable(target.rowId, "conflict");
       } else {
-        const inRange = assessment.relatedCurrentFindingIndexes.every((i) => i < output.findings.length);
+        // Validate model-reported related indexes against the FINAL
+        // envelope; any related unresolved concern wins over addressed.
+        const inRange = assessment.relatedCurrentFindingIndexes.every((i) => i < findings.length);
         if (!inRange) {
           assessment = forceUnverifiable(target.rowId, "conflict");
         } else if (
@@ -1476,7 +1499,14 @@ export type ProcessDeps = {
   attemptCapMs?: number;
   runnerConfigs: Map<string, RunnerConfig>;
   checkSettlements: Map<string, CheckSettlement>;
-  credentials: Map<string, { token: string; secretValues: string[] }>;
+  /**
+   * The purpose-scoped token this host minted for the attempt, cached so the
+   * prepare and review phases of ONE invocation never mint twice. It carries no
+   * gate credential set: the publish gate scans the sealed envelope on the
+   * attempt row, and only that, so no in-process value can stand in for the
+   * paid session's own. No token ever crosses a phase boundary.
+   */
+  credentials: Map<string, string>;
 };
 
 /**
@@ -2499,7 +2529,13 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
-  deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
+  // A MOVED HEAD never continues on the old identity. The identity frozen below
+  // is the one the LIVE claim owns — the claim the checkout settled on, after
+  // any supersede — so a frozen key that disagrees with it can only mean another
+  // caller froze a DIFFERENT head, and that attempt settles as skipped.
+  // The host caches the credential it just minted, so the phases of THIS
+  // invocation never re-mint; a resumed host starts empty and mints again.
+  deps.credentials.set(attemptId, token);
 
   const key: IdempotencyKey = {
     installation_id: payload.installation_id,
@@ -3193,17 +3229,81 @@ async function preparePhase(
  * state: a reply is not a completion, so an ambiguous one leads to collection
  * or recovery, never to a second launch.
  */
+/**
+ * The ONE owner of the "is this attempt's paid result durable?" probe and its
+ * read-fault semantics, shared by the Workflow callback and `reviewAttempt`.
+ *
+ * An UNOBSERVABLE fence is UNKNOWN, exactly as the paid-entry ladder treats it:
+ * the attempt may already own a paid result nobody can read, so a store fault
+ * must never become an ordinary failure (which would write a failure row,
+ * conclude the Check and stamp the claim on a review that was already paid).
+ * `persistedAtMs: null` means "not durable — carry on"; a fault throws
+ * `AttemptUnknownError`.
+ */
+export type PaidFence =
+  /** The paid result is durable: collect owns the rest, nothing may be paid again. */
+  | { kind: "persisted"; persistedAtMs: number }
+  /** No durable outcome yet and the row can still be paid once. */
+  | { kind: "payable" }
+  /** The row records a terminal non-payable state: never pay, never resolve config. */
+  | { kind: "unpayable" };
+
+export async function readDurablePaid(deps: Pick<ProcessDeps, "env">, attemptId: string): Promise<PaidFence> {
+  let verdict: ReturnType<typeof launchVerdict>;
+  try {
+    verdict = launchVerdict(await readReviewLaunch(deps.env.DB, attemptId));
+  } catch (err) {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the launch fence could not be read (${err instanceof Error ? err.message : String(err)}) — the paid outcome is unconfirmed`,
+    );
+  }
+  switch (verdict.kind) {
+    case "persisted":
+      return { kind: "persisted", persistedAtMs: verdict.persistedAtMs };
+    case "never-claimed":
+      // No row at all: this attempt cannot be paid, so no config or mint work.
+      return { kind: "unpayable" };
+    case "never-paid":
+      // Provisioned and still releasable: the paid entry may proceed.
+      return { kind: "payable" };
+    case "paid-failed":
+    case "owned-by-cleanup":
+    case "unrecognised":
+      return { kind: "unpayable" };
+    case "paid-unknown":
+      // Sent, but no durable outcome: the paid-entry fence refuses a second pay.
+      return { kind: "unpayable" };
+    default:
+      return noLaunchState(verdict);
+  }
+}
+
 export async function reviewAttempt(
   deps: ProcessDeps,
   ref: AttemptRef,
   prepared: PreparedAttempt,
 ): Promise<ReviewOutcome> {
   const { payload, attemptId, level } = ref;
+  // A callback replayed after this attempt's paid result became durable owns
+  // nothing here: the credentials the model saw are sealed on the row, and a
+  // set derived from today's config would be a DIFFERENT one. Return the row's
+  // state before minting a token, resolving a config or caching anything.
+  const fence = await readDurablePaid(deps, attemptId);
+  if (fence.kind === "persisted") return { state: "persisted", persistedAtMs: fence.persistedAtMs };
+  if (fence.kind === "unpayable") {
+    // Nothing may be paid or collected from this row, and today's config must not
+    // be consulted to say so (a broken config would turn an unpayable replay into
+    // an ordinary failure).
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: the launch row records a non-payable outcome — no paid step may be taken`,
+    );
+  }
   const runner = requireRunnerConfig(deps, payload);
   const progress = beginProgress();
   const sandbox = await reviewAttemptSandbox(deps, attemptId);
-  const cached = deps.credentials.get(attemptId);
-  const token = cached?.token ?? (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
+  const token =
+    deps.credentials.get(attemptId) ??
+    (await mintSandboxReadToken({ payload, commenter: requireCommenter(deps, payload) }));
   const fields = attemptFields(payload, level, attemptId, prepared.headSha, prepared.budget);
   try {
     await runReviewAttempt({
@@ -3231,7 +3331,6 @@ export async function reviewAttempt(
       progress,
       attemptId,
     });
-    deps.credentials.set(attemptId, { token, secretValues: progress.secretValues });
   } catch (err) {
     throw phaseFailure("review", err, {
       stage: progress.failureStage,
@@ -3303,23 +3402,51 @@ function modelTexts(
   return texts.filter((text) => text !== "");
 }
 
-async function refusesCredentialEcho(
+/**
+ * The credential values the publish gate scans for: the paid session's own set,
+ * sealed onto the attempt row by the paid step. That envelope is the ONLY
+ * source — an in-process value could only ever restate it, and a replayed or
+ * re-derived set must never stand in for the credentials the model actually
+ * saw. `null` means the row carries none (paid before the seal existed): the
+ * gate refuses rather than publish a body it cannot scan. A store fault throws,
+ * so the attempt retries rather than publishes unscanned.
+ */
+async function attemptGateSecrets(deps: ProcessDeps, ref: AttemptRef): Promise<string[] | null> {
+  const sealed = await readGateSecretsEnvelope(deps.env.DB, ref.attemptId);
+  if (sealed === null) return null;
+  return openGateSecrets(deps.env.DASHBOARD_ENCRYPTION_KEY, ref.attemptId, sealed);
+}
+
+/**
+ * SEC-01 publish gate DECISION: the refusal cause for the first text that
+ * carries a credential form, or `null` when the body may publish. Pure — the
+ * caller settles the refusal through the attempt's own failure path, and the
+ * decision is available BEFORE the round's accounting so that accounting can
+ * bind its artifacts to a refusal (`I-000686`). `secrets === null` (no envelope)
+ * is refused the same way: publishing a body the gate could not scan would be
+ * the very gap this gate exists to close.
+ */
+function credentialEchoRefusal(secrets: readonly string[] | null, texts: readonly string[]): Error | null {
+  if (secrets === null) {
+    return new Error("publish gate refused the review — this attempt predates the sealed credential set");
+  }
+  return texts.some((text) => carriesSecretForm(text, secrets))
+    ? new Error("publish gate refused the review — the outgoing body carries a credential echo")
+    : null;
+}
+
+/**
+ * Settle a gate refusal through the ATTEMPT'S FAILURE path (failure row +
+ * failed claim + Check conclusion) — the review genuinely did not deliver, and
+ * a publication-only settlement would have nothing to close.
+ */
+async function settleGateRefusal(
   deps: ProcessDeps,
   ref: AttemptRef,
   prepared: PreparedAttempt,
   progress: ReviewAttemptProgress,
-  texts: readonly string[],
-  fields: ConsumerLogFields,
-): Promise<"clear" | "settled" | "unknown"> {
-  if (progress.secretValues.length === 0) {
-    deps.log.warn(
-      fields,
-      "review publish gate could not run — this host holds no credentials for the attempt (the stored payload was redacted at write time)",
-    );
-    return "clear";
-  }
-  if (!texts.some((text) => carriesSecretForm(text, progress.secretValues))) return "clear";
-  const refusal = new Error("publish gate refused the review — the outgoing body carries a credential echo");
+  refusal: Error,
+): Promise<"settled" | "unknown"> {
   const wrapped = phaseFailure("collect", refusal, {
     stage: "pipeline",
     headSha: prepared.headSha,
@@ -3382,18 +3509,221 @@ async function collectPhase(
   const catalogExcluded: ReadonlySet<string> = new Set(prepared.catalogExcluded);
   const catalogBudgetExcluded: ReadonlySet<string> = new Set(prepared.catalogBudgetExcluded);
   const budgetExcluded = new Set(prepared.budgetExcluded);
-  progress.secretValues = deps.credentials.get(attemptId)?.secretValues ?? [];
+  // The paid result is the LAUNCH ROW's, never a predecessor's return value.
   const execution = await readPaidExecution(deps, attemptId);
+  // SEC-01: the gate — and every exact-value redaction below — works from the
+  // credential set the PAID session actually handed the model, sealed onto this
+  // attempt's row by the paid step. The seal is the ONLY source (a replayed or
+  // re-derived set must never stand in for it). `null` means the row carries
+  // none: the gate refuses rather than certify a body it could not scan.
+  const gateSecrets = await attemptGateSecrets(deps, ref);
+  progress.secretValues = gateSecrets ?? [];
   const { run, recheck, report, appliedProvider } = execution;
   const recheckDoc = recheck?.doc ?? null;
   const rejectedRowIds = recheck?.rejected ?? new Set<string>();
   const anonymousRejectedRows = recheck?.anonymousRejectedRows ?? 0;
+  // The stale-context flag belongs to the ROUND, not to one parse outcome: the
+  // degraded refusal path accounts the same round.
+  const staleContext = pendingApplyFailed || captureFailed;
+  // §7.8 attribution: ONE line per recheck round carrying the seat's own status
+  // next to this round's accounting. A lost round therefore leaves a D1 failure
+  // row and this line even when the container's stderr is gone. Emitted
+  // whenever rows were selected: a round the §7.3 size budget emptied sent
+  // nothing, and without this line that silence would be invisible.
+  //
+  // THE ROUND'S ACCOUNTING runs for every outcome that could have shipped a
+  // round — the publish path, a parseable refusal and a DEGRADED refusal alike.
+  // `required` binds the shipped-failure row to the refusal that follows: a
+  // refused review is not settled while its required row is missing, so an
+  // insert fault propagates (the collect step retries) instead of leaving a
+  // settled attempt with an incomplete ledger (I-000686).
+  const accountRecheckRound = async (
+    findings: readonly ReviewFinding[],
+    required: boolean,
+  ): Promise<ReturnType<typeof reconcileRecheckRound>> => {
+    const reconciled = reconcileRecheckRound({
+      targets,
+      doc: recheckDoc,
+      status: recheck?.status ?? null,
+      // The seat's own view: a thread of a row this round could not fit was
+      // never handed over, so it cannot authorize a resolve either.
+      discussion: askedDiscussion,
+      findings,
+      staleContext,
+      catalogExcluded,
+      catalogBudgetExcluded,
+      budgetExcluded,
+      rejectedRowIds,
+      anonymousRejectedRows,
+    });
+    if (targets.length === 0) return reconciled;
+    const status = recheck?.status ?? null;
+    const recheckOutcome = status?.outcome ?? "absent";
+    // The runner cancels an unfinished seat when the main review settles
+    // (spec §7.8): the round answered nothing because it was STOPPED, not
+    // because it ran and lost. That is neither a failure row nor an
+    // `invalid-output` for a row the seat never answered.
+    const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
+    // The status document belongs to the SEAT; a round whose document was
+    // lost has its real cause on the read side (absent / overflow /
+    // validation failure), so that cause LEADS the detail instead of the
+    // seat's `ok: null: null`, which says nothing about what went wrong.
+    // `failed` already names the seat's own fault, so it keeps its triple.
+    const docFailure = recheck?.docFailure ?? null;
+    // The seat's `reason`/`error` are MODEL text: a credential can ride them in a
+    // form only the exact set recognizes. They are emitted only when that set is
+    // available — every form of it removed — and withheld entirely when it is not
+    // (the round is still accounted by its counts). Nothing from the seat is
+    // persisted without the set that can prove it clean.
+    const seatText = (text: string): string | null =>
+      progress.secretValues.length === 0
+        ? null
+        : redactLedgerText(redactSecrets(text), progress.secretValues);
+    const detailSource =
+      recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
+        ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
+        : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`;
+    const recheckDetail = (
+      progress.secretValues.length === 0
+        ? `${recheckOutcome}: status text withheld — the attempt carries no sealed credential set`
+        : redactLedgerText(redactSecrets(detailSource), progress.secretValues)
+    ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
+    // Shipped failure rule: a round that SENT rows records one row when its
+    // document is absent or the seat reported `failed` — a seat budget skip
+    // records one too, because that round ran and answered nothing. A round
+    // the runner cancelled by design, and a round that sent nothing at all
+    // (capture failed, catalog exclusion, §7.3 size budget), records none:
+    // its rows are already accounted as `budget`/`no-evidence`/`omitted` in
+    // the closure section.
+    const shipped =
+      recheckInput !== undefined && !roundCancelled && (recheckDoc === null || recheckOutcome === "failed");
+    // RULING 1: a REFUSAL's intent is durable before any accounting effect (the
+    // marker, then the duty with its facts). A marker-write fault throws — fail
+    // closed — and every settlement lane reads the marker instead of inferring
+    // the obligation from a duty row that may never have committed.
+    if (required) await markRefusalPending(deps.env.DB, attemptId, Date.now());
+    const emitAttribution = (): void =>
+      deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
+        {
+          ...fields,
+          recheck_outcome: recheckOutcome,
+          // Same wrapper as `error`: a seat-authored `reason` can echo a
+          // credential exactly like `error` can.
+          recheck_reason: status?.reason === null || status?.reason === undefined
+            ? null
+            : seatText(status.reason),
+          recheck_error: status?.error === null || status?.error === undefined
+            ? null
+            : seatText(status.error),
+          // Named drops + the unnamed ones actually attributed (no usable
+          // rowId, so mapped by position): the count reports what happened,
+          // not only what could be named.
+          rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
+          // A seat-authored `rejected_unnamed` is unbounded; any claim beyond
+          // the sent-and-unanswered pool is excess that can claim no row. It is
+          // dropped, and reported here so the silence has a number.
+          rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
+          // Real seat answers (the published coverage count), never the
+          // lifecycle clock — a gate-rejected row advances `last_assessed_ms`
+          // without ever having been assessed.
+          assessed: reconciled.assessedCount,
+        },
+        recheckInput !== undefined
+          ? recheckDoc === null
+            ? roundCancelled
+              ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
+              : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
+            : "recheck round accounted"
+          : captureFailed
+            ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
+            : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
+      );
+    /**
+     * The round's durable accounting, in order: the DUTY first (a replay needs it),
+     * the shipped row, then the attribution line at-least-once — emitted before
+     * its own fact is recorded, so a crash in between duplicates the line at the
+     * sink but can never lose it. The duty is discharged only once both effects
+     * are durable, and the settlement rule reads those facts, never a host's say.
+     */
+    const accountDurably = async (): Promise<void> => {
+      await recordRecheckDuty(
+        deps.env.DB,
+        { attemptId, headSha, failureError: shipped ? recheckDetail : null, outcome: recheckOutcome },
+        Date.now(),
+      );
+      if (shipped) {
+        // Attempt+stage id, distinct from the parse/main rows: ONE durable record
+        // per shipped round, so a collect retry (or two concurrent entries)
+        // cannot count the round twice.
+        await deps.failureStore.record({
+          id: `${attemptId}:recheck`,
+          target_id: payload.targetId,
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: headSha,
+          stage: "recheck",
+          error: recheckDetail,
+        });
+      }
+      if (!(await readRecheckAttribution(deps.env.DB, attemptId))) {
+        emitAttribution();
+        await recordRecheckAttribution(deps.env.DB, attemptId, Date.now());
+      }
+      await clearRecheckDuty(deps.env.DB, attemptId);
+      // The refusal marker is discharged with the duty: both effects are durable.
+      if (required) await clearRefusalPending(deps.env.DB, attemptId);
+    };
+    if (!required) {
+      // The publish lane stays BEST-EFFORT end to end: nothing here may block a
+      // review the gate cleared from staging and publishing (F-010).
+      try {
+        await accountDurably();
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(fields, `recheck round accounting failed (continuing to publish): ${detail}`);
+      }
+      return reconciled;
+    }
+    // A REFUSAL fails closed: a duty that cannot be recorded, a row that cannot be
+    // written, or a fact that cannot be stored throws out of collect — the refusal
+    // is never settled over an accounting it does not hold (F-006 edge 1).
+    await accountDurably();
+    return reconciled;
+  };
+
+  // 9. Parse + validate the envelope (engine gate inside parseReviewOutput;
+  // mapping spec §4.2). Parse-fail is the DEGRADE path (architect AL-1):
+  // parseReviewOutput is a pure function of run.stdout —
+  // the same stdout fails identically on a retry (a deterministic
+  // model-output failure), so the message ACKS instead of throwing. Order:
+  // review_failures row (best-effort — an insert failure must never mask
+  // the degrade) → degraded comment (best-effort — a post failure is a
+  // structured log line only) → the `degraded` outcome the queue handler
   const parsed = parseReviewOutput(run.stdout);
   if (!parsed.ok) {
+    // SEC-01 exact-value defense: the session's ACTUAL secret values
+    // (runner env provider keys + the minted installation token) are
+    // exact-redacted from the parse error and the raw stdout BEFORE they
+    // reach the delegated gate inputs or the public degraded comment — a
+    // credential that evades every shape pattern is still removed.
     const redactedError = redactExactSecrets(redactSecrets(parsed.error), progress.secretValues);
     const redactedStdout = redactExactSecrets(redactSecrets(run.stdout), progress.secretValues);
+    // The diagnostic we STORE and LOG is model-controlled text (unknown keys ride
+    // the engine's error), so it follows the LEDGER policy rather than the
+    // publication gate's: every form of the sealed set removed, and withheld
+    // entirely when the attempt carries no set to prove it clean. The two gate
+    // inputs above are untouched.
+    const diagnostic =
+      progress.secretValues.length === 0
+        ? "parse diagnostic withheld — the attempt carries no sealed credential set"
+        : redactLedgerText(redactSecrets(parsed.error), progress.secretValues);
     try {
+      // Attempt+stage identity: the stdout is immutable, so a re-entered collect
+      // must not append a second diagnostic for the same parse failure (F-008).
       await deps.failureStore.record({
+        id: `${attemptId}:parse`,
         target_id: payload.targetId,
         installation_id: payload.installation_id,
         owner: payload.owner,
@@ -3401,22 +3731,29 @@ async function collectPhase(
         pr_number: payload.pr_number,
         head_sha: headSha,
         stage: "parse",
-        error: redactedError,
+        // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
+        // model-emitted secret-shaped value (`verdict "ghp_…" is not one
+        // of …`) — redactSecrets BEFORE the durable D1 row, same face as
+        // buildDegradedBody's public-comment choke point. SEC-01 adds the
+        // exact-value pass on top.
+        error: diagnostic,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       deps.log.warn(fields, `review_failures insert failed (degrade continues): ${detail}`);
     }
-    const degradedGate = await refusesCredentialEcho(
-      deps,
-      ref,
-      prepared,
-      progress,
-      [redactedStdout, redactedError],
-      fields,
-    );
-    if (degradedGate !== "clear") {
-      return { kind: "settled", outcome: { kind: degradedGate === "unknown" ? "unknown" : "ok" } };
+    // The degraded body embeds the raw stdout and the parse error: gate the
+    // same credential forms — each text on its own, so a short encoding that
+    // IS the whole stdout still exact-matches — before anything is staged.
+    const degradedRefusal = credentialEchoRefusal(gateSecrets, [redactedStdout, redactedError]);
+    if (degradedRefusal !== null) {
+      // A refused degraded attempt owes its shipped round's accounting exactly
+      // like a parseable refusal: there are no main findings to reconcile, so
+      // the counts are conservative by construction, and the row is REQUIRED
+      // (the refusal is not settled without it). The refusal marker comes first.
+      await accountRecheckRound([], true);
+      const outcome = await settleGateRefusal(deps, ref, prepared, progress, degradedRefusal);
+      return { kind: "settled", outcome: { kind: outcome === "unknown" ? "unknown" : "ok" } };
     }
     refusePublicationPastDeadline(ref.deadlineMs);
     const degradedCheckAttemptId = check?.handle?.attemptId ?? (await ownedCheckAttemptId(deps, ref.attemptId));
@@ -3449,7 +3786,7 @@ async function collectPhase(
     }
     deps.log.warn(
       fields,
-      `review degraded: output failed schema validation (${redactedError}) — degraded publication ${degradedOutcome.phase}` +
+      `review degraded: output failed schema validation (${diagnostic}) — degraded publication ${degradedOutcome.phase}` +
         `${degradedOutcome.phase === "failed" ? ` (${degradedOutcome.reason})` : ""}; acked, no retry/DLQ`,
     );
     if (payload.head_sha) {
@@ -3484,93 +3821,30 @@ async function collectPhase(
   };
   const capped = capFindings(clampFindingSizes(suggestionsDropped));
   const output = capped.output;
-  const publishGate = await refusesCredentialEcho(
-    deps,
-    ref,
-    prepared,
-    progress,
+  // 11. §7.7 step 6 — the round's accounting, then the publish gate. The gate's
+  // DECISION is taken first (it is pure), so the accounting can bind its
+  // artifacts to the refusal that follows; a clean review publishes exactly as
+  // it did before.
+  //
+  // SEC-01 publish gate: scan the MODEL fields before any renderer runs. Host
+  // template (markers, commit SHA, schema tags) is not model output, so a key
+  // whose encoding collides with it can never refuse a clean review.
+  const publishRefusal = credentialEchoRefusal(
+    gateSecrets,
     modelTexts(
       output,
       report,
       targets.map((target) => target.original.title),
     ),
-    fields,
   );
-  if (publishGate !== "clear") {
-    return { kind: "settled", outcome: { kind: publishGate === "unknown" ? "unknown" : "ok" } };
-  }
-  const staleContext = pendingApplyFailed || captureFailed;
-  const reconciled = reconcileRecheckRound({
-    targets,
-    doc: recheckDoc,
-    status: recheck?.status ?? null,
-    discussion: askedDiscussion,
-    output,
-    staleContext,
-    catalogExcluded,
-    catalogBudgetExcluded,
-    budgetExcluded,
-    rejectedRowIds,
-    anonymousRejectedRows,
-  });
-  if (targets.length > 0) {
-    const status = recheck?.status ?? null;
-    const recheckOutcome = status?.outcome ?? "absent";
-    const roundCancelled = recheckOutcome === "skipped" && status?.reason === "aborted";
-    const docFailure = recheck?.docFailure ?? null;
-    const recheckDetail = redactExactSecrets(
-      redactSecrets(
-        recheckDoc === null && docFailure !== null && recheckOutcome === "ok"
-          ? `document ${docFailure}: ${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`
-          : `${recheckOutcome}: ${status?.reason ?? null}: ${status?.error ?? null}`,
-      ),
-      progress.secretValues,
-    ).slice(0, RECHECK_STATUS_ERROR_MAX_CHARS);
-    deps.log[recheckDoc === null && !roundCancelled ? "warn" : "info"](
-      {
-        ...fields,
-        recheck_outcome: recheckOutcome,
-        recheck_reason: status?.reason === null || status?.reason === undefined
-          ? null
-          : redactExactSecrets(redactSecrets(status.reason), progress.secretValues),
-        recheck_error: status?.error === null || status?.error === undefined
-          ? null
-          : redactExactSecrets(redactSecrets(status.error), progress.secretValues),
-        rejected: rejectedRowIds.size + reconciled.anonymousRejectedCount,
-        rejected_unnamed_ignored: anonymousRejectedRows - reconciled.anonymousRejectedCount,
-        assessed: reconciled.assessedCount,
-      },
-      recheckInput !== undefined
-        ? recheckDoc === null
-          ? roundCancelled
-            ? "recheck round cancelled by the runner — no row was answered, no failure recorded"
-            : "recheck output absent or failed validation — proceeding with selected rows conservatively unverifiable"
-          : "recheck round accounted"
-        : captureFailed
-          ? "recheck round accounted — no input sent: lifecycle context capture failed, so no recheck could run"
-          : "recheck round accounted — no input sent: no selected row was both catalog-provable and within the §7.3 size budget",
-    );
-    if (
-      recheckInput !== undefined &&
-      !roundCancelled &&
-      (recheckDoc === null || recheckOutcome === "failed")
-    ) {
-      try {
-        await deps.failureStore.record({
-          target_id: payload.targetId,
-          installation_id: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          pr_number: payload.pr_number,
-          head_sha: headSha,
-          stage: "recheck",
-          error: recheckDetail,
-        });
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        deps.log.warn(fields, `review_failures insert failed (recheck round continues): ${detail}`);
-      }
-    }
+  // The round is reconciled against the SAME round's final capped findings
+  // (§7.4 conservative precedence: same-round recurrence and related unresolved
+  // concerns force unverifiable; rows the seat was never given are accounted but
+  // never "assessed").
+  const reconciled = await accountRecheckRound(output.findings, publishRefusal !== null);
+  if (publishRefusal !== null) {
+    const outcome = await settleGateRefusal(deps, ref, prepared, progress, publishRefusal);
+    return { kind: "settled", outcome: { kind: outcome === "unknown" ? "unknown" : "ok" } };
   }
   const contextCoverage: Coverage = staleContext
     ? "unavailable"

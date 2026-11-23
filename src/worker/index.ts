@@ -798,6 +798,8 @@ export default {
         DB: db,
         REVIEW_QUEUE: env.REVIEW_QUEUE,
         IDEMPOTENCY_KV: routeKv,
+        // The pass owns the refused round's accounting replay, including its log line.
+        log: defaultSweepLog,
       });
     } catch (error) {
       defaultSweepLog.warn(

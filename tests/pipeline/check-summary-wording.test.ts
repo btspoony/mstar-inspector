@@ -121,16 +121,18 @@ describe("the Check summary carries the approved wording", () => {
     expect(row.terminal_ms).not.toBeNull();
   });
 
-  test("a conclusion-only match is not delivery — the frozen text is sent to that run", async () => {
+  test("a conclusion-only match on a concluded run is never rewritten", async () => {
     const db = seededDb();
     const id = await frozenCapStop(db);
-    let sent: CheckConclusion | null = null;
     let updates = 0;
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, {
         now: () => T0 + 1,
         credentials: scriptedCredentials(db, {
+          // note: Same conclusion, but the run's own text is an OLDER wording (an
+          // earlier writer's, or none at all) — and the run is CONCLUDED. A concluded
+          // Check is never rewritten, so the wording is not delivered over it.
           fetch: async (identity, checkRunId) => ({
             kind: "found",
             remote: remoteFor(identity, {
@@ -142,7 +144,6 @@ describe("the Check summary carries the approved wording", () => {
           }),
           complete: async (identity, checkRunId, conclusion) => {
             updates += 1;
-            sent = conclusion;
             return {
               kind: "completed",
               remote: remoteFor(identity, { id: checkRunId, conclusion: "failure", summary: conclusion.summary }),
@@ -150,16 +151,19 @@ describe("the Check summary carries the approved wording", () => {
           },
         }),
       });
-      expect(summary.completed).toBe(1);
+      expect(summary.completed).toBe(0);
     } finally {
       fetchStub.restore();
     }
-    expect(updates).toBe(1);
-    expect(sent!.summary).toBe(APPROVED);
-    expect(sent!.failureStatus).toBe("cap-stop");
+    expect(updates).toBe(0);
     const row = await rawRow(db, id);
+    // note: The disagreement is recorded as a spent attempt (the ladder ends honestly);
+    // the run keeps its own concluded text and its own id.
     expect(row.check_run_id).toBe(4242);
-    expect(row.observed).toBe("failure");
+    expect(row.observed).not.toBe("failure");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(1);
+    expect(row.next_attempt_ms).not.toBeNull();
     expect(row.desired_summary).toBe(APPROVED);
   });
 
@@ -193,7 +197,7 @@ describe("the Check summary carries the approved wording", () => {
     expect(row.attempts).toBe(1);
   });
 
-  test("a reply without the frozen text is not delivery — that run is sent again", async () => {
+  test("a reply without the frozen text is not delivery — and a concluded run is never rewritten", async () => {
     const db = seededDb();
     const id = await frozenCapStop(db);
     let updates = 0;
@@ -228,6 +232,8 @@ describe("the Check summary carries the approved wording", () => {
       expect(afterFirst.check_run_id).toBe(4242);
       expect(afterFirst.next_attempt_ms).not.toBeNull();
 
+      // note: Pass 2: the run is now CONCLUDED and still lacks the text. A concluded
+      // run is never rewritten, so nothing is sent and the row takes another deferral.
       const second = await run(db, {
         now: () => T0 + 61_000,
         credentials: scriptedCredentials(db, {
@@ -254,15 +260,18 @@ describe("the Check summary carries the approved wording", () => {
           },
         }),
       });
-      expect(second.completed).toBe(1);
+      expect(second.completed).toBe(0);
     } finally {
       fetchStub.restore();
     }
-    expect(updates).toBe(2);
+    expect(updates).toBe(1);
     const row = await rawRow(db, id);
+    // note: Nothing terminal was recorded from a concluded run's text-less record, and
+    // the row keeps its own run and its frozen intent for the next ladder step.
     expect(row.check_run_id).toBe(4242);
-    expect(row.observed).toBe("failure");
-    expect(row.terminal_ms).not.toBeNull();
+    expect(row.observed).not.toBe("failure");
+    expect(row.terminal_ms).toBeNull();
+    expect(row.attempts).toBe(2);
     expect(row.desired_summary).toBe(APPROVED);
   });
 

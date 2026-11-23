@@ -1,3 +1,55 @@
+/**
+ * Review attempt budget — the ONE derivation owner.
+ *
+ * The hard stop is ONE absolute instant per attempt: `deadlineMs`, frozen when
+ * the delivery is first admitted as that delivery's claim time plus the
+ * operator's end-to-end cap, and carried on the attempt's durable records so a
+ * resume reads it instead of re-deriving it. The cap is a system row in
+ * `review_runtime_settings` (read here, absent-row default below); the Queue
+ * consumer's 900 000 ms wall clock no longer bounds execution — it bounds
+ * admission (`reviewGuardTtlSeconds`, the Check window), which is why
+ * `ROUND_BUDGET_MS` survives as that platform invariant only.
+ *
+ * Everything a review can spend is derived here from that instant and a named
+ * ledger of post-runner step costs; the consumer (`src/pipeline/consumer.ts`)
+ * and the Check store (`src/store/review-checks.ts`) import this module and
+ * NEVER import one another for budget answers. Every constant below is
+ * internal platform policy — the ledger terms bill steps the pipeline already
+ * owns — so none is a configuration surface (AGENTS.md § Configuration
+ * surfaces; the live terminalize setting the reserve charges is read per
+ * message by the consumer and passed IN).
+ *
+ * The arithmetic: the paid runner's PRE-RUNNER CUTOFF is
+ * `deadlineMs - reserveMs`, where `reserveMs = 224_000 + terminalizeMs` bills
+ * the whole post-runner tail:
+ *
+ *   post-runner bounded reads  POST_RUNNER_READ_BUDGET_MS     90_000
+ *   inline resolution          INLINE_RESOLVE_BUDGET_MS       12_000
+ *   Check begin hook           CHECK_HOOK_TIMEOUT_MS           2_000
+ *   untimed worker-side tail   GUARD_SLACK_MS                120_000
+ *   Check terminalize          live checkBudgets.terminalizeMs 1_000–30_000
+ *                        ---------------------------------------------
+ *                                                             234_000 at the
+ *                                              10_000ms absent-row default
+ *
+ * so the cutoff is 675_000ms at the supported terminalize floor, 666_000ms at
+ * the default and 646_000ms at the 30_000ms ceiling. `terminalizeMs` is the
+ * message's LIVE budget — the same value the terminalize hook runs on — never
+ * the documented default: an operator who raises the setting owes the
+ * difference out of the runner window, not out of thin air. NOT a reserve
+ * term: the `queued` → `in_progress` promotion and every pre-runner sandbox
+ * step (clone, captures, numstat, the input write) spend the round's own
+ * clock before the cutoff instead of being billed twice.
+ *
+ * Tier maxima are table policy sized INSIDE that cutoff for EVERY supported
+ * terminalize value: deep takes the worst-case ceiling (646_000ms), default
+ * keeps its frozen 10 minutes, and quick sits one 120_000ms step window below
+ * default — `quick < default < deep <= cap - reserve` over the whole
+ * [1_000, 30_000] range, so a larger deep value fails the table contract at
+ * the supported maximum. The shipped table is a CEILING the derivation
+ * enforces, not a reservation: a late start shrinks the effective budget the
+ * single min() below grants, never the table.
+ */
 
 import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 

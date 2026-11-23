@@ -139,6 +139,51 @@ function credentialMatcher(secrets: readonly string[]): CredentialMatcher {
   return { pattern: ordered.length === 0 ? null : formPattern(ordered), exact };
 }
 
+/**
+ * Redact every form of each secret from a text WE persist — an attribution log
+ * line, a durable failure row — for seat-authored text that never passes through
+ * `redactDocument`.
+ *
+ * Deliberately stricter than the publish gate's matcher: the gate REFUSES model
+ * output, so it matches a short raw value — and an encoding under its
+ * six-character substring floor — only as a whole leaf, to avoid false
+ * positives. A ledger write has the opposite cost: over-redaction is cheap, a
+ * durable leak is not. So EVERY form is removed wherever it appears — the long
+ * forms (`credentialMatcher`'s patterns) first, then the whole-leaf-only ones as
+ * substrings longest-first, then every raw value at any length.
+ */
+export function redactLedgerText(text: string, secrets: readonly string[]): string {
+  const matcher = credentialMatcher(secrets);
+  let out = redactText(text, matcher, { replaced: 0 });
+  for (const form of [...matcher.exact].sort((left, right) => right.length - left.length)) {
+    out = out.split(form).join(REDACTED);
+  }
+  return redactExactSecrets(out, secrets);
+}
+
+/**
+ * Redact ONE retained document root.
+ *
+ * Identity is protected by traversal path (`IDENTITY_PATHS` for `document`),
+ * not by key name and not by substituting values: a node whose path matches the
+ * table is left untouched, every other string leaf is redacted in place. A path
+ * the document does not carry is simply absent, and forged model text — e.g. a
+ * `summary_md` containing `{"head_sha": …}` — is at no protected path, so the
+ * credential match finds it like any other characters.
+ *
+ * A string document that parses as JSON (after trimming) is worked on as a
+ * structure: `\u002f`, `\/` and `\n` are decoded before matching, and the result
+ * is serialized again ONLY when a replacement happened — an untouched document
+ * keeps its exact bytes, surrounding whitespace included. A changed one loses
+ * that padding. A string leaf is NEVER parsed to look inside it: a leaf is text.
+ *
+ * Every string leaf at every depth is redacted; non-string leaves, object keys
+ * and container shape pass through.
+ *
+ * Shape patterns (`redactSecrets`) stay OUT: their long-hex rule rewrites a
+ * host-written `head_sha`.
+ */
+// limit: a credential split across two leaves, or one the model double-escaped (it decodes to literal `\uXXXX` text), is missed.
 export function redactDocument<T>(
   value: T,
   secrets: readonly string[],

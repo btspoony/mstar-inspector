@@ -50,29 +50,36 @@ export type AbandonClaim =
   | typeof IDEM_DEGRADED
   | typeof IDEM_SUPERSEDED;
 
+/** What one abandon-claim write proved (`done` = a completed review was seen). */
+export type AbandonClaimWrite = "written" | "done" | "unreadable";
+
 /**
  * Write an abandon claim without ever downgrading a completed review: `done`
  * outranks every abandon outcome because it is the durable proof that a commit
  * was reviewed, and erasing it re-reviews (and re-pays for) that commit.
  *
- * Reads first and writes only over a non-`done` claim. A read fault skips the
- * write entirely, leaving the existing claim as it was — callers warn about
- * their own write failure, so this never throws on the read.
+ * Reads first and writes only over a non-`done` claim. The answer says what was
+ * PROVEN: `written` (the put resolved), `done` (the existing claim outranks it),
+ * or `unreadable` (the read faulted, so nothing was written and the claim is
+ * still whatever the worker left there). Callers that record the write as a
+ * durable effect must treat only the first two as proof — an unreadable claim is
+ * owed, not settled, or the head could never be re-triggered.
  */
 export async function putAbandonClaim(
   kv: KVNamespace,
   key: string,
   value: AbandonClaim,
   ttlSeconds: number,
-): Promise<void> {
+): Promise<AbandonClaimWrite> {
   let current: string | null;
   try {
     current = await kv.get(key);
   } catch {
-    return;
+    return "unreadable";
   }
-  if (current === IDEM_DONE) return;
+  if (current === IDEM_DONE) return "done";
   await kv.put(key, value, { expirationTtl: ttlSeconds });
+  return "written";
 }
 
 /**

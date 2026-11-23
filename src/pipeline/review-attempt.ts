@@ -7,6 +7,9 @@ import {
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
 } from "../dashboard/app-config-store";
+// The credential encryption leaf (AES-256-GCM envelope): the paid session's
+// exact gate set is sealed at rest, never stored in the clear.
+import { createSecretbox } from "../dashboard/secretbox";
 import type { GitOpsCommands } from "./gitops";
 import { catalogLimitsFor } from "../contracts/provider-catalog-limits";
 import { resolveModelSize } from "../contracts/provider-models";
@@ -264,10 +267,77 @@ WHERE attempt_id = ? AND state = 'provisioned'
 
 const COMPLETE_LAUNCH_SQL = `
 UPDATE review_launches
-SET state = 'persisted', persisted_at_ms = ?, result_json = ?, result_outcome = 'persisted'
+SET state = 'persisted', persisted_at_ms = ?, result_json = ?, gate_secrets_enc = ?, result_outcome = 'persisted'
 WHERE attempt_id = ? AND state = 'launched'
 `;
 
+/**
+ * The AAD the gate's credential envelope is bound to: the column it lives in
+ * plus this attempt's id, so a ciphertext copied onto another attempt's row
+ * fails the GCM tag (the secretbox contract).
+ */
+const GATE_SECRETS_AAD = "review_launches.gate_secrets_enc";
+
+const READ_GATE_SECRETS_SQL = `SELECT gate_secrets_enc FROM review_launches WHERE attempt_id = ?`;
+
+/**
+ * Seal the paid session's EXACT gate set — the provider keys it transported and
+ * the installation token it minted — onto its own attempt row (I-000685). This
+ * is the set the SEC-01 gate must scan for on a RESUMED host: re-resolving the
+ * App config there would scan for whatever the config holds later, so a rotated
+ * or removed key's echo would pass. Nothing but that gate opens it.
+ */
+export async function sealGateSecrets(
+  encryptionKey: string | undefined,
+  attemptId: string,
+  values: readonly string[],
+): Promise<string> {
+  return createSecretbox(encryptionKey).encryptSecret(
+    JSON.stringify(values),
+    `${GATE_SECRETS_AAD}:${attemptId}`,
+  );
+}
+
+/**
+ * The sealed set's plaintext list. Throws on a tampered / AAD-mismatched /
+ * key-lost envelope — the gate must never treat an unreadable set as empty.
+ */
+export async function openGateSecrets(
+  encryptionKey: string | undefined,
+  attemptId: string,
+  envelope: string,
+): Promise<string[]> {
+  const parsed: unknown = JSON.parse(
+    await createSecretbox(encryptionKey).decryptSecret(envelope, `${GATE_SECRETS_AAD}:${attemptId}`),
+  );
+  if (!Array.isArray(parsed) || !parsed.every((value): value is string => typeof value === "string")) {
+    throw new Error(`attempt ${attemptId}: the sealed gate credential set is not a string list`);
+  }
+  return parsed;
+}
+
+/**
+ * The persisted result's sealed gate set, or `null` when that row records none.
+ * A NULL is only ever a PERSISTED-RESULT fact: the seal is taken before the paid
+ * exec (an encryption fault fails the step, so no result is written), and a
+ * sealing fault can therefore never leave a persisted row without one — the only
+ * NULL rows are attempts paid before the column existed. A store fault throws:
+ * the caller must retry, never publish a body it could not scan.
+ */
+export async function readGateSecretsEnvelope(db: D1Like, attemptId: string): Promise<string | null> {
+  const row = await db
+    .prepare(READ_GATE_SECRETS_SQL)
+    .bind(attemptId)
+    .first<{ gate_secrets_enc: string | null }>();
+  return row?.gate_secrets_enc ?? null;
+}
+
+/**
+ * The attempt's terminal NO-RESULT outcome, as one conditional statement: only
+ * a `launched` row moves to `failed`, so a replay or duplicate settle changes
+ * nothing. It carries `result_outcome` in the same statement (the schema
+ * refuses the timestamp without it).
+ */
 const RECORD_LAUNCH_FAILURE_SQL = `
 UPDATE review_launches
 SET state = 'failed', failed_at_ms = ?, result_outcome = 'failed'
@@ -530,15 +600,22 @@ export async function claimReviewLaunch(
  * cannot be recorded before the result is durable (the schema refuses the
  * combination). `false` means the row did not move — nothing is confirmed.
  */
+/**
+ * @param gateSecretsEnc the seal taken BEFORE the exec (see `runReviewAttempt`).
+ *   A `null` is only legitimate for a row that predates the seal (or a test that
+ *   writes the result directly) — never for an attempt this build paid, whose
+ *   sealing fault fails the step before the result exists.
+ */
 export async function completeReviewLaunch(
   db: D1Like,
   attemptId: string,
   execution: ReviewAttemptExecution,
   nowMs: number,
+  gateSecretsEnc: string | null = null,
 ): Promise<boolean> {
   const written = await db
     .prepare(COMPLETE_LAUNCH_SQL)
-    .bind(nowMs, encodeExecution(execution), attemptId)
+    .bind(nowMs, encodeExecution(execution), gateSecretsEnc, attemptId)
     .run();
   return written.meta.changes === 1;
 }
@@ -1363,6 +1440,15 @@ const RUNNER_EXEC_ENV_PASSTHROUGH_NAMES: readonly string[] = [
   "PI_CODING_AGENT_DIR",
 ];
 
+/**
+ * The ACTUAL secret values one review session carried (SEC-01 exact-value
+ * defense): every provider key the credential payload transported — the values
+ * a prompt-injected model could echo verbatim — plus the installation token
+ * minted for the session. `redactExactSecrets` removes them even when they
+ * evade every shape pattern. The key list is the SAME resolution the runner
+ * exec used (no re-resolution split-brain). The exec env adds nothing here: it
+ * carries only the names in `RUNNER_EXEC_ENV_PASSTHROUGH_NAMES`.
+ */
 function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: readonly string[], token: string): string[] {
   const values: string[] = [token, ...keyValues];
   for (const [name, value] of Object.entries(runnerEnv)) {
@@ -1630,7 +1716,8 @@ export async function prepareReviewAttempt(input: {
  * leaves the attempt `launched` and refuses to confirm completion.
  */
 export async function runReviewAttempt(input: {
-  deps: { log: AttemptLog; env: { DB: D1Like } };
+  deps: { log: AttemptLog; env: { DB: D1Like; DASHBOARD_ENCRYPTION_KEY?: string } };
+  /** The absolute instant the exec is killed at (`anchorRunnerBudget`'s end). */
   deadlineMs: number;
   sandbox: ReviewSandbox;
   headSha: string;
@@ -1765,6 +1852,21 @@ export async function runReviewAttempt(input: {
   const runnerEnv = buildRunnerEnv(appCfg);
   const credentials = buildRunnerCredentials(appCfg, deps.log, fields, customProviders);
   progress.secretValues = sessionSecretValues(runnerEnv, credentials.keyValues, token);
+  // SEC-01 resume (I-000685): the exact set this exec is about to hand the model
+  // — the provider keys it transports plus the installation token it minted — is
+  // sealed HERE, BEFORE the exec: an encryption failure is a PRE-SPEND failure of
+  // the paid step (nothing paid, nothing persisted). The ciphertext then rides the
+  // POST-SPEND statement that records the result, so a persisted row and its seal
+  // are durable together and neither can exist without the other.
+  const gateSecretsEnc = await sealGateSecrets(
+    deps.env.DASHBOARD_ENCRYPTION_KEY,
+    attemptId,
+    progress.secretValues,
+  );
+  // §7.8: with a recheck input the runner gains `--recheck-out` — the seat
+  // writes its validated document to the audited fixed path before the
+  // envelope reaches stdout. `--report-out` rides whenever the report seat
+  // has context to work with.
   const runnerCmd = runnerCommand(
     RUNNER_PATH,
     level,
@@ -1911,7 +2013,7 @@ export async function runReviewAttempt(input: {
   };
   let recorded = false;
   try {
-    recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now());
+    recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now(), gateSecretsEnc);
   } catch (err) {
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),

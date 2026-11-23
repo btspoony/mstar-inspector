@@ -856,6 +856,38 @@ async function reconcileCheckAttempt(
       }
       return;
     }
+    // A conclusion-only match is NOT delivery: the run carries the right
+    // conclusion but no — or different — approved text, so this handoff's
+    // wording never reached the user.
+    //
+    // An ALREADY-CONCLUDED run is nevertheless never rewritten (plan global
+    // constraint: "a Check that already has a conclusion is left alone"). The
+    // new persisted-launch selection can reach rows whose run another lane
+    // concluded, and re-updating a finished run is a write this lane may not
+    // make. The honest local end is the attempt ladder with the fact recorded;
+    // the §7.9a CORRECTION path is the one exception — there the concluded run
+    // carries this row's OWN unconfirmed record and the proof's conclusion must
+    // reach it.
+    if (!isCorrection) {
+      // A terminal update this lane already dispatched is READ BACK, never re-sent
+      // and never charged while its reply may still arrive: the concluded run keeps
+      // its own text, and the row waits without spending an attempt.
+      if ((await readTerminalDispatch(db, attemptId)) !== null && beforeDeadline) {
+        await releaseCheckClaim(db, attemptId, lease, now());
+        log.info(
+          { event: "ops_check_reconcile_dispatch_pending", detail: `attempt=${attemptId}` },
+          "a terminal update was already dispatched — concluded-run readback only, no second send",
+        );
+        return;
+      }
+      await settleFailedAttempt(
+        db, now, budget.settings.checkMaxAttempts, attemptsBefore, row, lease,
+        `remote run is already concluded ${fetched.remote.conclusion ?? "null"} with different text — an already-concluded Check is never rewritten`,
+        log, summary,
+      );
+      return;
+    }
+    // The correction's own text: fall through and send the frozen intent to THAT run.
   }
 
   if ((await readTerminalDispatch(db, attemptId)) !== null) {

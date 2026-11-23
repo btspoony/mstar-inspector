@@ -8,15 +8,24 @@ import { createConsumerHarness, failureRows, makePayload } from "../helpers/cons
 import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore, type FailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
-import { deliveryKeyOf, markAttemptSettled, reserveAttemptHandoff } from "../../src/store/review-route-store";
+import {
+  deliveryKeyOf,
+  listUnpublishedLaunchSettlements,
+  markAttemptSettled,
+  reserveAttemptHandoff,
+  stampOwedSettlementClaim,
+} from "../../src/store/review-route-store";
+import { idemKey } from "../../src/contracts/idem";
 import { reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { claimAttempt } from "../../src/store/review-checks";
+import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
 import type { AttemptRef, CheckSettlement, ProcessDeps } from "../../src/pipeline/review-attempt-execution";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
+const { createReviewConsumer } = await import("../../src/pipeline/consumer");
 const { AttemptPhaseError, cleanupAttempt, settleAttemptFailure } = await import(
   "../../src/pipeline/review-attempt-execution"
 );
@@ -623,5 +632,784 @@ describe("a rejection is not an observation", () => {
     expect(outcome.kind).toBe("budget-exhausted");
     expect(failureRows(db)).toHaveLength(1);
     expect(launchState(db)).toBe("failed");
+  });
+});
+
+// note: ---------------------------------------------------------------------------
+// A persisted launch that never staged a publication (I-000684)
+// ---------------------------------------------------------------------------
+
+/**
+ * note: The same database whose settle-once MARK write refuses AT EXECUTION, not at
+ * preparation: the batch's INSERT has already run when the mark throws, so the only
+ * way the assertions below can find neither is D1's transaction rolling the insert
+ * back. Everything else (reads, the insert itself, the KV) still works.
+ */
+function withoutMarkWrites(db: TestD1): TestD1 {
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (/UPDATE review_attempt_handoffs/.test(sql)) throw new Error("D1 mark write failed");
+      return st.run();
+    },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
+describe("a persisted launch that never staged a publication", () => {
+  // note: Another attempt id, so this suite's `settledMark` helper stays scoped to
+  // the delivery fixtures above.
+  const UNPUBLISHED_ATTEMPT = "attempt-4d-unpublished";
+  const WINDOW_CLOSED_AT = 10_000_000;
+
+  /**
+   * The crash window: the paid step persisted its result, the host died before
+   * `collect` staged anything, and the attempt's own hard stop has passed. No
+   * publication row exists for the scope/head, so the publication lane — which
+   * only ever walks journal rows — cannot own the outcome. `check` carries the
+   * Check identity the attempt froze, when it had one.
+   */
+  async function seedUnpublished(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    options: {
+      attemptId?: string;
+      check?: { attempt_key: string | null; generation: number };
+    } = {},
+  ): Promise<void> {
+    const attemptId = options.attemptId ?? UNPUBLISHED_ATTEMPT;
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId,
+      payload,
+      nowMs: WINDOW_CLOSED_AT - 900_000,
+      enqueuedMs: 0,
+      deadlineMs: WINDOW_CLOSED_AT - 1,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run(attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome,
+            attempt_key, attempt_generation)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted', ?, ?)`,
+      )
+      .run(
+        attemptId,
+        WINDOW_CLOSED_AT - 900_000,
+        WINDOW_CLOSED_AT - 800_000,
+        WINDOW_CLOSED_AT - 700_000,
+        options.check?.attempt_key ?? null,
+        options.check?.generation ?? null,
+      );
+  }
+
+  function unpublishedSettlement(
+    db: TestD1,
+    attemptId = UNPUBLISHED_ATTEMPT,
+  ): { settled_ms: number | null; settled_effects: string | null } {
+    return db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+  }
+
+  test("the pass records the terminal failure a failed review gets and settles the attempt", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+
+    // note: Visible and retryable instead of a paid result hidden behind a queued
+    // Check: the failure row carries the reason, the head's abandoned claim stops a
+    // silent re-pay, and the settle-once mark records the completion.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("publication never started");
+    expect(failureRows(db)[0]!.head_sha).toBe(payload.head_sha!);
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(true);
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
+
+    // note: Completed: a second pass writes nothing more.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  /** The reported shape: a persisted launch whose attempt froze a Check identity. */
+  async function seedWithOpenCheck(db: TestD1, payload: ReviewJobPayload): Promise<string> {
+    const claimed = await claimAttempt(db as never, {
+      scope: {
+        appId: payload.botRef!.appId,
+        installationId: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        prNumber: payload.pr_number,
+      },
+      githubAppId: 424242,
+      headSha: payload.head_sha!,
+      triggeredBy: "octocat",
+      action: "opened",
+      holder: "consumer-run",
+      nowMs: WINDOW_CLOSED_AT - 900_000,
+      executionDeadlineMs: WINDOW_CLOSED_AT - 1,
+    });
+    if (claimed.kind !== "claimed") throw new Error(`expected a claimed Check row, got ${claimed.kind}`);
+    const attemptId = claimed.attempt.identity.attemptId;
+    const check = db.raw
+      .prepare("SELECT attempt_key, generation FROM review_checks WHERE id = ?")
+      .get(attemptId) as { attempt_key: string; generation: number };
+    await seedUnpublished(db, payload, { check });
+    return attemptId;
+  }
+
+  /** The Check lane's own transition: never written by this pass. */
+  function concludeCheck(db: TestD1, attemptId: string): void {
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`,
+      )
+      .run(WINDOW_CLOSED_AT - 60_000, attemptId);
+  }
+
+  test("a landed claim stamp keeps the row selected, and the settlement completes once the Check concludes", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = await seedWithOpenCheck(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The healthy OWNER pass lands the record and the head-wide claim stamp;
+    // the open Check is the only obligation left, so nothing is certified yet.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["claim-stamp", "failure-row"]);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    const stamps = h.kvPuts.filter((put) => put.value === "failed").length;
+    expect(stamps).toBe(1);
+
+    // note: The row still owes the Check, so it stays in this lane: its landing
+    // stamp proves ownership, so nothing here is unrepairable. Excluding it would
+    // strand a settlement every remaining obligation is about to satisfy.
+    const selected = await listUnpublishedLaunchSettlements(db, { deadlineBeforeMs: WINDOW_CLOSED_AT, limit: 25 });
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual([UNPUBLISHED_ATTEMPT]);
+
+    // note: The Check concludes; the next pass lands that fact from durable state
+    // and discharges the settlement. The stamp already landed, and only its owner
+    // may write it — so this pass must not touch the KV key again.
+    concludeCheck(db, attemptId);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+
+    expect(unpublishedSettlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["check", "claim-stamp", "failure-row"]);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.kvPuts.filter((put) => put.value === "failed").length).toBe(stamps);
+  });
+
+  test("a settlement whose claim stamp never landed leaves the lane", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = await seedWithOpenCheck(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: Pass 1 is INTERRUPTED after the row and its fact landed: the claim write
+    // faults, so the obligation stays open (no `settled_ms`).
+    h.kvState.putError = new Error("KV write failed");
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
+
+    // note: A clean pass cannot prove ownership of the stamp (KV has no
+    // compare-and-set), so it writes nothing — and the row leaves the lane: only
+    // the unwritable stamp is left. Its residual sentinel decays on its own TTL.
+    h.kvState.putError = undefined;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
+
+    // note: The Check concluding changes nothing: the settlement can never be
+    // discharged, so recording its fact would only buy this batch another pass.
+    concludeCheck(db, attemptId);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(JSON.parse(unpublishedSettlement(db).settled_effects!)).toEqual(["failure-row"]);
+  });
+
+  test("an interrupted retry leaves exactly one failure row", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The failure row lands, then the claim write faults: the pass leaves the
+    // obligation open (no `settled_ms`) instead of certifying it.
+    h.kvState.putError = new Error("KV write failed");
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+
+    // note: Repeated passes never re-record the effect they can read back. The stamp is
+    // owed and unrepairable by a non-owner (KV has no compare-and-set), so the settlement
+    // stays incomplete — no duplicate failure row, no false completion.
+    h.kvState.putError = undefined;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("a mark fault between the row and its fact lands neither, and the retry lands one", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    // note: The settle-once mark throws WHILE the batch executes — after its INSERT has
+    // run. One persistence step means the transaction takes the insert down with it:
+    // a row without its fact could never be recognized by a later pass.
+    await reconcileReviewRoute(
+      { ...env, DB: withoutMarkWrites(db) as never, REVIEW_QUEUE: queue as never },
+      WINDOW_CLOSED_AT,
+    );
+    expect(failureRows(db)).toHaveLength(0);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+    expect(unpublishedSettlement(db).settled_effects).toBeNull();
+
+    // note: The healthy retry lands both, once — and a repeated pass changes nothing:
+    // the completed settlement and the effects it records stay exactly as written.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    const completed = unpublishedSettlement(db);
+    expect(completed.settled_ms).toEqual(expect.any(Number));
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT + 120_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(unpublishedSettlement(db)).toEqual(completed);
+  });
+
+  test("a staged publication keeps the outcome with the publication lane", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seedUnpublished(db, payload);
+    // note: `collect` DID stage the body — the M8 lane may still send it, so this pass
+    // must not declare the review lost.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-staged', ?, ?, ?, ?, ?, ?, 'review', 'prepared', '{}', NULL, 0, 'pending', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        WINDOW_CLOSED_AT - 800_000,
+        WINDOW_CLOSED_AT - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, WINDOW_CLOSED_AT);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(unpublishedSettlement(db).settled_ms).toBeNull();
+  });
+});
+
+// note: ---------------------------------------------------------------------------
+// The recorded failure's retry entry (I-000684)
+// ---------------------------------------------------------------------------
+
+describe("the recorded publication failure leaves the head re-triggerable", () => {
+  test("the reconcile → KV → consumer chain runs a fresh delivery for the same head", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    // note: The same crash window as above: persisted, window closed, nothing staged.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: "attempt-4d-retryable",
+      payload,
+      nowMs: 9_100_000,
+      enqueuedMs: 0,
+      deadlineMs: 9_999_999,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run("attempt-4d-retryable");
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run("attempt-4d-retryable", 9_100_000, 9_200_000, 9_300_000);
+    // note: A KV whose writes are readable, seeded with the claim the worker wrote when it
+    // enqueued this head: the consumer assertion below must observe what the pass wrote,
+    // not a value the test installed.
+    const kvStore = new Map<string, string>();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    kvStore.set(claimKey, "1");
+    const kv = {
+      get: async (key: string) => kvStore.get(key) ?? null,
+      put: async (key: string, value: string) => {
+        kvStore.set(key, value);
+      },
+      delete: async (key: string) => {
+        kvStore.delete(key);
+      },
+    };
+    const env = { ...(await h.makeEnv({ DB: db as never })), IDEMPOTENCY_KV: kv as never };
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 10_000_000);
+
+    expect(failureRows(db)).toHaveLength(1);
+    // note: The pass replaced the enqueue marker with the abandon claim — "a commit that
+    // was NOT reviewed, so a redelivery must enqueue again" (`src/contracts/idem.ts`).
+    expect(kvStore.get(claimKey)).toBe("failed");
+
+    const started: AttemptRef[] = [];
+    const consumer = createReviewConsumer(env, h.testLog, {
+      ...h.overrides,
+      startAttempt: async (_deps, ref) => {
+        started.push(ref);
+        return "created";
+      },
+    });
+    // note: A fresh delivery of the same head (its own attach identity) — what a
+    // re-trigger is. It reads the claim the pass wrote and runs.
+    await consumer(h.makeBatch(makePayload({ attachDeliveryId: "redelivery-2" })));
+
+    expect(started).toHaveLength(1);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(h.messageRetryCalls).toHaveLength(0);
+  });
+});
+
+// note: ---------------------------------------------------------------------------
+// QC findings on the publication-failure settlement (route pass)
+// ---------------------------------------------------------------------------
+
+/**
+ * note: The same database that plays the overlapping-pass interleaving the moment a
+ * stale pass re-reads its handoff: A's settlement lands and a fresh delivery re-claims
+ * the head, BOTH before that pass decides whether to write the head-wide claim.
+ */
+function settleDuringFenceRead(
+  db: TestD1,
+  input: { deliveryKey: string; claimKey: string; claims: Map<string, string>; nowMs: number },
+): TestD1 {
+  let fired = false;
+  const wrap = (statement: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(statement.bind(...values)),
+    first: async () => {
+      fired = true;
+      await markAttemptSettled(
+        db as never,
+        input.deliveryKey,
+        ["claim-stamp", "failure-row"],
+        ["claim-stamp", "failure-row"],
+        input.nowMs,
+      );
+      input.claims.set(input.claimKey, "1");
+      return statement.first();
+    },
+    all: () => statement.all(),
+    run: () => statement.run(),
+  });
+  return {
+    prepare(sql: string) {
+      const statement = db.prepare(sql);
+      return fired || !/FROM review_attempt_handoffs WHERE attempt_id = \?/.test(sql) ? statement : wrap(statement);
+    },
+    batch: (statements: Parameters<TestD1["batch"]>[0]) => db.batch(statements),
+    raw: db.raw,
+  } as TestD1;
+}
+
+describe("the publication-failure settlement under QC scrutiny", () => {
+  const NOW = 10_000_000;
+
+  /** A KV whose reads and writes share one readable map (a real claim store). */
+  function claimKv(seed: Record<string, string> = {}): {
+    claims: Map<string, string>;
+    kv: { get: (key: string) => Promise<string | null>; put: (key: string, value: string) => Promise<void>; delete: (key: string) => Promise<void> };
+    claimKey: string;
+  } {
+    const claims = new Map(Object.entries(seed));
+    return {
+      claims,
+      kv: {
+        get: async (key) => claims.get(key) ?? null,
+        put: async (key, value) => {
+          claims.set(key, value);
+        },
+        delete: async (key) => {
+          claims.delete(key);
+        },
+      },
+      claimKey: "",
+    };
+  }
+
+  async function seed(db: TestD1, payload: ReviewJobPayload, attemptId = "attempt-qc"): Promise<void> {
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId,
+      payload,
+      nowMs: NOW - 900_000,
+      enqueuedMs: 0,
+      deadlineMs: NOW - 1,
+    });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET state = 'created' WHERE attempt_id = ?")
+      .run(attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches
+           (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome)
+         VALUES (?, 'persisted', ?, ?, ?, '{}', 'persisted')`,
+      )
+      .run(attemptId, NOW - 900_000, NOW - 800_000, NOW - 700_000);
+  }
+
+  function settlement(db: TestD1, attemptId = "attempt-qc"): { settled_ms: number | null; settled_effects: string | null } {
+    return db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+  }
+
+  test("F-A: an unreadable claim is owed, not settled — and no non-owner repairs it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    const { claims, kv } = claimKv();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    claims.set(claimKey, "1");
+    let failReads = true;
+    const env = {
+      ...(await h.makeEnv({ DB: db as never })),
+      IDEMPOTENCY_KV: {
+        ...kv,
+        get: async (key: string) => {
+          if (failReads) throw new Error("KV read failed");
+          return kv.get(key);
+        },
+      } as never,
+    };
+    const queue = { send: async () => {} };
+
+    // note: The row and its fact land, but the claim could not be READ — so the stamp is
+    // not a fact and the settlement must stay owed.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toBeNull();
+    expect(claims.get(claimKey)).toBe("1");
+
+    // residual: the owner's write faulted, so the stamp stays owed. A later pass cannot
+    // prove it owns the settlement (KV has no compare-and-set), so no repair is attempted:
+    // the head's stale sentinel remains, and exactly one failure row stands.
+    failReads = false;
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW + 60_000);
+    expect(claims.get(claimKey)).toBe("1");
+    expect(settlement(db).settled_ms).toBeNull();
+    expect(failureRows(db)).toHaveLength(1);
+  });
+
+  test("F-B: a completed settlement never acts on the head-wide claim", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    const { claims, kv } = claimKv();
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    claims.set(claimKey, "1");
+    const env = { ...(await h.makeEnv({ DB: db as never })), IDEMPOTENCY_KV: kv as never };
+    const queue = { send: async () => {} };
+
+    // note: A settles and a fresh delivery re-claims the head before this stale pass
+    // writes: it must leave the fresh claim alone.
+    const racing = settleDuringFenceRead(db, {
+      deliveryKey: deliveryKeyOf(payload),
+      claimKey,
+      claims,
+      nowMs: NOW,
+    });
+    await reconcileReviewRoute({ ...env, DB: racing as never, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(claims.get(claimKey)).toBe("1");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-B3: only the pass that LANDED the record may abandon the head", async () => {
+    // note: KV has no compare-and-set and cannot tell one delivery's `1` from another's,
+    // so exclusivity is the rule: the insert winner writes, everyone else writes nothing.
+    const settleOnce = async (payload: ReviewJobPayload, effects: string[] | null): Promise<TestD1> => {
+      const db = await createSeededTestD1();
+      await seed(db, payload);
+      if (effects !== null) {
+        db.raw
+          .prepare(`UPDATE review_attempt_handoffs SET settled_effects = ? WHERE attempt_id = ?`)
+          .run(JSON.stringify(effects), "attempt-qc");
+      }
+      return db;
+    };
+    const keyOf = (payload: ReviewJobPayload) =>
+      idemKey({
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: payload.head_sha!,
+      });
+
+    // (1) The interleaving both seats named: B lost the insert, A stamped and settled,
+    // and a fresh delivery re-claimed the head. B must write nothing.
+    const settledDb = await settleOnce(makePayload(), ["claim-stamp", "failure-row"]);
+    const settledKey = keyOf(makePayload());
+    await markAttemptSettled(
+      settledDb as never,
+      deliveryKeyOf(makePayload()),
+      ["claim-stamp", "failure-row"],
+      ["claim-stamp", "failure-row"],
+      NOW,
+    );
+    const settledKv = claimKv();
+    settledKv.claims.set(settledKey, "1");
+    expect(
+      await stampOwedSettlementClaim(settledDb as never, settledKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: settledKey,
+        ttlSeconds: 1_800,
+        owned: false,
+      }),
+    ).toBeNull();
+    expect(settledKv.claims.get(settledKey)).toBe("1");
+
+    // (2) The insert-losing pass whose guard still reads "unstamped, unsettled": it still
+    // cannot prove its generation, so the head-wide key stays with the fresh delivery.
+    const loserDb = await settleOnce(makePayload(), ["failure-row"]);
+    const loserKey = keyOf(makePayload());
+    const loserKv = claimKv();
+    loserKv.claims.set(loserKey, "1");
+    expect(
+      await stampOwedSettlementClaim(loserDb as never, loserKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: loserKey,
+        ttlSeconds: 1_800,
+        owned: false,
+      }),
+    ).toBeNull();
+    expect(loserKv.claims.get(loserKey)).toBe("1");
+
+    // (3) The insert WINNER does write — that is the pass the stamp exists for.
+    const ownerDb = await settleOnce(makePayload(), ["failure-row"]);
+    const ownerKey = keyOf(makePayload());
+    const ownerKv = claimKv();
+    ownerKv.claims.set(ownerKey, "1");
+    expect(
+      await stampOwedSettlementClaim(ownerDb as never, ownerKv.kv as never, {
+        attemptId: "attempt-qc",
+        key: ownerKey,
+        ttlSeconds: 1_800,
+        owned: true,
+      }),
+    ).toBe("written");
+    expect(ownerKv.claims.get(ownerKey)).toBe("failed");
+  });
+
+  test("F-B3: an owner whose write faulted leaves the settlement owed, and no loser writes", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    const claimKey = idemKey({
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+    });
+    const { claims, kv } = claimKv();
+    claims.set(claimKey, "1");
+    let failPut = true;
+    const env = {
+      ...(await h.makeEnv({ DB: db as never })),
+      IDEMPOTENCY_KV: {
+        ...kv,
+        put: async (key: string, value: string) => {
+          if (failPut) throw new Error("KV write failed");
+          claims.set(key, value);
+        },
+      } as never,
+    };
+    const queue = { send: async () => {} };
+
+    // note: The owner's write faults: the record stands, the stamp is owed.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+    failPut = false;
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toBeNull();
+    expect(claims.get(claimKey)).toBe("1");
+
+    // note: Every later pass is a non-owner: it may not repair the stamp (KV has no CAS).
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toBeNull();
+    expect(claims.get(claimKey)).toBe("1");
+  });
+
+  test("F-C2: a headless attempt's OWN staged journal keeps the publication ownership", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null });
+    await seed(db, payload);
+    // note: The attempt resolved its checkout head and staged its own body there: the
+    // publication lane owns it, whatever the payload's head is (or is not).
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-own', ?, ?, ?, ?, ?, ?, 'review', 'prepared', ?, NULL, 0, 'pending', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        "fedcba9876543210fedcba9876543210fedcba98",
+        JSON.stringify({ admittedAttemptId: "attempt-qc" }),
+        NOW - 800_000,
+        NOW - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(settlement(db).settled_ms).toBeNull();
+  });
+
+  test("F-N2: another tenant's journal never suppresses this attempt's failure", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    // note: A FOREIGN tenant's journal — even one whose payload carries this attempt's id —
+    // is outside the scope-prefixed identity arm and cannot keep this launch unrecorded.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-foreign', ?, ?, ?, ?, ?, ?, 'review', 'prepared', ?, NULL, 0, 'pending', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        999,
+        "other-owner",
+        "other-repo",
+        99,
+        payload.head_sha,
+        JSON.stringify({ admittedAttemptId: "attempt-qc" }),
+        NOW - 800_000,
+        NOW - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-C: a prior generation's terminal journal never suppresses this attempt's failure", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    await seed(db, payload);
+    // note: One row exists per scope/head/kind; this is the OLD attempt's closed journal.
+    db.raw
+      .prepare(
+        `INSERT INTO review_publications
+           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+            payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
+         VALUES ('pub-old', ?, ?, ?, ?, ?, ?, 'review', 'failed', ?, NULL, 1, 'done', ?, ?)`,
+      )
+      .run(
+        payload.botRef!.appId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        JSON.stringify({ admittedAttemptId: "attempt-old" }),
+        NOW - 800_000,
+        NOW - 800_000,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("publication never started");
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+  });
+
+  test("F-C: a headless persisted launch is still recorded, with no claim write", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null });
+    await seed(db, payload);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, NOW);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.head_sha).toBe("");
+    // note: A headless delivery has no claim key: the settlement completes on the failure
+    // row alone (no journal, no head-wide write, no body restage).
+    expect(h.kvPuts.some((put) => put.value === "failed")).toBe(false);
+    expect(settlement(db).settled_ms).toEqual(expect.any(Number));
+    expect(JSON.parse(settlement(db).settled_effects!)).toEqual(["failure-row"]);
   });
 });

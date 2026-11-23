@@ -47,7 +47,7 @@ import {
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_STAGE,
 } from "../contracts/failure-stages";
-import type { D1Like } from "./types";
+import type { D1Like, D1StatementLike } from "./types";
 
 export const QUEUE_MAX_ATTEMPTS = 6;
 
@@ -97,6 +97,12 @@ export {
  * tenant faces bind it, so a row without one belongs to no workspace.
  */
 export type ReviewFailureInput = {
+  /**
+   * Optional deterministic row key (the attempt, or an attempt+stage). With it the
+   * insert is idempotent, so a replay cannot append a second row for one fact;
+   * absent, the row gets a random id.
+   */
+  id?: string;
   target_id: string;
   installation_id: number;
   owner: string;
@@ -173,6 +179,48 @@ FROM review_failures
 WHERE created_at > datetime('now', '-24 hours')
   AND error LIKE ?`;
 
+/** `review_failures.stage` is a producer vocabulary — reject anything off it before writing. */
+function assertFailureStage(stage: string): void {
+  if (!FAILURE_STAGES.includes(stage)) {
+    throw new Error(
+      `failure-store: stage ${JSON.stringify(stage)} is not on the producer vocabulary (${FAILURE_STAGES.join(" | ")}) — zero rows written`,
+    );
+  }
+}
+
+/**
+ * The route recovery pass's terminal settlement failure: ONE row per ATTEMPT,
+ * keyed by the attempt itself, so a re-pass or two concurrent passes can never
+ * mint a second randomly identified row. The caller commits this in the SAME
+ * D1 batch as the attempt's settle-once mark, which is what makes "the row
+ * exists" and "the fact is recorded" a single step.
+ */
+export function settlementFailureRowStatement(
+  db: D1Like,
+  input: ReviewFailureInput,
+  /** The deterministic row key: the attempt, or the attempt+stage for a per-stage row. */
+  rowId: string,
+): D1StatementLike {
+  assertFailureStage(input.stage);
+  return db
+    .prepare(
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .bind(
+      rowId,
+      input.target_id,
+      input.installation_id,
+      input.owner,
+      input.repo,
+      input.pr_number,
+      input.head_sha,
+      input.stage,
+      input.error,
+    );
+}
+
 /** Create the failure store over one D1 handle. */
 export function createFailureStore(db: D1Like): FailureStoreWithCounts {
   return {
@@ -181,6 +229,13 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
         throw new Error(
           `failure-store: stage ${JSON.stringify(input.stage)} is not on the producer vocabulary (${FAILURE_STAGES.join(" | ")}) — zero rows written`,
         );
+      }
+      // An explicit identity makes the write REPLAY-SAFE: one row per caller-chosen
+      // key (an attempt, or an attempt+stage), so a retried collect cannot count
+      // the same fact twice.
+      if (input.id !== undefined) {
+        await settlementFailureRowStatement(db, input, input.id).run();
+        return;
       }
       await db
         .prepare(

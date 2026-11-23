@@ -5,9 +5,12 @@ import { join } from "node:path";
 
 import "../helpers/cloudflare-workers-mock";
 
-import { createSeededTestD1 } from "../helpers/consumer-fixtures";
-import { createConsumerHarness, makePayload } from "../helpers/consumer-harness";
-import { deliveryKeyOf } from "../../src/store/review-route-store";
+import { createSeededTestD1, VALID_OUTPUT } from "../helpers/consumer-fixtures";
+import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
+import { withFrozenClock } from "../helpers/clock";
+import { deliveryKeyOf, readAttemptHandoff } from "../../src/store/review-route-store";
+import { readReviewLaunch } from "../../src/pipeline/review-attempt";
+import { REVIEW_ATTEMPT_CAP_DEFAULT_MS } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 
@@ -182,5 +185,76 @@ describe("claim 7 — one settled instant for the lease and the attempt", () => 
     expect(seenDeadline).toBe(settledDeadline);
     expect(leaseExpiry).not.toBeNaN();
     expect(leaseExpiry).toBeGreaterThan(settledDeadline);
+  });
+});
+
+/** note: Rows the completed round wrote — the review itself, not a shape probe. */
+function reviewCount(db: TestD1): number {
+  const row = db.raw.query("SELECT COUNT(*) AS n FROM reviews").get() as { n: number };
+  return row.n;
+}
+
+/**
+ * note: Claim 10 — the attempt's clock starts when the delivery CLAIMS the job.
+ * A pr-held guard's cumulative backoff (2460s+) outruns the operator cap, so a
+ * message can be delivered long after the enqueue stamp it was sent with. An
+ * anchor on that stamp leaves every such delivery a spent deadline: prepare
+ * refuses, nothing is reviewed, and the retry only burns the next attempt.
+ */
+describe("claim 10 — a delayed delivery is anchored on its claim, not its enqueue stamp", () => {
+  test("a delivery past the guard backoff derives a positive budget and completes prepare", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    await withFrozenClock(async (clock) => {
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+      const batch = h.makeBatch(payload);
+      // note: The guard's cumulative delayed retries, spent before admission —
+      // the platform keeps the ORIGINAL send stamp across them. Constructed, not
+      // mutated: `Message.timestamp` is readonly.
+      const sentAt = new Date(clock.now - 2_460_000);
+      const delivered = {
+        ...batch,
+        messages: batch.messages.map((message) => ({ ...message, timestamp: sentAt })),
+      };
+      await consumer(delivered);
+
+      // note: The round really ran to its review, and the clock it ran under is
+      // the operator cap from THIS delivery — not the stamp it was sent with.
+      expect(reviewCount(db)).toBe(1);
+      const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+      expect(handoff?.deadlineMs).toBe(clock.now + REVIEW_ATTEMPT_CAP_DEFAULT_MS);
+    });
+  });
+
+  test("an attempt whose frozen deadline is spent settles as a recorded refusal", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const key = deliveryKeyOf(payload);
+    await withFrozenClock(async (clock) => {
+      // note: The attempt's own instant is already gone. Delivery anchoring must
+      // not resurrect it: a genuinely spent attempt refuses, durably.
+      const spent = clock.now - 60_000;
+      db.raw
+        .prepare(
+          `INSERT INTO review_attempt_handoffs
+             (delivery_key, attempt_id, payload_json, state, deadline_ms, created_ms, updated_ms)
+           VALUES (?, ?, ?, 'owed', ?, ?, ?)`,
+        )
+        .run(key, "attempt-spent", JSON.stringify(payload), spent, spent, spent);
+      const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+      await consumer(h.makeBatch(payload));
+    });
+
+    // note: One ack, no retry: the stop is terminal because a durable row records it.
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(h.messageAckCalls).toHaveLength(1);
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("budget-exhausted:");
+    // note: The durable launch fact: no paid outcome was ever recorded for the attempt
+    // (an unlaunched row ends `provisioned` or `abandoned`), so no paid work ran.
+    const launch = await readReviewLaunch(db as never, "attempt-spent");
+    expect(launch?.state === "provisioned" || launch?.state === "abandoned").toBe(true);
   });
 });

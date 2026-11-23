@@ -164,6 +164,8 @@ export type SweepMaintenanceReplayFields =
  * they cannot ride ConsumerLogFields itself).
  */
 export type SweepLog = {
+  /** The durable-replay lane's accounting line (optional: only passes that replay emit one). */
+  info?: (fields: Record<string, unknown>, msg: string) => void;
   warn: (
     fields:
       | SweepAlertFields
@@ -186,6 +188,7 @@ function warnDetail(error: unknown, alertUrl?: string): string {
 
 /** Default sink: structured JSON lines on stderr. No secrets are logged. */
 export const defaultSweepLog: SweepLog = {
+  info: (fields, msg) => console.info(JSON.stringify({ ...fields, msg: msg ?? "" })),
   warn: (fields, msg) => console.warn(JSON.stringify({ ...fields, msg: msg ?? "" })),
 };
 

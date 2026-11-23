@@ -330,7 +330,12 @@ const DEFAULT_GITOPS = gitOpsCommandsFor({
   repo: TEST_REPO,
   pr_number: TEST_PR_NUMBER,
 });
-const RUNNER_CMDS: ReadonlySet<string> = new Set(
+/**
+ * note: The runner exec for EVERY legal tier, with and without the optional
+ * `--recheck-out`: the consumer forwards the resolved review depth verbatim.
+ */
+/** note: The paid runner's command shapes — the boundary a case can assert was never reached. */
+export const RUNNER_CMDS: ReadonlySet<string> = new Set(
   REVIEW_LEVELS.flatMap((level) => [
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH),
     runnerCommand(RUNNER_PATH, level, RUNNER_INPUT_PATH, RECHECK_OUTPUT_PATH),

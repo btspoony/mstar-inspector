@@ -992,6 +992,11 @@ export function createReviewConsumer(
       return;
     }
     for (const message of batch.messages) {
+      // The Queue send stamp is the attempt's queue-wait origin (the duration
+      // report's `enqueued_ms`), never its cap anchor — the cap starts at this
+      // delivery's claim (I-000683). It is a `Date` on the platform and may be
+      // absent in a hand-built test batch; the boundary normalization keeps an
+      // absent stamp absent.
       const sentAtMs = queueStampOf(message.timestamp);
       const outcome = await processMessage(message.body, deps, message.attempts, starter, sentAtMs);
       if (outcome.kind === "guard-held") {
@@ -1069,6 +1074,18 @@ export async function ensureRunnerConfig(
   return config;
 }
 
+/**
+ * @param attempts the delivery number of this message (1 = first delivery);
+ *   only the value past the queue's retry budget matters — it stamps the
+ *   idempotency key `failed` so a DLQ-bound commit stops counting as reviewed-
+ *   or-pending proof.
+ * @param queueSentAtMs the original Queue send stamp, already normalized at the
+ *   boundary: `null` means the platform supplied none. It is recorded as the
+ *   attempt's queue-wait origin (`enqueued_ms`) and never anchors the cap — an
+ *   absent stamp stays absent rather than be invented for the report. A
+ *   redelivery of an already-frozen attempt ignores it in favour of the
+ *   recorded deadline.
+ */
 async function processMessage(
   payload: ReviewJobPayload,
   deps: ProcessDeps,
@@ -1076,8 +1093,16 @@ async function processMessage(
   startAttempt?: AttemptStarter,
   queueSentAtMs: number | null = null,
 ): Promise<ProcessOutcome> {
+  // This invocation's entry instant — the delivery's claim. Every best-effort
+  // step that can spend a sandbox window is measured against it, and it is the
+  // origin of an attempt's cap (I-000683): a message delayed behind the guard's
+  // backoff is claimed long after it was enqueued.
   const roundStartedAt = Date.now();
-  const capOriginMs = queueSentAtMs === null ? roundStartedAt : Math.min(queueSentAtMs, roundStartedAt);
+  // The delivery key and the recorded attempt id are learned inside the try, so
+  // a DB fault or a legacy payload still flows through the structured failure
+  // channel. A redelivery of this message finds the row its predecessor wrote
+  // and replays the SAME attempt id, so an interrupted handoff can never mint a
+  // second attempt that could pay twice.
   let deliveryKey = "";
   let attemptId: string = crypto.randomUUID();
   let sandboxId = attemptSandboxId(attemptId);
@@ -1268,6 +1293,17 @@ async function processMessage(
       pr_number: payload.pr_number,
       workspace_id: workspaceId,
     };
+    // THE ATTEMPT'S ONE HARD STOP is frozen HERE, before the admission row is
+    // taken: that row's TTL must hold the whole attempt, so the instant cannot
+    // be discovered afterwards. The cap runs from THIS delivery's claim, never
+    // from the Queue send stamp: a message held behind the guard's cumulative
+    // delayed retries is delivered long after it was enqueued, and an origin on
+    // that stamp left every such delivery a spent deadline (I-000683). A row
+    // written before the deadline column existed is anchored ONCE from its OWN
+    // admission stamp — the only instant that attempt had — never from this
+    // delivery's clock, so a redelivery or a recovery re-enqueue cannot move it.
+    // The first writer wins the write itself (store), and a degraded cap read
+    // throws so admission retries instead of inventing a cap.
     let deadlineMs: number;
     if (previousHandoff?.deadlineMs !== null && previousHandoff?.deadlineMs !== undefined) {
       deadlineMs = previousHandoff.deadlineMs;
@@ -1278,7 +1314,7 @@ async function processMessage(
           warn: (readerFields, msg) =>
             deps.log.warn({ ...(baseFields ?? payloadIdentityFields(payload)), ...readerFields }, msg),
         }));
-      deadlineMs = (previousHandoff?.createdMs ?? capOriginMs) + capMs;
+      deadlineMs = (previousHandoff?.createdMs ?? roundStartedAt) + capMs;
     }
     const ttlSeconds = reviewGuardTtlForDeadline(deadlineMs, Date.now(), level);
     const admissionOpts: AcquireInflightOptions = {

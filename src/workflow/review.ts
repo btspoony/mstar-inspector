@@ -12,6 +12,7 @@ import {
   prepareAttempt,
   publishAttempt,
   reviewAttempt,
+  readDurablePaid,
   settleAttemptFailure,
   settleSkippedRow,
   payloadIdentityFields,
@@ -68,8 +69,20 @@ export async function runReviewAttemptWorkflow(
         retries: { limit: 0, delay: 0 },
         timeout: remainingMs + POST_RUNNER_READ_BUDGET_MS,
       },
+      // The prepare step may be checkpointed on a host that never ran it, so
+      // the step that pays resolves (or reuses) the config itself — but ONLY
+      // when it still has to pay. A replayed step can find the paid result
+      // already durable, and collect then finishes from the attempt's sealed
+      // credential set: resolving today's config for it would make an
+      // already-paid result depend on configuration that may have been removed,
+      // and a resolution fault would settle the attempt as a failure.
       async () => {
-        await ensureRunnerConfig(ref.payload, deps);
+        // Config is resolved only for a step that can still PAY. A persisted
+        // result needs none (collect owns it), and a non-payable row must not
+        // make an already-decided attempt depend on today's configuration.
+        if ((await readDurablePaid(deps, ref.attemptId)).kind === "payable") {
+          await ensureRunnerConfig(ref.payload, deps);
+        }
         return reviewAttempt(deps, ref, prepared.prepared);
       },
     );

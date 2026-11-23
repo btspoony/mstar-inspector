@@ -1,4 +1,26 @@
+/**
+ * The review route's durable handoffs (migration 0083).
+ *
+ * Two records make the route's transitions survive an interrupted host:
+ *
+ * - `review_attempt_handoffs` — the admission's handoff record, written BEFORE
+ *   the Workflow instance is created. The delivery key is the stable identity of
+ *   the queue message, so a redelivery finds the same row and replays the same
+ *   attempt id (the UNIQUE attempt id makes a second attempt impossible). The
+ *   row's state records the create outcome, and its settle-once mark keeps a
+ *   re-executed settlement step from settling twice.
+ * - `review_successors` — the moved head's outbox. The dedupe key is the
+ *   observed head's identity, so one moved head records at most one successor;
+ *   a delivery pass (immediate, then the reconciler) sends it and marks it
+ *   delivered only after the queue accepted it.
+ *
+ * Store module boundary (compass contracts A): D1 types only, no pipeline or
+ * worker imports.
+ */
+import type { KVNamespace } from "@cloudflare/workers-types";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
+import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
@@ -8,6 +30,14 @@ export type AttemptHandoff = {
   attemptId: string;
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
+  /**
+   * The attempt's absolute hard stop, frozen when this row was first written:
+   * the claiming delivery's time plus the operator's end-to-end cap. Every
+   * replay of the same attempt reads it instead of re-deriving it. `null` only
+   * on a row written before the column existed — "not yet anchored"; the next
+   * admission anchors it ONCE from `createdMs` (the only instant that attempt
+   * actually had), never from a later delivery's clock.
+   */
   deadlineMs: number | null;
   enqueuedMs: number | null;
   createdMs: number;
@@ -265,8 +295,130 @@ export async function touchAttemptHandoff(db: D1Like, deliveryKey: string, nowMs
     .run();
 }
 
-/** The effects a settlement can make durable (see `settleAttemptFailure`). */
-export type SettlementEffect = "failure-row" | "check" | "claim-stamp" | "skip" | "publication";
+/**
+ * The effects a settlement can make durable (see `settleAttemptFailure`).
+ *
+ * `recheck-row` and `recheck-attribution` are the refused round's two durable
+ * effects. They are REQUIRED while the attempt's duty row (`review_recheck_duties`)
+ * names them as still owed, and their existence — not a host's claim, a log call
+ * or a timestamp — is what lets the settlement rule discharge the attempt.
+ */
+export type SettlementEffect =
+  | "failure-row"
+  | "check"
+  | "claim-stamp"
+  | "skip"
+  | "publication"
+  | "recheck-row"
+  | "recheck-attribution";
+
+/** The seat's own round outcome — the vocabulary the attribution line reports. */
+export type RecheckOutcome = "ok" | "failed" | "absent" | "skipped";
+
+/** The round accounting a refusal still owes (everything a replay needs). */
+export type RecheckDuty = {
+  attemptId: string;
+  headSha: string;
+  /** The sanitized shipped-failure detail; `null` = no row owed. */
+  failureError: string | null;
+  outcome: RecheckOutcome;
+};
+
+const RECORD_RECHECK_DUTY_SQL = `
+INSERT INTO review_recheck_duties (attempt_id, head_sha, failure_error, outcome, created_ms)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_RECHECK_DUTY_SQL = `
+SELECT attempt_id, head_sha, failure_error, outcome FROM review_recheck_duties WHERE attempt_id = ?
+`;
+const CLEAR_RECHECK_DUTY_SQL = `DELETE FROM review_recheck_duties WHERE attempt_id = ?`;
+const RECORD_RECHECK_ATTRIBUTION_SQL = `
+INSERT INTO review_recheck_attributions (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
+const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+const MARK_REFUSAL_PENDING_SQL = `
+INSERT INTO review_refusal_pending (attempt_id, created_ms) VALUES (?, ?)
+ON CONFLICT(attempt_id) DO NOTHING
+`;
+const READ_REFUSAL_PENDING_SQL = `SELECT 1 AS present FROM review_refusal_pending WHERE attempt_id = ?`;
+const CLEAR_REFUSAL_PENDING_SQL = `DELETE FROM review_refusal_pending WHERE attempt_id = ?`;
+
+/**
+ * Record the refusal INTENT, before any accounting effect. Its presence — not
+ * the duty's — is what tells every settlement lane downstream that this attempt
+ * refused a review and owes its round's effects.
+ */
+export async function markRefusalPending(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(MARK_REFUSAL_PENDING_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether this attempt refused a review and still owes its round's accounting. */
+export async function readRefusalPending(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_REFUSAL_PENDING_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/** Discharge the refusal marker — its round's effects are durable. */
+export async function clearRefusalPending(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_REFUSAL_PENDING_SQL).bind(attemptId).run();
+}
+
+/**
+ * Open the round's duty: written BEFORE any effect, so a host that dies mid-way
+ * leaves the recovery owner everything it needs. Idempotent.
+ */
+export async function recordRecheckDuty(db: D1Like, duty: RecheckDuty, nowMs: number): Promise<void> {
+  await db
+    .prepare(RECORD_RECHECK_DUTY_SQL)
+    .bind(duty.attemptId, duty.headSha, duty.failureError, duty.outcome, nowMs)
+    .run();
+}
+
+/** The attempt's open round duty, or `null` when nothing is owed. */
+export async function readRecheckDuty(db: D1Like, attemptId: string): Promise<RecheckDuty | null> {
+  const row = await db.prepare(READ_RECHECK_DUTY_SQL).bind(attemptId).first<{
+    attempt_id: string;
+    head_sha: string;
+    failure_error: string | null;
+    outcome: RecheckOutcome;
+  }>();
+  if (row === null) return null;
+  return {
+    attemptId: row.attempt_id,
+    headSha: row.head_sha,
+    failureError: row.failure_error,
+    outcome: row.outcome,
+  };
+}
+
+/** Discharge the duty — BOTH its effects are durable. */
+export async function clearRecheckDuty(db: D1Like, attemptId: string): Promise<void> {
+  await db.prepare(CLEAR_RECHECK_DUTY_SQL).bind(attemptId).run();
+}
+
+/** Whether the round's attribution line was already emitted for this attempt. */
+export async function readRecheckAttribution(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(READ_RECHECK_ATTRIBUTION_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
+
+/**
+ * Record that the round's attribution line was emitted. Inserted AFTER the log
+ * call, so the delivery contract is at-least-once: a crash in between re-emits,
+ * and the sink accepts a duplicate; it can never claim a line that never ran.
+ */
+export async function recordRecheckAttribution(db: D1Like, attemptId: string, nowMs: number): Promise<void> {
+  await db.prepare(RECORD_RECHECK_ATTRIBUTION_SQL).bind(attemptId, nowMs).run();
+}
+
+/** Whether the attempt's `recheck` shipped-failure row is durable. */
+export async function recheckRowExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(RECHECK_ROW_EXISTS_SQL).bind(`${attemptId}:recheck`).first<{ present: number }>();
+  return row !== null;
+}
 
 /**
  * Complete the settle-once mark. It is written by the settlement itself, and it
@@ -310,13 +462,103 @@ async function settlementPlan(
     required = ["skip"];
   } else if (landed.has("failure-row")) {
     required = settlementObligationsOf(handoff.payload, checkInvolved);
+    // (The refused round's two effects are read from durable facts below.)
   } else if (landed.has("publication")) {
     required = ["publication"];
     if (checkInvolved) required.push("check");
   } else {
     return null;
   }
+  // The refused round's effects come from DURABLE FACTS, and only the FAILURE
+  // lane reads them: the publication lane must never be blocked by round state
+  // (a clean review's accounting is best-effort). The refusal MARKER is what says
+  // a round is owed at all — a duty row whose insert never committed cannot hide
+  // the obligation — while the duty carries what to write and the row/fact carry
+  // what already landed. The live settlement and the recovery pass share this
+  // plan, so neither can discharge an incomplete ledger.
+  if (required.includes("failure-row") && (await readRefusalPending(db, input.attemptId))) {
+    const duty = await readRecheckDuty(db, input.attemptId);
+    // A row is owed only when the duty says one was shipped (a cancelled round or
+    // one that sent nothing owes the attribution alone).
+    if (duty !== null && duty.failureError !== null) {
+      if (await recheckRowExists(db, input.attemptId)) landed.add("recheck-row");
+      else required.push("recheck-row");
+    }
+    if (await readRecheckAttribution(db, input.attemptId)) landed.add("recheck-attribution");
+    else required.push("recheck-attribution");
+  }
   return { deliveryKey: handoff.deliveryKey, landed: [...landed], required };
+}
+
+/**
+ * The settlement rule as a plain statement for the attempt's OWN handoff row —
+ * the batchable form of `settleAttemptIfDischarged` (same plan, same union, same
+ * completeness rule). `null` means no lane has closed (or no handoff row): there
+ * is nothing to mark.
+ */
+export async function settlementStatementForEffects(
+  db: D1Like,
+  input: AttemptSettlementInput,
+  nowMs: number,
+): Promise<D1StatementLike | null> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return null;
+  return settlementStatement(db, "attempt_id = ?", [input.attemptId], plan.landed, plan.required, nowMs);
+}
+
+/**
+ * Land the failure effect and its settle-once fact as ONE persistence step. The
+ * row is inserted and the fact recorded in a single D1 batch, so no interruption
+ * (a crash, a KV fault, a second pass) can ever see one without the other; the
+ * insert's deterministic attempt-scoped id makes a concurrent pass a no-op.
+ *
+ * `landed` is the OWNERSHIP proof the caller needs for the head-wide claim: the
+ * insert reports whether THIS pass wrote the row (`meta.changes`), so an
+ * overlapping pass that lost the race knows it owns nothing. `false` when the
+ * attempt has no handoff row to mark — nothing is written, because a row the
+ * settle-once rule cannot see is not a fact.
+ */
+export async function landFailureEffect(
+  db: D1Like,
+  input: AttemptSettlementInput & { failure: ReviewFailureInput },
+  nowMs: number,
+): Promise<{ landed: boolean; owned: boolean }> {
+  const landed: SettlementEffect[] = input.landed.includes("failure-row")
+    ? [...input.landed]
+    : [...input.landed, "failure-row"];
+  const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
+  if (mark === null) return { landed: false, owned: false };
+  const [insert] = await db.batch([settlementFailureRowStatement(db, input.failure, input.attemptId), mark]);
+  return { landed: true, owned: (insert?.meta.changes ?? 0) === 1 };
+}
+
+/**
+ * Stamp the head's abandoned claim — the head-wide key — ONLY from the pass that
+ * provably owns this attempt's settlement, i.e. the pass whose own insert landed
+ * the failure record (`owned`). KV has no compare-and-set and the value cannot
+ * tell one delivery's `1` from another's, so exclusivity is the only safe rule: a
+ * pass that lost the insert race — or that is only repairing an earlier pass's
+ * unlanded stamp — cannot prove its generation and writes NOTHING. The head may
+ * already have been re-claimed by a fresh delivery, and the row's failure record
+ * stands without this write.
+ *
+ * residual: an owner whose KV write faulted leaves the stamp owed forever; no
+ * later pass can prove ownership, so no repair is attempted. Closing that needs a
+ * compare-and-set (or a generation-scoped key) this platform does not offer.
+ *
+ * `null` means nothing was written. The write's own proof is the caller's to
+ * judge (`written`/`done` are facts, `unreadable` is still owed).
+ */
+export async function stampOwedSettlementClaim(
+  db: D1Like,
+  kv: KVNamespace,
+  input: { attemptId: string; key: string; ttlSeconds: number; owned: boolean },
+): Promise<AbandonClaimWrite | null> {
+  if (!input.owned) return null;
+  const handoff = await readAttemptHandoffByAttempt(db, input.attemptId);
+  // The owner still defers to a settlement another actor completed in between.
+  if (handoff === null || handoff.settledMs !== null) return null;
+  return putAbandonClaim(kv, input.key, IDEM_FAILED, input.ttlSeconds);
 }
 
 /**
@@ -458,6 +700,106 @@ export async function listIncompleteSettlements(
         LIMIT ?`,
     )
     .bind(input.settlingBeforeMs, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
+ * The persisted-but-unpublished crash window (I-000684): the attempt's paid
+ * result is durable, its own hard stop has passed, and NOTHING was ever staged
+ * for THIS attempt — so the publication lane (which only ever walks journal
+ * rows) can never pick it up and no settlement ever started. The pass turns that
+ * into the recorded terminal failure a failed review already gets, so the state
+ * is visible and re-triggerable instead of a paid result hidden behind a queued
+ * Check.
+ *
+ * `state = 'created'` keeps the instances that never got one in the re-enqueue
+ * family's hands; `settling_ms IS NULL` keeps a settlement that already started
+ * in `listIncompleteSettlements`. The journal anti-join is keyed FIRST on the
+ * PRODUCER's own identity (`payload.admittedAttemptId`, else `payload.attemptId`
+ * — the fields `collect` freezes into the staged payload), which is
+ * head-independent: a headless delivery resolves its checkout head and stages
+ * that body, and a resolved head that differs from the payload's is still this
+ * attempt's publication. One row exists per scope/head/kind, so a PRIOR
+ * generation's terminal `failed`/`degraded` journal must not suppress this
+ * attempt's failure record. Rows written before the identity existed carry
+ * neither field: those keep the old conservative scope/head rule (no migration
+ * invents an identity), and a headless delivery can never match that arm. A
+ * headless launch with NO journal of its own is recorded with the empty-head
+ * convention and without a claim write.
+ *
+ * A row whose durable effects carry `failure-row` but NOT `claim-stamp` has LEFT
+ * this lane: the record landed, the head-wide claim stamp never did, and the
+ * owner-exclusive rule lets no later pass write it (`owned === false`), so such
+ * a row can never discharge and re-selecting it every pass would let those rows
+ * monopolize the bounded oldest-first batch; its residual sentinel decays on its
+ * own TTL (I-000688). A row whose stamp landed TOO keeps a live obligation (the
+ * Check, while it is still open), so it stays selected and its settlement
+ * completes once that obligation clears — and the landed stamp means no second
+ * claim write is attempted.
+ */
+export async function listUnpublishedLaunchSettlements(
+  db: D1Like,
+  input: { deadlineBeforeMs: number; limit: number },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_launches l ON l.attempt_id = h.attempt_id
+        WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
+          AND l.state = 'persisted'
+          AND h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?
+          AND NOT (
+            EXISTS (
+              SELECT 1 FROM json_each(COALESCE(h.settled_effects, '[]'))
+               WHERE value = 'failure-row'
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM json_each(COALESCE(h.settled_effects, '[]'))
+               WHERE value = 'claim-stamp'
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_publications p
+             WHERE (
+               -- OWNERSHIP FIRST, head-independent: a journal this attempt staged is
+               -- its own body (a headless delivery's checkout head, or a resolved head
+               -- that differs from the payload) and the publication lane owns it. The
+               -- tenant scope leads so the expression index (0101) seeks by prefix and
+               -- an unrelated tenant's history is never touched.
+               p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+               AND p.owner = json_extract(h.payload_json, '$.owner')
+               AND p.repo = json_extract(h.payload_json, '$.repo')
+               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+               AND COALESCE(
+                 json_extract(p.payload_json, '$.admittedAttemptId'),
+                 json_extract(p.payload_json, '$.attemptId')
+               ) = h.attempt_id
+             )
+             OR (
+               -- Legacy rows carry no identity: keep the old conservative scope/head
+               -- rule. A headless delivery has no head to match, so it never lands
+               -- here (no migration invents an identity).
+               COALESCE(
+                 json_extract(p.payload_json, '$.admittedAttemptId'),
+                 json_extract(p.payload_json, '$.attemptId')
+               ) IS NULL
+               AND json_extract(h.payload_json, '$.head_sha') IS NOT NULL
+               AND p.bot_id = json_extract(h.payload_json, '$.botRef.appId')
+               AND p.installation_id = json_extract(h.payload_json, '$.installation_id')
+               AND p.owner = json_extract(h.payload_json, '$.owner')
+               AND p.repo = json_extract(h.payload_json, '$.repo')
+               AND p.pr_number = json_extract(h.payload_json, '$.pr_number')
+               AND p.head_sha = json_extract(h.payload_json, '$.head_sha')
+             )
+          )
+        ORDER BY h.deadline_ms, h.delivery_key
+        LIMIT ?`,
+    )
+    .bind(input.deadlineBeforeMs, input.limit)
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }
