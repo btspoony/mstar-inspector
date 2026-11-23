@@ -92,17 +92,18 @@ describe("the lost-reply selector", () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT_ID, 424242);
     seedTarget(db, BOT_ID, { id: TARGET_ID });
-    // A deadline older than the bound is selected; one inside it is not.
+    // A frozen deadline older than the bound is selected; one inside it is not.
     await seedLaunched(db, "attempt-old", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
     await seedLaunched(db, "attempt-new", { launchedAtMs: NOW - 1, deadlineMs: NOW - 300_000 });
-    // An unanchored row falls back to `created_ms + cap`: this one is too old.
-    await seedLaunched(db, "attempt-fallback-old", {
+    // An unanchored row is never this lane's — even when ancient: settling on a
+    // synthesized `created_ms + cap` could stop a live child whose admitted cap
+    // was larger than this pass's read.
+    await seedLaunched(db, "attempt-unanchored-ancient", {
       launchedAtMs: NOW - 900_000,
       deadlineMs: null,
       createdMs: NOW - 1_800_000,
     });
-    // An unanchored row whose derived deadline is still inside the bound.
-    await seedLaunched(db, "attempt-fallback-new", {
+    await seedLaunched(db, "attempt-unanchored", {
       launchedAtMs: NOW - 900_000,
       deadlineMs: null,
       createdMs: NOW - 500_000,
@@ -127,10 +128,21 @@ describe("the lost-reply selector", () => {
 
     const selected = await listLostReplyLaunchSettlements(db, {
       deadlineBeforeMs: NOW - 600_000,
-      capMs: 900_000,
       limit: 25,
     });
-    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-fallback-old", "attempt-old"]);
+    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+    // The window edge itself: a frozen deadline exactly at the bound is selected.
+    const atBound = await listLostReplyLaunchSettlements(db, {
+      deadlineBeforeMs: NOW - 1_200_000,
+      limit: 25,
+    });
+    expect(atBound.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+    // A row inside the window is not selected.
+    const insideWindow = await listLostReplyLaunchSettlements(db, {
+      deadlineBeforeMs: NOW - 1_300_000,
+      limit: 25,
+    });
+    expect(insideWindow).toEqual([]);
   });
 });
 

@@ -1158,6 +1158,46 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
   });
 
+  test("a settlement fault after the batch is logged, and the row stays terminal", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fault-after-batch";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // note: The fault lands AFTER the guarded batch committed `failed`/revoked:
+    // the head-wide claim stamp is the first effect that writes KV.
+    h.kvState.putError = new Error("kv unavailable");
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const before = h.logLines.length;
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never, log: h.testLog }, SETTLES_AT);
+
+    // note: The attempt is already terminal — only the incomplete-settlement lane
+    // can finish it — so the fault must be visible, not swallowed.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    const faultLine = h.logLines.slice(before).find((line) => line.fields.attempt_id === attemptId);
+    expect(faultLine?.msg).toContain("incomplete-settlement lane owes the rest");
+    expect(faultLine?.fields.error_cause).toBe("kv unavailable");
+    expect(faultLine?.fields.head_sha).toBe(payload.head_sha!);
+  });
+
+  test("a row with no frozen deadline is never settled, even when ancient", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-unanchored";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // note: A pre-column row: nothing proves when its paid exec was killed, and a
+    // cap resolved in this pass may be smaller than the one it was admitted under.
+    db.raw.prepare("UPDATE review_attempt_handoffs SET deadline_ms = NULL WHERE attempt_id = ?").run(attemptId);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 3_600_000);
+
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
   test("a row that terminalized between the selector and the batch writes nothing", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();

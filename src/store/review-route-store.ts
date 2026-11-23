@@ -847,10 +847,13 @@ export async function listUnpublishedLaunchSettlements(
  * `deadline_ms + window <= now` is the ONLY liveness proxy there is: the
  * attempt's hard stop is the instant its paid exec is killed, so a row whose
  * deadline passed longer than the grace ago has no live child left to protect.
- * The row's frozen `deadline_ms` is that instant; an unanchored row falls back
- * to `created_ms + cap` — the value admission anchors it from — where `cap` is
- * this pass's resolved attempt cap, and a row carrying neither is skipped
- * because nothing proves a deadline. The anti-join on `review_failures` is the
+ * The row's FROZEN `deadline_ms` is that instant and nothing else is: a
+ * `created_ms + cap` synthesis would read a cap resolved in THIS pass, which
+ * either degrades to the default while the row was admitted under a stored
+ * larger cap or shrinks when an operator lowers the cap afterwards — both
+ * settle a live paid child early. So an unanchored row (`deadline_ms IS NULL`)
+ * is simply not this lane's: it belongs to the incomplete-settlement lane,
+ * which needs no deadline to act. The anti-join on `review_failures` is the
  * idempotence guard: the failure row is keyed by the attempt, so a row that
  * already settled once is never selected again and a concurrent pass can
  * never mint a second one.
@@ -862,7 +865,7 @@ export async function listUnpublishedLaunchSettlements(
  */
 export async function listLostReplyLaunchSettlements(
   db: D1Like,
-  input: { deadlineBeforeMs: number; capMs: number; limit: number },
+  input: { deadlineBeforeMs: number; limit: number },
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
@@ -871,14 +874,15 @@ export async function listLostReplyLaunchSettlements(
          FROM review_attempt_handoffs h
          JOIN review_launches l ON l.attempt_id = h.attempt_id
         WHERE l.state = 'launched' AND l.result_outcome IS NULL
-          AND COALESCE(h.deadline_ms, h.created_ms + ?) <= ?
+          AND h.deadline_ms IS NOT NULL
+          AND h.deadline_ms <= ?
           AND NOT EXISTS (
             SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
           )
-        ORDER BY COALESCE(h.deadline_ms, h.created_ms), h.delivery_key
+        ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?`,
     )
-    .bind(input.capMs, input.deadlineBeforeMs, input.limit)
+    .bind(input.deadlineBeforeMs, input.limit)
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }

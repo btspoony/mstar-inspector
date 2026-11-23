@@ -1,11 +1,11 @@
-import type { D1Database, D1PreparedStatement, KVNamespace, Queue } from "@cloudflare/workers-types";
+import type { D1Database, D1PreparedStatement, D1Result, KVNamespace, Queue } from "@cloudflare/workers-types";
 import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
   idemKey,
 } from "../contracts/idem";
-import { getLostReplySettleMs, getReviewAttemptCap } from "../dashboard/runtime-config-store";
+import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
 import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
@@ -233,7 +233,6 @@ async function ensureRecheckAccounting(
  */
 async function settleLostReplies(
   env: ReviewRouteEnv,
-  capMs: number,
   windowMs: number,
   nowMs: number,
   log: Pick<NonNullable<ReviewRouteEnv["log"]>, "info"> | undefined,
@@ -242,21 +241,28 @@ async function settleLostReplies(
   try {
     candidates = await listLostReplyLaunchSettlements(env.DB, {
       deadlineBeforeMs: nowMs - windowMs,
-      capMs,
       limit: ROUTE_RECOVERY_LIMIT,
     });
   } catch {
     return;
   }
   for (const handoff of candidates) {
+    // The selector admits only a frozen deadline; an unanchored row is another lane's.
+    const deadlineMs = handoff.deadlineMs;
+    if (deadlineMs === null) continue;
+    let moved: D1Result[];
     try {
-      const moved = await env.DB.batch([
+      moved = await env.DB.batch([
         markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs),
         recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
         beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
       ] as D1PreparedStatement[]);
-      if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
-      const deadlineMs = handoff.deadlineMs ?? handoff.createdMs + capMs;
+    } catch {
+      // The batch is atomic: nothing moved, the row is untouched and the next pass retries it.
+      continue;
+    }
+    if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
+    try {
       await landSettlementEffects(
         env,
         handoff,
@@ -271,9 +277,19 @@ async function settleLostReplies(
         { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
         `lost reply settled ${windowMs} ms past its attempt deadline — capacity released, the attempt is terminal`,
       );
-    } catch {
-      // The guarded move is atomic; a later fault leaves the row `launched`
-      // (or marked as settling), and a matching lane picks it back up.
+    } catch (err) {
+      // The guarded batch above already made the row terminal (`failed`, revoked,
+      // settlement started), so this lane cannot retry it: only the
+      // incomplete-settlement lane can finish the failure row and the claim.
+      // Log the fault so it is observable instead of silently dropped.
+      log?.info?.(
+        {
+          ...payloadIdentityFields(handoff.payload),
+          attempt_id: handoff.attemptId,
+          error_cause: err instanceof Error ? err.message : String(err),
+        },
+        "lost-reply settlement faulted after the attempt became terminal — the incomplete-settlement lane owes the rest",
+      );
     }
   }
 }
@@ -365,13 +381,12 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // Check never terminalized. The attempt's own deadline plus a post-deadline
   // grace retires that last uncertainty; the settlement then takes the SAME
   // path every other settled failure takes, and moving the launch row to
-  // `failed` is what releases the hold. Both reads happen once per pass, never
-  // cached: an operator change applies to the next sweep.
-  const [lostReply, attemptCap] = await Promise.all([
-    getLostReplySettleMs(env.DB),
-    getReviewAttemptCap(env.DB),
-  ]);
-  await settleLostReplies(env, attemptCap.capMs, lostReply.settleMs, nowMs, env.log);
+  // `failed` is what releases the hold. The window is read once per pass, never
+  // cached: an operator change applies to the next sweep. No attempt cap is read
+  // here: the lane settles only rows that froze their own `deadline_ms`, so a
+  // cap resolved now can never move a live child's stop earlier.
+  const lostReply = await getLostReplySettleMs(env.DB);
+  await settleLostReplies(env, lostReply.settleMs, nowMs, env.log);
   // A claim whose delivery died before recording anything. The state transition
   // is the exclusive hand-back (a second pass finds it `queued`), and sending
   // AFTER it means a failed send is still owned by the comment outbox lane,
