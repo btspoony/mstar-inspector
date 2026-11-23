@@ -79,7 +79,7 @@ verdict per delivery, recorded once.
 - `shared` is platform-authorized and batch-verified against the current designation.
 - The bind writes only an installation the bot already reported: the pending read is the gate, so an id the bot never saw attaches nothing.
 - A shared bot's installation grants its repositories to the one workspace it is bound to; an unbound row grants none, and a row bound to another live workspace is never rebound (first binder wins). A deleted workspace's binding counts as unbound.
-- A wrong installation is repaired at the installation level; no per-target binding column exists to clear. No route unbinds an installation bound to a live workspace: the repair is that the account's GitHub admin uninstalls and reinstalls the App (GitHub issues a new installation id, which arrives unbound), or the wrongly bound workspace is deleted (its binding then counts as unbound).
+- A wrong installation is repaired at the installation level; no per-target binding column exists to clear. No route unbinds an installation bound to a live workspace. Deleting the wrongly bound workspace is the full repair: its binding then counts as unbound and the same batch retires its targets. Uninstalling and reinstalling the App gives a new installation id that arrives unbound, but the wrongly bound workspace's live targets keep their repository claims (delivery resolution reads targets, not bindings) until they are removed in that workspace.
 - The webhook writes installations and deliveries; it claims a null repository identity on its target and writes no installation binding.
 - A delivery whose repository matches no live target, and one matching two unclaimed rows, resolves to nothing; silently falling back would re-attribute a review.
 
