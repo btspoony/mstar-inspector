@@ -490,7 +490,9 @@ export async function setWorkspaceName(
 
 /**
  * Retire one workspace as ONE `batch`: stamp `deleted_at`, cancel the active
- * subscription, drop every membership and revoke the pending invites. The row
+ * subscription, drop every membership, revoke the pending invites and retire
+ * the live review targets (a retired tenant's target must not keep its
+ * repository claim from the next workspace that binds the installation). The row
  * itself is never hard-deleted — every live read filters `deleted_at IS NULL`,
  * so the tenant stops resolving while its history stays readable. The
  * subscription goes with the tenant: a retired workspace must not leave an
@@ -523,6 +525,12 @@ export async function deleteWorkspace(
           WHERE workspace_id = ? AND status = 'pending'`,
       )
       .bind(workspaceId),
+    db
+      .prepare(
+        `UPDATE review_targets SET deleted_at = ?, updated_at = ?
+          WHERE workspace_id = ? AND deleted_at IS NULL`,
+      )
+      .bind(deletedAt, deletedAt, workspaceId),
   ]);
   return retired!.meta.changes > 0;
 }
