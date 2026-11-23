@@ -1372,6 +1372,7 @@ describe("the publication settlement mark", () => {
       attemptId: ATTEMPT_ID,
       payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -1516,6 +1517,7 @@ describe("the publication settlement mark", () => {
       attemptId: ATTEMPT_ID,
       payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -1984,6 +1986,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2025,6 +2028,7 @@ describe("the SEC-01 publish gate", () => {
         attemptId: ATTEMPT_ID,
         payload: ref.payload,
         nowMs: Date.now(),
+        createdMs: ref.roundStartedAt,
         enqueuedMs: 500,
         deadlineMs: ref.deadlineMs,
       });
@@ -2382,6 +2386,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2601,6 +2606,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2735,6 +2741,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2788,6 +2795,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2891,6 +2899,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });
@@ -2951,6 +2960,7 @@ describe("the SEC-01 publish gate", () => {
       attemptId: ATTEMPT_ID,
       payload: ref.payload,
       nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
       enqueuedMs: 500,
       deadlineMs: ref.deadlineMs,
     });

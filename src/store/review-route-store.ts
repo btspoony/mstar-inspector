@@ -31,15 +31,17 @@ export type AttemptHandoff = {
   payload: ReviewJobPayload;
   state: AttemptHandoffState;
   /**
-   * The attempt's absolute hard stop, frozen when this row was first written:
-   * the claiming delivery's time plus the operator's end-to-end cap. Every
-   * replay of the same attempt reads it instead of re-deriving it. `null` only
-   * on a row written before the column existed — "not yet anchored"; the next
-   * admission anchors it ONCE from `createdMs` (the only instant that attempt
-   * actually had), never from a later delivery's clock.
+   * The attempt's hard stop, frozen when this row was first written: the
+   * claiming delivery's `createdMs` (its entry instant) plus the operator's
+   * end-to-end cap. Every replay of the same attempt reads it instead of
+   * re-deriving it. `null` only on a row written before the column existed —
+   * "not yet anchored"; the next admission anchors it ONCE from `createdMs`
+   * (the only instant that attempt actually had), never from a later
+   * delivery's clock.
    */
   deadlineMs: number | null;
   enqueuedMs: number | null;
+  /** The origin `deadlineMs` counted its cap from — the ONE round-clock origin. */
   createdMs: number;
   settledMs: number | null;
   settledEffects: SettlementEffect[] | null;
@@ -218,7 +220,14 @@ export async function attemptCheckIsOpen(db: D1Like, attemptId: string): Promise
  * concurrent attempts to reserve the same delivery harmless: both read back the
  * one row, and the caller uses ITS attempt id.
  *
- * `deadlineMs` is frozen by the FIRST writer: a conflicting insert changes
+ * `createdMs` is the ORIGIN of `deadlineMs` — the instant the claiming delivery
+ * froze its cap from — and the FIRST writer binds it to `created_ms` in the same
+ * insert. `created_ms` is therefore never "when the row was inserted": every
+ * later delivery reads the origin back from the row (`budgetStartMs`), so no two
+ * deliveries of one attempt can derive two origins for one deadline. `nowMs` is
+ * the write's own clock and lands on `updated_ms` only.
+ *
+ * `deadlineMs` is frozen by the FIRST writer too: a conflicting insert changes
  * nothing, and the conditional UPDATE only fills the column a pre-migration row
  * left NULL. So a redelivery, a concurrent duplicate or a recovery re-enqueue
  * can never move the attempt's hard stop. The caller derives the candidate for
@@ -234,6 +243,7 @@ export async function reserveAttemptHandoff(
     attemptId: string;
     payload: ReviewJobPayload;
     nowMs: number;
+    createdMs: number;
     deadlineMs: number;
     enqueuedMs: number | null;
   },
@@ -251,7 +261,7 @@ export async function reserveAttemptHandoff(
       JSON.stringify(input.payload),
       input.deadlineMs,
       input.enqueuedMs,
-      input.nowMs,
+      input.createdMs,
       input.nowMs,
     )
     .run();

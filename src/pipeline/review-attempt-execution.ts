@@ -212,7 +212,6 @@ import {
   runnerTimeoutMs,
   parseNumstatSize,
   requestRunnerBudget,
-  type ReviewBudget,
 } from "../review-budget";
 
 export type PipelineEnv = {
@@ -1721,7 +1720,15 @@ export type AttemptRef = {
   attemptId: string;
   payload: ReviewJobPayload;
   level: ReviewLevel;
+  /** This delivery's claim instant. Logging only — the budget never reads it. */
   roundStartedAt: number;
+  /**
+   * The origin `deadlineMs` counted its cap from: the handoff row's
+   * `created_ms`, the same instant on every delivery of this attempt. It is
+   * what `deriveReviewBudget` is called with, so a redelivery cannot derive a
+   * second origin against one frozen deadline.
+   */
+  budgetStartMs: number;
   deadlineMs: number;
   githubAppId: number;
   usageWorkspaceId: string;
@@ -2478,12 +2485,22 @@ async function preparePhase(
   const {
     payload,
     attemptId,
-    roundStartedAt,
     level,
     githubAppId,
     usageWorkspaceId,
     usageSource,
   } = ref;
+  // The round clock is frozen on the attempt, so a preparation window that is
+  // spent now is spent for every later entry too. Refuse it HERE — before a
+  // container is provisioned or a Check claimed — instead of letting the
+  // platform's retries re-spend a deadline that cannot come back.
+  const roundBudget = deriveReviewBudget({
+    roundStartMs: ref.budgetStartMs,
+    deadlineMs: ref.deadlineMs,
+    terminalizeMs: ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT,
+    level,
+  });
+  boundedStepTimeout(roundBudget.runnerCutoffMs, EXEC_TIMEOUT_GIT_MS, "attempt preparation", "preparation");
   const sandboxId = attemptSandboxId(attemptId);
   const commenter = requireCommenter(deps, payload);
   const check = createCheckSettlement({
@@ -2498,7 +2515,6 @@ async function preparePhase(
   let fields: ConsumerLogFields | undefined;
   let sandbox: ReviewSandbox | null = null;
   let lifecycleScope: Scope | undefined;
-  let roundBudget: ReviewBudget | null = null;
   let observedChangedLines: number | null = null;
   baseFields = toBaseFields(payload);
   lifecycleScope = {
@@ -2778,13 +2794,9 @@ async function preparePhase(
     }
   }
 
-  const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
-  roundBudget = deriveReviewBudget({
-    roundStartMs: roundStartedAt,
-    deadlineMs: ref.deadlineMs,
-    terminalizeMs: terminalizeBudgetMs,
-    level,
-  });
+  // The entry derivation IS this round's budget: `budgetStartMs` and
+  // `deadlineMs` are both frozen on the attempt, so re-deriving here would only
+  // restate the same instant.
   const runnerDeadlineMs = roundBudget.runnerCutoffMs;
   const diffStageNow = Date.now();
   const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
@@ -4489,7 +4501,7 @@ export async function settleAttemptFailure(
   const observedChangedLines = facts?.changedLines ?? null;
   const terminalizeBudgetMs = ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT;
   const roundBudget = deriveReviewBudget({
-    roundStartMs: ref.roundStartedAt,
+    roundStartMs: ref.budgetStartMs,
     deadlineMs: ref.deadlineMs,
     terminalizeMs: terminalizeBudgetMs,
     level,

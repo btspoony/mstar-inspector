@@ -1477,6 +1477,10 @@ async function processMessage(
       attemptId,
       payload,
       nowMs: Date.now(),
+      // The SAME instant `deadlineMs` counted its cap from: the row stores the
+      // origin, and every later delivery reads it back instead of this one's
+      // clock — one origin per attempt, not one per delivery.
+      createdMs: roundStartedAt,
       deadlineMs,
       enqueuedMs: queueSentAtMs,
     });
@@ -1514,6 +1518,10 @@ async function processMessage(
       payload,
       level,
       roundStartedAt,
+      // Both read from the ROW, never re-derived from this delivery's clock:
+      // the origin and the instant it anchored are one pair, frozen by the
+      // first writer.
+      budgetStartMs: handoff.createdMs,
       deadlineMs: handoff.deadlineMs ?? deadlineMs,
       githubAppId,
       usageWorkspaceId,

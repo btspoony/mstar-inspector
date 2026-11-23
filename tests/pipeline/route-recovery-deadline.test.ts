@@ -9,8 +9,8 @@ import { createSeededTestD1, VALID_OUTPUT } from "../helpers/consumer-fixtures";
 import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
 import { deliveryKeyOf, readAttemptHandoff } from "../../src/store/review-route-store";
-import { readReviewLaunch } from "../../src/pipeline/review-attempt";
-import { REVIEW_ATTEMPT_CAP_DEFAULT_MS } from "../../src/dashboard/runtime-config-store";
+import { deriveReviewBudget, EXEC_TIMEOUT_GIT_MS, postRunnerReserveMs } from "../../src/review-budget";
+import { CHECK_TERMINALIZE_DEFAULT, REVIEW_ATTEMPT_CAP_DEFAULT_MS } from "../../src/dashboard/runtime-config-store";
 import type { TestD1 } from "../store/helpers";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 
