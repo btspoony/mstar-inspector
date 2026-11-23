@@ -1859,6 +1859,13 @@ export async function prepareReviewAttempt(input: {
       `attempt ${attemptId}: its slot is retired — nothing may ever start on it`,
     );
   }
+  if (provisioned.kind === "misconfigured") {
+    // A missing image is setup, not weather: retrying re-reads the same absent
+    // binding forever, so it settles as a terminal configuration fault.
+    throw new ConfigUnresolvedError(
+      `attempt ${attemptId}: no container image is bound for its slot — nothing was started`,
+    );
+  }
   if (provisioned.kind === "unavailable") {
     throw new ContainerUnavailableError(
       `attempt ${attemptId}: its container could not be provisioned inside ${provisionMs}ms — nothing is proven, the next entry re-provisions it`,

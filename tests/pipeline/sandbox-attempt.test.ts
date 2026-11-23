@@ -11,6 +11,7 @@ import "../helpers/cloudflare-workers-mock";
 const { SandboxV1, shellCommand } = await import("../../src/pipeline/sandbox");
 const {
   AttemptUnknownError,
+  ConfigUnresolvedError,
   ContainerLostBeforePaidError,
   ContainerUnavailableError,
   attemptMarker,
@@ -154,7 +155,7 @@ type SandboxDouble = {
 };
 
 function attemptSandboxDouble(decision: {
-  provision?: "provisioned" | "unavailable" | "retired";
+  provision?: "provisioned" | "unavailable" | "misconfigured" | "retired";
   marked?: "ran" | "reply-lost" | "not-running" | "marker-mismatch" | "marker-unreadable" | "retired";
   markedRejected?: boolean;
   destroy?: "destroyed" | "stopped" | "unknown";
@@ -307,6 +308,18 @@ describe("provision is the only way a slot starts", () => {
     expect(rebuiltOn.startCalls).toBe(0);
   });
 
+  test("a stopped slot with no bound image answers misconfigured and starts nothing", async () => {
+    const container = makeContainer(false);
+    delete container.images.sandbox;
+    const sandbox = makeDo(container);
+
+    expect(await sandbox.provision(MARKER, { deadlineEpochMs: Date.now() + 60_000 })).toEqual({
+      kind: "misconfigured",
+    });
+    expect(container.startCalls).toBe(0);
+    expect(container.markerWrites).toBe(0);
+  });
+
   test("a stopped slot with a retention proof is 'stopped' and fences the slot", async () => {
     const storage = storageDouble();
     const container = makeContainer(false);
@@ -379,6 +392,16 @@ describe("prepare provisions on every entry", () => {
     const sandbox = attemptSandboxDouble({ provision: "retired" });
 
     await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toThrow(/retired/);
+    expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
+  });
+
+  test("a slot with no bound image is a terminal setup fault, never a retryable start failure", async () => {
+    const db = createMigratedTestD1();
+    const sandbox = attemptSandboxDouble({ provision: "misconfigured" });
+
+    await expect(prepareReviewAttempt(prepareInput(db, sandbox))).rejects.toBeInstanceOf(
+      ConfigUnresolvedError,
+    );
     expect(sandbox.events.some((event) => event.startsWith("run:"))).toBe(false);
   });
 });

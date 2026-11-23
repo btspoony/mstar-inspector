@@ -155,6 +155,7 @@ const {
   SandboxV1,
   getSandbox,
   EXEC_DEADLINE_WRAPPER,
+  EXEC_DEADLINE_REFUSED_SENTINEL,
   DEFAULT_EXEC_TIMEOUT_MS,
   MAX_EXEC_COMMAND_BYTES,
   MAX_EXEC_ENV_VALUE_BYTES,
@@ -381,8 +382,10 @@ describe("SandboxV1 Durable Object", () => {
     containerRunning = false;
     const sandbox = new SandboxV1(ctx as never, {}) as unknown as ReviewSandbox;
 
+    // Setup drift, not weather: `misconfigured` is terminal, never retried as
+    // a transient `unavailable`.
     expect(await sandbox.provision(MARKER, { deadlineEpochMs: Date.now() + 120_000 })).toEqual({
-      kind: "unavailable",
+      kind: "misconfigured",
     });
     expect(execCalls).toEqual([]);
   });
@@ -432,6 +435,36 @@ describe("SandboxV1 Durable Object", () => {
 
     expect(execCalls[0]!.cmd).toEqual(["timeout", "--kill-after=5", "5", "/bin/sh", "-lc", "sleep 9999"]);
     expect(result).toEqual({ stdout: "", stderr: "Terminated\n", exitCode: 124 });
+  });
+
+  test("a command that exits 125 on its own is NOT a deadline refusal (no sentinel)", async () => {
+    // `timeout` also exits 125 when it cannot run the command, and any command
+    // may `exit 125`; only the wrapper's own sentinel marks the pre-exec refusal.
+    reset();
+    execResult = { stdout: new ArrayBuffer(0), stderr: bytes("my own 125\n"), exitCode: 125 };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runCommand(shellCommand("exit 125"), { timeout: 5_000 });
+
+    expect(result).toEqual({ stdout: "", stderr: "my own 125\n", exitCode: 125 });
+  });
+
+  test("the wrapper's own refusal (exit 125 WITH the sentinel) is a deadline-spent", async () => {
+    reset();
+    markerBytes = MARKER;
+    containerRunning = true;
+    execResult = {
+      stdout: new ArrayBuffer(0),
+      stderr: bytes(`${EXEC_DEADLINE_REFUSED_SENTINEL}\n`),
+      exitCode: 125,
+    };
+    const { sandbox } = makeDo();
+
+    const result = await sandbox.runMarked(MARKER, shellCommand("bun run x"), {
+      deadlineEpochMs: Date.now() + 60_000,
+    });
+
+    expect(result).toEqual({ kind: "deadline-spent", remainingMs: 0 });
   });
 
   test("runCommand propagates container errors (caller decides retry/DLQ)", async () => {

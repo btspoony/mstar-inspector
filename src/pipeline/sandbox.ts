@@ -63,11 +63,14 @@ type ExecReplyLost = { kind: "reply-lost" };
  * the slot runs and its disk carries this attempt's marker; `unavailable` means
  * the start, the inactivity setting or the marker write did not answer inside
  * the caller's absolute deadline and NOTHING may be assumed about the slot;
- * `retired` means the durable fence is set and nothing may ever start here.
+ * `misconfigured` means the container has no image bound for this slot, a
+ * terminal setup fault a retry cannot fix; `retired` means the durable fence is
+ * set and nothing may ever start here.
  */
 export type ProvisionOutcome =
   | { kind: "provisioned" }
   | { kind: "unavailable" }
+  | { kind: "misconfigured" }
   | { kind: "retired" };
 
 /**
@@ -141,12 +144,19 @@ const AWAIT_EXPIRED = Symbol("await-expired");
 const KILL_GRACE_MS = 5_000;
 
 /**
+ * Printed on stderr by the wrapper's own refusal. Exit 125 alone proves
+ * nothing — `timeout` also exits 125 when it cannot run the command, and the
+ * command may `exit 125` itself — so a deadline refusal must be named.
+ */
+export const EXEC_DEADLINE_REFUSED_SENTINEL = "mstar-deadline-refused";
+
+/**
  * The in-container deadline evaluation, run by the container's own shell:
  * `$1` = the absolute deadline in Unix SECONDS, `$2` = the SIGKILL grace in ms,
  * `$3` = the command. `container.exec`'s relative timeout restarts when the
  * process actually starts, so a host-side number can never be absolute; the
  * wrapper reads `date +%s` inside the container and a window at or below the
- * grace exits 124 WITHOUT starting anything.
+ * grace REFUSES with 125 and the sentinel on stderr, WITHOUT starting anything.
  *
  * The clock is sampled TWICE, the second time immediately before the exec: a
  * single early sample can be stale by a container suspension, and a duration
@@ -166,9 +176,9 @@ export const EXEC_DEADLINE_WRAPPER = [
   "deadline_s=$1; grace_ms=$2; shift 2",
   "grace_s=$((grace_ms / 1000))",
   "remaining=$((deadline_s - $(date +%s) - 1))",
-  'if [ "$remaining" -le "$grace_s" ]; then exit 125; fi',
+  `if [ "$remaining" -le "$grace_s" ]; then echo ${EXEC_DEADLINE_REFUSED_SENTINEL} >&2; exit 125; fi`,
   "remaining=$((deadline_s - $(date +%s) - 1))",
-  'if [ "$remaining" -le "$grace_s" ]; then exit 125; fi',
+  `if [ "$remaining" -le "$grace_s" ]; then echo ${EXEC_DEADLINE_REFUSED_SENTINEL} >&2; exit 125; fi`,
   'exec timeout --kill-after=$grace_s "$((remaining - grace_s))" /bin/sh -lc "$1"',
 ].join("; ");
 
@@ -262,9 +272,9 @@ export class SandboxV1 extends DurableObject {
         const container = this.container;
         if (!container.running) {
           const image = container.images[CONTAINER_IMAGE_KEY];
-          if (image === undefined) {
-            throw new Error(`container image "${CONTAINER_IMAGE_KEY}" is not configured`);
-          }
+          // A missing image is a terminal setup fault, never a transient start
+          // failure: RETURN it (a throw here would be caught as `unavailable`).
+          if (image === undefined) return { kind: "misconfigured" };
           container.start({ image, instance: CONTAINER_INSTANCE, enableInternet: true });
           const armed = await boundedAwait(
             container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS),
@@ -531,13 +541,15 @@ export class SandboxV1 extends DurableObject {
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
     }
-    // 125 is the wrapper's own refusal: it ran BEFORE `exec`, so the command
+    // 125 alone proves nothing: `timeout` exits 125 when it cannot run the
+    // command, and the command may `exit 125` itself. Only the wrapper's own
+    // sentinel marks the refusal that ran BEFORE `exec`, so the command
     // provably never started. 124 stays a real timeout kill (the platform's
     // `timeout`), which is why the two codes differ.
-    if (output.exitCode === 125) {
+    const stderrText = utf8.decode(output.stderr);
+    if (output.exitCode === 125 && stderrText.includes(EXEC_DEADLINE_REFUSED_SENTINEL)) {
       return { kind: "deadline-spent", remainingMs: 0 };
     }
-    const stderrText = utf8.decode(output.stderr);
     const stdinNote = stdinFailure === undefined ? "" : `exec stdin: ${stdinFailure.message}`;
     return {
       stdout: utf8.decode(output.stdout),
