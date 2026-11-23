@@ -56,7 +56,8 @@ import {
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
-import type { MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
+import type { DestroyOutcome, MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
+import { ContainerNotRunningError } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /**
@@ -202,14 +203,70 @@ export async function markAttemptRevoked(db: D1Like, attemptId: string, nowMs: n
 
 /**
  * The attempt's container could not be proven to be the one this attempt
- * prepared: its marker is missing or different (a replacement incarnation, a
- * lost container, an unreadable filesystem). Nothing was read or destroyed on
- * that evidence and the outcome is unknown — neither a failure nor a success.
+ * prepared, or its state could not be read at all. Nothing paid ran on that
+ * evidence; the outcome is `unknown` — neither a failure nor a success.
  */
 export class AttemptUnknownError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "AttemptUnknownError";
+  }
+}
+
+/**
+ * The slot could not be provisioned inside the caller's absolute deadline
+ * (start, inactivity setting or marker write did not answer). TRANSIENT: the
+ * next entry re-provisions from scratch, because the D1 row still proves no
+ * paid step was sent.
+ */
+export class ContainerUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContainerUnavailableError";
+  }
+}
+
+/**
+ * The slot is not running. TRANSIENT: only `provision` may start a container,
+ * so the retry re-provisions rather than reviving this handle. Declared in the
+ * dependency-free `./sandbox-errors` leaf and re-exported here, so a consumer
+ * that only classifies outcomes never links the container binding.
+ */
+export { ContainerNotRunningError } from "./sandbox-errors";
+
+/**
+ * The slot is retired: the durable fence says nothing may ever start here
+ * again. TERMINAL — retrying it only burns the step's retry budget.
+ */
+export class AttemptRetiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AttemptRetiredError";
+  }
+}
+
+/**
+ * The slot stopped or was replaced BEFORE the paid step was sent. TERMINAL but
+ * free: the D1 row still proves no paid work, so nothing was charged and a new
+ * attempt may run.
+ */
+export class ContainerLostBeforePaidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContainerLostBeforePaidError";
+  }
+}
+
+/**
+ * The slot stopped or was replaced AFTER the launch row moved to `launched`.
+ * The paid exec was never issued (the marker proof precedes it), so this is a
+ * confirmed no-result — never a lost reply. The row is moved to `failed` before
+ * this is thrown.
+ */
+export class ContainerLostAfterClaimError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContainerLostAfterClaimError";
   }
 }
 
@@ -229,15 +286,15 @@ export class ExecDeadlineRefusedError extends Error {
 /**
  * Destroy the attempt's container ONLY after proving it is still the one this
  * attempt prepared AND that the caller may destroy it (the result is durable,
- * or no paid work started). No marker match and no retention proof destroy
- * nothing and report `unknown`, so a replacement incarnation is never torn
- * down and a running paid command never loses its only copy.
+ * or no paid work started). `destroyed` and `stopped` both end the slot (both
+ * fence it); `unknown` destroys nothing, so a replacement incarnation is never
+ * torn down and a running paid command never loses its only copy.
  */
 export async function discardReviewAttempt(
   sandbox: ReviewSandbox,
   attemptId: string,
   retention: RetentionProof,
-): Promise<"destroyed" | "unknown"> {
+): Promise<DestroyOutcome> {
   return sandbox.destroyMarked(attemptMarker(attemptId), retention);
 }
 
@@ -526,6 +583,28 @@ export async function claimReviewAttempt(
     .bind(attemptId, nowMs, identity?.key ?? null, identity?.generation ?? null, attemptSandboxId(attemptId), nowMs)
     .run();
   return written.meta.changes === 1 ? "claimed" : "already-claimed";
+}
+
+/**
+ * Whether this attempt's D1 row entitles a caller to provision its container.
+ *
+ * The row IS the authority to start (D1): only `provisioned` with no launch and
+ * no revocation proves that nothing paid can be lost, so a stopped or
+ * undeclared slot may be started again. Every other state refuses — and a
+ * revoked row is refused as `retired`, because no retry can ever help.
+ */
+async function readProvisionGate(
+  db: D1Like,
+  attemptId: string,
+): Promise<"may-provision" | "retired" | string> {
+  const row = await db
+    .prepare(`SELECT state, launched_at_ms, revoked_ms FROM review_launches WHERE attempt_id = ?`)
+    .bind(attemptId)
+    .first<{ state: string; launched_at_ms: number | null; revoked_ms: number | null }>();
+  if (row === null) return "absent";
+  if (row.revoked_ms !== null) return "retired";
+  if (row.state !== "provisioned" || row.launched_at_ms !== null) return `'${row.state}'`;
+  return "may-provision";
 }
 
 /**
@@ -892,8 +971,6 @@ function decodeExecution(attemptId: string, json: string): ReviewAttemptExecutio
   };
 }
 
-const MARKER_PROOF_COMMAND = shellCommand("true");
-
 /**
  * Structured log sink of one attempt. The caller owns the field schema; this
  * module only adds the fields of the step it is in.
@@ -989,7 +1066,7 @@ export function boundedStepTimeout(
   const left = Math.min(capMs, runnerDeadlineMs - nowMs);
   if (left <= 0) {
     throw new RoundBudgetSpent(
-      `round budget spent: ${step} declined — the derived runner deadline is spent (${left}ms left for it)`,
+      `round budget spent: ${step} declined — the derived runner deadline was already spent before this step`,
       window,
     );
   }
@@ -1012,6 +1089,12 @@ export function parseBoundedRead(stdout: string, provesAbsence = false): ReportB
   return { text: out.slice(0, split), failure: null };
 }
 
+/**
+ * A marker-guarded read of a post-paid document. Every outcome other than
+ * `ran` is an explicit unknown whose message NAMES the observation, so an
+ * operator can tell "the slot was replaced" from "the slot stopped" — the
+ * collection is fail-closed either way (QC1 F-002).
+ */
 async function boundedRead(
   sandbox: ReviewSandbox,
   marker: string,
@@ -1036,13 +1119,11 @@ async function boundedRead(
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
   } catch {
-    throw new AttemptUnknownError(
-      "the attempt container could not be proven to be this attempt's (the read itself was lost) — its result is not collected",
-    );
+    read = { kind: "reply-lost" };
   }
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
-      "the attempt container could not be proven to be this attempt's — its result is not collected",
+      `the attempt container could not be read (${read.kind}) — its result is not collected`,
     );
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
@@ -1480,52 +1561,116 @@ function toBase64Utf8(text: string): string {
   return btoa(binary);
 }
 
-async function runPreparedCommand(
+/**
+ * Run one marker-guarded command and hand back the RAW outcome. The three
+ * callers below map the same closed set differently because the D1 row gives
+ * each of them a different entitlement (prepare: nothing paid; review entry:
+ * nothing paid yet; paid exec: row `launched`).
+ */
+async function markedCommand(
   sandbox: ReviewSandbox,
   marker: string,
-  provisioning: "claimed" | "already-claimed",
+  command: ShellCommand,
+  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
+): Promise<MarkedRun> {
+  try {
+    return await sandbox.runMarked(marker, command, opts);
+  } catch {
+    // An RPC that never answered is an issued exec with no reply.
+    return { kind: "reply-lost" };
+  }
+}
+
+/**
+ * A prepare-phase command on the slot `provision` just declared. UNGUARDED by
+ * design (D2): provision ran inside the DO's exclusive gate and is the only
+ * thing that speaks for the slot's disk, so a plain exec is enough. A slot that
+ * stopped since then is a TRANSIENT `ContainerNotRunningError` — the next entry
+ * re-provisions from scratch, and the D1 row still proves nothing paid can be
+ * lost. A read fault is an ordinary error, which the platform retries too.
+ */
+async function runPreparedCommand(
+  sandbox: ReviewSandbox,
   command: ShellCommand,
   opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  if (provisioning === "claimed") return sandbox.runCommand(command, opts);
-  let read: MarkedRun;
-  try {
-    read = await sandbox.runMarked(marker, command, opts);
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new AttemptUnknownError(
-      `the attempt container could not be proven (the guarded command's reply was lost: ${detail}) — nothing ran on a replacement`,
-    );
-  }
-  if (read.kind === "unknown") {
-    throw new AttemptUnknownError(
-      "the attempt container could not be proven — nothing ran on a replacement",
-    );
-  }
-  if (read.kind === "deadline-spent") {
-    throw new ExecDeadlineRefusedError(read.remainingMs);
-  }
-  return { stdout: read.stdout, stderr: read.stderr, exitCode: read.exitCode };
+  return sandbox.runCommand(command, opts);
 }
 
-async function claimAttemptMarker(
+/**
+ * A pre-paid command at the review step's own entry. The row is `provisioned`,
+ * so a slot that stopped or was replaced means the attempt cannot continue —
+ * but nothing was charged. `reply-lost` and `retired` stay explicit unknowns:
+ * neither proves that nothing runs (§3.2, review-entry column).
+ */
+async function runReviewEntryCommand(
   sandbox: ReviewSandbox,
   marker: string,
-  attemptId: string,
-): Promise<void> {
-  let claimed: "written" | "matched" | "unknown";
-  try {
-    claimed = await sandbox.claimMarker(marker);
-  } catch {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: the marker claim's reply was lost — the container's state is unknown`,
-    );
+  command: ShellCommand,
+  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const read = await markedCommand(sandbox, marker, command, opts);
+  switch (read.kind) {
+    case "ran":
+      return { stdout: read.stdout, stderr: read.stderr, exitCode: read.exitCode };
+    case "deadline-spent":
+      throw new Error("the exec deadline was spent before the runner input write started");
+    case "not-running":
+    case "marker-mismatch":
+      throw new ContainerLostBeforePaidError(
+        `the attempt container did not carry this attempt's preparation (${read.kind}) — nothing was charged, a new attempt runs`,
+      );
+    case "marker-unreadable":
+    case "reply-lost":
+      throw new AttemptUnknownError(
+        `the attempt container could not be read at the review step (${read.kind}) — nothing may be concluded`,
+      );
+    case "retired":
+      throw new AttemptUnknownError(
+        "the attempt's slot is retired — nothing may run on it and nothing is charged",
+      );
+    default:
+      return noMarkedOutcome(read);
   }
-  if (claimed === "unknown") {
-    throw new AttemptUnknownError(
-      `attempt ${attemptId}: the container is not this attempt's (its marker is missing or different)`,
-    );
+}
+
+/**
+ * The PAID exec. The marker proof precedes the exec, so every proof outcome
+ * proves the paid exec was never issued: that is a confirmed no-result, not a
+ * lost reply. Only `reply-lost` leaves the child possibly alive, and only
+ * `deadline-spent` is a cap stop (§3.2, paid-runner column).
+ */
+async function runPaidCommand(
+  sandbox: ReviewSandbox,
+  marker: string,
+  command: ShellCommand,
+  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const read = await markedCommand(sandbox, marker, command, opts);
+  switch (read.kind) {
+    case "ran":
+      return { stdout: read.stdout, stderr: read.stderr, exitCode: read.exitCode };
+    case "deadline-spent":
+      throw new ExecDeadlineRefusedError(read.remainingMs);
+    case "not-running":
+    case "marker-mismatch":
+    case "marker-unreadable":
+    case "retired":
+      throw new ContainerLostAfterClaimError(
+        `the attempt container was lost after its launch was claimed (${read.kind}) — the paid exec was never sent`,
+      );
+    case "reply-lost":
+      throw new AttemptUnknownError(
+        "the paid exec was issued and its reply was lost — the process may still be running",
+      );
+    default:
+      return noMarkedOutcome(read);
   }
+}
+
+/** Unreachable by construction: the compiler proves every outcome is handled. */
+function noMarkedOutcome(outcome: never): never {
+  throw new Error(`review sandbox: unhandled marked outcome ${JSON.stringify(outcome)}`);
 }
 
 /**
@@ -1611,10 +1756,15 @@ export class MovedHeadError extends Error {
  * failure path reads `progress.failureStage` and `progress.secretValues`, so
  * both are updated in place as the steps advance.
  *
- * The attempt's own row grants the container: the entry whose INSERT creates it
- * provisions, and every later entry may only prove — and then act on — the
- * incarnation that entry started. A prepare that cannot prove that incarnation
- * is `unknown`, not a retry.
+ * EVERY entry provisions from scratch. The D1 row is the authority to start —
+ * `provisioned`, `launched_at_ms IS NULL`, `revoked_ms IS NULL` — and that row
+ * proves nothing paid can be lost, so a stopped or undeclared slot is a free
+ * retry rather than an unknown. A fresh disk means every retry re-clones; the
+ * marker is written by `provision` and is never repaired by a later step.
+ *
+ * `runnerCutoffMs` is the attempt's derived pre-runner cutoff: one absolute
+ * deadline bounds start + inactivity setting + readiness + marker write, capped
+ * by the existing git step bound.
  */
 export async function prepareReviewAttempt(input: {
   payload: ReviewJobPayload;
@@ -1628,12 +1778,13 @@ export async function prepareReviewAttempt(input: {
   sandbox: ReviewSandbox | null;
   onSandbox: (sandbox: ReviewSandbox) => void;
   progress: ReviewAttemptProgress;
+  /** The attempt's derived pre-runner cutoff; absent means "cap only". */
+  runnerCutoffMs?: number;
 }): Promise<PreparedReviewAttempt> {
   const { payload, deps, commenter, attemptId, progress } = input;
   let sandbox = input.sandbox;
-  let provisioning: "claimed" | "already-claimed";
   try {
-    provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now(), input.identity);
+    const provisioning = await claimReviewAttempt(deps.env.DB, attemptId, Date.now(), input.identity);
     if (provisioning === "already-claimed" && input.identity !== null) {
       const existing = await readAttemptIdentity(deps.env.DB, attemptId);
       if (existing === null) {
@@ -1653,6 +1804,7 @@ export async function prepareReviewAttempt(input: {
       }
     }
   } catch (err) {
+    if (err instanceof MovedHeadError) throw err;
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),
       progress.secretValues,
@@ -1661,16 +1813,40 @@ export async function prepareReviewAttempt(input: {
       `attempt ${attemptId}: the provisioning claim could not be read back (${detail}) — nothing is provisioned for it`,
     );
   }
+  const gate = await readProvisionGate(deps.env.DB, attemptId);
+  if (gate === "retired") {
+    throw new AttemptRetiredError(
+      `attempt ${attemptId}: its slot is retired — nothing may ever start on it`,
+    );
+  }
+  if (gate !== "may-provision") {
+    throw new AttemptUnknownError(
+      `attempt ${attemptId}: its launch row is ${gate}, so no container may be provisioned for it`,
+    );
+  }
   if (sandbox === null) {
     progress.failureStage = "sandbox";
     sandbox = await reviewAttemptSandbox(deps, attemptId);
     input.onSandbox(sandbox);
   }
   const marker = attemptMarker(attemptId);
-  if (provisioning === "claimed") {
-    await claimAttemptMarker(sandbox, marker, attemptId);
-  } else {
-    await runPreparedCommand(sandbox, marker, provisioning, MARKER_PROOF_COMMAND);
+  const provisionMs = boundedStepTimeout(
+    input.runnerCutoffMs ?? Date.now() + EXEC_TIMEOUT_GIT_MS,
+    EXEC_TIMEOUT_GIT_MS,
+    "container provisioning",
+    "preparation",
+  );
+  progress.failureStage = "sandbox";
+  const provisioned = await sandbox.provision(marker, { deadlineEpochMs: Date.now() + provisionMs });
+  if (provisioned.kind === "retired") {
+    throw new AttemptRetiredError(
+      `attempt ${attemptId}: its slot is retired — nothing may ever start on it`,
+    );
+  }
+  if (provisioned.kind === "unavailable") {
+    throw new ContainerUnavailableError(
+      `attempt ${attemptId}: its container could not be provisioned inside ${provisionMs}ms — nothing is proven, the next entry re-provisions it`,
+    );
   }
   progress.failureStage = "pipeline";
   const token = await mintSandboxReadToken({ payload, commenter });
@@ -1684,7 +1860,7 @@ export async function prepareReviewAttempt(input: {
     diffPath: DIFF_PATH,
   });
 
-  const clone = await runPreparedCommand(sandbox, marker, provisioning, cmds.clone, {
+  const clone = await runPreparedCommand(sandbox, cmds.clone, {
     env: gitTransportEnv(token),
     timeout: EXEC_TIMEOUT_GIT_MS,
   });
@@ -1692,7 +1868,7 @@ export async function prepareReviewAttempt(input: {
     throw new Error(`clone failed: exit ${clone.exitCode}, stdout ${clone.stdout.length}B`);
   }
 
-  const rev = await runPreparedCommand(sandbox, marker, provisioning, cmds.checkedOutSha, {
+  const rev = await runPreparedCommand(sandbox, cmds.checkedOutSha, {
     timeout: EXEC_TIMEOUT_GIT_MS,
   });
   if (rev.exitCode !== 0 || rev.stdout.trim() === "") {
@@ -1813,10 +1989,9 @@ export async function runReviewAttempt(input: {
   };
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
   const inputWriteWindowMs = deadlineMs - Date.now();
-  const writeInput = await runPreparedCommand(
+  const writeInput = await runReviewEntryCommand(
     sandbox,
     attemptMarker(attemptId),
-    "already-claimed",
     writeJsonCommand(RUNNER_INPUT_PATH),
     {
       stdin: runnerInputStdin,
@@ -1925,13 +2100,21 @@ export async function runReviewAttempt(input: {
   progress.runnerStartedAt = Date.now();
   let run: { stdout: string; stderr: string; exitCode: number };
   try {
-    run = await runPreparedCommand(sandbox, attemptMarker(attemptId), "already-claimed", runnerCmd, {
+    run = await runPaidCommand(sandbox, attemptMarker(attemptId), runnerCmd, {
       cwd: CLONE_DIR,
       env: runnerEnv,
       ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
       deadlineEpochMs: deadlineMs,
     });
   } catch (err) {
+    if (err instanceof ContainerLostAfterClaimError) {
+      // A proof outcome above the exec proves the paid exec was never issued, so
+      // the row may move to `failed` — the same terminal no-result the deadline
+      // refusal records.
+      progress.runnerStartedAt = undefined;
+      await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+      throw err;
+    }
     if (!(err instanceof ExecDeadlineRefusedError)) throw err;
     progress.runnerStartedAt = undefined;
     await recordReviewFailure(deps.env.DB, attemptId, Date.now());

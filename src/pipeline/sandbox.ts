@@ -1,6 +1,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Container, DurableObjectState } from "@cloudflare/workers-types";
+import { ContainerNotRunningError } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
@@ -52,24 +53,60 @@ type CommandOpts = {
 type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
 
 /**
- * The result of a marker-guarded operation: either it ran on a container that
- * still carries the attempt's exact marker bytes, or the container could not
- * be proven to be that one and NOTHING ran.
+ * What `provision` observed inside the DO's exclusive gate. `provisioned` means
+ * the slot runs and its disk carries this attempt's marker; `unavailable` means
+ * the start, the inactivity setting or the marker write did not answer inside
+ * the caller's absolute deadline and NOTHING may be assumed about the slot;
+ * `retired` means the durable fence is set and nothing may ever start here.
+ */
+export type ProvisionOutcome =
+  | { kind: "provisioned" }
+  | { kind: "unavailable" }
+  | { kind: "retired" };
+
+/**
+ * The closed outcome set of ONE marker-guarded operation, as classified at the
+ * observation inside the exclusive gate. `container.running` is sampled once, on
+ * entry: it separates `not-running` from everything else and is never used to
+ * explain a failed marker read.
+ *
+ * Only `ran` and `deadline-spent` prove that nothing is running. `reply-lost`
+ * covers an issued exec with no reply (the child may still be alive), so it is
+ * never treated as "nothing ran".
  */
 export type MarkedRun =
   | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
-  | { kind: "unknown" }
+  | { kind: "reply-lost" }
+  | { kind: "not-running" }
+  | { kind: "marker-mismatch" }
+  | { kind: "marker-unreadable" }
+  | { kind: "retired" }
   | { kind: "deadline-spent"; remainingMs: number };
+
+/**
+ * The terminal state of a destruction attempt. `destroyed` and `stopped` both
+ * mean the slot ends here and the fence is set; `unknown` means nothing was
+ * proven, nothing was destroyed and the slot keeps whatever it holds.
+ */
+export type DestroyOutcome = "destroyed" | "stopped" | "unknown";
+
+/**
+ * A command was addressed to a slot that is not running. Declared in the
+ * dependency-free `./sandbox-errors` leaf so a caller that only classifies
+ * outcomes never links the container binding; re-exported here as part of the
+ * sandbox boundary surface.
+ */
+export { ContainerNotRunningError } from "./sandbox-errors";
 
 /** Locked contract (compass contracts B). */
 export type ReviewSandbox = {
+  provision(marker: string, opts: { deadlineEpochMs: number }): Promise<ProvisionOutcome>;
   runCommand(
     command: ShellCommand,
     opts?: CommandOpts,
   ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-  claimMarker(marker: string): Promise<"written" | "matched" | "unknown">;
   runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun>;
-  destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown">;
+  destroyMarked(marker: string, retention: RetentionProof): Promise<DestroyOutcome>;
   destroy(): Promise<void>;
   revoke?(): Promise<{ revoked: boolean; running: boolean }>;
 };
@@ -93,9 +130,7 @@ function isRetentionProof(proof: RetentionProof | undefined): proof is Retention
   return proof?.kind === "retained" || proof?.kind === "no-paid-work";
 }
 
-const LOCKED_AWAIT_MARGIN_MS = 15_000;
-
-const LOCKED_AWAIT_TIMEOUT = Symbol("locked-await-timeout");
+const AWAIT_EXPIRED = Symbol("await-expired");
 
 const KILL_GRACE_MS = 5_000;
 
@@ -136,13 +171,13 @@ function normalizedTimeoutMs(requested: number | undefined): number {
   return Number.isFinite(ms) ? Math.max(1, ms) : DEFAULT_EXEC_TIMEOUT_MS;
 }
 
-async function boundedAwait<T>(work: Promise<T>, ms: number): Promise<T | typeof LOCKED_AWAIT_TIMEOUT> {
+async function boundedAwait<T>(work: Promise<T>, atMs: number): Promise<T | typeof AWAIT_EXPIRED> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       work,
-      new Promise<typeof LOCKED_AWAIT_TIMEOUT>((resolve) => {
-        timer = setTimeout(() => resolve(LOCKED_AWAIT_TIMEOUT), ms);
+      new Promise<typeof AWAIT_EXPIRED>((resolve) => {
+        timer = setTimeout(() => resolve(AWAIT_EXPIRED), Math.max(0, atMs - Date.now()));
       }),
     ]);
   } finally {
@@ -152,10 +187,9 @@ async function boundedAwait<T>(work: Promise<T>, ms: number): Promise<T | typeof
 
 const MARKER_PATH = "/tmp/mstar-review-attempt";
 const MARKER_READ_COMMAND = shellCommand(`[ -f '${MARKER_PATH}' ] || exit 3; cat -- '${MARKER_PATH}'`);
-const MARKER_CLAIM_COMMAND = shellCommand(
-  `umask 077; set -C; printf '%s' "$MSTAR_ATTEMPT_MARKER" > '${MARKER_PATH}'`,
+const MARKER_WRITE_COMMAND = shellCommand(
+  `umask 077; printf '%s' "$MSTAR_ATTEMPT_MARKER" > '${MARKER_PATH}'`,
 );
-const MARKER_READ_TIMEOUT_MS = 30_000;
 
 const REVOKED_KEY = "attempt-revoked";
 
@@ -206,18 +240,44 @@ export class SandboxV1 extends DurableObject {
     return container;
   }
 
-  private async ensureRunning(container: Container): Promise<void> {
-    if (this.revoked) {
-      throw new Error("this attempt was revoked by the successor that took its PR — nothing may start");
-    }
-    if (!container.running) {
-      const image = container.images[CONTAINER_IMAGE_KEY];
-      if (image === undefined) {
-        throw new Error(`container image "${CONTAINER_IMAGE_KEY}" is not configured`);
+  /**
+   * THE one method that may start a container. Everything the start owes — the
+   * start, the inactivity setting and the marker write — must answer inside the
+   * caller's ONE absolute deadline, or the whole provisioning is `unavailable`
+   * and nothing is assumed about the slot.
+   */
+  async provision(marker: string, opts: { deadlineEpochMs: number }): Promise<ProvisionOutcome> {
+    const markerOpts = { env: { MSTAR_ATTEMPT_MARKER: marker } };
+    this.assertBounds(MARKER_WRITE_COMMAND, markerOpts);
+    return this.exclusive(async () => {
+      if (this.revoked) return { kind: "retired" };
+      const deadlineEpochMs = opts.deadlineEpochMs;
+      try {
+        const container = this.container;
+        if (!container.running) {
+          const image = container.images[CONTAINER_IMAGE_KEY];
+          if (image === undefined) {
+            throw new Error(`container image "${CONTAINER_IMAGE_KEY}" is not configured`);
+          }
+          container.start({ image, instance: CONTAINER_INSTANCE, enableInternet: true });
+          const armed = await boundedAwait(
+            container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS),
+            deadlineEpochMs,
+          );
+          if (armed === AWAIT_EXPIRED) return { kind: "unavailable" };
+        }
+        // A running slot keeps its disk, so the marker is rewritten only when the
+        // bytes are absent or different; the fresh-disk case is the branch above.
+        const current = await this.readMarker(container, deadlineEpochMs);
+        if (current.kind !== "bytes" || current.text !== marker) {
+          const written = await this.writeMarker(container, marker, markerOpts, deadlineEpochMs);
+          if (!written) return { kind: "unavailable" };
+        }
+        return { kind: "provisioned" };
+      } catch {
+        return { kind: "unavailable" };
       }
-      container.start({ image, instance: CONTAINER_INSTANCE, enableInternet: true });
-    }
-    await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+    });
   }
 
   private gate: Promise<unknown> = Promise.resolve();
@@ -238,9 +298,10 @@ export class SandboxV1 extends DurableObject {
     const prepared = { stdin: this.assertBounds(command, opts) };
     const container = await this.exclusive(async () => {
       const handle = this.container;
-      const started = await boundedAwait(this.ensureRunning(handle), LOCKED_AWAIT_MARGIN_MS);
-      if (started === LOCKED_AWAIT_TIMEOUT) {
-        throw new Error(`container did not become ready within ${LOCKED_AWAIT_MARGIN_MS}ms`);
+      if (!handle.running) {
+        throw new ContainerNotRunningError(
+          "the attempt container is not running — only provisioning may start it",
+        );
       }
       return handle;
     });
@@ -251,73 +312,103 @@ export class SandboxV1 extends DurableObject {
     return result;
   }
 
-  async claimMarker(marker: string): Promise<"written" | "matched" | "unknown"> {
-    const opts = { env: { MSTAR_ATTEMPT_MARKER: marker } };
-    this.assertBounds(MARKER_CLAIM_COMMAND, opts);
-    return this.exclusive(async () => {
-      const container = this.container;
-      const started = await boundedAwait(this.ensureRunning(container), LOCKED_AWAIT_MARGIN_MS);
-      if (started === LOCKED_AWAIT_TIMEOUT) return "unknown";
-      let exitCode: number;
-      try {
-        const claimed = await boundedAwait(
-          this.execCommand(container, MARKER_CLAIM_COMMAND, opts),
-          MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS,
-        );
-        if (claimed === LOCKED_AWAIT_TIMEOUT) return "unknown";
-        if ("kind" in claimed) return "unknown";
-        exitCode = claimed.exitCode;
-      } catch {
-        exitCode = 1;
-      }
-      if (exitCode === 0) return "written";
-      const current = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
-      return current === marker ? "matched" : "unknown";
-    });
-  }
-
+  /**
+   * Probe-only: it never starts a container. The caller's absolute deadline is
+   * the ONE budget — the marker read and the command share it, and the proof
+   * gets none of its own.
+   */
   async runMarked(marker: string, command: ShellCommand, opts?: CommandOpts): Promise<MarkedRun> {
     return this.exclusive(async () => {
+      if (this.revoked) return { kind: "retired" };
       const container = this.container;
-      if (!container.running) return { kind: "unknown" };
-      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
-      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return { kind: "unknown" };
-      const awaitBoundMs =
-        opts?.deadlineEpochMs === undefined
-          ? normalizedTimeoutMs(opts?.timeout)
-          : Math.max(0, opts.deadlineEpochMs - Date.now()) + KILL_GRACE_MS;
+      if (!container.running) return { kind: "not-running" };
+      const deadlineEpochMs =
+        opts?.deadlineEpochMs ?? Date.now() + normalizedTimeoutMs(opts?.timeout);
+      if (deadlineEpochMs - Date.now() <= KILL_GRACE_MS) {
+        return { kind: "deadline-spent", remainingMs: deadlineEpochMs - Date.now() };
+      }
+      const proof = await this.readMarker(container, deadlineEpochMs);
+      if (proof.kind === "unreadable") return { kind: "marker-unreadable" };
+      if (proof.kind !== "bytes" || proof.text !== marker) return { kind: "marker-mismatch" };
+      if (deadlineEpochMs - Date.now() <= KILL_GRACE_MS) {
+        return { kind: "deadline-spent", remainingMs: deadlineEpochMs - Date.now() };
+      }
       try {
-        const ran = await boundedAwait(
-          this.execCommand(container, command, opts),
-          awaitBoundMs + LOCKED_AWAIT_MARGIN_MS,
-        );
-        if (ran === LOCKED_AWAIT_TIMEOUT) return { kind: "unknown" };
+        const ran = await this.execCommand(container, command, { ...opts, deadlineEpochMs });
         return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
       } catch {
-        return { kind: "unknown" };
+        return { kind: "reply-lost" };
       }
     });
   }
 
-  async destroyMarked(marker: string, retention: RetentionProof): Promise<"destroyed" | "unknown"> {
+  /**
+   * `destroyed` and `stopped` both fence the slot; `stopped` is the platform
+   * having ended the incarnation already, which the caller's retention proof
+   * makes equivalent to destroying it. `unknown` destroys nothing.
+   */
+  async destroyMarked(marker: string, retention: RetentionProof): Promise<DestroyOutcome> {
     if (!isRetentionProof(retention)) return "unknown";
     return this.exclusive(async () => {
+      if (this.revoked === true) return "stopped";
       const container = this.container;
-      if (!container.running) return "unknown";
-      const proof = await boundedAwait(this.readMarker(container), MARKER_READ_TIMEOUT_MS + LOCKED_AWAIT_MARGIN_MS);
-      if (proof === LOCKED_AWAIT_TIMEOUT || proof !== marker) return "unknown";
+      if (!container.running) {
+        await this.fence();
+        return "stopped";
+      }
+      const deadlineEpochMs = Date.now() + DEFAULT_EXEC_TIMEOUT_MS;
+      const proof = await this.readMarker(container, deadlineEpochMs);
+      if (proof.kind !== "bytes" || proof.text !== marker) return "unknown";
       await container.destroy();
+      await this.fence();
       return "destroyed";
     });
   }
 
-  private async readMarker(container: Container): Promise<string | null> {
+  private async fence(): Promise<void> {
+    if (this.revoked) return;
+    this.revoked = true;
+    await this.ctx.storage.put(REVOKED_KEY, true);
+  }
+
+  /**
+   * The marker's verdict on one sampled running slot. `absent` (the file is not
+   * there) and `unreadable` (the read gave no verdict inside the deadline) are
+   * different observations and stay apart: only the first can be repaired by
+   * writing the marker.
+   */
+  private async readMarker(
+    container: Container,
+    deadlineEpochMs: number,
+  ): Promise<{ kind: "bytes"; text: string } | { kind: "absent" } | { kind: "unreadable" }> {
     try {
-      const read = await this.execCommand(container, MARKER_READ_COMMAND, { timeout: MARKER_READ_TIMEOUT_MS });
-      if ("kind" in read) return null;
-      return read.exitCode === 0 ? read.stdout : null;
+      const read = await boundedAwait(
+        this.execCommand(container, MARKER_READ_COMMAND, { deadlineEpochMs }),
+        deadlineEpochMs,
+      );
+      if (read === AWAIT_EXPIRED || "kind" in read) return { kind: "unreadable" };
+      if (read.exitCode === 3) return { kind: "absent" };
+      return read.exitCode === 0 ? { kind: "bytes", text: read.stdout } : { kind: "unreadable" };
     } catch {
-      return null;
+      return { kind: "unreadable" };
+    }
+  }
+
+  /** Write the marker; `false` when it did not land or did not answer in time. */
+  private async writeMarker(
+    container: Container,
+    marker: string,
+    opts: { env: Record<string, string> },
+    deadlineEpochMs: number,
+  ): Promise<boolean> {
+    try {
+      const written = await boundedAwait(
+        this.execCommand(container, MARKER_WRITE_COMMAND, { env: opts.env, deadlineEpochMs }),
+        deadlineEpochMs,
+      );
+      return written !== AWAIT_EXPIRED && !("kind" in written) && written.exitCode === 0;
+    } catch {
+      return false;
     }
   }
 

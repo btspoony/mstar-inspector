@@ -574,7 +574,7 @@ describe("a container-side deadline refusal is a confirmed stop", () => {
         cmd.includes("--input")
           ? ({ kind: "deadline-spent", remainingMs: 0 } as const)
           : h.fakeSandbox.runMarked(marker, cmd, opts),
-      claimMarker: h.fakeSandbox.claimMarker,
+      provision: h.fakeSandbox.provision,
       destroyMarked: h.fakeSandbox.destroyMarked,
       destroy: h.fakeSandbox.destroy,
     });
