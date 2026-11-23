@@ -459,6 +459,20 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     return res.meta.changes;
   }
 
+  /** True when the workspace has a live, named target on the bot; gates `DELIVERY_WORKSPACE_REPO_SQL` reads. */
+  async function hasNamedTarget(appId: string, workspaceId: string): Promise<boolean> {
+    const row = await db
+      .prepare(
+        `SELECT 1 AS hit FROM review_targets
+         WHERE bot_id = ? AND workspace_id = ? AND deleted_at IS NULL
+           AND repo_owner IS NOT NULL AND repo_name IS NOT NULL
+         LIMIT 1`,
+      )
+      .bind(appId, workspaceId)
+      .first<{ hit: number }>();
+    return row !== null;
+  }
+
   async function deliverySummaries(appIds: string[]): Promise<Record<string, DeliverySummary>> {
     if (appIds.length === 0) return {};
     const placeholders = appIds.map(() => "?").join(", ");
@@ -908,6 +922,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      */
     async deliverySummary(appId: string, workspaceId: string | null = null): Promise<DeliverySummary> {
       if (workspaceId === null) return (await deliverySummaries([appId]))[appId]!;
+      if (!(await hasNamedTarget(appId, workspaceId))) return { latest: null, rejected24h: 0 };
       const latest = await db
         .prepare(
           `SELECT * FROM webhook_deliveries
@@ -943,6 +958,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       filters: DeliveryFilters,
       workspaceId: string | null = null,
     ): Promise<DeliveryPage> {
+      if (workspaceId !== null && !(await hasNamedTarget(appId, workspaceId))) {
+        return { rows: [], total: 0, repos: [], types: [] };
+      }
       const scopePredicates = ["bot_id = ?"];
       const scopeBinds: string[] = [appId];
       if (workspaceId !== null) {
