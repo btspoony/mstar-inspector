@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import {
   Button,
   Dialog,
@@ -38,7 +38,7 @@ export function CreateWorkspaceDialog({
     onOpenChange(next);
   }
 
-  async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function onCreate(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return;
     const trimmed = name.trim();

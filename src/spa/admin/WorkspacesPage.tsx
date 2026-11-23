@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import {
   Button,
   CardContent,
@@ -221,7 +221,7 @@ export function WorkspacesPage({ locale }: { locale: Locale }) {
     }
   }
 
-  async function submitSlug(event: FormEvent<HTMLFormElement>) {
+  async function submitSlug(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     const target = slugTarget;
     if (!target) return;

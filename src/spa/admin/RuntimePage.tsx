@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type SubmitEvent } from "react";
 import {
   Button,
   CardContent,
@@ -327,7 +327,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   } | null>(null);
 
   async function onSubmit(
-    event: FormEvent<HTMLFormElement>,
+    event: SubmitEvent<HTMLFormElement>,
     stored: number,
     degraded: boolean,
   ): Promise<void> {
@@ -365,7 +365,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   async function onSaveBudgets(
-    event: FormEvent<HTMLFormElement>,
+    event: SubmitEvent<HTMLFormElement>,
     stored: CheckBudgetConfig,
   ): Promise<void> {
     event.preventDefault();
@@ -409,7 +409,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   async function onSaveClaim(
-    event: FormEvent<HTMLFormElement>,
+    event: SubmitEvent<HTMLFormElement>,
     stored: CommentClaimConfig,
   ): Promise<void> {
     event.preventDefault();
@@ -455,7 +455,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  async function onSaveReconcile(event: FormEvent<HTMLFormElement>, stored: ReconcileConfig): Promise<void> {
+  async function onSaveReconcile(event: SubmitEvent<HTMLFormElement>, stored: ReconcileConfig): Promise<void> {
     event.preventDefault();
     if (busy || RECONCILE_FIELDS.some((field) => concurrencySubmitBlocked(stored.degraded, reconcileDraft[field] ?? null))) {
       return;
@@ -488,7 +488,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
-  async function onSaveSweep(event: FormEvent<HTMLFormElement>, stored: SweepConfig): Promise<void> {
+  async function onSaveSweep(event: SubmitEvent<HTMLFormElement>, stored: SweepConfig): Promise<void> {
     event.preventDefault();
     if (busy || SWEEP_FIELDS.some((field) => concurrencySubmitBlocked(sweepFieldUnreadable(stored, field), sweepDraft[field] ?? null))) {
       return;
@@ -522,7 +522,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   async function onSaveRecheck(
-    event: FormEvent<HTMLFormElement>,
+    event: SubmitEvent<HTMLFormElement>,
     stored: RecheckAssignmentConfig,
   ): Promise<void> {
     event.preventDefault();
@@ -584,7 +584,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   }
 
   async function onSaveAttemptCap(
-    event: FormEvent<HTMLFormElement>,
+    event: SubmitEvent<HTMLFormElement>,
     stored: AttemptCapConfig,
   ): Promise<void> {
     event.preventDefault();

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import { t, type DictionaryKey } from "../../i18n";
 import { Button, FlowSection, Input } from "@design-system";
 import { ListRow, ListRowGroup } from "@/components/ListRow";
@@ -78,7 +78,7 @@ export function WorkspaceSetupPage({ boot }: { boot: SpaBoot }) {
     }
   }
 
-  async function onCreate(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function onCreate(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return;
     const trimmed = name.trim();
