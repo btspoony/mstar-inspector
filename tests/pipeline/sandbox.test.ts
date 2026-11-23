@@ -261,6 +261,34 @@ describe("SandboxV1 Durable Object", () => {
     expect(execCalls).toEqual([]);
   });
 
+  test("an exec whose dispatch never answers is a LOST REPLY, never 'nothing ran'", async () => {
+    // A dispatched exec may have run even when its answer never arrives. The
+    // pre-exec refusal guard needs a deadline past KILL_GRACE_MS, so this case
+    // costs that grace and no more.
+    reset();
+    const { sandbox, container } = makeDo(true);
+    markerBytes = MARKER;
+    let dispatched = 0;
+    container.exec = mock(async (cmd: string[]) => {
+      execCalls.push({ cmd });
+      const line = cmd[cmd.length - 1] ?? "";
+      if (line.includes("/tmp/mstar-review-attempt")) {
+        return { stdin: null, output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }) };
+      }
+      dispatched += 1;
+      return Promise.withResolvers<{ output: () => Promise<ExecOutput>; stdin: null }>().promise;
+    });
+
+    const started = Date.now();
+    const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+      // KILL_GRACE_MS is 5 s; the pre-exec guard refuses anything closer.
+      deadlineEpochMs: started + 5_000 + 60,
+    });
+
+    expect(dispatched).toBe(1);
+    expect(read).toEqual({ kind: "reply-lost" });
+  }, 15_000);
+
   test("a marker write that never resolves answers unavailable AT the caller's deadline, not after a fixed wait", async () => {
     reset();
     const { sandbox, container } = makeDo(false);
@@ -733,10 +761,12 @@ describe("SandboxV1 absolute exec deadline", () => {
     expect(child.cmd).not.toContain("timeout");
   });
 
-  test("a container clock past the deadline exits 124 without running the runner", () => {
+  test("a container clock past the deadline REFUSES with 125 and does not run the runner", () => {
+    // 125 is the wrapper's own refusal (nothing started). 124 stays the
+    // platform timeout kill, which is a different fact about a running command.
     const past = Math.floor(Date.now() / 1000) - 60;
     const result = Bun.spawnSync(["/bin/sh", "-c", EXEC_DEADLINE_WRAPPER, "mstar-deadline", String(past), "5000", "echo ran"]);
-    expect(result.exitCode).toBe(124);
+    expect(result.exitCode).toBe(125);
     expect(result.stdout.toString()).toBe("");
   });
 });

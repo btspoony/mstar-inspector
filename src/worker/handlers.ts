@@ -10,6 +10,7 @@ import {
 import type { ReviewJobPayload } from "../contracts/review-job";
 import type { SharedBotRefusal } from "../dashboard/entitlement";
 import { CHECK_SUMMARIES } from "../pipeline/checks";
+import { FAILURE_SUMMARIES } from "../contracts/failure-codes";
 import { createFailureStore, type FailureStage } from "../store/failure-store";
 import type { Env } from "./env";
 
@@ -195,6 +196,9 @@ async function refuseDelivery(
       pr_number: payload.pr_number,
       head_sha: payload.head_sha ?? "",
       stage: deliveryRefusalStage(refusal),
+      code: "review.delivery.deferred",
+      trackId: `${payload.owner}/${payload.repo}#${payload.pr_number}@${payload.head_sha ?? ""}`,
+      message: FAILURE_SUMMARIES["review.delivery.deferred"],
       error: CHECK_SUMMARIES.skippedByDelivery(deliveryRefusalReason(refusal)),
     });
   } catch (err) {

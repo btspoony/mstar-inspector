@@ -727,6 +727,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -1236,6 +1237,7 @@ describe("createReviewConsumer", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -1738,6 +1740,7 @@ describe("createReviewConsumer", () => {
         },
       },
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },
@@ -4526,6 +4529,7 @@ describe("degraded-comment lifecycle (Bugbot finding)", () => {
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
       ...h.overrides,
       failureStore: {
+        reclassify: async () => {},
         record: async () => {
           throw new Error("d1 down");
         },

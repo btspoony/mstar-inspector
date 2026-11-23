@@ -23,9 +23,14 @@ export const FAILURE_CODES = [
   "review.budget.runner_spent",
   "review.paid.reply_lost",
   "review.output.invalid",
+  "review.output.degraded_published",
   "review.publish.deadline_spent",
   "review.github.rate_limited",
   "review.github.unavailable",
+  "review.admission.refused",
+  "review.delivery.deferred",
+  "review.metering.unrecorded",
+  "review.recheck.unaccounted",
   "review.internal.unclassified",
 ] as const;
 
@@ -44,9 +49,9 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.container.unavailable":
     "The review environment could not be started. Nothing was charged; it will be retried.",
   "review.container.lost_before_paid":
-    "The review environment was restarted before the review began. Nothing was charged; a new attempt will run.",
+    "The review environment was restarted before the review began. Nothing was charged. Ask for a review again, or push a new commit, to run a fresh attempt.",
   "review.container.lost_after_claim":
-    "The review was interrupted right after it started, before it produced any result. Nothing was charged; a new attempt will run.",
+    "The review was interrupted right after it started, before it produced any result. Nothing was charged. Ask for a review again, or push a new commit, to run a fresh attempt.",
   "review.container.retired":
     "This review attempt was cancelled for good, so it will not run again. Nothing was charged; ask for a new review to retry.",
   "review.budget.preparation_spent":
@@ -57,12 +62,22 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
     "The review process was started but its result never came back. Whether it finished is unknown, and nothing was published.",
   "review.output.invalid":
     "The review finished but its result was not a readable review. Nothing was published.",
+  "review.output.degraded_published":
+    "The review result was not readable as a normal review, so a reduced review was posted instead. No normal review was published.",
   "review.publish.deadline_spent":
     "The review finished its analysis, but there was no time left to publish it. Nothing was published.",
   "review.github.rate_limited":
     "GitHub asked the bot to slow down before the review could be published. Nothing was published; the next review may go through.",
   "review.github.unavailable":
     "GitHub could not be reached while the review was being published. Nothing was published; it will be retried.",
+  "review.admission.refused":
+    "This commit was not reviewed: another review already holds this pull request. Nothing was charged.",
+  "review.delivery.deferred":
+    "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
+  "review.metering.unrecorded":
+    "The review ran but its metering row could not be written, so usage may be lower than the work done. The review was not published.",
+  "review.recheck.unaccounted":
+    "A follow-up check could not be reconciled. The review result stands and nothing extra was charged; the check may need a manual re-run.",
   "review.internal.unclassified":
     "The review stopped for a reason that has not been classified yet. Whether anything was charged is unknown; an operator can look it up by this code.",
 };

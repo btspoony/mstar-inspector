@@ -1790,8 +1790,12 @@ export async function prepareReviewAttempt(input: {
   sandbox: ReviewSandbox | null;
   onSandbox: (sandbox: ReviewSandbox) => void;
   progress: ReviewAttemptProgress;
-  /** The attempt's derived pre-runner cutoff; absent means "cap only". */
-  runnerCutoffMs?: number;
+  /**
+   * The attempt's derived pre-runner cutoff. REQUIRED: provisioning is the one
+   * step that must not invent its own window, or a cold start can overrun the
+   * preparation budget and still be reported as provisioned.
+   */
+  runnerCutoffMs: number;
 }): Promise<PreparedReviewAttempt> {
   const { payload, deps, commenter, attemptId, progress } = input;
   let sandbox = input.sandbox;

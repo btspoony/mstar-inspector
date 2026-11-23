@@ -220,7 +220,7 @@ function prepareInput(
   db: TestD1,
   sandbox: SandboxDouble,
   acquired: string[] = [],
-  runnerCutoffMs?: number,
+  runnerCutoffMs: number = Date.now() + 120_000,
 ) {
   return {
     payload: PAYLOAD,
@@ -237,7 +237,7 @@ function prepareInput(
     sandbox: null,
     onSandbox: () => {},
     progress: progress(),
-    ...(runnerCutoffMs === undefined ? {} : { runnerCutoffMs }),
+    runnerCutoffMs,
   };
 }
 

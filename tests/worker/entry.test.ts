@@ -69,7 +69,10 @@ describe("worker entry scheduled wiring", () => {
         repo: "widgets",
         pr_number: 1,
         head_sha: "",
-        stage: "runner",
+        code: "review.internal.unclassified",
+      trackId: "t",
+      message: "the review did not complete",
+      stage: "runner",
         error: `boom-${i}`,
       });
     }

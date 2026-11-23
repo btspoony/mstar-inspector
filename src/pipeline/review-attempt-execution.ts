@@ -2481,7 +2481,45 @@ export type PhaseFailureContext = {
   budgetMs: number;
   changedLines: number | null;
   sendAttemptPublicationId: string | null;
+  /** Which GitHub limit refused the step, read from the real response. */
+  rateLimited?: "primary" | "secondary" | null;
 };
+
+/** The facts a transient phase error carries, readable WITHOUT its prototype. */
+export type TransientFacts = {
+  stage: FailureStage;
+  headSha: string | null;
+  runnerReturned: boolean;
+  sendAttemptPublicationId: string | null;
+  rateLimited: "primary" | "secondary" | null;
+};
+
+const TRANSIENT_FACTS_KEYS: ReadonlyArray<keyof TransientFacts> = [
+  "stage",
+  "headSha",
+  "runnerReturned",
+  "sendAttemptPublicationId",
+  "rateLimited",
+];
+
+/**
+ * Read `PhaseTransientError.facts` off an error a Workflows retry REBUILT. The
+ * platform keeps `name`, `message` and the serializable own properties but not
+ * the prototype, so `instanceof` cannot be the gate: a thrown runner failure
+ * would otherwise lose the evidence that its paid command returned.
+ */
+export function transientFactsOf(err: unknown): TransientFacts | undefined {
+  const value = err as { facts?: unknown } | null;
+  if (value === null || typeof value !== "object" || value.facts === undefined) return undefined;
+  const facts = value.facts as Partial<TransientFacts>;
+  for (const key of TRANSIENT_FACTS_KEYS) {
+    if (!(key in facts)) return undefined;
+  }
+  if (typeof facts.runnerReturned !== "boolean") return undefined;
+  if (typeof facts.headSha !== "string" && facts.headSha !== null) return undefined;
+  if (typeof facts.stage !== "string") return undefined;
+  return facts as TransientFacts;
+}
 
 /**
  * The D6 classifier: a phase wrapper's terminal outcome becomes a `PhaseFailure`
@@ -2496,6 +2534,7 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
     headSha: ctx.headSha,
     runnerReturned: ctx.runnerReturned,
     message: strippedMessage(err),
+    ...(ctx.rateLimited === undefined || ctx.rateLimited === null ? {} : { rateLimited: ctx.rateLimited }),
   };
   if (err instanceof BudgetExhaustedError) {
     return {
@@ -2620,6 +2659,7 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
           }).preparationBudgetMs,
         changedLines: null,
         sendAttemptPublicationId: null,
+        rateLimited: classifyGithubRateLimit(err),
       },
       err,
     );
@@ -2697,6 +2737,7 @@ async function preparePhase(
     commenter,
     attemptId,
     identity: null,
+    runnerCutoffMs: roundBudget.runnerCutoffMs,
     sandbox,
     onSandbox: (acquired) => {
       sandbox = acquired;
@@ -2837,7 +2878,11 @@ async function preparePhase(
     head_sha: payload.head_sha || "no-sha",
   });
   const usageNow = new Date();
-  const executionToken = crypto.randomUUID();
+  // The metering identity is the ATTEMPT, not this entry: a retry of `prepare`
+  // after the slot was rebuilt is the same paid execution, and the insert is
+  // idempotent on this token. A genuinely distinct attempt has its own id and
+  // therefore its own charge.
+  const executionToken = `usage-attempt:${attemptId}`;
   const usageOccurredAt = usageNow.toISOString();
   try {
     await recordUsageEvent(deps.env.DB, {
@@ -2867,6 +2912,9 @@ async function preparePhase(
         pr_number: payload.pr_number,
         head_sha: headSha,
         stage: "usage",
+        code: "review.metering.unrecorded",
+        trackId: attemptId,
+        message: FAILURE_SUMMARIES["review.metering.unrecorded"],
         error: `usage_events row not written: ${detail} ${JSON.stringify({
           reviewId,
           workspaceId: usageWorkspaceId,
@@ -3870,6 +3918,9 @@ async function collectPhase(
           pr_number: payload.pr_number,
           head_sha: headSha,
           stage: "recheck",
+          code: "review.recheck.unaccounted",
+          trackId: attemptId,
+          message: FAILURE_SUMMARIES["review.recheck.unaccounted"],
           error: recheckDetail,
         });
       }
@@ -3991,6 +4042,19 @@ async function collectPhase(
       if (degradedOutcome.phase === "confirmed") {
         await noteOwedCheck(deps, ref, headSha, check?.handle?.attemptId);
         await settleAttemptPublication(deps, attemptId, fields, ["publication"]);
+        // The row was recorded BEFORE publishing and said nothing would be
+        // published. It was, so the classification must say so — a summary that
+        // contradicts the PR is worse than no summary.
+        try {
+          await deps.failureStore.reclassify({
+            id: `${attemptId}:parse`,
+            code: "review.output.degraded_published",
+            message: FAILURE_SUMMARIES["review.output.degraded_published"],
+          });
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(fields, `degraded row reclassify failed (the row keeps its pre-publish summary): ${detail}`);
+        }
       }
     }
     deps.log.warn(
@@ -4641,6 +4705,9 @@ async function publishPhase(
             pr_number: payload.pr_number,
             head_sha: headSha,
             stage: "rate-limit",
+            code: "review.github.rate_limited",
+            trackId: attemptId,
+            message: FAILURE_SUMMARIES["review.github.rate_limited"],
             error: `${prefix}${count} stale degraded comment deletion(s) rejected by the GitHub ${kind} rate limit — the review stands`,
           });
         } catch (recordErr) {
@@ -4689,8 +4756,20 @@ async function sealedSecretValues(deps: ProcessDeps, attemptId: string): Promise
  * claim (`sandbox`) from one lost after it (`runner`).
  */
 export function failureCodeOf(failure: PhaseFailure): FailureCode {
+  // A GitHub limit is the most specific fact the record can carry: the step was
+  // refused by that limit, whatever phase it happened in.
+  if (failure.rateLimited === "primary" || failure.rateLimited === "secondary") {
+    return "review.github.rate_limited";
+  }
   switch (failure.class) {
     case "budget":
+      // A budget stop in the PUBLISH phase is a publication deadline, not
+      // runner exhaustion: different incidents, different owners. A stop during
+      // collection still means the runner window ran out, so it keeps the
+      // runner code.
+      if (failure.phase === "publish") {
+        return "review.publish.deadline_spent";
+      }
       return failure.window === "preparation"
         ? "review.budget.preparation_spent"
         : "review.budget.runner_spent";

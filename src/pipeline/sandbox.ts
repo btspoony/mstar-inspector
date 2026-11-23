@@ -51,6 +51,12 @@ type CommandOpts = {
 };
 
 type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
+/**
+ * The process was opened and its reply never arrived inside the host timer. The
+ * command may have run (and may have written a result), so this is NEVER a
+ * "nothing ran" verdict: only a refusal that precedes the exec proves that.
+ */
+type ExecReplyLost = { kind: "reply-lost" };
 
 /**
  * What `provision` observed inside the DO's exclusive gate. `provisioned` means
@@ -160,9 +166,9 @@ export const EXEC_DEADLINE_WRAPPER = [
   "deadline_s=$1; grace_ms=$2; shift 2",
   "grace_s=$((grace_ms / 1000))",
   "remaining=$((deadline_s - $(date +%s) - 1))",
-  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  'if [ "$remaining" -le "$grace_s" ]; then exit 125; fi',
   "remaining=$((deadline_s - $(date +%s) - 1))",
-  'if [ "$remaining" -le "$grace_s" ]; then exit 124; fi',
+  'if [ "$remaining" -le "$grace_s" ]; then exit 125; fi',
   'exec timeout --kill-after=$grace_s "$((remaining - grace_s))" /bin/sh -lc "$1"',
 ].join("; ");
 
@@ -322,6 +328,11 @@ export class SandboxV1 extends DurableObject {
       return handle;
     });
     const result = await this.execCommand(container, command, opts, prepared);
+    if ("kind" in result && result.kind === "reply-lost") {
+      // The command was opened; only its reply is missing. A caller that mutates
+      // the slot must treat this exactly like a lost reply on any other path.
+      throw new Error("the exec was issued and its reply was lost — the command may have run");
+    }
     if ("kind" in result) {
       throw new Error("the exec deadline was spent before the process started");
     }
@@ -458,7 +469,7 @@ export class SandboxV1 extends DurableObject {
     command: ShellCommand,
     opts: CommandOpts | undefined,
     prepared?: { stdin: Uint8Array | undefined },
-  ): Promise<{ stdout: string; stderr: string; exitCode: number } | ExecDeadlineSpent> {
+  ): Promise<{ stdout: string; stderr: string; exitCode: number } | ExecDeadlineSpent | ExecReplyLost> {
     const stdinPayload = prepared === undefined ? this.assertBounds(command, opts) : prepared.stdin;
     const deadlineMs = opts?.deadlineEpochMs;
     if (deadlineMs !== undefined && deadlineMs - Date.now() <= KILL_GRACE_MS) {
@@ -495,8 +506,10 @@ export class SandboxV1 extends DurableObject {
       deadlineMs === undefined
         ? await container.exec(argv, execOptions)
         : await boundedAwait(container.exec(argv, execOptions), deadlineMs);
+    // The open may already have been dispatched by the platform, so a host
+    // timer here proves neither "did not run" nor "no result": lost reply.
     if (opened === AWAIT_EXPIRED) {
-      return { kind: "deadline-spent", remainingMs: (deadlineMs ?? Date.now()) - Date.now() };
+      return { kind: "reply-lost" };
     }
     const process = opened;
     const drained = process.output();
@@ -510,11 +523,19 @@ export class SandboxV1 extends DurableObject {
     }
     const output =
       deadlineMs === undefined ? await drained : await boundedAwait(drained, deadlineMs + KILL_GRACE_MS);
+    // The command demonstrably ran (it was opened); the reply missed the timer.
+    // Its output may already be durable on the slot, so this is a lost reply.
     if (output === AWAIT_EXPIRED) {
-      return { kind: "deadline-spent", remainingMs: -KILL_GRACE_MS };
+      return { kind: "reply-lost" };
     }
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
+    }
+    // 125 is the wrapper's own refusal: it ran BEFORE `exec`, so the command
+    // provably never started. 124 stays a real timeout kill (the platform's
+    // `timeout`), which is why the two codes differ.
+    if (output.exitCode === 125) {
+      return { kind: "deadline-spent", remainingMs: 0 };
     }
     const stderrText = utf8.decode(output.stderr);
     const stdinNote = stdinFailure === undefined ? "" : `exec stdin: ${stdinFailure.message}`;

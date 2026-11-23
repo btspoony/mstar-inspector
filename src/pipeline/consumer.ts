@@ -105,7 +105,7 @@ import {
   GITHUB_RATE_LIMIT_PREFIX,
   MAINTENANCE_DEFERRED_STAGE,
 } from "../contracts/failure-stages";
-import type { FailureCode } from "../contracts/failure-codes";
+import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import {
   idemKey,
   IDEMPOTENCY_SECONDS,
@@ -440,6 +440,9 @@ async function handleGuardHeld(
       pr_number: message.body.pr_number,
       head_sha: headSha,
       stage: "pipeline",
+      code: "review.admission.refused",
+      trackId: `${message.body.owner}/${message.body.repo}#${message.body.pr_number}@${headSha}`,
+      message: FAILURE_SUMMARIES["review.admission.refused"],
       error: `${restoreFailure !== null ? `review dropped: ${restoreFailure}; admission refused` : `review dropped after ${delays.length} refused retries`}: ${admission.reason} (system_cap ${admission.system_cap}, workspace_cap ${admission.workspace_cap}${cause}) — PR ${identity}, head_sha ${
         headSha === "" ? "unresolved (comment trigger, no sha in payload)" : headSha
       }${heldNote}`,
@@ -981,6 +984,9 @@ export function createReviewConsumer(
             pr_number: body.pr_number,
             head_sha: body.head_sha ?? "",
             stage: MAINTENANCE_DEFERRED_STAGE,
+            code: "review.delivery.deferred",
+            trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
+            message: FAILURE_SUMMARIES["review.delivery.deferred"],
             error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
           })
           .catch((err: unknown) => {
@@ -1601,6 +1607,7 @@ async function processMessage(
         stage: "pipeline",
         code,
         trackId: attemptId,
+        message: FAILURE_SUMMARIES[code],
         error: redactExactSecrets(redactSecrets(persistedDetail), []),
       });
     } catch (recordErr) {

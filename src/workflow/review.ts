@@ -15,6 +15,7 @@ import {
   settleAttemptFailure,
   phaseFailureRecord,
   PhaseTransientError,
+  transientFactsOf,
   settleSkippedRow,
   payloadIdentityFields,
   type AttemptRef,
@@ -149,7 +150,9 @@ export async function runReviewAttemptWorkflow(
     // An unclassified throw carries the stage its own step observed (a clone
     // failure is `sandbox`, a runner failure `runner`); only a throw raised HERE
     // — this file's host and fence probes — has no step to ask.
-    const transient = err instanceof PhaseTransientError ? err.facts : undefined;
+    // A Workflows retry rebuilds the thrown error without its prototype, so the
+    // facts are read off the own property, never through `instanceof`.
+    const transient = transientFactsOf(err);
     const failure =
       err instanceof PhaseFailed
         ? err.failure

@@ -1,4 +1,5 @@
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
+import { FAILURE_SUMMARIES } from "../contracts/failure-codes";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
@@ -91,6 +92,9 @@ async function landSettlementEffects(
           pr_number: handoff.payload.pr_number,
           head_sha: handoff.payload.head_sha ?? "",
           stage: "pipeline",
+          code: "review.internal.unclassified",
+          trackId: handoff.attemptId,
+          message: FAILURE_SUMMARIES["review.internal.unclassified"],
           error: detail,
         },
       },
@@ -165,6 +169,9 @@ async function ensureRecheckAccounting(
         pr_number: handoff.payload.pr_number,
         head_sha: duty.headSha,
         stage: "recheck",
+        code: "review.recheck.unaccounted",
+        trackId: handoff.attemptId,
+        message: FAILURE_SUMMARIES["review.recheck.unaccounted"],
         error: duty.failureError,
       },
       `${duty.attemptId}:recheck`,

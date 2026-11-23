@@ -113,11 +113,12 @@ export type ReviewFailureInput = {
   stage: FailureStage;
   error: string;
   /**
-   * The closed operator-facing code (`src/contracts/failure-codes.ts`). Absent
-   * for failures this build does not classify — the column stays NULL and the
-   * UI renders the row as a historical one.
+   * The closed operator-facing code (`src/contracts/failure-codes.ts`).
+   * REQUIRED: a NULL code now means "recorded before classification existed",
+   * so a new row that omits one would be indistinguishable from a historical
+   * row and unfindable by its incident code.
    */
-  code?: FailureCode;
+  code: FailureCode;
   /**
    * The attempt id the failure belongs to (the Workflow instance id), or a
    * caller-chosen id for a failure that never reached an attempt. Absent, the
@@ -127,9 +128,9 @@ export type ReviewFailureInput = {
   /**
    * The PR author's one-sentence summary for `code`. Lives beside `error`, not
    * inside it: `error` stays the raw mechanism text every operator counter and
-   * exact-text read already depends on.
+   * exact-text read already depends on. REQUIRED for the same reason as `code`.
    */
-  message?: string;
+  message: string;
 };
 
 /** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0104). */
@@ -164,6 +165,12 @@ export type AdmissionDropCounts = Record<AdmissionDropReason, number>;
 
 export type FailureStore = {
   record(input: ReviewFailureInput): Promise<void>;
+  /**
+   * Rewrite a row's CLASSIFICATION after the fact (code + author sentence) when
+   * a step recorded it before the outcome was known. Append-only would leave a
+   * summary that contradicts what actually happened.
+   */
+  reclassify(input: { id: string; code: FailureCode; message: string }): Promise<void>;
   listRecent(limit?: number): Promise<ReviewFailureRow[]>;
   countAdmissionDrops24h(): Promise<AdmissionDropCounts>;
 };
@@ -248,6 +255,12 @@ export function settlementFailureRowStatement(
 /** Create the failure store over one D1 handle. */
 export function createFailureStore(db: D1Like): FailureStoreWithCounts {
   return {
+    async reclassify(input: { id: string; code: FailureCode; message: string }): Promise<void> {
+      await db
+        .prepare("UPDATE review_failures SET error_code = ?, message = ? WHERE id = ?")
+        .bind(input.code, input.message, input.id)
+        .run();
+    },
     async record(input: ReviewFailureInput): Promise<void> {
       if (!FAILURE_STAGES.includes(input.stage)) {
         throw new Error(
@@ -261,8 +274,9 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
         await settlementFailureRowStatement(db, input, input.id).run();
         return;
       }
-      // Without an explicit identity the row's own id IS the track id: one value,
-      // written twice, so a failure that never reached an attempt is still locatable.
+      // An explicit identity is required for reclassification; without one the
+      // row's own id IS the track id: one value, written twice, so a failure
+      // that never reached an attempt is still locatable.
       const rowId = crypto.randomUUID();
       await db
         .prepare(

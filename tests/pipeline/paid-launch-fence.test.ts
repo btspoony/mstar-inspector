@@ -194,6 +194,7 @@ function prepareInput(db: TestD1, sandbox: SandboxDouble | null, envDb: D1Like =
     sandbox: sandbox as never,
     onSandbox: () => {},
     progress: progress(),
+    runnerCutoffMs: Date.now() + 120_000,
   };
 }
 
