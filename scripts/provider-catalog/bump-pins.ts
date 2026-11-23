@@ -182,10 +182,11 @@ export function runtimeSpecifiers(root: string, packages: readonly string[]): st
 
 /** Import each specifier in a fresh `bun` process rooted at `dir`. Throws with
  *  the loader's own error when any of them fails to load, and when there is
- *  nothing to import (an empty list proves nothing). */
+ *  nothing to import (an empty list proves nothing). The bump proves both the
+ *  root tree (the repo's tooling) and the runner's exact-pin tree (the image). */
 export function proveLoads(dir: string, specifiers: readonly string[]): void {
   if (specifiers.length === 0) {
-    throw new Error(`no runtime SDK import found under ${path.join(dir, "packages/runner/src")} — nothing to prove the bump loads`);
+    throw new Error(`no runtime SDK import found under packages/runner/src — nothing to prove the bump loads in ${dir}`);
   }
   const script = specifiers.map((specifier) => `await import(${JSON.stringify(specifier)});`).join("\n");
   const proc = Bun.spawnSync(["bun", "-e", script], { cwd: dir, stdout: "pipe", stderr: "pipe" });
@@ -328,7 +329,8 @@ export async function runBump(
   const runnerDeps = JSON.parse(readFileSync(path.join(root, "packages/runner/package.json"), "utf8")) as {
     dependencies?: Record<string, string>;
   };
-  proveLoads(root, runtimeSpecifiers(root, Object.keys(runnerDeps.dependencies ?? {})));
+  const specifiers = runtimeSpecifiers(root, Object.keys(runnerDeps.dependencies ?? {}));
+  proveLoads(root, specifiers);
   hooks.afterRootInstall?.();
 
   if (edits.some((edit) => edit.file === "sandbox-image/cli-global/package.json")) {
@@ -347,6 +349,7 @@ export async function runBump(
         [],
         ["--frozen-lockfile"],
       ]);
+      proveLoads(tmp, specifiers);
       copyFileSync(path.join(tmp, "bun.lock"), path.join(root, "packages/runner/bun.lock"));
     } finally {
       rmSync(tmp, { recursive: true, force: true });

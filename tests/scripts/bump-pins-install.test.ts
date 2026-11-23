@@ -26,7 +26,7 @@ function packedStub(dir: string, version: string, loads = true): string {
     join(build, "index.js"),
     loads ? "export const ok = true;\n" : 'export { ok } from "../../../outside-the-tarball/messages.js";\n',
   );
-  const tarball = join(dir, `sdk-${version}.tgz`);
+  const tarball = join(dir, `sdk-${version}${loads ? "" : "-unloadable"}.tgz`);
   const tar = Bun.spawnSync(["tar", "czf", tarball, "-C", join(dir, "build"), "package"], {
     stdout: "pipe",
     stderr: "pipe",
@@ -79,9 +79,9 @@ function scratchRepo(sdkVersion: string): string {
   return root;
 }
 
-function publish(root: string, version: string, loads = true): void {
+function publish(root: string, version: string, loads = true, manifests = ["package.json", "packages/runner/package.json"]): void {
   const tarball = packedStub(root, version, loads);
-  for (const rel of ["package.json", "packages/runner/package.json"]) {
+  for (const rel of manifests) {
     const file = join(root, rel);
     const manifest = JSON.parse(readFileSync(file, "utf8")) as {
       overrides: Record<string, string>;
@@ -155,6 +155,21 @@ describe("bump-pins proves the bumped SDK loads, not just installs", () => {
     }
   });
 
+  test("a runner tree that does not load aborts the bump even when the root tree loads", () => {
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      publish(root, "18.22.2", true, ["package.json"]);
+      publish(root, "18.22.2", false, ["packages/runner/package.json"]);
+      const result = runBumpCli(root, ["--omp", "18.22.2"]);
+      expect(result.code, result.out).not.toBe(0);
+      expect(result.out).toMatch(/verified 1 runtime SDK import\(s\) load in \.\n/);
+      expect(result.out).toMatch(/the bumped tree in \S*runner-lock-\S* installs but does not load/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a loadable release passes the load proof", () => {
     const root = scratchRepo("18.22.1");
     try {
@@ -162,7 +177,8 @@ describe("bump-pins proves the bumped SDK loads, not just installs", () => {
       publish(root, "18.22.2");
       const result = runBumpCli(root, ["--omp", "18.22.2"]);
       expect(result.code, result.out).toBe(0);
-      expect(result.out).toContain("verified 1 runtime SDK import(s) load in");
+      expect(result.out).toMatch(/verified 1 runtime SDK import\(s\) load in \.\n/);
+      expect(result.out).toMatch(/verified 1 runtime SDK import\(s\) load in \S*runner-lock-/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
