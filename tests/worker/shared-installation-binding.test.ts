@@ -351,7 +351,7 @@ describe("shared bot installations are bound to one workspace", () => {
           )
           .run(WS_A);
       }
-      return github(input as RequestInfo, init);
+      return github(input as Parameters<typeof fetch>[0], init);
     }) as typeof fetch;
     const res = await bindThroughOAuth(db, WS_A, "alice", INSTALLATION_A);
     expect(res.status).toBe(403);
