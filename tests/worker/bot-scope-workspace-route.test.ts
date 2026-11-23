@@ -355,3 +355,43 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     expect(deliveriesBody.repos).toEqual(["ACME/Widgets", "globex/secret-repo"]);
   });
 });
+
+describe("GET a shared bot's settings face from a workspace that does not own it", () => {
+  test("the settings payload leaves the App-wide sections empty and the delivery summary scoped", async () => {
+    db = world();
+    setScope(db, "bot-home", "shared");
+    seedTarget(db, "bot-home", { workspaceId: OFFICIAL, repoOwner: "globex", repoName: "secret-repo" });
+    db.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('inst-globex', 'bot-home', 4401, 'globex', datetime('now'), NULL)`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+         VALUES ('d-globex', 'bot-home', 'pull_request', 'rejected', 401, 'globex/secret-repo', NULL)`,
+      )
+      .run();
+    const session = await createSessionValue("erin", null, SESSION_SECRET);
+    const res = await worker.fetch(
+      new Request("https://worker.local/dashboard/" + OTHER + "/api/apps/" + HOME_BOT + "/settings", {
+        headers: { Cookie: SESSION_COOKIE + "=" + session },
+      }),
+      { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64") } as Env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      can_configure_bot: boolean;
+      installations: unknown[];
+      keys: unknown[];
+      custom_providers: unknown[];
+      delivery_summary: { latest: unknown; rejected24h: number };
+    };
+    expect(body.can_configure_bot).toBe(false);
+    expect(body.installations).toEqual([]);
+    expect(body.keys).toEqual([]);
+    expect(body.custom_providers).toEqual([]);
+    expect(body.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
+  });
+});
