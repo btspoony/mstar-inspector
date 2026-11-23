@@ -3649,6 +3649,25 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(JSON.parse(JSON.stringify(record))).toEqual(record);
   });
 
+  test("an unobserved outcome says whether a paid step could still be live", () => {
+    // Two meanings share `class: "unknown"`. Only the post-paid one may hold
+    // capacity, so the record must carry the distinction and the classifier must
+    // derive it from the phase, never from the error's text.
+    const ctx = {
+      stage: "pipeline" as const,
+      headSha: SHA,
+      runnerReturned: false,
+      tier: "default" as const,
+      budgetMs: 0,
+      changedLines: null,
+      sendAttemptPublicationId: null,
+    };
+    const prePaid = phaseFailureRecord({ ...ctx, phase: "prepare" }, new AttemptUnknownError("unreadable"));
+    const postPaid = phaseFailureRecord({ ...ctx, phase: "collect" }, new AttemptUnknownError("unreadable"));
+    expect(prePaid).toMatchObject({ class: "unknown", containerStateUnknown: false });
+    expect(postPaid).toMatchObject({ class: "unknown", containerStateUnknown: true });
+  });
+
   test("a budget stop in prepare settles with the record's own window", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();

@@ -235,6 +235,18 @@ export class ContainerUnavailableError extends Error {
 export { ContainerNotRunningError } from "./sandbox-errors";
 
 /**
+ * This repository's per-App review configuration could not be resolved, so the
+ * attempt cannot pay. TERMINAL and operator-actionable: a retry changes
+ * nothing until someone fixes the App.
+ */
+export class ConfigUnresolvedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfigUnresolvedError";
+  }
+}
+
+/**
  * The slot is retired: the durable fence says nothing may ever start here
  * again. TERMINAL — retrying it only burns the step's retry budget.
  */

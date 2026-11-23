@@ -216,8 +216,9 @@ describe("SandboxV1 Durable Object", () => {
     ]);
     expect(inactivityCalls).toEqual([INACTIVITY_TIMEOUT_MS]);
     expect(INACTIVITY_TIMEOUT_MS).toBeGreaterThan(14 * 60 * 1000);
-    // the marker write is the exec that proves the fresh disk was declared
-    expect(execCalls[execCalls.length - 1]!.cmd[execCalls.length === 1 ? 6 : 6]).toContain("printf");
+    // the marker write happened, and the read-back proves the slot carries it
+    expect(execCalls.some((call) => (call.cmd[call.cmd.length - 1] ?? "").includes("printf"))).toBe(true);
+    expect(execCalls[execCalls.length - 1]!.cmd.join(" ")).toContain("cat --");
     expect(markerBytes).toBe(MARKER);
   });
 
@@ -230,7 +231,9 @@ describe("SandboxV1 Durable Object", () => {
       kind: "provisioned",
     });
 
+    // One read to decide, one read to prove what the slot now carries.
     expect(execCalls.map((call) => call.cmd[call.cmd.length - 1])).toEqual([
+      `[ -f '/tmp/mstar-review-attempt' ] || exit 3; cat -- '/tmp/mstar-review-attempt'`,
       `[ -f '/tmp/mstar-review-attempt' ] || exit 3; cat -- '/tmp/mstar-review-attempt'`,
     ]);
     expect(startCalls).toEqual([]);

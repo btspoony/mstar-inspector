@@ -31,7 +31,8 @@
  */
 
 import { runnerCommand, writeJsonCommand } from "./gitops";
-import { getSandbox, Sandbox, SandboxV1, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
+import { attemptMarker } from "./review-attempt";
+import { DEFAULT_EXEC_TIMEOUT_MS, getSandbox, Sandbox, SandboxV1, shellCommand, type ReviewSandbox, type SandboxBinding } from "./sandbox";
 import { DEFAULT_SANDBOX_IMAGE_ID, getSandboxImage } from "../contracts/sandbox-images";
 import { APP_VERSION } from "../version";
 import { parseReviewOutput } from "../review/schema";
@@ -94,7 +95,7 @@ export default {
       return runReviewSmoke(env, repo);
     }
 
-    const sandbox = await getSandbox(env.SANDBOX, `smoke-${crypto.randomUUID()}`);
+    const sandbox = await smokeSandbox(env, `smoke-${crypto.randomUUID()}`);
     const startedAt = Date.now();
     let result: Record<string, unknown>;
     try {
@@ -170,8 +171,25 @@ export default {
   },
 };
 
+/**
+ * A smoke slot has to be PROVISIONED before any command reaches it: since the
+ * slot model change, `runCommand` never starts a container, so a fresh smoke
+ * handle would answer `ContainerNotRunningError`. The marker is the smoke's own
+ * (it reviews nothing), and the deadline is one smoke window.
+ */
+async function smokeSandbox(env: SmokeEnv, id: string): Promise<ReviewSandbox> {
+  const sandbox = await getSandbox(env.SANDBOX, id);
+  const provisioned = await sandbox.provision(attemptMarker(id), {
+    deadlineEpochMs: Date.now() + DEFAULT_EXEC_TIMEOUT_MS,
+  });
+  if (provisioned.kind !== "provisioned") {
+    throw new Error(`the smoke slot could not be provisioned (${provisioned.kind})`);
+  }
+  return sandbox;
+}
+
 async function runReviewSmoke(env: SmokeEnv, repo: string): Promise<Response> {
-  const sandbox = await getSandbox(env.SANDBOX, `smoke-review-${crypto.randomUUID()}`);
+  const sandbox = await smokeSandbox(env, `smoke-review-${crypto.randomUUID()}`);
   const startedAt = Date.now();
   let result: Record<string, unknown>;
   try {

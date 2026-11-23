@@ -278,8 +278,8 @@ describe("provision is the only way a slot starts", () => {
 
     expect(container.startCalls).toBe(1);
     expect(container.markerWrites).toBe(1);
-    // one read for the start (absent), one for the second entry (matches)
-    expect(container.markerReads).toBe(2);
+    // per entry: one read to decide, one read-back to prove what it carries
+    expect(container.markerReads).toBe(4);
   });
 
   test("runMarked on a stopped slot answers not-running and calls start ZERO times", async () => {

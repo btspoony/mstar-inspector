@@ -266,12 +266,22 @@ export class SandboxV1 extends DurableObject {
           );
           if (armed === AWAIT_EXPIRED) return { kind: "unavailable" };
         }
-        // A running slot keeps its disk, so the marker is rewritten only when the
-        // bytes are absent or different; the fresh-disk case is the branch above.
+        // A running slot keeps its disk, so the marker is rewritten only when
+        // the bytes are ABSENT or different; the fresh-disk case is the branch
+        // above. An UNREADABLE marker is neither: writing over it would claim a
+        // provision the slot never proved, so it is `unavailable` and the next
+        // entry tries again.
         const current = await this.readMarker(container, deadlineEpochMs);
+        if (current.kind === "unreadable") return { kind: "unavailable" };
         if (current.kind !== "bytes" || current.text !== marker) {
           const written = await this.writeMarker(container, marker, markerOpts, deadlineEpochMs);
           if (!written) return { kind: "unavailable" };
+        }
+        // The write is proved by reading it back, so `provisioned` never means
+        // "I sent a write": it means the slot carries this attempt's bytes.
+        const confirmed = await this.readMarker(container, deadlineEpochMs);
+        if (confirmed.kind !== "bytes" || confirmed.text !== marker) {
+          return { kind: "unavailable" };
         }
         return { kind: "provisioned" };
       } catch {
@@ -371,10 +381,15 @@ export class SandboxV1 extends DurableObject {
     });
   }
 
+  /**
+   * Persist the fence FIRST, then raise the in-memory flag: a failed put must
+   * leave both sides agreeing the slot is open (a later entry retries), never
+   * the memory claiming a fence the storage does not hold.
+   */
   private async fence(): Promise<void> {
     if (this.revoked) return;
-    this.revoked = true;
     await this.ctx.storage.put(REVOKED_KEY, true);
+    this.revoked = true;
   }
 
   /**
@@ -468,12 +483,22 @@ export class SandboxV1 extends DurableObject {
             String(KILL_GRACE_MS),
             command,
           ];
-    const process = await container.exec(argv, {
-        cwd: opts?.cwd,
-        env: opts?.env,
-        ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
-      },
-    );
+    // `container.exec` itself can stall (readiness, supervisor). With an
+    // absolute deadline the call is bounded host-side too, so a wedged platform
+    // RPC cannot hold the DO's exclusive gate past the attempt's own instant.
+    const execOptions = {
+      cwd: opts?.cwd,
+      env: opts?.env,
+      ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
+    };
+    const opened =
+      deadlineMs === undefined
+        ? await container.exec(argv, execOptions)
+        : await boundedAwait(container.exec(argv, execOptions), deadlineMs);
+    if (opened === AWAIT_EXPIRED) {
+      return { kind: "deadline-spent", remainingMs: (deadlineMs ?? Date.now()) - Date.now() };
+    }
+    const process = opened;
     const drained = process.output();
     let stdinFailure: Error | undefined;
     if (stdinPayload !== undefined) {
@@ -483,7 +508,11 @@ export class SandboxV1 extends DurableObject {
         stdinFailure = new Error("exec stdin closed before the payload was delivered");
       }
     }
-    const output = await drained;
+    const output =
+      deadlineMs === undefined ? await drained : await boundedAwait(drained, deadlineMs + KILL_GRACE_MS);
+    if (output === AWAIT_EXPIRED) {
+      return { kind: "deadline-spent", remainingMs: -KILL_GRACE_MS };
+    }
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
     }
@@ -508,10 +537,7 @@ export class SandboxV1 extends DurableObject {
   async revoke(): Promise<{ revoked: boolean; running: boolean }> {
     return this.exclusive(async () => {
       if (this.ctx.container?.running === true) return { revoked: false, running: true };
-      if (!this.revoked) {
-        this.revoked = true;
-        await this.ctx.storage.put(REVOKED_KEY, true);
-      }
+      await this.fence();
       return { revoked: true, running: false };
     });
   }

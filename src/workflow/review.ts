@@ -24,6 +24,7 @@ import {
   type PreparedAttempt,
   type ProcessDeps,
 } from "../pipeline/review-attempt-execution";
+import { ConfigUnresolvedError } from "../pipeline/review-attempt";
 import { POST_RUNNER_READ_BUDGET_MS } from "../review-budget";
 import {
   beginAttemptSettlement,
@@ -74,7 +75,29 @@ export async function runReviewAttemptWorkflow(
       return;
     }
     const step1 = await step.do("prepare", async () => {
-      await ensureRunnerConfig(ref.payload, deps);
+      // A per-App config fault is a KNOWN, terminal refusal: retrying it only
+      // burns the step's budget. It is classified here, inside the step, so the
+      // outcome crosses the boundary as the same record every other terminal
+      // failure uses.
+      try {
+        await ensureRunnerConfig(ref.payload, deps);
+      } catch (err) {
+        const failure = phaseFailureRecord(
+          {
+            phase: "prepare",
+            stage: "pipeline",
+            headSha: null,
+            runnerReturned: false,
+            tier: ref.level,
+            budgetMs: 0,
+            changedLines: null,
+            sendAttemptPublicationId: null,
+          },
+          new ConfigUnresolvedError(err instanceof Error ? err.message : String(err)),
+        );
+        if (failure !== null) return { kind: "failed" as const, failure };
+        throw err;
+      }
       return prepareAttempt(deps, ref);
     });
     if (step1.kind === "settled") return;
@@ -216,7 +239,11 @@ function ordinaryFailure(
     // into the same `pipeline` a Workflow-level fault records.
     stage: transient?.stage ?? "pipeline",
     headSha: transient?.headSha ?? prepared?.headSha ?? null,
-    runnerReturned: true,
+    // Only the step that observed the runner outranks the row. A rebuilt throw
+    // from the engine (a step that timed out) observed nothing, so the record
+    // must not claim the runner returned: the settlement's `paid-unknown` guard
+    // reads this field to decide whether an unconfirmed row may be concluded.
+    runnerReturned: transient?.runnerReturned ?? false,
     message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
     sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
     rateLimited: transient?.rateLimited ?? null,

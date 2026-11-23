@@ -144,6 +144,7 @@ import {
   AttemptUnknownError,
   AttemptRetiredError,
   ContainerLostAfterClaimError,
+  ConfigUnresolvedError,
   ContainerLostBeforePaidError,
   discardReviewAttempt,
   type ReviewAttemptExecution,
@@ -1807,6 +1808,7 @@ export type PhaseFailure =
   | (PhaseFailureBase & { class: "unknown"; containerStateUnknown: boolean })
   | (PhaseFailureBase & { class: "moved-head"; phase: "prepare" })
   | (PhaseFailureBase & { class: "container-lost"; phase: "review" })
+  | (PhaseFailureBase & { class: "config-unresolved" })
   | (PhaseFailureBase & { class: "failure"; sendAttemptPublicationId: string | null });
 
 /** A phase wrapper's terminal return: the Workflow turns this into a signal. */
@@ -2523,13 +2525,17 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
       sendAttemptPublicationId: ctx.sendAttemptPublicationId,
     };
   }
+  if (err instanceof ConfigUnresolvedError) {
+    return { ...base, class: "config-unresolved" };
+  }
   if (err instanceof AttemptUnknownError || err instanceof AttemptRetiredError) {
-    // `AttemptRetiredError` is a slot that can never start: nothing paid can be
-    // lost. Any `AttemptUnknownError` raised from the paid step ONWARD could
-    // hide a live child, so only a PRE-PAID phase (`prepare`/`sandbox`/`pipeline`)
-    // may release capacity.
+    // `AttemptRetiredError` is a slot that can never start, so nothing paid can
+    // be lost. For the rest, the record must not infer liveness from the phase:
+    // `ctx.runnerReturned === false` with the row already `launched` is exactly
+    // the case that may hide a live child. The settlement re-checks the row, so
+    // this flag is only the record's own observation.
     const containerStateUnknown =
-      !(err instanceof AttemptRetiredError) && ctx.phase !== "prepare";
+      !(err instanceof AttemptRetiredError) && (ctx.runnerReturned || ctx.phase !== "prepare");
     return { ...base, class: "unknown", containerStateUnknown };
   }
   if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
@@ -4692,6 +4698,8 @@ export function failureCodeOf(failure: PhaseFailure): FailureCode {
       return failure.stage === "runner"
         ? "review.container.lost_after_claim"
         : "review.container.lost_before_paid";
+    case "config-unresolved":
+      return "review.config.unresolved";
     default:
       return "review.internal.unclassified";
   }
