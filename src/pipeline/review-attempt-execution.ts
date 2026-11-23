@@ -1798,7 +1798,13 @@ export type PhaseFailure =
       outcome: BudgetExhaustedOutcome;
       sendAttemptPublicationId: string | null;
     })
-  | (PhaseFailureBase & { class: "unknown" })
+  /**
+   * The outcome could not be observed. `containerStateUnknown` says WHICH kind:
+   * true means a paid step may be running on a slot nobody can read (hold
+   * capacity); false means the attempt never got far enough to pay and the
+   * launch row proves it (release and fence).
+   */
+  | (PhaseFailureBase & { class: "unknown"; containerStateUnknown: boolean })
   | (PhaseFailureBase & { class: "moved-head"; phase: "prepare" })
   | (PhaseFailureBase & { class: "container-lost"; phase: "review" })
   | (PhaseFailureBase & { class: "failure"; sendAttemptPublicationId: string | null });
@@ -2518,7 +2524,13 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
     };
   }
   if (err instanceof AttemptUnknownError || err instanceof AttemptRetiredError) {
-    return { ...base, class: "unknown" };
+    // `AttemptRetiredError` is a slot that can never start: nothing paid can be
+    // lost. Any `AttemptUnknownError` raised from the paid step ONWARD could
+    // hide a live child, so only a PRE-PAID phase (`prepare`/`sandbox`/`pipeline`)
+    // may release capacity.
+    const containerStateUnknown =
+      !(err instanceof AttemptRetiredError) && ctx.phase !== "prepare";
+    return { ...base, class: "unknown", containerStateUnknown };
   }
   if (err instanceof ContainerLostBeforePaidError || err instanceof ContainerLostAfterClaimError) {
     return { ...base, class: "container-lost", phase: "review" };

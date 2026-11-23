@@ -3691,7 +3691,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     // plain summary, and the mechanism text follows it in the same cell.
     expect(row.error_code).toBe("review.budget.preparation_spent");
     expect(row.track_id).toBe(ATTEMPT_ID);
-    expect(String(row.error).startsWith(`${FAILURE_SUMMARIES["review.budget.preparation_spent"]}\n`)).toBe(true);
+    expect(row.message).toBe(FAILURE_SUMMARIES["review.budget.preparation_spent"]);
     const failed = h.logLines.find((line) => line.level === "error" && line.msg.startsWith("review failed:"));
     expect(failed?.fields.error_code).toBe("review.budget.preparation_spent");
     expect(failed?.fields.attempt_id).toBe(ATTEMPT_ID);
@@ -3720,9 +3720,8 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     const row = failureRows(db)[0]!;
     expect(row.error_code).toBe("review.internal.unclassified");
     expect(row.track_id).toBe(ATTEMPT_ID);
-    expect(String(row.error)).toBe(
-      `${FAILURE_SUMMARIES["review.internal.unclassified"]}\nthe runner input write failed: exit 3`,
-    );
+    expect(String(row.error)).toBe("the runner input write failed: exit 3");
+    expect(row.message).toBe(FAILURE_SUMMARIES["review.internal.unclassified"]);
     const failed = h.logLines.find((line) => line.level === "error" && line.msg.startsWith("review failed:"));
     expect(failed?.fields).toMatchObject({
       error_code: "review.internal.unclassified",

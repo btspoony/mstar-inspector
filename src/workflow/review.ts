@@ -144,9 +144,11 @@ export async function runReviewAttemptWorkflow(
             err instanceof PhaseTransientError ? err.cause : err,
           );
     if (failure?.headSha !== undefined && failure.headSha !== null) cleanup.headSha = failure.headSha;
-    // A settlement that concluded "unknown" leaves the container's state unknown:
-    // cleanup must hold capacity rather than destroy on evidence nobody has.
-    if (failure?.class === "unknown") cleanup.unproven = true;
+    // The settlement concluded "unknown": no proof of what runs on the slot
+    // exists, and the D1 row cannot express that (it proves only that nothing
+    // was paid). The veto therefore rides the cleanup input, computed HERE from
+    // the record so a replay of the settle step cannot lose it.
+    if (failure?.class === "unknown" && failure.containerStateUnknown) cleanup.unproven = true;
     const moved = failure?.class === "moved-head" ? { headSha: failure.headSha } : null;
     await step.do(
       "settle-failure",
