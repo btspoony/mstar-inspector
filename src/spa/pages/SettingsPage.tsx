@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type SubmitEvent, type ReactNode } from "react";
 import { ChevronDown, ChevronUp, ExternalLink, Plus } from "lucide-react";
 import { isDictionaryKey, t, type DictionaryKey } from "../../i18n";
 import {
@@ -872,7 +872,7 @@ export function WorkspaceNameCard({ locale, storedName }: { locale: SpaBoot["loc
   const [savedCopy, setSavedCopy] = useState<string | null>(null);
   const renameMembership = useRenameMembership();
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function onSubmit(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return;
     const next = name.trim();
@@ -998,7 +998,7 @@ function NumberSettingCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [attempt]);
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function onSubmit(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy || loaded === null) return;
     if (concurrencySubmitBlocked(loaded.degraded, draft)) return;

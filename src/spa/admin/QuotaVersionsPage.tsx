@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import { Button, CardContent, CardHeader, Input } from "@design-system";
 import { quotaStartsOn } from "../../store/quota-store";
 import { t, type DictionaryKey, type Locale } from "../../i18n";
@@ -195,7 +195,7 @@ function CreateQuotaVersionForm({
     }
   }
 
-  async function publish(event: FormEvent<HTMLFormElement>) {
+  async function publish(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     if (candidate === null || preview === null || !fresh) return;
     setPublishing(true);

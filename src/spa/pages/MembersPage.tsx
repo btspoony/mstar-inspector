@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type SubmitEvent } from "react";
 import { MoreHorizontal } from "lucide-react";
 import { t, type Locale } from "../../i18n";
 import {
@@ -423,7 +423,7 @@ export function MembersPage({ boot }: { boot: SpaBoot }) {
 
   const canInvite = canInviteMembers(memberRole);
 
-  async function onInvite(event: FormEvent<HTMLFormElement>): Promise<void> {
+  async function onInvite(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busy) return;
     const key = inviteLoginNoticeKey(inviteLogin);

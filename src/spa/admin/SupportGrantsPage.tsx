@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useState, type SubmitEvent } from "react";
 import {
   Button,
   CardContent,
@@ -47,7 +47,7 @@ export function SupportGrantsPage({ locale }: { locale: Locale }) {
   const [revokingIds, setRevokingIds] = useState<ReadonlySet<string>>(new Set());
   const [refusal, setRefusal] = useState<string | null>(null);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     setRefusal(null);
     setCreating(true);
