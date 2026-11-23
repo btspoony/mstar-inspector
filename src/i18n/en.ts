@@ -1151,7 +1151,7 @@ export const en = {
       sweepSaved: "Sweep settings saved.",
       sweepFailed: "Could not save the sweep settings.",
       sweepUnreadable:
-        "Some sweep settings could not be read. Webhook retention is paused. Retry the read or enter and save all six settings to restore it.",
+        "Some sweep settings could not be read. Webhook and closed-PR retention are paused. Retry the read or enter and save all eight settings to restore them.",
       recheckTitle: "Recheck assignment budget",
       recheckDescription:
         "How much of a round the prior-findings seat is asked with, in UTF-8 bytes. Every prior finding and the discussion always ride; evidence slices ride until this budget is spent.",

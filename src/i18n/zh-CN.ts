@@ -1065,7 +1065,7 @@ export const zhCN: Dictionary = {
       sweepSaved: "已保存巡检设置。",
       sweepFailed: "无法保存巡检设置。",
       sweepUnreadable:
-        "部分巡检设置无法读取，已暂停 Webhook 投递记录清理。请重试读取，或填写并保存全部六项设置以恢复清理。",
+        "部分巡检设置无法读取，已暂停 Webhook 投递记录和已关闭 PR 的清理。请重试读取，或填写并保存全部八项设置以恢复清理。",
       recheckTitle: "重审提问预算",
       recheckDescription:
         "历史发现重审席位单轮可索要的上下文大小（UTF-8 字节）。所有历史发现与讨论始终保留，证据切片在此预算内按序保留。",
