@@ -2066,7 +2066,11 @@ async function appsListWithHealth(
       app.workspace_id === scope.workspaceId ||
       (app.scope === "shared" && targetedBotIds.has(app.id)),
   );
-  const summaries = await apps.deliverySummaries(rows.map((app) => app.id));
+  const owned = rows.filter((app) => canWriteBotScope(app, scope));
+  const summaries = await apps.deliverySummaries(owned.map((app) => app.id));
+  for (const app of rows) {
+    if (!canWriteBotScope(app, scope)) summaries[app.id] = await apps.deliverySummary(app.id, scope.workspaceId);
+  }
   return rows.map((app) => ({ ...app, health: summaries[app.id]! }));
 }
 

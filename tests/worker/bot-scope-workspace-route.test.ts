@@ -337,6 +337,31 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     expect(botBody.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
   });
 
+  test("the Apps list health column reads only the caller's repositories on a shared bot", async () => {
+    db = sharedWorld();
+    async function listHealth(ref: string, login: string) {
+      const session = await createSessionValue(login, null, SESSION_SECRET);
+      const res = await worker.fetch(
+        new Request("https://worker.local/dashboard/" + ref + "/api/apps", {
+          headers: { Cookie: SESSION_COOKIE + "=" + session },
+        }),
+        { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: ENCRYPTION_KEY } as Env,
+      );
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        apps: Array<{ bot_id: string; health: { latest: { event_name: string | null } | null; rejected24h: number } }>;
+      };
+      return body.apps.find((row) => row.bot_id === "bot-home")!.health;
+    }
+
+    const consumer = await listHealth(OTHER, "erin");
+    expect(consumer.rejected24h).toBe(0);
+    expect(consumer.latest).toEqual(expect.objectContaining({ event_name: "pull_request", outcome: "ok" }));
+
+    const owner = await listHealth(OFFICIAL, "dana");
+    expect(owner.rejected24h).toBe(1);
+  });
+
   test("the owning workspace still reads the whole App", async () => {
     db = sharedWorld();
 
