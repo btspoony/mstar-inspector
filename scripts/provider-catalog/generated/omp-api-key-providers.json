@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "19.0.1",
-    "extracted": "2026-11-20",
+    "version": "19.1.1",
+    "extracted": "2026-11-23",
     "upstream": [
       "src/compat/rules.json — `providers.<id>` seed rows (model ids, api, baseUrl) and `auth.providers` (login kind, display name, env keys)",
       "src/compat/rules/providers/<id>.kdl — authored provider contract (discovery label, seed api/base-url, default model)",
@@ -918,7 +918,6 @@
     "devin-windsurf",
     "antigravity-cli",
     "google-antigravity",
-    "google-gemini-cli",
     "openai-codex-device",
     "xai",
     "xai-oauth",
@@ -1069,7 +1068,6 @@
       "gitlab-duo",
       "gitlab-duo-agent",
       "google-antigravity",
-      "google-gemini-cli",
       "kimi-code",
       "kiro",
       "muse-code",
