@@ -1,0 +1,8 @@
+---
+category: Changed
+---
+
+- **harness engine, CLI and image ref move to 4.8.4**: the root and `packages/runner` manifests move `@mstar-harness/engine` from `^4.8.2`/`4.8.2` to `^4.8.4`/`4.8.4`, and both lockfiles re-resolve. The image pin moves with them — `HARNESS_VERSION`/`harnessRef` (tag v4.8.4, deref `27bf4e42338386e417008f4cdee1b80677c71216`), the global-install `@mstar-harness/cli` 4.8.4 and its lock, and the Dockerfile clone ref. Intermediate published release v4.8.3 is included by this jump. The omp SDK stays on 19.0.1. The `# image-inputs:` fingerprint is refreshed in the same commit because `packages/runner/package.json` and its lockfile are image inputs.
+
+<!-- CN -->
+- **harness engine、CLI 与镜像 ref 升至 4.8.4**：根目录与 `packages/runner` 的 `@mstar-harness/engine` pin 从 `^4.8.2`/`4.8.2` 升到 `^4.8.4`/`4.8.4`，两个 lock 重新解析。镜像 pin 一并移动——`HARNESS_VERSION`/`harnessRef`（tag v4.8.4，deref `27bf4e42338386e417008f4cdee1b80677c71216`）、全局安装的 `@mstar-harness/cli` 4.8.4 及其 lock、以及 Dockerfile 克隆 ref。中间已发布的 v4.8.3 随这次跳跃一并覆盖。omp SDK 仍停留在 19.0.1。同一提交中刷新了 `# image-inputs:` 指纹，因为 `packages/runner/package.json` 及其 lock 是镜像输入。
