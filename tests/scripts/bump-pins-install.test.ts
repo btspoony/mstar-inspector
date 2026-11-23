@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expectedInstalls, planEdits, runBump } from "../../scripts/provider-catalog/bump-pins";
+import { expectedInstalls, planEdits, proveLoads, runBump, runtimeSpecifiers } from "../../scripts/provider-catalog/bump-pins";
 
 const REPO_ROOT = join(import.meta.dir, "../..");
 const OMP = "@oh-my-pi/pi-coding-agent";
@@ -14,10 +14,18 @@ const REF = /harnessRef: "([0-9a-f]{40})"/.exec(
   readFileSync(join(REPO_ROOT, "src/contracts/sandbox-images.ts"), "utf8"),
 )![1]!;
 
-function packedStub(dir: string, version: string): string {
+function packedStub(dir: string, version: string, loads = true): string {
   const build = join(dir, "build", "package");
+  rmSync(build, { recursive: true, force: true });
   mkdirSync(build, { recursive: true });
-  writeFileSync(join(build, "package.json"), JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version }));
+  writeFileSync(
+    join(build, "package.json"),
+    JSON.stringify({ name: "@oh-my-pi/pi-coding-agent", version, type: "module", main: "index.js" }),
+  );
+  writeFileSync(
+    join(build, "index.js"),
+    loads ? "export const ok = true;\n" : 'export { ok } from "../../../outside-the-tarball/messages.js";\n',
+  );
   const tarball = join(dir, `sdk-${version}.tgz`);
   const tar = Bun.spawnSync(["tar", "czf", tarball, "-C", join(dir, "build"), "package"], {
     stdout: "pipe",
@@ -51,6 +59,10 @@ function scratchRepo(sdkVersion: string): string {
   write("package.json", manifest(sdkVersion));
   write("packages/runner/package.json", manifest(sdkVersion));
   write(
+    "packages/runner/src/runner.ts",
+    'import type { Missing } from "@oh-my-pi/pi-coding-agent/types-only";\nimport { ok } from "@oh-my-pi/pi-coding-agent";\nexport const loaded: boolean = ok;\n',
+  );
+  write(
     "src/contracts/sandbox-images.ts",
     `export const HARNESS_VERSION = "4.7.3";\nexport const OMP_SANDBOX_IMAGE_PINS = Object.freeze({\n  harnessRef: "${REF}",\n});\n`,
   );
@@ -67,8 +79,8 @@ function scratchRepo(sdkVersion: string): string {
   return root;
 }
 
-function publish(root: string, version: string): void {
-  const tarball = packedStub(root, version);
+function publish(root: string, version: string, loads = true): void {
+  const tarball = packedStub(root, version, loads);
   for (const rel of ["package.json", "packages/runner/package.json"]) {
     const file = join(root, rel);
     const manifest = JSON.parse(readFileSync(file, "utf8")) as {
@@ -124,6 +136,56 @@ describe("bump-pins installs the bumped SDK (not just relocks)", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("bump-pins proves the bumped SDK loads, not just installs", () => {
+  test("a release that installs but imports a file its tarball omits aborts the bump", () => {
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      publish(root, "18.22.2", false);
+      const result = runBumpCli(root, ["--omp", "18.22.2"]);
+      expect(result.code, result.out).not.toBe(0);
+      expect(result.out).toContain("verified @oh-my-pi/pi-coding-agent@18.22.2 installed in");
+      expect(result.out).toContain("installs but does not load");
+      expect(result.out).toContain("outside-the-tarball/messages.js");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a loadable release passes the load proof", () => {
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(Bun.spawnSync(["bun", "install"], { cwd: root, stdout: "pipe", stderr: "pipe" }).exitCode).toBe(0);
+      publish(root, "18.22.2");
+      const result = runBumpCli(root, ["--omp", "18.22.2"]);
+      expect(result.code, result.out).toBe(0);
+      expect(result.out).toContain("verified 1 runtime SDK import(s) load in");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("only value imports of the runner's dependencies are proved", () => {
+    const root = scratchRepo("18.22.1");
+    try {
+      expect(runtimeSpecifiers(root, [OMP])).toEqual([OMP]);
+      expect(runtimeSpecifiers(root, ["@mstar-harness/engine"])).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the repository's runner yields SDK specifiers to prove", () => {
+    const specifiers = runtimeSpecifiers(REPO_ROOT, [OMP]);
+    expect(specifiers).toContain(OMP);
+    expect(specifiers.every((specifier) => specifier === OMP || specifier.startsWith(`${OMP}/`))).toBe(true);
+  });
+
+  test("an empty specifier list is a refusal, never a silent pass", () => {
+    expect(() => proveLoads(REPO_ROOT, [])).toThrow(/nothing to prove the bump loads/);
   });
 });
 

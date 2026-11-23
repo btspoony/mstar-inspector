@@ -167,8 +167,8 @@ jobs:
           if [ -n "$ENGINE_ARG" ]; then ARGS+=(--engine "$ENGINE_ARG"); fi
           if [ -n "$REF_ARG" ]; then ARGS+=(--harness-ref "$REF_ARG"); fi
 
-          # A version npm lists but cannot resolve (a yanked tarball, a registry
-          # mirror lag) must not take the catalog refresh down with it: the bump
+          # A version npm lists but cannot resolve or load (a yanked tarball, a registry
+          # mirror lag, a tarball missing a file it imports) must not take the catalog refresh down with it: the bump
           # is attempted on the pin surfaces only, and a resolution failure
           # restores them and continues. The catalog is the job's reason to run;
           # the SDK bump is a rider.
@@ -198,10 +198,10 @@ jobs:
             # installed tree matches the held pins again.
             git checkout -- "${PINS[@]}"
             bun install --frozen-lockfile
-            echo "::warning::pins held at omp ${OMP_NOW} / engine ${ENGINE_NOW} — the newer release does not install; the catalog refresh continues"
+            echo "::warning::pins held at omp ${OMP_NOW} / engine ${ENGINE_NOW} — the newer release does not install or load; the catalog refresh continues"
             {
               echo "changed=false"
-              echo "note=pins held (omp ${OMP_NOW}, engine ${ENGINE_NOW}): the newer release does not install"
+              echo "note=pins held (omp ${OMP_NOW}, engine ${ENGINE_NOW}): the newer release does not install or load"
             } >> "$GITHUB_OUTPUT"
           fi
 
