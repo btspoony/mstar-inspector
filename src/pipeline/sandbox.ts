@@ -297,6 +297,12 @@ export class SandboxV1 extends DurableObject {
   ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
     const prepared = { stdin: this.assertBounds(command, opts) };
     const container = await this.exclusive(async () => {
+      // A retired slot is a different refusal from a stopped one: the fence is
+      // permanent (a successor owns the PR or the container was destroyed), so
+      // the caller must not treat it as a transient "provision me again".
+      if (this.revoked) {
+        throw new Error("this attempt was revoked by the successor that took its PR — nothing may start");
+      }
       const handle = this.container;
       if (!handle.running) {
         throw new ContainerNotRunningError(
