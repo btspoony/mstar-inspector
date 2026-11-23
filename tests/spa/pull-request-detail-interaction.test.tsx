@@ -16,7 +16,7 @@ import {
   scene,
 } from "./pull-request-fixtures";
 
-/** A row recorded before 0104: no code, no track id, rendered exactly as before. */
+/** A row recorded before 0106: no code, no track id, rendered exactly as before. */
 const historical = (row: Pick<PullRequestFailure, "stage" | "error" | "created_at">): PullRequestFailure => ({
   ...row,
   message: null,

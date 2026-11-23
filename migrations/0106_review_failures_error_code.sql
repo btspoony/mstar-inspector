@@ -1,4 +1,4 @@
--- 0104_review_failures_error_code.sql — every new failure carries a stable
+-- 0106_review_failures_error_code.sql — every new failure carries a stable
 -- operator-facing code and a track id.
 --
 -- `review_failures.error` keeps the mechanism text an operator needs, and the
@@ -8,7 +8,7 @@
 -- id), or the row's own id when the failure never reached an attempt.
 --
 -- Both nullable with no backfill: a historical row has no code, and the UI
--- renders it exactly as before. NULL therefore means "recorded before 0104",
+-- renders it exactly as before. NULL therefore means "recorded before 0106",
 -- never "classified as nothing".
 ALTER TABLE review_failures ADD COLUMN error_code TEXT;
 ALTER TABLE review_failures ADD COLUMN track_id TEXT;

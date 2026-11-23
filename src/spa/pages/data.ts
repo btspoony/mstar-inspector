@@ -1119,13 +1119,13 @@ export type PullRequestLatestReview = {
 
 /**
  * One review-failure log row — the diagnostic payload this tab exists for.
- * `error_code` and `track_id` are NULL on rows recorded before migration 0104;
+ * `error_code` and `track_id` are NULL on rows recorded before migration 0106;
  * such a row renders exactly as it did before the code existed.
  */
 export type PullRequestFailure = {
   stage: string;
   error: string;
-  /** The PR author's sentence (migration 0105); NULL on older rows. */
+  /** The PR author's sentence (migration 0107); NULL on older rows. */
   message: string | null;
   error_code: string | null;
   track_id: string | null;

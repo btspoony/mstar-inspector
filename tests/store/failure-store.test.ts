@@ -220,7 +220,7 @@ describe("createFailureStore", () => {
   });
 });
 
-describe("review_failures error_code / track_id (0104)", () => {
+describe("review_failures error_code / track_id (0106)", () => {
   test("record persists the code and the attempt's track id", async () => {
     const db = createFailureDb();
     const store = createFailureStore(db);
@@ -277,7 +277,7 @@ describe("review_failures error_code / track_id (0104)", () => {
     expect(row).toEqual({ error_code: "review.internal.unclassified", track_id: "attempt-settled" });
   });
 
-  test("0104 indexes (error_code, created_at) and both columns are nullable", async () => {
+  test("0106 indexes (error_code, created_at) and both columns are nullable", async () => {
     const db = createFailureDb();
     const columns = (db.raw.query("PRAGMA index_info(idx_review_failures_code_created)").all() as Array<{ name: string }>)
       .map((row) => row.name);
@@ -294,7 +294,7 @@ describe("review_failures error_code / track_id (0104)", () => {
   test("a historical row (code NULL) is still returned, unchanged, by listRecent and the detail read", async () => {
     const db = createFailureDb();
     const store = createFailureStore(db);
-    // Written by a build before 0104: no code, no message, no track id.
+    // Written by a build before 0106: no code, no message, no track id.
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error)

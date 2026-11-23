@@ -133,7 +133,7 @@ export type ReviewFailureInput = {
   message: string;
 };
 
-/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0104). */
+/** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0106). */
 export type ReviewFailureRow = Omit<ReviewFailureInput, "code" | "trackId"> & {
   id: string;
   error_code: string | null;

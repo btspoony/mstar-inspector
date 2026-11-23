@@ -1482,12 +1482,12 @@ export type PullRequestReviewDetailRow = {
 /**
  * One `review_failures` row as the detail face reads it. `error` carries the
  * mechanism detail an operator needs; `error_code`/`track_id` are NULL on rows
- * recorded before 0104, which the UI renders exactly as it always did.
+ * recorded before 0106, which the UI renders exactly as it always did.
  */
 export type PullRequestFailureDetailRow = {
   stage: string;
   error: string;
-  /** The PR author's sentence (migration 0105); NULL on older rows. */
+  /** The PR author's sentence (migration 0107); NULL on older rows. */
   message: string | null;
   error_code: string | null;
   track_id: string | null;
