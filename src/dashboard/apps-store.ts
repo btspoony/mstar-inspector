@@ -149,6 +149,17 @@ export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skippe
 const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
 
 /**
+ * Restricts `webhook_deliveries` rows to repositories the bound workspace has a
+ * live target for on the same bot. A workspace that does not own a shared bot
+ * reads only its own repositories' deliveries; rows without a repository
+ * (installation, ping) belong to the owner alone. One `?`: the workspace id.
+ */
+const DELIVERY_WORKSPACE_REPO_SQL = `EXISTS (SELECT 1 FROM review_targets t
+  WHERE t.bot_id = webhook_deliveries.bot_id AND t.workspace_id = ? AND t.deleted_at IS NULL
+    AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
+    AND webhook_deliveries.repository_full_name = (t.repo_owner || '/' || t.repo_name) COLLATE NOCASE)`;
+
+/**
  * Persist bound for the x-github-event header (QC wave 1, seat2
  * hygiene pin): the header is attacker-influenced on the unauthenticated
  * reject path, and the DDL has no length constraint — store the bounded
@@ -891,17 +902,56 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .run();
     },
 
-    async deliverySummary(appId: string): Promise<DeliverySummary> {
-      return (await deliverySummaries([appId]))[appId]!;
+    /**
+     * `workspaceId` non-null scopes the summary to that workspace's target
+     * repositories (`DELIVERY_WORKSPACE_REPO_SQL`); null reads the whole App.
+     */
+    async deliverySummary(appId: string, workspaceId: string | null = null): Promise<DeliverySummary> {
+      if (workspaceId === null) return (await deliverySummaries([appId]))[appId]!;
+      const latest = await db
+        .prepare(
+          `SELECT * FROM webhook_deliveries
+           WHERE bot_id = ? AND ${DELIVERY_WORKSPACE_REPO_SQL}
+           ORDER BY ${DELIVERY_VERDICT_TIER_SQL}, created_at DESC, rowid DESC
+           LIMIT 1`,
+        )
+        .bind(appId, workspaceId)
+        .first<WebhookDeliveryRow>();
+      const rejected = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM webhook_deliveries
+           WHERE bot_id = ? AND outcome = 'rejected'
+             AND created_at > datetime('now', '-24 hours')
+             AND ${DELIVERY_WORKSPACE_REPO_SQL}`,
+        )
+        .bind(appId, workspaceId)
+        .first<{ n: number }>();
+      return { latest: latest ?? null, rejected24h: rejected?.n ?? 0 };
     },
 
     deliverySummaries,
 
     sweepTerminalPullRequests,
 
-    async listDeliveries(appId: string, filters: DeliveryFilters): Promise<DeliveryPage> {
-      const predicates = ["bot_id = ?"];
-      const binds: (string | number)[] = [appId];
+    /**
+     * `workspaceId` non-null scopes rows, `total`, `repos` and `types` to that
+     * workspace's target repositories (`DELIVERY_WORKSPACE_REPO_SQL`); null
+     * reads the whole App.
+     */
+    async listDeliveries(
+      appId: string,
+      filters: DeliveryFilters,
+      workspaceId: string | null = null,
+    ): Promise<DeliveryPage> {
+      const scopePredicates = ["bot_id = ?"];
+      const scopeBinds: string[] = [appId];
+      if (workspaceId !== null) {
+        scopePredicates.push(DELIVERY_WORKSPACE_REPO_SQL);
+        scopeBinds.push(workspaceId);
+      }
+      const scopeWhere = scopePredicates.join(" AND ");
+      const predicates = [...scopePredicates];
+      const binds: (string | number)[] = [...scopeBinds];
       if (filters.repo !== null) {
         predicates.push("repository_full_name = ?");
         binds.push(filters.repo);
@@ -931,18 +981,18 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       const repos = await db
         .prepare(
           `SELECT DISTINCT repository_full_name AS name FROM webhook_deliveries
-           WHERE bot_id = ? AND repository_full_name IS NOT NULL
+           WHERE ${scopeWhere} AND repository_full_name IS NOT NULL
            ORDER BY repository_full_name`,
         )
-        .bind(appId)
+        .bind(...scopeBinds)
         .all<{ name: string }>();
       const types = await db
         .prepare(
           `SELECT DISTINCT event_name AS name FROM webhook_deliveries
-           WHERE bot_id = ? AND event_name IS NOT NULL
+           WHERE ${scopeWhere} AND event_name IS NOT NULL
            ORDER BY event_name`,
         )
-        .bind(appId)
+        .bind(...scopeBinds)
         .all<{ name: string }>();
       return {
         rows: page.results,

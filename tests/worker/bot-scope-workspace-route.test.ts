@@ -227,3 +227,129 @@ describe("PATCH /dashboard/<ref>/api/apps/:appId/bot/scope", () => {
     expect(audits()).toEqual([]);
   });
 });
+
+describe("GET a shared bot's read faces from a workspace that does not own it", () => {
+  const ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
+
+  function sharedWorld(): TestD1 {
+    const target = world();
+    setScope(target, "bot-home", "shared");
+    seedTarget(target, "bot-home", { workspaceId: OFFICIAL, repoOwner: "globex", repoName: "secret-repo" });
+    target.raw
+      .prepare(
+        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+         VALUES ('inst-globex', 'bot-home', 4401, 'globex', datetime('now'), NULL)`,
+      )
+      .run();
+    target.raw
+      .prepare(
+        `INSERT INTO bot_custom_providers (bot_id, provider_id, base_url, api, model_ids, created_at, updated_at)
+         VALUES ('bot-home', 'globex-llm', 'https://llm.globex.internal/v1', 'openai-completions', '["m1"]', datetime('now'), datetime('now'))`,
+      )
+      .run();
+    const delivery = target.raw.prepare(
+      `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, repository_full_name, reason)
+       VALUES (?, 'bot-home', ?, ?, ?, ?, NULL)`,
+    );
+    delivery.run("d-globex-1", "pull_request", "rejected", 401, "globex/secret-repo");
+    delivery.run("d-globex-2", "check_suite", "ok", null, "globex/secret-repo");
+    delivery.run("d-install", "installation", "ok", null, null);
+    delivery.run("d-acme", "pull_request", "ok", null, "ACME/Widgets");
+    return target;
+  }
+
+  async function get(ref: string, path: string, login: string): Promise<Response> {
+    const session = await createSessionValue(login, null, SESSION_SECRET);
+    return worker.fetch(
+      new Request("https://worker.local/dashboard/" + ref + "/api/apps/" + HOME_BOT + path, {
+        headers: { Cookie: SESSION_COOKIE + "=" + session },
+      }),
+      { ...envFor(db), DASHBOARD_ENCRYPTION_KEY: ENCRYPTION_KEY } as Env,
+    );
+  }
+
+  type BotBody = {
+    can_manage: boolean;
+    installations: unknown[];
+    keys: unknown[];
+    model_chain: unknown;
+    model_roles: Record<string, unknown>;
+    model_chains: unknown[];
+    custom_providers: unknown[];
+    configured_providers: unknown[];
+    delivery_summary: { latest: { event_name: string | null } | null; rejected24h: number };
+  };
+  type DeliveriesBody = {
+    deliveries: Array<{ repository_full_name: string | null; event_name: string | null }>;
+    total: number;
+    repos: string[];
+    types: string[];
+  };
+
+  test("workspace B sees none of workspace A's installations, providers or repositories", async () => {
+    db = sharedWorld();
+
+    const bot = await get(OTHER, "/bot", "erin");
+    expect(bot.status).toBe(200);
+    const botBody = (await bot.json()) as BotBody;
+    expect(botBody.can_manage).toBe(false);
+    expect(botBody.installations).toEqual([]);
+    expect(botBody.keys).toEqual([]);
+    expect(botBody.model_chain).toBeNull();
+    expect(botBody.model_roles).toEqual({});
+    expect(botBody.model_chains).toEqual([]);
+    expect(botBody.custom_providers).toEqual([]);
+    expect(botBody.configured_providers).toEqual([]);
+    expect(botBody.delivery_summary).toEqual({
+      latest: expect.objectContaining({ event_name: "pull_request", outcome: "ok" }),
+      rejected24h: 0,
+    });
+    const botText = JSON.stringify(botBody);
+    expect(botText).not.toContain("globex");
+
+    const deliveries = await get(OTHER, "/deliveries", "erin");
+    expect(deliveries.status).toBe(200);
+    const deliveriesBody = (await deliveries.json()) as DeliveriesBody;
+    expect(deliveriesBody.total).toBe(1);
+    expect(deliveriesBody.deliveries.map((row) => row.repository_full_name)).toEqual(["ACME/Widgets"]);
+    expect(deliveriesBody.repos).toEqual(["ACME/Widgets"]);
+    expect(deliveriesBody.types).toEqual(["pull_request"]);
+    expect(JSON.stringify(deliveriesBody)).not.toContain("globex");
+
+    const probe = await get(OTHER, "/deliveries?repo=globex/secret-repo", "erin");
+    expect(probe.status).toBe(200);
+    expect((await probe.json()) as DeliveriesBody).toMatchObject({ deliveries: [], total: 0 });
+  });
+
+  test("a workspace with no target on the shared bot reads no deliveries at all", async () => {
+    db = sharedWorld();
+    insertUser(db, "frank");
+    seedWorkspace(db, "ws-third");
+    seedMembership(db, "ws-third", "frank", "owner");
+
+    const deliveries = await get("ws-third", "/deliveries", "frank");
+    expect(deliveries.status).toBe(200);
+    expect((await deliveries.json()) as DeliveriesBody).toEqual({ deliveries: [], total: 0, repos: [], types: [] });
+    const bot = await get("ws-third", "/bot", "frank");
+    expect(bot.status).toBe(200);
+    const botBody = (await bot.json()) as BotBody;
+    expect(botBody.installations).toEqual([]);
+    expect(botBody.delivery_summary).toEqual({ latest: null, rejected24h: 0 });
+  });
+
+  test("the owning workspace still reads the whole App", async () => {
+    db = sharedWorld();
+
+    const bot = await get(OFFICIAL, "/bot", "dana");
+    expect(bot.status).toBe(200);
+    const botBody = (await bot.json()) as BotBody & { installations: Array<{ account_login: string }> };
+    expect(botBody.installations.map((row) => row.account_login)).toEqual(["globex"]);
+    expect(botBody.custom_providers).toHaveLength(1);
+    expect(botBody.delivery_summary.rejected24h).toBe(1);
+
+    const deliveries = await get(OFFICIAL, "/deliveries", "dana");
+    const deliveriesBody = (await deliveries.json()) as DeliveriesBody;
+    expect(deliveriesBody.total).toBe(4);
+    expect(deliveriesBody.repos).toEqual(["ACME/Widgets", "globex/secret-repo"]);
+  });
+});
