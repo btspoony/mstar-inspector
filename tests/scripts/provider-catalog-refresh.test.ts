@@ -267,7 +267,8 @@ describe("pin bump plan", () => {
         const slug = `${name.replace(/[^a-z0-9]+/gi, "-")}-${version}`;
         const build = join(root, `build-${slug}`, "package");
         mkdirSync(build, { recursive: true });
-        writeFileSync(join(build, "package.json"), JSON.stringify({ name, version }));
+        writeFileSync(join(build, "package.json"), JSON.stringify({ name, version, type: "module", main: "index.js" }));
+        writeFileSync(join(build, "index.js"), "export const ok = true;\n");
         const tarball = join(root, `stub-${slug}.tgz`);
         expect(
           Bun.spawnSync(["tar", "czf", tarball, "-C", join(root, `build-${slug}`), "package"], {
@@ -292,6 +293,7 @@ describe("pin bump plan", () => {
         }, null, 2)}\n`;
       write("package.json", manifest("bump-locks-fixture", "^4.7.3"));
       write("packages/runner/package.json", manifest("bump-locks-runner", "4.7.3"));
+      write("packages/runner/src/runner.ts", 'import { ok } from "@mstar-harness/engine";\nexport const loaded: boolean = ok;\n');
       write("sandbox-image/cli-global/package.json", `${JSON.stringify({
         dependencies: { "@mstar-harness/cli": "4.7.3" },
         overrides: { "@mstar-harness/cli": `file:${pack("@mstar-harness/cli", "4.8.0")}` },
