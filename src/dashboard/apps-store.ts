@@ -434,6 +434,7 @@ const SHARED_BOT_LIST_SQL = `
 /** Create the review_bots / bot_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
   async function sweepTerminalPullRequests(): Promise<number> {
+    // The state predicate must stay identical to idx_pull_requests_terminal_seen's WHERE (0099).
     const res = await db
       .prepare(
         `DELETE FROM pull_requests WHERE id IN (
