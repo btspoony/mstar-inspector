@@ -342,7 +342,9 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
 
     const bot = await get(OFFICIAL, "/bot", "dana");
     expect(bot.status).toBe(200);
-    const botBody = (await bot.json()) as BotBody & { installations: Array<{ account_login: string }> };
+    const botBody = (await bot.json()) as Omit<BotBody, "installations"> & {
+      installations: Array<{ account_login: string }>;
+    };
     expect(botBody.installations.map((row) => row.account_login)).toEqual(["globex"]);
     expect(botBody.custom_providers).toHaveLength(1);
     expect(botBody.delivery_summary.rejected24h).toBe(1);
