@@ -78,7 +78,9 @@ describe("claim 6 — the remaining window is re-derived in the container, grace
 
     const ran = runWrapper(tools, fakeNow + 3, 5_000, "bun run review");
 
-    expect(ran.exitCode).toBe(124);
+    // 125 is the wrapper's own pre-exec refusal; 124 stays the platform's
+    // timeout kill for a command that did start.
+    expect(ran.exitCode).toBe(125);
     expect(() => readFileSync(record, "utf8")).toThrow();
   });
 });
@@ -102,7 +104,7 @@ sleep 1
 
     const ran = runWrapper(tools, fakeNow + 120, 5_000, "bun run review");
 
-    expect(ran.exitCode).toBe(124);
+    expect(ran.exitCode).toBe(125);
     expect(() => readFileSync(marker, "utf8")).toThrow();
     expect(() => readFileSync(record, "utf8")).toThrow();
   });

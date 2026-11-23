@@ -689,8 +689,10 @@ describe("createReviewConsumer", () => {
       pr_number: 42,
       head_sha: SHA,
       stage: "parse",
-      error_code: "review.output.invalid",
-      message: FAILURE_SUMMARIES["review.output.invalid"],
+      // The row is written BEFORE publishing (so a crash keeps the diagnostic)
+      // and reclassified once the degraded notice is confirmed applied.
+      error_code: "review.output.degraded_published",
+      message: FAILURE_SUMMARIES["review.output.degraded_published"],
       error: "not valid ReviewOutput JSON",
     });
     expect(h.messageAckCalls).toHaveLength(1);
@@ -754,6 +756,8 @@ describe("createReviewConsumer", () => {
     await consumer(h.makeBatch(makePayload()));
 
     expect(failureRows(db)).toHaveLength(1);
+    // Nothing was published, so the row keeps the "nothing was published" code.
+    expect(failureRows(db)[0]).toMatchObject({ error_code: "review.output.invalid" });
     expect(h.messageAckCalls).toHaveLength(1);
     const warn = h.logLines.find((l) => l.level === "warn" && l.msg.includes("degraded publication unknown"));
     expect(warn).toBeDefined();
