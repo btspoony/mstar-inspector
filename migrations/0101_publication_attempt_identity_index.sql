@@ -9,7 +9,7 @@
 -- including other tenants. The index is scope-prefixed with the same
 -- (bot_id, installation_id, owner, repo, pr_number) columns the probe
 -- constrains, so an unrelated tenant's rows never leave the B-tree.
-CREATE INDEX idx_review_publications_attempt_identity
+CREATE INDEX IF NOT EXISTS idx_review_publications_attempt_identity
   ON review_publications (
     bot_id,
     installation_id,

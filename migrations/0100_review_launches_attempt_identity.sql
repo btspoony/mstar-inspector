@@ -7,5 +7,5 @@
 -- pair `review_checks` stores. Without this index each probe scans the whole
 -- (never pruned) launch table. The 0095 partial index only covers rows that
 -- already carry an owed mark, which this state deliberately does not.
-CREATE INDEX idx_review_launches_attempt_identity
+CREATE INDEX IF NOT EXISTS idx_review_launches_attempt_identity
   ON review_launches (attempt_key, attempt_generation);
