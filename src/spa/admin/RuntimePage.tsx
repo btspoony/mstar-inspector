@@ -75,6 +75,11 @@ function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): stri
   );
 }
 
+/** A failed read trusts no stored value; an invalid row distrusts only its own field. */
+function sweepFieldUnreadable(sweep: SweepConfig, field: SweepField): boolean {
+  return sweep.degraded && (sweep.invalid.length === 0 || sweep.invalid.includes(field));
+}
+
 function CardOutcome({
   notice,
   status,
@@ -485,7 +490,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
 
   async function onSaveSweep(event: FormEvent<HTMLFormElement>, stored: SweepConfig): Promise<void> {
     event.preventDefault();
-    if (busy || SWEEP_FIELDS.some((field) => concurrencySubmitBlocked(stored.degraded, sweepDraft[field] ?? null))) {
+    if (busy || SWEEP_FIELDS.some((field) => concurrencySubmitBlocked(sweepFieldUnreadable(stored, field), sweepDraft[field] ?? null))) {
       return;
     }
     const values = {} as SweepValues;
@@ -497,7 +502,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     sweepSignal.start();
     try {
       await saveSweepSettings(values);
-      update((data) => ({ ...data, sweep: { ...stored, values, degraded: false } }));
+      update((data) => ({ ...data, sweep: { ...stored, values, degraded: false, invalid: [] } }));
       setSweepDraft({});
       setNotice({ kind: "success", message: t(locale, "admin.runtime.sweepSaved"), source: "sweep" });
       sweepSignal.succeed();
@@ -1307,32 +1312,53 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                   {notice?.source === "sweep" ? <CardOutcome notice={notice} status={sweepSignal.status} /> : null}
                   {sweep.degraded ? (
                     <div className="mt-4">
-                      <PageNotice kind="warn" message={t(locale, "admin.runtime.sweepUnreadable")} />
+                      <PageNotice
+                        kind="warn"
+                        message={
+                          sweep.invalid.length > 0
+                            ? t(locale, "admin.runtime.sweepInvalidRows", {
+                                fields: new Intl.ListFormat(locale === "zh_CN" ? "zh-CN" : "en").format(
+                                  sweep.invalid.map((field) => t(locale, `admin.runtime.sweepFields.${field}`)),
+                                ),
+                              })
+                            : t(locale, "admin.runtime.sweepUnreadable")
+                        }
+                      />
                     </div>
                   ) : null}
                   <form className="mt-4 space-y-4" onSubmit={(event) => void onSaveSweep(event, sweep)}>
                     <div className="grid max-w-3xl gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {SWEEP_FIELDS.map((field) => (
-                        <div className="flex flex-col gap-1.5" key={field}>
-                          <label className="text-sm font-medium" htmlFor={`sweep-${field}`}>
-                            {t(locale, `admin.runtime.sweepFields.${field}`)}
-                          </label>
-                          <Input
-                            id={`sweep-${field}`}
-                            type="number"
-                            min={sweep.limits[field].min}
-                            max={sweep.limits[field].max}
-                            autoComplete="off"
-                            required
-                            disabled={busy}
-                            value={sweepDraft[field] ?? (sweep.degraded ? "" : String(sweep.values[field]))}
-                            onChange={(event) => {
-                              const value = event.target.value;
-                              setSweepDraft((drafts) => ({ ...drafts, [field]: value }));
-                            }}
-                          />
-                        </div>
-                      ))}
+                      {SWEEP_FIELDS.map((field) => {
+                        const invalid = sweep.degraded && sweep.invalid.includes(field);
+                        return (
+                          <div className="flex flex-col gap-1.5" key={field}>
+                            <label className="text-sm font-medium" htmlFor={`sweep-${field}`}>
+                              {t(locale, `admin.runtime.sweepFields.${field}`)}
+                            </label>
+                            <Input
+                              id={`sweep-${field}`}
+                              type="number"
+                              min={sweep.limits[field].min}
+                              max={sweep.limits[field].max}
+                              autoComplete="off"
+                              required
+                              disabled={busy}
+                              aria-invalid={invalid || undefined}
+                              aria-describedby={invalid ? `sweep-${field}-invalid` : undefined}
+                              value={sweepDraft[field] ?? (sweepFieldUnreadable(sweep, field) ? "" : String(sweep.values[field]))}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                setSweepDraft((drafts) => ({ ...drafts, [field]: value }));
+                              }}
+                            />
+                            {invalid ? (
+                              <p className="text-xs text-destructive" id={`sweep-${field}-invalid`}>
+                                {t(locale, "admin.runtime.sweepInvalidField")}
+                              </p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="flex items-center gap-2">
                       <Button
@@ -1343,7 +1369,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                         {t(locale, "admin.runtime.sweepSave")}
                       </Button>
                       <SaveInFlight show={sweepSignal.status === "loading"} locale={locale} />
-                      {sweep.degraded ? (
+                      {sweep.degraded && sweep.invalid.length === 0 ? (
                         <Button type="button" variant="secondary" onClick={reload}>
                           {t(locale, "common.retry")}
                         </Button>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { RECONCILE_FIELDS, type ReconcileConfig, type ReconcileLimits, type ReconcileValues } from "../../contracts/reconcile-settings";
-import { SWEEP_FIELDS, type SweepConfig, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
+import { SWEEP_FIELDS, type SweepConfig, type SweepField, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
 import { fetchJson } from "../api";
 
 const BASE = "/_internal_admin/api";
@@ -232,7 +232,11 @@ function parseSweep(row: Json): SweepConfig | null {
     values[field] = num(rawValues, field);
     limits[field] = { min: num(range, "min"), max: num(range, "max") };
   }
-  return { values, limits, degraded: bool(group, "degraded") };
+  const invalid = group.invalid;
+  if (!Array.isArray(invalid) || !invalid.every((field) => (SWEEP_FIELDS as readonly unknown[]).includes(field))) {
+    throw new Error("admin API: runtime sweep invalid is not a list of sweep fields");
+  }
+  return { values, limits, degraded: bool(group, "degraded"), invalid: invalid as SweepField[] };
 }
 
 function parseCheckBudgets(row: Json): CheckBudgetConfig | null {

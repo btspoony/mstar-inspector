@@ -504,6 +504,63 @@ describe("Runtime screen", () => {
     await refreshed.close();
   });
 
+  const SWEEP_LIMITS = {
+    failureThreshold: { min: 1, max: 10_000 },
+    windowHours: { min: 1, max: 168 },
+    webhookTimeoutMs: { min: 100, max: 15_000 },
+    retentionDays: { min: 1, max: 365 },
+    retentionCap: { min: 1, max: 500 },
+    inviteLapseCap: { min: 1, max: 500 },
+  };
+  const SWEEP_STORED = {
+    failureThreshold: 7,
+    windowHours: 48,
+    webhookTimeoutMs: 3_000,
+    retentionDays: 30,
+    retentionCap: 200,
+    inviteLapseCap: 100,
+  };
+  const sweepInput = (surface: Surface, field: string) =>
+    surface.container.querySelector(`#sweep-${field}`) as unknown as HTMLInputElement;
+  const sweepCard = (surface: Surface) => surface.container.querySelector("#sweep-windowHours")!.closest("form")!.parentElement!;
+
+  test("an invalid sweep row keeps the valid stored values and marks only the invalid field", async () => {
+    const surface = await runtimeScreen((request) =>
+      request.method === "PATCH"
+        ? json({ sweep: (request.body as { sweep: unknown }).sweep })
+        : json({ ...RUNTIME, sweep: { values: SWEEP_STORED, limits: SWEEP_LIMITS, degraded: true, invalid: ["retentionDays"] } }),
+    );
+    expect(sweepInput(surface, "windowHours").value).toBe("48");
+    expect(sweepInput(surface, "retentionCap").value).toBe("200");
+    expect(sweepInput(surface, "inviteLapseCap").value).toBe("100");
+    expect(sweepInput(surface, "retentionDays").value).toBe("");
+    expect(sweepInput(surface, "retentionDays").getAttribute("aria-invalid")).toBe("true");
+    expect(sweepInput(surface, "windowHours").getAttribute("aria-invalid")).toBeNull();
+    const card = sweepCard(surface);
+    expect(card.textContent).toContain("Stored value invalid for: Webhook retention (days).");
+    expect(card.textContent).not.toContain("Retry");
+
+    await surface.type("#sweep-retentionDays", "45");
+    await surface.click(card.querySelector('button[type="submit"]'));
+    expect(surface.sent.filter((request) => request.method === "PATCH")).toEqual([
+      { url: "/_internal_admin/api/runtime", method: "PATCH", body: { sweep: { ...SWEEP_STORED, retentionDays: 45 } } },
+    ]);
+    expect(sweepInput(surface, "retentionDays").getAttribute("aria-invalid")).toBeNull();
+    expect(sweepCard(surface).textContent).not.toContain("Stored value invalid");
+    await surface.close();
+  });
+
+  test("an unreadable sweep settings read blanks every field and offers Retry", async () => {
+    const surface = await runtimeScreen(() =>
+      json({ ...RUNTIME, sweep: { values: SWEEP_STORED, limits: SWEEP_LIMITS, degraded: true, invalid: [] } }),
+    );
+    for (const field of Object.keys(SWEEP_STORED)) expect(sweepInput(surface, field).value).toBe("");
+    const card = sweepCard(surface);
+    expect(card.textContent).toContain("Some sweep settings could not be read.");
+    expect([...card.querySelectorAll("button")].some((button) => button.textContent === "Retry")).toBe(true);
+    await surface.close();
+  });
+
   test("a failed read renders the error with a retry that reloads", async () => {
     let failing = true;
     const surface = await runtimeScreen(() => (failing ? failed() : json(RUNTIME)));

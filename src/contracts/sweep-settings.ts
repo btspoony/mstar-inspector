@@ -15,4 +15,6 @@ export type SweepConfig = {
   values: SweepValues;
   limits: SweepLimits;
   degraded: boolean;
+  /** Fields whose stored row is invalid; empty when the read itself failed. */
+  invalid: SweepField[];
 };
