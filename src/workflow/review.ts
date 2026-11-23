@@ -14,6 +14,7 @@ import {
   readDurablePaid,
   settleAttemptFailure,
   phaseFailureRecord,
+  PhaseTransientError,
   settleSkippedRow,
   payloadIdentityFields,
   type AttemptRef,
@@ -122,23 +123,30 @@ export async function runReviewAttemptWorkflow(
     // A classified error thrown OUTSIDE a phase wrapper (this file's own host
     // and fence probes) is turned into the same record; only an unclassified
     // one stays a throw, settled as ordinary and retried by a fresh delivery.
+    // An unclassified throw carries the stage its own step observed (a clone
+    // failure is `sandbox`, a runner failure `runner`); only a throw raised HERE
+    // — this file's host and fence probes — has no step to ask.
+    const transient = err instanceof PhaseTransientError ? err.facts : undefined;
     const failure =
       err instanceof PhaseFailed
         ? err.failure
         : phaseFailureRecord(
             {
               phase: inPhase,
-              stage: "pipeline",
-              headSha: prepared?.headSha ?? null,
-              runnerReturned: prepared !== null,
+              stage: transient?.stage ?? "pipeline",
+              headSha: transient?.headSha ?? prepared?.headSha ?? null,
+              runnerReturned: transient?.runnerReturned ?? prepared !== null,
               tier: ref.level,
               budgetMs: prepared?.runnerEffectiveMs ?? 0,
               changedLines: prepared?.observedChangedLines ?? null,
-              sendAttemptPublicationId: null,
+              sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
             },
-            err,
+            err instanceof PhaseTransientError ? err.cause : err,
           );
     if (failure?.headSha !== undefined && failure.headSha !== null) cleanup.headSha = failure.headSha;
+    // A settlement that concluded "unknown" leaves the container's state unknown:
+    // cleanup must hold capacity rather than destroy on evidence nobody has.
+    if (failure?.class === "unknown") cleanup.unproven = true;
     const moved = failure?.class === "moved-head" ? { headSha: failure.headSha } : null;
     await step.do(
       "settle-failure",
@@ -148,18 +156,28 @@ export async function runReviewAttemptWorkflow(
         const handoff = await readAttemptHandoff(deps.env.DB, deliveryKey);
         if (handoff !== null && handoff.settledMs !== null) return { settled: true };
         if (handoff !== null) await beginAttemptSettlement(deps.env.DB, deliveryKey, Date.now());
-        await settleAttemptFailure(
+        const outcome = await settleAttemptFailure(
           deps,
           ref,
           // A thrown, unclassified error has no record: it settles as the
           // ordinary failure its message describes (D6 "after retries run out").
-          failure ?? ordinaryFailure(err, inPhase, prepared),
+          failure ??
+            ordinaryFailure(
+              err instanceof PhaseTransientError ? err.cause : err,
+              inPhase,
+              prepared,
+              transient,
+            ),
           prepared,
         );
         // An UNCLASSIFIED throw is transient: it rethrows here so the step's
         // own retry (and, exhausted, the platform) retries the delivery. The
-        // second attempt sees the settled mark and returns.
-        if (failure === null) throw err;
+        // second attempt sees the settled mark and returns. `unknown` is not a
+        // retry: the attempt holds capacity and its container on evidence
+        // nobody observed, and a replay would settle it a second time.
+        if (failure === null && outcome.kind !== "unknown") {
+          throw (err instanceof PhaseTransientError ? err.cause : err);
+        }
         return { settled: true };
       },
     );
@@ -186,16 +204,20 @@ function ordinaryFailure(
   err: unknown,
   phase: AttemptPhase,
   prepared: PreparedAttempt | null,
+  transient?: PhaseTransientError["facts"],
 ): PhaseFailure {
   const raw = err instanceof Error ? err.message : String(err);
   return {
     class: "failure",
     phase,
-    stage: "pipeline",
-    headSha: prepared?.headSha ?? null,
+    // The stage the failing step reported, so a clone failure is not flattened
+    // into the same `pipeline` a Workflow-level fault records.
+    stage: transient?.stage ?? "pipeline",
+    headSha: transient?.headSha ?? prepared?.headSha ?? null,
     runnerReturned: true,
     message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
-    sendAttemptPublicationId: null,
+    sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
+    rateLimited: transient?.rateLimited ?? null,
   };
 }
 

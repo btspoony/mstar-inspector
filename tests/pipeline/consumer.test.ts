@@ -690,7 +690,8 @@ describe("createReviewConsumer", () => {
       head_sha: SHA,
       stage: "parse",
       error_code: "review.output.invalid",
-      error: `${FAILURE_SUMMARIES["review.output.invalid"]}\nnot valid ReviewOutput JSON`,
+      message: FAILURE_SUMMARIES["review.output.invalid"],
+      error: "not valid ReviewOutput JSON",
     });
     expect(h.messageAckCalls).toHaveLength(1);
     expect(h.messageRetryCalls).toHaveLength(0);

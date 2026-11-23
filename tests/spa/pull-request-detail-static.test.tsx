@@ -1208,7 +1208,7 @@ describe("pull request detail face (static SSR)", () => {
       face({
         findings: page([]),
         reviews: page([]),
-        failures: page([{ stage: "sandbox", error, error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
+        failures: page([{ stage: "sandbox", error, message: null, error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
       });
     const multiline = failureText("a\nb");
     expect(multiline).toContain(t("en", "pullRequests.failureRemainingOutput"));
@@ -1235,7 +1235,7 @@ describe("pull request detail face (static SSR)", () => {
       face({
         findings: page([]),
         reviews: page([]),
-        failures: page([{ stage: "", error: "boom", error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
+        failures: page([{ stage: "", error: "boom", message: null, error_code: null, track_id: null, created_at: "2026-10-31 23:00:00" }]),
       }),
       (container) => {
         const entry = [...container.querySelectorAll<HTMLElement>('[data-slot="activity-entry"]')].find((row) =>
@@ -1257,7 +1257,8 @@ describe("pull request detail face (static SSR)", () => {
   test("a classified failure's first line carries its summary, code and shortened track id", async () => {
     const classified = {
       stage: "runner" as const,
-      error: `${FAILURE_SUMMARIES["review.budget.runner_spent"]}\nbudget-exhausted: {"budgetWindow":"runner"} — mechanism text`,
+      error: `budget-exhausted: {"budgetWindow":"runner"} — mechanism text`,
+      message: FAILURE_SUMMARIES["review.budget.runner_spent"],
       error_code: "review.budget.runner_spent",
       track_id: "9f2c1d4e-aaaa-bbbb-cccc-000000000001",
       created_at: "2026-11-02 00:00:00",
@@ -1286,6 +1287,7 @@ describe("pull request detail face (static SSR)", () => {
     const historical = {
       stage: "sandbox" as const,
       error: "the attempt container could not be proven\nsecond line",
+      message: null,
       error_code: null,
       track_id: null,
       created_at: "2026-10-31 23:00:00",

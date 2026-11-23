@@ -124,6 +124,12 @@ export type ReviewFailureInput = {
    * row's own id is the track id.
    */
   trackId?: string;
+  /**
+   * The PR author's one-sentence summary for `code`. Lives beside `error`, not
+   * inside it: `error` stays the raw mechanism text every operator counter and
+   * exact-text read already depends on.
+   */
+  message?: string;
 };
 
 /** A row of the `review_failures` table (D1 column names, snake_case; migration 0010 + 0104). */
@@ -219,8 +225,8 @@ export function settlementFailureRowStatement(
   assertFailureStage(input.stage);
   return db
     .prepare(
-      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
@@ -235,6 +241,7 @@ export function settlementFailureRowStatement(
       input.error,
       input.code ?? null,
       input.trackId ?? rowId,
+      input.message ?? null,
     );
 }
 
@@ -259,8 +266,8 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
       const rowId = crypto.randomUUID();
       await db
         .prepare(
-          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           rowId,
@@ -274,6 +281,7 @@ export function createFailureStore(db: D1Like): FailureStoreWithCounts {
           input.error,
           input.code ?? null,
           input.trackId ?? rowId,
+          input.message ?? null,
         )
         .run();
     },

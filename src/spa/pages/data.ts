@@ -1125,6 +1125,8 @@ export type PullRequestLatestReview = {
 export type PullRequestFailure = {
   stage: string;
   error: string;
+  /** The PR author's sentence (migration 0105); NULL on older rows. */
+  message: string | null;
   error_code: string | null;
   track_id: string | null;
   created_at: string;
@@ -1284,6 +1286,7 @@ function parsePullRequestFailure(value: unknown): PullRequestFailure | null {
   return {
     stage: value.stage,
     error: value.error,
+    message: typeof value.message === "string" ? value.message : null,
     error_code: typeof value.error_code === "string" ? value.error_code : null,
     track_id: typeof value.track_id === "string" ? value.track_id : null,
     created_at: value.created_at,

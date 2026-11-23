@@ -19,6 +19,7 @@ import {
 /** A row recorded before 0104: no code, no track id, rendered exactly as before. */
 const historical = (row: Pick<PullRequestFailure, "stage" | "error" | "created_at">): PullRequestFailure => ({
   ...row,
+  message: null,
   error_code: null,
   track_id: null,
 });
@@ -545,7 +546,8 @@ describe("pull request detail (mounted)", () => {
   test("copying a classified failure writes code, full track id and the full error", async () => {
     const classified = {
       stage: "runner" as const,
-      error: `${FAILURE_SUMMARIES["review.budget.runner_spent"]}\nmechanism detail`,
+      error: `mechanism detail`,
+      message: FAILURE_SUMMARIES["review.budget.runner_spent"],
       error_code: "review.budget.runner_spent",
       track_id: "9f2c1d4e-aaaa-bbbb-cccc-000000000001",
       created_at: "2026-11-02 00:00:00",

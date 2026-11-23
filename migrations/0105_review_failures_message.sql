@@ -1,0 +1,12 @@
+-- 0105_review_failures_message.sql — the PR author's sentence gets its own
+-- column.
+--
+-- `error` stays the RAW mechanism text every operator surface already reads by
+-- prefix or exact text (the GitHub rate-limit counters, the admission-drop
+-- LIKE counters, the parse diagnostics). 0104 prefixed a summary to it and
+-- broke those contracts, so the summary moves here instead.
+--
+-- Nullable with no backfill: a row recorded before this migration has no
+-- summary and the UI falls back to the first line of `error`, exactly as it
+-- rendered before 0104.
+ALTER TABLE review_failures ADD COLUMN message TEXT;

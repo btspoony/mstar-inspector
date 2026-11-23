@@ -912,10 +912,10 @@ export function PullRequestDetailView({
                   <ul className="flex flex-col gap-2">
                     {failuresPage.items.map((failure, index) => {
                       const lines = failure.error.replace(/(\r?\n)+$/, "").split(/\r?\n/);
-                      // A classified row's first line IS its summary (0104 writes
-                      // `summary + "\n" + detail`); the mechanism detail stays in the
-                      // collapsed block for both shapes.
-                      const summary = lines[0] ?? "";
+                      // `error` stays the raw mechanism text every operator surface
+                      // reads by prefix; a classified row carries its PR-author
+                      // sentence in `message`, and older rows fall back to it.
+                      const summary = failure.message ?? lines[0] ?? "";
                       const code = failure.error_code;
                       const track = failure.track_id;
                       const firstLine =
@@ -952,13 +952,13 @@ export function PullRequestDetailView({
                               {firstLine}
                             </p>
                           )}
-                          {lines.length > 1 ? (
+                          {lines.length > 1 || failure.message !== null ? (
                             <details>
                               <summary className="cursor-pointer text-(length:--typo-label-12-size) text-(--text-secondary)">
                                 {t(locale, "pullRequests.failureRemainingOutput")}
                               </summary>
                               <pre className="mt-2 max-h-64 overflow-auto whitespace-pre rounded-(--radius-control) border border-(--tone-danger-border) bg-(--surface-page) p-2.5 font-mono text-(length:--typo-label-12-size) leading-relaxed text-(--text-secondary)">
-                                {lines.slice(1).join("\n")}
+                                {failure.message === null ? lines.slice(1).join("\n") : failure.error}
                               </pre>
                             </details>
                           ) : null}

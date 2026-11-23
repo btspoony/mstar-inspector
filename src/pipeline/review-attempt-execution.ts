@@ -1782,6 +1782,12 @@ type PhaseFailureBase = {
   /** The paid state was observed: a budget outcome or a returned paid exec. */
   runnerReturned: boolean;
   message: string;
+  /**
+   * Which GitHub limit, if any, refused the step. The wrapper sees the response
+   * headers; the record carries the verdict as data so settlement can prefix the
+   * persisted error without the original error object.
+   */
+  rateLimited?: "primary" | "secondary" | null;
 };
 
 export type PhaseFailure =
@@ -1799,6 +1805,32 @@ export type PhaseFailure =
 
 /** A phase wrapper's terminal return: the Workflow turns this into a signal. */
 export type PhaseFailureStep = { kind: "failed"; failure: PhaseFailure };
+
+/**
+ * A phase wrapper's UNCLASSIFIED throw: it stays a throw so the platform retries
+ * the step, and it carries the facts the settlement needs as plain data.
+ *
+ * Without it the rebuilt record lost the stage the failing step actually
+ * reported — a clone failure (`sandbox`) and a runner failure (`runner`) both
+ * settled as `pipeline`. The facts are read from `facts`, never re-derived from
+ * the error object's prototype.
+ */
+export class PhaseTransientError extends Error {
+  constructor(
+    readonly facts: {
+      stage: FailureStage;
+      headSha: string | null;
+      runnerReturned: boolean;
+      sendAttemptPublicationId: string | null;
+      /** Which GitHub limit refused the step, read from the real response. */
+      rateLimited: "primary" | "secondary" | null;
+    },
+    readonly cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "PhaseTransientError";
+  }
+}
 
 
 /**
@@ -2494,6 +2526,9 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
   if (err instanceof MovedHeadError && ctx.phase === "prepare") {
     return { ...base, class: "moved-head", phase: "prepare" };
   }
+  // An UNCLASSIFIED error stays a THROW so the platform retries the step (D6);
+  // the wrapper wraps it in `PhaseTransientError` to keep the facts it observed,
+  // and the Workflow settles it as the ordinary failure once retries run out.
   return null;
 }
 
@@ -2570,7 +2605,18 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
       },
       err,
     );
-    if (failure === null) throw err;
+    if (failure === null) {
+      throw new PhaseTransientError(
+        {
+          stage: progress.failureStage,
+          headSha: observed.headSha,
+          runnerReturned: progress.runnerReturned,
+          sendAttemptPublicationId: null,
+          rateLimited: classifyGithubRateLimit(err),
+        },
+        err,
+      );
+    }
     return { kind: "failed", failure };
   }
 }
@@ -3457,7 +3503,18 @@ export async function reviewAttempt(
       err,
     );
     // `retries: 0` on this step: every classified outcome is its return value.
-    if (failure === null) throw err;
+    if (failure === null) {
+      throw new PhaseTransientError(
+        {
+          stage: progress.failureStage,
+          headSha: prepared.headSha,
+          runnerReturned: progress.runnerReturned,
+          sendAttemptPublicationId: null,
+          rateLimited: classifyGithubRateLimit(err),
+        },
+        err,
+      );
+    }
     return { kind: "failed", failure };
   }
   return readPersistedLaunch(deps, attemptId);
@@ -3492,7 +3549,18 @@ export async function collectAttempt(
       },
       err,
     );
-    if (failure === null) throw err;
+    if (failure === null) {
+      throw new PhaseTransientError(
+        {
+          stage: progress.failureStage,
+          headSha: prepared.headSha,
+          runnerReturned: progress.runnerReturned,
+          sendAttemptPublicationId: null,
+          rateLimited: classifyGithubRateLimit(err),
+        },
+        err,
+      );
+    }
     return { kind: "failed", failure };
   }
 }
@@ -3853,12 +3921,13 @@ async function collectPhase(
         stage: "parse",
         code: "review.output.invalid",
         trackId: attemptId,
+        message: FAILURE_SUMMARIES["review.output.invalid"],
         // qc3 F-001 / qc2 F-001: the zod/engine error can echo a
         // model-emitted secret-shaped value (`verdict "ghp_…" is not one
         // of …`) — redactSecrets BEFORE the durable D1 row, same face as
         // buildDegradedBody's public-comment choke point. SEC-01 adds the
         // exact-value pass on top.
-        error: `${FAILURE_SUMMARIES["review.output.invalid"]}\n${diagnostic}`,
+        error: diagnostic,
       });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -4152,7 +4221,18 @@ export async function publishAttempt(
       },
       err,
     );
-    if (failure === null) throw err;
+    if (failure === null) {
+      throw new PhaseTransientError(
+        {
+          stage: progress.failureStage,
+          headSha: null,
+          runnerReturned: progress.runnerReturned,
+          sendAttemptPublicationId: sent.publicationId,
+          rateLimited: classifyGithubRateLimit(err),
+        },
+        err,
+      );
+    }
     return { kind: "failed", failure };
   }
 }
@@ -4654,6 +4734,10 @@ export async function settleAttemptFailure(
   const check = maybeSettlement(deps, attemptId);
   const launch = await readReviewLaunch(deps.env.DB, attemptId);
   const sandboxMayExist = launch !== null;
+  // The runner's start instant is the row's own `launched_at_ms` (design D3):
+  // the record no longer carries it, and a rebuilt error never could.
+  const runnerStartedAt = launch !== null && "launchedAtMs" in launch ? launch.launchedAtMs : undefined;
+  const elapsed = runnerStartedAt === undefined ? {} : { elapsed_ms: Date.now() - runnerStartedAt };
   const paidStateObserved = failure.runnerReturned;
   const launchJudgement = launchVerdict(launch);
   const outcomeUnobservable =
@@ -4697,6 +4781,7 @@ export async function settleAttemptFailure(
               orchestration: level === "deep" ? "parent" : "bun-fanout",
             }),
         budget_outcome: budgetOutcome,
+        ...elapsed,
         error_code: code,
         attempt_id: attemptId,
       },
@@ -4713,7 +4798,8 @@ export async function settleAttemptFailure(
         stage: failure.stage,
         code,
         trackId: attemptId,
-        error: redactExactSecrets(redactSecrets(`${summary}\n${budgetDetail}`), await sealedSecretValues(deps, attemptId)),
+        message: summary,
+        error: redactExactSecrets(redactSecrets(budgetDetail), await sealedSecretValues(deps, attemptId)),
       });
       durableOutcome = true;
     } catch (recordErr) {
@@ -4779,14 +4865,17 @@ export async function settleAttemptFailure(
             runner_timeout_ms: runnerTimeoutMs(level),
             orchestration: level === "deep" ? "parent" : "bun-fanout",
           }),
+      ...elapsed,
       error_code: code,
       attempt_id: attemptId,
     },
     `review failed: ${detail}`,
   );
 
+  // The prefix stays at the START of `error`: the counters match it there, and
+  // the verdict is record data now (the wrapper saw the response headers).
   const persistedDetail =
-    classifyGithubRateLimit(new Error(detail)) === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
+    failure.rateLimited === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
   try {
     await deps.failureStore.record({
       target_id: payload.targetId,
@@ -4798,7 +4887,8 @@ export async function settleAttemptFailure(
       stage: failure.stage,
       code,
       trackId: attemptId,
-      error: redactExactSecrets(redactSecrets(`${summary}\n${persistedDetail}`), await sealedSecretValues(deps, attemptId)),
+      message: summary,
+      error: redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId)),
     });
     durableOutcome = true;
   } catch (recordErr) {
@@ -4874,6 +4964,12 @@ export async function settleAttemptFailure(
  */
 export type CleanupInput = {
   headSha?: string | null;
+  /**
+   * The settlement concluded "unknown": the container could not be read, so no
+   * proof of what runs on it exists. The D1 row cannot express that (it proves
+   * only that nothing was paid), so the veto rides here.
+   */
+  unproven?: boolean;
 };
 
 export async function cleanupAttempt(
@@ -4925,7 +5021,7 @@ export async function cleanupAttempt(
         return noLaunchState(verdict);
     }
   }
-  let containerUnproven = retention === undefined;
+  let containerUnproven = retention === undefined || input.unproven === true;
   if (containerUnproven) {
     deps.log.warn(
       {
