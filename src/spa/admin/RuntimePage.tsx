@@ -87,6 +87,7 @@ const REVIEWS_ANSWER_KEYS: Record<ReviewsRunningAnswer, DictionaryKey> = {
   running: "admin.runtime.reviewsAnswerRunning",
   "paused-platform": "admin.runtime.reviewsAnswerPausedPlatform",
   "blocked-deployment-gate": "admin.runtime.reviewsAnswerBlockedDeploymentGate",
+  "unreadable-state": "admin.runtime.reviewsAnswerUnreadableState",
 };
 
 function reviewsPlatform(locale: Locale, platform: ReviewsRunningConfig["platform"]): string {
@@ -133,9 +134,11 @@ function ReviewsRunningCard({
             <dd className="font-medium" data-reviews-running="route">
               {t(locale, routeWorkflow === null
                 ? "admin.runtime.reviewsRouteUnreadable"
-                : routeWorkflow.mode === "on" && !routeWorkflow.degraded
-                  ? "admin.runtime.reviewsRouteOn"
-                  : "admin.runtime.reviewsRouteOff")}
+                : routeWorkflow.degraded
+                  ? "admin.runtime.reviewsRouteDegraded"
+                  : routeWorkflow.mode === "on"
+                    ? "admin.runtime.reviewsRouteOn"
+                    : "admin.runtime.reviewsRouteOff")}
             </dd>
           </div>
           <div className="flex flex-col gap-1">

@@ -756,10 +756,15 @@ export type ReviewPlatformRead = { enabled: boolean; unreadable: boolean };
 
 /**
  * The ONE answer to "are reviews running": a deliberate pause, a deployment
- * that has not opened the route, or running. Never a boolean — the three
- * answers name different operator actions.
+ * that has not opened the route, running, or a state that could not be read.
+ * Never a boolean, and never two states folded together — each one names a
+ * different operator action (or none at all).
  */
-export type ReviewsRunAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
+export type ReviewsRunAnswer =
+  | "running"
+  | "paused-platform"
+  | "blocked-deployment-gate"
+  | "unreadable-state";
 
 /** The answer plus the two raw facts it was derived from. */
 export type ReviewRunState = {
@@ -774,13 +779,14 @@ export type ReviewRunState = {
  *
  * Precedence is the queue's, because the queue is the thing that acts:
  *
- * 1. A gate that is not `on` (absent, `off`, untrusted, unreadable) is
+ * 1. A READ FAULT on either fact is `unreadable-state`. It is not a closed
+ *    gate and not a pause: the queue throws and the delivery is redelivered, so
+ *    nothing was settled and the answer must not claim a cause it cannot prove.
+ * 2. A gate that is not `on` (absent, `off`, or an untrusted stored value) is
  *    `blocked-deployment-gate`. It is a fact about the deployment, and it
- *    outranks a paused platform: with both closed the deliveries are refused by
- *    the gate, so the answer must not claim the platform pause settled them.
- * 2. An unreadable platform flag is `blocked-deployment-gate` too — never
- *    `running`, and never a pause nothing can prove.
- * 3. Only a readable `off` is `paused-platform`.
+ *    outranks a paused platform: with both closed the deliveries are settled by
+ *    the gate, so the answer must not name the platform pause instead.
+ * 3. Only a readable `off` platform switch is `paused-platform`.
  */
 export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   const gate = await getReviewRouteWorkflowGate(db);
@@ -790,8 +796,8 @@ export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   } catch {
     platform = { enabled: false, unreadable: true };
   }
-  if (gate.mode !== "on" || gate.degraded) return { state: "blocked-deployment-gate", gate, platform };
-  if (platform.unreadable) return { state: "blocked-deployment-gate", gate, platform };
+  if (gate.degraded || platform.unreadable) return { state: "unreadable-state", gate, platform };
+  if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
   return { state: platform.enabled ? "running" : "paused-platform", gate, platform };
 }
 

@@ -1131,17 +1131,20 @@ export const zhCN: Dictionary = {
       reviewsAnswerPausedPlatform: "审查已被平台开关暂停：新投递会被拒绝，队列中的投递会以暂停结束。",
       reviewsAnswerBlockedDeploymentGate:
         "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递会以阻塞结束。",
+      reviewsAnswerUnreadableState:
+        "无法读取审查状态：平台开关或部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算，它们会被重新投递，状态恢复可读后即会运行。",
       reviewsPlatformLabel: "平台开关",
       reviewsPlatformOn: "on — 允许审查",
       reviewsPlatformOff: "off — 审查已暂停",
-      reviewsPlatformUnreadable: "无法读取 — 在此之前审查按阻塞处理",
+      reviewsPlatformUnreadable: "无法读取 — 无法对审查状态下定论",
       reviewsRouteLabel: "部署门禁",
       reviewsRouteOn: "on — 投递会创建 Workflow 实例",
-      reviewsRouteOff: "off 或无法读取 — 投递不创建任何实例",
+      reviewsRouteOff: "off — 队列中的投递会以阻塞结束",
+      reviewsRouteDegraded: "无法读取 — 无法对审查状态下定论",
       reviewsRouteUnreadable: "本服务器未报告该字段",
       reviewsPausedAppsLabel: "已暂停审查的 App 数",
       reviewsPausedAppsUnreadable: "无法读取",
-      reviewsPrecedence: "先看部署门禁：门禁未开启时，队列中的投递会以阻塞结束，即使平台开关同时关闭，此处显示的也是这一原因。",
+      reviewsPrecedence: "读取失败优先于两种原因，此时不做任何结论。除此之外先看部署门禁：门禁未开启时，队列中的投递会以阻塞结束，即使平台开关同时关闭，此处显示的也是这一原因。",
       reviewsPausedAppsLink: "在 App 设置中暂停或恢复单个 App",
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:

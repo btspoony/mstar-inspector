@@ -166,7 +166,11 @@ export type RouteWorkflowConfig = {
   rejected: string | null;
 };
 
-export type ReviewsRunningAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
+export type ReviewsRunningAnswer =
+  | "running"
+  | "paused-platform"
+  | "blocked-deployment-gate"
+  | "unreadable-state";
 
 /**
  * One operations answer for "are reviews running": the derived answer plus the
@@ -411,7 +415,8 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
   if (
     (block.answer !== "running" &&
       block.answer !== "paused-platform" &&
-      block.answer !== "blocked-deployment-gate") ||
+      block.answer !== "blocked-deployment-gate" &&
+      block.answer !== "unreadable-state") ||
     typeof facts.enabled !== "boolean" ||
     typeof facts.unreadable !== "boolean"
   ) {

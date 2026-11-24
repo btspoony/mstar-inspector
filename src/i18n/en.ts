@@ -1221,18 +1221,21 @@ export const en = {
         "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
       reviewsAnswerBlockedDeploymentGate:
         "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
+      reviewsAnswerUnreadableState:
+        "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — they are redelivered and run once the state reads again.",
       reviewsPlatformLabel: "Platform switch",
       reviewsPlatformOn: "on — reviews are allowed",
       reviewsPlatformOff: "off — reviews are paused",
-      reviewsPlatformUnreadable: "unreadable — reviews are blocked until it reads again",
+      reviewsPlatformUnreadable: "unreadable — the review state cannot be concluded",
       reviewsRouteLabel: "Deployment gate",
       reviewsRouteOn: "on — deliveries create a Workflow instance",
-      reviewsRouteOff: "off or unreadable — deliveries create nothing",
+      reviewsRouteOff: "off — queued deliveries end as blocked",
+      reviewsRouteDegraded: "unreadable — the review state cannot be concluded",
       reviewsRouteUnreadable: "not reported by this server",
       reviewsPausedAppsLabel: "Apps with reviews paused",
       reviewsPausedAppsUnreadable: "not readable",
       reviewsPrecedence:
-        "The deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
+        "A read fault outranks both causes and concludes nothing. Otherwise the deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
       reviewsPausedAppsLink: "Pause or resume a single App in the App settings",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:

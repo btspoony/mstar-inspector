@@ -106,7 +106,7 @@ describe("the review route's deployment gate", () => {
       expect(warnLines).toHaveLength(1);
       const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;
       expect(line.event).toBe("review_route_gate_closed");
-      expect(line.answer).toBe("blocked-deployment-gate");
+      expect(line.answer).toBe("unreadable-state");
       expect(line.gate_degraded).toBe(true);
       expect(line.gate_reason).toBe("untrusted");
       expect(line.gate_rejected).toBe(JSON.stringify(raw));

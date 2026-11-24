@@ -99,7 +99,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
-  test("an unreadable platform switch answers blocked-deployment-gate, never running", async () => {
+  test("an unreadable platform switch answers unreadable-state, never blocked and never running", async () => {
     const db = fixture();
     setRouteGate(db, "on");
     const res = await worker.fetch(
@@ -119,7 +119,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { reviewsRunning: { answer: string; platform: unknown } };
-    expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
     expect(body.reviewsRunning.platform).toEqual({ enabled: false, unreadable: true });
   });
 
@@ -145,7 +145,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
-  test("a gate read that degrades answers blocked-deployment-gate, never running", async () => {
+  test("a gate read that degrades answers unreadable-state, never blocked and never running", async () => {
     const db = fixture();
     setRouteGate(db, "ON");
     const res = await worker.fetch(
@@ -158,7 +158,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       reviewsRunning: { answer: string };
       routeWorkflow: { mode: string; degraded: boolean; reason: string };
     };
-    expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
     expect(body.routeWorkflow).toMatchObject({ mode: "off", degraded: true, reason: "untrusted" });
   });
 
@@ -199,6 +199,33 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       const label = JSON.stringify(entry);
       expect((await readAnswer(db)).answer, label).toBe((await reviewRunState(db)).state);
     }
+  });
+
+  test("a read fault is never folded into blocked-deployment-gate", async () => {
+    // Same gate row, same flag: only the READ fault differs, and the answers
+    // must differ too — the card's blocked copy promises a settlement the fault
+    // path never performs.
+    const closed = fixture();
+    expect((await readAnswer(closed)).answer).toBe("blocked-deployment-gate");
+
+    const degraded = fixture();
+    setRouteGate(degraded, "on");
+    const faulting = {
+      prepare: (sql: string) => {
+        if (sql.includes("server_flags")) throw new Error("flags unavailable");
+        return degraded.prepare(sql);
+      },
+      batch: (statements: never[]) => degraded.batch(statements),
+    };
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      { ...envFor(degraded), DB: faulting } as unknown as Env,
+    );
+    const body = (await res.json()) as { reviewsRunning: { answer: string } };
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.reviewsRunning.answer).not.toBe("blocked-deployment-gate");
   });
 
   test("the paused-App count reads the App pause of live Apps only", async () => {

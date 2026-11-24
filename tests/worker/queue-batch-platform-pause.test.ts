@@ -243,7 +243,7 @@ describe("the platform switch ends a queued batch visibly", () => {
     const closed = linesOf("review_route_gate_closed");
     expect(closed).toHaveLength(1);
     expect(closed[0]!.platform_unreadable).toBe(true);
-    expect(closed[0]!.answer).toBe("blocked-deployment-gate");
+    expect(closed[0]!.answer).toBe("unreadable-state");
     expect(failureRows(db)).toHaveLength(0);
     expect(acks).toHaveLength(0);
     expect(checkRow(db).desired).toBe("in_progress");

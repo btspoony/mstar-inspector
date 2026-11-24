@@ -1406,7 +1406,7 @@ describe("Runtime screen", () => {
         ?.textContent,
     ).toBe("Pause or resume a single App in the App settings");
     expect(surface.container.querySelector('[data-reviews-running="precedence"]')?.textContent).toBe(
-      "The deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
+      "A read fault outranks both causes and concludes nothing. Otherwise the deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
     );
     await surface.close();
   });
@@ -1446,16 +1446,16 @@ describe("Runtime screen", () => {
       "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
     );
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
-      "off or unreadable — deliveries create nothing",
+      "off — queued deliveries end as blocked",
     );
     await surface.close();
   });
 
-  test("a degraded gate read renders blocked with an unreadable platform and App count", async () => {
+  test("a degraded gate read concludes nothing — it never reads as blocked or settled", async () => {
     const surface = await runtimeScreen(() =>
       json({
         ...reviews({
-          answer: "blocked-deployment-gate",
+          answer: "unreadable-state",
           platform: { enabled: false, unreadable: true },
           pausedApps: null,
         }),
@@ -1468,18 +1468,44 @@ describe("Runtime screen", () => {
         },
       }),
     );
-    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
-      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
+    const answer = surface.container.querySelector('[data-reviews-running="answer"]')?.textContent ?? "";
+    expect(answer).toBe(
+      "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — they are redelivered and run once the state reads again.",
     );
+    // The read fault must not be presented as either proven cause.
+    expect(answer.toLowerCase()).not.toContain("blocked by the deployment gate");
+    expect(answer).not.toContain("end as blocked");
+    expect(answer).toContain("not settled");
+    expect(answer).toContain("redelivered");
     expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
-      "unreadable — reviews are blocked until it reads again",
+      "unreadable — the review state cannot be concluded",
     );
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
-      "off or unreadable — deliveries create nothing",
+      "unreadable — the review state cannot be concluded",
     );
     expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe(
       "not readable",
     );
+    await surface.close();
+  });
+
+  test("the Chinese face states the unreadable answer without claiming a settlement", async () => {
+    const surface = await runtimeScreen(
+      () =>
+        json({
+          ...reviews({
+            answer: "unreadable-state",
+            platform: { enabled: false, unreadable: true },
+            pausedApps: null,
+          }),
+          routeWorkflow: { mode: "off", saved: false, degraded: true, reason: "read-failed", rejected: null },
+        }),
+      "zh_CN",
+    );
+    const answer = surface.container.querySelector('[data-reviews-running="answer"]')?.textContent ?? "";
+    expect(answer).toContain("无法读取审查状态");
+    expect(answer).not.toContain("以阻塞结束");
+    expect(answer).toContain("不会被结算");
     await surface.close();
   });
 

@@ -737,7 +737,7 @@ export async function runReviewQueueBatch(
     return;
   }
   const gate = run.gate;
-  const line = {
+  const fields = {
     event: "review_route_gate_closed",
     answer: run.state,
     review_route_workflow: gate.mode,
@@ -749,13 +749,12 @@ export async function runReviewQueueBatch(
     platform_unreadable: run.platform.unreadable,
     batch_messages: batch.messages.length,
   };
-  // A degraded anything is never permission: it is a read fault about the
-  // deployment, so the batch throws and the queue redelivers instead of
-  // acknowledging deliveries nothing settled.
-  if (gate.degraded || run.platform.unreadable) {
+  // A read fault is not a cause: nothing routed, nothing settled, batch thrown
+  // back for redelivery. `settleHaltedBatch` only accepts PROVEN halt states.
+  if (run.state === "unreadable-state") {
     console.warn(
       JSON.stringify({
-        ...line,
+        ...fields,
         msg: "review run state could not be read — fail-closed: nothing routed, nothing settled, the batch is redelivered",
       }),
     );
@@ -774,7 +773,7 @@ export async function runReviewQueueBatch(
   }
   console.log(
     JSON.stringify({
-      ...line,
+      ...fields,
       msg: `review route is closed (${REVIEW_ROUTE_WORKFLOW_KEY}) — every delivery in this batch is settled with a durable failure row and acked`,
     }),
   );
