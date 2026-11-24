@@ -22,6 +22,7 @@ import { testAppPem } from "../helpers/rsa-key";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createConsumerHarness, failureRows, makePayload } from "../helpers/consumer-harness";
 import { FINDING_BODY_MAX } from "../../src/review/schema";
+import { REDACTED } from "../../src/pipeline/redact";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { inlineWorkflowStep } from "../helpers/workflow-route";
 import { createArtifactStore } from "../../src/store/artifact-store";
@@ -73,7 +74,9 @@ const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipel
 const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedReviewWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
   "../../src/pipeline/comment"
 );
-const { RoundBudgetSpent, openGateSecrets, sealGateSecrets } = await import("../../src/pipeline/review-attempt");
+const { RoundBudgetSpent, openGateSecrets, sealGateSecrets, lastRunnerStage } = await import(
+  "../../src/pipeline/review-attempt"
+);
 const { reconcileReviewLifecycle } = await import("../../src/worker/lifecycle-reconcile");
 const { reconcileReviewRoute } = await import("../../src/pipeline/route-reconcile");
 const { TERMINAL_FAILURE_TEXT, createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
@@ -3954,5 +3957,170 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     const rows = failureRows(db);
     expect(rows.length).toBeGreaterThan(0);
     for (const row of rows) expect(String(row.error)).not.toContain(paidKey);
+  });
+});
+
+describe("the runner's last traced stage", () => {
+  const stageLine = (name: string): string => JSON.stringify({ event: "review_stage", stage: name });
+
+  test("lastRunnerStage keeps the LAST stage line, skips non-events, and bounds the name", () => {
+    expect(
+      lastRunnerStage(
+        `${stageLine("clone")}\n${stageLine("seats")}\nnot json at all\n${JSON.stringify({ event: "other", stage: "x" })}\n${stageLine("synthesize")}\n`,
+      ),
+    ).toBe("synthesize");
+    expect(lastRunnerStage("no traces here\n")).toBeUndefined();
+    // A name that carries a credential SHAPE is redacted by the same helper the
+    // stderr tail uses — the stage field cannot become a leak.
+    expect(lastRunnerStage(stageLine("leak ghp_abcdefghijklmnop"))).toBe(`leak ${REDACTED}`);
+    expect(lastRunnerStage(stageLine("z".repeat(200)))!.length).toBeLessThanOrEqual(60);
+  });
+
+  test("a real runner failure carries the stage into `error` and the log field", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerExitCode = 1;
+    h.sandbox.runnerStderr = `${stageLine("clone")}\n${stageLine("synthesize")}\nboom\n`;
+    const ref = makeRef(payload);
+
+    // A non-zero exit is a TRANSIENT error: it becomes a record only once the
+    // workflow's retries run out, so the whole route is what has to run.
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    await expect(runReviewAttemptWorkflow(deps, ref, stepStore(new Map()), async () => {})).rejects.toThrow(
+      /last stage: synthesize/,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("(last stage: synthesize)");
+    // The author-facing sentence keeps no internal mechanism wording.
+    expect(row.message).not.toContain("synthesize");
+    const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
+    expect(line?.fields.last_stage).toBe("synthesize");
+  });
+
+  test("a budget stop carries the stage of the seat that ran out of time", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerExitCode = 0;
+    h.sandbox.runnerStdout = JSON.stringify({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 5,
+      seatsStopped: 3,
+    });
+    h.sandbox.runnerStderr = `${stageLine("seats")}\n${stageLine("seat 3/5")}\n`;
+    const ref = makeRef(payload);
+
+    const step = await prepareAttempt(deps, ref);
+    if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+    const reviewed = await reviewAttempt(deps, ref, step.prepared);
+    if (!("failure" in reviewed) || reviewed.failure.class !== "budget") {
+      throw new Error("the budget stop was not classified");
+    }
+    expect(reviewed.failure.lastStage).toBe("seat 3/5");
+    expect(reviewed.failure.message).toContain("(last stage: seat 3/5)");
+
+    const settled = await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared);
+    expect(settled.kind).toBe("budget-exhausted");
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("(last stage: seat 3/5)");
+    // The Check's author-facing summary is budget wording only: the stage is an
+    // operator fact and must not leak into the sentence an author reads.
+    expect(row.message).not.toContain("seat 3/5");
+    const line = h.logLines.find(
+      (entry) => entry.msg.startsWith("review failed:") && entry.fields.error_code !== undefined,
+    );
+    expect(line?.fields.last_stage).toBe("seat 3/5");
+  });
+});
+
+describe("the runner's last traced stage — settlement text", () => {
+  const stage = (name: string): string => `${JSON.stringify({ event: "review_stage", stage: name })}\n`;
+
+  test("the LAST of two stage lines lands in `error` and in the log field", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const failed = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "runner failed: exit 1, stdout 0B, stderr tail: boom (last stage: synthesize)",
+        lastStage: "synthesize",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    expect(failed.kind).not.toBe("unknown");
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("(last stage: synthesize)");
+    // The author-facing sentence keeps no internal mechanism wording.
+    expect(row.message).not.toContain("synthesize");
+    const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
+    expect(line?.fields.last_stage).toBe("synthesize");
+  });
+
+  test("a runner that traced no stage leaves the text and the field untouched", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "runner failed: exit 1, stdout 0B, stderr tail: boom",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    expect(String(failureRows(db)[0]!.error)).toBe("runner failed: exit 1, stdout 0B, stderr tail: boom");
+    const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
+    expect(line?.fields.last_stage).toBeUndefined();
+  });
+
+  test("a secret-shaped stage name is redacted by the existing helper", async () => {
+    // The stage name is runner-controlled text, so it passes the same shape
+    // redaction the stderr tail does — a credential pasted into a stage name
+    // cannot ride this field out.
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: `runner failed: exit 1, stdout 0B, stderr tail: boom (last stage: ${REDACTED})`,
+        lastStage: REDACTED,
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain(`(last stage: ${REDACTED})`);
+    expect(String(row.error)).not.toContain("ghp_");
+    const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
+    expect(line?.fields.last_stage).toBe(REDACTED);
   });
 });

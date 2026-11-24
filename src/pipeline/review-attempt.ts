@@ -1054,6 +1054,12 @@ export type ReviewAttemptProgress = {
   secretValues: string[];
   runnerStartedAt: number | undefined;
   runnerReturned: boolean;
+  /**
+   * The runner's last traced stage, read from its stderr the moment it returned.
+   * It rides the progress object so a throw raised AFTER the runner (a lost
+   * document read, a nonzero exit) still hands the stage to the caller's record.
+   */
+  lastStage?: string;
 };
 
 /** The container, credential and checkout an attempt's paid step runs on. */
@@ -1099,6 +1105,12 @@ export class BudgetExhaustedError extends Error {
   constructor(
     readonly outcome: BudgetExhaustedOutcome,
     message: string,
+    /**
+     * The runner's last traced stage, when its stderr was readable at this
+     * point. Data next to `message`, never parsed back out of it: settlement
+     * logs it as `last_stage` so an operator sees where the budget ran out.
+     */
+    readonly lastStage?: string,
   ) {
     super(message);
     this.name = "BudgetExhaustedError";
@@ -1607,13 +1619,60 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
 /** Characters of an exec's stderr tail carried by its failure message. */
 export const STDERR_TAIL_MAX = 600;
 
+/** Bound on a stage name — the runner's vocabulary is short words, never a payload. */
+const STAGE_NAME_MAX_CHARS = 60;
+
+/**
+ * The LAST `{"event":"review_stage","stage":"…"}` line the runner wrote, or
+ * `undefined` when it wrote none. This is the one answer to "where did the
+ * review stop?" that needs no dashboard: the runner traces each stage to
+ * stderr, and a budget stop or a lost reply otherwise says only that time ran
+ * out.
+ *
+ * Read line by line, last match wins: a stage line is one JSON object on its
+ * own line, and the LAST one is the stage that was running when the exec ended.
+ * A malformed line, a non-string stage or an empty one is skipped rather than
+ * ending the scan — the earlier stage is still better evidence than nothing.
+ *
+ * The value passes the SAME redaction the failure text gets, so a stage name
+ * that happens to carry a credential shape cannot leak through this field, and
+ * it is bounded because the line is runner-controlled text.
+ */
+export function lastRunnerStage(stderr: string): string | undefined {
+  let stage: string | undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    if (!line.includes("review_stage")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A stage trace split across lines (or interleaved with other output) is
+      // not this event; an earlier complete one still stands.
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const { event, stage: candidate } = parsed as { event?: unknown; stage?: unknown };
+    if (event !== "review_stage" || typeof candidate !== "string") continue;
+    const bounded = redactSecrets(candidate).trim().slice(0, STAGE_NAME_MAX_CHARS);
+    if (bounded !== "") stage = bounded;
+  }
+  return stage;
+}
+
+/** The tail a failure text appends so an operator can see where the runner stopped. */
+function lastStageSuffix(stderr: string): string {
+  const stage = lastRunnerStage(stderr);
+  return stage === undefined ? "" : ` (last stage: ${stage})`;
+}
+
 function runnerFailureDetail(
   run: { stdout: string; stderr: string; exitCode: number },
   secretValues: readonly string[],
 ): string {
   const base = `runner failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
-  return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+  const detail = tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+  return `${detail}${lastStageSuffix(run.stderr)}`;
 }
 
 function toBase64Utf8(text: string): string {
@@ -2256,11 +2315,16 @@ export async function runReviewAttempt(input: {
   }
   progress.runnerReturned = true;
   const runnerElapsedMs = Date.now() - progress.runnerStartedAt;
+  // Where the review stopped, once, for every path below: the runner traces each
+  // stage to stderr and nothing else on this row can say it.
+  const lastStage = lastRunnerStage(run.stderr);
+  progress.lastStage = lastStage;
   if (run.exitCode === 124) {
     deps.log.warn(
       {
         ...fields,
         stderr_tail: redactExactSecrets(redactSecrets(run.stderr), progress.secretValues).slice(-STDERR_TAIL_MAX),
+        ...(lastStage === undefined ? {} : { last_stage: lastStage }),
       },
       "runner exec killed at the anchored deadline (provider stderr on this line only)",
     );
@@ -2275,14 +2339,25 @@ export async function runReviewAttempt(input: {
         seatsStopped: null,
         changedLines: observedChangedLines,
       },
-      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B`,
+      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B${lastStageSuffix(run.stderr)}`,
+      lastStage,
     );
   }
   if (run.exitCode !== 0) {
-    throw new Error(runnerFailureDetail(run, progress.secretValues));
+    // The detail text already names the stage for a reader; the own property
+    // carries it as DATA too, so the failure record and its log field get it
+    // without anything reparsing the sentence.
+    const detail = runnerFailureDetail(run, progress.secretValues);
+    const failure = new Error(detail);
+    if (lastStage !== undefined) (failure as Error & { lastStage?: string }).lastStage = lastStage;
+    throw failure;
   }
   deps.log.info(
-    { ...fields, elapsed_ms: runnerElapsedMs },
+    {
+      ...fields,
+      elapsed_ms: runnerElapsedMs,
+      ...(lastStage === undefined ? {} : { last_stage: lastStage }),
+    },
     `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
   );
 
@@ -2299,7 +2374,8 @@ export async function runReviewAttempt(input: {
         seatsStopped: budgetSignal.signal.seatsStopped,
         changedLines: observedChangedLines,
       },
-      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})`,
+      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})${lastStageSuffix(run.stderr)}`,
+      lastStage,
     );
   }
 

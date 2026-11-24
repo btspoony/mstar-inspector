@@ -353,6 +353,11 @@ export type ConsumerLogFields = {
   /** The classified code of a failed/unresolved review, so one query finds every occurrence. */
   error_code?: FailureCode;
   stderr_tail?: string;
+  /**
+   * The runner's last traced stage (`review_stage` on its stderr): the only
+   * structured answer to "where did the review stop?" without a dashboard read.
+   */
+  last_stage?: string;
 };
 
 export type ConsumerLog = {
@@ -1797,6 +1802,12 @@ type PhaseFailureBase = {
    * persisted error without the original error object.
    */
   rateLimited?: "primary" | "secondary" | null;
+  /**
+   * The runner's last traced stage, when the throw site had its stderr. It is
+   * logged as `last_stage` on every settlement line — never rendered into the
+   * author-facing `message`, which keeps no internal mechanism wording.
+   */
+  lastStage?: string;
 };
 
 export type PhaseFailure =
@@ -1846,6 +1857,8 @@ export class PhaseTransientError extends Error {
       sendAttemptPublicationId: string | null;
       /** Which GitHub limit refused the step, read from the real response. */
       rateLimited: "primary" | "secondary" | null;
+      /** The runner's last traced stage, when this step had its stderr. */
+      lastStage?: string;
     },
     readonly cause: unknown,
   ) {
@@ -2508,8 +2521,15 @@ export type TransientFacts = {
   runnerReturned: boolean;
   sendAttemptPublicationId: string | null;
   rateLimited: "primary" | "secondary" | null;
+  /** The runner's last traced stage, when the throw site had its stderr. */
+  lastStage?: string;
 };
 
+/**
+ * Required keys: every one of these must be present for the record to be
+ * trusted. `lastStage` is deliberately absent — it is optional evidence, and an
+ * older build (or a phase with no runner) legitimately carries none.
+ */
 const TRANSIENT_FACTS_KEYS: ReadonlyArray<keyof TransientFacts> = [
   "stage",
   "headSha",
@@ -2548,6 +2568,14 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
   // `cause` hands it to the record, and settlement forwards it to the handoff
   // observation. Nothing is parsed out of the composed message.
   const cause = (err as { cause?: unknown } | null)?.cause;
+  // The runner's last stage rides the SAME path: the wrapper put it on the
+  // transient facts it threw, so a rebuilt error keeps it as data.
+  const facts = transientFactsOf(err);
+  // A plain throw carries the stage the same way it carries `cause`: as an own
+  // property on the error, which the platform preserves across a step boundary.
+  const ownStage = (err as { lastStage?: unknown } | null)?.lastStage;
+  const lastStage =
+    facts?.lastStage ?? (typeof ownStage === "string" && ownStage !== "" ? ownStage : undefined);
   const base = {
     phase: ctx.phase,
     stage: ctx.stage,
@@ -2556,6 +2584,7 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
     message: strippedMessage(err),
     ...(typeof cause === "string" ? { cause } : {}),
     ...(ctx.rateLimited === undefined || ctx.rateLimited === null ? {} : { rateLimited: ctx.rateLimited }),
+    ...(lastStage === undefined ? {} : { lastStage }),
   };
   if (err instanceof BudgetExhaustedError) {
     return {
@@ -2563,6 +2592,7 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
       class: "budget",
       window: err.outcome.budgetWindow,
       outcome: err.outcome,
+      ...(err.lastStage === undefined ? {} : { lastStage: err.lastStage }),
       sendAttemptPublicationId: ctx.sendAttemptPublicationId,
     };
   }
@@ -2698,6 +2728,7 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -3629,6 +3660,7 @@ export async function reviewAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -3675,6 +3707,7 @@ export async function collectAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -4363,6 +4396,7 @@ export async function publishAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: sent.publicationId,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -4979,6 +5013,7 @@ export async function settleAttemptFailure(
         ...elapsed,
         error_code: code,
         attempt_id: attemptId,
+        ...(failure.lastStage === undefined ? {} : { last_stage: failure.lastStage }),
       },
       `review failed: ${budgetDetail}`,
     );
@@ -5069,6 +5104,7 @@ export async function settleAttemptFailure(
       ...elapsed,
       error_code: code,
       attempt_id: attemptId,
+      ...(failure.lastStage === undefined ? {} : { last_stage: failure.lastStage }),
     },
     `review failed: ${detail}`,
   );
