@@ -19,7 +19,11 @@ import {
 } from "../../src/store/review-route-store";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { idemKey } from "../../src/contracts/idem";
-import { HANDOFF_RECOVERY_AFTER_MS, reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import {
+  HANDOFF_RECOVERY_AFTER_MS,
+  reconcileReviewRoute,
+  type ReviewRouteLogFields,
+} from "../../src/pipeline/route-reconcile";
 import { LOST_REPLY_SETTLE_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
@@ -1824,6 +1828,86 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(settled).toHaveLength(1);
     expect(String(settled[0]!.message)).toContain("Request rejected — nothing was charged because the account is suspended");
     expect(String(settled[0]!.message)).not.toContain("1200ms");
+  });
+
+  test("a faulting selector and a faulting sync are logged, and the pass still completes", async () => {
+    // Both catches in the repair lane used to swallow their reason: a lane that
+    // failed every pass was invisible. Each fault now emits one line — the
+    // selector's carries the cause (it covers every selected row), the per-row
+    // sync's carries the attempt it left selected.
+    //
+    // A local sink typed to the pass's own port: the shared harness recorder is
+    // PR-scoped, and these two lines deliberately name no PR.
+    const lines: Array<{ fields: ReviewRouteLogFields; msg: string }> = [];
+    const log = {
+      info(fields: ReviewRouteLogFields, msg: string): void {
+        lines.push({ fields, msg });
+      },
+    };
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-inert-lane";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    // A row that already settled from the fallback, so the sync lane has work.
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    expect(failureRows(db)).toHaveLength(1);
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        message: "the attempt container could not be read (reply-lost) — Error: never synced (after 10ms)",
+        cause: "Error: never synced (after 10ms)",
+      },
+      nowMs: SETTLES_AT,
+    });
+
+    // The selector fault: every row of the lane is invisible for this pass.
+    const selectorFault = new Error("late-observation selector unavailable");
+    const syncFault = new Error("late-observation sync unavailable");
+    const failing: D1Like = {
+      prepare: (sql: string) => {
+        if (sql.includes("$.attemptObservation.message') IS NOT NULL")) throw selectorFault;
+        if (sql.startsWith("UPDATE review_failures SET error_code")) throw syncFault;
+        return db.prepare(sql);
+      },
+      batch: (statements: D1StatementLike[]) => db.batch(statements),
+    } as unknown as D1Like;
+    const faultyEnv = await h.makeEnv({ DB: failing as never });
+
+    await reconcileReviewRoute({ ...faultyEnv, REVIEW_QUEUE: queue as never, log }, SETTLES_AT + 60_000);
+
+    const selectorLine = lines.find(
+      (line) => line.fields.event === "review_late_observation_selector_failed",
+    );
+    expect(selectorLine?.fields.error_cause).toBe("late-observation selector unavailable");
+    expect(selectorLine?.msg).toContain("next pass retries");
+    // The pass completed: the row is untouched and still selected for the next pass.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).not.toContain("never synced");
+
+    // Now let the selector work and fault only the sync: the per-row line names
+    // the attempt and the cause, and the row stays selected.
+    const syncOnly: D1Like = {
+      prepare: (sql: string) => {
+        if (sql.startsWith("UPDATE review_failures SET error_code")) throw syncFault;
+        return db.prepare(sql);
+      },
+      batch: (statements: D1StatementLike[]) => db.batch(statements),
+    } as unknown as D1Like;
+    const syncEnv = await h.makeEnv({ DB: syncOnly as never });
+    lines.length = 0;
+
+    await reconcileReviewRoute({ ...syncEnv, REVIEW_QUEUE: queue as never, log }, SETTLES_AT + 120_000);
+
+    const syncLine = lines.find((line) => line.fields.event === "review_late_observation_sync_failed");
+    expect(syncLine?.fields.attempt_id).toBe(attemptId);
+    expect(syncLine?.fields.error_cause).toBe("late-observation sync unavailable");
+    expect(syncLine?.msg).toContain("stays selected");
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).not.toContain("never synced");
   });
 });
 

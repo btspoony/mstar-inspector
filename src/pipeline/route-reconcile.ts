@@ -143,6 +143,21 @@ function authorFacingMessage(code: FailureCode, observed: AttemptObservation | n
   return cause === "" ? summary : `${summary} ${cause}`;
 }
 
+/**
+ * What this pass logs through `log.info`. One sink carries two shapes: the
+ * PR-scoped lines a settlement or recheck replay names, and this pass's own
+ * fault lines. A selector fault covers every selected row at once, so it names
+ * no PR; a per-row sync fault names the attempt it left selected.
+ */
+export type ReviewRouteLogFields =
+  | (ConsumerLogFields & { recheck_replayed?: boolean })
+  | {
+      event: "review_late_observation_selector_failed" | "review_late_observation_sync_failed";
+      /** The fault's own message — the cause this lane used to swallow. */
+      error_cause: string;
+      attempt_id?: string;
+    };
+
 export type ReviewRouteEnv = {
   DB: D1Database;
   REVIEW_QUEUE: Queue<ReviewJobPayload>;
@@ -151,8 +166,13 @@ export type ReviewRouteEnv = {
    * The pass's log sink. The recheck accounting's attribution LINE is a durable
    * effect owned by whoever finishes the round, so a replay this pass performs
    * has to emit it too. Absent only in a caller that does not log.
+   *
+   * Declared as a method on purpose: the production sweep sink accepts
+   * `Record<string, unknown>` while the consumer/test sink accepts the narrower
+   * `ConsumerLogFields`, and method parameters are checked bivariantly — one
+   * port serves both without casting at either call site.
    */
-  log?: { info?: (fields: ConsumerLogFields & { recheck_replayed?: boolean }, msg: string) => void };
+  log?: { info?(fields: ReviewRouteLogFields, msg: string): void };
 };
 
 /**
@@ -512,14 +532,23 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // fallback shape (its code, its sentence, its summary) is selected, a row
   // already carrying the observation leaves the lane for good, and a row any
   // other producer wrote is never touched. A fault leaves the row selected
-  // for the next pass.
+  // for the next pass — and is LOGGED: a lane that fails every pass while
+  // silently swallowing the reason is invisible, and the sibling lost-reply
+  // catch below is the shape this pass already uses.
   let lateObserved: AttemptHandoff[] = [];
   try {
     lateObserved = await listLateObservedFailures(env.DB, {
       ...LOST_REPLY_FALLBACK_SHAPE,
       limit: ROUTE_RECOVERY_LIMIT,
     });
-  } catch {
+  } catch (err) {
+    env.log?.info?.(
+      {
+        event: "review_late_observation_selector_failed",
+        error_cause: err instanceof Error ? err.message : String(err),
+      },
+      "late-observation repair is inert for this pass — the selector failed, so the next pass retries it",
+    );
     lateObserved = [];
   }
   for (const handoff of lateObserved) {
@@ -532,8 +561,17 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
         error: observed.message,
         message: authorFacingMessage(observed.code, observed),
       });
-    } catch {
-      // Stays selected; the next pass retries it.
+    } catch (err) {
+      // The row stays selected (content, never a clock), and the fault is
+      // visible: without this line a permanently failing sync is undiagnosable.
+      env.log?.info?.(
+        {
+          event: "review_late_observation_sync_failed",
+          attempt_id: handoff.attemptId,
+          error_cause: err instanceof Error ? err.message : String(err),
+        },
+        "the late-observation sync faulted — the row stays selected for the next pass",
+      );
     }
   }
   // A claim whose delivery died before recording anything. The state transition
