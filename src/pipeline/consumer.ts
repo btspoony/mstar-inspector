@@ -709,10 +709,9 @@ async function newerCommitHasJob(
       )
       .first();
     if (reviewed !== null) return true;
-    const open = await deps.env.DB.prepare(
+    const openRows = await deps.env.DB.prepare(
       `SELECT check_run_id, triggered_by, attempt_key FROM review_checks
-         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL
-       LIMIT 1`,
+         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
     )
       .bind(
         payload.botRef.appId,
@@ -721,27 +720,40 @@ async function newerCommitHasJob(
         payload.pr_number,
         headSha,
       )
-      .first<{ check_run_id: number | null; triggered_by: string; attempt_key: string }>();
-    if (open === null) return false;
-    // The claim lives under the REREQUESTED (concluded) run id — the row's own
-    // `check_run_id` is the new run GitHub created for this attempt, which can
-    // never be the claim's run id (and may still be NULL mid-attach). A
-    // non-rerun or unparseable key is not job proof.
-    const rerunCheckRunId =
-      open.triggered_by === "check_run" ? rerunCheckRunIdOfAttemptKey(open.attempt_key) : null;
-    if (rerunCheckRunId === null) return false;
-    // A rerun writes its enqueue claim under `{idemKey}:rerun:{rerequested id}`;
-    // the row alone cannot distinguish "queued" from "refused at the door".
-    try {
-      const rerunClaim = await deps.env.IDEMPOTENCY_KV.get(
-        rerunIdemKey(idempotencyKey, rerunCheckRunId),
-      );
-      return isReviewClaim(rerunClaim);
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      deps.log.warn(fields, `supersede rerun-claim read failed — reviewing normally: ${detail}`);
-      return false;
+      .all<{ check_run_id: number | null; triggered_by: string; attempt_key: string }>();
+    // One head can hold SEVERAL nonterminal rows — e.g. a refused
+    // `pull_request` attach (no claim) beside a real `check_run` rerun — so
+    // every row gets a say, not just the first one LIMIT picked.
+    const rerunIds = new Set<number>();
+    for (const row of openRows.results) {
+      // The claim lives under the REREQUESTED (concluded) run id — the row's
+      // own `check_run_id` is the new run GitHub created for this attempt,
+      // which can never be the claim's run id (and may still be NULL
+      // mid-attach). A non-`check_run` row names no claim: its plain key is
+      // exactly what the fast path already missed, so it proves nothing.
+      if (row.triggered_by !== "check_run") continue;
+      const rerunCheckRunId = rerunCheckRunIdOfAttemptKey(row.attempt_key);
+      if (rerunCheckRunId !== null) rerunIds.add(rerunCheckRunId);
     }
+    // A rerun writes its enqueue claim under `{idemKey}:rerun:{rerequested
+    // id}`; the row alone cannot distinguish "queued" from "refused at the
+    // door". One failed read only forfeits that row's say — a sibling row
+    // may still carry proof.
+    for (const rerunCheckRunId of rerunIds) {
+      try {
+        const rerunClaim = await deps.env.IDEMPOTENCY_KV.get(
+          rerunIdemKey(idempotencyKey, rerunCheckRunId),
+        );
+        if (isReviewClaim(rerunClaim)) return true;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          fields,
+          `supersede rerun-claim read failed — checking remaining rows: ${detail}`,
+        );
+      }
+    }
+    return false;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `supersede D1 probe failed — reviewing normally: ${detail}`);

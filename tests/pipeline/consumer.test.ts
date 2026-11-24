@@ -3648,6 +3648,102 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
   });
 
+  // A nonterminal `review_checks` row seed; `id` doubles as the external_id
+  // stem so two rows never collide on the UNIQUE(external_id) constraint.
+  const seedOpenCheckRow = (
+    db: TestD1,
+    row: { id: string; triggeredBy: string; action: string; attemptKey: string; summary: string },
+  ): void => {
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES (?, ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 ?, ?, ?, 1, ?, NULL,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', ?,
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(
+        row.id,
+        TEST_APP_ID,
+        NEW_SHA,
+        row.triggeredBy,
+        row.action,
+        row.attemptKey,
+        `mstar-check:v1:${row.id}:1`,
+        row.summary,
+      );
+  };
+
+  // One head can hold MULTIPLE nonterminal rows: a quota-refused
+  // `pull_request` attach (no claim) plus a real `check_run` rerun (claim
+  // under `:rerun:7002`). A `LIMIT 1` probe that happened to pick the refused
+  // row returned false and let the stale delivery pay for old code. The
+  // refused row is seeded FIRST so a first-row pick would hit it — the scan
+  // must look past it and find the rerun's claim.
+  test("a refused check row beside a rerun row does not hide the rerun's claim — the delivery still supersedes", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    seedOpenCheckRow(db, {
+      id: "refused-check-mixed",
+      triggeredBy: "pull_request",
+      action: "synchronize",
+      attemptKey: "refused-attempt-key-mixed",
+      summary: "pending",
+    });
+    seedOpenCheckRow(db, {
+      id: "rerun-check-mixed",
+      triggeredBy: "check_run",
+      action: "rerequested",
+      attemptKey: RERUN_ATTEMPT_KEY(7002),
+      summary: "rerunning",
+    });
+    h.kvState.entries.set(RERUN_KEY(NEW_SHA, 7002), "1");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  // Same two rows, but no `{idemKey}:rerun:7002` claim exists — the rerun
+  // row alone cannot prove a queued job, and the refused row proves nothing.
+  test("refused + rerun rows without the rerun claim do NOT supersede", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    seedOpenCheckRow(db, {
+      id: "refused-check-mixed2",
+      triggeredBy: "pull_request",
+      action: "synchronize",
+      attemptKey: "refused-attempt-key-mixed2",
+      summary: "pending",
+    });
+    seedOpenCheckRow(db, {
+      id: "rerun-check-mixed2",
+      triggeredBy: "check_run",
+      action: "rerequested",
+      attemptKey: RERUN_ATTEMPT_KEY(7002),
+      summary: "rerunning",
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
   // Same gate, other D1 leg: a finished `reviews` row for the newer head is
   // proof the head needs no second delivery, even with no KV claim at all.
   test("a newer head whose only proof is a finished reviews row still supersedes the delivery", async () => {
