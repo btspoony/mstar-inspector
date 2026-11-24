@@ -229,6 +229,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
   const db = c.env.DB;
   if (!db) return c.notFound();
   const failures = createFailureStore(db);
+  // The maintenance window is read ONCE and handed to the derivation: the
+  // card's answer and its `maintenance` block must name the same read, or the
+  // answer could say paused-maintenance beside a window shown open.
+  const maintenance = await getMaintenanceMode(db);
   const [
     system,
     budgets,
@@ -255,7 +259,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
-    reviewRunState(db),
+    reviewRunState(db, maintenance),
     getLostReplySettleMs(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
@@ -264,7 +268,6 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readPausedApps(db),
     readAppsHref(c.env, login),
   ]);
-  const maintenance = await getMaintenanceMode(db);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,

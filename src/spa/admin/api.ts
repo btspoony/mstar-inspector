@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RECONCILE_FIELDS, type ReconcileConfig, type ReconcileLimits, type ReconcileValues } from "../../contracts/reconcile-settings";
 import { SWEEP_FIELDS, type SweepConfig, type SweepField, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
+import { REVIEW_ANSWERS, type ReviewsRunAnswer } from "../../contracts/review-answer";
 import { fetchJson } from "../api";
 
 const BASE = "/_internal_admin/api";
@@ -166,12 +167,10 @@ export type RouteWorkflowConfig = {
   rejected: string | null;
 };
 
-export type ReviewsRunningAnswer =
-  | "running"
-  | "paused-platform"
-  | "blocked-deployment-gate"
-  | "paused-maintenance"
-  | "unreadable-state";
+// The card's answer IS the shared derivation's state — the canonical union
+// comes from the contract, so a new state minted server-side is visible here
+// by structure, never by a string literal kept in parallel.
+export type ReviewsRunningAnswer = ReviewsRunAnswer;
 
 /**
  * One operations answer for "are reviews running": the derived answer plus the
@@ -414,11 +413,7 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
   if (typeof platform !== "object" || platform === null) return null;
   const facts = platform as Json;
   if (
-    (block.answer !== "running" &&
-      block.answer !== "paused-platform" &&
-      block.answer !== "blocked-deployment-gate" &&
-      block.answer !== "paused-maintenance" &&
-      block.answer !== "unreadable-state") ||
+    !(REVIEW_ANSWERS as readonly string[]).includes(block.answer as string) ||
     typeof facts.enabled !== "boolean" ||
     typeof facts.unreadable !== "boolean"
   ) {
@@ -426,7 +421,7 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
   }
   if (block.pausedApps !== null && typeof block.pausedApps !== "number") return null;
   return {
-    answer: block.answer,
+    answer: block.answer as ReviewsRunningAnswer,
     platform: { enabled: facts.enabled, unreadable: facts.unreadable },
     pausedApps: block.pausedApps as number | null,
     appsHref: typeof block.appsHref === "string" ? block.appsHref : null,

@@ -128,6 +128,17 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
+  test("an unreadable maintenance read is an unknowable fact — unreadable-state, never a pause claim", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 1);
+    // The window cannot be READ. A closed-looking guess would mint
+    // `paused-maintenance` (a proven cause it is not) or `running` (unlocking
+    // traffic on a settings outage) — the derivation refuses both.
+    const unreadable = { enabled: false, reason: null, since: null, unreadable: true };
+    expect((await reviewRunState(db, unreadable)).state).toBe("unreadable-state");
+  });
+
   test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {
     const db = fixture();
     setPlatformSwitch(db, 0);

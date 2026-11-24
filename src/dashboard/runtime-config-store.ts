@@ -759,19 +759,25 @@ export type ReviewPlatformRead = { enabled: boolean; unreadable: boolean };
  * that has not opened the route, a closed maintenance window, running, or a
  * state that could not be read. Never a boolean, and never two states folded
  * together — each one names a different operator action (or none at all).
+ * The vocabulary itself lives in `contracts/review-answer.ts` (server and SPA
+ * share it); this re-export keeps the existing import site.
  */
-export type ReviewsRunAnswer =
-  | "running"
-  | "paused-platform"
-  | "blocked-deployment-gate"
-  | "paused-maintenance"
-  | "unreadable-state";
+export type { ReviewsRunAnswer } from "../contracts/review-answer";
 
-/** The answer plus the two raw facts it was derived from. */
+import type { ReviewsRunAnswer } from "../contracts/review-answer";
+
+/** The answer plus the raw facts it was derived from. */
 export type ReviewRunState = {
   state: ReviewsRunAnswer;
   gate: ReviewRouteWorkflowGate;
   platform: ReviewPlatformRead;
+  /**
+   * The maintenance read behind `paused-maintenance` — present whenever the
+   * derivation reached the running branch (the halt answers return before it
+   * is read). A caller that already fetched one may pass it in so the answer
+   * and its own maintenance view can never disagree.
+   */
+  maintenance?: MaintenanceMode;
 };
 
 /**
@@ -797,7 +803,7 @@ export type ReviewRunState = {
  *    reviews flow. It stays BELOW the halt states — a real pause still names
  *    the switch, and the pause's settlement is what the queue performs.
  */
-export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
+export async function reviewRunState(db: DashboardD1, knownMaintenance?: MaintenanceMode): Promise<ReviewRunState> {
   const gate = await getReviewRouteWorkflowGate(db);
   let platform: ReviewPlatformRead;
   try {
@@ -810,8 +816,19 @@ export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   }
   if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
   if (!platform.enabled) return { state: "paused-platform", gate, platform };
-  const maintenance = await getMaintenanceMode(db);
-  return { state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running", gate, platform };
+  const maintenance = knownMaintenance ?? (await getMaintenanceMode(db));
+  // An UNREADABLE window is a third unknowable fact, not a closed one: minting
+  // `paused-maintenance` would claim a proven cause, minting `running` would
+  // let a settings outage unlock traffic. Only a KNOWN closed window pauses.
+  if (maintenance.unreadable) {
+    return { state: "unreadable-state", gate, platform, maintenance };
+  }
+  return {
+    state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running",
+    gate,
+    platform,
+    maintenance,
+  };
 }
 
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";
