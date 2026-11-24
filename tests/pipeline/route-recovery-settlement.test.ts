@@ -1572,6 +1572,75 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toEqual(synced);
   });
 
+  test("a delayed workflow settling an already-settled handoff writes no second row", async () => {
+    // The gate the late-cause path actually relies on. A recovery pass can win
+    // the row while the invocation is still running (or after it died); when that
+    // invocation's settlement step finally runs it must find the mark and stop,
+    // so ONE row exists and only the late-observation sync ever touches it. The
+    // direct-write tests above pin the sync; this one pins the OTHER half — that
+    // the workflow's own settle step cannot mint a rival row for the same
+    // attempt once the mark is durable.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-delayed-workflow";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(String(settled[0]!.error)).toContain("no reply ever arrived");
+
+    // The settlement writes through `deps.failureStore` (not the DB handle), so
+    // that is what has to be observed: a row count alone proves nothing here,
+    // because the insert is attempt-keyed with `ON CONFLICT DO NOTHING`.
+    const settlementWrites = async (at: TestD1, id: string): Promise<number> => {
+      const deps = await makeDeps(at);
+      let writes = 0;
+      deps.failureStore = {
+        ...deps.failureStore,
+        record: async (input) => {
+          writes += 1;
+          await createFailureStore(at as never).record(input);
+        },
+      };
+      const host = stepHost({ failOn: "prepare" });
+      await runReviewAttemptWorkflow(deps, { ...makeRef(payload), attemptId: id }, host.step, async () => {});
+      expect(host.runs).toContain("settle-failure");
+      return writes;
+    };
+
+    // The gate: with the mark durable, the settlement writes NOTHING.
+    expect(await settlementWrites(db, attemptId)).toBe(0);
+    expect(failureRows(db)).toEqual(settled);
+
+    // ...and the control that proves this probe CAN see a write: an unsettled
+    // handoff of the same shape takes the same step and records its row.
+    const fresh = await createSeededTestD1();
+    await seedHandoff(fresh, payload);
+    expect(await settlementWrites(fresh, ATTEMPT_ID)).toBe(1);
+    expect(failureRows(fresh)).toHaveLength(1);
+
+    // Now the phase's cause arrives. The sync applies it to that same row —
+    // still ONE row — which is what makes the gate safe rather than lossy.
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        message:
+          "the attempt container could not be read at the review step (reply-lost) — Error: delayed cause (after 900ms) — nothing may be concluded",
+        cause: "Error: delayed cause (after 900ms)",
+      },
+      nowMs: SETTLES_AT,
+    });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    const synced = failureRows(db);
+    expect(synced).toHaveLength(1);
+    expect(synced[0]!.id).toBe(attemptId);
+    expect(String(synced[0]!.error)).toContain("delayed cause");
+  });
+
   test("a cause recorded AFTER the selector ran still reaches the one row the pass writes", async () => {
     // The reported race, at its widest: the selector reads the handoff (nothing
     // observed yet), and only then does the live phase record its cause. The pass
@@ -1960,6 +2029,93 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(syncLine?.msg).toContain("stays selected");
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).not.toContain("never synced");
+  });
+
+  test("a faulting repair still lets the lanes after it run in the same pass", async () => {
+    // The repair lane sits in the MIDDLE of the pass: the comment-claim hand-back
+    // runs after it. A fault that ended the pass early would strand every claim
+    // behind it, so the assertion is not "it logged" but "the later lane ran" —
+    // the queued re-delivery is the observable proof.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fault-mid-pass";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    // A row that already settled from the fallback, so the sync lane has work.
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        message: "the attempt container could not be read (reply-lost) — Error: unsynced (after 10ms)",
+        cause: "Error: unsynced (after 10ms)",
+      },
+      nowMs: SETTLES_AT,
+    });
+
+    // An orphaned comment claim, old enough for the hand-back lane to pick up.
+    const orphan = makePayload({
+      head_sha: null,
+      action: "created",
+      triggered_by: "issue_comment",
+      comment_id: 9511,
+    });
+    const consumedMs = SETTLES_AT + 60_000 - HANDOFF_RECOVERY_AFTER_MS - 1;
+    db.raw
+      .prepare(
+        `INSERT INTO comment_trigger_claims
+           (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms, consumed_ms)
+         VALUES (?, ?, ?, ?, ?, 'consumed', ?, 0, ?, ?, ?)`,
+      )
+      .run(
+        orphan.installation_id,
+        orphan.owner,
+        orphan.repo,
+        orphan.pr_number,
+        9511,
+        JSON.stringify(orphan),
+        1,
+        1,
+        consumedMs,
+      );
+
+    // The repair's selector faults, exactly as it would on a D1 hiccup.
+    const failing: D1Like = {
+      prepare: (sql: string) => {
+        if (sql.includes("$.attemptObservation.message') IS NOT NULL")) {
+          throw new Error("late-observation selector unavailable");
+        }
+        return db.prepare(sql);
+      },
+      batch: (statements: D1StatementLike[]) => db.batch(statements),
+    } as unknown as D1Like;
+    const faultyEnv = await h.makeEnv({ DB: failing as never });
+    const sent: ReviewJobPayload[] = [];
+    const lines: Array<{ fields: ReviewRouteLogFields; msg: string }> = [];
+    const log = {
+      info(fields: ReviewRouteLogFields, msg: string): void {
+        lines.push({ fields, msg });
+      },
+    };
+
+    await reconcileReviewRoute(
+      { ...faultyEnv, REVIEW_QUEUE: { send: async (message: ReviewJobPayload) => void sent.push(message) } as never, log },
+      SETTLES_AT + 60_000,
+    );
+
+    // The fault happened...
+    expect(
+      lines.some((line) => line.fields.event === "review_late_observation_selector_failed"),
+    ).toBe(true);
+    // ...AND the lane behind it ran: the claim is back in the outbox and was sent.
+    const claim = db.raw
+      .query("SELECT state, consumed_ms FROM comment_trigger_claims WHERE comment_id = 9511")
+      .get() as { state: string; consumed_ms: number | null };
+    expect(claim).toEqual({ state: "queued", consumed_ms: null });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.comment_id).toBe(9511);
   });
 });
 
