@@ -1966,6 +1966,28 @@ export function selectAttemptSeats(
 }
 
 /**
+ * The settings read behind {@link selectAttemptSeats}: one statement, plus the
+ * degraded warn on the attempt's own fields when a stored row cannot be
+ * trusted. Callers gate this on the level having a seat-table entry — the read
+ * exists only where its answer is used.
+ */
+async function selectAttemptSeatsFrom(
+  deps: ProcessDeps,
+  fields: ConsumerLogFields,
+  level: ReviewLevel,
+  observedChangedLines: number | null,
+): Promise<AttemptSeatSelection> {
+  const settings = await getReviewSeatSettings(deps.env.DB);
+  if (settings.degraded) {
+    deps.log.warn(
+      { ...fields, event: "review_seat_settings_degraded" },
+      "seat settings read degraded — the documented defaults drive the seat count",
+    );
+  }
+  return selectAttemptSeats(level, observedChangedLines, settings);
+}
+
+/**
  * What `prepare` hands the paid step, as data: the authoritative checkout, the
  * round's captured context and the ONE anchored deadline. No container handle,
  * no token, no `Set` — a resumed `review` re-derives those from `deps` plus
@@ -3516,14 +3538,12 @@ async function preparePhase(
     );
   }
   observed.runnerEffectiveBudgetMs = anchor.effectiveBudgetMs;
-  const seatSettings = await getReviewSeatSettings(deps.env.DB);
-  if (seatSettings.degraded) {
-    deps.log.warn(
-      { ...fields, event: "review_seat_settings_degraded" },
-      "seat settings read degraded — the documented defaults drive the seat count",
-    );
-  }
-  const seatSelection = selectAttemptSeats(level, observedChangedLines, seatSettings);
+  // Seat selection is only a fan-out concept: deep runs one parent turn, so
+  // the settings read and its degraded warn belong to the levels that have a
+  // seat table entry.
+  const seatSelection = Object.hasOwn(REVIEW_SEATS, level)
+    ? await selectAttemptSeatsFrom(deps, fields, level, observedChangedLines)
+    : { seats: undefined, reason: "level" as const };
   fields = {
     ...fields,
     runner_requested_ms: anchor.requestedBudgetMs,

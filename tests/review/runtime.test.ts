@@ -137,13 +137,16 @@ describe("partitionSeats", () => {
     ]);
   });
 
-  test("quick asked for seats above its count still produces one plan (the plan check refuses)", () => {
-    // runReview partitions with `input.seats ?? REVIEW_SEATS[level]` and
-    // refuses `plans.length !== requested`: quick can only ever produce one
-    // plan, so a request for two fails that check rather than silently
-    // widening the tier.
-    const plans = partitionSeats([numstat(4, 0, "src/a.ts")], "quick", 2);
-    expect(plans).toHaveLength(1);
+  test("requested seats above the level's count refuse, naming both counts", () => {
+    // runReview partitions with `input.seats ?? REVIEW_SEATS[level]`; quick can
+    // only ever produce one plan, so a request for two seats throws rather
+    // than silently widening the tier — and the message carries both counts.
+    expect(() => partitionSeats([numstat(4, 0, "src/a.ts")], "quick", 2)).toThrow(
+      "seat partition produced 1 seats for level quick (expected 2)",
+    );
+    expect(() => partitionSeats([numstat(4, 0, "src/a.ts")], "default", 3)).toThrow(
+      "seat partition produced 2 seats for level default (expected 3)",
+    );
   });
 });
 

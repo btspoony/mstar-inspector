@@ -330,13 +330,23 @@ function seatLabel(dirs: readonly string[]): string {
  *   fall back to sorted-path halves with domains `changeset-1`/`changeset-2`.
  *   An empty universe (no numstat facts) gives both seats full coverage —
  *   overlap is allowed and the merge step dedupes.
+ * Any request the level cannot fulfil — above its own count, or fewer than
+ * one seat — throws rather than silently widening or starving the tier.
  */
 export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel, seats: number): SeatPlan[] {
   const files = parseChangedFiles(reconFacts);
-  if (level === "quick" || seats === 1) {
-    return [{ domain: "full-diff", seat: "combined", scope: files.map((file) => file.path).sort() }];
+  const plans =
+    level === "quick" || seats === 1
+      ? [{ domain: "full-diff", seat: "combined", scope: files.map((file) => file.path).sort() }]
+      : partitionTwoSeats(files);
+  if (plans.length !== seats) {
+    throw new Error(`seat partition produced ${plans.length} seats for level ${level} (expected ${seats})`);
   }
+  return plans;
+}
 
+/** The two-seat partition `partitionSeats` asks for when `seats` allows it. */
+function partitionTwoSeats(files: readonly ChangedFile[]): SeatPlan[] {
   const degenerateHalves = (): SeatPlan[] => {
     const paths = files.map((file) => file.path).sort();
     const half = Math.ceil(paths.length / 2);
@@ -1197,13 +1207,7 @@ export const ompAgentRuntime: AgentRuntime = {
       session = created.session;
       traceStage("session_ready");
 
-      const requestedSeats = input.seats ?? REVIEW_SEATS[input.level];
-      const plans = partitionSeats(input.reconFacts, input.level, requestedSeats);
-      if (plans.length !== requestedSeats) {
-        throw new Error(
-          `seat partition produced ${plans.length} seats for level ${input.level} (expected ${requestedSeats})`,
-        );
-      }
+      const plans = partitionSeats(input.reconFacts, input.level, input.seats ?? REVIEW_SEATS[input.level]);
       const toolSession = asToolSession(session, cwd);
 
       const recheckController = new AbortController();
