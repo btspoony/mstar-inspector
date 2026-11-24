@@ -7,7 +7,7 @@ import {
   createSeededTestD1,
 } from "../helpers/consumer-fixtures";
 import { makePayload, failureRows } from "../helpers/consumer-harness";
-import type { TestD1 } from "../store/helpers";
+import { seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import {
   TERMINAL_FAILURE_TEXT,
@@ -543,13 +543,37 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect(puts).toHaveLength(0);
     const failures = failureRows(db);
     expect(failures).toHaveLength(1);
-    // The card and the row name the same cause: the pause, not the window —
-    // the window only appears as the reason the last redelivery was spent.
-    expect(failures[0]!.error_code).toBe("review.paused.platform");
-    expect(failures[0]!.stage).toBe("pipeline");
-    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.paused.platform"]);
+    // The row stays replayable (maintenance_deferred) so the outbox can resend
+    // it once the window closes, while its error still names the pause as the
+    // cause — the same answer the operator card gives.
+    expect(failures[0]!.error_code).toBe("review.delivery.deferred");
+    expect(failures[0]!.stage).toBe("maintenance_deferred");
+    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.delivery.deferred"]);
     expect(String(failures[0]!.error)).toContain("platform_paused");
     expect(String(failures[0]!.error)).toContain("maintenance window");
     expect(checkRow(db).terminal_failure_status).toBeNull();
+  });
+
+  test("one comment id naming two Apps' targets still keeps a row each", async () => {
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    // Two Apps may serve one repository (one target each): the same mention
+    // then arrives as two deliveries that differ only in targetId, and each
+    // needs its own durable row.
+    seedBot(db, "bot-other-app", 9101);
+    const otherTarget = seedTarget(db, "bot-other-app", { repoOwner: "acme", repoName: "widgets" });
+    const first = mentionPayload(9531);
+    const second = { ...first, targetId: otherTarget };
+    seedClaim(db, first);
+    const { kv } = kvDouble();
+    const env = { DB: db as never, IDEMPOTENCY_KV: kv } as never;
+
+    await runReviewQueueBatch(batchOf(first).batch, env, CTX);
+    await runReviewQueueBatch(batchOf(second).batch, env, CTX);
+
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(2);
+    expect(new Set(failures.map((row) => row.id)).size).toBe(2);
   });
 });

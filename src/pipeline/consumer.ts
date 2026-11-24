@@ -955,14 +955,19 @@ const HALT_SETTLEMENT = {
 >;
 
 /**
- * The halt row's durable identity: the comment id when the delivery is a bot
- * mention, otherwise the delivery key. A mention's webhook copy and its outbox
- * resend disagree on `deliveryKeyOf` — the claim's `payload_json` is saved
- * before the webhook attaches a delivery id — so keying on the comment id is
- * what keeps both copies on ONE row (and two different mentions on two).
+ * The halt row's durable identity: the target + comment id when the delivery
+ * is a bot mention, otherwise the delivery key. A mention's webhook copy and
+ * its outbox resend disagree on `deliveryKeyOf` — the claim's `payload_json`
+ * is saved after `targetId` is resolved but before the webhook attaches a
+ * delivery id — so keying on the comment id is what keeps both copies on ONE
+ * row. The `targetId` stays in the key because two Apps may serve one
+ * repository: the same comment id then names a DIFFERENT delivery per target,
+ * and each needs its own row.
  */
 function haltRowIdentity(payload: ReviewJobPayload): string {
-  return payload.comment_id !== undefined ? `comment:${payload.comment_id}` : deliveryKeyOf(payload);
+  return payload.comment_id !== undefined
+    ? `comment:${payload.targetId}:${payload.comment_id}`
+    : deliveryKeyOf(payload);
 }
 
 /**
@@ -1072,11 +1077,12 @@ export async function settleHaltedBatch(
  * an ack.
  *
  * A batch that was ALREADY halted (`halt` set — the platform switch off or
- * the route gate closed) keeps its halt cause on that last-attempt row: the
- * operator card and the halt contract name the pause/gate, so the row takes
- * the halt's code and author-facing summary and mentions the maintenance
- * deferral in `error`. Its `id` is the same mention-keyed identity
- * `settleHaltedBatch` writes, so both settlement faces land on one row.
+ * the route gate closed) keeps its halt cause on that last-attempt row's
+ * `error` — the operator card names the pause/gate and the row must not
+ * contradict it — while the row itself stays `maintenance_deferred` so the
+ * replay route and outbox can resend it once the window closes. Its `id` is
+ * the same mention-keyed identity `settleHaltedBatch` writes, so both
+ * settlement faces land on one row.
  *
  * shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
  * longer spends every delivery, and each spent one is now alerted through
@@ -1114,11 +1120,10 @@ export async function deferMaintenanceBatch(
         repo: body.repo,
         pr_number: body.pr_number,
         head_sha: headSha,
-        stage: settled === null ? MAINTENANCE_DEFERRED_STAGE : "pipeline",
-        code: settled === null ? "review.delivery.deferred" : settled.code,
+        stage: MAINTENANCE_DEFERRED_STAGE,
+        code: "review.delivery.deferred",
         trackId: `${identity}@${headSha}`,
-        message:
-          settled === null ? FAILURE_SUMMARIES["review.delivery.deferred"] : FAILURE_SUMMARIES[settled.code],
+        message: FAILURE_SUMMARIES["review.delivery.deferred"],
         error:
           settled === null
             ? `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${identity} was never reviewed`
