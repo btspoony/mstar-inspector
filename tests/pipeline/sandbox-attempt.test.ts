@@ -48,7 +48,10 @@ type MarkerContainer = {
   destroyed: boolean;
   start(opts: unknown): void;
   setInactivityTimeout(ms: number): Promise<void>;
-  exec(cmd: string[], opts?: unknown): Promise<{ output: () => Promise<ExecOutput>; stdin: null }>;
+  exec(
+    cmd: string[],
+    opts?: unknown,
+  ): Promise<{ output: () => Promise<ExecOutput>; stdin: WritableStream<Uint8Array> | null }>;
   destroy(): Promise<void>;
 };
 
@@ -469,27 +472,19 @@ describe("collection refuses an unproven container", () => {
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(3);
   });
 
-  test("a lost paid reply carries its exec cause into the message and the log fields", async () => {
+  test("a rejected paid RPC yields one bounded, sanitized cause at the caller boundary", async () => {
     const db = createMigratedTestD1();
     await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
     const sandbox = attemptSandboxDouble({});
-    const CAUSE = "Error: platform socket closed (after 4200ms)";
     let marked = 0;
-    sandbox.runMarked = async (_marker: string, command: string) => {
+    sandbox.runMarked = async (_marker: string) => {
       marked += 1;
       // call 1 = the runner input write, call 2 = the paid exec.
-      if (marked === 2) return { kind: "reply-lost", cause: CAUSE };
-      const stdout = command.includes("rev-parse") ? `${SHA}\n` : "";
-      return { kind: "ran", stdout, stderr: "", exitCode: 0 };
+      if (marked === 2) throw new Error(`rpc refused: key ${"k".repeat(1000)}`);
+      return { kind: "ran", stdout: `${SHA}\n`, stderr: "", exitCode: 0 };
     };
     const input = executionInput(sandbox, db);
-    const lines: Array<{ fields: Record<string, unknown>; msg: string | undefined }> = [];
-    input.deps.log = {
-      info: () => {},
-      warn: (fields?: Record<string, unknown>, msg?: string) => {
-        lines.push({ fields: fields ?? {}, msg });
-      },
-    };
+    input.deps.log = { info: () => {}, warn: () => {} };
 
     let thrown: unknown;
     try {
@@ -500,32 +495,121 @@ describe("collection refuses an unproven container", () => {
 
     const failure = thrown as InstanceType<typeof AttemptUnknownError>;
     expect(failure).toBeInstanceOf(AttemptUnknownError);
-    // The classification is untouched: evidence, not a new outcome.
     expect(failure.code).toBe("review.paid.reply_lost");
-    expect(failure.message).toContain("its reply was lost");
-    expect(failure.message).toContain("the process may still be running");
-    expect(failure.message).toContain(CAUSE);
-    expect(failure.cause).toBe(CAUSE);
-    expect(lines.some((line) => line.fields["exec_cause"] === CAUSE)).toBe(true);
+    // The RPC path shares the boundary's bound: 300 chars including the suffix.
+    expect(failure.cause!.length).toBeLessThanOrEqual(300);
+    expect(failure.cause!.endsWith("ms)")).toBe(true);
+    expect(failure.message.length).toBeLessThan(600);
+  });
 
-    // The settlement branch reads the class, never the cause.
-    const { phaseFailureRecord } = await import("../../src/pipeline/review-attempt-execution");
-    expect(
-      phaseFailureRecord(
-        {
-          phase: "collect",
-          stage: "runner",
-          headSha: SHA,
-          runnerReturned: true,
-          tier: "default",
-          budgetMs: 0,
-          changedLines: null,
-          sendAttemptPublicationId: null,
-        },
-        thrown,
-      ),
-    ).toMatchObject({ class: "unknown", containerStateUnknown: true, code: "review.paid.reply_lost" });
-    expect(sandbox.events).not.toContain("destroy");
+  test("an exec throw survives the real path into settlement with its bounded cause and retained container", async () => {
+    const db = createMigratedTestD1();
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
+    // The REAL Durable Object and the REAL marker container: only the exec throws.
+    const container = makeContainer(true);
+    container.marker = attemptMarker(ATTEMPT_A);
+    const sandbox = makeDo(container);
+    const credential = "providerkey9a1fbc";
+    const baseExec = container.exec.bind(container);
+    container.exec = async (cmd, opts) => {
+      if ((cmd[cmd.length - 1] ?? "").includes("base64 -d >")) {
+        // The runner-input write carries stdin; drain it so the paid step is reached.
+        return {
+          stdin: new WritableStream<Uint8Array>({ write() {}, close() {} }),
+          output: async () => ({ stdout: bytes(""), stderr: new ArrayBuffer(0), exitCode: 0 }) as unknown as ExecOutput,
+        };
+      }
+      const command = cmd[cmd.length - 1] ?? "";
+      if (command.includes("bun run")) {
+        // A real platform error echoing the command it could not run.
+        throw new Error(`runner rpc failed: ${command} key ${credential} ${"z".repeat(900)}`);
+      }
+      return baseExec(cmd, opts);
+    };
+
+    const input = executionInput(sandbox as never, db);
+    input.appCfg = { keys: { ark: [credential] }, modelChain: "ark/deepseek-v4-flash" };
+    const attemptLog: Array<{ fields: Record<string, unknown>; msg: string | undefined }> = [];
+    input.deps.log = {
+      info: () => {},
+      warn: (fields?: Record<string, unknown>, msg?: string) => attemptLog.push({ fields: fields ?? {}, msg }),
+    };
+
+    let thrown: unknown;
+    try {
+      await runReviewAttempt(input);
+    } catch (err) {
+      thrown = err;
+    }
+
+    const failureError = thrown as InstanceType<typeof AttemptUnknownError>;
+    expect(failureError).toBeInstanceOf(AttemptUnknownError);
+    expect(failureError.code).toBe("review.paid.reply_lost");
+    // The cause rode the message, bounded, with the elapsed measurement reserved.
+    const cause = failureError.cause!;
+    expect(cause.startsWith("Error: runner rpc failed:")).toBe(true);
+    expect(cause.length).toBeLessThanOrEqual(300);
+    expect(cause).toMatch(/\(after \d+ms\)$/);
+    expect(failureError.message).toContain(cause);
+    expect(cause).toContain("[REDACTED]");
+    // Neither the command text nor the credential behind stdin may survive.
+    expect(cause).not.toContain("runner.ts");
+    expect(cause).not.toContain("--input");
+    expect(cause).not.toContain(credential);
+    // The structured field a log query filters is emitted on the same throw.
+    const paidWarn = attemptLog.find((line) => line.fields["exec_cause"] !== undefined);
+    expect(paidWarn?.fields["exec_cause"]).toBe(cause);
+
+    const { phaseFailureRecord, settleAttemptFailure, cleanupAttempt } = await import(
+      "../../src/pipeline/review-attempt-execution"
+    );
+    const failure = phaseFailureRecord(
+      {
+        phase: "collect",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        tier: "default",
+        budgetMs: 0,
+        changedLines: null,
+        sendAttemptPublicationId: null,
+      },
+      thrown,
+    );
+    if (failure === null) throw new Error("the lost reply was not classified");
+    expect(failure).toMatchObject({
+      class: "unknown",
+      containerStateUnknown: true,
+      code: "review.paid.reply_lost",
+    });
+
+    // The REAL settlement branch: an unobservable paid step concludes nothing.
+    const { createFailureStore } = await import("../../src/store/failure-store");
+    const settlementLog: Array<{ fields: Record<string, unknown>; msg: string | undefined }> = [];
+    const deps = {
+      env: { DB: db },
+      log: {
+        info: () => {},
+        warn: (fields: Record<string, unknown>, msg?: string) => settlementLog.push({ fields, msg }),
+        error: () => {},
+      },
+      failureStore: createFailureStore(db as never),
+      checkSettlements: new Map(),
+    } as unknown as Parameters<typeof settleAttemptFailure>[0];
+    const ref = {
+      attemptId: ATTEMPT_A,
+      payload: PAYLOAD,
+      level: "default" as const,
+      inflight: null,
+    } as unknown as Parameters<typeof settleAttemptFailure>[1];
+
+    expect(await settleAttemptFailure(deps, ref, failure, null)).toEqual({ kind: "unknown" });
+    expect(settlementLog.some((line) => line.fields["event"] === "review_unresolved")).toBe(true);
+    // And the retention veto the settlement leaves behind: nothing destroys a
+    // container whose paid state was never observed.
+    expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "unknown" });
+    expect(container.destroyed).toBe(false);
+    expect(container.running).toBe(true);
   });
 
   test("boundedRead's refusal message names the outcome it observed", async () => {

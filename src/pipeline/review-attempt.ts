@@ -58,7 +58,7 @@ import {
   writeJsonCommand,
 } from "./gitops";
 import type { DestroyOutcome, MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
-import { ContainerNotRunningError } from "./sandbox-errors";
+import { ContainerNotRunningError, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /**
@@ -1176,10 +1176,13 @@ async function boundedRead(
   provesAbsence = false,
 ): Promise<ReportBoundedRead> {
   let read: MarkedRun;
+  const openedAtMs = Date.now();
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
   } catch (err) {
-    read = { kind: "reply-lost", cause: redactSecrets(err instanceof Error ? err.message : String(err)) };
+    // Same contract as the boundary itself: sanitize against this call's own
+    // command, reserve the elapsed suffix, and never echo what cannot be proven.
+    read = { kind: "reply-lost", cause: execCause(err, openedAtMs, execSensitiveValues(command)) };
   }
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
@@ -1644,12 +1647,14 @@ async function markedCommand(
   command: ShellCommand,
   opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
 ): Promise<MarkedRun> {
+  const openedAtMs = Date.now();
   try {
     return await sandbox.runMarked(marker, command, opts);
   } catch (err) {
-    // An RPC that never answered is an issued exec with no reply. The error's
-    // own text is all this layer knows, so it rides as the cause.
-    return { kind: "reply-lost", cause: redactSecrets(err instanceof Error ? err.message : String(err)) };
+    // An RPC that never answered is an issued exec with no reply. The cause gets
+    // the boundary's own sanitize+bound policy, so a rejection cannot smuggle an
+    // unbounded or command-bearing message past it.
+    return { kind: "reply-lost", cause: execCause(err, openedAtMs, execSensitiveValues(command, opts)) };
   }
 }
 

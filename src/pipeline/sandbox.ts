@@ -1,8 +1,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Container, DurableObjectState } from "@cloudflare/workers-types";
-import { redactSecretShapes } from "../../packages/shared/src/secret-shapes";
-import { ContainerNotRunningError } from "./sandbox-errors";
+import { ContainerNotRunningError, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
@@ -146,23 +145,6 @@ function isRetentionProof(proof: RetentionProof | undefined): proof is Retention
 const AWAIT_EXPIRED = Symbol("await-expired");
 
 const KILL_GRACE_MS = 5_000;
-
-/** Characters of a thrown exec error's name+message the cause keeps. */
-const EXEC_CAUSE_MAX_CHARS = 300;
-
-/**
- * The evidence a thrown exec leaves behind, bounded for a log field and a
- * failure row: error name, message and how long the exec had been open. No
- * stack, no argv (the shell command text may carry interpolated values), no
- * env, and secret shapes are redacted — a provider key echoed in a platform
- * error must not reach a log or a PR page.
- */
-function execCause(err: unknown, openedAtMs: number): string {
-  const name = err instanceof Error ? err.name : typeof err;
-  const message = err instanceof Error ? err.message : String(err);
-  const text = redactSecretShapes(message === "" ? name : `${name}: ${message}`);
-  return `${text} (after ${Date.now() - openedAtMs}ms)`.slice(0, EXEC_CAUSE_MAX_CHARS);
-}
 
 /**
  * Printed on stderr by the wrapper's own refusal. Exit 125 alone proves
@@ -397,8 +379,12 @@ export class SandboxV1 extends DurableObject {
         return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
       } catch (err) {
         // The exec was opened; only its reply is missing. The cause is the one
-        // thing this boundary would otherwise discard before any caller logs it.
-        return { kind: "reply-lost", cause: execCause(err, openedAtMs) };
+        // thing this boundary would otherwise discard before any caller logs it,
+        // sanitized against everything THIS exec carried.
+        return {
+          kind: "reply-lost",
+          cause: execCause(err, openedAtMs, execSensitiveValues(command, opts)),
+        };
       }
     });
   }

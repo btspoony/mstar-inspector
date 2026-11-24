@@ -322,6 +322,95 @@ describe("SandboxV1 Durable Object", () => {
     });
   });
 
+  test("an exception echoing the command or an unprefixed credential never reaches the cause", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      const command = "bun run 'x' --token argv-secret";
+      const credential = "unprefixed-custom-credential-9f3a";
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        throw new Error(`exec failed: ${command} (key ${credential})`);
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand(command), {
+        env: { REVIEW_API_KEY: credential },
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      // The message survives only as far as it can be proven safe.
+      expect(read.cause).toContain("exec failed:");
+      expect(read.cause).toContain("[REDACTED]");
+      expect(read.cause).toContain("(after 1200ms)");
+      expect(read.cause).not.toContain(command);
+      expect(read.cause).not.toContain("argv-secret");
+      expect(read.cause).not.toContain(credential);
+    });
+  });
+
+  test("a message longer than the bound keeps the elapsed measurement", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        throw new Error(`platform fault ${"z".repeat(900)}`);
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      expect(read.cause!.length).toBeLessThanOrEqual(300);
+      // The suffix is reserved before truncation, so the measurement always survives.
+      expect(read.cause!.endsWith("(after 1200ms)")).toBe(true);
+    });
+  });
+
+  test("an error with nothing safe to say degrades to its class and elapsed time", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        throw new TypeError("");
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      expect(read.cause).toBe("TypeError (after 1200ms)");
+    });
+  });
+
   test("a marker write that never resolves answers unavailable AT the caller's deadline, not after a fixed wait", async () => {
     reset();
     const { sandbox, container } = makeDo(false);
