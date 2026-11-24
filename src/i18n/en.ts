@@ -1204,7 +1204,7 @@ export const en = {
         "The stored lost reply window could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       routeWorkflowTitle: "Review route",
       routeWorkflowDescription:
-        "Whether a queued review delivery creates a Workflow instance. Off refuses every delivery; a change applies to the next batch.",
+        "Whether a queued review delivery creates a Workflow instance. Set by the deploy pipeline; read-only here. Off refuses every delivery.",
       routeWorkflowStoredLabel: "Stored value",
       routeWorkflowEffectiveLabel: "Effective now",
       routeWorkflowStoredSaved: "{value} — saved",
@@ -1213,11 +1213,6 @@ export const en = {
       routeWorkflowStoredUnreadable: "off — unreadable",
       routeWorkflowEffectiveOn: "on — deliveries create a Workflow instance",
       routeWorkflowEffectiveOff: "off — deliveries are refused and nothing is created",
-      routeWorkflowSave: "Save",
-      routeWorkflowSaved: "Saved.",
-      routeWorkflowFailed: "Could not change the review route.",
-      routeWorkflowUnconfirmed:
-        "The save could not be confirmed: its response carried no readable gate answer and the re-read failed, so the stored mode is unknown. Reload to read it back.",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",

@@ -1115,7 +1115,7 @@ export const zhCN: Dictionary = {
         "无法读取已存储的回执丢失窗口，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
       routeWorkflowTitle: "审查路由",
       routeWorkflowDescription:
-        "队列中的审查投递是否创建 Workflow 实例。关闭时拒绝所有投递；改动从下一批开始生效。",
+        "队列中的审查投递是否创建 Workflow 实例。由部署流水线设置，此处为只读；关闭时拒绝所有投递。",
       routeWorkflowStoredLabel: "存储的值",
       routeWorkflowEffectiveLabel: "当前生效",
       routeWorkflowStoredSaved: "{value} — 已保存",
@@ -1124,11 +1124,6 @@ export const zhCN: Dictionary = {
       routeWorkflowStoredUnreadable: "off — 无法读取",
       routeWorkflowEffectiveOn: "on — 投递会创建 Workflow 实例",
       routeWorkflowEffectiveOff: "off — 拒绝投递，不创建任何实例",
-      routeWorkflowSave: "保存",
-      routeWorkflowSaved: "已保存。",
-      routeWorkflowFailed: "修改审查路由失败。",
-      routeWorkflowUnconfirmed:
-        "无法确认保存结果：响应中没有可读的闸门回答，且重新读取失败，因此存储的模式未知。请重新加载页面读取。",
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:
         "流水线拒绝准入的审查数量，按原因统计。被拒绝的审查从未开始；计数读取流水线已写入的失败记录。",

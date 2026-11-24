@@ -139,6 +139,7 @@ const WORKFLOWS = [
     migrations: "Apply D1 migrations (remote)",
     refIdentity: "Assert checkout identity",
     refNeedles: ["HEAD_SHA"],
+    gateDb: "mstar-inspector-db",
     dispatchInputs: ["base_sha", "expected_container_digest"],
     redNeedles: ["checked-out HEAD", "!= run SHA"],
     serving: undefined,
@@ -148,13 +149,14 @@ const WORKFLOWS = [
     migrations: "Apply prod D1 migrations (remote)",
     refIdentity: "Assert tag identity",
     refNeedles: ["refs/tags/", "TAG_SHA"],
+    gateDb: "mstar-inspector-prod-db",
     dispatchInputs: ["expected_container_digest"],
     redNeedles: ["names", "but this run executes"],
     serving: { id: "serving", name: "Deploy serving version (prod)" },
   },
 ] as const;
 
-for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dispatchInputs } of WORKFLOWS) {
+for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dispatchInputs, gateDb } of WORKFLOWS) {
   describe(`${file} gate ordering`, () => {
     const steps = parseWorkflow(file).jobs.deploy.steps as Step[];
     const deployCapable = steps
@@ -187,6 +189,26 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       );
       for (const i of deployCapable) {
         expect(i, `${file}: "${steps[i]!.name}" runs before the encryption-key gate`).toBeGreaterThan(keyGate);
+      }
+    });
+
+    test("the routing-gate upsert follows every post-deploy proof step against this environment's own database", () => {
+      const gate = steps.findIndex((s) => s.name === "Open the review routing gate (idempotent)");
+      expect(gate, `${file}: routing-gate step is missing`).toBeGreaterThan(-1);
+      const step = steps[gate]!;
+      expect(step.run, `${file}: the gate must be an idempotent wrangler d1 execute --file`).toBe(
+        `bunx wrangler d1 execute ${gateDb} --remote${file === "deploy-prod.yml" ? " --env production" : ""} --file scripts/review-route-gate.sql`,
+      );
+      // The gate opens only after the deploy AND every proof step — a failed
+      // smoke or orphan re-check must never leave the gate open.
+      const proof = steps
+        .map((s, i) => ((s.name ?? "").startsWith("Smoke:") || s.name === "Assert zero orphan Apps (post-deploy)" ? i : -1))
+        .filter((i) => i >= 0);
+      expect(proof.length, `${file}: no post-deploy proof steps found`).toBeGreaterThan(0);
+      const lastDeploy = deployCapable[deployCapable.length - 1]!;
+      expect(gate, `${file}: the gate must follow the last deploy-capable step`).toBeGreaterThan(lastDeploy);
+      for (const i of proof) {
+        expect(gate, `${file}: the gate runs before proof step "${steps[i]!.name}"`).toBeGreaterThan(i);
       }
     });
 

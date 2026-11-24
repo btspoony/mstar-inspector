@@ -669,25 +669,6 @@ export async function setLostReplySettleMs(
 }
 
 /**
- * Save the route switch, answering the gate read-back the server returned —
- * the mode the queue handler will act on, not this page's assumption. `null`
- * means the write landed but its echo carried no readable gate answer: the
- * request value is NOT substituted for it, because a page that shows `on`
- * while the gate reads `off` is the failure this control exists to prevent.
- * The caller re-reads the store and renders that answer.
- */
-export async function setRouteWorkflow(
-  value: "on" | "off",
-): Promise<RouteWorkflowConfig | null> {
-  const answer = await write("PATCH", "/runtime", { routeWorkflow: { value } });
-  const saved =
-    typeof answer === "object" && answer !== null ? (answer as Json).routeWorkflow : undefined;
-  return typeof saved === "object" && saved !== null
-    ? routeWorkflowGate((saved as Json).effective)
-    : null;
-}
-
-/**
  * Open or close the maintenance window, answering the state the server stored.
  * The server owns `since`, so an unreadable echo answers the REQUEST's flag —
  * the write already landed — but keeps the loaded window's stamps: claiming a

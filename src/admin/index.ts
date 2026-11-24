@@ -47,7 +47,6 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
-  setReviewRouteWorkflow,
   setSweepSettings,
   setSystemConcurrency,
   type CheckBudgetValues,
@@ -314,13 +313,6 @@ function reviewLevelValue(value: unknown): string | null {
   const { value: level } = value as { value?: unknown };
   return typeof level === "string" ? level : null;
 }
-
-function routeWorkflowValue(value: unknown): string | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { value: mode } = value as { value?: unknown };
-  return typeof mode === "string" ? mode : null;
-}
-
 function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { terminalizeMs, updateMs } = value as { terminalizeMs?: unknown; updateMs?: unknown };
@@ -351,7 +343,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
   let rawLostReply: unknown;
-  let rawRouteWorkflow: unknown;
   let rawMaintenance: unknown;
   try {
     const body = (await c.req.json()) as {
@@ -364,7 +355,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       recheckAssignment?: unknown;
       attemptCap?: unknown;
       lostReplySettle?: unknown;
-      routeWorkflow?: unknown;
       maintenance?: unknown;
     };
     concurrency = body.concurrency;
@@ -376,7 +366,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
     rawLostReply = body.lostReplySettle;
-    rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
   } catch {
   }
@@ -391,14 +380,13 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawRecheck,
       rawAttemptCap,
       rawLostReply,
-      rawRouteWorkflow,
       rawMaintenance,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | routeWorkflow | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance",
       },
       400,
     );
@@ -487,18 +475,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     }
     try {
       return c.json({ lostReplySettle: { settleMs: await setLostReplySettleMs(db, settleMs, login) } });
-    } catch (error) {
-      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
-      throw error;
-    }
-  }
-  if (rawRouteWorkflow !== undefined) {
-    const value = routeWorkflowValue(rawRouteWorkflow);
-    if (value === null) {
-      return c.json({ error: "body must be { routeWorkflow: { value } }" }, 400);
-    }
-    try {
-      return c.json({ routeWorkflow: await setReviewRouteWorkflow(db, value, login) });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;

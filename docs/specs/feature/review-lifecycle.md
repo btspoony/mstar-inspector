@@ -694,7 +694,7 @@ Final manifest permissions: contents write, metadata read, pull_requests write, 
 
 ## Deployment gate
 
-Merging this code does not enable the review route, and no deploy flips it. The queue handler
+Merging this code does not by itself enable the review route. The queue handler
 (`src/worker/index.ts`) consults the system setting **`review.route.workflow`** on every batch:
 
 - **Absent row — `off`.** A fresh deploy ships closed; shipping the schema is not an admission
@@ -707,12 +707,11 @@ Merging this code does not enable the review route, and no deploy flips it. The 
   line (`event: "review_route_gate_closed"`) names the gate, its source and the batch size. A
   refused delivery is never silently re-routed to a path that no longer exists.
 
-The setting is a runtime setting on the operator page: a validated store setter
-(`setReviewRouteWorkflow`, exact `on`/`off` only), an audited admin write route, and a control
-that renders the gate's own answer rather than the row it wrote. A merge never flips it; enabling
-stays an explicit act an operator performs and the audit row records. It ships **after** the
-credential-echo redaction lands, because turning the route on before the retained result is
-redacted would persist a transformed credential echo.
+The setting is deployment-owned: a successful deploy pipeline run writes `on`
+idempotently (`scripts/review-route-gate.sql` against the environment's own
+database), and the operator page reports the gate read-only — no write route,
+no control. A merge alone still ships closed: only the gate step that follows
+the deploy opens it.
 
 ## Change obligations
 
