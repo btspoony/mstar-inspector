@@ -8,7 +8,6 @@ import {
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
   readEffectiveTargetSettings,
-  setInheritance,
   setWorkspaceReviewDefaults,
 } from "../../src/dashboard/targets-store";
 import { UnknownWorkspaceError } from "../../src/dashboard/runtime-config-store";
@@ -90,6 +89,7 @@ type TargetRowSnapshot = {
   repo_name: string | null;
   follow_workspace_defaults: number;
   review_enabled: number;
+  review_drafts: number;
   review_trigger_mode: string;
   review_level: string | null;
   check_min_score: number;
@@ -101,7 +101,8 @@ function targetRow(db: TestD1, targetId: string): TargetRowSnapshot {
   const row = db.raw
     .query(
       `SELECT repo_id, repo_owner, repo_name, follow_workspace_defaults, review_enabled,
-              review_trigger_mode, review_level, check_min_score, check_pass_verdicts, deleted_at
+              review_drafts, review_trigger_mode, review_level, check_min_score,
+              check_pass_verdicts, deleted_at
          FROM review_targets WHERE id = ?`,
     )
     .get(targetId) as TargetRowSnapshot | null;
@@ -155,7 +156,7 @@ describe("tenant reads bind workspace_id", () => {
     expect(await store.setReviewEnabled(WS, targetId, false)).toBe(false);
     expect(await store.delete(WS, targetId)).toBe(false);
     expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(false);
-    await setInheritance(db, WS, targetId, 1);
+    expect(await store.setReviewConfig(WS, targetId, { follow: 1 })).toBe(false);
     expect(await store.getInWorkspace(WS, targetId)).toBeNull();
 
     const row = targetRow(db, targetId);
@@ -500,6 +501,8 @@ describe("effective settings and inheritance", () => {
       checkMinScore: 45,
       checkPassVerdicts: ["ship it", "blocked"],
       checkPassVerdictsReadable: true,
+      reviewDrafts: true,
+      reviewEnabled: true,
     });
 
     const following = (await store.getInWorkspace(WS, "t-follow"))!;
@@ -510,6 +513,7 @@ describe("effective settings and inheritance", () => {
       checkPassVerdicts: ["ship it", "blocked"],
       checkPassVerdictsReadable: true,
       reviewDrafts: true,
+      reviewEnabled: true,
     });
     const own = (await store.getInWorkspace(WS, "t-own"))!;
     expect(effectiveTargetSettings(own, defaults)).toEqual({
@@ -519,10 +523,67 @@ describe("effective settings and inheritance", () => {
       checkPassVerdicts: ["ship it"],
       checkPassVerdictsReadable: true,
       reviewDrafts: true,
+      reviewEnabled: true,
     });
   });
 
-  test("inheriting never copies the defaults into the row, and toggling off snapshots them", async () => {
+  test("the two admission answers come from the defaults while inheriting, from the row otherwise", async () => {
+    const db = createMigratedTestD1();
+    db.raw
+      .prepare(
+        `UPDATE workspaces SET default_review_drafts = 0, default_review_enabled = 0 WHERE id = ?`,
+      )
+      .run(WS);
+    seedBot(db, "bot-admission");
+    const following = seedTarget(db, {
+      id: "t-admission-follow",
+      botId: "bot-admission",
+      repoId: 10500,
+      repoOwner: "acme",
+      repoName: "follow",
+      follow: 1,
+    });
+    const own = seedTarget(db, {
+      id: "t-admission-own",
+      botId: "bot-admission",
+      repoId: 10501,
+      repoOwner: "acme",
+      repoName: "own",
+      follow: 0,
+    });
+    db.raw.prepare("UPDATE review_targets SET review_drafts = 0, review_enabled = 0 WHERE id = ?").run(own);
+    const store = createTargetsStore(db);
+
+    expect(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, following))!)).toMatchObject({
+      reviewDrafts: false,
+      reviewEnabled: false,
+    });
+    const ownSettings = await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, own))!);
+    expect(ownSettings).toMatchObject({ reviewDrafts: false, reviewEnabled: false });
+
+    expect(await store.setReviewConfig(WS, following, { follow: 0, reviewDrafts: false, reviewEnabled: false })).toBe(
+      true,
+    );
+    expect(targetRow(db, following)).toMatchObject({
+      follow_workspace_defaults: 0,
+      review_drafts: 0,
+      review_enabled: 0,
+    });
+
+    db.raw
+      .prepare(`UPDATE workspaces SET default_review_drafts = 1, default_review_enabled = 1 WHERE id = ?`)
+      .run(WS);
+    expect(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, following))!)).toMatchObject({
+      reviewDrafts: false,
+      reviewEnabled: false,
+    });
+    expect(await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, own))!)).toMatchObject({
+      reviewDrafts: false,
+      reviewEnabled: false,
+    });
+  });
+
+  test("inheriting never copies the defaults into the row", async () => {
     const db = createMigratedTestD1();
     db.raw
       .prepare(
@@ -548,22 +609,6 @@ describe("effective settings and inheritance", () => {
     db.raw.prepare("UPDATE workspaces SET default_review_trigger_mode = 'manual' WHERE id = ?").run(WS);
     expect((await getWorkspaceReviewDefaults(db, WS)).triggerMode).toBe("manual");
     expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push");
-
-    await setInheritance(db, WS, targetId, 0);
-    expect(targetRow(db, targetId)).toMatchObject({
-      follow_workspace_defaults: 0,
-      review_trigger_mode: "manual",
-      review_level: "quick",
-      check_min_score: 45,
-      check_pass_verdicts: '["ship it"]',
-    });
-
-    await setInheritance(db, WS, targetId, 1);
-    expect(targetRow(db, targetId)).toMatchObject({
-      follow_workspace_defaults: 1,
-      review_trigger_mode: "manual",
-      check_min_score: 45,
-    });
   });
 
   test("an unreadable stored verdict array fails closed instead of admitting nobody's gate", async () => {
@@ -722,7 +767,8 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
     db.raw
       .prepare(
         `SELECT default_review_trigger_mode, default_review_level,
-                default_check_pass_verdicts, check_min_score
+                default_check_pass_verdicts, check_min_score,
+                default_review_drafts, default_review_enabled
            FROM workspaces WHERE id = ?`,
       )
       .get(WS) as Record<string, unknown>;
@@ -739,6 +785,8 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
           level: "deep",
           checkPassVerdicts: ["ship it", "blocked"],
           checkMinScore: 45,
+          reviewDrafts: false,
+          reviewEnabled: false,
         },
         "operator",
       ),
@@ -748,6 +796,8 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
       default_review_level: "deep",
       default_check_pass_verdicts: '["ship it","blocked"]',
       check_min_score: 45,
+      default_review_drafts: 0,
+      default_review_enabled: 0,
     });
     expect(floorAudits(db)).toEqual([{ before: null, after: 45 }]);
   });
@@ -787,6 +837,8 @@ describe("setWorkspaceReviewDefaults (defaults + floor, one writer)", () => {
       default_review_level: null,
       default_check_pass_verdicts: '["ship it"]',
       check_min_score: null,
+      default_review_drafts: 1,
+      default_review_enabled: 1,
     });
     expect(floorAudits(db)).toEqual([]);
   });

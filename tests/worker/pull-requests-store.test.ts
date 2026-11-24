@@ -950,6 +950,119 @@ describe("pull request detail reads", () => {
   });
 });
 
+
+describe("failure rows are scoped to the PR's current head", () => {
+  function seedFailure(
+    db: TestD1,
+    id: string,
+    headSha: string,
+    error = `boom ${id}`,
+    stage = "runner",
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES (?, 99, 'acme', 'widgets', 131, ?, ?, ?, 'target-app-pr-ledger')`,
+      )
+      .run(id, headSha, stage, error);
+  }
+
+  async function headScopedFixture(): Promise<TestD1> {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createReviewBotsStore(db).upsertPullRequest(PR);
+    db.raw
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
+      .run(APP_ID);
+    // 'sha-1' is PR.headSha: one live-head failure, one old-head failure, one headless row.
+    seedFailure(db, "f-head", "sha-1");
+    seedFailure(db, "f-old", "sha-0");
+    seedFailure(db, "f-empty", "");
+    return db;
+  }
+
+  test("the count and the default failures page follow only the current head", async () => {
+    const db = await headScopedFixture();
+    const store = createReviewBotsStore(db);
+
+    expect((await store.countPullRequestRecords(SCOPE, "acme", "widgets", 131)).failures).toBe(1);
+    expect((await store.listPullRequests(SCOPE)).rows[0]!.failure_count).toBe(1);
+    const head = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(head!.total).toBe(1);
+    expect(head!.items.map((row) => row.error)).toEqual(["boom f-head"]);
+  });
+
+  test("the history scope keeps old-head and empty-head rows reachable", async () => {
+    const db = await headScopedFixture();
+    const store = createReviewBotsStore(db);
+
+    const all = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      history: true,
+    });
+    expect(all!.total).toBe(3);
+    expect(all!.items.map((row) => row.error).sort()).toEqual(["boom f-empty", "boom f-head", "boom f-old"]);
+
+    const explicitHead = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, {
+      offset: 0,
+      limit: 10,
+      history: false,
+    });
+    expect(explicitHead!.total).toBe(1);
+  });
+
+  test("a moved head re-attributes the count without touching history", async () => {
+    const db = await headScopedFixture();
+    const store = createReviewBotsStore(db);
+    await store.upsertPullRequest({ ...PR, headSha: "sha-0", updatedAt: "2026-03-01T00:00:00.000Z" });
+
+    expect((await store.countPullRequestRecords(SCOPE, "acme", "widgets", 131)).failures).toBe(1);
+    const head = await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, { offset: 0, limit: 10 });
+    expect(head!.items.map((row) => row.error)).toEqual(["boom f-old"]);
+    expect(
+      (await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, {
+        offset: 0,
+        limit: 10,
+        history: true,
+      }))!.total,
+    ).toBe(3);
+  });
+
+  test("a headless PR attributes nothing: a NULL head and an empty head count zero", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db);
+    await createReviewBotsStore(db).upsertPullRequest({ ...PR, headSha: undefined });
+    db.raw
+      .prepare("INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('i1', ?, 99, 'acme', datetime('now'))")
+      .run(APP_ID);
+    seedFailure(db, "f-empty", "");
+    seedFailure(db, "f-named", "sha-9");
+    const store = createReviewBotsStore(db);
+
+    // A NULL head names no head: no row may claim it — the empty-head row cannot
+    // equal NULL, and a named head differs. History still shows both.
+    expect((await store.countPullRequestRecords(SCOPE, "acme", "widgets", 131)).failures).toBe(0);
+    expect(
+      (await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, { offset: 0, limit: 10 }))!.total,
+    ).toBe(0);
+    expect(
+      (await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, {
+        offset: 0,
+        limit: 10,
+        history: true,
+      }))!.total,
+    ).toBe(2);
+
+    await store.upsertPullRequest({ ...PR, headSha: "" });
+    // An EMPTY head names no head either — it must not borrow the headless row.
+    expect((await store.countPullRequestRecords(SCOPE, "acme", "widgets", 131)).failures).toBe(0);
+    expect(
+      (await store.listPullRequestFailures(SCOPE, "acme", "widgets", 131, { offset: 0, limit: 10 }))!.total,
+    ).toBe(0);
+  });
+});
+
 function seedFinding(
   db: TestD1,
   finding: { findingId: string; mergeClass: string; title: string; filePath: string; lineStart: number; body: string },

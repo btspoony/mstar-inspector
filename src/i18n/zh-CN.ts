@@ -263,6 +263,9 @@ export const zhCN: Dictionary = {
     reviewDurationLabel: "本轮运行耗时",
     failures: "失败",
     noFailures: "此拉取请求没有失败记录。",
+    failureScope: "失败范围",
+    failureScopeHead: "当前头部",
+    failureScopeAll: "全部历史",
     findings: "发现",
     noFindings: "此拉取请求没有发现问题。",
     noFindingsForSeverity: "没有严重程度为“{severity}”的发现。",
@@ -1129,7 +1132,7 @@ export const zhCN: Dictionary = {
         "无法读取已存储的回执丢失窗口，因此正在使用文档默认值。输入范围内的值可保存为新值，重新读取会重新检查该行。",
       routeWorkflowTitle: "审查路由",
       routeWorkflowDescription:
-        "队列中的审查投递是否创建 Workflow 实例。关闭时拒绝所有投递；改动从下一批开始生效。",
+        "队列中的审查投递是否创建 Workflow 实例。由部署流水线设置，此处为只读；关闭时拒绝所有投递。",
       routeWorkflowStoredLabel: "存储的值",
       routeWorkflowEffectiveLabel: "当前生效",
       routeWorkflowStoredSaved: "{value} — 已保存",
@@ -1138,11 +1141,37 @@ export const zhCN: Dictionary = {
       routeWorkflowStoredUnreadable: "off — 无法读取",
       routeWorkflowEffectiveOn: "on — 投递会创建 Workflow 实例",
       routeWorkflowEffectiveOff: "off — 拒绝投递，不创建任何实例",
-      routeWorkflowSave: "保存",
-      routeWorkflowSaved: "已保存。",
-      routeWorkflowFailed: "修改审查路由失败。",
-      routeWorkflowUnconfirmed:
-        "无法确认保存结果：响应中没有可读的闸门回答，且重新读取失败，因此存储的模式未知。请重新加载页面读取。",
+      reviewsTitle: "审查是否在运行？",
+      reviewsDescription:
+        "当前的生效答案，由平台开关、部署的路由门禁，以及已暂停审查的 App 数共同决定。队列积压见下方。",
+      reviewsAnswerRunning: "审查正在运行。",
+      reviewsAnswerPausedPlatform: "审查已被平台开关暂停：新投递会被拒绝，队列中的投递会以暂停结束。",
+      reviewsAnswerBlockedDeploymentGate:
+        "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递会以阻塞结束。",
+      reviewsAnswerPausedMaintenance:
+        "审查已被维护窗口暂停：所有队列投递都会被延后，直到窗口关闭后在有界的重试次数内重新投递。",
+      reviewsAnswerUnreadableState:
+        "无法读取审查状态：平台开关或部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadableGate:
+        "无法读取审查状态：部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadablePlatform:
+        "无法读取审查状态：平台开关未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadableMaintenance:
+        "无法读取审查状态：维护窗口未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsPlatformLabel: "平台开关",
+      reviewsPlatformOn: "on — 允许审查",
+      reviewsPlatformOff: "off — 审查已暂停",
+      reviewsPlatformUnreadable: "无法读取 — 无法对审查状态下定论",
+      reviewsRouteLabel: "部署门禁",
+      reviewsRouteOn: "on — 投递会创建 Workflow 实例",
+      reviewsRouteOff: "off — 队列中的投递会以阻塞结束",
+      reviewsRouteDegraded: "无法读取 — 无法对审查状态下定论",
+      reviewsRouteUntrusted: "off — 存储值不是 on 或 off，投递会以阻塞结束",
+      reviewsRouteUnreadable: "本服务器未报告该字段",
+      reviewsPausedAppsLabel: "已暂停审查的 App 数",
+      reviewsPausedAppsUnreadable: "无法读取",
+      reviewsPrecedence: "读取失败优先于两种原因，此时不做任何结论。除此之外先看部署门禁：门禁未开启时，队列中的投递会以阻塞结束，即使平台开关同时关闭，此处显示的也是这一原因。",
+      reviewsPausedAppsLink: "在 App 设置中暂停或恢复单个 App",
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:
         "流水线拒绝准入的审查数量，按原因统计。被拒绝的审查从未开始；计数读取流水线已写入的失败记录。",

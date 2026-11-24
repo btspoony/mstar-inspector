@@ -17,7 +17,7 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { readReviewLaunch } from "../../src/pipeline/review-attempt";
-import { deliveryKeyOf, readAttemptHandoff } from "../../src/store/review-route-store";
+import { deliveryKeyOf, readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import {
   CHECK_TERMINALIZE_DEFAULT,
   REVIEW_ATTEMPT_CAP_DEFAULT_MS,
@@ -185,7 +185,7 @@ describe("the paid exec at the frozen deadline", () => {
     });
   });
 
-  test("a lost reply is unknown: no failure row, no Check conclusion, nothing destroyed", async () => {
+  test("a lost reply is unknown: its own cause is recorded, no Check conclusion, nothing destroyed", async () => {
     const { deps, db } = await makeDeps();
     h.sandbox.runnerError = new Error("the exec's reply was lost");
     let terminalizeCalls = 0;
@@ -198,6 +198,17 @@ describe("the paid exec at the frozen deadline", () => {
 
     await withFrozenClock(async (clock) => {
       const ref = makeRef(makePayload(), clock.now + CAP_MS);
+      // Admission's own row, as the consumer leaves it before the instance runs:
+      // the observation rides THIS record, and it is what the reconciler reads.
+      await reserveAttemptHandoff(db as never, {
+        deliveryKey: deliveryKeyOf(ref.payload),
+        attemptId: ATTEMPT_ID,
+        payload: ref.payload,
+        nowMs: clock.now,
+        createdMs: clock.now,
+        enqueuedMs: 0,
+        deadlineMs: clock.now + CAP_MS,
+      });
       const step = await prepareFor(deps, ref);
       if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
 
@@ -206,7 +217,15 @@ describe("the paid exec at the frozen deadline", () => {
       expect(reviewed.failure.class).toBe("unknown");
 
       expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toEqual({ kind: "unknown" });
+      // The phase's own cause is durable as an OBSERVATION (the reconciler that
+      // later releases the slot can otherwise only observe that no reply
+      // arrived); no failure row is written here — the reconciler is its ONE
+      // writer — and the ATTEMPT stays un-settled: no Check conclusion, no
+      // terminal move.
       expect(failureRows(db)).toHaveLength(0);
+      const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(ref.payload));
+      expect(handoff?.observation?.message).toContain("the exec's reply was lost");
+      expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
       expect(terminalizeCalls).toBe(0);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
 

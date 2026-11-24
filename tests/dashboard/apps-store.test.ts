@@ -681,3 +681,52 @@ describe("pending installations of a bot", () => {
   });
 });
 
+
+describe("failure attribution follows the ledger head", () => {
+  test("only the current head's failures count; history keeps the rest reachable", async () => {
+    const db = createMigratedTestD1();
+    seedApp(db, "bot-fail", { githubAppId: 9901 });
+    db.raw
+      .prepare(
+        `INSERT INTO review_targets (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         VALUES ('t-fail', ?, 'bot-fail', 'widgets', 'fixture', datetime('now'), datetime('now'))`,
+      )
+      .run(WS);
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests
+           (id, bot_id, target_id, owner, repo, pr_number, title, state, head_sha, first_seen_at, last_seen_at)
+         VALUES ('pr-7', 'bot-fail', 't-fail', 'acme', 'widgets', 7, 'PR', 'open', 'sha-now',
+                 datetime('now'), datetime('now'))`,
+      )
+      .run();
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('fa', 1, 'acme', 'widgets', 7, 'sha-now', 'runner', 'new head', 't-fail'),
+                ('fb', 1, 'acme', 'widgets', 7, 'sha-old', 'runner', 'old head', 't-fail'),
+                ('fc', 1, 'acme', 'widgets', 7, '', 'runner', 'headless', 't-fail')`,
+      )
+      .run();
+
+    const scope = { kind: "workspace", workspaceId: WS } as const;
+    const store = createReviewBotsStore(db);
+    expect(await store.countPullRequestRecords(scope, "acme", "widgets", 7)).toEqual({
+      findings: 0,
+      reviews: 0,
+      failures: 1,
+      must_fix: 0,
+    });
+    expect(
+      (await store.listPullRequestFailures(scope, "acme", "widgets", 7, { offset: 0, limit: 10 }))!
+        .items.map((row) => row.error),
+    ).toEqual(["new head"]);
+    expect(
+      (await store.listPullRequestFailures(scope, "acme", "widgets", 7, {
+        offset: 0,
+        limit: 10,
+        history: true,
+      }))!.total,
+    ).toBe(3);
+  });
+});

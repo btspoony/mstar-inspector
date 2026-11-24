@@ -23,6 +23,14 @@ function fixture(opts: { stage?: string; deletedTarget?: boolean } = {}): TestD1
   insertUser.run(crypto.randomUUID(), MEMBER, "2026-11-18T00:00:00.000Z");
   seedBot(db, BOT_ID, 9401);
   seedTarget(db, BOT_ID, { id: TARGET_ID });
+  // The replay gate reads `reviewRunState`: reviews must be able to run —
+  // route gate on, platform switch on — for any send to be allowed.
+  db.raw
+    .prepare(`INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.route.workflow', 'on', ?)`)
+    .run("2026-11-18T00:00:00.000Z");
+  db.raw
+    .prepare(`INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', 1, ?, 'tester')`)
+    .run("2026-11-18T00:00:00.000Z");
   if (opts.deletedTarget === true) {
     db.raw.prepare("UPDATE review_targets SET deleted_at = ? WHERE id = ?").run("2026-11-18T01:00:00.000Z", TARGET_ID);
   }
@@ -223,6 +231,44 @@ describe("the maintenance replay route", () => {
     expect(auditCount(outsider)).toBe(0);
   });
 
+
+  test("a new request refuses reviews_not_running while the halt holds and stays replayable after resume", async () => {
+    const db = fixture();
+    db.raw.prepare("UPDATE server_flags SET enabled = 0 WHERE key = 'review_global'").run();
+    const sent: Sent = { payloads: [] };
+
+    const refused = await replay(db, sent);
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({ error: "reviews_not_running" });
+    // No stamp, no audit, no send: the row keeps its single replay shot.
+    expect(sent.payloads).toHaveLength(0);
+    expect(auditCount(db)).toBe(0);
+    expect(failureState(db)).toMatchObject({ requested: null, sent: null });
+
+    db.raw.prepare("UPDATE server_flags SET enabled = 1 WHERE key = 'review_global'").run();
+    const res = await replay(db, sent);
+    expect(res.status).toBe(202);
+    expect(sent.payloads).toHaveLength(1);
+    expect(failureState(db).sent).not.toBeNull();
+  });
+
+  test("the sweep holds a pending replay while reviews are halted and sends once they run", async () => {
+    const db = fixture();
+    const sent: Sent = { payloads: [] };
+    expect((await replay(db, sent, { failSend: true })).status).toBe(202);
+    const queue = { send: async (payload: ReviewJobPayload) => void sent.payloads.push(payload) };
+
+    // Paused platform: the sweep's replay lane closes and nothing is sent.
+    db.raw.prepare("UPDATE server_flags SET enabled = 0 WHERE key = 'review_global'").run();
+    await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
+    expect(sent.payloads).toHaveLength(0);
+    expect(failureState(db).sent).toBeNull();
+
+    db.raw.prepare("UPDATE server_flags SET enabled = 1 WHERE key = 'review_global'").run();
+    await runSweep(db, { log: { warn: () => {} }, queue: queue as never });
+    expect(sent.payloads).toHaveLength(1);
+    expect(failureState(db).sent).not.toBeNull();
+  });
   test("an unreadable maintenance window refuses 503 rather than replaying", async () => {
     const db = fixture();
     db.raw.run("DROP TABLE review_runtime_settings");

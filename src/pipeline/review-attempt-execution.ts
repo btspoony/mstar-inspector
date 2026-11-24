@@ -60,6 +60,9 @@ import {
   deliveryKeyOf,
   readRecheckAttribution,
   markRefusalPending,
+  recordAttemptObservation,
+  recordReviewedHead,
+  attemptFailureStoryExists,
   recordRecheckAttribution,
   recordRecheckDuty,
   readAttemptCheckKey,
@@ -138,6 +141,7 @@ import {
   MovedHeadError,
   noLaunchState,
   noteCheckOwed,
+  lastStageField,
   openGateSecrets,
   runReviewAttempt,
   readGateSecretsEnvelope,
@@ -280,7 +284,7 @@ type DiffCaptureDecline = {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_blocked_deployment_gate" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -352,6 +356,11 @@ export type ConsumerLogFields = {
   /** The classified code of a failed/unresolved review, so one query finds every occurrence. */
   error_code?: FailureCode;
   stderr_tail?: string;
+  /**
+   * The runner's last traced stage (`review_stage` on its stderr): the only
+   * structured answer to "where did the review stop?" without a dashboard read.
+   */
+  last_stage?: string;
 };
 
 export type ConsumerLog = {
@@ -1784,11 +1793,24 @@ type PhaseFailureBase = {
   runnerReturned: boolean;
   message: string;
   /**
+   * The throw site's own evidence, carried as data next to `message` — never
+   * reconstructed from it. Settlement forwards it to the handoff observation
+   * so the reconciler renders the author-facing sentence without reparsing
+   * the composed text.
+   */
+  cause?: string;
+  /**
    * Which GitHub limit, if any, refused the step. The wrapper sees the response
    * headers; the record carries the verdict as data so settlement can prefix the
    * persisted error without the original error object.
    */
   rateLimited?: "primary" | "secondary" | null;
+  /**
+   * The runner's last traced stage, when the throw site had its stderr. It is
+   * logged as `last_stage` on every settlement line — never rendered into the
+   * author-facing `message`, which keeps no internal mechanism wording.
+   */
+  lastStage?: string;
 };
 
 export type PhaseFailure =
@@ -1838,6 +1860,8 @@ export class PhaseTransientError extends Error {
       sendAttemptPublicationId: string | null;
       /** Which GitHub limit refused the step, read from the real response. */
       rateLimited: "primary" | "secondary" | null;
+      /** The runner's last traced stage, when this step had its stderr. */
+      lastStage?: string;
     },
     readonly cause: unknown,
   ) {
@@ -2491,6 +2515,12 @@ export type PhaseFailureContext = {
   sendAttemptPublicationId: string | null;
   /** Which GitHub limit refused the step, read from the real response. */
   rateLimited?: "primary" | "secondary" | null;
+  /**
+   * The stage the runner last traced, read from the wrapper's own progress.
+   * A CLASSIFIED throw carries no such property of its own, so this is the only
+   * way the lost-doc-read and unobservable paths can say where they stopped.
+   */
+  lastStage?: string;
 };
 
 /** The facts a transient phase error carries, readable WITHOUT its prototype. */
@@ -2500,8 +2530,15 @@ export type TransientFacts = {
   runnerReturned: boolean;
   sendAttemptPublicationId: string | null;
   rateLimited: "primary" | "secondary" | null;
+  /** The runner's last traced stage, when the throw site had its stderr. */
+  lastStage?: string;
 };
 
+/**
+ * Required keys: every one of these must be present for the record to be
+ * trusted. `lastStage` is deliberately absent — it is optional evidence, and an
+ * older build (or a phase with no runner) legitimately carries none.
+ */
 const TRANSIENT_FACTS_KEYS: ReadonlyArray<keyof TransientFacts> = [
   "stage",
   "headSha",
@@ -2536,13 +2573,29 @@ export function transientFactsOf(err: unknown): TransientFacts | undefined {
  * an ordinary error (clone failed, D1 fault) is transient by default.
  */
 export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): PhaseFailure | null {
+  // The throw site's evidence crosses as data: any error that carries a string
+  // `cause` hands it to the record, and settlement forwards it to the handoff
+  // observation. Nothing is parsed out of the composed message.
+  const cause = (err as { cause?: unknown } | null)?.cause;
+  // The runner's last stage rides the SAME path: the wrapper put it on the
+  // transient facts it threw, so a rebuilt error keeps it as data.
+  const facts = transientFactsOf(err);
+  // A plain throw carries the stage the same way it carries `cause`: as an own
+  // property on the error, which the platform preserves across a step boundary.
+  const ownStage = (err as { lastStage?: unknown } | null)?.lastStage;
+  const lastStage =
+    facts?.lastStage ??
+    (typeof ownStage === "string" && ownStage !== "" ? ownStage : undefined) ??
+    ctx.lastStage;
   const base = {
     phase: ctx.phase,
     stage: ctx.stage,
     headSha: ctx.headSha,
     runnerReturned: ctx.runnerReturned,
     message: strippedMessage(err),
+    ...(typeof cause === "string" ? { cause } : {}),
     ...(ctx.rateLimited === undefined || ctx.rateLimited === null ? {} : { rateLimited: ctx.rateLimited }),
+    ...(lastStage === undefined ? {} : { lastStage }),
   };
   if (err instanceof BudgetExhaustedError) {
     return {
@@ -2550,6 +2603,7 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
       class: "budget",
       window: err.outcome.budgetWindow,
       outcome: err.outcome,
+      ...(err.lastStage === undefined ? {} : { lastStage: err.lastStage }),
       sendAttemptPublicationId: ctx.sendAttemptPublicationId,
     };
   }
@@ -2662,6 +2716,7 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
         stage: progress.failureStage,
         headSha: observed.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs:
           observed.runnerEffectiveBudgetMs ??
@@ -2685,6 +2740,7 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -2763,6 +2819,12 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
+  // The commit this attempt actually reviews, durable BEFORE any paid step: a
+  // failure recovered later is attributed to it, never to the frozen Check
+  // identity (admission can pin that to a commit the PR ledger already knew,
+  // while the checkout lands on a newer one). A fault here fails the prepare —
+  // the attempt's own record must exist before anything is spent on it.
+  await recordReviewedHead(deps.env.DB, { attemptId, headSha, nowMs: Date.now() });
   // A MOVED HEAD never continues on the old identity. The identity frozen below
   // is the one the LIVE claim owns — the claim the checkout settled on, after
   // any supersede — so a frozen key that disagrees with it can only mean another
@@ -3602,6 +3664,7 @@ export async function reviewAttempt(
         stage: progress.failureStage,
         headSha: prepared.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: prepared.runnerEffectiveMs,
         changedLines: prepared.observedChangedLines,
@@ -3618,6 +3681,7 @@ export async function reviewAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -3649,6 +3713,7 @@ export async function collectAttempt(
         stage: progress.failureStage,
         headSha: prepared.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: prepared.runnerEffectiveMs,
         changedLines: prepared.observedChangedLines,
@@ -3664,6 +3729,7 @@ export async function collectAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: null,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -4337,6 +4403,7 @@ export async function publishAttempt(
         stage: progress.failureStage,
         headSha: null,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: 0,
         changedLines: null,
@@ -4352,6 +4419,7 @@ export async function publishAttempt(
           runnerReturned: progress.runnerReturned,
           sendAttemptPublicationId: sent.publicationId,
           rateLimited: classifyGithubRateLimit(err),
+          ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         },
         err,
       );
@@ -4887,13 +4955,68 @@ export async function settleAttemptFailure(
   const outcomeUnobservable =
     launchJudgement.kind === "unrecognised" ||
     (launchJudgement.kind === "paid-unknown" && !paidStateObserved);
+  /**
+   * The cause has to outlive this invocation: the reconciler that eventually
+   * settles the attempt can only observe that no reply arrived, and its own
+   * sentence would then stand in for the phase's. It is recorded as
+   * OBSERVATION on this attempt's handoff row — the durable evidence the
+   * recovery lane already reads — so the reconciler stays the ONE failure-row
+   * writer and renders that row from the real cause — `message` keeps the
+   * composed text for `error`, `cause` carries the throw site's evidence for
+   * the author-facing sentence.
+   *
+   * Recording is INDEPENDENT of the retention veto below: a returned runner
+   * means the paid child is provably gone, so nothing has to be held — but the
+   * cause a read lost AFTER that return is still the only evidence of what the
+   * failing read was, and it would otherwise be replaced by the reconciler's
+   * generic sentence.
+   */
+  const recordObservation = async (): Promise<void> => {
+    const secrets = await sealedSecretValues(deps, attemptId);
+    // Where it stopped belongs in the composed text: the reconciler renders this
+    // observation into the row's `error` verbatim, and nothing there can know a
+    // stage the phase already parsed out of the runner's stderr.
+    const observedMessage = redactExactSecrets(redactSecrets(detail), secrets);
+    const messageWithStage =
+      failure.lastStage === undefined
+        ? observedMessage
+        : `${observedMessage} (last stage: ${redactSecrets(failure.lastStage)})`;
+    const observedCause =
+      failure.cause === undefined ? undefined : redactExactSecrets(redactSecrets(failure.cause), secrets);
+    try {
+      // A row that already tells this attempt's story in words the phase cannot
+      // improve on — a recovery lane that saw a durable result with nothing
+      // staged — is the authoritative account, and recording here would let that
+      // lane's next pass compose its row from this stale text. The lost-reply
+      // lane's placeholder is NOT such a story: it exists only until this
+      // observation arrives, and the late-observation sync rewrites it in place.
+      if (await attemptFailureStoryExists(deps.env.DB, attemptId)) return;
+      await recordAttemptObservation(deps.env.DB, {
+        attemptId,
+        observation: {
+          code,
+          message: messageWithStage,
+          ...(observedCause === undefined ? {} : { cause: observedCause }),
+        },
+        nowMs: Date.now(),
+      });
+    } catch (recordErr) {
+      const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+      deps.log.warn(
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `the unobservable outcome's cause could not be recorded (the attempt stays unknown): ${recordDetail}`,
+      );
+    }
+  };
   if (outcomeUnobservable) {
+    await recordObservation();
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
@@ -4928,6 +5051,7 @@ export async function settleAttemptFailure(
         ...elapsed,
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review failed: ${budgetDetail}`,
     );
@@ -4967,6 +5091,7 @@ export async function settleAttemptFailure(
           event: "review_unresolved",
           error_code: code,
           attempt_id: attemptId,
+          ...lastStageField(failure.lastStage),
         },
         `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
       );
@@ -4981,6 +5106,12 @@ export async function settleAttemptFailure(
   }
 
   if (failure.class === "unknown") {
+    // A returned runner does not make the outcome readable: a document read
+    // after it can still lose its reply, and this row is left un-settled for
+    // the reconciler. The phase's cause must survive that hand-off too, or the
+    // reconciler's generic lost-reply sentence stands in for the read that
+    // actually failed.
+    await recordObservation();
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -4994,6 +5125,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — nothing was collected, destroyed or reclaimed`,
     );
@@ -5012,6 +5144,7 @@ export async function settleAttemptFailure(
       ...elapsed,
       error_code: code,
       attempt_id: attemptId,
+      ...lastStageField(failure.lastStage),
     },
     `review failed: ${detail}`,
   );
@@ -5056,6 +5189,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
     );

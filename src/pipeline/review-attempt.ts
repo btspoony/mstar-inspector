@@ -66,7 +66,7 @@ import {
 } from "./gitops";
 import { tokenUsageStatements, type ReviewTokenUsageWrite } from "../store/token-usage-store";
 import type { DestroyOutcome, MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
-import { ContainerNotRunningError } from "./sandbox-errors";
+import { ContainerNotRunningError, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /**
@@ -226,10 +226,15 @@ export class AttemptUnknownError extends Error {
   /**
    * The operator-facing code the throw site knows to be true — never inferred
    * from the phase or the message later.
+   *
+   * `cause` is the bounded evidence the sandbox boundary handed back for an
+   * unobservable paid step (error name, message, elapsed time). It is evidence
+   * only: nothing classifies on it, and the settlement branch never reads it.
    */
   constructor(
     message: string,
     readonly code: FailureCode,
+    readonly cause?: string,
   ) {
     super(message);
     this.name = "AttemptUnknownError";
@@ -1065,6 +1070,12 @@ export type ReviewAttemptProgress = {
   secretValues: string[];
   runnerStartedAt: number | undefined;
   runnerReturned: boolean;
+  /**
+   * The runner's last traced stage, read from its stderr the moment it returned.
+   * It rides the progress object so a throw raised AFTER the runner (a lost
+   * document read, a nonzero exit) still hands the stage to the caller's record.
+   */
+  lastStage?: string;
 };
 
 /** The container, credential and checkout an attempt's paid step runs on. */
@@ -1110,6 +1121,12 @@ export class BudgetExhaustedError extends Error {
   constructor(
     readonly outcome: BudgetExhaustedOutcome,
     message: string,
+    /**
+     * The runner's last traced stage, when its stderr was readable at this
+     * point. Data next to `message`, never parsed back out of it: settlement
+     * logs it as `last_stage` so an operator sees where the budget ran out.
+     */
+    readonly lastStage?: string,
   ) {
     super(message);
     this.name = "BudgetExhaustedError";
@@ -1187,15 +1204,19 @@ async function boundedRead(
   provesAbsence = false,
 ): Promise<ReportBoundedRead> {
   let read: MarkedRun;
+  const openedAtMs = Date.now();
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
-  } catch {
-    read = { kind: "reply-lost" };
+  } catch (err) {
+    // Same contract as the boundary itself: sanitize against this call's own
+    // command, reserve the elapsed suffix, and never echo what cannot be proven.
+    read = { kind: "reply-lost", cause: execCause(err, openedAtMs, execSensitiveValues(command)) };
   }
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
-      `the attempt container could not be read (${read.kind}) — its result is not collected`,
+      `the attempt container could not be read (${read.kind})${lostReplyCause(read)} — its result is not collected`,
       "review.paid.reply_lost",
+      read.kind === "reply-lost" ? read.cause : undefined,
     );
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
@@ -1683,13 +1704,80 @@ function sessionSecretValues(runnerEnv: Record<string, string>, keyValues: reado
 /** Characters of an exec's stderr tail carried by its failure message. */
 export const STDERR_TAIL_MAX = 600;
 
+/** Bound on a stage name — the runner's vocabulary is short words, never a payload. */
+const STAGE_NAME_MAX_CHARS = 60;
+
+/**
+ * The LAST `{"event":"review_stage","stage":"…"}` line the runner wrote, or
+ * `undefined` when it wrote none. This is the one answer to "where did the
+ * review stop?" that needs no dashboard: the runner traces each stage to
+ * stderr, and a budget stop or a lost reply otherwise says only that time ran
+ * out.
+ *
+ * Read line by line, last match wins: a stage line is one JSON object on its
+ * own line, and the LAST one is the last stage the runner ENTERED — the trace
+ * marks entry, not completion, so a failure inside that stage (or after it)
+ * names the stage that started last, never one proven to have been running.
+ * A malformed line, a non-string stage or an empty one is skipped rather than
+ * ending the scan — the earlier stage is still better evidence than nothing.
+ *
+ * The stage is runner-controlled text, so it gets the SAME two-layer redaction
+ * the stderr tail gets: shape patterns (`redactSecrets`) AND every exact session
+ * secret the exec carried (`secretValues`). A stage that happens to BE a
+ * credential — or to contain one verbatim — cannot leak through this field. The
+ * result is bounded, because the line is attacker-influenced text.
+ */
+export function lastRunnerStage(stderr: string, secretValues: readonly string[] = []): string | undefined {
+  let stage: string | undefined;
+  for (const line of stderr.split(/\r?\n/)) {
+    if (!line.includes("review_stage")) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      // A stage trace split across lines (or interleaved with other output) is
+      // not this event; an earlier complete one still stands.
+      continue;
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const { event, stage: candidate } = parsed as { event?: unknown; stage?: unknown };
+    if (event !== "review_stage" || typeof candidate !== "string") continue;
+    const bounded = redactExactSecrets(redactSecrets(candidate), secretValues).trim().slice(0, STAGE_NAME_MAX_CHARS);
+    if (bounded !== "") stage = bounded;
+  }
+  return stage;
+}
+
+/**
+ * The text a failure message appends for an already-redacted stage. Derived from
+ * the ONE parse above: a caller that needs both the field and the sentence reads
+ * stderr once and passes the result here, so the two can never disagree. The
+ * sentence says "last stage", not "running stage": the trace marks entry.
+ */
+export function lastStageNote(stage: string | undefined): string {
+  return stage === undefined ? "" : ` (last stage: ${stage})`;
+}
+
+/**
+ * The `last_stage` log field, spreadable into every settlement line. Absent
+ * when no stage was traced: an empty field would claim a stage nobody observed.
+ * The value is shape-redacted again HERE because a throw site can carry a stage
+ * it did not obtain from `lastRunnerStage`, and this is the last boundary before
+ * the field reaches a durable log line.
+ */
+export function lastStageField(stage: string | undefined): { last_stage?: string } {
+  return stage === undefined ? {} : { last_stage: redactSecrets(stage) };
+}
+
 function runnerFailureDetail(
   run: { stdout: string; stderr: string; exitCode: number },
   secretValues: readonly string[],
+  lastStage: string | undefined,
 ): string {
   const base = `runner failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
-  return tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+  const detail = tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
+  return `${detail}${lastStageNote(lastStage)}`;
 }
 
 function toBase64Utf8(text: string): string {
@@ -1700,6 +1788,15 @@ function toBase64Utf8(text: string): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
+}
+
+/**
+ * The cause suffix a lost reply's message carries. The boundary hands back
+ * bounded evidence (error name, message, elapsed time) or nothing; this never
+ * invents text, so an older outcome keeps its exact wording.
+ */
+function lostReplyCause(read: { kind: string; cause?: string }): string {
+  return read.cause === undefined ? "" : ` — ${read.cause}`;
 }
 
 /**
@@ -1714,11 +1811,14 @@ async function markedCommand(
   command: ShellCommand,
   opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
 ): Promise<MarkedRun> {
+  const openedAtMs = Date.now();
   try {
     return await sandbox.runMarked(marker, command, opts);
-  } catch {
-    // An RPC that never answered is an issued exec with no reply.
-    return { kind: "reply-lost" };
+  } catch (err) {
+    // An RPC that never answered is an issued exec with no reply. The cause gets
+    // the boundary's own sanitize+bound policy, so a rejection cannot smuggle an
+    // unbounded or command-bearing message past it.
+    return { kind: "reply-lost", cause: execCause(err, openedAtMs, execSensitiveValues(command, opts)) };
   }
 }
 
@@ -1764,8 +1864,9 @@ async function runReviewEntryCommand(
     case "marker-unreadable":
     case "reply-lost":
       throw new AttemptUnknownError(
-        `the attempt container could not be read at the review step (${read.kind}) — nothing may be concluded`,
+        `the attempt container could not be read at the review step (${read.kind})${lostReplyCause(read)} — nothing may be concluded`,
         "review.paid.reply_lost",
+        read.kind === "reply-lost" ? read.cause : undefined,
       );
     case "retired":
       throw new AttemptUnknownError(
@@ -1787,7 +1888,11 @@ async function runPaidCommand(
   sandbox: ReviewSandbox,
   marker: string,
   command: ShellCommand,
-  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
+  opts:
+    | { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string }
+    | undefined,
+  log: AttemptLog,
+  fields: AttemptLogFields,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const read = await markedCommand(sandbox, marker, command, opts);
   switch (read.kind) {
@@ -1803,9 +1908,18 @@ async function runPaidCommand(
         `the attempt container was lost after its launch was claimed (${read.kind}) — the paid exec was never sent`,
       );
     case "reply-lost":
+      // The cause rides the message AND its own field: the message is what an
+      // operator reads on the PR page, the field is what a log query filters.
+      log.warn(
+        read.cause === undefined
+          ? { ...fields }
+          : { ...fields, exec_cause: read.cause },
+        "paid exec reply lost — the process may still be running",
+      );
       throw new AttemptUnknownError(
-        "the paid exec was issued and its reply was lost — the process may still be running",
+        `the paid exec was issued and its reply was lost${lostReplyCause(read)} — the process may still be running`,
         "review.paid.reply_lost",
+        read.cause,
       );
     default:
       return noMarkedOutcome(read);
@@ -2291,12 +2405,19 @@ export async function runReviewAttempt(input: {
   progress.runnerStartedAt = Date.now();
   let run: { stdout: string; stderr: string; exitCode: number };
   try {
-    run = await runPaidCommand(sandbox, attemptMarker(attemptId), runnerCmd, {
-      cwd: CLONE_DIR,
-      env: runnerEnv,
-      ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
-      deadlineEpochMs: deadlineMs,
-    });
+    run = await runPaidCommand(
+      sandbox,
+      attemptMarker(attemptId),
+      runnerCmd,
+      {
+        cwd: CLONE_DIR,
+        env: runnerEnv,
+        ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
+        deadlineEpochMs: deadlineMs,
+      },
+      deps.log,
+      fields,
+    );
   } catch (err) {
     if (err instanceof ContainerLostAfterClaimError) {
       // A proof outcome above the exec proves the paid exec was never issued, so
@@ -2315,11 +2436,16 @@ export async function runReviewAttempt(input: {
   }
   progress.runnerReturned = true;
   const runnerElapsedMs = Date.now() - progress.runnerStartedAt;
+  // Where the review stopped, once, for every path below: the runner traces each
+  // stage to stderr and nothing else on this row can say it.
+  const lastStage = lastRunnerStage(run.stderr, progress.secretValues);
+  progress.lastStage = lastStage;
   if (run.exitCode === 124) {
     deps.log.warn(
       {
         ...fields,
         stderr_tail: redactExactSecrets(redactSecrets(run.stderr), progress.secretValues).slice(-STDERR_TAIL_MAX),
+        ...(lastStage === undefined ? {} : { last_stage: lastStage }),
       },
       "runner exec killed at the anchored deadline (provider stderr on this line only)",
     );
@@ -2334,14 +2460,25 @@ export async function runReviewAttempt(input: {
         seatsStopped: null,
         changedLines: observedChangedLines,
       },
-      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B`,
+      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B${lastStageNote(lastStage)}`,
+      lastStage,
     );
   }
   if (run.exitCode !== 0) {
-    throw new Error(runnerFailureDetail(run, progress.secretValues));
+    // The detail text already names the stage for a reader; the own property
+    // carries it as DATA too, so the failure record and its log field get it
+    // without anything reparsing the sentence.
+    const detail = runnerFailureDetail(run, progress.secretValues, lastStage);
+    const failure = new Error(detail);
+    if (lastStage !== undefined) (failure as Error & { lastStage?: string }).lastStage = lastStage;
+    throw failure;
   }
   deps.log.info(
-    { ...fields, elapsed_ms: runnerElapsedMs },
+    {
+      ...fields,
+      elapsed_ms: runnerElapsedMs,
+      ...(lastStage === undefined ? {} : { last_stage: lastStage }),
+    },
     `runner finished in ${runnerElapsedMs}ms (budget ${runnerTimeout}ms)`,
   );
 
@@ -2358,7 +2495,8 @@ export async function runReviewAttempt(input: {
         seatsStopped: budgetSignal.signal.seatsStopped,
         changedLines: observedChangedLines,
       },
-      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})`,
+      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})${lastStageNote(lastStage)}`,
+      lastStage,
     );
   }
 

@@ -694,7 +694,7 @@ Final manifest permissions: contents write, metadata read, pull_requests write, 
 
 ## Deployment gate
 
-Merging this code does not enable the review route, and no deploy flips it. The queue handler
+Merging this code does not by itself enable the review route. The queue handler
 (`src/worker/index.ts`) consults the system setting **`review.route.workflow`** on every batch:
 
 - **Absent row — `off`.** A fresh deploy ships closed; shipping the schema is not an admission
@@ -703,16 +703,37 @@ Merging this code does not enable the review route, and no deploy flips it. The 
 - **`off`, any other stored value, or an unreadable row — `off`.** Every unreadable shape is a
   refusal, never permission; `getReviewRouteWorkflowGate` reports it as `degraded` with its
   reason (`malformed`, `untrusted`, `read-failed`).
-- When off, the batch is acknowledged without creating any Workflow instance and ONE structured
-  line (`event: "review_route_gate_closed"`) names the gate, its source and the batch size. A
-  refused delivery is never silently re-routed to a path that no longer exists.
+- When off, each delivery is settled visibly: a `review.paused.platform` (platform switch off)
+  or `review.blocked.deployment_gate` (gate not open) failure row plus the paused Check
+  conclusion, then an ack — no Workflow instance is created. Each branch logs its own
+  structured line, and each carries only the facts it owns: a platform pause emits only
+  `event: "review_paused"` — the settlement's line, with the payload identity fields,
+  `queue` and `batch_size`, and no gate fields (a second gate-shaped line would name the
+  wrong cause); a closed gate emits `event: "review_route_gate_closed"` — which carries
+  `answer`, the gate mode/saved/degraded/reason and `platform_*` facts — plus the
+  settlement's `event: "review_blocked_deployment_gate"` line (payload identity fields
+  and `batch_size` only); and a halted batch that lands inside a closed maintenance
+  window emits `event: "maintenance_defer"` (queue + `batch_size`) and no halt line at
+  all. A gate whose READ failed, or an
+  unreadable platform switch, is not a halt and not a
+  cause: nothing routes, nothing is settled, and the batch throws so the queue redelivers it.
+  That state answers `unreadable-state` on the operator card, which claims no settlement. A
+  readable row whose value is not `on`/`off` (`untrusted`, like `malformed`) is NOT that state:
+  the gate's documented answer is the safe default `off`, so it is closed and settled.
 
-The setting is a runtime setting on the operator page: a validated store setter
-(`setReviewRouteWorkflow`, exact `on`/`off` only), an audited admin write route, and a control
-that renders the gate's own answer rather than the row it wrote. A merge never flips it; enabling
-stays an explicit act an operator performs and the audit row records. It ships **after** the
-credential-echo redaction lands, because turning the route on before the retained result is
-redacted would persist a transformed credential echo.
+Both the batch and the operator answer read ONE derivation (`reviewRunState`), so they can never
+name different causes: a failed READ is `unreadable-state`, the deployment gate is judged next
+(absent, `off`, `untrusted` and `malformed` all answer `blocked-deployment-gate`), and only a
+readable `off` platform switch answers `paused-platform`. A failed failure-row insert
+is not swallowed — the message stays unacked and is redelivered, and the deterministic row id plus
+`ON CONFLICT(id) DO NOTHING` make the replay a no-op.
+
+The setting is deployment-owned: a successful deploy pipeline run writes `on`
+idempotently (`scripts/review-route-gate.sql` against the environment's own
+database), and the operator page reports the gate read-only — no write route,
+no control. A merge alone still ships closed: only the gate step that follows
+the deploy opens it, and that upsert re-opens a hand-written `off` on every
+deploy — the platform switch is the operator's pause.
 
 ## Change obligations
 

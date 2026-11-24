@@ -93,6 +93,7 @@ import type { Message, MessageBatch, Workflow } from "@cloudflare/workers-types"
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   clearCommentClaimPayload,
+  closeCommentClaim,
   deliveryKeyOf,
   guardDropDedupeKeyOf,
   markAttemptHandoff,
@@ -498,11 +499,12 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       `per-App credential resolution failed: target ${target.id} belongs to bot ${target.bot_id}, not ${botId}`,
     );
   }
-  if (row.review_enabled === 0 || target.review_enabled === 0) {
+  if (row.review_enabled === 0) return { kind: "paused" };
+  const effective = await readEffectiveTargetSettings(deps.env.DB, target);
+  if (!effective.reviewEnabled) {
     return { kind: "paused" };
   }
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
-  const effective = await readEffectiveTargetSettings(deps.env.DB, target);
   const cached = deps.appCommenters.get(botId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
     return {
@@ -914,6 +916,273 @@ export async function priorAttemptStopEvidence(
 }
 
 /**
+ * The `review_failures.error` cause token a platform pause writes beside its
+ * code — the same shape `maintenance_window` uses, so an operator counter can
+ * name the cause without parsing the sentence.
+ */
+export const PLATFORM_PAUSE_REASON = "platform_paused";
+
+/** The cause token a closed deployment gate writes beside its own code. */
+export const DEPLOYMENT_GATE_REASON = "deployment_gate_closed";
+
+/**
+ * The two PROVEN halt states of `reviewRunState`: reviews cannot run, and the
+ * reason is a fact rather than a read fault. Each names its own failure code,
+ * cause token and log event, so the queue's settlement and the operator's
+ * answer describe the same state.
+ */
+export type ReviewHaltState = "paused-platform" | "blocked-deployment-gate";
+
+const HALT_SETTLEMENT = {
+  "paused-platform": {
+    code: "review.paused.platform",
+    cause: PLATFORM_PAUSE_REASON,
+    checkReason: "review paused",
+    event: "review_paused",
+    why: "the review switch (review_global) is off",
+    line: "review platform paused (review_global off) — every delivery in this batch is settled as paused and acked; no Workflow instance is created",
+  },
+  "blocked-deployment-gate": {
+    code: "review.blocked.deployment_gate",
+    cause: DEPLOYMENT_GATE_REASON,
+    checkReason: "review route not open",
+    event: "review_blocked_deployment_gate",
+    why: "the deployment's review route (review.route.workflow) is not open",
+    line: "review route closed (review.route.workflow) — every delivery in this batch is settled as blocked and acked; no Workflow instance is created",
+  },
+} as const satisfies Record<
+  ReviewHaltState,
+  { code: FailureCode; cause: string; checkReason: string; event: string; why: string; line: string }
+>;
+
+/**
+ * The halt row's durable identity: the target + comment id when the delivery
+ * is a bot mention, otherwise the delivery key. A mention's webhook copy and
+ * its outbox resend disagree on `deliveryKeyOf` — the claim's `payload_json`
+ * is saved after `targetId` is resolved but before the webhook attaches a
+ * delivery id — so keying on the comment id is what keeps both copies on ONE
+ * row. The `targetId` stays in the key because two Apps may serve one
+ * repository: the same comment id then names a DIFFERENT delivery per target,
+ * and each needs its own row.
+ */
+function haltRowIdentity(payload: ReviewJobPayload): string {
+  return payload.comment_id !== undefined
+    ? `comment:${payload.targetId}:${payload.comment_id}`
+    : deliveryKeyOf(payload);
+}
+
+/**
+ * End a whole queue batch VISIBLY while reviews provably cannot run — the
+ * platform switch is off, or the deployment's routing gate is not open.
+ *
+ * Neither halt is a silent ack: each delivery's attached run is settled through
+ * the SAME paused skip the per-App pause uses (`settleSkippedRow`), one
+ * `review_failures` row names the cause with its own code, the commit's
+ * idempotency claim is handed back as `paused` (so a resume re-enqueues it
+ * instead of skipping it for a day), and the message is acked. Nothing here
+ * creates a Workflow instance or starts a container.
+ *
+ * The row is written BEFORE the Check is settled and its failure is NOT
+ * caught: a failed insert must leave the message unacked so the queue
+ * redelivers it — the plan's "every queued delivery ends with a durable failure
+ * row" cannot hold on a best-effort write. The row's `id` is the delivery's
+ * mention identity (`haltRowIdentity`) and the insert is `ON CONFLICT DO
+ * NOTHING`, so two mentions of one PR each keep their row while a replay of
+ * either copy of one delivery rewrites nothing.
+ *
+ * An acked bot mention with an open comment claim is a resend the sweep would
+ * deliver to a platform that cannot run it (or replay once it resumes), so
+ * the claim is closed with the settlement (`closeCommentClaim`) and that
+ * failure is uncaught for the same reason.
+ */
+export async function settleHaltedBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  env: PipelineEnv,
+  state: ReviewHaltState,
+  log: ConsumerLog = defaultConsumerLog,
+  overrides: ConsumerOverrides = {},
+): Promise<void> {
+  const deps = createProcessDeps(env, log, overrides);
+  const first = batch.messages[0];
+  if (first === undefined) return;
+  const halt = HALT_SETTLEMENT[state];
+  log.warn(
+    {
+      ...payloadIdentityFields(first.body),
+      event: halt.event,
+      queue: batch.queue,
+      batch_size: batch.messages.length,
+    },
+    halt.line,
+  );
+  for (const message of batch.messages) {
+    const payload = message.body;
+    const fields = { ...payloadIdentityFields(payload), event: halt.event };
+    if (payload.head_sha) {
+      try {
+        await putAbandonClaim(
+          deps.env.IDEMPOTENCY_KV,
+          idemKey({
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: payload.head_sha,
+          }),
+          IDEM_PAUSED,
+          IDEMPOTENCY_SECONDS,
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        log.warn(fields, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+      }
+    }
+    const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
+    await deps.failureStore.record({
+      id: `${halt.cause}:${haltRowIdentity(payload)}`,
+      target_id: payload.targetId,
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha ?? "",
+      stage: "pipeline",
+      code: halt.code,
+      trackId: `${identity}@${payload.head_sha ?? ""}`,
+      message: FAILURE_SUMMARIES[halt.code],
+      error: `${halt.cause}: ${halt.why}, so this queued delivery ended without a review — PR ${identity}, head_sha ${
+        payload.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : payload.head_sha
+      }`,
+    });
+    await settleSkippedRow(deps, payload, payload.head_sha, halt.checkReason, { paused: true });
+    await closeCommentClaim(deps.env.DB, payload);
+    message.ack();
+  }
+}
+
+/**
+ * The maintenance window (D20) defers the whole invocation: a mid-upgrade
+ * pipeline write could land on a ledger row the backfill just repointed.
+ * Every delivery is DEFERRED where the queue still allows it — acking would
+ * drop the review for good, while the window is temporary. ONE line per
+ * invocation (the queue and the batch size it deferred), not one per message:
+ * the batch is the unit the platform redelivers.
+ *
+ * `retry` is the FIRST choice because it is the only path that keeps the
+ * review. Two deliveries have no redelivery left — a runtime that offers no
+ * `message.retry`, and a message already on its LAST platform delivery
+ * (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
+ * every `retry()` spends one). Those are dropped, so each one takes the
+ * failure carrier instead of vanishing: one `review_failures` row
+ * (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
+ * an ack.
+ *
+ * A batch that was ALREADY halted (`halt` set — the platform switch off or
+ * the route gate closed) keeps its halt code, cause and summary on that
+ * last-attempt row — the operator card names the pause/gate and the row must
+ * not contradict it — and goes STRAIGHT to the replay outbox: the write stamps
+ * `maintenance_replay_requested_at` up front, so the sweep lane is the only
+ * sender (the operator route answers the stamped row `repeat`, and refuses
+ * `reviews_not_running` while the halt holds) and it re-issues the row once
+ * the gate and the window are both open. The halted settlement's other side
+ * effects run too — the paused KV claim, the Check settled paused, the
+ * comment claim closed — so nothing hangs open while the row waits. The row's
+ * `id` is the same mention-keyed identity `settleHaltedBatch` writes, so both
+ * settlement faces land on one row.
+ *
+ * shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
+ * longer spends every delivery, and each spent one is now alerted through
+ * `review_failures` — upgrade: a re-enqueue-on-close drain, once a window
+ * routinely outlives the retry cover.
+ */
+export async function deferMaintenanceBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  deps: ProcessDeps,
+  halt?: ReviewHaltState,
+): Promise<void> {
+  if (batch.messages[0] === undefined) return;
+  const deferral = {
+    ...payloadIdentityFields(batch.messages[0].body),
+    event: "maintenance_defer" as const,
+    queue: batch.queue,
+    batch_size: batch.messages.length,
+  };
+  deps.log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
+  for (const message of batch.messages) {
+    if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
+      message.retry({ delaySeconds: 300 });
+      continue;
+    }
+    const body = message.body;
+    const settled = halt === undefined ? null : HALT_SETTLEMENT[halt];
+    const identity = `${body.owner}/${body.repo}#${body.pr_number}`;
+    const headSha = body.head_sha ?? "";
+    const rowId = settled === null ? undefined : `${settled.cause}:${haltRowIdentity(body)}`;
+    await deps.failureStore
+      .record({
+        ...(rowId === undefined ? {} : { id: rowId }),
+        target_id: body.targetId,
+        installation_id: body.installation_id,
+        owner: body.owner,
+        repo: body.repo,
+        pr_number: body.pr_number,
+        head_sha: headSha,
+        stage: MAINTENANCE_DEFERRED_STAGE,
+        code: settled === null ? "review.delivery.deferred" : settled.code,
+        trackId: `${identity}@${headSha}`,
+        message: FAILURE_SUMMARIES[settled === null ? "review.delivery.deferred" : settled.code],
+        error:
+          settled === null
+            ? `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${identity} was never reviewed`
+            : `${settled.cause}: ${settled.why}, so this queued delivery ended without a review — PR ${identity}, head_sha ${
+                body.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : body.head_sha
+              }; the maintenance window's deferral spent its last redelivery (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS})`,
+      })
+      .catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
+        throw err;
+      });
+    if (settled !== null) {
+      // The halt settlement's full contract on the last-attempt row: hand the
+      // commit's claim back as `paused` (a resume re-enqueues it), hand the
+      // row straight to the replay outbox (the stamp IS the outbox mark — the
+      // operator route then answers it `repeat`, leaving the sweep's send gate
+      // the only sender lane), settle its Check paused like the halted path
+      // did before acking, and close the mention's comment claim so the
+      // outbox cannot resend it into a stopped platform. The row's stamp
+      // update and the claim close stay UNCAUGHT: a failed write must leave
+      // the delivery unacked for redelivery.
+      if (body.head_sha) {
+        try {
+          await putAbandonClaim(
+            deps.env.IDEMPOTENCY_KV,
+            idemKey({
+              installation_id: body.installation_id,
+              owner: body.owner,
+              repo: body.repo,
+              pr_number: body.pr_number,
+              head_sha: body.head_sha,
+            }),
+            IDEM_PAUSED,
+            IDEMPOTENCY_SECONDS,
+          );
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(deferral, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+        }
+      }
+      await deps.env.DB.prepare("UPDATE review_failures SET maintenance_replay_requested_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), rowId)
+        .run();
+      await settleSkippedRow(deps, body, body.head_sha, settled.checkReason, { paused: true });
+      await closeCommentClaim(deps.env.DB, body);
+    }
+    message.ack();
+  }
+}
+
+/**
  * Create the queue consumer: admission, dedupe, skip settlement and the
  * hand-off only. One admitted delivery becomes one Workflow instance through
  * the caller's `startAttempt` (or the `startAttempt` override); the consumer
@@ -940,62 +1209,10 @@ export function createReviewConsumer(
   return async (batch) => {
     // The maintenance window (D20) defers the whole invocation: a mid-upgrade
     // pipeline write could land on a ledger row the backfill just repointed.
-    // ONE read per invocation; nothing else in the batch runs. Every delivery
-    // is DEFERRED where the queue still allows it — acking would drop the
-    // review for good, while the window is temporary. ONE line per invocation
-    // (the queue and the batch size it deferred), not one per message: the batch
-    // is the unit the platform redelivers.
-    //
-    // `retry` is the FIRST choice because it is the only path that keeps the
-    // review. Two deliveries have no redelivery left — a runtime that offers no
-    // `message.retry`, and a message already on its LAST platform delivery
-    // (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
-    // every `retry()` spends one). Those are dropped, so each one takes the
-    // failure carrier instead of vanishing: one `review_failures` row
-    // (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
-    // an ack.
-    //
-    // shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
-    // longer spends every delivery, and each spent one is now alerted through
-    // `review_failures` — upgrade: a re-enqueue-on-close drain, once a window
-    // routinely outlives the retry cover.
+    // ONE read per invocation; nothing else in the batch runs.
     const maintenance = await getMaintenanceMode(env.DB);
     if (maintenanceClosed(maintenance)) {
-      if (batch.messages[0] === undefined) return;
-      const deferral = {
-        ...payloadIdentityFields(batch.messages[0].body),
-        event: "maintenance_defer" as const,
-        queue: batch.queue,
-        batch_size: batch.messages.length,
-      };
-      log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
-      for (const message of batch.messages) {
-        if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
-          message.retry({ delaySeconds: 300 });
-          continue;
-        }
-        const body = message.body;
-        await deps.failureStore
-          .record({
-            target_id: body.targetId,
-            installation_id: body.installation_id,
-            owner: body.owner,
-            repo: body.repo,
-            pr_number: body.pr_number,
-            head_sha: body.head_sha ?? "",
-            stage: MAINTENANCE_DEFERRED_STAGE,
-            code: "review.delivery.deferred",
-            trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
-            message: FAILURE_SUMMARIES["review.delivery.deferred"],
-            error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
-          })
-          .catch((err: unknown) => {
-            const detail = err instanceof Error ? err.message : String(err);
-            log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
-            throw err;
-          });
-        message.ack();
-      }
+      await deferMaintenanceBatch(batch, deps);
       return;
     }
     for (const message of batch.messages) {

@@ -1,6 +1,6 @@
 import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
-import { isPlatformOperator } from "../dashboard/index";
+import { isPlatformOperator, workspaceBoot } from "../dashboard/index";
 import { listBotScopes, setBotScope } from "../dashboard/apps-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
@@ -31,7 +31,6 @@ import {
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
-  getReviewRouteWorkflowGate,
   getSweepSettings,
   getReconcileSettings,
   setReconcileSettings,
@@ -47,11 +46,12 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
-  setReviewRouteWorkflow,
   setSweepSettings,
   setSystemConcurrency,
+  reviewRunState,
   type CheckBudgetValues,
   type CommentClaimValues,
+  type ReviewsRunAnswer,
 } from "../dashboard/runtime-config-store";
 import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
@@ -60,6 +60,7 @@ import { localizeDocument } from "../worker/document-locale";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
+import type { DashboardD1 } from "../dashboard/users";
 import type { Env } from "../worker/env";
 import { isServerFlagKey, listFlags } from "./flags";
 import {
@@ -176,12 +177,62 @@ async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<Ru
   }
 }
 
+/**
+ * Apps whose reviews are paused. `review_enabled` is the App-level operational
+ * pause; the per-repository pause lives on the target and is a different
+ * answer, so it is not folded in here.
+ */
+const PAUSED_APPS_SQL = `
+  SELECT COUNT(*) AS n
+    FROM review_bots
+   WHERE deleted_at IS NULL AND review_enabled = 0`;
+
+async function readPausedApps(db: DashboardD1): Promise<number | null> {
+  try {
+    const row = await db.prepare(PAUSED_APPS_SQL).first<{ n: number }>();
+    return row?.n ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+/** The Apps list the pause link opens. `/dashboard` alone lands on the
+ * repository overview, and the unscoped `/dashboard/apps` is one of the two
+ * redirect roots (also the repository overview), so the address needs a
+ * workspace segment — the same one sign-in would land this operator on.
+ *
+ * The link exists so the operator can change review state, so it prefers the
+ * first membership whose role can manage Apps (`owner` or `admin`) — an
+ * ordinary `member` workspace would open the same page read-only. A
+ * sole-workspace deployment (`boot.workspaceRef`) keeps its own answer next,
+ * and only when no membership qualifies does the link fall back to
+ * `memberships[0]` (the list is ordered by workspace name): an
+ * arbitrary-but-stable choice, because this operator page has no workspace
+ * context of its own and picking none would hide the link from every
+ * multi-workspace operator. The App pause link is a convenience, not a scoped
+ * answer — the payload's own facts are all platform-wide.
+ */
+async function readAppsHref(env: Env, login: string): Promise<string | null> {
+  try {
+    const boot = await workspaceBoot(env, login);
+    const managed = boot.memberships.find((row) => row.role === "owner" || row.role === "admin");
+    const ref = managed?.id ?? boot.workspaceRef ?? boot.memberships[0]?.id;
+    return ref === undefined ? null : `/dashboard/${ref}/apps`;
+  } catch {
+    return null;
+  }
+}
+
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
   const db = c.env.DB;
   if (!db) return c.notFound();
   const failures = createFailureStore(db);
+  // The maintenance window is read ONCE and handed to the derivation: the
+  // card's answer and its `maintenance` block must name the same read, or the
+  // answer could say paused-maintenance beside a window shown open.
+  const maintenance = await getMaintenanceMode(db);
   const [
     system,
     budgets,
@@ -191,12 +242,14 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     level,
     recheck,
     attemptCap,
-    routeWorkflow,
+    reviews,
     lostReplySettle,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
     queue,
+    pausedApps,
+    appsHref,
   ] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
@@ -206,12 +259,14 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
-    getReviewRouteWorkflowGate(db),
+    reviewRunState(db, maintenance),
     getLostReplySettleMs(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
     readQueueBacklog(c.env.REVIEW_QUEUE),
+    readPausedApps(db),
+    readAppsHref(c.env, login),
   ]);
   return c.json({
     concurrency: system.concurrency,
@@ -261,7 +316,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
-    routeWorkflow,
+    routeWorkflow: reviews.gate,
     lostReplySettle: {
       settleMs: lostReplySettle.settleMs,
       min: LOST_REPLY_SETTLE_MIN_MS,
@@ -271,7 +326,18 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     admissionDrops24h,
     githubRateLimited24h,
     queue,
-    maintenance: await getMaintenanceMode(db),
+    reviewsRunning: {
+      // The shared derivation verbatim — `paused-maintenance` included — so
+      // the card can never name a cause the queue did not act on.
+      // `unreadableSource` rides along so an `unreadable-state` sentence names
+      // WHICH read failed instead of blaming the gate beside its own `on`.
+      answer: reviews.state,
+      platform: reviews.platform,
+      unreadableSource: reviews.unreadableSource ?? null,
+      pausedApps,
+      appsHref,
+    },
+    maintenance,
   });
 }
 
@@ -314,13 +380,6 @@ function reviewLevelValue(value: unknown): string | null {
   const { value: level } = value as { value?: unknown };
   return typeof level === "string" ? level : null;
 }
-
-function routeWorkflowValue(value: unknown): string | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { value: mode } = value as { value?: unknown };
-  return typeof mode === "string" ? mode : null;
-}
-
 function checkBudgetsBody(value: unknown): CheckBudgetValues | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
   const { terminalizeMs, updateMs } = value as { terminalizeMs?: unknown; updateMs?: unknown };
@@ -351,8 +410,8 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawRecheck: unknown;
   let rawAttemptCap: unknown;
   let rawLostReply: unknown;
-  let rawRouteWorkflow: unknown;
   let rawMaintenance: unknown;
+  let rawRouteWorkflow: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -364,8 +423,8 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       recheckAssignment?: unknown;
       attemptCap?: unknown;
       lostReplySettle?: unknown;
-      routeWorkflow?: unknown;
       maintenance?: unknown;
+      routeWorkflow?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
@@ -376,9 +435,21 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawRecheck = body.recheckAssignment;
     rawAttemptCap = body.attemptCap;
     rawLostReply = body.lostReplySettle;
-    rawRouteWorkflow = body.routeWorkflow;
     rawMaintenance = body.maintenance;
+    rawRouteWorkflow = body.routeWorkflow;
   } catch {
+  }
+  // `routeWorkflow` is gone from this surface: name the removed capability
+  // instead of falling through to the concurrency validator, which would tell a
+  // stale client the wrong field is wrong.
+  if (rawRouteWorkflow !== undefined) {
+    return c.json(
+      {
+        error:
+          "routeWorkflow is no longer writable here: the review routing gate is owned by the deploy pipeline and opens after a successful deploy",
+      },
+      400,
+    );
   }
   if (
     [
@@ -391,14 +462,13 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawRecheck,
       rawAttemptCap,
       rawLostReply,
-      rawRouteWorkflow,
       rawMaintenance,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | routeWorkflow | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance",
       },
       400,
     );
@@ -487,18 +557,6 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     }
     try {
       return c.json({ lostReplySettle: { settleMs: await setLostReplySettleMs(db, settleMs, login) } });
-    } catch (error) {
-      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
-      throw error;
-    }
-  }
-  if (rawRouteWorkflow !== undefined) {
-    const value = routeWorkflowValue(rawRouteWorkflow);
-    if (value === null) {
-      return c.json({ error: "body must be { routeWorkflow: { value } }" }, 400);
-    }
-    try {
-      return c.json({ routeWorkflow: await setReviewRouteWorkflow(db, value, login) });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
       throw error;

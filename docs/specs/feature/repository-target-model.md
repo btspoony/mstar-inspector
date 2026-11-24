@@ -45,10 +45,10 @@ A row that migration produced now carries three NULL repository columns (`repo_i
 
 | ID | Contract |
 |----|----------|
-| E1 | One read decides what a target runs with: `follow_workspace_defaults = 1` answers the workspace defaults (trigger mode, review level, gate floor, passing verdicts), `= 0` answers the row's own four columns. The workspace defaults are read only for a target that actually inherits, so an overridden target pays no second round trip. |
+| E1 | One read decides what a target runs with: `follow_workspace_defaults = 1` answers the workspace defaults (trigger mode, review level, gate floor, passing verdicts, draft review, business pause), `= 0` answers the row's own columns. The two admission facts are inheritable like the policy ones: while following, `default_review_drafts` / `default_review_enabled` (0108) answer them; with inheritance off, `review_targets.review_drafts` / `.review_enabled` do. The workspace defaults are read only for a target that actually inherits, so an overridden target pays no second round trip. |
 | E2 | While a target inherits, its effective settings are computed on every read and never copied into the row. A defaults change therefore reaches all inheriting targets immediately; no propagation job exists. |
-| E3 | Turning inheritance off snapshots the currently effective values into the row; turning it on sets the flag only, leaving the stored overrides inert. A target that never overrode anything and a target whose overrides are inert answer the same policy. |
-| E4 | New targets created through the surface inherit (`= 1`); targets created by the historical backfill do not (`= 0`, with the winner's configuration copied), so the upgrade changes no live review behaviour. |
+| E3 | Turning inheritance off snapshots the currently effective values into the row, the two admission values included; turning it on sets the flag only, leaving the stored overrides inert. A target that never overrode anything and a target whose overrides are inert answer the same policy, so the toggle itself changes no live behaviour. |
+| E4 | New targets created through the surface inherit (`= 1`); targets created by the historical backfill do not (`= 0`, with the winner's configuration copied), so the upgrade changes no live review behaviour. The 0108 upgrade detaches only a following target whose own admission answer differs from the new default, snapshotting the policy values it was running with; a target that already answered drafts-reviewed / reviews-enabled keeps inheriting. |
 | E5 | An unreadable stored `check_pass_verdicts` fails closed (an empty verdict list) with a `check_pass_verdicts_readable: false` flag on the wire, so a page can tell "saved nothing" from "could not read it" and refuse the policy save instead of overwriting the gate. |
 
 ### Store surface
@@ -67,7 +67,7 @@ A row that migration produced now carries three NULL repository columns (`repo_i
 | A1 | `GET …/api/apps/:appId/installation-repositories` walks the application's live installations with the App JWT — for a shared bot (or a bot the caller's workspace does not own), only the installations bound to the caller's workspace — (`per_page=100`, at most 5 pages and 500 repositories per installation, plus a listing time budget), dedupes by `repo_id` and answers `200 { repositories, degraded }`. A walk that stops with a next page pending is an incomplete answer, not a short one: it counts as a failed installation. `degraded: true` means some installations gave no answer while others did; an application that grants nothing is `200 []` (the dialog's empty state), and a walk that could not run at all — no encryption key, an undecryptable App key, a JWT that cannot be minted — or that failed for every installation is `502 installation_repositories_unavailable`. |
 | A2 | `POST …/api/targets` takes `{ bot_id, repositories: [{ repo_id, owner, name }] }`, resolves the bot through the same workspace-scoped visibility rule as its sibling reads (owned apps plus shared bots already holding a live target here), and creates one target per repository with `follow_workspace_defaults = 1`. A repository outside the A1 walk for this workspace — including one granted only by another workspace's installation of a shared bot — is `400 repository_not_installed`. |
 | A3 | The write refuses before the first insert: an empty or malformed selection is `400`, an invisible or unknown bot is `404 unknown app`, a non-manager is `403`, a `repo_id` outside the application's granted set is `400 repository_not_installed` with zero rows written, and an incomplete installation walk is `502` (fail closed — an incomplete walk proves nothing). |
-| A4 | The list read (`GET …/api/targets`) answers each live target with `target_id, repo_id, repo_owner, repo_name, bot_id, app_name, review_enabled, follow_workspace_defaults, last_reviewed_at`, where `repo_id: null` is the only 待安装 discriminator. |
+| A4 | The list read (`GET …/api/targets`) answers each live target with `target_id, repo_id, repo_owner, repo_name, bot_id, app_name, review_enabled, follow_workspace_defaults, last_reviewed_at`, where `repo_id: null` is the only 待安装 discriminator and `review_enabled` is the EFFECTIVE pause (the workspace default while inheriting, the row otherwise). |
 
 ### Installation binding
 
@@ -128,7 +128,7 @@ Execution reads — webhook bot lookup, consumer credential load, publication re
 ## Where it lives
 
 - `migrations/0067_repo_target_identity.sql`, `migrations/0068_target_repo_global_unique.sql`
-- `src/dashboard/targets-store.ts` (`resolveByRepo`, `create`, `listLiveWithApp`, `countLive`, `getInWorkspace`, `getForExecution`, `readEffectiveTargetSettings`, `setInheritance`, `setReviewConfig`, `setReviewEnabled`)
+- `src/dashboard/targets-store.ts` (`resolveByRepo`, `create`, `listLiveWithApp`, `countLive`, `getInWorkspace`, `getForExecution`, `readEffectiveTargetSettings`, `setReviewConfig`, `setReviewEnabled`)
 - `src/worker/index.ts`, `src/worker/webhooks.ts` (repository classifier and target resolution)
 - `src/dashboard/index.ts` (the target and defaults routes, the application-settings gates), `src/dashboard/apps-store.ts` (application visibility and installations)
 - `src/pipeline/consumer.ts`, `src/contracts/review-job.ts` (execution reads)

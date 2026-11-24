@@ -1279,10 +1279,10 @@ describe("the list failure face", () => {
 
 function targetPayload(
   follow: 0 | 1,
-  overrides: { review_enabled?: 0 | 1; verdictsReadable?: boolean; reviewDrafts?: boolean } = {},
+  overrides: { review_enabled?: 0 | 1; verdictsReadable?: boolean; review_drafts?: boolean } = {},
 ) {
   const readable = overrides.verdictsReadable ?? true;
-  const draftSwitch: 0 | 1 = overrides.reviewDrafts === false ? 0 : 1;
+  const draftSwitch: 0 | 1 = overrides.review_drafts === false ? 0 : 1;
   return {
     target: {
       target_id: "t-1",
@@ -1301,7 +1301,8 @@ function targetPayload(
       check_min_score: 45,
       check_pass_verdicts: readable ? ["ship it"] : [],
       check_pass_verdicts_readable: readable,
-      reviewDrafts: overrides.reviewDrafts ?? true,
+      review_drafts: overrides.review_drafts ?? true,
+      review_enabled: (overrides.review_enabled ?? 1) === 1,
     },
     defaults: {
       trigger_mode: "open" as const,
@@ -1309,6 +1310,8 @@ function targetPayload(
       check_min_score: 60,
       check_pass_verdicts: ["ship it", "blocked"],
       check_pass_verdicts_readable: true,
+      review_drafts: true,
+      review_enabled: true,
     },
   };
 }
@@ -1345,7 +1348,7 @@ describe("target settings tab (static SSR)", () => {
     expect(markup).toContain('value="45"');
     const inputs = [...markup.matchAll(/<input[^>]*>/g)];
     expect(inputs.length).toBe(8);
-    expect(disabledInputs(markup)).toBe(5);
+    expect(disabledInputs(markup)).toBe(7);
     expect(markup).toContain("Following the workspace defaults");
     expect(markup).toContain(t("en", "settings.reviewGateSave"));
   });
@@ -1435,17 +1438,17 @@ async function mountDetail(
 }
 
 describe("repository detail page (mounted)", () => {
-  test("the draft switch posts only review_drafts and survives the reload while inheriting", async () => {
+  test("the draft switch posts only review_drafts on an explicit target", async () => {
     let draftOn = true;
     const view = await mountDetail((wire) => {
       if (wire.method === "POST") {
         expect(JSON.parse(wire.body ?? "null")).toEqual({ review_drafts: false });
         expect(wire.url).toBe("/dashboard/acme/api/targets/t-1");
         draftOn = false;
-        return wireJson(targetPayload(1, { reviewDrafts: false }));
+        return wireJson(targetPayload(0, { review_drafts: false }));
       }
       return wire.url.endsWith("/api/targets/t-1")
-        ? wireJson(targetPayload(1, { reviewDrafts: draftOn }))
+        ? wireJson(targetPayload(0, { review_drafts: draftOn }))
         : wireJson({}, 500);
     });
     const draftSwitch = (): HTMLInputElement | null =>
@@ -1465,7 +1468,6 @@ describe("repository detail page (mounted)", () => {
 
       expect(view.sent.filter((wire) => wire.method === "POST")).toHaveLength(1);
       expect(draftSwitch()?.checked).toBe(false);
-      expect(view.text()).toContain("Following the workspace defaults");
     } finally {
       await view.unmount();
     }
@@ -1529,6 +1531,8 @@ const workspaceDefaults = (overrides: Record<string, unknown> = {}) => ({
     check_min_score: 60,
     check_pass_verdicts: ["ship it", "blocked"],
     check_pass_verdicts_readable: true,
+    review_drafts: true,
+    review_enabled: true,
     ...overrides,
   },
   target_count: 3,
@@ -1549,9 +1553,9 @@ describe("all-repositories detail (mounted)", () => {
         t("en", "targets.tabPullRequests"),
       ]);
       expect(view.text()).toContain(t("en", "settings.triggerModeOpen"));
-      expect(view.text()).not.toContain(t("en", "settings.pauseReviews"));
+      expect(view.text()).toContain(t("en", "settings.pauseReviews"));
       expect(view.text()).not.toContain(t("en", "targets.settings.follow"));
-      expect(view.text()).not.toContain(t("en", "settings.reviewDrafts"));
+      expect(view.text()).toContain(t("en", "settings.reviewDrafts"));
       const score = view.win.document.querySelector('input[type="number"]');
       expect((score as unknown as { value: string } | null)?.value).toBe("60");
       expect((score as unknown as { disabled: boolean } | null)?.disabled).toBe(false);

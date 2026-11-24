@@ -764,6 +764,11 @@ describe("per-App webhook face — best-effort delivery recording", () => {
   test("paused path: the target's business pause (the settings switch) → 2xx ignored, zero enqueue + row outcome='paused'", async () => {
     const db = createMigratedD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // The row's own pause answers only with inheritance off; a following target
+    // answers the workspace default (covered separately).
+    db.raw
+      .prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?")
+      .run(appRow.targetId);
     expect(await createTargetsStore(db).setReviewEnabled("default", appRow.targetId, false)).toBe(true);
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
