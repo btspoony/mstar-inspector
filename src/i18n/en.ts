@@ -1207,7 +1207,7 @@ export const en = {
         "The stored lost reply window could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
       routeWorkflowTitle: "Review route",
       routeWorkflowDescription:
-        "Whether a queued review delivery creates a Workflow instance. Off refuses every delivery; a change applies to the next batch.",
+        "Whether a queued review delivery creates a Workflow instance. Set by the deploy pipeline; read-only here. Off refuses every delivery.",
       routeWorkflowStoredLabel: "Stored value",
       routeWorkflowEffectiveLabel: "Effective now",
       routeWorkflowStoredSaved: "{value} — saved",
@@ -1216,11 +1216,39 @@ export const en = {
       routeWorkflowStoredUnreadable: "off — unreadable",
       routeWorkflowEffectiveOn: "on — deliveries create a Workflow instance",
       routeWorkflowEffectiveOff: "off — deliveries are refused and nothing is created",
-      routeWorkflowSave: "Save",
-      routeWorkflowSaved: "Saved.",
-      routeWorkflowFailed: "Could not change the review route.",
-      routeWorkflowUnconfirmed:
-        "The save could not be confirmed: its response carried no readable gate answer and the re-read failed, so the stored mode is unknown. Reload to read it back.",
+      reviewsTitle: "Are reviews running?",
+      reviewsDescription:
+        "The effective answer right now, from the platform switch, the deployment's routing gate and the Apps whose reviews are paused. Queue backlog is below.",
+      reviewsAnswerRunning: "Reviews are running.",
+      reviewsAnswerPausedPlatform:
+        "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
+      reviewsAnswerBlockedDeploymentGate:
+        "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
+      reviewsAnswerPausedMaintenance:
+        "Reviews are paused by the maintenance window: every queued delivery is deferred until the window closes, then retried within the queue's bounded attempts.",
+      reviewsAnswerUnreadableState:
+        "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadableGate:
+        "The review state could not be read: the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadablePlatform:
+        "The review state could not be read: the platform switch did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadableMaintenance:
+        "The review state could not be read: the maintenance window did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsPlatformLabel: "Platform switch",
+      reviewsPlatformOn: "on — reviews are allowed",
+      reviewsPlatformOff: "off — reviews are paused",
+      reviewsPlatformUnreadable: "unreadable — the review state cannot be concluded",
+      reviewsRouteLabel: "Deployment gate",
+      reviewsRouteOn: "on — deliveries create a Workflow instance",
+      reviewsRouteOff: "off — queued deliveries end as blocked",
+      reviewsRouteDegraded: "unreadable — the review state cannot be concluded",
+      reviewsRouteUntrusted: "off — the stored value is not on or off, so deliveries end as blocked",
+      reviewsRouteUnreadable: "not reported by this server",
+      reviewsPausedAppsLabel: "Apps with reviews paused",
+      reviewsPausedAppsUnreadable: "not readable",
+      reviewsPrecedence:
+        "A read fault outranks both causes and concludes nothing. Otherwise the deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
+      reviewsPausedAppsLink: "Pause or resume a single App in the App settings",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",

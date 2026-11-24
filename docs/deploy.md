@@ -1694,6 +1694,54 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `model` is the effective chain head selector, or NULL meaning the in-image
    default ran (§ Image pins and digest record).
+5. **Review routing gate** — `review.route.workflow` is deployment-owned: the
+   workflow's `Open the review routing gate` step writes `on` after a
+   successful deploy, and the operator console reports the gate read-only (no
+   toggle; `PATCH /_internal_admin/api/runtime` refuses `routeWorkflow` and
+   names the deploy pipeline as the owner). A closed gate (`off`, absent, or an
+   unreadable row) is not a silent stop: the queue handler settles every
+   delivery with a `review.blocked.deployment_gate` failure row and a paused
+   Check, then acks it. Confirm the row:
+   ```bash
+   wrangler d1 execute mstar-inspector-db --remote --command \
+     "SELECT key, value FROM review_runtime_settings WHERE key = 'review.route.workflow'"
+   ```
+   `value = on` after every deploy; anything else means the pipeline step did
+   not run (production reads `mstar-inspector-prod-db --env production`).
+
+   Two gate facts an operator must know:
+
+   - **A hand-closed gate does not survive a deploy.** The step is an upsert
+     (`INSERT … ON CONFLICT(key) DO UPDATE SET value = 'on'`), so a manually
+     written `off` is re-opened by the next deploy. To stop reviews, use the
+     platform switch (`review_global`) — that is the operator-owned switch.
+   - **The first deploy of an environment has a narrow window.** The Worker
+     serves as soon as `wrangler deploy` finishes, and the gate step runs after
+     it. Until the step writes the row, queued deliveries are settled as
+     blocked (durable failure row + paused Check), not routed. The window is the
+     gap between those two steps on an environment whose row does not exist yet;
+     every later deploy starts from `on` and has no such gap.
+
+   **A manual `wrangler deploy` must open the gate itself.** The workflow's
+   `Open the review routing gate` step is the only pipeline writer; a hand-run
+   deploy leaves the row absent or stale, and the queue settles every delivery
+   as `review.blocked.deployment_gate`. Run the same idempotent SQL after the
+   deploy (staging shown; production adds `--env production` and reads
+   `mstar-inspector-prod-db`):
+   ```bash
+   bunx wrangler d1 execute mstar-inspector-db --remote --file scripts/review-route-gate.sql
+   ```
+
+   **"Deployment gate closed" is not "state unreadable".** A closed gate is a
+   proven cause and deliveries are settled with a
+   `review.blocked.deployment_gate` row and a paused Check. That covers an absent
+   row, a stored `off`, and a readable row whose value is neither (`untrusted`):
+   the gate's documented answer for an unreadable VALUE is the safe default
+   `off`, so it is closed, not unknowable. Only a read that could not happen —
+   the gate row or `server_flags` unreachable (`read-failed`) — is not a cause:
+   nothing is routed, nothing is settled, the batch throws and the queue
+   redelivers it. The console reports that as `unreadable-state`, and the runbook
+   answer for it is "retry the read", not "open the gate".
 
 ### Production red-run equivalents
 

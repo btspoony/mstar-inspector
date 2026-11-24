@@ -8,6 +8,7 @@ import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } fro
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 import { RECONCILE_FIELDS, RECONCILE_RULES, RECONCILE_DEFAULTS, invalidReconcileRelations, type ReconcileField, type ReconcileValues } from "../contracts/reconcile-settings";
 import { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
+import { isFlagEnabled } from "../admin/flags";
 
 export { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
 
@@ -750,43 +751,86 @@ export async function getReviewRouteWorkflowGate(
   }
 }
 
-const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
-  INSERT INTO platform_audit_events
-    (id, actor_login, action, target_type, target_id, detail_json, created_at)
-  VALUES (?1, ?2, 'runtime.route_workflow.set', 'runtime', '${REVIEW_ROUTE_WORKFLOW_KEY}',
-          json_object('before', (SELECT value FROM review_runtime_settings WHERE key = ?5),
-                      'after', ?3),
-          ?4)`;
+/** The platform switch as both the queue and the operator answer read it. */
+export type ReviewPlatformRead = { enabled: boolean; unreadable: boolean };
 
-/** What one accepted save holds and what the gate answers afterwards. */
-export type ReviewRouteWorkflowWrite = {
-  stored: ReviewRouteWorkflowGate["mode"];
-  effective: ReviewRouteWorkflowGate;
+/**
+ * The ONE answer to "are reviews running": a deliberate pause, a deployment
+ * that has not opened the route, a closed maintenance window, running, or a
+ * state that could not be read. Never a boolean, and never two states folded
+ * together — each one names a different operator action (or none at all).
+ * The vocabulary itself lives in `contracts/review-answer.ts` (server and SPA
+ * share it); this re-export keeps the existing import site.
+ */
+export type { ReviewsRunAnswer } from "../contracts/review-answer";
+
+import type { ReviewsRunAnswer } from "../contracts/review-answer";
+
+/** The answer plus the raw facts it was derived from. */
+export type ReviewRunState = {
+  state: ReviewsRunAnswer;
+  gate: ReviewRouteWorkflowGate;
+  platform: ReviewPlatformRead;
+  /**
+   * Which READ failed when `state` is `unreadable-state` — the gate row, the
+   * platform switch, or the maintenance window. Never two at once (the first
+   * fault wins), and absent on every answer the read actually proves. The
+   * worker names it in the redelivery error and the card names it in the
+   * unreadable copy; without it both surfaces would blame the gate while
+   * printing the gate healthy.
+   */
+  unreadableSource?: "gate" | "platform" | "maintenance";
 };
 
 /**
- * Set the route switch. The write is exactly as strict as the read: anything
- * but `on` / `off` refuses (`invalid_value`, nothing written, no audit row), so
- * a value the gate would not trust can never be stored through the product.
- * `effective` is the gate's answer after the write, never this function's
- * assumption.
+ * The state machine BOTH the queue batch and the operator answer read, so they
+ * can never name different causes for the same deployment.
+ *
+ * Precedence is the queue's, because the queue is the thing that acts:
+ *
+ * 1. An UNKNOWABLE fact is `unreadable-state`: the gate read itself failed
+ *    (`read-failed` — the row could not be asked), the platform switch read
+ *    threw, or the maintenance read answered unreadable. `unreadableSource`
+ *    names which read failed so the card and the worker never blame the gate
+ *    while printing it healthy. The queue throws and the delivery is
+ *    redelivered, so nothing was settled and the answer must not claim a cause.
+ * 2. A gate that is not `on` is `blocked-deployment-gate`, and that includes a
+ *    readable-but-untrusted or malformed row: the gate's documented answer for
+ *    those is the safe default `off` (`degraded` says the value could not be
+ *    read as on/off, not that the outcome is unknown). The queue settles them
+ *    visibly, so they are a fact about the deployment, not a fault.
+ * 3. A readable `off` platform switch is `paused-platform`, after the gate —
+ *    with both closed the deliveries are settled by the gate, so the answer
+ *    must not name the platform pause instead.
+ * 4. Only a proven `running` is overlaid by the maintenance window into
+ *    `paused-maintenance`: every delivery defers, so the answer cannot claim
+ *    reviews flow. It stays BELOW the halt states — a real pause still names
+ *    the switch, and the pause's settlement is what the queue performs.
  */
-export async function setReviewRouteWorkflow(
-  db: DashboardD1,
-  value: string,
-  operator: string,
-): Promise<ReviewRouteWorkflowWrite> {
-  if (value !== "on" && value !== "off") {
-    throw new RuntimeConfigError("invalid_value", "the review route workflow must be exactly on | off");
+export async function reviewRunState(db: DashboardD1, knownMaintenance?: MaintenanceMode): Promise<ReviewRunState> {
+  const gate = await getReviewRouteWorkflowGate(db);
+  let platform: ReviewPlatformRead;
+  try {
+    platform = { enabled: await isFlagEnabled(db, "review_global"), unreadable: false };
+  } catch {
+    platform = { enabled: false, unreadable: true };
   }
-  const now = new Date().toISOString();
-  await db.batch([
-    db
-      .prepare(REVIEW_ROUTE_WORKFLOW_AUDIT_SQL)
-      .bind(crypto.randomUUID(), operator, value, now, REVIEW_ROUTE_WORKFLOW_KEY),
-    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ROUTE_WORKFLOW_KEY, value, now, operator),
-  ]);
-  return { stored: value, effective: await getReviewRouteWorkflowGate(db) };
+  if (gate.reason === "read-failed") {
+    return { state: "unreadable-state", gate, platform, unreadableSource: "gate" };
+  }
+  if (platform.unreadable) {
+    return { state: "unreadable-state", gate, platform, unreadableSource: "platform" };
+  }
+  if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
+  if (!platform.enabled) return { state: "paused-platform", gate, platform };
+  const maintenance = knownMaintenance ?? (await getMaintenanceMode(db));
+  // An UNREADABLE window is a third unknowable fact, not a closed one: minting
+  // `paused-maintenance` would claim a proven cause, minting `running` would
+  // let a settings outage unlock traffic. Only a KNOWN closed window pauses.
+  if (maintenance.unreadable) {
+    return { state: "unreadable-state", gate, platform, unreadableSource: "maintenance" };
+  }
+  return { state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running", gate, platform };
 }
 
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";

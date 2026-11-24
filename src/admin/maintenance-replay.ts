@@ -24,7 +24,7 @@
 import type { Queue } from "@cloudflare/workers-types";
 import { MAINTENANCE_DEFERRED_STAGE } from "../contracts/failure-stages";
 import type { ReviewJobPayload } from "../contracts/review-job";
-import { getMaintenanceMode } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, reviewRunState } from "../dashboard/runtime-config-store";
 import type { DashboardD1 } from "../dashboard/users";
 import { redactSecrets } from "../pipeline/redact";
 
@@ -63,6 +63,7 @@ export type MaintenanceReplayRefusal =
   | "not_maintenance_deferred"
   | "maintenance_active"
   | "maintenance_unreadable"
+  | "reviews_not_running"
   | "target_unavailable"
   | "queue_unavailable";
 
@@ -167,6 +168,16 @@ export async function requestMaintenanceReplay(
   const maintenance = await getMaintenanceMode(db);
   if (maintenance.unreadable) return { kind: "refused", error: "maintenance_unreadable", status: 503 };
   if (maintenance.enabled) return { kind: "refused", error: "maintenance_active", status: 409 };
+  // A send while reviews are halted would land in `settleHaltedBatch` and be
+  // acked without running — the stamp would then claim a replay that never
+  // happened. A NEW request refuses BEFORE any stamp so it stays eligible
+  // (the stamp's `requested` write would also mint a second send attempt); a
+  // row already stamped — e.g. a halt-spent deferral — still answers `repeat`
+  // above and its send waits on the sweep's own run-state gate.
+  const run = await reviewRunState(db);
+  if (run.state !== "running") {
+    return { kind: "refused", error: "reviews_not_running", status: 409 };
+  }
   const target = await readLiveTarget(db, failure.id);
   if (target === null) return { kind: "refused", error: "target_unavailable", status: 409 };
   if (queue === undefined) return { kind: "refused", error: "queue_unavailable", status: 503 };

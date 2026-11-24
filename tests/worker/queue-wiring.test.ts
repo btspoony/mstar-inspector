@@ -15,10 +15,32 @@ const handedByConsumer = Promise.withResolvers<void>();
 
 type QueueEnv = Parameters<typeof runReviewQueueBatch>[1];
 
-function envWithGate(extra: Record<string, unknown>): QueueEnv {
+const deferRuns: Array<{ batch: unknown; deps: unknown; halt: unknown }> = [];
+const settleRuns: Array<{ batch: unknown; halt: unknown }> = [];
+
+function envWithGate(
+  extra: Record<string, unknown>,
+  maintenanceRows: Array<{ key: string; value: string }> = [],
+  throwAll = false,
+): QueueEnv {
   const db = {
-    prepare: () => ({
-      bind: () => ({ first: async () => ({ value: "on" }) }),
+    prepare: (sql: string) => ({
+      bind: () => ({
+        // The route gate reads `value`; the platform switch (`server_flags`)
+        // reads `enabled`. Both answer "open" so the wiring tests exercise the
+        // review path, not either gate. The maintenance read asks for the
+        // `key IN (…)` row SET (`all`), and answers empty = window open.
+        first: async () =>
+          sql.includes("server_flags")
+            ? { enabled: extra.__platformEnabled === 0 ? 0 : 1 }
+            : { value: "on" },
+        all: async () => {
+          if (throwAll) throw new Error("settings read failed");
+          return {
+            results: sql.includes("review_runtime_settings WHERE key IN") ? maintenanceRows : [],
+          };
+        },
+      }),
     }),
   };
   return { DB: db, ...extra } as unknown as QueueEnv;
@@ -26,6 +48,13 @@ function envWithGate(extra: Record<string, unknown>): QueueEnv {
 
 function fakeConsumerModule() {
   return {
+    settleHaltedBatch: async (batch: unknown, _env: unknown, halt: unknown): Promise<void> => {
+      settleRuns.push({ batch, halt });
+    },
+    createProcessDeps: (env: unknown) => ({ env }),
+    deferMaintenanceBatch: async (batch: unknown, deps: unknown, halt?: unknown): Promise<void> => {
+      deferRuns.push({ batch, deps, halt });
+    },
     createReviewConsumer: (
       _env: unknown,
       _log?: unknown,
@@ -89,5 +118,64 @@ describe("worker queue wiring (spec §7.10)", () => {
     await consumerRuns.at(-1)!.startAttempt!({}, attempt);
 
     expect(creates).toEqual([{ id: "attempt-route-1", params: attempt }]);
+  });
+
+  test("a closed maintenance window defers the batch instead of running the review path", async () => {
+    const batch = { queue: "review", messages: [] } as unknown as MessageBatch<ReviewJobPayload>;
+    const ctx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) } }, [
+      { key: "platform.maintenance.enabled", value: "1" },
+    ]);
+    const consumerCallsBefore = consumerRuns.length;
+    const deferCallsBefore = deferRuns.length;
+
+    await runReviewQueueBatch(batch, env, ctx, async () => fakeConsumerModule());
+
+    expect(consumerRuns).toHaveLength(consumerCallsBefore);
+    expect(deferRuns).toHaveLength(deferCallsBefore + 1);
+    expect(deferRuns.at(-1)!.batch).toBe(batch);
+    // The maintenance answer is no halt of its own — the defer gets no cause.
+    expect(deferRuns.at(-1)!.halt).toBeUndefined();
+  });
+
+  test("a halted batch with an open window settles instead of throwing — never dead-lettered", async () => {
+    // The old branch threw when the window read contradicted the derivation,
+    // sending deliveries to the DLQ. With the switch OFF and the window open
+    // the batch must settle as the platform pause it is.
+    const batch = { queue: "review", messages: [] } as unknown as MessageBatch<ReviewJobPayload>;
+    const ctx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) }, __platformEnabled: 0 });
+    const consumerCallsBefore = consumerRuns.length;
+    const settleCallsBefore = settleRuns.length;
+
+    await runReviewQueueBatch(batch, env, ctx, async () => fakeConsumerModule());
+
+    expect(consumerRuns).toHaveLength(consumerCallsBefore);
+    expect(settleRuns).toHaveLength(settleCallsBefore + 1);
+    expect(settleRuns.at(-1)!.batch).toBe(batch);
+    expect(settleRuns.at(-1)!.halt).toBe("paused-platform");
+  });
+
+  test("a failed maintenance read names maintenance in the redelivery error — not the gate", async () => {
+    // Gate and platform read healthy; only the window's row-set read throws.
+    // The batch fails closed for redelivery, and the error must say which
+    // read fault it was — never "the review route gate is unreadable" beside
+    // a gate that answered.
+    const batch = { queue: "review", messages: [] } as unknown as MessageBatch<ReviewJobPayload>;
+    const ctx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) } }, [], true);
+
+    await expect(runReviewQueueBatch(batch, env, ctx, async () => fakeConsumerModule())).rejects.toThrow(
+      "the maintenance window is unreadable",
+    );
   });
 });
