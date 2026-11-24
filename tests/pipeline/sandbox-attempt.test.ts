@@ -469,6 +469,65 @@ describe("collection refuses an unproven container", () => {
     expect(sandbox.events.filter((event) => event.startsWith("marked:"))).toHaveLength(3);
   });
 
+  test("a lost paid reply carries its exec cause into the message and the log fields", async () => {
+    const db = createMigratedTestD1();
+    await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
+    const sandbox = attemptSandboxDouble({});
+    const CAUSE = "Error: platform socket closed (after 4200ms)";
+    let marked = 0;
+    sandbox.runMarked = async (_marker: string, command: string) => {
+      marked += 1;
+      // call 1 = the runner input write, call 2 = the paid exec.
+      if (marked === 2) return { kind: "reply-lost", cause: CAUSE };
+      const stdout = command.includes("rev-parse") ? `${SHA}\n` : "";
+      return { kind: "ran", stdout, stderr: "", exitCode: 0 };
+    };
+    const input = executionInput(sandbox, db);
+    const lines: Array<{ fields: Record<string, unknown>; msg: string | undefined }> = [];
+    input.deps.log = {
+      info: () => {},
+      warn: (fields?: Record<string, unknown>, msg?: string) => {
+        lines.push({ fields: fields ?? {}, msg });
+      },
+    };
+
+    let thrown: unknown;
+    try {
+      await runReviewAttempt(input);
+    } catch (err) {
+      thrown = err;
+    }
+
+    const failure = thrown as InstanceType<typeof AttemptUnknownError>;
+    expect(failure).toBeInstanceOf(AttemptUnknownError);
+    // The classification is untouched: evidence, not a new outcome.
+    expect(failure.code).toBe("review.paid.reply_lost");
+    expect(failure.message).toContain("its reply was lost");
+    expect(failure.message).toContain("the process may still be running");
+    expect(failure.message).toContain(CAUSE);
+    expect(failure.cause).toBe(CAUSE);
+    expect(lines.some((line) => line.fields["exec_cause"] === CAUSE)).toBe(true);
+
+    // The settlement branch reads the class, never the cause.
+    const { phaseFailureRecord } = await import("../../src/pipeline/review-attempt-execution");
+    expect(
+      phaseFailureRecord(
+        {
+          phase: "collect",
+          stage: "runner",
+          headSha: SHA,
+          runnerReturned: true,
+          tier: "default",
+          budgetMs: 0,
+          changedLines: null,
+          sendAttemptPublicationId: null,
+        },
+        thrown,
+      ),
+    ).toMatchObject({ class: "unknown", containerStateUnknown: true, code: "review.paid.reply_lost" });
+    expect(sandbox.events).not.toContain("destroy");
+  });
+
   test("boundedRead's refusal message names the outcome it observed", async () => {
     const db = createMigratedTestD1();
     await claimReviewAttempt(db, ATTEMPT_A, Date.now(), null);
@@ -559,13 +618,17 @@ describe("SandboxV1 marker gate", () => {
     expect(container.destroyed).toBe(false);
   });
 
-  test("a guarded command whose reply is lost reports reply-lost, not nothing-ran", async () => {
+  test("a guarded command whose reply is lost reports reply-lost with the exec's cause", async () => {
     const container = makeContainer(true);
     const sandbox = makeDo(container);
     container.marker = MARKER_A;
     container.execRejects = true;
 
-    expect(await sandbox.runMarked(MARKER_A, shellCommand("cat result.json"))).toEqual({ kind: "reply-lost" });
+    const read = await sandbox.runMarked(MARKER_A, shellCommand("cat result.json"));
+    // The classification still decides alone; the cause is the evidence that
+    // used to be discarded here.
+    if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+    expect(read.cause).toContain("container exec reply lost");
     expect(container.markerReads).toBe(1);
   });
 

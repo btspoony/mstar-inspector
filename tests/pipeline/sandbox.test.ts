@@ -291,6 +291,37 @@ describe("SandboxV1 Durable Object", () => {
     expect(read).toEqual({ kind: "reply-lost" });
   }, 15_000);
 
+  test("a throwing exec carries a bounded cause and the reply-lost classification is unchanged", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        throw new Error("platform socket closed: ghs_abc123def456");
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand("bun run 'x' --token argv-secret"), {
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      // Name, message and elapsed time only; the secret shape is redacted.
+      expect(read.cause).toBe("Error: platform socket closed: [REDACTED] (after 1200ms)");
+      // Neither the command text nor a stack frame may ride along.
+      expect(read.cause).not.toContain("argv-secret");
+      expect(read.cause).not.toContain("\n");
+      expect(read.cause!.length).toBeLessThanOrEqual(300);
+    });
+  });
+
   test("a marker write that never resolves answers unavailable AT the caller's deadline, not after a fixed wait", async () => {
     reset();
     const { sandbox, container } = makeDo(false);

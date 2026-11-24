@@ -1,6 +1,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Container, DurableObjectState } from "@cloudflare/workers-types";
+import { redactSecretShapes } from "../../packages/shared/src/secret-shapes";
 import { ContainerNotRunningError } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
@@ -55,8 +56,11 @@ type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
  * The process was opened and its reply never arrived inside the host timer. The
  * command may have run (and may have written a result), so this is NEVER a
  * "nothing ran" verdict: only a refusal that precedes the exec proves that.
+ *
+ * `cause` is bounded evidence and NEVER a second discriminant: callers classify
+ * on `kind` alone.
  */
-type ExecReplyLost = { kind: "reply-lost" };
+type ExecReplyLost = { kind: "reply-lost"; cause?: string };
 
 /**
  * What `provision` observed inside the DO's exclusive gate. `provisioned` means
@@ -85,7 +89,7 @@ export type ProvisionOutcome =
  */
 export type MarkedRun =
   | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
-  | { kind: "reply-lost" }
+  | { kind: "reply-lost"; cause?: string }
   | { kind: "not-running" }
   | { kind: "marker-mismatch" }
   | { kind: "marker-unreadable" }
@@ -142,6 +146,23 @@ function isRetentionProof(proof: RetentionProof | undefined): proof is Retention
 const AWAIT_EXPIRED = Symbol("await-expired");
 
 const KILL_GRACE_MS = 5_000;
+
+/** Characters of a thrown exec error's name+message the cause keeps. */
+const EXEC_CAUSE_MAX_CHARS = 300;
+
+/**
+ * The evidence a thrown exec leaves behind, bounded for a log field and a
+ * failure row: error name, message and how long the exec had been open. No
+ * stack, no argv (the shell command text may carry interpolated values), no
+ * env, and secret shapes are redacted — a provider key echoed in a platform
+ * error must not reach a log or a PR page.
+ */
+function execCause(err: unknown, openedAtMs: number): string {
+  const name = err instanceof Error ? err.name : typeof err;
+  const message = err instanceof Error ? err.message : String(err);
+  const text = redactSecretShapes(message === "" ? name : `${name}: ${message}`);
+  return `${text} (after ${Date.now() - openedAtMs}ms)`.slice(0, EXEC_CAUSE_MAX_CHARS);
+}
 
 /**
  * Printed on stderr by the wrapper's own refusal. Exit 125 alone proves
@@ -370,11 +391,14 @@ export class SandboxV1 extends DurableObject {
       if (deadlineEpochMs - Date.now() <= KILL_GRACE_MS) {
         return { kind: "deadline-spent", remainingMs: deadlineEpochMs - Date.now() };
       }
+      const openedAtMs = Date.now();
       try {
         const ran = await this.execCommand(container, command, { ...opts, deadlineEpochMs });
         return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
-      } catch {
-        return { kind: "reply-lost" };
+      } catch (err) {
+        // The exec was opened; only its reply is missing. The cause is the one
+        // thing this boundary would otherwise discard before any caller logs it.
+        return { kind: "reply-lost", cause: execCause(err, openedAtMs) };
       }
     });
   }

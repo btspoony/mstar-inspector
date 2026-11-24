@@ -218,10 +218,15 @@ export class AttemptUnknownError extends Error {
   /**
    * The operator-facing code the throw site knows to be true — never inferred
    * from the phase or the message later.
+   *
+   * `cause` is the bounded evidence the sandbox boundary handed back for an
+   * unobservable paid step (error name, message, elapsed time). It is evidence
+   * only: nothing classifies on it, and the settlement branch never reads it.
    */
   constructor(
     message: string,
     readonly code: FailureCode,
+    readonly cause?: string,
   ) {
     super(message);
     this.name = "AttemptUnknownError";
@@ -1173,13 +1178,14 @@ async function boundedRead(
   let read: MarkedRun;
   try {
     read = await sandbox.runMarked(marker, command, { timeout: timeoutMs });
-  } catch {
-    read = { kind: "reply-lost" };
+  } catch (err) {
+    read = { kind: "reply-lost", cause: redactSecrets(err instanceof Error ? err.message : String(err)) };
   }
   if (read.kind !== "ran") {
     throw new AttemptUnknownError(
-      `the attempt container could not be read (${read.kind}) — its result is not collected`,
+      `the attempt container could not be read (${read.kind})${lostReplyCause(read)} — its result is not collected`,
       "review.paid.reply_lost",
+      read.kind === "reply-lost" ? read.cause : undefined,
     );
   }
   if (read.exitCode !== 0) return { text: null, failure: "unreadable" };
@@ -1618,6 +1624,15 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
+ * The cause suffix a lost reply's message carries. The boundary hands back
+ * bounded evidence (error name, message, elapsed time) or nothing; this never
+ * invents text, so an older outcome keeps its exact wording.
+ */
+function lostReplyCause(read: { kind: string; cause?: string }): string {
+  return read.cause === undefined ? "" : ` — ${read.cause}`;
+}
+
+/**
  * Run one marker-guarded command and hand back the RAW outcome. The three
  * callers below map the same closed set differently because the D1 row gives
  * each of them a different entitlement (prepare: nothing paid; review entry:
@@ -1631,9 +1646,10 @@ async function markedCommand(
 ): Promise<MarkedRun> {
   try {
     return await sandbox.runMarked(marker, command, opts);
-  } catch {
-    // An RPC that never answered is an issued exec with no reply.
-    return { kind: "reply-lost" };
+  } catch (err) {
+    // An RPC that never answered is an issued exec with no reply. The error's
+    // own text is all this layer knows, so it rides as the cause.
+    return { kind: "reply-lost", cause: redactSecrets(err instanceof Error ? err.message : String(err)) };
   }
 }
 
@@ -1679,8 +1695,9 @@ async function runReviewEntryCommand(
     case "marker-unreadable":
     case "reply-lost":
       throw new AttemptUnknownError(
-        `the attempt container could not be read at the review step (${read.kind}) — nothing may be concluded`,
+        `the attempt container could not be read at the review step (${read.kind})${lostReplyCause(read)} — nothing may be concluded`,
         "review.paid.reply_lost",
+        read.kind === "reply-lost" ? read.cause : undefined,
       );
     case "retired":
       throw new AttemptUnknownError(
@@ -1702,7 +1719,11 @@ async function runPaidCommand(
   sandbox: ReviewSandbox,
   marker: string,
   command: ShellCommand,
-  opts?: { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string },
+  opts:
+    | { env?: Record<string, string>; cwd?: string; timeout?: number; deadlineEpochMs?: number; stdin?: string }
+    | undefined,
+  log: AttemptLog,
+  fields: AttemptLogFields,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   const read = await markedCommand(sandbox, marker, command, opts);
   switch (read.kind) {
@@ -1718,9 +1739,18 @@ async function runPaidCommand(
         `the attempt container was lost after its launch was claimed (${read.kind}) — the paid exec was never sent`,
       );
     case "reply-lost":
+      // The cause rides the message AND its own field: the message is what an
+      // operator reads on the PR page, the field is what a log query filters.
+      log.warn(
+        read.cause === undefined
+          ? { ...fields }
+          : { ...fields, exec_cause: read.cause },
+        "paid exec reply lost — the process may still be running",
+      );
       throw new AttemptUnknownError(
-        "the paid exec was issued and its reply was lost — the process may still be running",
+        `the paid exec was issued and its reply was lost${lostReplyCause(read)} — the process may still be running`,
         "review.paid.reply_lost",
+        read.cause,
       );
     default:
       return noMarkedOutcome(read);
@@ -2190,12 +2220,19 @@ export async function runReviewAttempt(input: {
   progress.runnerStartedAt = Date.now();
   let run: { stdout: string; stderr: string; exitCode: number };
   try {
-    run = await runPaidCommand(sandbox, attemptMarker(attemptId), runnerCmd, {
-      cwd: CLONE_DIR,
-      env: runnerEnv,
-      ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
-      deadlineEpochMs: deadlineMs,
-    });
+    run = await runPaidCommand(
+      sandbox,
+      attemptMarker(attemptId),
+      runnerCmd,
+      {
+        cwd: CLONE_DIR,
+        env: runnerEnv,
+        ...(credentials.payload === undefined ? {} : { stdin: credentials.payload }),
+        deadlineEpochMs: deadlineMs,
+      },
+      deps.log,
+      fields,
+    );
   } catch (err) {
     if (err instanceof ContainerLostAfterClaimError) {
       // A proof outcome above the exec proves the paid exec was never issued, so
