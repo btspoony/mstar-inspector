@@ -516,25 +516,10 @@ describe("provider combobox", () => {
 });
 
 describe("add-entry visibility + picker usability at breadth", () => {
-  test("the Add Provider entry is a labeled, bordered control heading the providers section", () => {
+  test("the Add Provider entry is a labeled, bordered control above the empty state", () => {
     const payload: ProviderManagementPayload = {
       ...detailPayload(),
-      provider_catalog: [
-        {
-          id: "anthropic",
-          label: "Anthropic",
-          tier: "builtin",
-          base_url: null,
-          api: null,
-          models: [],
-          verifiable: true,
-          usage_probe: false,
-          eligibility: "builtin",
-          display_group: "catalog",
-        },
-      ],
-      model_limits_snapshot: "2026-01-01",
-      keys: [{ provider: "anthropic", keyId: "k1", last4: "4242", updatedAt: null, verifiedAt: null, verifiedStatus: null }],
+      provider_catalog: [],
     };
     const html = renderToStaticMarkup(
       createElement(LoadedProvidersSection, {
@@ -558,10 +543,12 @@ describe("add-entry visibility + picker usability at breadth", () => {
       );
       expect(add).toBeDefined();
       expect(add!.getAttribute("aria-haspopup")).toBe("dialog");
-      expect(add!.getAttribute("data-variant")).toBe("outline");
-      const group = doc.querySelector('[data-slot="group-card"]');
-      expect(group).not.toBeNull();
-      expect(add!.compareDocumentPosition(group!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(add!.className.split(/\s+/)).toContain("border");
+      const empty = [...doc.querySelectorAll("p")].find(
+        (node) => node.textContent === t("en", "settings.noConfiguredProviders"),
+      );
+      expect(empty).toBeDefined();
+      expect(add!.compareDocumentPosition(empty!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     } finally {
       cleanup();
     }
