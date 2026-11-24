@@ -62,7 +62,7 @@ import {
   markRefusalPending,
   recordAttemptObservation,
   recordReviewedHead,
-  attemptFailureRowExists,
+  attemptFailureStoryExists,
   recordRecheckAttribution,
   recordRecheckDuty,
   readAttemptCheckKey,
@@ -4982,12 +4982,13 @@ export async function settleAttemptFailure(
     const observedCause =
       failure.cause === undefined ? undefined : redactExactSecrets(redactSecrets(failure.cause), secrets);
     try {
-      // A row that already tells this attempt's story — a recovery lane that saw
-      // the outcome with more evidence than this phase has — is the authoritative
-      // account. Recording an observation here would let that lane's next pass
-      // compose its row from this stale text instead of its own sentence, so the
-      // phase stays silent and the durable story stands.
-      if (await attemptFailureRowExists(deps.env.DB, attemptId)) return;
+      // A row that already tells this attempt's story in words the phase cannot
+      // improve on — a recovery lane that saw a durable result with nothing
+      // staged — is the authoritative account, and recording here would let that
+      // lane's next pass compose its row from this stale text. The lost-reply
+      // lane's placeholder is NOT such a story: it exists only until this
+      // observation arrives, and the late-observation sync rewrites it in place.
+      if (await attemptFailureStoryExists(deps.env.DB, attemptId)) return;
       await recordAttemptObservation(deps.env.DB, {
         attemptId,
         observation: {

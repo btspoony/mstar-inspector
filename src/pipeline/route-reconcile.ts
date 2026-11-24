@@ -20,6 +20,9 @@ import {
   clearRecheckDuty,
   listIncompleteSettlements,
   listLateObservedFailures,
+  LOST_REPLY_FALLBACK_ERROR,
+  LOST_REPLY_FALLBACK_ERROR_UNANCHORED,
+  LOST_REPLY_FALLBACK_SHAPE,
   listLostReplyLaunchSettlements,
   readAttemptHandoffByAttempt,
   readRefusalPending,
@@ -110,30 +113,6 @@ const MECHANISM_TERMS: readonly (readonly [RegExp, string])[] = [
   [/\bchild\s+process(?:es)?\b/gi, "review step"],
   [/\b(?:\d+|thousands?)\s*ms\b/gi, "a short time"],
 ];
-
-/**
- * The fallback `review_failures.error` the lost-reply lane writes when no
- * observation existed yet — two constants (anchored / pre-column), which is
- * what lets the late-observation sync PROVE a row is this reconciler's own
- * before rewriting it. The deadline and the grace are durable on the launch
- * and handoff rows; the sentence states the conclusion.
- */
-const LOST_REPLY_FALLBACK_ERROR =
-  "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived";
-const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
-  "a pre-column legacy attempt carries no frozen deadline; its launch outlived the maximum attempt cap plus the post-deadline grace, and no reply ever arrived";
-
-/**
- * The exact row shape this reconciler writes for a lost reply with no
- * observation: attempt-keyed, the lane's own code, and one of its fallback
- * sentences. The late-observation sync binds this shape — a row any other
- * producer wrote is never selected, never rewritten.
- */
-const LOST_REPLY_FALLBACK_SHAPE = {
-  fallbackCode: "review.paid.reply_lost",
-  fallbackErrors: [LOST_REPLY_FALLBACK_ERROR, LOST_REPLY_FALLBACK_ERROR_UNANCHORED],
-  fallbackMessage: FAILURE_SUMMARIES["review.paid.reply_lost"],
-} as const;
 
 /**
  * The cause an author can be shown, read as DATA off the observation: the

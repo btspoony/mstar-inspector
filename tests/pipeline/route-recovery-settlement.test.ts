@@ -1583,6 +1583,58 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toEqual(synced);
   });
 
+  test("a phase settling after the lane's fallback row still records its cause, and the sync repairs that row", async () => {
+    // The ordering the settlement's guard must NOT block: the lost-reply lane
+    // settles the attempt first with its placeholder sentence, and the invocation
+    // only then records what it actually saw. The placeholder is not a story — it
+    // exists until exactly this cause arrives — so the observation lands and the
+    // sync rewrites that same row in place: one row, the real cause.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fallback-first";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    const fallback = failureRows(db);
+    expect(fallback).toHaveLength(1);
+    expect(String(fallback[0]!.error)).toContain("no reply ever arrived");
+
+    // The phase now settles the same attempt. Recording its cause must succeed:
+    // the row above is the lane's placeholder, not a lane-authored story.
+    const deps = await makeDeps(db);
+    const cause = "Error: runner rpc failed: read the diff (after 1200ms)";
+    expect(
+      await settleAttemptFailure(
+        deps,
+        { ...makeRef(payload), attemptId },
+        {
+          class: "unknown",
+          phase: "collect",
+          stage: "runner",
+          headSha: payload.head_sha!,
+          runnerReturned: false,
+          containerStateUnknown: true,
+          code: "review.paid.reply_lost",
+          message: `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`,
+          cause,
+        },
+        null,
+      ),
+    ).toEqual({ kind: "unknown" });
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.observation?.cause).toBe(cause);
+
+    // The sync lane replaces the placeholder text in place.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    const synced = failureRows(db);
+    expect(synced).toHaveLength(1);
+    expect(synced[0]!.id).toBe(attemptId);
+    expect(String(synced[0]!.error)).toContain("read the diff");
+    expect(String(synced[0]!.error)).not.toContain("no reply ever arrived");
+  });
+
   test("a delayed workflow settling an already-settled handoff writes no second row", async () => {
     // The gate the late-cause path actually relies on. A recovery pass can win
     // the row while the invocation is still running (or after it died); when that

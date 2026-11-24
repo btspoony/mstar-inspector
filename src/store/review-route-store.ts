@@ -21,7 +21,7 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
-import { isFailureCode, type FailureCode } from "../contracts/failure-codes";
+import { FAILURE_SUMMARIES, isFailureCode, type FailureCode } from "../contracts/failure-codes";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
@@ -55,6 +55,35 @@ const OBSERVATION_KEY = "attemptObservation";
  * delivery identity.
  */
 const REVIEWED_HEAD_KEY = "reviewedHeadSha";
+
+/**
+ * The fallback `review_failures.error` the lost-reply lane writes when no
+ * observation existed yet — two constants (anchored / pre-column), which is what
+ * lets the late-observation sync PROVE a row is that lane's own before rewriting
+ * it. The deadline and the grace are durable on the launch and handoff rows; the
+ * sentence states the conclusion.
+ *
+ * Owned HERE because two readers must agree on it: the sync selector that
+ * rewrites such a row, and the settlement's guard deciding whether a row already
+ * tells the attempt's story (a fallback row does not — it is a placeholder
+ * awaiting exactly that cause).
+ */
+export const LOST_REPLY_FALLBACK_ERROR =
+  "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived";
+export const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
+  "a pre-column legacy attempt carries no frozen deadline; its launch outlived the maximum attempt cap plus the post-deadline grace, and no reply ever arrived";
+
+/**
+ * The exact row shape the lost-reply lane writes for an attempt with no
+ * observation: attempt-keyed, the lane's own code, and one of its fallback
+ * sentences. The late-observation sync binds this shape — a row any other
+ * producer wrote is never selected, never rewritten.
+ */
+export const LOST_REPLY_FALLBACK_SHAPE = {
+  fallbackCode: "review.paid.reply_lost",
+  fallbackErrors: [LOST_REPLY_FALLBACK_ERROR, LOST_REPLY_FALLBACK_ERROR_UNANCHORED],
+  fallbackMessage: FAILURE_SUMMARIES["review.paid.reply_lost"],
+} as const;
 
 export type AttemptHandoff = {
   deliveryKey: string;
@@ -539,16 +568,43 @@ ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
-const ATTEMPT_FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE track_id = ?`;
+/**
+ * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
+ * outside the fallback sentences, or another code, or another summary. Any such
+ * row is a lane-authored story ("publication never started …") and the phase's
+ * later observation must not replace it.
+ *
+ * A fallback-shaped row is deliberately NOT a story: it exists precisely because
+ * no observation had arrived, and the late-observation sync rewrites it in place
+ * — so recording the observation is what makes that repair possible. COALESCE
+ * keeps a NULL code/message (a pre-0106 row) on the "story" side.
+ */
+const ATTEMPT_FAILURE_STORY_SQL = `
+SELECT 1 AS present FROM review_failures
+ WHERE track_id = ?
+   AND NOT (
+     COALESCE(error_code, '') = ?
+     AND COALESCE(error, '') IN (?, ?)
+     AND COALESCE(message, '') = ?
+   )`;
 
 /**
- * Whether a failure row already tells this attempt's story. The live settlement
- * records only an OBSERVATION — never a row — so a row existing here belongs to
- * a recovery lane that observed the outcome with more evidence than the phase
- * has, and its sentence must stand.
+ * Whether a failure row already tells this attempt's story in words the phase
+ * cannot improve on. The live settlement records only an OBSERVATION — never a
+ * row — so a row that exists here came from a recovery lane that saw materially
+ * more (a durable paid result with nothing staged), and its sentence must stand.
+ * A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
  */
-export async function attemptFailureRowExists(db: D1Like, attemptId: string): Promise<boolean> {
-  const row = await db.prepare(ATTEMPT_FAILURE_ROW_EXISTS_SQL).bind(attemptId).first<{ present: number }>();
+export async function attemptFailureStoryExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db
+    .prepare(ATTEMPT_FAILURE_STORY_SQL)
+    .bind(
+      attemptId,
+      LOST_REPLY_FALLBACK_SHAPE.fallbackCode,
+      ...LOST_REPLY_FALLBACK_SHAPE.fallbackErrors,
+      LOST_REPLY_FALLBACK_SHAPE.fallbackMessage,
+    )
+    .first<{ present: number }>();
   return row !== null;
 }
 const MARK_REFUSAL_PENDING_SQL = `
