@@ -1213,6 +1213,25 @@ export const en = {
       routeWorkflowStoredUnreadable: "off — unreadable",
       routeWorkflowEffectiveOn: "on — deliveries create a Workflow instance",
       routeWorkflowEffectiveOff: "off — deliveries are refused and nothing is created",
+      reviewsTitle: "Are reviews running?",
+      reviewsDescription:
+        "The effective answer right now, from the platform switch, the deployment's routing gate and the Apps whose reviews are paused. Queue backlog is below.",
+      reviewsAnswerRunning: "Reviews are running.",
+      reviewsAnswerPausedPlatform:
+        "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
+      reviewsAnswerBlockedDeploymentGate:
+        "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+      reviewsPlatformLabel: "Platform switch",
+      reviewsPlatformOn: "on — reviews are allowed",
+      reviewsPlatformOff: "off — reviews are paused",
+      reviewsPlatformUnreadable: "unreadable — treated as paused",
+      reviewsRouteLabel: "Deployment gate",
+      reviewsRouteOn: "on — deliveries create a Workflow instance",
+      reviewsRouteOff: "off or unreadable — deliveries create nothing",
+      reviewsRouteUnreadable: "not reported by this server",
+      reviewsPausedAppsLabel: "Apps with reviews paused",
+      reviewsPausedAppsUnreadable: "not readable",
+      reviewsPausedAppsLink: "Pause or resume a single App in the App list",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",

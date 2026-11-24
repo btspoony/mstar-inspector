@@ -40,6 +40,8 @@ import {
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
+  type ReviewsRunningAnswer,
+  type ReviewsRunningConfig,
   type RouteWorkflowConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
@@ -79,6 +81,81 @@ function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): stri
 /** A failed read trusts no stored value; an invalid row distrusts only its own field. */
 function sweepFieldUnreadable(sweep: SweepConfig, field: SweepField): boolean {
   return sweep.degraded && (sweep.invalid.length === 0 || sweep.invalid.includes(field));
+}
+
+const REVIEWS_ANSWER_KEYS: Record<ReviewsRunningAnswer, DictionaryKey> = {
+  running: "admin.runtime.reviewsAnswerRunning",
+  "paused-platform": "admin.runtime.reviewsAnswerPausedPlatform",
+  "blocked-deployment-gate": "admin.runtime.reviewsAnswerBlockedDeploymentGate",
+};
+
+function reviewsPlatform(locale: Locale, platform: ReviewsRunningConfig["platform"]): string {
+  if (platform.unreadable) return t(locale, "admin.runtime.reviewsPlatformUnreadable");
+  return t(
+    locale,
+    platform.enabled ? "admin.runtime.reviewsPlatformOn" : "admin.runtime.reviewsPlatformOff",
+  );
+}
+
+/**
+ * The one answer to "are reviews running": the derived sentence plus the three
+ * gate facts behind it. The paused-App count links to the App list instead of
+ * repeating its per-App toggles here.
+ */
+function ReviewsRunningCard({
+  locale,
+  data,
+  routeWorkflow,
+}: {
+  locale: Locale;
+  data: ReviewsRunningConfig;
+  routeWorkflow: RouteWorkflowConfig | null;
+}) {
+  return (
+    <SectionCard tier="primary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "admin.runtime.reviewsTitle")}</SectionCardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{t(locale, "admin.runtime.reviewsDescription")}</p>
+        <p className="mt-4 text-base font-medium" data-reviews-running="answer">
+          {t(locale, REVIEWS_ANSWER_KEYS[data.answer])}
+        </p>
+        <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsPlatformLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="platform">
+              {reviewsPlatform(locale, data.platform)}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsRouteLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="route">
+              {t(locale, routeWorkflow === null
+                ? "admin.runtime.reviewsRouteUnreadable"
+                : routeWorkflow.mode === "on" && !routeWorkflow.degraded
+                  ? "admin.runtime.reviewsRouteOn"
+                  : "admin.runtime.reviewsRouteOff")}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsPausedAppsLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="paused-apps">
+              {data.pausedApps === null
+                ? t(locale, "admin.runtime.reviewsPausedAppsUnreadable")
+                : data.pausedApps}
+            </dd>
+          </div>
+        </dl>
+        <a
+          className="mt-4 inline-flex w-fit text-sm text-primary hover:underline"
+          href="/_internal_admin/bots"
+        >
+          {t(locale, "admin.runtime.reviewsPausedAppsLink")}
+        </a>
+      </CardContent>
+    </SectionCard>
+  );
 }
 
 function CardOutcome({
@@ -725,10 +802,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const routeWorkflow = data.routeWorkflow;
           const drops = data.admissionDrops24h;
           const queue = data.queue;
+          const reviewsRunning = data.reviewsRunning;
           const maintenance = data.maintenance;
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
           return (
           <div className="flex flex-col gap-4">
+            {reviewsRunning === null ? null : (
+              <ReviewsRunningCard locale={locale} data={reviewsRunning} routeWorkflow={routeWorkflow} />
+            )}
             {maintenance === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>

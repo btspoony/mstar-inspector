@@ -166,6 +166,20 @@ export type RouteWorkflowConfig = {
   rejected: string | null;
 };
 
+export type ReviewsRunningAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
+
+/**
+ * One operations answer for "are reviews running": the derived answer plus the
+ * two facts behind it that the page does not already carry (the routing gate is
+ * the top-level `routeWorkflow`). `pausedApps` is `null` when the App count
+ * could not be read — never `0`.
+ */
+export type ReviewsRunningConfig = {
+  answer: ReviewsRunningAnswer;
+  platform: { enabled: boolean; unreadable: boolean };
+  pausedApps: number | null;
+};
+
 /**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
@@ -210,6 +224,7 @@ export type RuntimeConfig = {
   attemptCap: AttemptCapConfig | null;
   lostReplySettle: LostReplySettleConfig | null;
   routeWorkflow: RouteWorkflowConfig | null;
+  reviewsRunning: ReviewsRunningConfig | null;
   maintenance: MaintenanceConfig | null;
   admissionDrops24h: AdmissionDropCounts | null;
   queue: QueueBacklog | null;
@@ -384,6 +399,30 @@ function parseQueue(row: Json): QueueBacklog | null {
   };
 }
 
+function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
+  const raw = row.reviewsRunning;
+  if (typeof raw !== "object" || raw === null) return null;
+  const block = raw as Json;
+  const platform = block.platform;
+  if (typeof platform !== "object" || platform === null) return null;
+  const facts = platform as Json;
+  if (
+    (block.answer !== "running" &&
+      block.answer !== "paused-platform" &&
+      block.answer !== "blocked-deployment-gate") ||
+    typeof facts.enabled !== "boolean" ||
+    typeof facts.unreadable !== "boolean"
+  ) {
+    return null;
+  }
+  if (block.pausedApps !== null && typeof block.pausedApps !== "number") return null;
+  return {
+    answer: block.answer,
+    platform: { enabled: facts.enabled, unreadable: facts.unreadable },
+    pausedApps: block.pausedApps as number | null,
+  };
+}
+
 function parseGithubRateLimited(row: Json): number {
   const value = row.githubRateLimited24h;
   return typeof value === "number" ? value : 0;
@@ -404,6 +443,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     attemptCap: parseAttemptCap(body),
     lostReplySettle: parseLostReplySettle(body),
     routeWorkflow: parseRouteWorkflow(body),
+    reviewsRunning: parseReviewsRunning(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),

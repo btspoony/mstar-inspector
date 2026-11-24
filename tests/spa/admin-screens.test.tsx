@@ -1374,6 +1374,122 @@ describe("Runtime screen", () => {
     expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
     await surface.close();
   });
+
+  const reviews = (over: Record<string, unknown>) => ({
+    ...RUNTIME,
+    routeWorkflow: { mode: "on", saved: true, degraded: false, reason: null, rejected: null },
+    reviewsRunning: {
+      answer: "running",
+      platform: { enabled: true, unreadable: false },
+      pausedApps: 0,
+      ...over,
+    },
+  });
+
+  test("the reviews card states the running answer with its three gate facts", async () => {
+    const surface = await runtimeScreen(() =>
+      json(reviews({ pausedApps: 2, platform: { enabled: true, unreadable: false } })),
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are running.",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
+      "on — reviews are allowed",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
+      "on — deliveries create a Workflow instance",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe("2");
+    expect(
+      (surface.container.querySelector('a[href="/_internal_admin/bots"]') as unknown as Element | null)
+        ?.textContent,
+    ).toBe("Pause or resume a single App in the App list");
+    await surface.close();
+  });
+
+  test("a platform-paused answer names the switch as the cause", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...reviews({ answer: "paused-platform", platform: { enabled: false, unreadable: false } }),
+      }),
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
+      "off — reviews are paused",
+    );
+    await surface.close();
+  });
+
+  test("a blocked answer states the deployment gate and never reads as running", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...reviews({ answer: "blocked-deployment-gate" }),
+        routeWorkflow: { mode: "off", saved: false, degraded: false, reason: null, rejected: null },
+      }),
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
+      "off or unreadable — deliveries create nothing",
+    );
+    await surface.close();
+  });
+
+  test("a degraded gate read renders blocked with an unreadable platform and App count", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...reviews({
+          answer: "blocked-deployment-gate",
+          platform: { enabled: false, unreadable: true },
+          pausedApps: null,
+        }),
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      }),
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
+      "unreadable — treated as paused",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
+      "off or unreadable — deliveries create nothing",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe(
+      "not readable",
+    );
+    await surface.close();
+  });
+
+  test("an older server without a reviewsRunning block hides only that card", async () => {
+    const surface = await runtimeScreen(() => json(RUNTIME));
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')).toBeNull();
+    expect(surface.container.querySelector("#system-concurrency")).not.toBeNull();
+    await surface.close();
+  });
+
+  test("the Chinese face states the same answer and gate detail", async () => {
+    const surface = await runtimeScreen(
+      () => json(reviews({ answer: "blocked-deployment-gate" })),
+      "zh_CN",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递不会创建任何实例。",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
+      "on — 允许审查",
+    );
+    await surface.close();
+  });
 });
 
 describe("Workspaces screen", () => {

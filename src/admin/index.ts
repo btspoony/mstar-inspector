@@ -59,8 +59,9 @@ import { localizeDocument } from "../worker/document-locale";
 import { ADMIN_PAGES } from "../spa/admin/pages";
 import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
+import type { DashboardD1 } from "../dashboard/users";
 import type { Env } from "../worker/env";
-import { isServerFlagKey, listFlags } from "./flags";
+import { isFlagEnabled, isServerFlagKey, listFlags } from "./flags";
 import {
   DURATION_REPORT_CAP_MAX_MS,
   DURATION_REPORT_CAP_MIN_MS,
@@ -175,6 +176,50 @@ async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<Ru
   }
 }
 
+/**
+ * Apps whose reviews are paused. `review_enabled` is the App-level operational
+ * pause; the per-repository pause lives on the target and is a different
+ * answer, so it is not folded in here.
+ */
+const PAUSED_APPS_SQL = `
+  SELECT COUNT(*) AS n
+    FROM review_bots
+   WHERE deleted_at IS NULL AND review_enabled = 0`;
+
+type ReviewsAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
+
+/** The platform switch as the pipeline reads it; a failed read refuses, as the webhook does. */
+async function readPlatformSwitch(db: DashboardD1): Promise<{ enabled: boolean; unreadable: boolean }> {
+  try {
+    return { enabled: await isFlagEnabled(db, "review_global"), unreadable: false };
+  } catch {
+    return { enabled: false, unreadable: true };
+  }
+}
+
+async function readPausedApps(db: DashboardD1): Promise<number | null> {
+  try {
+    const row = await db.prepare(PAUSED_APPS_SQL).first<{ n: number }>();
+    return row?.n ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One answer for "are reviews running": the platform switch first, then the
+ * deployment's routing gate. An unreadable gate is never permission, so it
+ * answers blocked rather than running.
+ */
+function deriveReviewsAnswer(
+  platform: { enabled: boolean },
+  gate: { mode: "on" | "off"; degraded: boolean },
+): ReviewsAnswer {
+  if (!platform.enabled) return "paused-platform";
+  if (gate.mode !== "on" || gate.degraded) return "blocked-deployment-gate";
+  return "running";
+}
+
 async function readRuntime(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
   if (!login) return c.notFound();
@@ -196,6 +241,8 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     admissionDrops24h,
     githubRateLimited24h,
     queue,
+    platform,
+    pausedApps,
   ] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
@@ -211,6 +258,8 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
     readQueueBacklog(c.env.REVIEW_QUEUE),
+    readPlatformSwitch(db),
+    readPausedApps(db),
   ]);
   return c.json({
     concurrency: system.concurrency,
@@ -270,6 +319,11 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     admissionDrops24h,
     githubRateLimited24h,
     queue,
+    reviewsRunning: {
+      answer: deriveReviewsAnswer(platform, routeWorkflow),
+      platform: { enabled: platform.enabled, unreadable: platform.unreadable },
+      pausedApps,
+    },
     maintenance: await getMaintenanceMode(db),
   });
 }
