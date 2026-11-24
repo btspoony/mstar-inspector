@@ -1451,20 +1451,21 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
-  test("a degraded gate read concludes nothing — it never reads as blocked or settled", async () => {
+  test("a failed gate READ concludes nothing — it never reads as blocked or settled", async () => {
+    // reason: read-failed — the row could not be asked, so no cause is provable.
     const surface = await runtimeScreen(() =>
       json({
         ...reviews({
           answer: "unreadable-state",
-          platform: { enabled: false, unreadable: true },
+          platform: { enabled: true, unreadable: false },
           pausedApps: null,
         }),
         routeWorkflow: {
           mode: "off",
           saved: false,
           degraded: true,
-          reason: "untrusted",
-          rejected: '"ON"',
+          reason: "read-failed",
+          rejected: null,
         },
       }),
     );
@@ -1477,14 +1478,35 @@ describe("Runtime screen", () => {
     expect(answer).not.toContain("end as blocked");
     expect(answer).toContain("not settled");
     expect(answer).toContain("redelivered");
-    expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
-      "unreadable — the review state cannot be concluded",
-    );
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
       "unreadable — the review state cannot be concluded",
     );
     expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe(
       "not readable",
+    );
+    await surface.close();
+  });
+
+  test("a readable but untrusted gate reads as closed, and the answer says blocked", async () => {
+    // The row WAS read: closed is the gate's documented safe default and the
+    // queue settles it, so this must not borrow the unknowable state's copy.
+    const surface = await runtimeScreen(() =>
+      json({
+        ...reviews({ answer: "blocked-deployment-gate", pausedApps: null }),
+        routeWorkflow: {
+          mode: "off",
+          saved: false,
+          degraded: true,
+          reason: "untrusted",
+          rejected: '"ON"',
+        },
+      }),
+    );
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
+    );
+    expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
+      'off — the stored value is not on or off, so deliveries end as blocked',
     );
     await surface.close();
   });

@@ -280,6 +280,78 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect((await reviewRunState(db as never)).state).toBe("blocked-deployment-gate");
   });
 
+  test("a readable but untrusted gate settles as blocked, with the gate's own code", async () => {
+    lines.length = 0;
+    const db = await createSeededTestD1();
+    // The row exists but holds a value the gate refuses (not on/off).
+    db.raw
+      .prepare(`INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.route.workflow', 'ON', ?)`)
+      .run(new Date().toISOString());
+    storeSwitch(db, 1);
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-7");
+    const { batch, acks } = batchOf(payload);
+    const { kv } = kvDouble();
+
+    await runReviewQueueBatch(
+      batch,
+      { DB: db as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
+      CTX,
+    );
+
+    expect(acks).toHaveLength(1);
+    expect(checkRow(db).terminal_failure_status).toBe("paused");
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.error_code).toBe("review.blocked.deployment_gate");
+    expect((await reviewRunState(db as never)).state).toBe("blocked-deployment-gate");
+  });
+
+  test("a gate whose READ fails throws with nothing settled", async () => {
+    lines.length = 0;
+    const db = await createSeededTestD1();
+    storeSwitch(db, 1);
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-8");
+    const { batch, acks } = batchOf(payload);
+    const { kv } = kvDouble();
+    // The gate's own point read fails; every other statement works.
+    const gateFault = {
+      prepare: (sql: string) => {
+        const statement = db.prepare(sql) as unknown as Record<string, unknown> & {
+          bind: (...args: unknown[]) => unknown;
+        };
+        return new Proxy(statement, {
+          get(target, property, receiver) {
+            if (property !== "bind") return Reflect.get(target, property, receiver);
+            return (...args: unknown[]) => {
+              if (args[0] === "review.route.workflow") throw new Error("gate unavailable");
+              return target.bind(...args);
+            };
+          },
+        });
+      },
+      batch: (statements: never[]) => db.batch(statements),
+    };
+
+    await expect(
+      runReviewQueueBatch(
+        batch,
+        { DB: gateFault as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
+        CTX,
+      ),
+    ).rejects.toThrow("the review route gate is unreadable (read-failed)");
+
+    expect(acks).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(checkRow(db).desired).toBe("in_progress");
+    expect(checkRow(db).terminal_failure_status).toBeNull();
+    const closed = linesOf("review_route_gate_closed");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.answer).toBe("unreadable-state");
+    expect(closed[0]!.gate_reason).toBe("read-failed");
+  });
+
   test("a failed failure-row insert leaves the delivery unacked so it is redelivered", async () => {
     lines.length = 0;
     const db = await createSeededTestD1();

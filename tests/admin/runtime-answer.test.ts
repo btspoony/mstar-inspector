@@ -145,8 +145,10 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
-  test("a gate read that degrades answers unreadable-state, never blocked and never running", async () => {
+  test("a readable but untrusted gate answers blocked-deployment-gate — closed is settled, not unknown", async () => {
     const db = fixture();
+    // A readable row the gate refuses to read as on/off: the documented answer is
+    // the safe default `off`, which the queue settles. This is NOT a read fault.
     setRouteGate(db, "ON");
     const res = await worker.fetch(
       new Request("https://worker.local/_internal_admin/api/runtime", {
@@ -158,8 +160,45 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       reviewsRunning: { answer: string };
       routeWorkflow: { mode: string; degraded: boolean; reason: string };
     };
-    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
     expect(body.routeWorkflow).toMatchObject({ mode: "off", degraded: true, reason: "untrusted" });
+  });
+
+  test("a gate READ FAULT answers unreadable-state — the row could not be asked", async () => {
+    const db = fixture();
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      {
+        ...envFor(db),
+        // Only the GATE's own point read fails; every other settings reader keeps
+        // working, so the fault is the gate's and nothing else's.
+        DB: {
+          prepare: (sql: string) => {
+            const statement = db.prepare(sql) as unknown as Record<string, unknown> & {
+              bind: (...args: unknown[]) => unknown;
+            };
+            return new Proxy(statement, {
+              get(target, property, receiver) {
+                if (property !== "bind") return Reflect.get(target, property, receiver);
+                return (...args: unknown[]) => {
+                  if (args[0] === "review.route.workflow") throw new Error("settings unavailable");
+                  return target.bind(...args);
+                };
+              },
+            });
+          },
+          batch: (statements: never[]) => db.batch(statements),
+        },
+      } as unknown as Env,
+    );
+    const body = (await res.json()) as {
+      reviewsRunning: { answer: string };
+      routeWorkflow: { degraded: boolean; reason: string };
+    };
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.routeWorkflow).toMatchObject({ degraded: true, reason: "read-failed" });
   });
 
   test("the Apps link is workspace-scoped when the operator has a workspace", async () => {
@@ -207,6 +246,10 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     // path never performs.
     const closed = fixture();
     expect((await readAnswer(closed)).answer).toBe("blocked-deployment-gate");
+    // An untrusted readable row shares the blocked answer, because it IS closed.
+    const untrusted = fixture();
+    setRouteGate(untrusted, "ON");
+    expect((await readAnswer(untrusted)).answer).toBe("blocked-deployment-gate");
 
     const degraded = fixture();
     setRouteGate(degraded, "on");

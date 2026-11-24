@@ -707,13 +707,16 @@ Merging this code does not by itself enable the review route. The queue handler
   or `review.blocked.deployment_gate` (gate not open) failure row plus the paused Check
   conclusion, then an ack — no Workflow instance is created. One structured line
   (`event: "review_route_gate_closed"`) names the answer, the gate, its source and the batch
-  size. An UNREADABLE gate or platform switch is not a halt and not a cause: nothing routes,
-  nothing is settled, and the batch throws so the queue redelivers it. That state answers
-  `unreadable-state` on the operator card, which claims no settlement.
+  size. A gate whose READ failed, or an unreadable platform switch, is not a halt and not a
+  cause: nothing routes, nothing is settled, and the batch throws so the queue redelivers it.
+  That state answers `unreadable-state` on the operator card, which claims no settlement. A
+  readable row whose value is not `on`/`off` (`untrusted`, like `malformed`) is NOT that state:
+  the gate's documented answer is the safe default `off`, so it is closed and settled.
 
 Both the batch and the operator answer read ONE derivation (`reviewRunState`), so they can never
-name different causes: a read fault is `unreadable-state`, the deployment gate is judged next,
-and only a readable `off` platform switch answers `paused-platform`. A failed failure-row insert
+name different causes: a failed READ is `unreadable-state`, the deployment gate is judged next
+(absent, `off`, `untrusted` and `malformed` all answer `blocked-deployment-gate`), and only a
+readable `off` platform switch answers `paused-platform`. A failed failure-row insert
 is not swallowed — the message stays unacked and is redelivered, and the deterministic row id plus
 `ON CONFLICT(id) DO NOTHING` make the replay a no-op.
 

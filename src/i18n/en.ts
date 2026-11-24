@@ -1231,6 +1231,7 @@ export const en = {
       reviewsRouteOn: "on — deliveries create a Workflow instance",
       reviewsRouteOff: "off — queued deliveries end as blocked",
       reviewsRouteDegraded: "unreadable — the review state cannot be concluded",
+      reviewsRouteUntrusted: "off — the stored value is not on or off, so deliveries end as blocked",
       reviewsRouteUnreadable: "not reported by this server",
       reviewsPausedAppsLabel: "Apps with reviews paused",
       reviewsPausedAppsUnreadable: "not readable",

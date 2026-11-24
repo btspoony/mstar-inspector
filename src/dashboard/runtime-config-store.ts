@@ -779,14 +779,18 @@ export type ReviewRunState = {
  *
  * Precedence is the queue's, because the queue is the thing that acts:
  *
- * 1. A READ FAULT on either fact is `unreadable-state`. It is not a closed
- *    gate and not a pause: the queue throws and the delivery is redelivered, so
- *    nothing was settled and the answer must not claim a cause it cannot prove.
- * 2. A gate that is not `on` (absent, `off`, or an untrusted stored value) is
- *    `blocked-deployment-gate`. It is a fact about the deployment, and it
- *    outranks a paused platform: with both closed the deliveries are settled by
- *    the gate, so the answer must not name the platform pause instead.
- * 3. Only a readable `off` platform switch is `paused-platform`.
+ * 1. An UNKNOWABLE fact is `unreadable-state`: the gate read itself failed
+ *    (`read-failed` — the row could not be asked) or the platform switch read
+ *    threw. The queue throws and the delivery is redelivered, so nothing was
+ *    settled and the answer must not claim a cause.
+ * 2. A gate that is not `on` is `blocked-deployment-gate`, and that includes a
+ *    readable-but-untrusted or malformed row: the gate's documented answer for
+ *    those is the safe default `off` (`degraded` says the value could not be
+ *    read as on/off, not that the outcome is unknown). The queue settles them
+ *    visibly, so they are a fact about the deployment, not a fault.
+ * 3. A readable `off` platform switch is `paused-platform`, after the gate —
+ *    with both closed the deliveries are settled by the gate, so the answer
+ *    must not name the platform pause instead.
  */
 export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   const gate = await getReviewRouteWorkflowGate(db);
@@ -796,7 +800,9 @@ export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   } catch {
     platform = { enabled: false, unreadable: true };
   }
-  if (gate.degraded || platform.unreadable) return { state: "unreadable-state", gate, platform };
+  if (gate.reason === "read-failed" || platform.unreadable) {
+    return { state: "unreadable-state", gate, platform };
+  }
   if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
   return { state: platform.enabled ? "running" : "paused-platform", gate, platform };
 }

@@ -1722,11 +1722,14 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
      gap between those two steps on an environment whose row does not exist yet;
      every later deploy starts from `on` and has no such gap.
 
-   **"Deployment gate closed" is not "state unreadable".** A closed gate (absent,
-   `off`, or an untrusted value) is a proven cause: deliveries are settled with a
-   `review.blocked.deployment_gate` row and a paused Check. A read FAULT on the
-   gate or on the platform switch (`server_flags` unreachable) is not a cause —
-   nothing is routed and nothing is settled; the batch throws and the queue
+   **"Deployment gate closed" is not "state unreadable".** A closed gate is a
+   proven cause and deliveries are settled with a
+   `review.blocked.deployment_gate` row and a paused Check. That covers an absent
+   row, a stored `off`, and a readable row whose value is neither (`untrusted`):
+   the gate's documented answer for an unreadable VALUE is the safe default
+   `off`, so it is closed, not unknowable. Only a read that could not happen —
+   the gate row or `server_flags` unreachable (`read-failed`) — is not a cause:
+   nothing is routed, nothing is settled, the batch throws and the queue
    redelivers it. The console reports that as `unreadable-state`, and the runbook
    answer for it is "retry the read", not "open the gate".
 

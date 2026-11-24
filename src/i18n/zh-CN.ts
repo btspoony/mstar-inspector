@@ -1141,6 +1141,7 @@ export const zhCN: Dictionary = {
       reviewsRouteOn: "on — 投递会创建 Workflow 实例",
       reviewsRouteOff: "off — 队列中的投递会以阻塞结束",
       reviewsRouteDegraded: "无法读取 — 无法对审查状态下定论",
+      reviewsRouteUntrusted: "off — 存储值不是 on 或 off，投递会以阻塞结束",
       reviewsRouteUnreadable: "本服务器未报告该字段",
       reviewsPausedAppsLabel: "已暂停审查的 App 数",
       reviewsPausedAppsUnreadable: "无法读取",

@@ -134,11 +134,15 @@ function ReviewsRunningCard({
             <dd className="font-medium" data-reviews-running="route">
               {t(locale, routeWorkflow === null
                 ? "admin.runtime.reviewsRouteUnreadable"
-                : routeWorkflow.degraded
+                : routeWorkflow.reason === "read-failed"
                   ? "admin.runtime.reviewsRouteDegraded"
-                  : routeWorkflow.mode === "on"
-                    ? "admin.runtime.reviewsRouteOn"
-                    : "admin.runtime.reviewsRouteOff")}
+                  : routeWorkflow.degraded
+                    // Readable but not on/off: the gate's safe default is closed
+                    // and deliveries ARE settled as blocked — not unknowable.
+                    ? "admin.runtime.reviewsRouteUntrusted"
+                    : routeWorkflow.mode === "on"
+                      ? "admin.runtime.reviewsRouteOn"
+                      : "admin.runtime.reviewsRouteOff")}
             </dd>
           </div>
           <div className="flex flex-col gap-1">

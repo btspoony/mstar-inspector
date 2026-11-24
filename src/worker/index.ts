@@ -759,9 +759,9 @@ export async function runReviewQueueBatch(
       }),
     );
     throw new Error(
-      gate.degraded
-        ? `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`
-        : "the platform review switch is unreadable — the batch is redelivered",
+      run.platform.unreadable
+        ? "the platform review switch is unreadable — the batch is redelivered"
+        : `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`,
     );
   }
   const { settleHaltedBatch } = await loadConsumer();
