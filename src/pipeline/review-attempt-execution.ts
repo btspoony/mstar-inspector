@@ -2512,6 +2512,12 @@ export type PhaseFailureContext = {
   sendAttemptPublicationId: string | null;
   /** Which GitHub limit refused the step, read from the real response. */
   rateLimited?: "primary" | "secondary" | null;
+  /**
+   * The stage the runner last traced, read from the wrapper's own progress.
+   * A CLASSIFIED throw carries no such property of its own, so this is the only
+   * way the lost-doc-read and unobservable paths can say where they stopped.
+   */
+  lastStage?: string;
 };
 
 /** The facts a transient phase error carries, readable WITHOUT its prototype. */
@@ -2575,7 +2581,9 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
   // property on the error, which the platform preserves across a step boundary.
   const ownStage = (err as { lastStage?: unknown } | null)?.lastStage;
   const lastStage =
-    facts?.lastStage ?? (typeof ownStage === "string" && ownStage !== "" ? ownStage : undefined);
+    facts?.lastStage ??
+    (typeof ownStage === "string" && ownStage !== "" ? ownStage : undefined) ??
+    ctx.lastStage;
   const base = {
     phase: ctx.phase,
     stage: ctx.stage,
@@ -2705,6 +2713,7 @@ export async function prepareAttempt(deps: ProcessDeps, ref: AttemptRef): Promis
         stage: progress.failureStage,
         headSha: observed.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs:
           observed.runnerEffectiveBudgetMs ??
@@ -3644,6 +3653,7 @@ export async function reviewAttempt(
         stage: progress.failureStage,
         headSha: prepared.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: prepared.runnerEffectiveMs,
         changedLines: prepared.observedChangedLines,
@@ -3692,6 +3702,7 @@ export async function collectAttempt(
         stage: progress.failureStage,
         headSha: prepared.headSha,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: prepared.runnerEffectiveMs,
         changedLines: prepared.observedChangedLines,
@@ -4381,6 +4392,7 @@ export async function publishAttempt(
         stage: progress.failureStage,
         headSha: null,
         runnerReturned: progress.runnerReturned,
+        ...(progress.lastStage === undefined ? {} : { lastStage: progress.lastStage }),
         tier: ref.level,
         budgetMs: 0,
         changedLines: null,
@@ -4950,7 +4962,12 @@ export async function settleAttemptFailure(
    */
   const recordObservation = async (): Promise<void> => {
     const secrets = await sealedSecretValues(deps, attemptId);
+    // Where it stopped belongs in the composed text: the reconciler renders this
+    // observation into the row's `error` verbatim, and nothing there can know a
+    // stage the phase already parsed out of the runner's stderr.
     const observedMessage = redactExactSecrets(redactSecrets(detail), secrets);
+    const messageWithStage =
+      failure.lastStage === undefined ? observedMessage : `${observedMessage} (last stage: ${failure.lastStage})`;
     const observedCause =
       failure.cause === undefined ? undefined : redactExactSecrets(redactSecrets(failure.cause), secrets);
     try {
@@ -4958,7 +4975,7 @@ export async function settleAttemptFailure(
         attemptId,
         observation: {
           code,
-          message: observedMessage,
+          message: messageWithStage,
           ...(observedCause === undefined ? {} : { cause: observedCause }),
         },
         nowMs: Date.now(),

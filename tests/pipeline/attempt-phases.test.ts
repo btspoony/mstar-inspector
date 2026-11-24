@@ -3913,6 +3913,45 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(handoff?.observation?.message).toContain("report read: transport closed");
   });
 
+  test("a CLASSIFIED post-runner throw records the stage the attempt already holds", async () => {
+    // The lost-doc-read path throws `AttemptUnknownError`, which carries a code
+    // and a cause but no `lastStage` own property — and the runner has already
+    // returned. Without the wrapper's progress the record could not say where it
+    // stopped, which is exactly what the reconciler's row would then lack.
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    const record = phaseFailureRecord(
+      {
+        phase: "review",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: true,
+        tier: "default",
+        budgetMs: 600_000,
+        changedLines: 17,
+        sendAttemptPublicationId: null,
+        lastStage: "synthesize",
+      },
+      new AttemptUnknownError(
+        "the attempt container could not be read (reply-lost) — its result is not collected",
+        "review.paid.reply_lost",
+      ),
+    );
+    expect(record).not.toBeNull();
+    expect(record!.lastStage).toBe("synthesize");
+  });
+
   test("no secret value appears in any step return value", async () => {
     const paidKey = "sk-step-boundary-secret-1";
     const { deps, db } = await makeDeps();
@@ -3976,6 +4015,17 @@ describe("the runner's last traced stage", () => {
     expect(lastRunnerStage(stageLine("z".repeat(200)))!.length).toBeLessThanOrEqual(60);
   });
 
+  test("a stage that IS an exact session secret is redacted by the exact-value pass", () => {
+    // Shape redaction cannot see a UUID-shaped or plain-word credential; only the
+    // session's own sealed values can. The stage is runner-controlled text, so it
+    // gets the same two layers the stderr tail gets.
+    const sealed = "9d1f4c0a-77b3-4a1e-9a55-c0ffee123456";
+    expect(lastRunnerStage(stageLine(sealed), [sealed])).toBe(REDACTED);
+    expect(lastRunnerStage(stageLine(`seats ${sealed} done`), [sealed])).toBe(`seats ${REDACTED} done`);
+    // ...and with no secret set it is only shape-redacted, as before.
+    expect(lastRunnerStage(stageLine(sealed))).toBe(sealed);
+  });
+
   test("a real runner failure carries the stage into `error` and the log field", async () => {
     const { deps, db } = await makeDeps();
     const payload = makePayload();
@@ -4005,6 +4055,46 @@ describe("the runner's last traced stage", () => {
     expect(row.message).not.toContain("synthesize");
     const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
     expect(line?.fields.last_stage).toBe("synthesize");
+  });
+
+  test("an exact session secret in a stage never reaches the row or the log field", async () => {
+    // The end-to-end half of the exact-value rule: the stage is read from the
+    // runner's own stderr, so a run that pasted its key into a stage name must
+    // still be redacted everywhere the value can surface.
+    const paidKey = "9d1f4c0a-77b3-4a1e-9a55-c0ffee123456";
+    const { deps, db } = await makeDeps();
+    deps.runnerConfigs.set(TEST_APP_ID, {
+      appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
+      modelOverrides: undefined,
+      customProviders: undefined,
+    });
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    h.sandbox.runnerExitCode = 1;
+    h.sandbox.runnerStderr = `${stageLine(`seats ${paidKey}`)}\nboom\n`;
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    await expect(runReviewAttemptWorkflow(deps, ref, stepStore(new Map()), async () => {})).rejects.toThrow(
+      /runner failed/,
+    );
+
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain(`(last stage: seats ${REDACTED})`);
+    expect(String(row.error)).not.toContain(paidKey);
+    const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
+    expect(line?.fields.last_stage).toBe(`seats ${REDACTED}`);
+    // Nothing on the boundary leaked it either.
+    expect(JSON.stringify(h.logLines)).not.toContain(paidKey);
   });
 
   test("a budget stop carries the stage of the seat that ran out of time", async () => {

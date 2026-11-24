@@ -1634,11 +1634,13 @@ const STAGE_NAME_MAX_CHARS = 60;
  * A malformed line, a non-string stage or an empty one is skipped rather than
  * ending the scan — the earlier stage is still better evidence than nothing.
  *
- * The value passes the SAME redaction the failure text gets, so a stage name
- * that happens to carry a credential shape cannot leak through this field, and
- * it is bounded because the line is runner-controlled text.
+ * The stage is runner-controlled text, so it gets the SAME two-layer redaction
+ * the stderr tail gets: shape patterns (`redactSecrets`) AND every exact session
+ * secret the exec carried (`secretValues`). A stage that happens to BE a
+ * credential — or to contain one verbatim — cannot leak through this field. The
+ * result is bounded, because the line is attacker-influenced text.
  */
-export function lastRunnerStage(stderr: string): string | undefined {
+export function lastRunnerStage(stderr: string, secretValues: readonly string[] = []): string | undefined {
   let stage: string | undefined;
   for (const line of stderr.split(/\r?\n/)) {
     if (!line.includes("review_stage")) continue;
@@ -1653,26 +1655,30 @@ export function lastRunnerStage(stderr: string): string | undefined {
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const { event, stage: candidate } = parsed as { event?: unknown; stage?: unknown };
     if (event !== "review_stage" || typeof candidate !== "string") continue;
-    const bounded = redactSecrets(candidate).trim().slice(0, STAGE_NAME_MAX_CHARS);
+    const bounded = redactExactSecrets(redactSecrets(candidate), secretValues).trim().slice(0, STAGE_NAME_MAX_CHARS);
     if (bounded !== "") stage = bounded;
   }
   return stage;
 }
 
-/** The tail a failure text appends so an operator can see where the runner stopped. */
-function lastStageSuffix(stderr: string): string {
-  const stage = lastRunnerStage(stderr);
+/**
+ * The text a failure message appends for an already-redacted stage. Derived from
+ * the ONE parse above: a caller that needs both the field and the sentence reads
+ * stderr once and passes the result here, so the two can never disagree.
+ */
+export function lastStageNote(stage: string | undefined): string {
   return stage === undefined ? "" : ` (last stage: ${stage})`;
 }
 
 function runnerFailureDetail(
   run: { stdout: string; stderr: string; exitCode: number },
   secretValues: readonly string[],
+  lastStage: string | undefined,
 ): string {
   const base = `runner failed: exit ${run.exitCode}, stdout ${new TextEncoder().encode(run.stdout).length}B`;
   const tail = redactExactSecrets(redactSecrets(run.stderr), secretValues).trim().slice(-STDERR_TAIL_MAX);
   const detail = tail === "" ? `${base}, stderr empty` : `${base}, stderr tail: ${tail}`;
-  return `${detail}${lastStageSuffix(run.stderr)}`;
+  return `${detail}${lastStageNote(lastStage)}`;
 }
 
 function toBase64Utf8(text: string): string {
@@ -2317,7 +2323,7 @@ export async function runReviewAttempt(input: {
   const runnerElapsedMs = Date.now() - progress.runnerStartedAt;
   // Where the review stopped, once, for every path below: the runner traces each
   // stage to stderr and nothing else on this row can say it.
-  const lastStage = lastRunnerStage(run.stderr);
+  const lastStage = lastRunnerStage(run.stderr, progress.secretValues);
   progress.lastStage = lastStage;
   if (run.exitCode === 124) {
     deps.log.warn(
@@ -2339,7 +2345,7 @@ export async function runReviewAttempt(input: {
         seatsStopped: null,
         changedLines: observedChangedLines,
       },
-      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B${lastStageSuffix(run.stderr)}`,
+      `runner exec killed at its deadline: exit 124, stdout ${new TextEncoder().encode(run.stdout).length}B${lastStageNote(lastStage)}`,
       lastStage,
     );
   }
@@ -2347,7 +2353,7 @@ export async function runReviewAttempt(input: {
     // The detail text already names the stage for a reader; the own property
     // carries it as DATA too, so the failure record and its log field get it
     // without anything reparsing the sentence.
-    const detail = runnerFailureDetail(run, progress.secretValues);
+    const detail = runnerFailureDetail(run, progress.secretValues, lastStage);
     const failure = new Error(detail);
     if (lastStage !== undefined) (failure as Error & { lastStage?: string }).lastStage = lastStage;
     throw failure;
@@ -2374,7 +2380,7 @@ export async function runReviewAttempt(input: {
         seatsStopped: budgetSignal.signal.seatsStopped,
         changedLines: observedChangedLines,
       },
-      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})${lastStageSuffix(run.stderr)}`,
+      `runner signalled budget exhaustion (seats ${budgetSignal.signal.seatsStopped}/${budgetSignal.signal.seatsDispatched})${lastStageNote(lastStage)}`,
       lastStage,
     );
   }
