@@ -17,7 +17,7 @@ import {
   type ChecksOctokit,
 } from "../../src/pipeline/checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import { reviewRunState } from "../../src/dashboard/runtime-config-store";
+import { reviewRunState, setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
 
 // Static import cannot work here: `src/worker/index` loads the workerd shim at
 // module scope, so the shim above must be registered first (same seam as
@@ -98,6 +98,28 @@ function kvDouble() {
     delete: async () => {},
   };
   return { kv: kv as never, puts };
+}
+
+/** A queued mention claim, as the webhook lane writes it before the queue send. */
+function seedClaim(db: TestD1, payload: ReviewJobPayload): void {
+  db.raw
+    .prepare(
+      `INSERT INTO comment_trigger_claims
+         (installation_id, owner, repo, pr_number, comment_id, state, payload_json, attempts, created_ms, queued_ms)
+       VALUES (?, ?, ?, ?, ?, 'queued', ?, 0, 1, 1)`,
+    )
+    .run(
+      payload.installation_id,
+      payload.owner,
+      payload.repo,
+      payload.pr_number,
+      payload.comment_id!,
+      JSON.stringify(payload),
+    );
+}
+
+function mentionPayload(commentId: number): ReviewJobPayload {
+  return makePayload({ head_sha: null, action: "created", triggered_by: "issue_comment", comment_id: commentId });
 }
 
 function scriptedChecks(): ChecksOctokit {
@@ -402,5 +424,80 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect(acks).toHaveLength(1);
     expect(failureRows(db).filter((row) => row.error_code === "review.paused.platform")).toHaveLength(0);
     expect(checkRow(db).terminal_failure_status).toBe("paused");
+  });
+
+  test("platform off + maintenance on: the batch defers, it does not halt-settle", async () => {
+    lines.length = 0;
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    await setMaintenanceMode(
+      db,
+      { enabled: true, reason: "repository backfill", actor: "tester" },
+      "2026-11-24T09:00:00.000Z",
+    );
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-9");
+    const { batch, acks, retries } = batchOf(payload);
+    const { kv, puts } = kvDouble();
+
+    await runReviewQueueBatch(
+      batch,
+      { DB: db as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
+      CTX,
+    );
+
+    expect(retries).toHaveLength(1);
+    expect(acks).toHaveLength(0);
+    expect(puts).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(checkRow(db).terminal_failure_status).toBeNull();
+    expect(linesOf("maintenance_defer")).toHaveLength(1);
+  });
+
+  test("a halt-settled bot mention closes its comment claim — nothing left for the sweep to resend", async () => {
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    const payload = mentionPayload(9501);
+    seedClaim(db, payload);
+    const { batch, acks } = batchOf(payload);
+    const { kv } = kvDouble();
+
+    await runReviewQueueBatch(batch, { DB: db as never, IDEMPOTENCY_KV: kv } as never, CTX);
+
+    expect(acks).toHaveLength(1);
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.error_code).toBe("review.paused.platform");
+    const claim = db.raw
+      .query("SELECT state, consumed_ms, payload_json FROM comment_trigger_claims")
+      .get() as { state: string; consumed_ms: number | null; payload_json: string | null };
+    expect(claim.state).toBe("consumed");
+    expect(claim.consumed_ms).not.toBeNull();
+    expect(claim.payload_json).toBeNull();
+  });
+
+  test("two halted mentions of one PR keep a row each, and replaying a delivery shares its row", async () => {
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    const first = mentionPayload(9511);
+    const second = mentionPayload(9512);
+    seedClaim(db, first);
+    seedClaim(db, second);
+    const { kv } = kvDouble();
+    const env = { DB: db as never, IDEMPOTENCY_KV: kv } as never;
+
+    await runReviewQueueBatch(batchOf(first).batch, env, CTX);
+    await runReviewQueueBatch(batchOf(second).batch, env, CTX);
+    expect(failureRows(db)).toHaveLength(2);
+
+    await runReviewQueueBatch(batchOf(first).batch, env, CTX);
+
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(2);
+    expect(failures.map((row) => row.error_code)).toEqual(["review.paused.platform", "review.paused.platform"]);
+    expect(new Set(failures.map((row) => row.id)).size).toBe(2);
   });
 });

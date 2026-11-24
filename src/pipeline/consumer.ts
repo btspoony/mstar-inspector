@@ -93,6 +93,7 @@ import type { Message, MessageBatch, Workflow } from "@cloudflare/workers-types"
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   clearCommentClaimPayload,
+  closeCommentClaim,
   deliveryKeyOf,
   guardDropDedupeKeyOf,
   markAttemptHandoff,
@@ -967,9 +968,15 @@ const HALT_SETTLEMENT = {
  * The row is written BEFORE the Check is settled and its failure is NOT
  * caught: a failed insert must leave the message unacked so the queue
  * redelivers it — the plan's "every queued delivery ends with a durable failure
- * row" cannot hold on a best-effort write. The row's `id` is deterministic per
- * delivery identity and the insert is `ON CONFLICT DO NOTHING`, so the
- * redelivery rewrites nothing.
+ * row" cannot hold on a best-effort write. The row's `id` is the delivery's
+ * own identity (`deliveryKeyOf`) and the insert is `ON CONFLICT DO NOTHING`,
+ * so two mentions of one PR each keep their row while a replay of one
+ * delivery rewrites nothing.
+ *
+ * An acked bot mention with an open comment claim is a resend the sweep would
+ * deliver to a platform that cannot run it (or replay once it resumes), so
+ * the claim is closed with the settlement (`closeCommentClaim`) and that
+ * failure is uncaught for the same reason.
  */
 export async function settleHaltedBatch(
   batch: MessageBatch<ReviewJobPayload>,
@@ -1015,7 +1022,7 @@ export async function settleHaltedBatch(
     }
     const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
     await deps.failureStore.record({
-      id: `${halt.cause}:${payload.installation_id}:${identity}@${payload.head_sha ?? ""}`,
+      id: `${halt.cause}:${deliveryKeyOf(payload)}`,
       target_id: payload.targetId,
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -1031,6 +1038,70 @@ export async function settleHaltedBatch(
       }`,
     });
     await settleSkippedRow(deps, payload, payload.head_sha, halt.checkReason, { paused: true });
+    await closeCommentClaim(deps.env.DB, payload);
+    message.ack();
+  }
+}
+
+/**
+ * The maintenance window (D20) defers the whole invocation: a mid-upgrade
+ * pipeline write could land on a ledger row the backfill just repointed.
+ * Every delivery is DEFERRED where the queue still allows it — acking would
+ * drop the review for good, while the window is temporary. ONE line per
+ * invocation (the queue and the batch size it deferred), not one per message:
+ * the batch is the unit the platform redelivers.
+ *
+ * `retry` is the FIRST choice because it is the only path that keeps the
+ * review. Two deliveries have no redelivery left — a runtime that offers no
+ * `message.retry`, and a message already on its LAST platform delivery
+ * (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
+ * every `retry()` spends one). Those are dropped, so each one takes the
+ * failure carrier instead of vanishing: one `review_failures` row
+ * (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
+ * an ack.
+ *
+ * shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
+ * longer spends every delivery, and each spent one is now alerted through
+ * `review_failures` — upgrade: a re-enqueue-on-close drain, once a window
+ * routinely outlives the retry cover.
+ */
+export async function deferMaintenanceBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  deps: ProcessDeps,
+): Promise<void> {
+  if (batch.messages[0] === undefined) return;
+  const deferral = {
+    ...payloadIdentityFields(batch.messages[0].body),
+    event: "maintenance_defer" as const,
+    queue: batch.queue,
+    batch_size: batch.messages.length,
+  };
+  deps.log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
+  for (const message of batch.messages) {
+    if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
+      message.retry({ delaySeconds: 300 });
+      continue;
+    }
+    const body = message.body;
+    await deps.failureStore
+      .record({
+        target_id: body.targetId,
+        installation_id: body.installation_id,
+        owner: body.owner,
+        repo: body.repo,
+        pr_number: body.pr_number,
+        head_sha: body.head_sha ?? "",
+        stage: MAINTENANCE_DEFERRED_STAGE,
+        code: "review.delivery.deferred",
+        trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
+        message: FAILURE_SUMMARIES["review.delivery.deferred"],
+        error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
+      })
+      .catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
+        throw err;
+      });
     message.ack();
   }
 }
@@ -1062,62 +1133,10 @@ export function createReviewConsumer(
   return async (batch) => {
     // The maintenance window (D20) defers the whole invocation: a mid-upgrade
     // pipeline write could land on a ledger row the backfill just repointed.
-    // ONE read per invocation; nothing else in the batch runs. Every delivery
-    // is DEFERRED where the queue still allows it — acking would drop the
-    // review for good, while the window is temporary. ONE line per invocation
-    // (the queue and the batch size it deferred), not one per message: the batch
-    // is the unit the platform redelivers.
-    //
-    // `retry` is the FIRST choice because it is the only path that keeps the
-    // review. Two deliveries have no redelivery left — a runtime that offers no
-    // `message.retry`, and a message already on its LAST platform delivery
-    // (`wrangler.jsonc` max_retries 5 ⇒ QUEUE_MAX_ATTEMPTS 6 deliveries, and
-    // every `retry()` spends one). Those are dropped, so each one takes the
-    // failure carrier instead of vanishing: one `review_failures` row
-    // (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
-    // an ack.
-    //
-    // shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
-    // longer spends every delivery, and each spent one is now alerted through
-    // `review_failures` — upgrade: a re-enqueue-on-close drain, once a window
-    // routinely outlives the retry cover.
+    // ONE read per invocation; nothing else in the batch runs.
     const maintenance = await getMaintenanceMode(env.DB);
     if (maintenanceClosed(maintenance)) {
-      if (batch.messages[0] === undefined) return;
-      const deferral = {
-        ...payloadIdentityFields(batch.messages[0].body),
-        event: "maintenance_defer" as const,
-        queue: batch.queue,
-        batch_size: batch.messages.length,
-      };
-      log.warn(deferral, "delivery deferred — the platform is in its maintenance window");
-      for (const message of batch.messages) {
-        if (typeof message.retry === "function" && message.attempts < QUEUE_MAX_ATTEMPTS) {
-          message.retry({ delaySeconds: 300 });
-          continue;
-        }
-        const body = message.body;
-        await deps.failureStore
-          .record({
-            target_id: body.targetId,
-            installation_id: body.installation_id,
-            owner: body.owner,
-            repo: body.repo,
-            pr_number: body.pr_number,
-            head_sha: body.head_sha ?? "",
-            stage: MAINTENANCE_DEFERRED_STAGE,
-            code: "review.delivery.deferred",
-            trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
-            message: FAILURE_SUMMARIES["review.delivery.deferred"],
-            error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
-          })
-          .catch((err: unknown) => {
-            const detail = err instanceof Error ? err.message : String(err);
-            log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
-            throw err;
-          });
-        message.ack();
-      }
+      await deferMaintenanceBatch(batch, deps);
       return;
     }
     for (const message of batch.messages) {

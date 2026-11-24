@@ -694,7 +694,11 @@ type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRe
 
 type ReviewQueueConsumerModule = Pick<
   typeof ConsumerModule,
-  "createReviewConsumer" | "createWorkflowInstance" | "settleHaltedBatch"
+  | "createReviewConsumer"
+  | "createWorkflowInstance"
+  | "createProcessDeps"
+  | "deferMaintenanceBatch"
+  | "settleHaltedBatch"
 >;
 
 /**
@@ -764,11 +768,19 @@ export async function runReviewQueueBatch(
         : `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`,
     );
   }
-  const { settleHaltedBatch } = await loadConsumer();
+  const consumer = await loadConsumer();
+  // The maintenance window defers EVERY settlement face, not just the running
+  // path: a halted batch acked here would drop the review without retry and
+  // never enter the maintenance replay outbox, so it takes the consumer's
+  // deferral path instead of `settleHaltedBatch`.
+  if (maintenanceClosed(await getMaintenanceMode(env.DB))) {
+    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env));
+    return;
+  }
   if (run.state === "paused-platform") {
     // The settlement logs the batch line itself; a second gate-shaped line here
     // would name the wrong cause.
-    await settleHaltedBatch(batch, env, run.state);
+    await consumer.settleHaltedBatch(batch, env, run.state);
     return;
   }
   console.log(
@@ -777,7 +789,7 @@ export async function runReviewQueueBatch(
       msg: `review route is closed (${REVIEW_ROUTE_WORKFLOW_KEY}) — every delivery in this batch is settled with a durable failure row and acked`,
     }),
   );
-  await settleHaltedBatch(batch, env, run.state);
+  await consumer.settleHaltedBatch(batch, env, run.state);
 }
 
 export default {

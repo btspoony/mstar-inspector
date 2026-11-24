@@ -221,6 +221,32 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-admin/apps");
   });
 
+  test("the Apps link prefers a workspace the operator manages over a member-only one", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    seed(
+      db,
+      "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws-viewer', 'viewer-ws', 'A viewer', NULL, ?, NULL), ('ws-managed', 'managed-ws', 'Z managed', NULL, ?, NULL)",
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+    const operatorId = db.raw
+      .prepare("SELECT id FROM users WHERE github_login = ?")
+      .get(OPERATOR) as { id: string };
+    seed(
+      db,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws-viewer', ?, 'member', ?), ('ws-managed', ?, 'admin', ?)",
+      operatorId.id,
+      new Date().toISOString(),
+      operatorId.id,
+      new Date().toISOString(),
+    );
+    // 'A viewer' sorts first by name, so it is what memberships[0] would pick —
+    // but a member cannot change review state there, so the link names the
+    // managed workspace.
+    expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-managed/apps");
+  });
+
   test("the card and the queue read ONE state machine", async () => {
     // The payload answer is the shared derivation verbatim — the queue settles
     // by the same value, so the card can never name a cause the batch did not act on.

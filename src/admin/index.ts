@@ -201,16 +201,22 @@ async function readPausedApps(db: DashboardD1): Promise<number | null> {
  * redirect roots (also the repository overview), so the address needs a
  * workspace segment — the same one sign-in would land this operator on.
  *
- * With several memberships the link opens `memberships[0]` (the list is ordered
- * by workspace name): an arbitrary-but-stable choice, because this operator
- * page has no workspace context of its own and picking none would hide the link
- * from every multi-workspace operator. The App pause link is a convenience, not
- * a scoped answer — the payload's own facts are all platform-wide.
+ * The link exists so the operator can change review state, so it prefers the
+ * first membership whose role can manage Apps (`owner` or `admin`) — an
+ * ordinary `member` workspace would open the same page read-only. A
+ * sole-workspace deployment (`boot.workspaceRef`) keeps its own answer next,
+ * and only when no membership qualifies does the link fall back to
+ * `memberships[0]` (the list is ordered by workspace name): an
+ * arbitrary-but-stable choice, because this operator page has no workspace
+ * context of its own and picking none would hide the link from every
+ * multi-workspace operator. The App pause link is a convenience, not a scoped
+ * answer — the payload's own facts are all platform-wide.
  */
 async function readAppsHref(env: Env, login: string): Promise<string | null> {
   try {
     const boot = await workspaceBoot(env, login);
-    const ref = boot.workspaceRef ?? boot.memberships[0]?.id;
+    const managed = boot.memberships.find((row) => row.role === "owner" || row.role === "admin");
+    const ref = managed?.id ?? boot.workspaceRef ?? boot.memberships[0]?.id;
     return ref === undefined ? null : `/dashboard/${ref}/apps`;
   } catch {
     return null;
