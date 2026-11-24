@@ -1471,13 +1471,13 @@ describe("Runtime screen", () => {
     );
     const answer = surface.container.querySelector('[data-reviews-running="answer"]')?.textContent ?? "";
     expect(answer).toBe(
-      "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — they are redelivered and run once the state reads again.",
+      "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
     );
     // The read fault must not be presented as either proven cause.
     expect(answer.toLowerCase()).not.toContain("blocked by the deployment gate");
     expect(answer).not.toContain("end as blocked");
     expect(answer).toContain("not settled");
-    expect(answer).toContain("redelivered");
+    expect(answer).toContain("bounded attempts");
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
       "unreadable — the review state cannot be concluded",
     );
