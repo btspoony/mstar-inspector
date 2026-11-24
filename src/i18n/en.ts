@@ -171,7 +171,7 @@ export const en = {
     columnReviews7d: "Last 7 days",
     columnLastReview: "Last review",
     filterLabel: "Filter repositories",
-    filterAll: "All",
+    filterAvailable: "Available",
     filterUninstalled: "Awaiting install ({count})",
     backToList: "Back to repositories",
     tabInsights: "Insights",
@@ -193,7 +193,7 @@ export const en = {
     repositoryCountOne: "1 repository",
     repositoryCountMany: "{count} repositories",
     status: {
-      reviewing: "Reviewing",
+      reviewable: "Reviewable",
       uninstalled: "Awaiting install",
       paused: "Paused",
     },

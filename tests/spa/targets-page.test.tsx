@@ -145,7 +145,7 @@ describe("repository list (static SSR)", () => {
     expect(markup).toContain('href="/dashboard/acme/repos/all"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-1"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-2"');
-    expect(markup).toContain(t("en", "targets.status.reviewing"));
+    expect(markup).toContain(t("en", "targets.status.reviewable"));
     expect(markup).toContain(t("en", "targets.status.paused"));
     expect(markup).toContain("cursor-pointer");
   });
@@ -174,26 +174,20 @@ describe("repository list (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.emptyDescription"));
   });
 
-  test("a 待安装 row reports the discriminator instead of an invented name", () => {
+  test("the default face omits a 待安装 row", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    expect(markup).toContain(t("en", "targets.status.uninstalled"));
+    expect(markup).not.toContain('data-tone="warn"');
     expect(markup).not.toContain("null/null");
   });
 
-  test("a target without repo_id but with owner/name renders the name, not a dash", () => {
+  test("a target without repo_id but with owner/name is hidden from the default face", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })]);
-    expect(markup).toContain("42ch-dev/nexus");
-    const targetRow = rowMarkup(markup, "42ch-dev/nexus");
-    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
-    expect(targetRow).toContain('data-tone="warn"');
-    expect(targetRow).not.toContain(">—</a>");
+    expect(markup).not.toContain("42ch-dev/nexus");
   });
 
-  test("a target with neither an id nor a name still falls back to the dash", () => {
+  test("a target with neither an id nor a name stays off the default face too", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    const targetRow = rowMarkup(markup, "—</a>");
-    expect(targetRow).toContain(">—</a>");
-    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
+    expect(markup).not.toContain(">—</a>");
   });
 
   test("the overview band reports review volume summed from the row aggregates", () => {
@@ -211,7 +205,7 @@ describe("repository list (static SSR)", () => {
       row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
     ]);
     expect(markup).toContain(t("en", "targets.headingDescription"));
-    expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
+    expect(markup).not.toContain("acme/web");
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "3",
       [t("en", "targets.metricReviews")]: "13",
@@ -260,6 +254,11 @@ describe("the 待安装 filter (mounted)", () => {
       root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
     );
     try {
+      const initial = container.textContent ?? "";
+      expect(initial).toContain("acme/api");
+      expect(initial).toContain("acme/docs");
+      expect(initial).not.toContain("acme/web");
+
       const segment = [...container.querySelectorAll("button")].find(
         (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
       );
@@ -270,19 +269,20 @@ describe("the 待安装 filter (mounted)", () => {
       });
       const text = container.textContent ?? "";
       expect(text).toContain("acme/web");
+      expect(text).toContain(t("en", "targets.status.uninstalled"));
       expect(text).not.toContain("acme/api");
       expect(text).not.toContain("acme/docs");
       expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
 
       const all = [...container.querySelectorAll("button")].find(
-        (node) => node.textContent === t("en", "targets.filterAll"),
+        (node) => node.textContent === t("en", "targets.filterAvailable"),
       );
       await act(async () => {
         all?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       const restored = container.textContent ?? "";
-      expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/web"));
-      expect(restored.indexOf("acme/web")).toBeLessThan(restored.indexOf("acme/docs"));
+      expect(restored).not.toContain("acme/web");
+      expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/docs"));
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -301,7 +301,7 @@ describe("list helpers", () => {
   test("a paused target outranks its missing repository identity only after it", () => {
     expect(targetStatusPill("en", row({ repo_id: null })).label).toBe(t("en", "targets.status.uninstalled"));
     expect(targetStatusPill("en", row({ review_enabled: 0 })).label).toBe(t("en", "targets.status.paused"));
-    expect(targetStatusPill("en", row()).label).toBe(t("en", "targets.status.reviewing"));
+    expect(targetStatusPill("en", row()).label).toBe(t("en", "targets.status.reviewable"));
   });
 });
 

@@ -149,7 +149,7 @@ export const zhCN: Dictionary = {
     columnReviews7d: "近 7 天",
     columnLastReview: "最近评审",
     filterLabel: "筛选仓库",
-    filterAll: "全部",
+    filterAvailable: "可用仓库",
     filterUninstalled: "待安装（{count}）",
     backToList: "返回仓库",
     tabInsights: "洞察",
@@ -170,7 +170,7 @@ export const zhCN: Dictionary = {
     repositoryCountOne: "1 个仓库",
     repositoryCountMany: "{count} 个仓库",
     status: {
-      reviewing: "审查中",
+      reviewable: "可审查",
       uninstalled: "待安装",
       paused: "已暂停",
     },
