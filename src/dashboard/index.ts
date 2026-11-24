@@ -221,6 +221,7 @@ import {
   type DegradedReason,
   type MaintenanceMode,
 } from "./runtime-config-store";
+import { readTargetTokenUsage } from "./token-usage-store";
 import { isReviewLevel, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
   CHECK_MIN_SCORE_MAX,
@@ -3988,6 +3989,14 @@ const targetInsightsRoute = async (c: DashboardContext) => {
   return insightsSummaryJson(c, params, gate.scope, gate.db);
 };
 
+const targetTokenUsageRoute = async (c: DashboardContext) => {
+  const gate = await requireTargetManagerJson(c);
+  if (!gate.ok) return gate.response;
+  const params = parseInsightsParams({ window: c.req.query("window") });
+  if (!params.ok) return c.json({ error: params.reason }, 400);
+  return c.json(await readTargetTokenUsage(gate.db, gate.scope, params.windowDays));
+};
+
 async function requireWorkspaceManagerJson(
   c: DashboardContext,
 ): Promise<
@@ -4024,7 +4033,7 @@ async function requireTargetManagerJson(
   | {
       ok: true;
       target: ReviewTargetRow;
-      scope: LedgerScope;
+      scope: Extract<LedgerScope, { kind: "target" }>;
       db: DashboardDb;
       store: ReturnType<typeof createReviewBotsStore>;
     }
@@ -4983,6 +4992,7 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "post", path: "/apps/:appId/settings/key/delete", handler: appKeyDeleteRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/insights/summary", handler: targetInsightsRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests", handler: targetPullRequestsRoute, access: "write" },
+  { method: "get", path: "/api/targets/:targetId/token-usage", handler: targetTokenUsageRoute, access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number", handler: (c) => pullRequestDetailRoute(c, () => requireTargetManagerJson(c)), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/findings", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "findings"), access: "write" },
   { method: "get", path: "/api/targets/:targetId/pull-requests/:owner/:repo/:number/reviews", handler: (c) => pullRequestRecordsRoute(c, () => requireTargetManagerJson(c), "reviews"), access: "write" },
