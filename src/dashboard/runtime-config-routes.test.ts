@@ -209,6 +209,7 @@ const DEFAULT_ROUTE_WORKFLOW = { mode: "off", saved: false, degraded: false };
 const DEFAULT_REVIEWS_RUNNING = {
   answer: "blocked-deployment-gate",
   platform: { enabled: true, unreadable: false },
+  unreadableSource: null,
   pausedApps: 0,
   appsHref: null,
 };
