@@ -1,4 +1,4 @@
--- 0108_review_token_usage.sql — every completed review execution's REAL token
+-- 0111_review_token_usage.sql — every completed review execution's REAL token
 -- spend, one row per (attempt_id, provider, model), attributable to the
 -- target that paid for it.
 --
@@ -6,7 +6,11 @@
 -- replaces its own rows and cannot double-count. `target_id`/`workspace_id`
 -- are denormalized on purpose — the billing aggregate must not join `reviews`,
 -- which a failed or never-published attempt never creates.
-CREATE TABLE review_token_usage (
+--
+-- Idempotent DDL: this file first shipped as 0109 and was renumbered after a
+-- second 0109 landed on main. An environment that already applied the earlier
+-- name must be able to apply this one without failing on an existing table.
+CREATE TABLE IF NOT EXISTS review_token_usage (
   attempt_id        TEXT NOT NULL,
   provider          TEXT NOT NULL,
   model             TEXT NOT NULL,
@@ -24,4 +28,4 @@ CREATE TABLE review_token_usage (
 );
 
 -- The target aggregate's window scan ("how many tokens did target T spend").
-CREATE INDEX idx_review_token_usage_target ON review_token_usage(target_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_review_token_usage_target ON review_token_usage(target_id, occurred_at);
