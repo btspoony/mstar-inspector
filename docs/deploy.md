@@ -1388,8 +1388,9 @@ smoke token is the explicitly **repository-scoped, read-only** `sandbox-read`
 grant (`contents: read`, `metadata: read`, `pull_requests: read` — the last
 one because the diff step runs `gh pr diff` with exactly that token); the
 Worker asserts the returned capabilities (`assertSandboxGrant`) and fails
-closed on anything broader or unscoped. The App subscribes only `pull_request`
-and `issue_comment`: `installation` is not a subscribable GitHub App event
+closed on anything broader or unscoped. The manifest subscribes `pull_request`,
+`issue_comment` and `check_run` (an App holding `checks: write` is also
+auto-subscribed to `check_run`): `installation` is not a subscribable GitHub App event
 (GitHub's "Subscribe to events" list offers only "Installation target"), it is
 delivered to every App automatically. So a new App receives
 `installation.created` without any subscription, and the install-bookkeeping

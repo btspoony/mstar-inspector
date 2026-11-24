@@ -245,6 +245,7 @@ export type ChecksAdapter = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     checkRunId: number;
     summary: string;
@@ -637,6 +638,7 @@ async function markQueuedBehindInflightWith(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     checkRunId: number;
     summary: string;
@@ -655,6 +657,7 @@ async function markQueuedBehindInflightWith(
       headSha: input.headSha,
       triggeredBy: input.triggeredBy,
       action: input.action,
+      rerunCheckRunId: input.rerunCheckRunId,
       attachDeliveryId: input.attachDeliveryId,
       title: CHECK_NAME,
       summary: input.summary,
@@ -1268,6 +1271,7 @@ export type CheckLifecycle = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     executionDeadlineMs: number;
     expect?: { key: string; generation: number };
     latch?: CheckBeginLatch;
@@ -1291,6 +1295,7 @@ export type CheckLifecycle = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     reason: string;
     paused?: boolean;
@@ -1302,6 +1307,7 @@ export type CheckLifecycle = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     summary: string;
     updateBudgetMs: number;
@@ -1365,6 +1371,7 @@ export async function attachCheckAtAcceptance(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     deliveryId: string;
   },
 ): Promise<CheckAttachResult> {
@@ -1375,6 +1382,7 @@ export async function attachCheckAtAcceptance(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
     attachDeliveryId: deliveryId,
     holder: `delivery:${deliveryId}`,
     nowMs: deps.nowMs(),
@@ -1526,6 +1534,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: input.headSha,
         triggeredBy: input.triggeredBy,
         action: input.action,
+        rerunCheckRunId: input.rerunCheckRunId,
         holder: `consumer:${crypto.randomUUID()}`,
         nowMs: deps.nowMs(),
         executionDeadlineMs: input.executionDeadlineMs,
@@ -1646,6 +1655,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: input.headSha,
         triggeredBy: input.triggeredBy,
         action: input.action,
+        rerunCheckRunId: input.rerunCheckRunId,
         attachDeliveryId: input.attachDeliveryId,
         holder: `skip:${crypto.randomUUID()}`,
         executionDeadlineMs: nowMs + CHECK_LEASE_MS,
@@ -1740,6 +1750,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
           headSha: input.headSha,
           triggeredBy: input.triggeredBy,
           action: input.action,
+          rerunCheckRunId: input.rerunCheckRunId,
           attachDeliveryId: input.attachDeliveryId,
           title: CHECK_NAME,
           summary: input.summary,
@@ -1754,6 +1765,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         headSha: input.headSha,
         triggeredBy: input.triggeredBy,
         action: input.action,
+        rerunCheckRunId: input.rerunCheckRunId,
         attachDeliveryId: input.attachDeliveryId,
         checkRunId: relabeled.checkRunId,
         summary: input.summary,

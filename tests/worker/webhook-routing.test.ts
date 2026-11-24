@@ -2768,11 +2768,11 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
   const RERUN_HEAD = "0123456789abcdef0123456789abcdef01234567";
   const RERUN_CHECK_RUN_ID = 4242;
 
-  function checkRunPayload(checkRunId = RERUN_CHECK_RUN_ID): string {
+  function checkRunPayload(checkRunId = RERUN_CHECK_RUN_ID, repo = FIXTURE_REPO): string {
     return JSON.stringify({
       action: "rerequested",
       installation: { id: 123 },
-      repository: { name: FIXTURE_REPO.name, owner: { login: FIXTURE_REPO.owner }, id: 555 },
+      repository: { name: repo.name, owner: { login: repo.owner }, id: 555 },
       check_run: {
         id: checkRunId,
         head_sha: RERUN_HEAD,
@@ -2782,7 +2782,11 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     });
   }
 
-  async function seedAttachedCheck(db: TestD1, appRow: { id: string }): Promise<void> {
+  async function seedAttachedCheck(
+    db: TestD1,
+    appRow: { id: string },
+    repo: { owner: string; name: string } = FIXTURE_REPO,
+  ): Promise<void> {
     const bot = db.raw.query("SELECT github_app_id FROM review_bots WHERE id = ?").get(appRow.id) as {
       github_app_id: number;
     };
@@ -2823,8 +2827,8 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
         scope: {
           appId: appRow.id,
           installationId: 123,
-          owner: FIXTURE_REPO.owner,
-          repo: FIXTURE_REPO.name,
+          owner: repo.owner,
+          repo: repo.name,
           prNumber: 42,
         },
         githubAppId: bot.github_app_id,
@@ -2875,6 +2879,42 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(attempts).toHaveLength(2);
     expect(attempts[0]).toMatchObject({ triggered_by: "pull_request", check_run_id: RERUN_CHECK_RUN_ID });
     expect(attempts[1]).toMatchObject({ triggered_by: "check_run", action: "rerequested" });
+  });
+
+  test("a rerun of a renamed repository enqueues under the delivery's current owner/repo", async () => {
+    const db = createMigratedTestD1();
+    const current = { owner: "new-owner", name: "new-name" };
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      githubAppId: 1000,
+      targets: [{ repoId: 555, repoOwner: current.owner, repoName: current.name }],
+    });
+    // The Check was created before the rename; the delivery names today's repo.
+    await seedAttachedCheck(db, appRow, { owner: "old-owner", name: "old-name" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload(RERUN_CHECK_RUN_ID, current);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      owner: current.owner,
+      repo: current.name,
+      pr_number: 42,
+      head_sha: RERUN_HEAD,
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      targetId: appRow.targetId,
+    });
   });
 
   test("a rerequested run with no review_checks row is 200 ignored — zero enqueue, delivery recorded ignored", async () => {

@@ -911,7 +911,7 @@ export const zhCN: Dictionary = {
       registeredAs: "它将为此部署注册为：",
       slugWebhook: "Slug {slug} · webhook URL {webhookUrl}",
       appIdWebhook: "App ID {id} · webhook URL {webhookUrl}",
-      note: "连接后，此 App 的 pull_request 和 issue_comment webhook 将投递到此 Worker。审查按 App 控制 — 暂停某个 App 即可停止其审查。",
+      note: "连接后，此 App 的 pull_request、issue_comment 和 check_run webhook 将投递到此 Worker。审查按 App 控制 — 暂停某个 App 即可停止其审查。",
       create: "创建 App",
       cancel: "取消",
     },

@@ -405,6 +405,7 @@ export type ProcessOutcome =
   | { kind: "paused" }
   | { kind: "degraded" }
   | { kind: "superseded" }
+  | { kind: "rerun-stale" }
   | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
   | { kind: "unknown" };
 
@@ -473,6 +474,7 @@ export async function settleSkippedRow(
       headSha: attachedHeadSha,
       triggeredBy: payload.triggered_by,
       action: payload.action,
+      rerunCheckRunId: payload.rerun_check_run_id,
       attachDeliveryId: payload.attachDeliveryId,
       reason,
       ...(opts.paused === true ? { paused: true } : {}),
@@ -536,6 +538,7 @@ export type CheckLifecycleHooks = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     executionDeadlineMs: number;
     latch?: CheckBeginLatch;
   }): Promise<CheckHandle | null>;
@@ -563,6 +566,7 @@ export type CheckLifecycleHooks = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     reason: string;
     warn?: (detail: string) => void;
@@ -573,6 +577,7 @@ export type CheckLifecycleHooks = {
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     summary: string;
     updateBudgetMs: number;
@@ -2221,6 +2226,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
           headSha,
           triggeredBy: payload.triggered_by,
           action: payload.action,
+          rerunCheckRunId: payload.rerun_check_run_id,
           executionDeadlineMs: claimDeadlineMs,
           latch: beginLatch,
           ...(expect === undefined ? {} : { expect }),

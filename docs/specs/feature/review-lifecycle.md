@@ -671,7 +671,7 @@ A lease is authority over a row that still wants `in_progress`; it stops being a
 
 ### 7.12 Fresh-App surfaces
 
-Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Events remain pull_request and issue_comment only. Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, gate-aware Check conclusions (a green Check means the App's review gate was met, not merge approval), branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority).
+Final manifest permissions: contents write, metadata read, pull_requests write, issues write, checks write. Manifest events are pull_request, issue_comment and check_run (`checks: write` also auto-subscribes the event, so an existing App needs no settings change). Direct surfaces: `src/dashboard/manifest.ts`, `.env.example`, `README.md`, `docs/deploy.md`, operator smoke documentation and the publication companion spec. No old-App acceptance branch. Documentation explains Worker-only writes, read-only Sandbox, gate-aware Check conclusions (a green Check means the App's review gate was met, not merge approval), branch protection user control, and historical same-name Check generations (newest applicable attempt, not universal cross-App authority).
 
 ## Invariants
 

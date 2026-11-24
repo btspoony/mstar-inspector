@@ -88,7 +88,7 @@ app.use("*", spaDispatch());
  * is on.
  */
 export function deliveryOutcomeFromWebhook(
-  outcome: { kind: WebhookOutcome["kind"] },
+  outcome: { kind: Exclude<WebhookOutcome["kind"], "check_rerun"> },
   reviewEnabled: number,
   reviewGlobal: boolean,
   sharedBotRefused = false,
@@ -96,11 +96,68 @@ export function deliveryOutcomeFromWebhook(
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
-  // Defensive only: the route rewrites `check_rerun` into a job or an ignore
-  // before it consults this function, so this arm is unreachable in the route.
-  if (outcome.kind === "check_rerun") return "ignored";
   if (reviewEnabled === 0 || !reviewGlobal) return "paused";
   return sharedBotRefused ? "skipped" : "ok";
+}
+
+/**
+ * `check_run.rerequested` → the outcome the route may act on: the resolved
+ * job, or an `ignore` when the run's `review_checks` row proves no ownership
+ * (a foreign or pre-Checks run) or the lookup faults (fail-closed: a rerun
+ * that cannot prove ownership is a retry, not a review).
+ *
+ * The attempt row — not the payload — is the authoritative PR identity (a
+ * fork PR's delivery carries an empty `pull_requests` list), and
+ * `(github_app_id, check_run_id)` is the only "this App owns that run"
+ * proof. `owner`/`repo` come from the DELIVERY instead, because the row may
+ * name a repository that has since been renamed while `target` was resolved
+ * by the payload's current name: the job and the target must agree. The
+ * run's own `pr_number`/`head_sha`/`installation_id` stay authoritative.
+ */
+async function resolveCheckRerunOutcome(
+  db: D1Database,
+  row: Pick<GithubAppTenantRow, "id" | "github_app_id">,
+  rerun: Extract<WebhookOutcome, { kind: "check_rerun" }>,
+  webhookRef: string,
+): Promise<Exclude<WebhookOutcome, { kind: "check_rerun" }>> {
+  const attempt = await findCheckAttemptByRunId(db, row.github_app_id, rerun.checkRunId).catch((err: unknown) => {
+    webhookWarn(
+      "check_rerun_lookup_failed",
+      `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
+      "per-App webhook could not resolve the rerequested check run — answering ignored (fail-closed)",
+    );
+    return null;
+  });
+  if (attempt === null) {
+    webhookWarn(
+      "check_rerun_no_attempt",
+      `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId}`,
+      "per-App webhook ignored a rerequested check run — no review check names it (foreign or pre-Checks run)",
+    );
+    return { kind: "ignore", reason: "no review check for this check run" };
+  }
+  if (attempt.owner !== rerun.owner || attempt.repo !== rerun.repo) {
+    webhookInfo(
+      "check_rerun_repo_renamed",
+      `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} attempt=${attempt.owner}/${attempt.repo} delivery=${rerun.owner}/${rerun.repo}`,
+      "rerequested run resolved to a renamed repository — enqueueing under the delivery's current name",
+    );
+  }
+  return {
+    kind: "job",
+    payload: {
+      installation_id: attempt.installationId,
+      owner: rerun.owner,
+      repo: rerun.repo,
+      pr_number: attempt.prNumber,
+      head_sha: attempt.headSha,
+      action: "rerequested",
+      triggered_by: "check_run",
+      rerun_check_run_id: rerun.checkRunId,
+    },
+    installationAccount: rerun.installationAccount,
+    accountAuthoritative: false,
+  };
 }
 
 function webhookWarn(event: string, detail: string, msg: string): void {
@@ -220,6 +277,7 @@ async function attachCheckOnAcceptance(input: {
         headSha,
         triggeredBy: payload.triggered_by,
         action: payload.action,
+        rerunCheckRunId: payload.rerun_check_run_id,
         deliveryId,
       },
     );
@@ -455,48 +513,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     );
   }
 
-  if (outcome.kind === "check_rerun") {
-    const rerun = outcome;
-    // The attempt row — not the payload — is the authoritative PR identity
-    // (a fork PR's delivery carries an empty pull_requests list), and the
-    // (github_app_id, check_run_id) pair is the only "this App owns that
-    // run" proof. A miss means the run was never ours: ignore with 200.
-    const attempt = await findCheckAttemptByRunId(db, row.github_app_id, rerun.checkRunId).catch((err: unknown) => {
-      webhookWarn(
-        "check_rerun_lookup_failed",
-        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
-        "per-App webhook could not resolve the rerequested check run — answering ignored (fail-closed)",
-      );
-      return null;
-    });
-    if (attempt === null) {
-      webhookWarn(
-        "check_rerun_no_attempt",
-        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId}`,
-        "per-App webhook ignored a rerequested check run — no review check names it (foreign or pre-Checks run)",
-      );
-      outcome = { kind: "ignore", reason: "no review check for this check run" };
-    } else {
-      outcome = {
-        kind: "job",
-        payload: {
-          installation_id: attempt.installationId,
-          owner: attempt.owner,
-          repo: attempt.repo,
-          pr_number: attempt.prNumber,
-          head_sha: attempt.headSha,
-          action: "rerequested",
-          triggered_by: "check_run",
-          rerun_check_run_id: rerun.checkRunId,
-        },
-        installationAccount: rerun.installationAccount,
-        accountAuthoritative: false,
-      };
-    }
-  }
+  const settled: Exclude<WebhookOutcome, { kind: "check_rerun" }> =
+    outcome.kind === "check_rerun" ? await resolveCheckRerunOutcome(db, row, outcome, webhookRef) : outcome;
 
   const target = delivery.target;
-  if (outcome.kind === "ignore" && outcome.reason === NO_TARGET_REASON) {
+  if (settled.kind === "ignore" && settled.reason === NO_TARGET_REASON) {
     webhookWarn(
       "no_target_for_repo",
       `${webhookRef} row_id=${row.id} installation_id=${delivery.installationId ?? "unknown"}`,
@@ -507,7 +528,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     target !== null && (row.review_enabled === 0 || !(delivery.effective?.reviewEnabled ?? false));
 
   let reviewGlobal = true;
-  if (outcome.kind === "job" && !paused) {
+  if (settled.kind === "job" && !paused) {
     try {
       reviewGlobal = await isFlagEnabled(db, "review_global");
     } catch (err) {
@@ -520,7 +541,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  if (outcome.kind === "job") {
+  if (settled.kind === "job") {
     const routeGate = await getReviewRouteWorkflowGate(db);
     if (routeGate.mode !== "on") {
       const line = JSON.stringify({
@@ -530,11 +551,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         gate_degraded: routeGate.degraded,
         gate_reason: routeGate.reason ?? null,
         gate_rejected: routeGate.rejected ?? null,
-        installation_id: outcome.payload.installation_id,
-        owner: outcome.payload.owner,
-        repo: outcome.payload.repo,
-        pr_number: outcome.payload.pr_number,
-        head_sha: outcome.payload.head_sha,
+        installation_id: settled.payload.installation_id,
+        owner: settled.payload.owner,
+        repo: settled.payload.repo,
+        pr_number: settled.payload.pr_number,
+        head_sha: settled.payload.head_sha,
         msg: "review route is off (review.route.workflow) — delivery refused at acceptance: no Check attached, nothing enqueued",
       });
       if (routeGate.degraded) console.warn(line);
@@ -544,7 +565,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
-  if (outcome.kind === "job" && target !== null && !paused && reviewGlobal) {
+  if (settled.kind === "job" && target !== null && !paused && reviewGlobal) {
     try {
       if (row.scope === "shared") {
         const verdict = await checkEntitlement({
@@ -574,18 +595,18 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     await appsStore.recordDelivery({
       appId: row.id,
       eventName,
-      outcome: deliveryOutcomeFromWebhook(outcome, paused ? 0 : 1, reviewGlobal, refusal !== null),
-      statusCode: outcome.kind === "reject" ? outcome.status : null,
+      outcome: deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, refusal !== null),
+      statusCode: settled.kind === "reject" ? settled.status : null,
       repositoryFullName: webhookRepositoryFullName(classified),
-      reason: outcome.kind === "reject" ? outcome.reason : null,
+      reason: settled.kind === "reject" ? settled.reason : null,
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     webhookWarn("delivery_record_failed", detail, "webhook delivery record failed — webhook response unaffected");
   }
 
-  if (outcome.kind === "reject") {
-    return c.text(outcome.reason, outcome.status);
+  if (settled.kind === "reject") {
+    return c.text(settled.reason, settled.status);
   }
 
   if (eventName === "pull_request" && target !== null) {
@@ -613,34 +634,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     webhookWarn("last_webhook_touch_failed", detail, "last_webhook_at touch failed — webhook response unaffected");
   }
 
-  if (outcome.kind === "ignore") {
+  if (settled.kind === "ignore") {
     return c.text("ignored", 200);
   }
 
-  if (outcome.kind === "job") {
+  if (settled.kind === "job") {
     await recordInstallation(
       appsStore,
       row.id,
-      outcome.payload.installation_id,
-      outcome.installationAccount,
-      outcome.accountAuthoritative,
+      settled.payload.installation_id,
+      settled.installationAccount,
+      settled.accountAuthoritative,
     );
   }
 
-  if (outcome.kind === "installation") {
+  if (settled.kind === "installation") {
     await recordInstallation(
       appsStore,
       row.id,
-      outcome.installationId,
-      outcome.accountLogin,
-      outcome.accountAuthoritative,
+      settled.installationId,
+      settled.accountLogin,
+      settled.accountAuthoritative,
     );
     return c.text("accepted", 200);
   }
 
-  if (outcome.kind === "installation_removed") {
+  if (settled.kind === "installation_removed") {
     try {
-      await appsStore.markInstallationRemoved(row.id, outcome.installationId);
+      await appsStore.markInstallationRemoved(row.id, settled.installationId);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       webhookWarn(
@@ -669,7 +690,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
-  await handleReviewJob({ ...outcome.payload, botRef: { appId: row.id }, targetId: target!.id }, {
+  await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
     beforeEnqueue: async (payload) => {
@@ -693,6 +714,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
                   headSha,
                   triggeredBy: payload.triggered_by,
                   action: payload.action,
+                  rerunCheckRunId: payload.rerun_check_run_id,
                   attachDeliveryId,
                   reason: deliveryRefusalReason(refusal),
                 }),

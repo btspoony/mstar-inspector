@@ -307,8 +307,9 @@ export function attemptKey(input: {
   headSha: string;
   triggeredBy: string;
   action: string;
+  rerunCheckRunId?: number;
 }): string {
-  return JSON.stringify([
+  const base = JSON.stringify([
     input.appId,
     input.installationId,
     input.owner,
@@ -318,6 +319,10 @@ export function attemptKey(input: {
     input.triggeredBy,
     input.action,
   ]);
+  // A `check_run.rerequested` rerun keys on the run it was asked to rerun:
+  // two reruns of one head get fresh checks, an ordinary key stays byte-
+  // identical so nothing else sees a new shape.
+  return input.rerunCheckRunId === undefined ? base : `${base}#rerun:${input.rerunCheckRunId}`;
 }
 
 const NEXT_GENERATION_SQL = `(SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks m WHERE m.attempt_key = ?)`;
@@ -507,6 +512,7 @@ export async function claimAttempt(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     holder: string;
     nowMs: number;
     executionDeadlineMs: number;
@@ -530,6 +536,7 @@ export async function claimAttempt(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   if (input.expect !== undefined) {
     const active = await db
@@ -905,6 +912,7 @@ export async function claimAttachedCheckForSettlement(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     holder: string;
     executionDeadlineMs: number;
@@ -929,6 +937,7 @@ export async function claimAttachedCheckForSettlement(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   const claimable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
@@ -1468,6 +1477,7 @@ export async function markCheckQueuedBehindInflight(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     title: string;
     summary: string;
@@ -1484,6 +1494,7 @@ export async function markCheckQueuedBehindInflight(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   const relabelable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL

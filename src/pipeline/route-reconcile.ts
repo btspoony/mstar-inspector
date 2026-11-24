@@ -86,7 +86,9 @@ async function readFrozenIdentityHead(env: ReviewRouteEnv, attemptId: string): P
   if (row?.attempt_key == null) return null;
   let tuple: unknown;
   try {
-    tuple = JSON.parse(row.attempt_key);
+    // A rerun key appends `#rerun:<id>` to the canonical tuple; `#` cannot
+    // occur in any tuple field, so the base is the prefix before it.
+    tuple = JSON.parse(row.attempt_key.split("#rerun:")[0] as string);
   } catch {
     return null;
   }
