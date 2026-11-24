@@ -642,6 +642,34 @@ export function chainAttributionBlock(
     return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
   }
 }
+/**
+ * Remove the token-usage document without letting a removal fault become a
+ * second failure — the startup clear and the empty-fold clear share it. If
+ * unlink fails, the stale content is truncated to zero bytes as a fallback
+ * where the file stays writable, so the reader sees absence or "not a
+ * document", never this run reading a previous run's usage. Both legs are
+ * logged, never thrown: usage is analysis data, not a gate.
+ */
+function clearTokenUsageDoc(path: string): boolean {
+  try {
+    rmSync(path, { force: true });
+    return true;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "token_usage_clear_failed",
+        path,
+        reason: (error as Error).message,
+      }),
+    );
+  }
+  try {
+    writeFileSync(path, "");
+  } catch {
+    // Removal and truncation both failed; the clear already logged its fault.
+  }
+  return false;
+}
 
 /**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
@@ -677,7 +705,7 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
-  stale.push(appliedModelPath, tokenUsagePath);
+  stale.push(appliedModelPath);
   for (const path of stale) {
     try {
       rmSync(path, { force: true });
@@ -686,6 +714,13 @@ export async function main(
       return 1;
     }
   }
+  // why: Unlike the paths above, the token-usage document is analysis-only —
+  // its startup clear degrades to a logged fault and the run still reaches
+  // runReview. Rule: an unremovable stale document is a capture fault for
+  // this run — the write below is suppressed so this run's own write path
+  // cannot leave stale content in place; the reader sees absence or a
+  // cleared file, never a document.
+  const tokenUsageClearFailed = !clearTokenUsageDoc(tokenUsagePath);
   let agentDir: string | undefined;
   const removeAgentDir = (): void => {
     if (agentDir === undefined) return;
@@ -777,18 +812,8 @@ export async function main(
       // why: Same side-document discipline as appliedModel — a stale document
       // from a previous run must not ride this run's output, and a capture or
       // write fault is logged, never thrown: usage is analysis data, not a gate.
-      if (tokenUsage === undefined || tokenUsage.length === 0) {
-        try {
-          rmSync(tokenUsagePath, { force: true });
-        } catch (error) {
-          console.error(
-            JSON.stringify({
-              event: "token_usage_clear_failed",
-              path: tokenUsagePath,
-              reason: (error as Error).message,
-            }),
-          );
-        }
+      if (tokenUsageClearFailed || tokenUsage === undefined || tokenUsage.length === 0) {
+        clearTokenUsageDoc(tokenUsagePath);
       } else {
         try {
           writeFileSync(tokenUsagePath, JSON.stringify({ version: 1, buckets: tokenUsage } satisfies TokenUsageDoc));

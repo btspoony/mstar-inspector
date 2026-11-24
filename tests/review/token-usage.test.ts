@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -463,6 +463,41 @@ describe("runner token-usage side document", () => {
     expect(code).toBe(0);
     expect(JSON.parse(stdout)).toEqual(ENVELOPE);
     expect(stderr).toContain("token_usage_write_failed");
+  });
+
+  test("a failed startup clear degrades — the review completes and no stale document survives", async () => {
+    // A non-empty directory at the document path: rmSync fails ENOTEMPTY even
+    // with force, and the truncate fallback fails EISDIR — an unremovable
+    // stale path through the same param seam, no mocks. The run must still
+    // complete, log the fault, and suppress this run's write so the consumer
+    // sees absence/a fault rather than a stale document.
+    const dir = mkdtempSync(join(tmpdir(), "token-usage-out-"));
+    const path = join(dir, "review-token-usage.json");
+    mkdirSync(path);
+    mkdirSync(join(path, "occupant"));
+    const { code, stdout, stderr } = await runCli(
+      ["--level", "quick", "--input", writeInput()],
+      runtimeWith([
+        {
+          provider: "ark",
+          model: "deepseek-v4",
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 2,
+          requests: 1,
+          costUsd: 0,
+        },
+      ]),
+      path,
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(stderr).toContain("token_usage_clear_failed");
+    // No document was persisted under the unremovable path — a consumer's
+    // existence probe would read a fault, never a stale usage document.
+    expect(() => readFileSync(path)).toThrow();
   });
 
   test("the fixed wire path is the applied-model sibling", () => {
