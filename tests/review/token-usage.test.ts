@@ -17,6 +17,7 @@ import { encodeCredentialPayload } from "../../packages/shared/src/credential-pa
 import {
   bucketFromSubagent,
   bucketsFromSession,
+  deepSeatRemainder,
   mergeBuckets,
 } from "../../packages/runner/src/token-usage";
 import { main } from "../../packages/runner/src/runner";
@@ -197,7 +198,21 @@ describe("bucketsFromSession", () => {
   test("a session with no usage yields zero buckets", () => {
     expect(bucketsFromSession([])).toEqual([]);
   });
+
+  // regression: a/bcde and ab/cde share the concatenation "abcde" — a raw
+  // `${provider}${model}` key merged them into one bucket.
+  test("keeps (a, bcde) and (ab, cde) in distinct buckets", () => {
+    const buckets = bucketsFromSession([
+      assistantEntry("e1", "a", "bcde", { input: 1, output: 1, total: 2 }),
+      assistantEntry("e2", "ab", "cde", { input: 3, output: 4, total: 7 }),
+    ]);
+    expect(buckets).toEqual([
+      { provider: "a", model: "bcde", input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2, requests: 1, costUsd: 0 },
+      { provider: "ab", model: "cde", input: 3, output: 4, cacheRead: 0, cacheWrite: 0, total: 7, requests: 1, costUsd: 0 },
+    ]);
+  });
 });
+
 
 describe("bucketFromSubagent", () => {
   test("attributes usage and requests to resolvedModel, stripping a :<thinking> suffix", () => {
@@ -307,6 +322,58 @@ describe("mergeBuckets", () => {
         costUsd: 0.01,
       },
     ]);
+  });
+});
+
+describe("deepSeatRemainder", () => {
+  const folded = [
+    {
+      provider: "ark",
+      model: "deepseek-v4",
+      input: 100,
+      output: 40,
+      cacheRead: 10,
+      cacheWrite: 5,
+      total: 155,
+      requests: 3,
+      costUsd: 0.5,
+    },
+  ];
+
+  test("stats larger than the fold yields one unattributed deep-seat-spend bucket", () => {
+    const remainder = deepSeatRemainder(
+      { input: 300, output: 90, cacheRead: 20, cacheWrite: 8, totalTokens: 418, cost: 1.5 },
+      folded,
+    );
+    expect(remainder).toEqual({
+      provider: "unattributed",
+      model: "deep-seat-spend",
+      input: 200,
+      output: 50,
+      cacheRead: 10,
+      cacheWrite: 3,
+      total: 263,
+      requests: 0,
+      costUsd: 1,
+    });
+  });
+
+  test("stats equal to the fold — and a deficit — yield no bucket", () => {
+    expect(
+      deepSeatRemainder(
+        { input: 100, output: 40, cacheRead: 10, cacheWrite: 5, totalTokens: 155, cost: 0.5 },
+        folded,
+      ),
+    ).toBeUndefined();
+    // Per-field clamping: folded exceeding stats reports nothing, never a negative.
+    expect(
+      deepSeatRemainder({ input: 50, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 60, cost: 0.1 }, folded),
+    ).toBeUndefined();
+  });
+
+  test("absent stats yield no bucket", () => {
+    expect(deepSeatRemainder(undefined, folded)).toBeUndefined();
+    expect(deepSeatRemainder(null, folded)).toBeUndefined();
   });
 });
 

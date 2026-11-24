@@ -34,6 +34,16 @@ export type ReviewTokenUsageWrite = {
 };
 
 /**
+ * why: Replay wipes the attempt's rows before the upserts — an attempt-keyed
+ * upsert alone leaves a stale row for every (provider, model) the replay no
+ * longer reports. The DELETE rides the same batch, so the wipe and the new
+ * rows land or roll back together; another attempt's rows are untouched.
+ */
+const DELETE_ATTEMPT_TOKEN_USAGE_SQL = `
+DELETE FROM review_token_usage WHERE attempt_id = ?
+`;
+
+/**
  * Idempotent on (attempt_id, provider, model): a replayed write of the same
  * attempt replaces its own rows and cannot double-count. `occurred_at` moves
  * to the replay's instant — the latest observed fact wins, matching the
@@ -59,29 +69,33 @@ ON CONFLICT (attempt_id, provider, model) DO UPDATE SET
 `;
 
 /**
- * The statements persisting one attempt's buckets — one upsert per
- * (provider, model). The caller puts them in ONE D1 batch with the launch
- * completion, so a fault rolls back both sides and a successful execution is
- * never recorded as finished without its usage rows.
+ * The statements persisting one attempt's buckets — the attempt-scoped wipe
+ * first, then one upsert per (provider, model). The caller puts them in ONE
+ * D1 batch with the launch completion, so a fault rolls back both sides and a
+ * successful execution is never recorded as finished without its usage rows.
  */
 export function tokenUsageStatements(db: D1Like, write: ReviewTokenUsageWrite): D1StatementLike[] {
-  return write.buckets.map((bucket) =>
-    db
-      .prepare(UPSERT_TOKEN_USAGE_SQL)
-      .bind(
-        write.attemptId,
-        bucket.provider,
-        bucket.model,
-        write.targetId,
-        write.workspaceId,
-        bucket.input,
-        bucket.output,
-        bucket.cacheRead,
-        bucket.cacheWrite,
-        bucket.total,
-        bucket.requests,
-        bucket.costUsd,
-        write.occurredAt,
-      ),
-  );
+  return [
+    db.prepare(DELETE_ATTEMPT_TOKEN_USAGE_SQL).bind(write.attemptId),
+    ...write.buckets.map((bucket) =>
+      db
+        .prepare(UPSERT_TOKEN_USAGE_SQL)
+        .bind(
+          write.attemptId,
+          bucket.provider,
+          bucket.model,
+          write.targetId,
+          write.workspaceId,
+          bucket.input,
+          bucket.output,
+          bucket.cacheRead,
+          bucket.cacheWrite,
+          bucket.total,
+          bucket.requests,
+          bucket.costUsd,
+          write.occurredAt,
+        ),
+    ),
+  ];
 }
+

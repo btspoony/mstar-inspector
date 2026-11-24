@@ -38,8 +38,14 @@ import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
 import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
-import { bucketsFromSession, bucketFromSubagent, mergeBuckets, type SubagentUsageSource } from "./token-usage";
-import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import {
+  bucketsFromSession,
+  bucketFromSubagent,
+  deepSeatRemainder,
+  mergeBuckets,
+  type SubagentUsageSource,
+} from "./token-usage";
+import type { SessionEntry, UsageStatistics } from "@oh-my-pi/pi-coding-agent";
 import type { TokenUsageBucket } from "../../shared/src/token-usage-wire";
 
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
@@ -806,6 +812,23 @@ function sessionEntries(
 }
 
 /**
+ * why: The session manager's usage statistics for the deep-seat remainder.
+ * Same degradation contract as `sessionEntries`: an absent or throwing
+ * accessor yields undefined, which emits no remainder bucket.
+ */
+function sessionUsageStats(
+  session: { sessionManager?: { getUsageStatistics?: () => UsageStatistics } } | undefined,
+): UsageStatistics | undefined {
+  const manager = session?.sessionManager;
+  if (typeof manager?.getUsageStatistics !== "function") return undefined;
+  try {
+    return manager.getUsageStatistics();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * why: Merge the fold's two DISJOINT inputs — session entries (the parent/
  * host session's own calls; a subagent's spend is journaled ONLY in the
  * child's aggregate `SingleResult`, never duplicated into these entries) and
@@ -1064,16 +1087,23 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         }
       }
       const appliedModel = servedModel(session);
+      const folded = runTokenUsage(
+        sessionEntries(parentSession),
+        [settled?.usage, ...reportSingles].flatMap((single) => (single === undefined ? [] : [single])),
+      );
+      // why: The parent's `task`-dispatched review seats spend inside
+      // `getUsageStatistics()` without journaling entries or reporting a
+      // subagent result, so `folded` never sees them. The remainder bucket is
+      // stats minus the folded spend — deep path only (the quick path folds
+      // its seat results and would double-count).
+      const remainder = deepSeatRemainder(sessionUsageStats(parentSession), folded);
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
         ...(appliedModel === undefined ? {} : { appliedModel }),
-        tokenUsage: runTokenUsage(
-          sessionEntries(parentSession),
-          [settled?.usage, ...reportSingles].flatMap((single) => (single === undefined ? [] : [single])),
-        ),
+        tokenUsage: mergeBuckets(folded, remainder === undefined ? [] : [remainder]),
       };
     });
   } finally {

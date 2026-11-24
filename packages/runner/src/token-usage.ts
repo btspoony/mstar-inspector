@@ -46,7 +46,9 @@ function newBucket(provider: string, model: string): TokenUsageBucket {
 
 function bucketFor(buckets: Map<string, TokenUsageBucket>, provider: string, model: string): TokenUsageBucket | undefined {
   if (provider.trim() === "" || model.trim() === "") return undefined;
-  const key = `${provider}${model}`;
+  // JSON keeps (a, bcde) and (ab, cde) distinct — a bare `${provider}${model}`
+  // concatenation merges them into one bucket.
+  const key = JSON.stringify([provider, model]);
   let bucket = buckets.get(key);
   if (bucket === undefined) {
     bucket = newBucket(provider, model);
@@ -160,4 +162,51 @@ export function mergeBuckets(...sources: readonly (readonly TokenUsageBucket[])[
     }
   }
   return sorted(buckets);
+}
+
+/**
+ * The slice of `sessionManager.getUsageStatistics()` the deep-seat remainder
+ * needs — all-optional so a missing field degrades to 0. `totalTokens` is the
+ * stats' name for the bucket's `total`; `cost` carries USD.
+ */
+export type UsageStatsSource = {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+  cost?: number;
+} | undefined | null;
+
+function remainderField(value: number | undefined, folded: number): number {
+  const raw = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return Math.max(0, raw - folded);
+}
+
+/**
+ * why: The deep parent's `task`-dispatched review seats spend tokens the SDK
+ * folds into `getUsageStatistics()` without journaling entries or reporting
+ * subagent results, so `runTokenUsage` cannot see them. Emit ONE
+ * `unattributed/deep-seat-spend` bucket carrying stats minus the folded
+ * buckets, per field clamped at 0 — the seat spend that would otherwise be
+ * silently dropped. `requests` is 0 because the stats expose no per-request
+ * count (`premiumRequests` counts premium requests only, not the seats').
+ * Deep path only: the quick path already folds its seat results and would
+ * double-count. A remainder total of 0 emits nothing.
+ */
+export function deepSeatRemainder(
+  stats: UsageStatsSource,
+  folded: readonly TokenUsageBucket[],
+): TokenUsageBucket | undefined {
+  if (stats === undefined || stats === null) return undefined;
+  const sum = (field: "input" | "output" | "cacheRead" | "cacheWrite" | "total" | "costUsd"): number =>
+    folded.reduce((total, bucket) => total + bucket[field], 0);
+  const bucket = newBucket("unattributed", "deep-seat-spend");
+  bucket.input = remainderField(stats.input, sum("input"));
+  bucket.output = remainderField(stats.output, sum("output"));
+  bucket.cacheRead = remainderField(stats.cacheRead, sum("cacheRead"));
+  bucket.cacheWrite = remainderField(stats.cacheWrite, sum("cacheWrite"));
+  bucket.total = remainderField(stats.totalTokens, sum("total"));
+  bucket.costUsd = remainderField(stats.cost, sum("costUsd"));
+  return bucket.total > 0 ? bucket : undefined;
 }

@@ -79,7 +79,7 @@ describe("migrations/0109_review_token_usage.sql", () => {
 });
 
 describe("review_token_usage is idempotent on (attempt_id, provider, model)", () => {
-  test("writing the same attempt twice leaves one row per pair with the latest values", async () => {
+  test("writing the same attempt twice keeps the latest values, and a shorter replay drops the stale row", async () => {
     const db = createMigratedTestD1();
     await db.batch(write(db, ATTEMPT_A, buckets()));
 
@@ -121,6 +121,27 @@ describe("review_token_usage is idempotent on (attempt_id, provider, model)", ()
         occurred_at: "2026-11-25T10:05:00.000Z",
       },
     ]);
+    // A replay reporting fewer pairs keeps no stale row — the attempt-scoped
+    // wipe inside the write set clears what the upserts no longer cover.
+    await db.batch(write(db, ATTEMPT_A, [replay[0]!], "2026-11-25T10:10:00.000Z"));
+    expect(rowsFor(db, ATTEMPT_A)).toEqual([
+      {
+        attempt_id: ATTEMPT_A,
+        provider: "ark",
+        model: "deepseek-v4-flash",
+        target_id: TARGET,
+        workspace_id: WORKSPACE,
+        input_tokens: 200,
+        output_tokens: 80,
+        cache_read_tokens: 20,
+        cache_write_tokens: 10,
+        total_tokens: 310,
+        requests: 6,
+        cost_usd: 0.0246,
+        occurred_at: "2026-11-25T10:10:00.000Z",
+      },
+    ]);
+
   });
 
   test("two attempts produce two row sets — a retried attempt never displaces another's rows", async () => {
