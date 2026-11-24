@@ -64,10 +64,11 @@ import {
 import {
   checkGateOf,
   createTargetsStore,
+  effectiveTargetSettings,
   getWorkspaceReviewDefaults,
-  readEffectiveTargetSettings,
   REVIEW_TRIGGER_MODES,
   setWorkspaceReviewDefaults,
+  workspaceDefaultsOfListRow,
   type EffectiveTargetSettings,
   type ReviewTargetRow,
   type ReviewTriggerMode,
@@ -2107,6 +2108,7 @@ const appListRoute = async (c: DashboardContext) => {
       target,
     ]),
   );
+  const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
   const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
@@ -2119,7 +2121,9 @@ const appListRoute = async (c: DashboardContext) => {
         github_slug: app.github_slug ?? null,
         github_avatar_url: app.github_avatar_url ?? null,
         status: app.status,
-        ...(target === undefined ? {} : { review_enabled: target.review_enabled }),
+        ...(target === undefined
+          ? {}
+          : { review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled ? 1 : 0 }),
         created_by: app.created_by,
         health: {
           latest: app.health.latest
@@ -2654,6 +2658,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
   const target = gate.target;
   try {
     c.header("Cache-Control", "private, no-store");
+    // Inside the try, like every other settings read: the route's catch is the
+    // only guard that logs `api_render` and answers the controlled 500.
+    const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
     if (!canManageApp(gate.scope)) {
       return c.json({
         can_manage: false,
@@ -2664,7 +2671,9 @@ const appSettingsRoute = async (c: DashboardContext) => {
         app: {
           github_app_id: app.github_app_id,
           status: app.status,
-          ...(target === null ? {} : { review_enabled: target.review_enabled !== 0 }),
+          ...(target === null
+            ? {}
+            : { review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled }),
           created_by: app.created_by,
           created_at: app.created_at,
           github_name: app.github_name ?? null,
@@ -2682,7 +2691,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
     const githubVisibility = await apps.getGithubVisibility(app.id);
     const installationPayload = null;
     if (blockedReason !== null) {
-      const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
+      const effective = target === null ? null : effectiveTargetSettings(target, defaults);
       const checkGate = effective === null ? null : checkGateOf(effective);
       const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
       return c.json({
@@ -2708,7 +2717,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
           ...(target === null
             ? {}
             : {
-                review_enabled: target.review_enabled !== 0,
+                review_enabled: effective!.reviewEnabled,
                 review_trigger_mode: effective!.triggerMode,
                 review_level: effective!.level,
                 default_review_level: defaultReviewLevel,
@@ -2724,7 +2733,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         installation: installationPayload,
       });
     }
-    const effective = target === null ? null : await readEffectiveTargetSettings(gate.db, target);
+    const effective = target === null ? null : effectiveTargetSettings(target, defaults);
     const checkGate = effective === null ? null : checkGateOf(effective);
     const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(gate.db)).value;
     const officialWorkspaceId = await readOfficialWorkspaceId(gate.db);
@@ -2733,7 +2742,7 @@ const appSettingsRoute = async (c: DashboardContext) => {
         ? { app: {}, top: {} }
         : {
             app: {
-              review_enabled: target.review_enabled !== 0,
+              review_enabled: effective!.reviewEnabled,
               review_trigger_mode: effective!.triggerMode,
               review_level: effective!.level,
               default_review_level: defaultReviewLevel,
@@ -4442,7 +4451,15 @@ const pullRequestRecordsRoute = async (
       limit,
     });
   }
-  const page = await gate.store.listPullRequestFailures(gate.scope, owner, repo, number, { offset, limit });
+  const rawScope = c.req.query("scope") ?? "";
+  if (rawScope !== "" && rawScope !== "head" && rawScope !== "all") {
+    return c.json({ error: "invalid scope" }, 400);
+  }
+  const page = await gate.store.listPullRequestFailures(gate.scope, owner, repo, number, {
+    offset,
+    limit,
+    history: rawScope === "all",
+  });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total, limit });
 };
@@ -4466,6 +4483,9 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   const targets = await createTargetsStore(gate.db).listLiveWithApp(gate.scope.workspaceId);
+  // The defaults ride the list statement (one statement per target row join),
+  // so this face stays inside its three-read budget.
+  const defaults = workspaceDefaultsOfListRow(targets[0]);
   const rows: TargetListRow[] = targets.map((target) => ({
     target_id: target.id,
     repo_id: target.repo_id,
@@ -4473,7 +4493,7 @@ const targetListRoute = async (c: DashboardContext): Promise<Response> => {
     repo_name: target.repo_name,
     bot_id: target.bot_id,
     app_name: target.app_name,
-    review_enabled: target.review_enabled,
+    review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled ? 1 : 0,
     follow_workspace_defaults: target.follow_workspace_defaults,
     last_reviewed_at: target.last_reviewed_at,
     reviews_total: target.reviews_total,
@@ -4647,9 +4667,11 @@ type ReviewSettingsPayload = {
   check_min_score: number;
   check_pass_verdicts: PrVerdict[];
   check_pass_verdicts_readable: boolean;
+  review_drafts: boolean;
+  review_enabled: boolean;
 };
 
-type TargetEffectivePayload = ReviewSettingsPayload & { reviewDrafts: boolean };
+type TargetEffectivePayload = ReviewSettingsPayload;
 
 function reviewSettingsPayload(settings: EffectiveTargetSettings): ReviewSettingsPayload {
   return {
@@ -4658,17 +4680,13 @@ function reviewSettingsPayload(settings: EffectiveTargetSettings): ReviewSetting
     check_min_score: settings.checkMinScore,
     check_pass_verdicts: [...settings.checkPassVerdicts],
     check_pass_verdicts_readable: settings.checkPassVerdictsReadable,
+    review_drafts: settings.reviewDrafts,
+    review_enabled: settings.reviewEnabled,
   };
 }
 
 function workspaceDefaultsPayload(defaults: WorkspaceReviewDefaults): ReviewSettingsPayload {
-  return reviewSettingsPayload({
-    triggerMode: defaults.triggerMode,
-    level: defaults.level,
-    checkMinScore: defaults.checkMinScore,
-    checkPassVerdicts: defaults.checkPassVerdicts,
-    checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
-  });
+  return reviewSettingsPayload(defaults);
 }
 
 type TargetSettingsPayload = {
@@ -4688,9 +4706,10 @@ type TargetSettingsPayload = {
 async function targetSettingsPayload(
   db: DashboardDb,
   target: ReviewTargetRow,
-): Promise<{ target: TargetSettingsPayload; effective: TargetEffectivePayload }> {
+  defaults: WorkspaceReviewDefaults,
+): Promise<{ target: TargetSettingsPayload; effective: TargetEffectivePayload; defaults: ReviewSettingsPayload }> {
   const app = await createReviewBotsStore(db).getAppById(target.bot_id);
-  const effective = await readEffectiveTargetSettings(db, target);
+  const effective = effectiveTargetSettings(target, defaults);
   return {
     target: {
       target_id: target.id,
@@ -4705,7 +4724,8 @@ async function targetSettingsPayload(
       follow_workspace_defaults: target.follow_workspace_defaults,
       review_drafts: target.review_drafts === 0 ? 0 : 1,
     },
-    effective: { ...reviewSettingsPayload(effective), reviewDrafts: effective.reviewDrafts },
+    effective: reviewSettingsPayload(effective),
+    defaults: workspaceDefaultsPayload(defaults),
   };
 }
 
@@ -4715,11 +4735,13 @@ const targetSettingsReadRoute = async (c: DashboardContext): Promise<Response> =
   const store = createTargetsStore(member.db);
   const target = await store.getInWorkspace(member.scope.workspaceId, c.req.param("targetId") ?? "");
   if (!target) return c.json({ error: "unknown target" }, 404);
-  const payload = await targetSettingsPayload(member.db, target);
-  return c.json({
-    ...payload,
-    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
-  });
+  return c.json(
+    await targetSettingsPayload(
+      member.db,
+      target,
+      await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId),
+    ),
+  );
 };
 
 const workspaceDefaultsReadRoute = async (c: DashboardContext): Promise<Response> => {
@@ -4745,7 +4767,7 @@ type ReviewSettingsParse =
   | { ok: true; patch: ReviewSettingsPatch }
   | { ok: false; error: string; key?: DictionaryKey; params?: Record<string, string | number> };
 
-function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSettingsParse {
+function parseReviewSettingsBody(raw: unknown): ReviewSettingsParse {
   if (typeof raw !== "object" || raw === null) return { ok: false, error: "invalid body" };
   const body = raw as Record<string, unknown>;
   const patch: ReviewSettingsPatch = {};
@@ -4801,7 +4823,6 @@ function parseReviewSettingsBody(raw: unknown, withSwitch: boolean): ReviewSetti
     }
     patch.checkPassVerdicts = [...new Set(list as PrVerdict[])];
   }
-  if (!withSwitch) return { ok: true, patch };
   if ("review_drafts" in body) {
     if (typeof body.review_drafts !== "boolean") {
       return { ok: false, error: "invalid review_drafts" };
@@ -4840,13 +4861,14 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
     raw = await c.req.json();
   } catch {
   }
-  const parsed = parseReviewSettingsBody(raw, true);
+  const parsed = parseReviewSettingsBody(raw);
   if (!parsed.ok) {
     return parsed.key === undefined
       ? c.json({ error: parsed.error }, 400)
       : keyed400(c, parsed.key, parsed.params);
   }
   const { patch } = parsed;
+  const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
   const touchesPolicy =
     patch.triggerMode !== undefined ||
     patch.level !== undefined ||
@@ -4855,42 +4877,47 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
   const follow: 0 | 1 | undefined =
     patch.follow ?? (touchesPolicy ? 0 : undefined);
   const current =
-    touchesPolicy || patch.follow !== undefined
-      ? await readEffectiveTargetSettings(member.db, target)
-      : null;
+    touchesPolicy || patch.follow !== undefined ? effectiveTargetSettings(target, defaults) : null;
   if (current !== null && !current.checkPassVerdictsReadable) {
     return c.json({ error: "review_gate_unreadable" }, 400);
   }
+  // The admission pair is answered by the DEFAULTS while the target inherits,
+  // so a save that leaves it inheriting must not write the row's copies.
+  const inheriting = (follow ?? target.follow_workspace_defaults) === 1;
+  // Only a transition from inheriting to own-columns snapshots unnamed values;
+  // an already-detached target writes an admission column only when the patch
+  // names it, so a concurrent admission save is never reverted by a policy save.
+  const detaching = target.follow_workspace_defaults === 1 && follow === 0;
   const config: TargetReviewConfig = {
     triggerMode: follow === 1 ? undefined : patch.triggerMode,
     level: follow === 1 ? undefined : patch.level,
     checkMinScore: follow === 1 ? undefined : patch.checkMinScore,
     checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
-    reviewDrafts: patch.reviewDrafts,
+    reviewDrafts: inheriting ? undefined : patch.reviewDrafts,
+    reviewEnabled: inheriting ? undefined : patch.reviewEnabled,
     follow,
   };
-  if (follow === 0 && current !== null) {
+  if (detaching && current !== null) {
     config.triggerMode ??= current.triggerMode;
     if (config.level === undefined) config.level = current.level;
     config.checkMinScore ??= current.checkMinScore;
     config.checkPassVerdicts ??= current.checkPassVerdicts;
+    // Dropping inheritance must keep the target on the admission values it is
+    // running with right now; the row's copies may be stale overrides. The
+    // pause rides the same UPDATE as `follow`, so no read can see follow = 0
+    // beside the row's old pause.
+    config.reviewDrafts ??= current.reviewDrafts;
+    config.reviewEnabled ??= current.reviewEnabled;
   }
   try {
     await store.setReviewConfig(member.scope.workspaceId, target.id, config);
-    if (patch.reviewEnabled !== undefined) {
-      await store.setReviewEnabled(member.scope.workspaceId, target.id, patch.reviewEnabled);
-    }
   } catch (err) {
     logSettingsFailure("target_settings_save", target.id, err);
     return c.json({ error: "save failed" }, 500);
   }
   const saved = await store.getInWorkspace(member.scope.workspaceId, target.id);
   if (!saved) return c.json({ error: "unknown target" }, 404);
-  const payload = await targetSettingsPayload(member.db, saved);
-  return c.json({
-    ...payload,
-    defaults: workspaceDefaultsPayload(await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId)),
-  });
+  return c.json(await targetSettingsPayload(member.db, saved, defaults));
 };
 
 const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Response> => {
@@ -4902,7 +4929,7 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
     raw = await c.req.json();
   } catch {
   }
-  const parsed = parseReviewSettingsBody(raw, false);
+  const parsed = parseReviewSettingsBody(raw);
   if (!parsed.ok) {
     return parsed.key === undefined
       ? c.json({ error: parsed.error }, 400)
@@ -4918,6 +4945,8 @@ const workspaceDefaultsWriteRoute = async (c: DashboardContext): Promise<Respons
         level: patch.level,
         checkPassVerdicts: patch.checkPassVerdicts,
         checkMinScore: patch.checkMinScore,
+        reviewDrafts: patch.reviewDrafts,
+        reviewEnabled: patch.reviewEnabled,
       },
       member.user.github_login,
     );

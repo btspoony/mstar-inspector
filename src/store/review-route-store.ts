@@ -21,10 +21,69 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
+import { FAILURE_SUMMARIES, isFailureCode, type FailureCode } from "../contracts/failure-codes";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
+
+/**
+ * What a live settlement OBSERVED about an outcome it could not conclude: the
+ * throw site's own classification, its composed message verbatim (`error` on
+ * the failure row is that raw text) and the bounded, already-redacted cause
+ * it carried as data (`cause`), which is what the reconciler renders into the
+ * author-facing message. No part is reconstructed from another part.
+ *
+ * It rides the delivery's handoff row because that row is the durable evidence
+ * the recovery lanes already read for this attempt, and because neither
+ * `review_launches` slot could hold it: `result_json` is CHECK-coupled to
+ * `state = 'persisted'` (writing one would forge a durable result), and the
+ * frozen Check triple is coupled to `check_owed_ms`. No new column is needed —
+ * the observation is row state, never queue payload (`toHandoff` keeps it out
+ * of `payload`), and the reconciler remains the ONLY failure-row writer.
+ */
+export type AttemptObservation = { code: FailureCode; message: string; cause?: string };
+
+/** The `payload_json` key the observation rides under, never part of the payload. */
+const OBSERVATION_KEY = "attemptObservation";
+
+/**
+ * The `payload_json` key the reviewed head rides under, never part of the
+ * payload: the same row-state convention the observation uses, because
+ * `payload` is what a recovery re-enqueue sends and what `deliveryKeyOf`
+ * hashes, so a second key in the body would change an existing attempt's
+ * delivery identity.
+ */
+const REVIEWED_HEAD_KEY = "reviewedHeadSha";
+
+/**
+ * The fallback `review_failures.error` the lost-reply lane writes when no
+ * observation existed yet — two constants (anchored / pre-column), which is what
+ * lets the late-observation sync PROVE a row is that lane's own before rewriting
+ * it. The deadline and the grace are durable on the launch and handoff rows; the
+ * sentence states the conclusion.
+ *
+ * Owned HERE because two readers must agree on it: the sync selector that
+ * rewrites such a row, and the settlement's guard deciding whether a row already
+ * tells the attempt's story (a fallback row does not — it is a placeholder
+ * awaiting exactly that cause).
+ */
+export const LOST_REPLY_FALLBACK_ERROR =
+  "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived";
+export const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
+  "a pre-column legacy attempt carries no frozen deadline; its launch outlived the maximum attempt cap plus the post-deadline grace, and no reply ever arrived";
+
+/**
+ * The exact row shape the lost-reply lane writes for an attempt with no
+ * observation: attempt-keyed, the lane's own code, and one of its fallback
+ * sentences. The late-observation sync binds this shape — a row any other
+ * producer wrote is never selected, never rewritten.
+ */
+export const LOST_REPLY_FALLBACK_SHAPE = {
+  fallbackCode: "review.paid.reply_lost",
+  fallbackErrors: [LOST_REPLY_FALLBACK_ERROR, LOST_REPLY_FALLBACK_ERROR_UNANCHORED],
+  fallbackMessage: FAILURE_SUMMARIES["review.paid.reply_lost"],
+} as const;
 
 export type AttemptHandoff = {
   deliveryKey: string;
@@ -47,6 +106,22 @@ export type AttemptHandoff = {
   settledMs: number | null;
   settledEffects: SettlementEffect[] | null;
   settlingMs: number | null;
+  /**
+   * The live settlement's own record of why this attempt's outcome could not be
+   * concluded, or `null` when nothing was observed (or the row predates the
+   * write). The recovery pass composes its failure row from THIS — the observed
+   * cause is the operator's, the code is the throw site's — and falls back to
+   * its own deadline sentence only when no observation exists.
+   */
+  observation: AttemptObservation | null;
+  /**
+   * The head this attempt's checkout actually resolved, recorded by prepare
+   * before any paid step, or `null` when no head was resolved (or the row
+   * predates the write). Recovery attributes the failure row to THIS — never to
+   * the frozen Check identity, which admission can pin to an older commit than
+   * the checkout landed on.
+   */
+  reviewedHeadSha: string | null;
 };
 
 /**
@@ -155,10 +230,20 @@ type HandoffRow = {
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
+  // The observation and the reviewed head share the row but never the payload:
+  // `payload` is what a recovery re-enqueue sends and what `deliveryKeyOf`
+  // hashes, so leaking either key would change the delivery identity of an
+  // existing attempt. Destructuring keeps the parse fail-fast (a non-object body
+  // throws, as before).
+  const {
+    [OBSERVATION_KEY]: raw,
+    [REVIEWED_HEAD_KEY]: reviewedHead,
+    ...payload
+  } = JSON.parse(row.payload_json) as ReviewJobPayload & Record<string, unknown>;
   return {
     deliveryKey: row.delivery_key,
     attemptId: row.attempt_id,
-    payload: JSON.parse(row.payload_json) as ReviewJobPayload,
+    payload: payload as ReviewJobPayload,
     state: row.state,
     deadlineMs: row.deadline_ms,
     enqueuedMs: row.enqueued_ms,
@@ -166,7 +251,147 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     settledMs: row.settled_ms,
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
     settlingMs: row.settling_ms,
+    observation: toObservation(raw),
+    reviewedHeadSha: typeof reviewedHead === "string" && reviewedHead !== "" ? reviewedHead : null,
   };
+}
+
+/**
+ * Anything off the vocabulary — a foreign key, a non-string message or cause,
+ * a payload from another build — reads as "nothing was observed", so the
+ * recovery pass falls back to its own sentence instead of rendering an unknown
+ * string as an author-facing code.
+ */
+function toObservation(value: unknown): AttemptObservation | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { code, message, cause } = value as Record<string, unknown>;
+  if (!isFailureCode(code) || typeof message !== "string" || message === "") return null;
+  if (cause !== undefined && typeof cause !== "string") return null;
+  return { code, message, ...(cause === undefined ? {} : { cause }) };
+}
+
+/**
+ * Record the head this attempt's checkout actually resolved — the commit its
+ * review runs on. Row state, never queue payload (same convention as the
+ * observation above), and written by prepare BEFORE the paid step, so recovery
+ * can attribute a failure to the head that was reviewed even when the host that
+ * knew it is gone.
+ *
+ * The value is bound through `json_quote`, not as bare text: `json_set`'s value
+ * argument is JSON-text-typed on some engines, so a digits-only SHA would land
+ * as a JSON NUMBER (which `toHandoff`'s string guard would then drop) and a bare
+ * SHA is not well-formed JSON at all (`json(?)` would raise `malformed JSON`).
+ * Quoting makes the stored leaf a string on every engine, which is what the
+ * reader's type check relies on.
+ *
+ * The write is not guarded on an existing value: a re-prepared attempt resolves
+ * its head again, and the LAST resolution is the one its paid step used. `false`
+ * means no handoff row carries this attempt (a delivery that never reached
+ * admission), which leaves the frozen Check identity as the only evidence.
+ */
+export async function recordReviewedHead(
+  db: D1Like,
+  input: { attemptId: string; headSha: string; nowMs: number },
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET payload_json = json_set(payload_json, '$.${REVIEWED_HEAD_KEY}', json_quote(?)),
+              updated_ms = ?
+        WHERE attempt_id = ?`,
+    )
+    .bind(input.headSha, input.nowMs, input.attemptId)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Record what the live settlement observed about an outcome it could not
+ * conclude. The FIRST observation for the attempt stands: a replay of the same
+ * settlement carries the same cause, and a later lane has strictly less
+ * evidence than the phase that was there. `false` means the row does not exist
+ * or an observation was already recorded.
+ *
+ * An existing `review_failures` row is deliberately NOT a reason to refuse: the
+ * pass may settle the attempt before the phase records its cause, and the late
+ * observation is then applied to that same row by
+ * `listLateObservedFailures`/`syncSettledFailureRow`. `nowMs` lands on
+ * `updated_ms` — the same clock the recovery quiet period reads (the sync
+ * orders by content, never by time).
+ */
+export async function recordAttemptObservation(
+  db: D1Like,
+  input: { attemptId: string; observation: AttemptObservation; nowMs: number },
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET payload_json = json_set(payload_json, '$.${OBSERVATION_KEY}', json(?)),
+              updated_ms = ?
+        WHERE attempt_id = ?
+          AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL`,
+    )
+    .bind(JSON.stringify(input.observation), input.nowMs, input.attemptId)
+    .run();
+  return written.meta.changes === 1;
+}
+
+/**
+ * Failure rows still carrying the writer's own fallback while their attempt
+ * holds an observation. Idempotence is content, never a clock: no timestamp is
+ * compared anywhere here, so an observation recorded between the composer's
+ * read and its insert — across any second boundary — still reaches the row.
+ *
+ * `f.error IS NOT` the observation's own message is exactly "not synced yet": a
+ * synced row leaves this lane for good, a second pass selects nothing and
+ * writes nothing.
+ *
+ * The writer's OWN shape is what keeps a foreign row out: `f.track_id` must
+ * name the attempt, `f.error_code` the lane's code, `f.error` one of the
+ * writer's exact fallback sentences and `f.message` its fallback summary — the
+ * caller binds its own constants, so a row another producer wrote is never
+ * selected even when an observation exists.
+ */
+export async function listLateObservedFailures(
+  db: D1Like,
+  input: { limit: number; fallbackCode: string; fallbackErrors: readonly string[]; fallbackMessage: string },
+): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_failures f ON f.id = h.attempt_id
+        WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.message') IS NOT NULL
+          AND f.error IS NOT json_extract(h.payload_json, '$.${OBSERVATION_KEY}.message')
+          AND f.track_id = h.attempt_id
+          AND f.error_code = ?
+          AND f.error IN (${input.fallbackErrors.map(() => "?").join(",")})
+          AND f.message = ?
+        ORDER BY h.updated_ms
+        LIMIT ?`,
+    )
+    .bind(input.fallbackCode, ...input.fallbackErrors, input.fallbackMessage, input.limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
+ * Apply a late observation to the attempt's existing failure row: the SAME row,
+ * keyed by the attempt, rewritten to the story the phase actually observed.
+ * The selector above is the ownership proof — only the reconciler's own
+ * fallback shape reaches this call — so a keyed update is enough, and a row
+ * already carrying the observation leaves the lane for good.
+ */
+export async function syncSettledFailureRow(
+  db: D1Like,
+  input: { attemptId: string; code: FailureCode; error: string; message: string },
+): Promise<boolean> {
+  const written = await db
+    .prepare(`UPDATE review_failures SET error_code = ?, error = ?, message = ? WHERE id = ?`)
+    .bind(input.code, input.error, input.message, input.attemptId)
+    .run();
+  return written.meta.changes === 1;
 }
 
 /** The delivery's handoff record, or `null` when this body was never handed off. */
@@ -350,6 +575,57 @@ ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+/**
+ * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
+ * outside the fallback sentences, or another code, or another summary. Any such
+ * row is a lane-authored story ("publication never started …") and the phase's
+ * later observation must not replace it.
+ *
+ * Keyed on `id`, which the recovery writers set to the ATTEMPT id
+ * (`landFailureEffect` inserts with it), so the guard is a primary-key lookup.
+ * `track_id` carries the same value but has no index, and this predicate runs
+ * precisely while no row matches yet — a scan of every workspace's failure
+ * history per lost reply.
+ *
+ * A fallback-shaped row is deliberately NOT a story: it exists precisely because
+ * no observation had arrived, and the late-observation sync rewrites it in place
+ * — so recording the observation is what makes that repair possible. COALESCE
+ * keeps a NULL code/message (a pre-0106 row) on the "story" side.
+ */
+const ATTEMPT_FAILURE_STORY_SQL = `
+SELECT 1 AS present FROM review_failures
+ WHERE id = ?
+   AND NOT (
+     COALESCE(error_code, '') = ?
+     AND COALESCE(error, '') IN (?, ?)
+     AND COALESCE(message, '') = ?
+   )`;
+
+/**
+ * Whether the attempt's own failure row already tells its story in words the
+ * phase cannot improve on. The live settlement records only an OBSERVATION —
+ * never a row — so a row that exists here came from a recovery lane that saw
+ * materially more (a durable paid result with nothing staged), and its sentence
+ * must stand. A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
+ *
+ * Only the ATTEMPT-KEYED row is consulted, which is the row those lanes compose
+ * and the only indexed key. A row the live phase wrote under a random id (or the
+ * per-stage `<attempt>:recheck` row) is not a story: a lane's later insert is
+ * attempt-keyed with ON CONFLICT DO NOTHING and the sync lane only rewrites
+ * fallback shapes, so recording the observation over such a row changes nothing.
+ */
+export async function attemptFailureStoryExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db
+    .prepare(ATTEMPT_FAILURE_STORY_SQL)
+    .bind(
+      attemptId,
+      LOST_REPLY_FALLBACK_SHAPE.fallbackCode,
+      ...LOST_REPLY_FALLBACK_SHAPE.fallbackErrors,
+      LOST_REPLY_FALLBACK_SHAPE.fallbackMessage,
+    )
+    .first<{ present: number }>();
+  return row !== null;
+}
 const MARK_REFUSAL_PENDING_SQL = `
 INSERT INTO review_refusal_pending (attempt_id, created_ms) VALUES (?, ?)
 ON CONFLICT(attempt_id) DO NOTHING
@@ -867,7 +1143,10 @@ export async function listUnpublishedLaunchSettlements(
  *
  * The anti-join on `review_failures` is the idempotence guard: the failure row
  * is keyed by the attempt, so a row that already settled once is never selected
- * again and a concurrent pass can never mint a second one.
+ * again and a concurrent pass can never mint a second one. That row is written
+ * by THIS lane alone — the live settlement records only an OBSERVATION on the
+ * handoff row (see `AttemptObservation`), never a failure row — so a row
+ * existing here means the settlement already ran.
  *
  * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
  * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement

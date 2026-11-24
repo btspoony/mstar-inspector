@@ -524,6 +524,37 @@ describe("GET /api/targets/:targetId/pull-requests/:owner/:repo/:number", () => 
     expect(await unknownPr.json()).toEqual({ error: "unknown pull request" });
   });
 
+  test("the failures scope is head by default, all on scope=all, and 400 on any other spelling", async () => {
+    const db = await fixture();
+    seedInstallation(db);
+    seedFailure(db, "fx-head");
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, installation_id, owner, repo, pr_number, head_sha, stage, error, target_id)
+         VALUES ('fx-old', 77, 'acme', 'widgets', 131, 'sha-0', 'runner', 'old head timeout', 'target-app-acme')`,
+      )
+      .run();
+
+    const heads = async (suffix: string) =>
+      (await (await getFace(`${sectionPath("failures")}${suffix}`, db)).json()) as {
+        items: Array<{ stage: string }>;
+        total: number;
+      };
+    for (const suffix of ["", "?scope=head", "?scope="]) {
+      expect(await heads(suffix), suffix).toMatchObject({ total: 1 });
+      expect((await heads(suffix)).items[0]?.stage).toBe("sandbox");
+    }
+    const all = await heads("?scope=all");
+    expect(all.total).toBe(2);
+    expect(all.items.map((row) => row.stage).sort()).toEqual(["runner", "sandbox"]);
+
+    for (const bad of ["?scope=history", "?scope=ALL", "?scope=0"]) {
+      const res = await getFace(`${sectionPath("failures")}${bad}`, db);
+      expect(res.status, bad).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid scope" });
+    }
+  });
+
   test("malformed paging is a 400 on every section", async () => {
     const db = await fixture();
     seedInstallation(db);

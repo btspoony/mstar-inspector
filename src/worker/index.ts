@@ -32,9 +32,9 @@ import {
 import {
   createTargetsStore,
   checkGateOf,
-  getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
   readEffectiveTargetSettings,
+  type EffectiveReviewTargetSettings,
   type ReviewTargetRow,
 } from "../dashboard/targets-store";
 import {
@@ -388,9 +388,14 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   const targetsStore = createTargetsStore(db);
-  const delivery: { target: ReviewTargetRow | null; installationId: number | null } = {
+  const delivery: {
+    target: ReviewTargetRow | null;
+    installationId: number | null;
+    effective: EffectiveReviewTargetSettings | null;
+  } = {
     target: null,
     installationId: null,
+    effective: null,
   };
 
   let appSecret: string;
@@ -424,11 +429,13 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       delivery.target = await targetsStore.resolveByRepo(row.id, repo);
       const target = delivery.target;
       if (target === null) return null;
-      const mode =
-        target.follow_workspace_defaults === 1
-          ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
-          : target.review_trigger_mode;
-      return { mode, appSlug, reviewDrafts: target.review_drafts !== 0, githubAppId: row.github_app_id };
+      delivery.effective = await readEffectiveTargetSettings(db, target);
+      return {
+        mode: delivery.effective.triggerMode,
+        appSlug,
+        reviewDrafts: delivery.effective.reviewDrafts,
+        githubAppId: row.github_app_id,
+      };
     },
     (parsed) => {
       classified = parsed;
@@ -496,7 +503,8 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       "per-App webhook ignored with 200 — no review target resolves for this delivery (zero enqueue, no ledger row)",
     );
   }
-  const paused = target !== null && (row.review_enabled === 0 || target.review_enabled === 0);
+  const paused =
+    target !== null && (row.review_enabled === 0 || !(delivery.effective?.reviewEnabled ?? false));
 
   let reviewGlobal = true;
   if (outcome.kind === "job" && !paused) {

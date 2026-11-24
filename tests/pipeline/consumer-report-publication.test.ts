@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { SHA, VALID_DIFF, VALID_OUTPUT, createSeededTestD1 } from "../helpers/consumer-fixtures";
-import { createConsumerHarness, loadConsumer, makePayload } from "../helpers/consumer-harness";
+import { createConsumerHarness, failureRows, loadConsumer, makePayload } from "../helpers/consumer-harness";
 import { REPORT_FIELD_MAX_CHARS } from "../../packages/shared/src/report-wire";
 
 const { createReviewConsumer, extractIssueRefs } = await loadConsumer();
@@ -170,6 +170,54 @@ describe("report publication", () => {
     expect(warn?.fields.report_doc_error).not.toContain("IGNORE PREVIOUS");
     expect(warn?.fields.report_doc_error).not.toContain("sk-live-hostile");
     expect(preparedBody()).not.toContain("IGNORE PREVIOUS");
+  });
+  test("a report read that loses its reply still names its cause on the settled row", async () => {
+    // End to end: the paid runner returns, the report-document read loses its
+    // reply, and the reconciler later writes the ONE failure row. The cause must
+    // come from the phase that saw the read fail, not from the reconciler's
+    // generic "no reply ever arrived" sentence.
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    h.sandbox.diffStdout = VALID_DIFF;
+    h.sandbox.prBodyExitCode = 0;
+    h.sandbox.prBodyContent = "no issues referenced";
+    // Call 1 is the runner-input write, 2 the runner, 3 the report read.
+    h.sandbox.markedError = new Error("report read: transport closed");
+    h.sandbox.markedErrorFromCall = 3;
+    const db = await createSeededTestD1();
+    const env = await h.makeEnv({ DB: db as never });
+    const consumer = createReviewConsumer(env, h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload()));
+
+    // Nothing is concluded here: the launch row is still `launched`, so the
+    // reconciler owns the row and the cause rides the attempt's observation.
+    expect(failureRows(db)).toHaveLength(0);
+    const observation = db.raw
+      .query(
+        `SELECT json_extract(payload_json, '$.attemptObservation.cause') AS cause
+           FROM review_attempt_handoffs ORDER BY created_ms DESC LIMIT 1`,
+      )
+      .get() as { cause: string | null } | null;
+    expect(observation?.cause).toContain("report read: transport closed");
+
+    // Let the attempt's own hard stop plus the default grace pass, then let the
+    // pass write the row: it carries the phase's cause, not the generic
+    // sentence.
+    const handoff = db.raw
+      .query("SELECT deadline_ms FROM review_attempt_handoffs ORDER BY created_ms DESC LIMIT 1")
+      .get() as { deadline_ms: number | null };
+    const { LOST_REPLY_SETTLE_DEFAULT_MS } = await import("../../src/dashboard/runtime-config-store");
+    const { reconcileReviewRoute } = await import("../../src/pipeline/route-reconcile");
+    await reconcileReviewRoute(
+      { ...env, REVIEW_QUEUE: { send: async () => {} } as never },
+      (handoff.deadline_ms ?? 0) + LOST_REPLY_SETTLE_DEFAULT_MS,
+    );
+
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(String(settled[0]!.error)).toContain("report read: transport closed");
+    expect(String(settled[0]!.error)).not.toContain("no reply ever arrived");
+    expect(String(settled[0]!.message)).toContain("Report read: transport closed");
   });
 });
 

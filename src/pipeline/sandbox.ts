@@ -1,7 +1,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Container, DurableObjectState } from "@cloudflare/workers-types";
-import { ContainerNotRunningError } from "./sandbox-errors";
+import { ContainerNotRunningError, constantCause, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
@@ -55,8 +55,11 @@ type ExecDeadlineSpent = { kind: "deadline-spent"; remainingMs: number };
  * The process was opened and its reply never arrived inside the host timer. The
  * command may have run (and may have written a result), so this is NEVER a
  * "nothing ran" verdict: only a refusal that precedes the exec proves that.
+ *
+ * `cause` is bounded evidence and NEVER a second discriminant: callers classify
+ * on `kind` alone.
  */
-type ExecReplyLost = { kind: "reply-lost" };
+type ExecReplyLost = { kind: "reply-lost"; cause?: string };
 
 /**
  * What `provision` observed inside the DO's exclusive gate. `provisioned` means
@@ -85,7 +88,7 @@ export type ProvisionOutcome =
  */
 export type MarkedRun =
   | { kind: "ran"; stdout: string; stderr: string; exitCode: number }
-  | { kind: "reply-lost" }
+  | { kind: "reply-lost"; cause?: string }
   | { kind: "not-running" }
   | { kind: "marker-mismatch" }
   | { kind: "marker-unreadable" }
@@ -340,8 +343,12 @@ export class SandboxV1 extends DurableObject {
     const result = await this.execCommand(container, command, opts, prepared);
     if ("kind" in result && result.kind === "reply-lost") {
       // The command was opened; only its reply is missing. A caller that mutates
-      // the slot must treat this exactly like a lost reply on any other path.
-      throw new Error("the exec was issued and its reply was lost — the command may have run");
+      // the slot must treat this exactly like a lost reply on any other path,
+      // and the bound's own cause (a thrown fault OR a host timer) rides the
+      // message — this path has no outcome field to carry it.
+      throw new Error(
+        `the exec was issued and its reply was lost — the command may have run${result.cause === undefined ? "" : ` — ${result.cause}`}`,
+      );
     }
     if ("kind" in result) {
       throw new Error("the exec deadline was spent before the process started");
@@ -370,11 +377,18 @@ export class SandboxV1 extends DurableObject {
       if (deadlineEpochMs - Date.now() <= KILL_GRACE_MS) {
         return { kind: "deadline-spent", remainingMs: deadlineEpochMs - Date.now() };
       }
+      const openedAtMs = Date.now();
       try {
         const ran = await this.execCommand(container, command, { ...opts, deadlineEpochMs });
         return "kind" in ran ? ran : ({ kind: "ran", ...ran } as const);
-      } catch {
-        return { kind: "reply-lost" };
+      } catch (err) {
+        // The exec was opened; only its reply is missing. The cause is the one
+        // thing this boundary would otherwise discard before any caller logs it,
+        // sanitized against everything THIS exec carried.
+        return {
+          kind: "reply-lost",
+          cause: execCause(err, openedAtMs, execSensitiveValues(command, opts)),
+        };
       }
     });
   }
@@ -512,14 +526,22 @@ export class SandboxV1 extends DurableObject {
       env: opts?.env,
       ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
     };
+    const openedAtMs = Date.now();
     const opened =
       deadlineMs === undefined
         ? await container.exec(argv, execOptions)
         : await boundedAwait(container.exec(argv, execOptions), deadlineMs);
     // The open may already have been dispatched by the platform, so a host
-    // timer here proves neither "did not run" nor "no result": lost reply.
+    // timer here proves neither "did not run" nor "no result": lost reply. The
+    // sentence is this file's own constant — it names WHICH bound expired, and
+    // it survives an exec whose carried values cannot all be enumerated (an
+    // over-bound stdin), which is why it is not routed through the message
+    // sanitizer. The two timer paths stay distinguishable in the row.
     if (opened === AWAIT_EXPIRED) {
-      return { kind: "reply-lost" };
+      return {
+        kind: "reply-lost",
+        cause: constantCause("the host timer expired before the exec dispatch answered", openedAtMs),
+      };
     }
     const process = opened;
     const drained = process.output();
@@ -536,7 +558,10 @@ export class SandboxV1 extends DurableObject {
     // The command demonstrably ran (it was opened); the reply missed the timer.
     // Its output may already be durable on the slot, so this is a lost reply.
     if (output === AWAIT_EXPIRED) {
-      return { kind: "reply-lost" };
+      return {
+        kind: "reply-lost",
+        cause: constantCause("the host timer expired while the exec output was being drained", openedAtMs),
+      };
     }
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;

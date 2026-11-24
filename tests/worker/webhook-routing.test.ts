@@ -1016,6 +1016,21 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({ action: "synchronize", pr_number: 42, head_sha: DRAFT_SHA });
     });
+
+    test("a following target inherits the workspace's draft switch over its own row", async () => {
+      const db = createMigratedTestD1();
+      await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewDrafts: 1 }] });
+      db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 1").run();
+      db.raw.prepare("UPDATE workspaces SET default_review_drafts = 0 WHERE id = 'default'").run();
+      const { queue, sent } = makeQueue();
+      const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+
+      const res = await post(env, delivery("synchronize"));
+
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe("ignored");
+      expect(sent).toHaveLength(0);
+    });
   });
 
   test("an unsynced App (github_slug NULL) logs mention_unresolved for a mention, still enqueues nothing", async () => {
@@ -2330,6 +2345,23 @@ describe("target resolution (webhook → review_targets by repository)", () => {
       review_enabled: number;
     };
     expect(bot.review_enabled).toBe(1);
+  });
+
+  test("a following target inherits the workspace pause over its own row", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", targets: [{ reviewEnabled: 1 }] });
+    db.raw.run("UPDATE review_targets SET follow_workspace_defaults = 1");
+    db.raw.run("UPDATE workspaces SET default_review_enabled = 0 WHERE id = 'default'");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "paused" }]);
   });
 });
 

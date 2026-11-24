@@ -493,11 +493,12 @@ async function resolveCommenter(payload: ReviewJobPayload, deps: ProcessDeps): P
       `per-App credential resolution failed: target ${target.id} belongs to bot ${target.bot_id}, not ${botId}`,
     );
   }
-  if (row.review_enabled === 0 || target.review_enabled === 0) {
+  if (row.review_enabled === 0) return { kind: "paused" };
+  const effective = await readEffectiveTargetSettings(deps.env.DB, target);
+  if (!effective.reviewEnabled) {
     return { kind: "paused" };
   }
   const fingerprint = JSON.stringify([row.github_app_id, row.private_key_enc]);
-  const effective = await readEffectiveTargetSettings(deps.env.DB, target);
   const cached = deps.appCommenters.get(botId);
   if (cached !== undefined && cached.fingerprint === fingerprint) {
     return {
