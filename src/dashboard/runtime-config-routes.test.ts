@@ -939,8 +939,20 @@ describe("PATCH /_internal_admin/api/runtime routeWorkflow", () => {
     ]) {
       const res = await runtimeApi(db, { method: "PATCH", body });
       expect(res.status, body).toBe(400);
-      expect(await res.json()).toHaveProperty("error");
+      // The refusal names the removed capability and its new owner, so a stale
+      // client is not told the wrong field is wrong.
+      const error = ((await res.json()) as { error?: string }).error ?? "";
+      expect(error, body).toContain("routeWorkflow");
+      expect(error, body).toContain("deploy pipeline");
     }
+    // A routeWorkflow write beside a valid field is refused outright, so the
+    // caller never believes half the body was applied.
+    const mixed = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ routeWorkflow: "on", concurrency: 5 }),
+    });
+    expect(mixed.status).toBe(400);
+    expect(storedSystem(db)).toBeNull();
     expect(storedRouteWorkflow(db)).toBe("on");
     expect(auditRows(db)).toEqual([]);
     expect(await getReviewRouteWorkflowGate(db)).toEqual({

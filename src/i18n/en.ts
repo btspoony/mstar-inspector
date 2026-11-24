@@ -1220,11 +1220,11 @@ export const en = {
       reviewsAnswerPausedPlatform:
         "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
       reviewsAnswerBlockedDeploymentGate:
-        "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+        "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
       reviewsPlatformLabel: "Platform switch",
       reviewsPlatformOn: "on — reviews are allowed",
       reviewsPlatformOff: "off — reviews are paused",
-      reviewsPlatformUnreadable: "unreadable — treated as paused",
+      reviewsPlatformUnreadable: "unreadable — reviews are blocked until it reads again",
       reviewsRouteLabel: "Deployment gate",
       reviewsRouteOn: "on — deliveries create a Workflow instance",
       reviewsRouteOff: "off or unreadable — deliveries create nothing",
@@ -1232,7 +1232,7 @@ export const en = {
       reviewsPausedAppsLabel: "Apps with reviews paused",
       reviewsPausedAppsUnreadable: "not readable",
       reviewsPrecedence:
-        "When the platform switch and the deployment gate are both off, the platform pause is the one named here.",
+        "The deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
       reviewsPausedAppsLink: "Pause or resume a single App in the App settings",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:

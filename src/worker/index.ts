@@ -41,6 +41,8 @@ import {
   getReviewRouteWorkflowGate,
   maintenanceClosed,
   readDefaultReviewLevel,
+  REVIEW_ROUTE_WORKFLOW_KEY,
+  reviewRunState,
 } from "../dashboard/runtime-config-store";
 import { checkEntitlement } from "../dashboard/entitlement";
 import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
@@ -692,20 +694,18 @@ type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRe
 
 type ReviewQueueConsumerModule = Pick<
   typeof ConsumerModule,
-  "createReviewConsumer" | "createWorkflowInstance" | "settlePausedPlatformBatch"
+  "createReviewConsumer" | "createWorkflowInstance" | "settleHaltedBatch"
 >;
 
 /**
- * ONE queue batch, end to end: the deployment gate, the platform switch, then
- * the consumer through the Workflow starter.
+ * ONE queue batch, end to end: the shared run state, then the consumer through
+ * the Workflow starter.
  *
- * The deployment gate is read FIRST and is unchanged: it is the deployment's own
- * fact (a route that is not wired up yet), so a closed gate keeps today's
- * single-line refusal and must not be re-explained as a customer-facing pause.
- * The operator's platform switch is read SECOND, in the branch that would
- * otherwise create a Workflow instance: off ends every delivery visibly
- * (`settlePausedPlatformBatch`), a read FAULT keeps the fail-closed meaning —
- * nothing routes, and nothing is fabricated as a pause — so the batch throws and
+ * The state is `reviewRunState` — the SAME derivation the operator answer
+ * reads, so the console and the queue can never name different causes for the
+ * same deployment. Two answers halt the batch visibly (`settleHaltedBatch`,
+ * each with its own failure code and Check settlement) and one is a read FAULT:
+ * nothing routes and nothing is fabricated as a pause, so the batch throws and
  * the queue redelivers it instead of dropping reviews.
  *
  * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
@@ -720,53 +720,65 @@ export async function runReviewQueueBatch(
   ctx: ExecutionContext,
   loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
 ): Promise<void> {
-  const gate = await getReviewRouteWorkflowGate(env.DB);
-  if (gate.mode !== "on") {
-    const line = JSON.stringify({
-      event: "review_route_gate_closed",
-      review_route_workflow: "off",
-      gate_saved: gate.saved,
-      gate_degraded: gate.degraded,
-      gate_reason: gate.reason ?? null,
-      gate_rejected: gate.rejected ?? null,
-      batch_messages: batch.messages.length,
-      msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
-    });
-    if (gate.degraded) console.warn(line);
-    else console.log(line);
+  const run = await reviewRunState(env.DB);
+  if (run.state === "running") {
+    const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
+    const workflow = env.REVIEW_WORKFLOW;
+    if (workflow === undefined) {
+      throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+    }
+    await createReviewConsumer(
+      env,
+      undefined,
+      {},
+      { waitUntil: (promise) => ctx.waitUntil(promise) },
+      (_deps, ref) => createWorkflowInstance(workflow, ref),
+    )(batch);
     return;
   }
-  let reviewGlobal: boolean;
-  try {
-    reviewGlobal = await isFlagEnabled(env.DB, "review_global");
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+  const gate = run.gate;
+  const line = {
+    event: "review_route_gate_closed",
+    answer: run.state,
+    review_route_workflow: gate.mode,
+    gate_saved: gate.saved,
+    gate_degraded: gate.degraded,
+    gate_reason: gate.reason ?? null,
+    gate_rejected: gate.rejected ?? null,
+    platform_enabled: run.platform.enabled,
+    platform_unreadable: run.platform.unreadable,
+    batch_messages: batch.messages.length,
+  };
+  // A degraded anything is never permission: it is a read fault about the
+  // deployment, so the batch throws and the queue redelivers instead of
+  // acknowledging deliveries nothing settled.
+  if (gate.degraded || run.platform.unreadable) {
     console.warn(
       JSON.stringify({
-        event: "review_global_read_failed",
-        batch_messages: batch.messages.length,
-        detail: redactSecrets(detail),
-        msg: "review_global flag read failed — fail-closed: nothing routed, nothing settled as paused, the batch is redelivered",
+        ...line,
+        msg: "review run state could not be read — fail-closed: nothing routed, nothing settled, the batch is redelivered",
       }),
     );
-    throw err;
+    throw new Error(
+      gate.degraded
+        ? `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`
+        : "the platform review switch is unreadable — the batch is redelivered",
+    );
   }
-  const { createReviewConsumer, createWorkflowInstance, settlePausedPlatformBatch } = await loadConsumer();
-  if (!reviewGlobal) {
-    await settlePausedPlatformBatch(batch, env);
+  const { settleHaltedBatch } = await loadConsumer();
+  if (run.state === "paused-platform") {
+    // The settlement logs the batch line itself; a second gate-shaped line here
+    // would name the wrong cause.
+    await settleHaltedBatch(batch, env, run.state);
     return;
   }
-  const workflow = env.REVIEW_WORKFLOW;
-  if (workflow === undefined) {
-    throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
-  }
-  await createReviewConsumer(
-    env,
-    undefined,
-    {},
-    { waitUntil: (promise) => ctx.waitUntil(promise) },
-    (_deps, ref) => createWorkflowInstance(workflow, ref),
-  )(batch);
+  console.log(
+    JSON.stringify({
+      ...line,
+      msg: `review route is closed (${REVIEW_ROUTE_WORKFLOW_KEY}) — every delivery in this batch is settled with a durable failure row and acked`,
+    }),
+  );
+  await settleHaltedBatch(batch, env, run.state);
 }
 
 export default {

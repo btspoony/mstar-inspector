@@ -3,6 +3,7 @@ import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { reviewRunState } from "../../src/dashboard/runtime-config-store";
 
 const SESSION_SECRET = ["test", "reviews", "answer", "session", "32-bytes!"].join("-");
 const OPERATOR = "Support-Bot";
@@ -87,6 +88,41 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
+  test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {
+    const db = fixture();
+    setPlatformSwitch(db, 0);
+    expect(await readAnswer(db)).toEqual({
+      answer: "blocked-deployment-gate",
+      platform: { enabled: false, unreadable: false },
+      pausedApps: 0,
+      appsHref: null,
+    });
+  });
+
+  test("an unreadable platform switch answers blocked-deployment-gate, never running", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      {
+        ...envFor(db),
+        DB: {
+          prepare: (sql: string) => {
+            if (sql.includes("server_flags")) throw new Error("flags unavailable");
+            return db.prepare(sql);
+          },
+          batch: (statements: never[]) => db.batch(statements),
+        },
+      } as unknown as Env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { reviewsRunning: { answer: string; platform: unknown } };
+    expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
+    expect(body.reviewsRunning.platform).toEqual({ enabled: false, unreadable: true });
+  });
+
   test("the platform switch off answers paused-platform even with the gate on", async () => {
     const db = fixture();
     setRouteGate(db, "on");
@@ -144,6 +180,25 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       new Date().toISOString(),
     );
     expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-admin/apps");
+  });
+
+  test("the card and the queue read ONE state machine", async () => {
+    // The payload answer is the shared derivation verbatim — the queue settles
+    // by the same value, so the card can never name a cause the batch did not act on.
+    const cases: Array<{ gate: string | null; flag: 0 | 1 | null }> = [
+      { gate: "on", flag: 1 },
+      { gate: "on", flag: 0 },
+      { gate: null, flag: 1 },
+      { gate: null, flag: 0 },
+      { gate: "ON", flag: 1 },
+    ];
+    for (const entry of cases) {
+      const db = fixture();
+      if (entry.gate !== null) setRouteGate(db, entry.gate);
+      if (entry.flag !== null) setPlatformSwitch(db, entry.flag);
+      const label = JSON.stringify(entry);
+      expect((await readAnswer(db)).answer, label).toBe((await reviewRunState(db)).state);
+    }
   });
 
   test("the paused-App count reads the App pause of live Apps only", async () => {

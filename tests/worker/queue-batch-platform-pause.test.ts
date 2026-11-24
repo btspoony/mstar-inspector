@@ -17,6 +17,7 @@ import {
   type ChecksOctokit,
 } from "../../src/pipeline/checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
+import { reviewRunState } from "../../src/dashboard/runtime-config-store";
 
 // Static import cannot work here: `src/worker/index` loads the workerd shim at
 // module scope, so the shim above must be registered first (same seam as
@@ -215,7 +216,7 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect(failureRows(db)).toHaveLength(1);
   });
 
-  test("switch read fault: fail-closed warn, nothing settled as paused, nothing acked", async () => {
+  test("switch read fault: fail-closed, nothing settled, nothing acked, batch redelivered", async () => {
     lines.length = 0;
     const db = await createSeededTestD1();
     openRouteGate(db);
@@ -237,11 +238,75 @@ describe("the platform switch ends a queued batch visibly", () => {
         { DB: faulting as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
         CTX,
       ),
-    ).rejects.toThrow("flags unavailable");
+    ).rejects.toThrow("unreadable");
 
-    expect(linesOf("review_global_read_failed")).toHaveLength(1);
+    const closed = linesOf("review_route_gate_closed");
+    expect(closed).toHaveLength(1);
+    expect(closed[0]!.platform_unreadable).toBe(true);
+    expect(closed[0]!.answer).toBe("blocked-deployment-gate");
     expect(failureRows(db)).toHaveLength(0);
     expect(acks).toHaveLength(0);
+    expect(checkRow(db).desired).toBe("in_progress");
+    expect(checkRow(db).terminal_failure_status).toBeNull();
+  });
+
+  test("both gates closed: the batch settles as blocked, never the silent ack", async () => {
+    lines.length = 0;
+    const db = await createSeededTestD1();
+    // No gate row (absent = off) AND the platform switch off.
+    storeSwitch(db, 0);
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-5");
+    const { batch, acks, retries } = batchOf(payload);
+    const { kv, puts } = kvDouble();
+
+    await runReviewQueueBatch(
+      batch,
+      { DB: db as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
+      CTX,
+    );
+
+    expect(acks).toHaveLength(1);
+    expect(retries).toHaveLength(0);
+    expect(puts.map((put) => put.value)).toEqual(["paused"]);
+    expect(checkRow(db).terminal_failure_status).toBe("paused");
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.error_code).toBe("review.blocked.deployment_gate");
+    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.blocked.deployment_gate"]);
+    expect(String(failures[0]!.error)).toContain("deployment_gate_closed");
+    expect(failures[0]!.stage).toBe("pipeline");
+    // The card and the queue agree: ONE derivation answers both.
+    expect((await reviewRunState(db as never)).state).toBe("blocked-deployment-gate");
+  });
+
+  test("a failed failure-row insert leaves the delivery unacked so it is redelivered", async () => {
+    lines.length = 0;
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-6");
+    const { batch, acks } = batchOf(payload);
+    const { kv } = kvDouble();
+    const refuseInsert = {
+      prepare: (sql: string) => {
+        if (sql.includes("INSERT INTO review_failures")) throw new Error("failure store unavailable");
+        return db.prepare(sql);
+      },
+      batch: (statements: never[]) => db.batch(statements),
+    };
+
+    await expect(
+      runReviewQueueBatch(
+        batch,
+        { DB: refuseInsert as never, IDEMPOTENCY_KV: kv, REVIEW_WORKFLOW: { create: async () => ({}) } } as never,
+        CTX,
+      ),
+    ).rejects.toThrow("failure store unavailable");
+
+    expect(acks).toHaveLength(0);
+    // The row was attempted BEFORE the Check settlement, so the Check is still open.
     expect(checkRow(db).desired).toBe("in_progress");
     expect(checkRow(db).terminal_failure_status).toBeNull();
   });

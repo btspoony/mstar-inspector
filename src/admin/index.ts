@@ -31,7 +31,6 @@ import {
   getMaintenanceMode,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
-  getReviewRouteWorkflowGate,
   getSweepSettings,
   getReconcileSettings,
   setReconcileSettings,
@@ -49,8 +48,10 @@ import {
   setReviewAttemptCap,
   setSweepSettings,
   setSystemConcurrency,
+  reviewRunState,
   type CheckBudgetValues,
   type CommentClaimValues,
+  type ReviewsRunAnswer,
 } from "../dashboard/runtime-config-store";
 import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import { resolveLocale, t, type Locale } from "../i18n";
@@ -61,7 +62,7 @@ import { RESERVED_WORKSPACE_SLUGS } from "../spa/routes";
 import { createFailureStore } from "../store/failure-store";
 import type { DashboardD1 } from "../dashboard/users";
 import type { Env } from "../worker/env";
-import { isFlagEnabled, isServerFlagKey, listFlags } from "./flags";
+import { isServerFlagKey, listFlags } from "./flags";
 import {
   DURATION_REPORT_CAP_MAX_MS,
   DURATION_REPORT_CAP_MIN_MS,
@@ -186,17 +187,6 @@ const PAUSED_APPS_SQL = `
     FROM review_bots
    WHERE deleted_at IS NULL AND review_enabled = 0`;
 
-type ReviewsAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
-
-/** The platform switch as the pipeline reads it; a failed read refuses, as the webhook does. */
-async function readPlatformSwitch(db: DashboardD1): Promise<{ enabled: boolean; unreadable: boolean }> {
-  try {
-    return { enabled: await isFlagEnabled(db, "review_global"), unreadable: false };
-  } catch {
-    return { enabled: false, unreadable: true };
-  }
-}
-
 async function readPausedApps(db: DashboardD1): Promise<number | null> {
   try {
     const row = await db.prepare(PAUSED_APPS_SQL).first<{ n: number }>();
@@ -206,11 +196,16 @@ async function readPausedApps(db: DashboardD1): Promise<number | null> {
   }
 }
 
-/**
- * The Apps list the pause link opens. `/dashboard` alone lands on the
+/** The Apps list the pause link opens. `/dashboard` alone lands on the
  * repository overview, and the unscoped `/dashboard/apps` is one of the two
  * redirect roots (also the repository overview), so the address needs a
  * workspace segment — the same one sign-in would land this operator on.
+ *
+ * With several memberships the link opens `memberships[0]` (the list is ordered
+ * by workspace name): an arbitrary-but-stable choice, because this operator
+ * page has no workspace context of its own and picking none would hide the link
+ * from every multi-workspace operator. The App pause link is a convenience, not
+ * a scoped answer — the payload's own facts are all platform-wide.
  */
 async function readAppsHref(env: Env, login: string): Promise<string | null> {
   try {
@@ -220,20 +215,6 @@ async function readAppsHref(env: Env, login: string): Promise<string | null> {
   } catch {
     return null;
   }
-}
-
-/**
- * One answer for "are reviews running": the platform switch first, then the
- * deployment's routing gate. An unreadable gate is never permission, so it
- * answers blocked rather than running.
- */
-function deriveReviewsAnswer(
-  platform: { enabled: boolean },
-  gate: { mode: "on" | "off"; degraded: boolean },
-): ReviewsAnswer {
-  if (!platform.enabled) return "paused-platform";
-  if (gate.mode !== "on" || gate.degraded) return "blocked-deployment-gate";
-  return "running";
 }
 
 async function readRuntime(c: AdminContext): Promise<Response> {
@@ -251,13 +232,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     level,
     recheck,
     attemptCap,
-    routeWorkflow,
+    reviews,
     lostReplySettle,
     officialWorkspaceId,
     admissionDrops24h,
     githubRateLimited24h,
     queue,
-    platform,
     pausedApps,
     appsHref,
   ] = await Promise.all([
@@ -269,13 +249,12 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
-    getReviewRouteWorkflowGate(db),
+    reviewRunState(db),
     getLostReplySettleMs(db),
     readOfficialWorkspaceId(db),
     failures.countAdmissionDrops24h(),
     failures.countGithubRateLimited24h(),
     readQueueBacklog(c.env.REVIEW_QUEUE),
-    readPlatformSwitch(db),
     readPausedApps(db),
     readAppsHref(c.env, login),
   ]);
@@ -327,7 +306,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
-    routeWorkflow,
+    routeWorkflow: reviews.gate,
     lostReplySettle: {
       settleMs: lostReplySettle.settleMs,
       min: LOST_REPLY_SETTLE_MIN_MS,
@@ -338,8 +317,8 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     githubRateLimited24h,
     queue,
     reviewsRunning: {
-      answer: deriveReviewsAnswer(platform, routeWorkflow),
-      platform: { enabled: platform.enabled, unreadable: platform.unreadable },
+      answer: reviews.state,
+      platform: reviews.platform,
       pausedApps,
       appsHref,
     },
@@ -417,6 +396,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawAttemptCap: unknown;
   let rawLostReply: unknown;
   let rawMaintenance: unknown;
+  let rawRouteWorkflow: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -429,6 +409,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       attemptCap?: unknown;
       lostReplySettle?: unknown;
       maintenance?: unknown;
+      routeWorkflow?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
@@ -440,7 +421,20 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawAttemptCap = body.attemptCap;
     rawLostReply = body.lostReplySettle;
     rawMaintenance = body.maintenance;
+    rawRouteWorkflow = body.routeWorkflow;
   } catch {
+  }
+  // `routeWorkflow` is gone from this surface: name the removed capability
+  // instead of falling through to the concurrency validator, which would tell a
+  // stale client the wrong field is wrong.
+  if (rawRouteWorkflow !== undefined) {
+    return c.json(
+      {
+        error:
+          "routeWorkflow is no longer writable here: the review routing gate is owned by the deploy pipeline and opens after a successful deploy",
+      },
+      400,
+    );
   }
   if (
     [

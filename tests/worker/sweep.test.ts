@@ -721,6 +721,30 @@ describe("runSweep", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
   });
 
+  test("a deliberate halt row never joins the infrastructure pager", async () => {
+    for (const code of ["review.paused.platform", "review.blocked.deployment_gate"] as const) {
+      const db = failureDb();
+      const store = createFailureStore(db);
+      // ONE deliberate halt row beside ONE real infrastructure failure: the
+      // halt must not be counted, and it must not be hidden either.
+      await store.record({
+        ...failureRow("pipeline", code === "review.paused.platform" ? "platform_paused: paused" : "deployment_gate_closed: closed"),
+        code,
+      });
+      await store.record(failureRow("sandbox", "container acquisition failed"));
+
+      // Threshold 1: ONE real failure stays quiet only because the halt row is
+      // excluded — counting it would breach and page.
+      await setSweepSettings(db, { ...SWEEP_OVERRIDE, failureThreshold: 1 }, "operator");
+      const { log, calls } = captureLog();
+      const result = await runSweep(db, { log });
+      expect(result.failures24h, code).toBe(1);
+      expect(result.thresholdBreached, code).toBe(false);
+      expect(calls, code).toHaveLength(0);
+      expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+    }
+  });
+
   test("a maintenance_deferred row rides the breach payload under its own key, leaving the total alone", async () => {
     const db = failureDb();
     const store = createFailureStore(db);

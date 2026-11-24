@@ -8,6 +8,7 @@ import { SWEEP_FIELDS, type SweepField, type SweepLimits, type SweepValues } fro
 import { QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 import { RECONCILE_FIELDS, RECONCILE_RULES, RECONCILE_DEFAULTS, invalidReconcileRelations, type ReconcileField, type ReconcileValues } from "../contracts/reconcile-settings";
 import { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
+import { isFlagEnabled } from "../admin/flags";
 
 export { CHECK_UPDATE_MIN } from "../contracts/check-budgets";
 
@@ -750,43 +751,48 @@ export async function getReviewRouteWorkflowGate(
   }
 }
 
-const REVIEW_ROUTE_WORKFLOW_AUDIT_SQL = `
-  INSERT INTO platform_audit_events
-    (id, actor_login, action, target_type, target_id, detail_json, created_at)
-  VALUES (?1, ?2, 'runtime.route_workflow.set', 'runtime', '${REVIEW_ROUTE_WORKFLOW_KEY}',
-          json_object('before', (SELECT value FROM review_runtime_settings WHERE key = ?5),
-                      'after', ?3),
-          ?4)`;
+/** The platform switch as both the queue and the operator answer read it. */
+export type ReviewPlatformRead = { enabled: boolean; unreadable: boolean };
 
-/** What one accepted save holds and what the gate answers afterwards. */
-export type ReviewRouteWorkflowWrite = {
-  stored: ReviewRouteWorkflowGate["mode"];
-  effective: ReviewRouteWorkflowGate;
+/**
+ * The ONE answer to "are reviews running": a deliberate pause, a deployment
+ * that has not opened the route, or running. Never a boolean — the three
+ * answers name different operator actions.
+ */
+export type ReviewsRunAnswer = "running" | "paused-platform" | "blocked-deployment-gate";
+
+/** The answer plus the two raw facts it was derived from. */
+export type ReviewRunState = {
+  state: ReviewsRunAnswer;
+  gate: ReviewRouteWorkflowGate;
+  platform: ReviewPlatformRead;
 };
 
 /**
- * Set the route switch. The write is exactly as strict as the read: anything
- * but `on` / `off` refuses (`invalid_value`, nothing written, no audit row), so
- * a value the gate would not trust can never be stored through the product.
- * `effective` is the gate's answer after the write, never this function's
- * assumption.
+ * The state machine BOTH the queue batch and the operator answer read, so they
+ * can never name different causes for the same deployment.
+ *
+ * Precedence is the queue's, because the queue is the thing that acts:
+ *
+ * 1. A gate that is not `on` (absent, `off`, untrusted, unreadable) is
+ *    `blocked-deployment-gate`. It is a fact about the deployment, and it
+ *    outranks a paused platform: with both closed the deliveries are refused by
+ *    the gate, so the answer must not claim the platform pause settled them.
+ * 2. An unreadable platform flag is `blocked-deployment-gate` too — never
+ *    `running`, and never a pause nothing can prove.
+ * 3. Only a readable `off` is `paused-platform`.
  */
-export async function setReviewRouteWorkflow(
-  db: DashboardD1,
-  value: string,
-  operator: string,
-): Promise<ReviewRouteWorkflowWrite> {
-  if (value !== "on" && value !== "off") {
-    throw new RuntimeConfigError("invalid_value", "the review route workflow must be exactly on | off");
+export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
+  const gate = await getReviewRouteWorkflowGate(db);
+  let platform: ReviewPlatformRead;
+  try {
+    platform = { enabled: await isFlagEnabled(db, "review_global"), unreadable: false };
+  } catch {
+    platform = { enabled: false, unreadable: true };
   }
-  const now = new Date().toISOString();
-  await db.batch([
-    db
-      .prepare(REVIEW_ROUTE_WORKFLOW_AUDIT_SQL)
-      .bind(crypto.randomUUID(), operator, value, now, REVIEW_ROUTE_WORKFLOW_KEY),
-    db.prepare(SYSTEM_UPSERT_SQL).bind(REVIEW_ROUTE_WORKFLOW_KEY, value, now, operator),
-  ]);
-  return { stored: value, effective: await getReviewRouteWorkflowGate(db) };
+  if (gate.mode !== "on" || gate.degraded) return { state: "blocked-deployment-gate", gate, platform };
+  if (platform.unreadable) return { state: "blocked-deployment-gate", gate, platform };
+  return { state: platform.enabled ? "running" : "paused-platform", gate, platform };
 }
 
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";

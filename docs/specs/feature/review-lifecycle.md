@@ -703,15 +703,25 @@ Merging this code does not by itself enable the review route. The queue handler
 - **`off`, any other stored value, or an unreadable row — `off`.** Every unreadable shape is a
   refusal, never permission; `getReviewRouteWorkflowGate` reports it as `degraded` with its
   reason (`malformed`, `untrusted`, `read-failed`).
-- When off, the batch is acknowledged without creating any Workflow instance and ONE structured
-  line (`event: "review_route_gate_closed"`) names the gate, its source and the batch size. A
-  refused delivery is never silently re-routed to a path that no longer exists.
+- When off, each delivery is settled visibly: a `review.paused.platform` (platform switch off)
+  or `review.blocked.deployment_gate` (gate not open) failure row plus the paused Check
+  conclusion, then an ack — no Workflow instance is created. One structured line
+  (`event: "review_route_gate_closed"`) names the answer, the gate, its source and the batch
+  size. An UNREADABLE gate or platform switch is not a halt: nothing routes, nothing is
+  settled, and the batch throws so the queue redelivers it.
+
+Both the batch and the operator answer read ONE derivation (`reviewRunState`), so they can never
+name different causes: the deployment gate is judged first, and only a readable `off` platform
+switch answers `paused-platform`. A failed failure-row insert is not swallowed — the message
+stays unacked and is redelivered, and the deterministic row id plus `ON CONFLICT(id) DO NOTHING`
+make the replay a no-op.
 
 The setting is deployment-owned: a successful deploy pipeline run writes `on`
 idempotently (`scripts/review-route-gate.sql` against the environment's own
 database), and the operator page reports the gate read-only — no write route,
 no control. A merge alone still ships closed: only the gate step that follows
-the deploy opens it.
+the deploy opens it, and that upsert re-opens a hand-written `off` on every
+deploy — the platform switch is the operator's pause.
 
 ## Change obligations
 

@@ -17,6 +17,7 @@ import {
   sqlStageList,
 } from "../store/failure-store";
 import { QUOTA_STAGE } from "../contracts/failure-stages";
+import { REVIEW_HALT_CODES } from "../contracts/failure-codes";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -201,7 +202,8 @@ const QUOTA_SPREAD_SQL = `(SELECT COUNT(DISTINCT t.workspace_id)
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', ?1)
          AND (stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
               OR (stage = '${QUOTA_STAGE}' AND ${QUOTA_SPREAD_SQL}))
-         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
+         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'
+         AND COALESCE(error_code, '') NOT IN (${sqlStageList(REVIEW_HALT_CODES)})`;
 
 const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_failures
        WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'

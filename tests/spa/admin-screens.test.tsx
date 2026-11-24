@@ -1406,7 +1406,7 @@ describe("Runtime screen", () => {
         ?.textContent,
     ).toBe("Pause or resume a single App in the App settings");
     expect(surface.container.querySelector('[data-reviews-running="precedence"]')?.textContent).toBe(
-      "When the platform switch and the deployment gate are both off, the platform pause is the one named here.",
+      "The deployment gate is checked first: when it is not on, queued deliveries are settled as blocked, and that is the answer named here even if the platform switch is also off.",
     );
     await surface.close();
   });
@@ -1443,7 +1443,7 @@ describe("Runtime screen", () => {
       }),
     );
     expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
-      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
     );
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
       "off or unreadable — deliveries create nothing",
@@ -1469,10 +1469,10 @@ describe("Runtime screen", () => {
       }),
     );
     expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
-      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries create nothing.",
+      "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
     );
     expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
-      "unreadable — treated as paused",
+      "unreadable — reviews are blocked until it reads again",
     );
     expect(surface.container.querySelector('[data-reviews-running="route"]')?.textContent).toBe(
       "off or unreadable — deliveries create nothing",
@@ -1496,7 +1496,7 @@ describe("Runtime screen", () => {
       "zh_CN",
     );
     expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
-      "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递不会创建任何实例。",
+      "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递会以阻塞结束。",
     );
     expect(surface.container.querySelector('[data-reviews-running="platform"]')?.textContent).toBe(
       "on — 允许审查",

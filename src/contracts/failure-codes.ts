@@ -29,6 +29,7 @@ export const FAILURE_CODES = [
   "review.github.cleanup_limited",
   "review.admission.refused",
   "review.paused.platform",
+  "review.blocked.deployment_gate",
   "review.delivery.deferred",
   "review.delivery.quota_exhausted",
   "review.delivery.entitlement_unreadable",
@@ -38,6 +39,20 @@ export const FAILURE_CODES = [
 ] as const;
 
 export type FailureCode = (typeof FAILURE_CODES)[number];
+
+/**
+ * The codes a DELIBERATE halt writes: the platform switch is off (operator
+ * action) or the deployment's routing gate is not open (deployment action).
+ * Both are recorded as ordinary `pipeline` rows, so the PR keeps its durable
+ * trace and the dashboard keeps counting them — but neither is an incident, so
+ * the sweep's infrastructure total excludes these CODES the same way it
+ * excludes the `maintenance_deferred` STAGE. Keyed by code rather than stage
+ * because both rows share `pipeline` with real infrastructure failures.
+ */
+export const REVIEW_HALT_CODES = Object.freeze([
+  "review.paused.platform",
+  "review.blocked.deployment_gate",
+] as const);
 
 const CODE_SET: ReadonlySet<string> = new Set(FAILURE_CODES);
 
@@ -77,6 +92,8 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
     "This commit was not reviewed: another review holds a slot for this pull request, or a concurrent-review limit (workspace or platform) was reached. Nothing was charged.",
   "review.paused.platform":
     "This commit was not reviewed: the platform has paused code reviews. Nothing was charged; the review runs again once the operator resumes the service.",
+  "review.blocked.deployment_gate":
+    "This commit was not reviewed: this deployment has not opened its review route, so queued reviews cannot start. Nothing was charged; the review runs again once the route is opened.",
   "review.delivery.deferred":
     "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
   "review.delivery.quota_exhausted":
