@@ -1222,7 +1222,7 @@ export const en = {
       reviewsAnswerBlockedDeploymentGate:
         "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
       reviewsAnswerUnreadableState:
-        "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — they are redelivered and run once the state reads again.",
+        "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
       reviewsPlatformLabel: "Platform switch",
       reviewsPlatformOn: "on — reviews are allowed",
       reviewsPlatformOff: "off — reviews are paused",

@@ -1132,7 +1132,7 @@ export const zhCN: Dictionary = {
       reviewsAnswerBlockedDeploymentGate:
         "审查被部署门禁阻塞：本次部署的路由门禁未开启，队列中的投递会以阻塞结束。",
       reviewsAnswerUnreadableState:
-        "无法读取审查状态：平台开关或部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算，它们会被重新投递，状态恢复可读后即会运行。",
+        "无法读取审查状态：平台开关或部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
       reviewsPlatformLabel: "平台开关",
       reviewsPlatformOn: "on — 允许审查",
       reviewsPlatformOff: "off — 审查已暂停",

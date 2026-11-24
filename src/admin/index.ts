@@ -29,6 +29,7 @@ import {
   getCommentClaimSettings,
   getLostReplySettleMs,
   getMaintenanceMode,
+  maintenanceClosed,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
   getSweepSettings,
@@ -264,6 +265,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readPausedApps(db),
     readAppsHref(c.env, login),
   ]);
+  const maintenance = await getMaintenanceMode(db);
   return c.json({
     concurrency: system.concurrency,
     min: CONCURRENCY_MIN,
@@ -323,12 +325,15 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     githubRateLimited24h,
     queue,
     reviewsRunning: {
-      answer: reviews.state,
+      // "running" claims reviews flow; a closed maintenance window defers
+      // every delivery instead, so the answer degrades to the pause vocabulary
+      // — `paused-platform` — rather than assert a state the queue contradicts.
+      answer: reviews.state === "running" && maintenanceClosed(maintenance) ? "paused-platform" : reviews.state,
       platform: reviews.platform,
       pausedApps,
       appsHref,
     },
-    maintenance: await getMaintenanceMode(db),
+    maintenance,
   });
 }
 

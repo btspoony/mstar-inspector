@@ -16,9 +16,11 @@ import {
   type CheckRunPayload,
   type ChecksOctokit,
 } from "../../src/pipeline/checks";
+import { QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
+import { requestMaintenanceReplay } from "../../src/admin/maintenance-replay";
+import { runSweep } from "../../src/worker/sweep";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { reviewRunState, setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
-import { QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 // Static import cannot work here: `src/worker/index` loads the workerd shim at
 // module scope, so the shim above must be registered first (same seam as
 // tests/worker/queue-route-gate.test.ts).
@@ -522,7 +524,7 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect(failures[0]!.error_code).toBe("review.paused.platform");
   });
 
-  test("a halted batch that spends its last maintenance deferral keeps the halt cause on the row", async () => {
+  test("a halted batch that spends its last maintenance deferral keeps the halt shape and joins the outbox", async () => {
     const db = await createSeededTestD1();
     openRouteGate(db);
     storeSwitch(db, 0);
@@ -540,18 +542,59 @@ describe("the platform switch ends a queued batch visibly", () => {
 
     expect(retries).toHaveLength(0);
     expect(acks).toHaveLength(1);
-    expect(puts).toHaveLength(0);
+    // The halted settlement's claim: a resume may re-enqueue this head.
+    expect(puts).toHaveLength(1);
+    expect(puts[0]!.value).toBe("paused");
     const failures = failureRows(db);
     expect(failures).toHaveLength(1);
-    // The row stays replayable (maintenance_deferred) so the outbox can resend
-    // it once the window closes, while its error still names the pause as the
-    // cause — the same answer the operator card gives.
-    expect(failures[0]!.error_code).toBe("review.delivery.deferred");
+    // The row keeps the HALT shape — code, cause and summary — so the operator
+    // card and the row agree, while `maintenance_deferred` + the requested
+    // stamp put it in the sweep's replay outbox (and ONLY there: the admin
+    // route answers it `repeat`, and `reviews_not_running` while the switch
+    // stays off).
+    expect(failures[0]!.error_code).toBe("review.paused.platform");
     expect(failures[0]!.stage).toBe("maintenance_deferred");
-    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.delivery.deferred"]);
+    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.paused.platform"]);
+    expect(failures[0]!.maintenance_replay_requested_at).not.toBeNull();
+    expect(failures[0]!.maintenance_replay_sent_at).toBeNull();
     expect(String(failures[0]!.error)).toContain("platform_paused");
     expect(String(failures[0]!.error)).toContain("maintenance window");
-    expect(checkRow(db).terminal_failure_status).toBeNull();
+    // The Check is settled paused like the halted path settles it — the
+    // deferral may not leave an attached run hanging.
+    expect(checkRow(db).terminal_failure_status).toBe("paused");
+
+    // The admin replay refuses the halt-caused row while the halt holds: a
+    // send would be acked without running. Maintenance is lifted first so the
+    // refusal names the halt, not the window.
+    await setMaintenanceMode(
+      db,
+      { enabled: false, reason: null, actor: "tester" },
+      "2026-11-24T10:00:00.000Z",
+    );
+    const res = await requestMaintenanceReplay(
+      db as never,
+      { send: async () => {} } as never,
+      { failureId: String(failures[0]!.id), actor: "tester", now: new Date().toISOString() },
+    );
+    // Already stamped: the route answers `repeat` from the row's own state
+    // before any gate — the stamp is what kept it out of the operator lane.
+    expect(res).toEqual({ kind: "repeat", state: "requested" });
+    expect(failureRows(db)[0]!.maintenance_replay_sent_at).toBeNull();
+
+    // Once the halt clears, the sweep lane is the one sender: it re-issues
+    // the delivery and stamps the row sent.
+    db.raw.prepare("UPDATE server_flags SET enabled = 1 WHERE key = 'review_global'").run();
+    const sent: ReviewJobPayload[] = [];
+    await runSweep(db as never, {
+      log: { warn: () => {} },
+      queue: { send: async (p: ReviewJobPayload) => void sent.push(p) } as never,
+    });
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ action: "maintenance_replay", pr_number: payload.pr_number });
+    const after = db.raw
+      .prepare("SELECT maintenance_replay_sent_at AS sent FROM review_failures WHERE id = ?")
+      .get(failures[0]!.id as string) as { sent: string | null };
+    expect(after.sent).not.toBeNull();
   });
 
   test("one comment id naming two Apps' targets still keeps a row each", async () => {

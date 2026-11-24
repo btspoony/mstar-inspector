@@ -48,6 +48,14 @@ function failureDb(): TestD1 {
   const db = createMigratedTestD1();
   seedBot(db, "bot-sweep", 9301);
   seedTarget(db, "bot-sweep", { id: BASE.target_id });
+  // The replay outbox lane only runs while reviews can run — an absent gate
+  // row means blocked, and a blocked route sends nothing.
+  db.raw
+    .prepare(
+      `INSERT INTO review_runtime_settings (key, value, updated_at)
+       VALUES ('review.route.workflow', 'on', '2026-11-01T00:00:00.000Z')`,
+    )
+    .run();
   return db;
 }
 

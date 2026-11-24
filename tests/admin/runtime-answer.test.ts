@@ -88,6 +88,23 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
+  test("running with a closed maintenance window degrades to paused-platform — the queue defers everything", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 1);
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+      new Date().toISOString(),
+    );
+    expect((await readAnswer(db)).answer).toBe("paused-platform");
+    seed(
+      db,
+      "UPDATE review_runtime_settings SET value = '0' WHERE key = 'platform.maintenance.enabled'",
+    );
+    expect((await readAnswer(db)).answer).toBe("running");
+  });
+
   test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {
     const db = fixture();
     setPlatformSwitch(db, 0);

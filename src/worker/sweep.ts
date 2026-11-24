@@ -9,7 +9,7 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { getMaintenanceMode, getSweepSettings, maintenanceClosed } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, getSweepSettings, maintenanceClosed, reviewRunState } from "../dashboard/runtime-config-store";
 import { retryMaintenanceReplay } from "../admin/maintenance-replay";
 import {
   MAINTENANCE_DEFERRED_STAGE,
@@ -443,7 +443,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "comment trigger outbox sweep failed — continuing",
       );
     }
-    if (outboxRemaining > 0 && replayOpen) {
+    // The replay outbox is the ONE lane a deferred row can leave by, and it
+    // only runs while reviews can actually run: a send while the platform is
+    // paused or the route gate closed would be acked by `settleHaltedBatch`
+    // and stamped `sent` without ever reviewing. Unreadability keeps the lane
+    // closed too — the queue's own halt branch does the same.
+    const reviewsRunning = replayOpen && (await reviewRunState(db)).state === "running";
+    if (outboxRemaining > 0 && replayOpen && reviewsRunning) {
       try {
         const now = new Date().toISOString();
         const tried: string[] = [];

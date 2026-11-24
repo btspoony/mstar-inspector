@@ -770,9 +770,11 @@ export async function runReviewQueueBatch(
   }
   const consumer = await loadConsumer();
   // The maintenance window defers EVERY settlement face, not just the running
-  // path: a halted batch acked here would drop the review without retry and
-  // never enter the maintenance replay outbox, so it takes the consumer's
-  // deferral path instead of `settleHaltedBatch`.
+  // path: a halted batch acked here would drop the review without retry. The
+  // consumer's deferral path carries the halt through instead of
+  // `settleHaltedBatch` — a spent delivery still writes the pause/gate-cause
+  // row, settles its Check and stamps its own replay-outbox mark, so the
+  // sweep re-issues it once reviews run again.
   if (maintenanceClosed(await getMaintenanceMode(env.DB))) {
     await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env), run.state);
     return;

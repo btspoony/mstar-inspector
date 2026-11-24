@@ -1077,11 +1077,16 @@ export async function settleHaltedBatch(
  * an ack.
  *
  * A batch that was ALREADY halted (`halt` set — the platform switch off or
- * the route gate closed) keeps its halt cause on that last-attempt row's
- * `error` — the operator card names the pause/gate and the row must not
- * contradict it — while the row itself stays `maintenance_deferred` so the
- * replay route and outbox can resend it once the window closes. Its `id` is
- * the same mention-keyed identity `settleHaltedBatch` writes, so both
+ * the route gate closed) keeps its halt code, cause and summary on that
+ * last-attempt row — the operator card names the pause/gate and the row must
+ * not contradict it — and goes STRAIGHT to the replay outbox: the write stamps
+ * `maintenance_replay_requested_at` up front, so the sweep lane is the only
+ * sender (the operator route answers the stamped row `repeat`, and refuses
+ * `reviews_not_running` while the halt holds) and it re-issues the row once
+ * the gate and the window are both open. The halted settlement's other side
+ * effects run too — the paused KV claim, the Check settled paused, the
+ * comment claim closed — so nothing hangs open while the row waits. The row's
+ * `id` is the same mention-keyed identity `settleHaltedBatch` writes, so both
  * settlement faces land on one row.
  *
  * shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
@@ -1111,9 +1116,10 @@ export async function deferMaintenanceBatch(
     const settled = halt === undefined ? null : HALT_SETTLEMENT[halt];
     const identity = `${body.owner}/${body.repo}#${body.pr_number}`;
     const headSha = body.head_sha ?? "";
+    const rowId = settled === null ? undefined : `${settled.cause}:${haltRowIdentity(body)}`;
     await deps.failureStore
       .record({
-        ...(settled === null ? {} : { id: `${settled.cause}:${haltRowIdentity(body)}` }),
+        ...(rowId === undefined ? {} : { id: rowId }),
         target_id: body.targetId,
         installation_id: body.installation_id,
         owner: body.owner,
@@ -1121,9 +1127,9 @@ export async function deferMaintenanceBatch(
         pr_number: body.pr_number,
         head_sha: headSha,
         stage: MAINTENANCE_DEFERRED_STAGE,
-        code: "review.delivery.deferred",
+        code: settled === null ? "review.delivery.deferred" : settled.code,
         trackId: `${identity}@${headSha}`,
-        message: FAILURE_SUMMARIES["review.delivery.deferred"],
+        message: FAILURE_SUMMARIES[settled === null ? "review.delivery.deferred" : settled.code],
         error:
           settled === null
             ? `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${identity} was never reviewed`
@@ -1136,6 +1142,41 @@ export async function deferMaintenanceBatch(
         deps.log.warn(deferral, `review_failures insert failed (leaving deferred delivery unacked): ${detail}`);
         throw err;
       });
+    if (settled !== null) {
+      // The halt settlement's full contract on the last-attempt row: hand the
+      // commit's claim back as `paused` (a resume re-enqueues it), hand the
+      // row straight to the replay outbox (the stamp IS the outbox mark — the
+      // operator route then answers it `repeat`, leaving the sweep's send gate
+      // the only sender lane), settle its Check paused like the halted path
+      // did before acking, and close the mention's comment claim so the
+      // outbox cannot resend it into a stopped platform. The row's stamp
+      // update and the claim close stay UNCAUGHT: a failed write must leave
+      // the delivery unacked for redelivery.
+      if (body.head_sha) {
+        try {
+          await putAbandonClaim(
+            deps.env.IDEMPOTENCY_KV,
+            idemKey({
+              installation_id: body.installation_id,
+              owner: body.owner,
+              repo: body.repo,
+              pr_number: body.pr_number,
+              head_sha: body.head_sha,
+            }),
+            IDEM_PAUSED,
+            IDEMPOTENCY_SECONDS,
+          );
+        } catch (err) {
+          const detail = err instanceof Error ? err.message : String(err);
+          deps.log.warn(deferral, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+        }
+      }
+      await deps.env.DB.prepare("UPDATE review_failures SET maintenance_replay_requested_at = ? WHERE id = ?")
+        .bind(new Date().toISOString(), rowId)
+        .run();
+      await settleSkippedRow(deps, body, body.head_sha, settled.checkReason, { paused: true });
+      await closeCommentClaim(deps.env.DB, body);
+    }
     message.ack();
   }
 }

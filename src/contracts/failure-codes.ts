@@ -91,9 +91,9 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.admission.refused":
     "This commit was not reviewed: another review holds a slot for this pull request, or a concurrent-review limit (workspace or platform) was reached. Nothing was charged.",
   "review.paused.platform":
-    "This commit was not reviewed: the platform has paused code reviews. Nothing was charged; the review runs again once the operator resumes the service.",
+    "This commit was not reviewed: the platform has paused code reviews. Nothing was charged; a new push or mention reviews it after the operator resumes the service.",
   "review.blocked.deployment_gate":
-    "This commit was not reviewed: this deployment has not opened its review route, so queued reviews cannot start. Nothing was charged; the review runs again once the route is opened.",
+    "This commit was not reviewed: this deployment has not opened its review route, so queued reviews cannot start. Nothing was charged; a new push or mention reviews it after the route is opened.",
   "review.delivery.deferred":
     "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
   "review.delivery.quota_exhausted":

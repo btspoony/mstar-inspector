@@ -1722,6 +1722,16 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
      gap between those two steps on an environment whose row does not exist yet;
      every later deploy starts from `on` and has no such gap.
 
+   **A manual `wrangler deploy` must open the gate itself.** The workflow's
+   `Open the review routing gate` step is the only pipeline writer; a hand-run
+   deploy leaves the row absent or stale, and the queue settles every delivery
+   as `review.blocked.deployment_gate`. Run the same idempotent SQL after the
+   deploy (staging shown; production adds `--env production` and reads
+   `mstar-inspector-prod-db`):
+   ```bash
+   bunx wrangler d1 execute mstar-inspector-db --remote --file scripts/review-route-gate.sql
+   ```
+
    **"Deployment gate closed" is not "state unreadable".** A closed gate is a
    proven cause and deliveries are settled with a
    `review.blocked.deployment_gate` row and a paused Check. That covers an absent
