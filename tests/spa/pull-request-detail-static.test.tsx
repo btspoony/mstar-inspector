@@ -20,6 +20,7 @@ import {
 } from "../../src/spa/pages/data";
 import {
   PullRequestDetail as PullRequestDetailFace,
+  type RecordSections,
   PullRequestDetailView,
 } from "../../src/spa/pages/PullRequestDetail";
 import { defaultFamily, formatReviewDuration, recordId } from "../../src/spa/pages/pullRequestDetailModel";
@@ -1420,7 +1421,7 @@ describe("pull request detail face (static SSR)", () => {
   test("the findings filter lives in the toolbar row, only while the PR has findings", async () => {
     const filter = async (markup: string) =>
       withMarkup(markup, (container) => {
-        const trigger = container.querySelector('[role="combobox"]');
+        const trigger = container.querySelector(`[role="combobox"][aria-label="${t("en", "pullRequests.filterSeverity")}"]`);
         const toolbar = container.querySelector('[data-slot="record-toolbar"]');
         const findingsPanel = container.querySelector('[role="tabpanel"][data-state="active"]');
         return {
@@ -1619,5 +1620,74 @@ describe("reviewing-now badge on the detail header (D11)", () => {
     const markup = face({}, { reviewing: { state: "unknown" } });
     expect(markup).toContain(t("en", "pullRequests.reviewingUnknown"));
     expect(markup).not.toContain(t("en", "pullRequests.reviewingHead", { head: IDLE_HEAD }));
+  });
+});
+
+describe("the failures family scopes to the current head", () => {
+  // The page-level fixture: the current head passed review, so the head-scope
+  // failures page is EMPTY and the count is 0 — but one failure exists under
+  // the historical scope and must stay reachable.
+  const headPassing = () =>
+    scene({ findings: page([]), reviews: page(REVIEWS), failures: page([]) }, {}, DETAIL.latest_review, 0);
+
+  const renderFamily = (records: RecordSections, locale: "en" | "zh_CN") =>
+    renderToStaticMarkup(
+      createElement(PullRequestDetailView, {
+        locale,
+        detail: headPassing().detail,
+        records,
+        onEnsureSection: () => {},
+        onLoadPage: () => {},
+        initialFamily: "failures" as const,
+      }),
+    );
+
+  const scopeRead = (markup: string, locale: "en" | "zh_CN") =>
+    withMarkup(markup, (container) => {
+      const metrics = [...container.querySelectorAll('[data-slot="metric"]')].map((metric) => [
+        metric.querySelector('[data-slot="metric-key"]')?.textContent ?? "",
+        metric.querySelector('[data-slot="metric-value"]')?.textContent ?? "",
+      ]);
+      const failuresMetric = metrics.find(([key]) => key === t(locale, "pullRequests.failures"));
+      return {
+        metricFailures: failuresMetric?.[1] ?? null,
+        scopeControl: container.querySelector('[data-slot="failure-scope"]') !== null,
+        scopeCombobox: container.querySelector('[data-slot="failure-scope"] [role="combobox"]')?.getAttribute("aria-label") ?? null,
+        failureRows: container.querySelectorAll('[data-slot="failure-stage"]').length,
+        emptyCopy: container.querySelector('[role="tabpanel"] p')?.textContent ?? null,
+      };
+    });
+
+  test("a passing current head shows zero failures in head scope, both locales", async () => {
+    const built = headPassing();
+    expect(built.detail.counts.failures).toBe(0);
+    for (const locale of ["en", "zh_CN"] as const) {
+      const read = await scopeRead(renderFamily(recordsOf(built.pages), locale), locale);
+      expect(read.scopeControl).toBe(true);
+      expect(read.scopeCombobox).toBe(t(locale, "pullRequests.failureScope"));
+      expect(read.failureRows).toBe(0);
+      expect(read.emptyCopy).toBe(t(locale, "pullRequests.noFailures"));
+      expect(read.metricFailures).toBe("0");
+      expect(renderFamily(recordsOf(built.pages), locale)).not.toContain(t(locale, "pullRequests.failureScopeAll"));
+    }
+  });
+
+  test("a historical failure still renders under the all-history scope", async () => {
+    const built = headPassing();
+    const allRecords = {
+      ...recordsOf(built.pages),
+      failures: {
+        offset: 0,
+        severity: "",
+        history: true,
+        status: "ok" as const,
+        page: page(FAILURES),
+        newest: null,
+      },
+    };
+    const read = await scopeRead(renderFamily(allRecords, "en"), "en");
+    expect(read.scopeControl).toBe(true);
+    expect(read.scopeCombobox).toBe(t("en", "pullRequests.failureScope"));
+    expect(read.failureRows).toBe(1);
   });
 });
