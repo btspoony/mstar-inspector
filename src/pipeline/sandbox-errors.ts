@@ -58,6 +58,10 @@ export type ExecSensitiveSet = {
  * argument, not the quoting), every env value, the stdin payload, and every
  * string leaf of that payload — the credential transport is base64 JSON, and a
  * provider key echoed by a platform error has no recognizable shape of its own.
+ *
+ * A stdin payload that is not a document makes the whole collection UNPROVABLE:
+ * splitting it into tokens is not a parser and cannot establish its sensitive
+ * values, so no message built from it can be proven clean.
  */
 export function execSensitiveValues(
   command: string,
@@ -77,32 +81,16 @@ export function execSensitiveValues(
     values.push(stdin);
     const decoded = decodedStdin(stdin);
     if (decoded === undefined) {
-      // Not a document, so no leaf can be named. The raw text alone is not
-      // enough either: a platform error echoes ONE field, not the blob. Hold
-      // every token of it to the same proof, and degrade when the payload is
-      // too large to enumerate.
-      if (stdin.length > STDIN_RAW_MAX_CHARS) complete = false;
-      else collectTokens(stdin, values);
+      // Not a document, so no leaf can be named and the payload is UNPROVABLE:
+      // whatever the boundary could split out of it is not its set of sensitive
+      // values, so the whole collection is marked incomplete and the cause
+      // degrades. The raw text still rides along as one value.
+      complete = false;
     } else {
       complete = collectStrings(decoded, values);
     }
   }
   return { values: values.filter((value) => value.length >= CAUSE_MIN_SENSITIVE_CHARS), complete };
-}
-
-/** A credential payload that does not parse is bounded before it is enumerated. */
-const STDIN_RAW_MAX_CHARS = 4_096;
-
-/** Payload fields are separated by JSON/shell/query punctuation, not only spaces. */
-const STDIN_TOKEN_DELIMITERS = /[\s,;:"'`{}[\]()<>=&?\\|/]+/;
-
-function collectTokens(text: string, into: string[]): void {
-  for (const token of text.split(STDIN_TOKEN_DELIMITERS)) {
-    if (token === "") continue;
-    into.push(token);
-    const unquoted = token.replace(/^['"]+|['"]+$/g, "");
-    if (unquoted !== token) into.push(unquoted);
-  }
 }
 
 function decodedStdin(stdin: string): unknown {
@@ -114,8 +102,8 @@ function decodedStdin(stdin: string): unknown {
     try {
       return JSON.parse(atob(stdin));
     } catch {
-      // Not a document: the raw string is all this boundary can name, and it is
-      // already in the list.
+      // Not a document: no leaf can be named, so the caller marks the whole
+      // collection unprovable.
       return undefined;
     }
   }

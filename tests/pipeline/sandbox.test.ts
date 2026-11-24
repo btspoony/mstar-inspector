@@ -561,14 +561,15 @@ describe("SandboxV1 Durable Object", () => {
     });
   });
 
-  test("a raw non-JSON stdin payload is unprovable: a substring the error reports is still removed", async () => {
+  test("an unparsed stdin payload degrades BOTH the message and the error name", async () => {
     reset();
     running = true;
     await withFrozenClock(async (clock) => {
       const { sandbox, container } = makeDo(true);
       const credential = "providerkey9a1fbc";
-      // Not JSON, not base64: the walk can name no leaf of it.
-      const stdin = `apikey=${credential};region=us-east`;
+      // Not JSON, not base64: no parser can name its sensitive values, and a
+      // delimiter split would collect `providerkey9a1fbc#comment` instead.
+      const stdin = `apikey=${credential}#comment`;
       container.exec = mock(async (cmd: string[]) => {
         execCalls.push({ cmd });
         if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
@@ -578,7 +579,10 @@ describe("SandboxV1 Durable Object", () => {
           };
         }
         clock.now += 1_200;
-        throw new Error(`exec failed: ${credential} rejected`);
+        // The rejection reports the credential ALONE, and names itself after it.
+        const err = new Error(`exec failed: ${credential}`);
+        err.name = credential;
+        throw err;
       });
 
       const read = await sandbox.runMarked(MARKER, shellCommand("bun run runner.ts"), {
@@ -587,8 +591,8 @@ describe("SandboxV1 Durable Object", () => {
       });
 
       if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
-      expect(read.cause).toContain("exec failed:");
-      expect(read.cause).toContain("[REDACTED]");
+      // Unprovable payload: neither the name nor any of the message survives.
+      expect(read.cause).toBe("Error (after 1200ms)");
       expect(read.cause).not.toContain(credential);
     });
   });
