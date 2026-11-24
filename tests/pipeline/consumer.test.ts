@@ -9747,3 +9747,66 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
     });
   }
 });
+
+describe("check_run.rerequested rerun (the rerun id is its own idempotency dimension)", () => {
+  const RERUN_CHECK_RUN_ID = 4242;
+  const plainDoneKey = (sha: string): string => {
+    const { installation_id, owner, repo, pr_number } = makePayload();
+    return idemKey({ installation_id, owner, repo, pr_number, head_sha: sha });
+  };
+  const rerunPayload = () =>
+    makePayload({
+      action: "rerequested",
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      attachDeliveryId: "delivery-rerun",
+    });
+
+  test("a rerun whose head was never reviewed runs the review — the plain done claim cannot skip it", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    h.kvState.entries.set(plainDoneKey(SHA), "done");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(rerunPayload()));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    const doneWrites = h.kvPuts.filter((p) => p.value === "done");
+    expect(doneWrites).toHaveLength(1);
+    expect(doneWrites[0]!.key).toBe(`${plainDoneKey(SHA)}:rerun:${RERUN_CHECK_RUN_ID}`);
+  });
+
+  test("a rerun of an already-reviewed head settles its attached check instead of paying a second review", async () => {
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?)`,
+      )
+      .run(`idem:123:acme/widgets:42:${SHA}`, SHA, TEST_APP_ID, `target-${TEST_APP_ID}`);
+    h.kvState.entries.set(plainDoneKey(SHA), "done");
+    const settled: Array<{ reason: string; attachDeliveryId?: string }> = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        settleSkipped: async (input: { reason: string; attachDeliveryId?: string }) => {
+          settled.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(rerunPayload()));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.reason).toContain("already reviewed for this head");
+    expect(settled[0]!.attachDeliveryId).toBe("delivery-rerun");
+  });
+});

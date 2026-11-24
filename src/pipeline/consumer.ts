@@ -108,6 +108,7 @@ import {
 import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import {
   idemKey,
+  kvClaimKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DROPPED,
   IDEM_FAILED,
@@ -411,13 +412,7 @@ async function handleGuardHeld(
   message.ack();
   const headSha = payloadSha ?? "";
   if (headSha !== "") {
-    const claimKey = idemKey({
-      installation_id: message.body.installation_id,
-      owner: message.body.owner,
-      repo: message.body.repo,
-      pr_number: message.body.pr_number,
-      head_sha: headSha,
-    });
+    const claimKey = kvClaimKey(message.body, headSha);
     try {
       await putAbandonClaim(deps.env.IDEMPOTENCY_KV, claimKey, IDEM_DROPPED, IDEMPOTENCY_SECONDS);
     } catch (err) {
@@ -668,6 +663,9 @@ async function newerCommitHasJob(
 ): Promise<boolean> {
   if (!headSha) return false;
   try {
+    // The claim belongs to ANOTHER commit's delivery, so it carries no rerun
+    // dimension of ours — `kvClaimKey(payload, headSha)` would append this
+    // delivery's `:rerun:{id}` and never find it.
     const key = idemKey({
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -1175,13 +1173,7 @@ async function processMessage(
         try {
           await putAbandonClaim(
             deps.env.IDEMPOTENCY_KV,
-            idemKey({
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: payload.head_sha,
-            }),
+            kvClaimKey(payload, payload.head_sha!),
             IDEM_PAUSED,
             IDEMPOTENCY_SECONDS,
           );
@@ -1243,13 +1235,7 @@ async function processMessage(
         try {
           await putAbandonClaim(
             deps.env.IDEMPOTENCY_KV,
-            idemKey({
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: payloadHeadSha,
-            }),
+            kvClaimKey(payload, payloadHeadSha),
             IDEM_SUPERSEDED,
             IDEMPOTENCY_SECONDS,
           );
@@ -1396,7 +1382,7 @@ async function processMessage(
         const earlyFields: ConsumerLogFields = {
           ...(baseFields ?? payloadIdentityFields(payload)),
           head_sha: earlyHeadSha,
-          idempotency_key: idemKey(earlyKey),
+          idempotency_key: kvClaimKey(payload, earlyHeadSha),
         };
         let liveHeadSha: string | null | undefined;
         const liveHead = async (): Promise<string | null> => {
@@ -1419,7 +1405,7 @@ async function processMessage(
           }
           return liveHeadSha;
         };
-        const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(earlyKey), earlyFields, deps.log);
+        const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, kvClaimKey(payload, earlyHeadSha), earlyFields, deps.log);
         let earlyReviewed = earlyDone;
         if (!earlyReviewed) {
           try {
@@ -1621,13 +1607,7 @@ async function processMessage(
       try {
         await putAbandonClaim(
           deps.env.IDEMPOTENCY_KV,
-          idemKey({
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: payload.head_sha,
-          }),
+          kvClaimKey(payload, payload.head_sha!),
           IDEM_FAILED,
           IDEMPOTENCY_SECONDS,
         );

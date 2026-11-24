@@ -25,7 +25,15 @@ export type ReviewJobPayload = {
   head_at?: string;
   comment_id?: number;
   action: string;
-  triggered_by: "pull_request" | "issue_comment";
+  triggered_by: "pull_request" | "issue_comment" | "check_run";
+  /**
+   * The completed check run a `check_run.rerequested` delivery asked to run
+   * again — an idempotency dimension only: the KV claims key through
+   * `rerunIdemKey`, so a rerun of an already-reviewed head reaches the
+   * pipeline's settle-skip instead of dying on the plain key's `done`,
+   * and GitHub's redelivery of the same rerequested event enqueues once.
+   */
+  rerun_check_run_id?: number;
   botRef: { appId: string };
   targetId: string;
   attachDeliveryId?: string;

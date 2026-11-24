@@ -38,7 +38,7 @@ The lifecycle verifies retained earlier findings against current code and discus
 
 | Candidate | Owner | Trigger | Done definition |
 |---|---|---|---|
-| Check rerequested, annotations, check-suite triggers | Product owner | Explicit user demand after this delivery | Explicit approval, implementation evidence and updated contract |
+| Check rerequested (Re-run on the Checks page) — delivered in [review trigger policy](review-trigger-policy.md) §2.2; Check annotations and check-suite triggers still deferred | Product owner | Explicit user demand for annotations/check-suite triggers | Explicit approval, implementation evidence and updated contract |
 | Comment-trigger extension — superseded by the bare mention in [review trigger policy](review-trigger-policy.md); RL-7 is unchanged | Product owner | — (resolved; no longer awaiting demand) | Delivered: trigger-mode + mention contract and acceptance evidence alongside the superseding policy |
 | Fuzzy/alias thread re-anchoring | Product owner | Explicit user demand revising exact mapping | Explicit approval with detection/undo story and evidence; **not implemented here** |
 
@@ -160,6 +160,8 @@ CREATE TABLE review_checks (
 );
 CREATE UNIQUE INDEX idx_check_one_open ON review_checks(attempt_key) WHERE terminal_ms IS NULL;
 CREATE INDEX idx_check_recovery ON review_checks(recovery_state,next_attempt_ms,lease_until_ms);
+-- migration 0108; the rerequested Re-run reverse lookup:
+CREATE INDEX idx_review_checks_app_run ON review_checks(github_app_id, check_run_id) WHERE check_run_id IS NOT NULL;
 ```
 
 The partial unique index, not merely `(key,generation)` uniqueness, prevents simultaneous active generations. A generation, `external_id` and known remote ID are never recycled. `terminal_ms` records local completion/give-up; remote observation remains separate. Terminal history is never silently overwritten by a fresh attempt.

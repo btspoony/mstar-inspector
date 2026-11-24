@@ -1164,3 +1164,76 @@ describe("classifyEvent — installation event (account authority + rejects)", (
   });
 });
 
+
+function checkRunBody(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    action: "rerequested",
+    installation: { id: 123 },
+    repository: { name: "test-repo", owner: { login: "test-owner" }, id: 555 },
+    check_run: {
+      id: 4242,
+      head_sha: HEAD_SHA,
+      app: { id: 9001 },
+      pull_requests: [{ number: 42 }],
+    },
+    ...overrides,
+  });
+}
+
+const APP_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: APP_SLUG, githubAppId: 9001 };
+
+describe("classifyEvent — check_run.rerequested", () => {
+  test("a rerequested run this App created yields check_rerun with the payload's advisory identity", () => {
+    const outcome = classifyEvent("check_run", checkRunBody(), undefined, APP_TRIGGER);
+    expect(outcome).toEqual({
+      kind: "check_rerun",
+      checkRunId: 4242,
+      installationId: 123,
+      owner: "test-owner",
+      repo: "test-repo",
+      prNumber: 42,
+      headSha: HEAD_SHA,
+      installationAccount: "test-owner",
+      accountAuthoritative: false,
+    });
+  });
+
+  test("an empty pull_requests list (fork PR) leaves prNumber null for the route's lookup", () => {
+    const body = checkRunBody({ check_run: { id: 4242, head_sha: HEAD_SHA, app: { id: 9001 }, pull_requests: [] } });
+    const outcome = classifyEvent("check_run", body, undefined, APP_TRIGGER);
+    expect(outcome.kind).toBe("check_rerun");
+    if (outcome.kind === "check_rerun") {
+      expect(outcome.prNumber).toBeNull();
+    }
+  });
+
+  test.each(["created", "completed", "requested_action"])("check_run.%s is ignored", (action) => {
+    const outcome = classifyEvent("check_run", checkRunBody({ action }), undefined, APP_TRIGGER);
+    expect(outcome).toEqual({ kind: "ignore", reason: `check_run action ${action} is not whitelisted` });
+  });
+
+  test("a run created by another App is ignored — never resolved", () => {
+    const body = checkRunBody({ check_run: { id: 4242, head_sha: HEAD_SHA, app: { id: 7777 }, pull_requests: [{ number: 42 }] } });
+    const outcome = classifyEvent("check_run", body, undefined, APP_TRIGGER);
+    expect(outcome).toEqual({ kind: "ignore", reason: "check run was not created by this App" });
+  });
+
+  test("a missing check_run.app still classifies — the route's review_checks lookup is the ownership proof", () => {
+    const body = checkRunBody({ check_run: { id: 4242, head_sha: HEAD_SHA, pull_requests: [{ number: 42 }] } });
+    const outcome = classifyEvent("check_run", body, undefined, APP_TRIGGER);
+    expect(outcome.kind).toBe("check_rerun");
+  });
+
+  test.each([
+    ["installation", { installation: null }],
+    ["repository", { repository: null }],
+    ["check_run", { check_run: { id: 4242, app: { id: 9001 } } }],
+  ])("a rerequested payload missing %s is rejected 400", (_what, overrides) => {
+    const outcome = classifyEvent("check_run", checkRunBody(overrides as Record<string, unknown>), undefined, APP_TRIGGER);
+    expect(outcome).toEqual({ kind: "reject", status: 400, reason: "check_run payload missing required fields" });
+  });
+
+  test("malformed check_run JSON is rejected 400", () => {
+    expect(classifyEvent("check_run", "{not json")).toEqual({ kind: "reject", status: 400, reason: "invalid JSON body" });
+  });
+});

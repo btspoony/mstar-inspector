@@ -3,7 +3,7 @@ import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes"
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
-  idemKey,
+  kvClaimKey,
 } from "../contracts/idem";
 import { getLostReplySettleMs, REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
@@ -124,13 +124,7 @@ async function landSettlementEffects(
     // delivery's claim. See `stampOwedSettlementClaim`'s residual note.
     const stamped = await stampOwedSettlementClaim(env.DB, env.IDEMPOTENCY_KV, {
       attemptId: handoff.attemptId,
-      key: idemKey({
-        installation_id: handoff.payload.installation_id,
-        owner: handoff.payload.owner,
-        repo: handoff.payload.repo,
-        pr_number: handoff.payload.pr_number,
-        head_sha: handoff.payload.head_sha,
-      }),
+      key: kvClaimKey(handoff.payload, handoff.payload.head_sha),
       ttlSeconds: IDEMPOTENCY_SECONDS,
       owned,
     });

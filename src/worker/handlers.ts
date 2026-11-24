@@ -1,5 +1,5 @@
 import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
-import { idemCommentKey, idemKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
+import { idemCommentKey, kvClaimKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import {
   ENTITLEMENT_UNREADABLE_SKIP_REASON,
   QUOTA_SKIP_REASON,
@@ -16,7 +16,7 @@ import type { Env } from "./env";
 
 /** Seven-field structured event log (along M0 gateway semantics). */
 export type WorkerEventLog = {
-  event: "pull_request" | "issue_comment";
+  event: ReviewJobPayload["triggered_by"];
   action: string;
   installation_id: number;
   owner: string;
@@ -62,7 +62,7 @@ export const defaultLog: HandlerLog = {
 
 function toEventLog(payload: ReviewJobPayload): WorkerEventLog {
   return {
-    event: payload.triggered_by === "pull_request" ? "pull_request" : "issue_comment",
+    event: payload.triggered_by,
     action: payload.action,
     installation_id: payload.installation_id,
     owner: payload.owner,
@@ -247,17 +247,11 @@ export async function handleReviewJob(
   refusal: DeliveryRefusal | null = null,
 ): Promise<HandleOutcome> {
   const fields = toEventLog(payload);
-
   if (refusal !== null) return refuseDelivery(payload, deps, fields, refusal);
 
+
   const key = payload.head_sha
-    ? idemKey({
-        installation_id: payload.installation_id,
-        owner: payload.owner,
-        repo: payload.repo,
-        pr_number: payload.pr_number,
-        head_sha: payload.head_sha,
-      })
+    ? kvClaimKey(payload, payload.head_sha)
     : payload.comment_id !== undefined
       ? idemCommentKey({
           installation_id: payload.installation_id,

@@ -22,6 +22,7 @@ import {
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, deliveryRefusalReason, handleReviewJob, type DeliveryRefusal } from "./handlers";
+import { findCheckAttemptByRunId } from "../store/review-checks";
 import {
   createReviewBotsStore,
   type BotScope,
@@ -95,6 +96,9 @@ export function deliveryOutcomeFromWebhook(
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
+  // Defensive only: the route rewrites `check_rerun` into a job or an ignore
+  // before it consults this function, so this arm is unreachable in the route.
+  if (outcome.kind === "check_rerun") return "ignored";
   if (reviewEnabled === 0 || !reviewGlobal) return "paused";
   return sharedBotRefused ? "skipped" : "ok";
 }
@@ -407,7 +411,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
 
   const appSlug = row.github_slug ?? "";
   let classified: unknown = null;
-  const outcome = await classifyWebhook(
+  let outcome = await classifyWebhook(
     appSecret,
     rawBody,
     signature,
@@ -424,7 +428,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         target.follow_workspace_defaults === 1
           ? (await getWorkspaceReviewDefaults(db, target.workspace_id)).triggerMode
           : target.review_trigger_mode;
-      return { mode, appSlug, reviewDrafts: target.review_drafts !== 0 };
+      return { mode, appSlug, reviewDrafts: target.review_drafts !== 0, githubAppId: row.github_app_id };
     },
     (parsed) => {
       classified = parsed;
@@ -442,6 +446,46 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       `${webhookRef} row_id=${row.id}`,
       "per-App webhook ignored an issue_comment mention — github_slug is not synced yet; open the App's settings page to sync it",
     );
+  }
+
+  if (outcome.kind === "check_rerun") {
+    const rerun = outcome;
+    // The attempt row — not the payload — is the authoritative PR identity
+    // (a fork PR's delivery carries an empty pull_requests list), and the
+    // (github_app_id, check_run_id) pair is the only "this App owns that
+    // run" proof. A miss means the run was never ours: ignore with 200.
+    const attempt = await findCheckAttemptByRunId(db, row.github_app_id, rerun.checkRunId).catch((err: unknown) => {
+      webhookWarn(
+        "check_rerun_lookup_failed",
+        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "per-App webhook could not resolve the rerequested check run — answering ignored (fail-closed)",
+      );
+      return null;
+    });
+    if (attempt === null) {
+      webhookWarn(
+        "check_rerun_no_attempt",
+        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId}`,
+        "per-App webhook ignored a rerequested check run — no review check names it (foreign or pre-Checks run)",
+      );
+      outcome = { kind: "ignore", reason: "no review check for this check run" };
+    } else {
+      outcome = {
+        kind: "job",
+        payload: {
+          installation_id: attempt.installationId,
+          owner: attempt.owner,
+          repo: attempt.repo,
+          pr_number: attempt.prNumber,
+          head_sha: attempt.headSha,
+          action: "rerequested",
+          triggered_by: "check_run",
+          rerun_check_run_id: rerun.checkRunId,
+        },
+        installationAccount: rerun.installationAccount,
+        accountAuthoritative: false,
+      };
+    }
   }
 
   const target = delivery.target;

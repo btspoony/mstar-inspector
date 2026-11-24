@@ -20,21 +20,25 @@ export const INSTALLATION_ACTIONS = ["created", "new_permissions_accepted"] as c
 /**
  * The per-App trigger inputs classification branches on (spec
  * review-trigger-policy §2/§3 read path): the resolved target's
- * `review_trigger_mode` and the bot's GitHub slug (the mention target — one
- * App's mention never triggers another App). The mention login is GitHub's
- * mutable `github_slug`, never our local webhook path or the row id. The
- * per-App webhook route passes both from the rows it resolved — no second
- * lookup. An omitted context defaults to `every_push` with NO mention target
- * (empty slug never matches — fail-safe: no trigger rather than a spurious
- * one).
+ * `review_trigger_mode`, the bot's GitHub slug (the mention target — one
+ * App's mention never triggers another App), and the row's numeric GitHub
+ * App id. The mention login is GitHub's mutable `github_slug`, never our
+ * local webhook path or the row id. `githubAppId` matches a
+ * `check_run.rerequested` delivery's `check_run.app.id` — a run another
+ * App created is ignored rather than resolved. The per-App webhook route
+ * passes all three from the rows it resolved — no second lookup. An
+ * omitted context defaults to `every_push` with NO mention target and NO
+ * App id (empty slug never matches, and a null App id cannot prove a
+ * foreign run — fail-safe on both faces).
  */
 export type ReviewTriggerContext = {
   mode: ReviewTriggerMode;
   appSlug: string;
   reviewDrafts?: boolean;
+  githubAppId?: number | null;
 };
 
-const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "" };
+const DEFAULT_TRIGGER: ReviewTriggerContext = { mode: "every_push", appSlug: "", githubAppId: null };
 
 /**
  * The delivery's install identity and source repository, read from the
@@ -258,7 +262,25 @@ export type WebhookOutcome =
       accountLogin: string | null;
       accountAuthoritative: true;
     }
-  | { kind: "installation_removed"; installationId: number };
+  | { kind: "installation_removed"; installationId: number }
+  | {
+      /**
+       * A `check_run.rerequested` delivery on one of this App's runs. The
+       * payload's `prNumber` is advisory (null when GitHub omitted the
+       * pull_requests list); the route resolves the authoritative
+       * owner/repo/pr/head from the `review_checks` row the run id names
+       * before it enqueues.
+       */
+      kind: "check_rerun";
+      checkRunId: number;
+      installationId: number;
+      owner: string;
+      repo: string;
+      prNumber: number | null;
+      headSha: string;
+      installationAccount: string;
+      accountAuthoritative: false;
+    };
 
 const installationAccountSchema = z.object({ login: z.string().min(1) }).nullable().optional();
 const installationSchema = z
@@ -325,6 +347,27 @@ const issueCommentSchema = z.object({
     .optional(),
   repository: repositorySchema,
   sender: z.object({ type: z.string().optional(), login: z.string().optional() }).nullable().optional(),
+});
+
+/**
+ * The `check_run` face's loose shape: only the fields classification and the
+ * route's `review_checks` lookup need. `pull_requests` is optional and often
+ * empty (fork PRs carry no array and `head_branch` is null), so the PR
+ * identity it yields is advisory — the route's row lookup is authoritative.
+ */
+const checkRunSchema = z.object({
+  action: z.string(),
+  installation: installationSchema,
+  repository: repositorySchema,
+  check_run: z
+    .object({
+      id: z.number().optional(),
+      head_sha: z.string().optional(),
+      app: z.object({ id: z.number() }).nullable().optional(),
+      pull_requests: z.array(z.object({ number: z.number() })).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 /**
@@ -402,7 +445,10 @@ export async function classifyWebhook(
   }
   const parsed = parseBody(rawBody);
   onParsed?.(parsed);
-  if (typeof trigger === "function" && (eventName === "pull_request" || eventName === "issue_comment")) {
+  if (
+    typeof trigger === "function" &&
+    (eventName === "pull_request" || eventName === "issue_comment" || eventName === "check_run")
+  ) {
     const identity = deliveryIdentityOf(parsed);
     if (identity.installationId !== null && identity.repository !== null) {
       const resolved = await trigger(identity);
@@ -477,7 +523,63 @@ function classifyParsed(
   if (eventName === "installation") {
     return classifyInstallation(parsed);
   }
+  if (eventName === "check_run") {
+    return classifyCheckRun(parsed, trigger);
+  }
   return { kind: "ignore", reason: `event ${eventName} is not whitelisted` };
+}
+
+
+/**
+ * `check_run` classification: only `rerequested` is reviewable — GitHub
+ * sends it when someone clicks Re-run on a concluded run. The run must be
+ * ours (`check_run.app.id` vs. the resolved row's `github_app_id`); the
+ * `review_checks` row that run id names is the authoritative
+ * owner/repo/pr/head source (a fork PR carries an empty `pull_requests`
+ * list), so the outcome carries only the lookup handles, and the route
+ * resolves them before it enqueues.
+ */
+function classifyCheckRun(parsed: unknown, trigger: ReviewTriggerContext): WebhookOutcome {
+  if (parsed === null) {
+    return { kind: "reject", status: 400, reason: "invalid JSON body" };
+  }
+  const result = checkRunSchema.safeParse(parsed);
+  if (!result.success) {
+    return { kind: "reject", status: 400, reason: "check_run payload failed validation" };
+  }
+  const { action, installation, repository, check_run } = result.data;
+  if (action !== "rerequested") {
+    return { kind: "ignore", reason: `check_run action ${action} is not whitelisted` };
+  }
+  const installationId = installation?.id;
+  const owner = repository?.owner.login;
+  const repo = repository?.name;
+  const checkRunId = check_run?.id;
+  const headSha = check_run?.head_sha;
+  if (
+    installationId === undefined ||
+    owner === undefined ||
+    repo === undefined ||
+    checkRunId === undefined ||
+    !headSha
+  ) {
+    return { kind: "reject", status: 400, reason: "check_run payload missing required fields" };
+  }
+  const runAppId = check_run?.app?.id;
+  if (runAppId !== undefined && trigger.githubAppId != null && runAppId !== trigger.githubAppId) {
+    return { kind: "ignore", reason: "check run was not created by this App" };
+  }
+  return {
+    kind: "check_rerun",
+    checkRunId,
+    installationId,
+    owner,
+    repo,
+    prNumber: check_run?.pull_requests?.[0]?.number ?? null,
+    headSha,
+    installationAccount: installationAccountOf(installation, owner),
+    accountAuthoritative: false,
+  };
 }
 
 function classifyInstallation(parsed: unknown): WebhookOutcome {

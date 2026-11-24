@@ -687,6 +687,37 @@ export async function readOpenCheckIdentityForKey(
   return row === null ? null : { key, generation: row.generation };
 }
 
+/**
+ * The `check_run.rerequested` lookup (webhook route): which attempt a remote
+ * check run id names, scoped to the GitHub App id — a run another App
+ * created never resolves, so this is both the "is it ours" proof and the
+ * authoritative owner/repo/pr/head source (a fork PR's delivery carries an
+ * empty `pull_requests` list). A remote run id names at most one attempt in
+ * practice; the ORDER BY only keeps a duplicate-write accident deterministic.
+ */
+export async function findCheckAttemptByRunId(
+  db: D1Like,
+  githubAppId: number,
+  checkRunId: number,
+): Promise<{ owner: string; repo: string; prNumber: number; headSha: string; installationId: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT installation_id, owner, repo, pr_number, head_sha FROM review_checks
+        WHERE github_app_id = ? AND check_run_id = ?
+        ORDER BY created_ms DESC LIMIT 1`,
+    )
+    .bind(githubAppId, checkRunId)
+    .first<{ installation_id: number; owner: string; repo: string; pr_number: number; head_sha: string }>();
+  if (row === null) return null;
+  return {
+    installationId: row.installation_id,
+    owner: row.owner,
+    repo: row.repo,
+    prNumber: row.pr_number,
+    headSha: row.head_sha,
+  };
+}
+
 export async function getCheckAttempt(db: D1Like, id: string): Promise<CheckAttempt | null> {
   const row = await db.prepare(`SELECT * FROM review_checks WHERE id = ?`).bind(id).first<ReviewCheckRow>();
   return row === null ? null : attemptOf(row);

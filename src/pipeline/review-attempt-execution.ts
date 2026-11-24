@@ -8,6 +8,7 @@ import {
 } from "../contracts/failure-stages";
 import {
   idemKey,
+  kvClaimKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DEGRADED,
   IDEM_DONE,
@@ -280,7 +281,7 @@ type DiffCaptureDecline = {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "issue_comment" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "check_run" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -1526,7 +1527,7 @@ export type ProcessDeps = {
  */
 export function payloadIdentityFields(payload: ReviewJobPayload): ConsumerLogFields {
   return {
-    event: payload.triggered_by === "pull_request" ? "pull_request" : "issue_comment",
+    event: payload.triggered_by,
     action: payload.action,
     installation_id: payload.installation_id,
     owner: payload.owner,
@@ -2462,13 +2463,7 @@ function attemptFields(
       ? {}
       : {
           head_sha: headSha,
-          idempotency_key: idemKey({
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: headSha,
-          }),
+          idempotency_key: kvClaimKey(payload, headSha),
         }),
   };
 }
@@ -2784,7 +2779,7 @@ async function preparePhase(
     runner_timeout_ms: runnerTimeoutMs(level),
     orchestration: level === "deep" ? "parent" : "bun-fanout",
     head_sha: headSha,
-    idempotency_key: idemKey(key),
+    idempotency_key: kvClaimKey(payload, headSha),
     sandbox_id: sandboxId,
   };
   check.fields = fields;
@@ -2809,8 +2804,7 @@ async function preparePhase(
       );
     }
   }
-
-  const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(key), fields, deps.log);
+  const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, kvClaimKey(payload, headSha), fields, deps.log);
   if (done) {
     deps.log.info(fields, "KV idempotency hit — ack");
     await check?.terminalize(null, "skipped", headSha);
@@ -4105,13 +4099,7 @@ async function collectPhase(
       try {
         await putAbandonClaim(
           deps.env.IDEMPOTENCY_KV,
-          idemKey({
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: payload.head_sha,
-          }),
+          kvClaimKey(payload, payload.head_sha!),
           IDEM_DEGRADED,
           IDEMPOTENCY_SECONDS,
         );
@@ -4405,13 +4393,6 @@ async function publishPhase(
   const lineIntents = stagedPayload.lineIntents;
   const resolutions: { associationId: string; verified: VerifiedResolution }[] =
     stagedPayload.lifecycle?.resolutions ?? [];
-  const key: IdempotencyKey = {
-    installation_id: payload.installation_id,
-    owner: payload.owner,
-    repo: payload.repo,
-    pr_number: payload.pr_number,
-    head_sha: headSha,
-  };
   const fields = attemptFields(payload, level, attemptId, headSha);
   const check = await settlementFor(deps, ref, headSha);
   const checkAttemptId = check?.handle?.attemptId ?? (await ownedCheckAttemptId(deps, ref.attemptId));
@@ -4504,7 +4485,7 @@ async function publishPhase(
     return { kind: "ok" };
   }
   try {
-    await deps.env.IDEMPOTENCY_KV.put(idemKey(key), IDEM_DONE, {
+    await deps.env.IDEMPOTENCY_KV.put(kvClaimKey(payload, headSha), IDEM_DONE, {
       expirationTtl: IDEMPOTENCY_SECONDS,
     });
   } catch (err) {
@@ -5073,13 +5054,7 @@ export async function settleAttemptFailure(
     try {
       await putAbandonClaim(
         deps.env.IDEMPOTENCY_KV,
-        idemKey({
-          installation_id: payload.installation_id,
-          owner: payload.owner,
-          repo: payload.repo,
-          pr_number: payload.pr_number,
-          head_sha: payload.head_sha,
-        }),
+        kvClaimKey(payload, payload.head_sha!),
         IDEM_FAILED,
         IDEMPOTENCY_SECONDS,
       );
