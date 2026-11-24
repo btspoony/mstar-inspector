@@ -142,14 +142,14 @@ export function repositoryCountLabel(locale: SpaBoot["locale"], count: number): 
       : t(locale, "targets.repositoryCountMany", { count });
 }
 
-/** A target's status pill: awaiting its first delivery, paused, or reviewing. */
+/** A target's status pill: awaiting its first delivery, paused, or reviewable. */
 export function targetStatusPill(
   locale: SpaBoot["locale"],
   target: TargetListRow,
 ): { tone: "warn" | "neutral" | "success"; label: string } {
   if (target.repo_id === null) return { tone: "warn", label: t(locale, "targets.status.uninstalled") };
   if (target.review_enabled === 0) return { tone: "neutral", label: t(locale, "targets.status.paused") };
-  return { tone: "success", label: t(locale, "targets.status.reviewing") };
+  return { tone: "success", label: t(locale, "targets.status.reviewable") };
 }
 
 type RepositoryIdentity = { repo_owner: string | null; repo_name: string | null };
@@ -191,7 +191,17 @@ export function TargetsView({
   const allHref = `${base}/repos/all`;
   const [uninstalledOnly, setUninstalledOnly] = useState(false);
   const uninstalledCount = all.filter((target) => target.repo_id === null).length;
-  const rows = uninstalledOnly ? all.filter((target) => target.repo_id === null) : all;
+  // The toggle disappears when nothing awaits install; clear the stored
+  // selection too, so a later reload that brings a pending row back does not
+  // silently jump the table to the 待安装 face.
+  useEffect(() => {
+    if (uninstalledCount === 0 && uninstalledOnly) setUninstalledOnly(false);
+  }, [uninstalledCount, uninstalledOnly]);
+  // Same-render fallback while the stored selection is stale.
+  const showUninstalled = uninstalledOnly && uninstalledCount > 0;
+  const rows = showUninstalled
+    ? all.filter((target) => target.repo_id === null)
+    : all.filter((target) => target.repo_id !== null);
   const reviewsTotal = all.reduce((sum, target) => sum + target.reviews_total, 0);
   const reviews7d = all.reduce((sum, target) => sum + target.reviews_7d, 0);
   const latestReview = all.reduce<string | null>(
@@ -295,13 +305,13 @@ export function TargetsView({
                 type="single"
                 variant="outline"
                 size="sm"
-                value={uninstalledOnly ? "uninstalled" : "all"}
+                value={showUninstalled ? "uninstalled" : "available"}
                 onValueChange={(next) => {
                   if (next !== "") setUninstalledOnly(next === "uninstalled");
                 }}
                 aria-label={t(locale, "targets.filterLabel")}
               >
-                <ToggleGroupItem value="all">{t(locale, "targets.filterAll")}</ToggleGroupItem>
+                <ToggleGroupItem value="available">{t(locale, "targets.filterAvailable")}</ToggleGroupItem>
                 <ToggleGroupItem value="uninstalled">
                   {t(locale, "targets.filterUninstalled", { count: uninstalledCount })}
                 </ToggleGroupItem>
@@ -324,7 +334,9 @@ export function TargetsView({
             <EmptyState title={t(locale, "targets.emptyTitle")} description={t(locale, "targets.emptyDescription")} />
           ) : null}
           {all.length > 0 && rows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "targets.filterEmpty")}</p>
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "targets.filterEmptyAvailable")}
+            </p>
           ) : null}
         </div>
       ) : null}

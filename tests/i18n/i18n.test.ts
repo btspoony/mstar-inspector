@@ -222,6 +222,8 @@ describe("App detail IA copy", () => {
       "targets.addDialog.resultsTruncated",
       "targets.metricReviews",
       "targets.metricReviews7d",
+      "targets.filterAvailable",
+      "targets.status.reviewable",
       "targets.filterUninstalled",
       "targets.columnReviews",
       "targets.columnReviews7d",
@@ -240,6 +242,15 @@ describe("App detail IA copy", () => {
     expect(t("zh_CN", "targets.addDialog.stepRepos")).toBe("3 · 仓库");
     expect(t("en", "targets.filterUninstalled", { count: 3 })).toBe("Awaiting install (3)");
     expect(t("zh_CN", "targets.filterUninstalled", { count: 3 })).toBe("待安装（3）");
+    expect(t("en", "targets.filterAvailable")).toBe("Available");
+    expect(t("zh_CN", "targets.filterAvailable")).toBe("可用仓库");
+    expect(t("en", "targets.status.reviewable")).toBe("Reviewable");
+    expect(t("zh_CN", "targets.status.reviewable")).toBe("可审查");
+    expect(isDictionaryKey("targets.filterAll")).toBe(false);
+    expect(isDictionaryKey("targets.status.reviewing")).toBe(false);
+    expect(t("en", "targets.filterEmptyAvailable")).toBe("No repository is available yet.");
+    expect(t("zh_CN", "targets.filterEmptyAvailable")).toBe("还没有可审查的仓库。");
+    expect(isDictionaryKey("targets.filterEmpty")).toBe(false);
     expect(t("en", "targets.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
     expect(t("en", "targets.settings.heading")).toBe("Review settings");

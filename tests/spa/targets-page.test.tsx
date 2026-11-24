@@ -145,7 +145,7 @@ describe("repository list (static SSR)", () => {
     expect(markup).toContain('href="/dashboard/acme/repos/all"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-1"');
     expect(markup).toContain('href="/dashboard/acme/repos/t-2"');
-    expect(markup).toContain(t("en", "targets.status.reviewing"));
+    expect(markup).toContain(t("en", "targets.status.reviewable"));
     expect(markup).toContain(t("en", "targets.status.paused"));
     expect(markup).toContain("cursor-pointer");
   });
@@ -174,26 +174,24 @@ describe("repository list (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.emptyDescription"));
   });
 
-  test("a 待安装 row reports the discriminator instead of an invented name", () => {
-    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    expect(markup).toContain(t("en", "targets.status.uninstalled"));
-    expect(markup).not.toContain("null/null");
+  test("the default face omits a pending target's row link", () => {
+    const markup = renderView([
+      row({ target_id: "t-web", repo_id: null, repo_owner: "acme", repo_name: "web" }),
+    ]);
+    expect(markup).not.toContain('href="/dashboard/acme/repos/t-web"');
+    expect(markup).not.toContain("acme/web");
   });
 
-  test("a target without repo_id but with owner/name renders the name, not a dash", () => {
+  test("a target without repo_id but with owner/name is hidden from the default face", () => {
     const markup = renderView([row({ repo_id: null, repo_owner: "42ch-dev", repo_name: "nexus" })]);
-    expect(markup).toContain("42ch-dev/nexus");
-    const targetRow = rowMarkup(markup, "42ch-dev/nexus");
-    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
-    expect(targetRow).toContain('data-tone="warn"');
-    expect(targetRow).not.toContain(">—</a>");
+    expect(markup).not.toContain("42ch-dev/nexus");
   });
 
-  test("a target with neither an id nor a name still falls back to the dash", () => {
-    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    const targetRow = rowMarkup(markup, "—</a>");
-    expect(targetRow).toContain(">—</a>");
-    expect(targetRow).toContain(t("en", "targets.status.uninstalled"));
+  test("an all-pending workspace shows the available-empty copy on the default face", () => {
+    const markup = renderView([
+      row({ target_id: "t-web", repo_id: null, repo_owner: "acme", repo_name: "web" }),
+    ]);
+    expect(markup).toContain(t("en", "targets.filterEmptyAvailable"));
   });
 
   test("the overview band reports review volume summed from the row aggregates", () => {
@@ -211,7 +209,7 @@ describe("repository list (static SSR)", () => {
       row({ target_id: "t-3", repo_id: null, repo_owner: null, repo_name: null }),
     ]);
     expect(markup).toContain(t("en", "targets.headingDescription"));
-    expect(rowMarkup(markup, "acme/web")).toContain(t("en", "targets.status.uninstalled"));
+    expect(markup).not.toContain("acme/web");
     expect(metricValues(markup)).toEqual({
       [t("en", "targets.metricRepositories")]: "3",
       [t("en", "targets.metricReviews")]: "13",
@@ -260,6 +258,11 @@ describe("the 待安装 filter (mounted)", () => {
       root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
     );
     try {
+      const initial = container.textContent ?? "";
+      expect(initial).toContain("acme/api");
+      expect(initial).toContain("acme/docs");
+      expect(initial).not.toContain("acme/web");
+
       const segment = [...container.querySelectorAll("button")].find(
         (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
       );
@@ -272,17 +275,80 @@ describe("the 待安装 filter (mounted)", () => {
       expect(text).toContain("acme/web");
       expect(text).not.toContain("acme/api");
       expect(text).not.toContain("acme/docs");
+      const pendingRow = rowMarkup(container.innerHTML, "acme/web");
+      expect(pendingRow).toContain(t("en", "targets.status.uninstalled"));
+      expect(pendingRow).toContain('data-tone="warn"');
+      expect(text).toContain(t("en", "targets.allRepositories"));
       expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
 
       const all = [...container.querySelectorAll("button")].find(
-        (node) => node.textContent === t("en", "targets.filterAll"),
+        (node) => node.textContent === t("en", "targets.filterAvailable"),
       );
       await act(async () => {
         all?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
       const restored = container.textContent ?? "";
-      expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/web"));
-      expect(restored.indexOf("acme/web")).toBeLessThan(restored.indexOf("acme/docs"));
+      expect(restored).not.toContain("acme/web");
+      expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/docs"));
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("a reload that empties the pending set restores the available face and drops the toggle", async () => {
+    const targets = [
+      row({ target_id: "t-1", repo_name: "api" }),
+      row({ target_id: "t-2", repo_id: null, repo_name: "web" }),
+      row({ target_id: "t-3", repo_name: "docs" }),
+    ];
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () =>
+      root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
+    );
+    try {
+      const segment = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
+      );
+      await act(async () => {
+        segment?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+      const narrowed = container.textContent ?? "";
+      expect(narrowed).toContain("acme/web");
+      expect(narrowed).not.toContain("acme/api");
+      expect(narrowed).not.toContain("acme/docs");
+      expect(segment?.getAttribute("data-state")).toBe("on");
+
+      const reloaded = targets.map((target) =>
+        target.target_id === "t-2" ? { ...target, repo_id: 501 } : target,
+      );
+      await act(async () =>
+        root.render(createElement(TargetsView, { locale: "en", state: "ok", targets: reloaded, onRetry: () => {} })),
+      );
+
+      const text = container.textContent ?? "";
+      expect(text).toContain("acme/api");
+      expect(text).toContain("acme/web");
+      expect(text).toContain("acme/docs");
+      const toggleLabels = [...container.querySelectorAll("button")].map((node) => node.textContent);
+      expect(toggleLabels).not.toContain(t("en", "targets.filterAvailable"));
+      expect(toggleLabels).not.toContain(t("en", "targets.filterUninstalled", { count: 0 }));
+
+      const reloadedAgain = reloaded.map((target) =>
+        target.target_id === "t-2" ? { ...target, repo_id: null } : target,
+      );
+      await act(async () =>
+        root.render(
+          createElement(TargetsView, { locale: "en", state: "ok", targets: reloadedAgain, onRetry: () => {} }),
+        ),
+      );
+      const textAgain = container.textContent ?? "";
+      expect(textAgain).toContain("acme/api");
+      expect(textAgain).toContain("acme/docs");
+      expect(textAgain).not.toContain("acme/web");
     } finally {
       await act(async () => root.unmount());
       cleanup();
@@ -301,7 +367,7 @@ describe("list helpers", () => {
   test("a paused target outranks its missing repository identity only after it", () => {
     expect(targetStatusPill("en", row({ repo_id: null })).label).toBe(t("en", "targets.status.uninstalled"));
     expect(targetStatusPill("en", row({ review_enabled: 0 })).label).toBe(t("en", "targets.status.paused"));
-    expect(targetStatusPill("en", row()).label).toBe(t("en", "targets.status.reviewing"));
+    expect(targetStatusPill("en", row()).label).toBe(t("en", "targets.status.reviewable"));
   });
 });
 
