@@ -20,11 +20,13 @@ import {
   clearRecheckDuty,
   listIncompleteSettlements,
   listLostReplyLaunchSettlements,
+  readAttemptHandoffByAttempt,
   readRefusalPending,
   readRecheckAttribution,
   readRecheckDuty,
   recordRecheckDuty,
   recordRecheckAttribution,
+  recorrectSettledFailureRow,
   recheckRowExists,
   listOwedSuccessors,
   listUnpublishedLaunchSettlements,
@@ -35,6 +37,7 @@ import {
   successorGeneration,
   touchAttemptHandoff,
   type AttemptHandoff,
+  type AttemptObservation,
   type SettlementEffect,
 } from "../store/review-route-store";
 
@@ -42,6 +45,94 @@ import {
 export const HANDOFF_RECOVERY_AFTER_MS = 5 * 60_000;
 /** Rows per pass per family — the reconciler's own bound. */
 export const ROUTE_RECOVERY_LIMIT = 25;
+
+/**
+ * The observation the attempt holds RIGHT NOW — never the selector's copy: the
+ * selector read the row before it decided to settle, and the live phase may have
+ * recorded its cause since. A failed read is the same fact as "nothing recorded"
+ * for this decision: the row must still be inserted (the settlement cannot hang
+ * on a lost cause), and the pass's own sentence is the honest fallback.
+ */
+async function readObservedCause(
+  env: ReviewRouteEnv,
+  handoff: AttemptHandoff,
+): Promise<AttemptObservation | null> {
+  try {
+    return (await readAttemptHandoffByAttempt(env.DB, handoff.attemptId))?.observation ?? null;
+  } catch {
+    return handoff.observation;
+  }
+}
+
+/**
+ * Mechanism vocabulary a cause can carry, and the plain noun an author reads
+ * instead. A closed list on purpose: whoever threw wrote the cause, and only
+ * this row is author-visible. Anything absent stays — "GitHub" or "the diff" is
+ * the author's own language. Plurals first so a plural never half-matches.
+ */
+const MECHANISM_TERMS: readonly (readonly [RegExp, string])[] = [
+  [/\bdurable\s+objects\b/gi, "review service"],
+  [/\bdurable\s+object\b/gi, "review service"],
+  [/\bcontainer(s?)\b/gi, "review environment$1"],
+  [/\bsandbox(es)?\b/gi, "review environment$1"],
+  [/\bmarker(s?)\b/gi, "attempt setup$1"],
+  [/\bexec(s?)\b/gi, "review step$1"],
+  [/\bworkflow\s+instances?\b/gi, "review run"],
+  [/\bworkflows?\b/gi, "review run"],
+  [/\bchild\s+process(?:es)?\b/gi, "review step"],
+  [/\b(?:\d+|thousands?)\s*ms\b/gi, "a short time"],
+];
+
+/** A segment that states what we did NOT conclude — never the cause. */
+const DISPOSITION_SEGMENT = /^(?:nothing|no\s|its result\b)/i;
+/** A segment that is our own wrapper around the cause: it names the mechanism. */
+const WRAPPER_SEGMENT = /\b(?:container|sandbox|marker|exec|durable\s+object|workflow|launch row)\b/i;
+
+/**
+ * The cause an author can be shown, out of the phase's own sentence.
+ *
+ * A throw site writes `<wrapper — cause — disposition>`; only the middle
+ * segments are the site's evidence. The disposition is dropped, a leading
+ * wrapper is dropped when it names the mechanism (substituting it would read
+ * "the attempt environment could not be read"), and what remains is elided term
+ * by term. A cause with no wrapper — the sandbox boundary's `<Name>: <message>
+ * (after <n>ms)` — is kept whole apart from that elision.
+ */
+function authorFacingCause(observed: AttemptObservation): string {
+  let segments = observed.error
+    .split(" — ")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment !== "" && !DISPOSITION_SEGMENT.test(segment));
+  if (segments.length > 1 && WRAPPER_SEGMENT.test(segments[0]!)) segments = segments.slice(1);
+  let cause = segments
+    .join(" — ")
+    .replace(/^[A-Za-z]*Error:\s*/, "")
+    .replace(/\(\s*after\s+\d+\s*ms\s*\)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  for (const [pattern, plain] of MECHANISM_TERMS) cause = cause.replace(pattern, plain);
+  cause = cause.replace(/\s+([.,;:])/g, "$1").trim();
+  if (cause === "") return "";
+  cause = `${cause[0]!.toUpperCase()}${cause.slice(1)}`;
+  return cause.length > 200 ? `${cause.slice(0, 197)}…` : cause;
+}
+
+/**
+ * The `review_failures.message` sentence for a row: the code's own summary
+ * ("what happened, was anything charged") and then the cause the phase actually
+ * observed in author-facing words. The raw cause stays in `error`, which is the
+ * operator's text — that is the whole split, so this function grows no option,
+ * no policy read and no second dialect.
+ *
+ * No observation means no cause to name: the summary alone stands, which is the
+ * pass's honest statement of what IT saw (a deadline that passed in silence).
+ */
+function authorFacingMessage(code: FailureCode, observed: AttemptObservation | null): string {
+  const summary = FAILURE_SUMMARIES[code];
+  if (observed === null) return summary;
+  const cause = authorFacingCause(observed);
+  return cause === "" ? summary : `${summary} ${cause}`;
+}
 
 export type ReviewRouteEnv = {
   DB: D1Database;
@@ -72,13 +163,24 @@ export type ReviewRouteEnv = {
  *
  * `failure.code` defaults to the unclassified crash-window code; a caller that
  * knows why it settled names it. The handoff's own `observation` — what the LIVE
- * settlement recorded before it could conclude anything — WINS over both: the
- * row is then composed from that observation, its code and its cause in `error`,
- * while `message` stays the code's own author-facing summary so no internal
- * mechanism wording reaches the PR author. `failure.statements` are extra writes
+ * settlement recorded before it could conclude anything — WINS over both, and it
+ * is re-read HERE rather than taken from the selector's snapshot: a phase that
+ * records its cause between this pass's selection and its insert must still be
+ * reflected. Its code names the row and its cause lands in `error`; `message`
+ * carries that cause in author-facing words, with the mechanism vocabulary
+ * elided (see `authorFacingMessage`), because `error` is the operator's raw text.
+ * `failure.statements` are extra writes
  * that must land in that same batch first — the lost-reply pass uses them to
  * move a `launched` row to `failed` AND revoke it, which is what releases both
  * arms of the capacity hold.
+ *
+ * One row per attempt, in every interleaving: the insert is attempt-keyed
+ * (`ON CONFLICT DO NOTHING`), so a concurrent pass adds nothing and only the
+ * pass whose insert returned `meta.changes === 1` may correct it afterwards —
+ * that correction is an UPDATE of the same row, so the identity never changes.
+ * And no observation can arrive behind a settled row's back:
+ * `recordAttemptObservation` refuses once the row exists, so the row a phase
+ * lost the race to write never silently contradicts itself later.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -96,7 +198,7 @@ async function landSettlementEffects(
   // that lost the insert race owns nothing and must not touch it.
   let owned = false;
   if (!landed.has("failure-row")) {
-    const observed = handoff.observation;
+    const observed = await readObservedCause(env, handoff);
     const code = observed?.code ?? failure.code ?? "review.internal.unclassified";
     const recorded = await landFailureEffect(
       env.DB,
@@ -113,7 +215,7 @@ async function landSettlementEffects(
           stage: "pipeline",
           code,
           trackId: handoff.attemptId,
-          message: FAILURE_SUMMARIES[code],
+          message: authorFacingMessage(code, observed),
           error: observed?.error ?? detail,
         },
       },
@@ -121,6 +223,20 @@ async function landSettlementEffects(
     );
     owned = recorded.owned;
     landed.add("failure-row");
+    if (owned) {
+      // The re-read above narrows the window but cannot close it: the phase can
+      // record between that read and this insert. Re-read once as the row's
+      // owner and let the observation that arrived late win — same row, same id.
+      const later = await readObservedCause(env, handoff);
+      if (later !== null && (later.error !== observed?.error || later.code !== observed?.code)) {
+        await recorrectSettledFailureRow(env.DB, {
+          attemptId: handoff.attemptId,
+          code: later.code,
+          error: later.error,
+          message: authorFacingMessage(later.code, later),
+        });
+      }
+    }
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
     // ONLY the pass that landed the record may move the head-wide key (a loser or a

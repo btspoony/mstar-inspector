@@ -220,7 +220,13 @@ function toObservation(value: unknown): AttemptObservation | null {
  * conclude. The FIRST observation for the attempt stands: a replay of the same
  * settlement carries the same cause, and a later lane has strictly less
  * evidence than the phase that was there. `false` means the row does not exist,
- * or an observation was already recorded.
+ * an observation was already recorded, or the attempt already HAS its failure
+ * row.
+ *
+ * That last arm is the invariant the reconciler relies on: once the row exists,
+ * its `message`/`error` are the author's story of the attempt, so no observation
+ * may be written behind it and quietly disagree. A phase that observes after
+ * the reconciler settled the attempt adds nothing — the row stands.
  */
 export async function recordAttemptObservation(
   db: D1Like,
@@ -230,11 +236,30 @@ export async function recordAttemptObservation(
     .prepare(
       `UPDATE review_attempt_handoffs
           SET payload_json = json_set(payload_json, '$.${OBSERVATION_KEY}', json(?))
-        WHERE attempt_id = ? AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL`,
+        WHERE attempt_id = ?
+          AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL
+          AND NOT EXISTS (SELECT 1 FROM review_failures f WHERE f.id = ?)`,
     )
-    .bind(JSON.stringify(input.observation), input.attemptId)
+    .bind(JSON.stringify(input.observation), input.attemptId, input.attemptId)
     .run();
   return written.meta.changes === 1;
+}
+
+/**
+ * Correct the row a settlement pass just INSERTED from an observation it could
+ * not read in time: the phase may record its cause between that pass's own read
+ * and its insert. Only the insert's owner calls this (`meta.changes === 1`), so
+ * it never rewrites a record another producer wrote, and the row keeps its
+ * identity — one attempt, one row, one story.
+ */
+export async function recorrectSettledFailureRow(
+  db: D1Like,
+  input: { attemptId: string; code: FailureCode; error: string; message: string },
+): Promise<void> {
+  await db
+    .prepare(`UPDATE review_failures SET error_code = ?, error = ?, message = ? WHERE id = ?`)
+    .bind(input.code, input.error, input.message, input.attemptId)
+    .run();
 }
 
 /** The delivery's handoff record, or `null` when this body was never handed off. */

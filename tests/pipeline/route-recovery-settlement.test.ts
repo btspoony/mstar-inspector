@@ -13,6 +13,7 @@ import {
   listUnpublishedLaunchSettlements,
   markAttemptSettled,
   readAttemptHandoff,
+  recordAttemptObservation,
   reserveAttemptHandoff,
   stampOwedSettlementClaim,
 } from "../../src/store/review-route-store";
@@ -499,6 +500,59 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     expect(settledMark(db)).toEqual(expect.any(Number));
   });
 });
+
+/**
+ * The reconciler's own read/batch seam, for the interleavings a durable row
+ * cannot otherwise be raced into. `afterSelection` runs on the first statement
+ * the pass issues AFTER the lost-reply selector answered — i.e. after the
+ * selected handoffs were mapped, which is exactly the window between the
+ * selector's snapshot and the insert. `beforeBatch` runs before a batch
+ * executes (the narrower window: after the pass's own re-read). Every query
+ * passes straight through.
+ */
+function withReconcilerRace(
+  db: TestD1,
+  hooks: {
+    afterSelection?: () => void;
+    beforeBatch?: (statements: readonly D1StatementLike[]) => void | Promise<void>;
+  },
+): D1Like {
+  let selected = false;
+  return {
+    prepare: (sql: string) => {
+      const statement = db.prepare(sql);
+      const isLostReplySelector =
+        sql.includes("FROM review_failures f WHERE f.id = h.attempt_id") &&
+        sql.includes("FROM review_attempt_handoffs h");
+      if (isLostReplySelector) {
+        let bound = statement;
+        const racing: D1StatementLike = {
+          bind: (...values: unknown[]) => {
+            bound = bound.bind(...values);
+            return racing;
+          },
+          first: <T = Record<string, unknown>>() => bound.first<T>(),
+          run: <T = Record<string, unknown>>() => bound.run<T>(),
+          all: async <T = Record<string, unknown>>() => {
+            const answer = await bound.all<T>();
+            selected = true;
+            return answer;
+          },
+        };
+        return racing;
+      }
+      if (selected && hooks.afterSelection !== undefined) {
+        selected = false;
+        hooks.afterSelection();
+      }
+      return statement;
+    },
+    batch: async (statements: D1StatementLike[]) => {
+      await hooks.beforeBatch?.(statements);
+      return db.batch(statements);
+    },
+  };
+}
 
 function unreadableLaunchDb(db: TestD1): D1Like {
   const row = {
@@ -1355,18 +1409,23 @@ describe("a launched attempt whose paid reply was lost", () => {
     const queue = { send: async () => {} };
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
 
-    // ONE row, composed from the observation: the observed cause in `error`, and
-    // the code's own author-facing summary in `message` — no internal mechanism
-    // wording reaches the PR author.
+    // ONE row, composed from the observation: the observed cause in `error` AND in
+    // the author-facing `message`, with the mechanism vocabulary elided there.
     const settled = failureRows(db);
     expect(settled).toHaveLength(1);
     expect(settled[0]!.id).toBe(attemptId);
     expect(settled[0]!.error_code).toBe("review.paid.reply_lost");
     expect(String(settled[0]!.error)).toContain(cause);
     expect(String(settled[0]!.error)).not.toContain("no reply ever arrived");
-    expect(settled[0]!.message).toBe(FAILURE_SUMMARIES["review.paid.reply_lost"]);
+    // The author's sentence carries the CAUSE, not the generic summary alone.
+    expect(String(settled[0]!.message)).toContain("Runner rpc failed: check the diff");
+    expect(String(settled[0]!.message)).not.toBe(FAILURE_SUMMARIES["review.paid.reply_lost"]);
+    // ... and names no internal mechanism: neither the wrapper's vocabulary nor
+    // the millisecond suffix survives into the author's line.
     expect(String(settled[0]!.message)).not.toContain("container");
     expect(String(settled[0]!.message)).not.toContain("reply-lost");
+    expect(String(settled[0]!.message)).not.toContain("1200ms");
+    expect(String(settled[0]!.message)).not.toContain("Error:");
     // ... and the release it owns did happen: the terminal move, the revoke and
     // the head's claim stamp all landed, so the settlement can discharge.
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
@@ -1407,13 +1466,15 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(settled).toHaveLength(1);
     expect(settled[0]!.id).toBe(attemptId);
     // No observation existed, so the pass states only what IT observed — the
-    // deadline and the grace — and never invents a cause.
+    // deadline and the grace — and never invents a cause. The generic summary is
+    // the honest fallback, and no mechanism word appears in it.
     expect(String(settled[0]!.error)).toContain("no reply ever arrived");
     expect(settled[0]!.message).toBe(FAILURE_SUMMARIES["review.paid.reply_lost"]);
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
 
-    // The late phase records its observation; the row is already settled, so it
-    // mints no second row and the settled record stands.
+    // The late phase's observation is REFUSED once the row exists (the store's
+    // own guard), so the settled record can never quietly disagree with an
+    // observation written behind its back; no second row appears either.
     const deps = await makeDeps(db);
     expect(
       await settleAttemptFailure(
@@ -1432,9 +1493,95 @@ describe("a launched attempt whose paid reply was lost", () => {
         null,
       ),
     ).toEqual({ kind: "unknown" });
+    // The store refuses an observation once the attempt's row exists: the guard
+    // is what makes "no observation behind a settled row" an invariant rather
+    // than a race the phase happens to lose.
+    expect(
+      await recordAttemptObservation(db as never, {
+        attemptId,
+        observation: { code: "review.paid.reply_lost", error: "late cause" },
+      }),
+    ).toBe(false);
+    expect((await readAttemptHandoff(db as never, deliveryKeyOf(payload)))?.observation ?? null).toBeNull();
     expect(failureRows(db)).toEqual(settled);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
     expect(failureRows(db)).toEqual(settled);
+  });
+
+  test("a cause recorded AFTER the selector ran still reaches the one row the pass writes", async () => {
+    // The reported race, at its widest: the selector reads the handoff (nothing
+    // observed yet), and only then does the live phase record its cause. The pass
+    // must not write the generic fallback over a cause that is already durable —
+    // so it re-reads the handoff at insertion time instead of trusting the
+    // selector's snapshot.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-late-cause";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const cause = "Error: runner rpc failed: check the diff (after 1200ms)";
+    const observedError = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
+    let recorded = false;
+    const racing = withReconcilerRace(db, {
+      afterSelection: () => {
+        if (recorded) return;
+        recorded = true;
+        db.raw
+          .prepare(
+            "UPDATE review_attempt_handoffs SET payload_json = json_set(payload_json, '$.attemptObservation', json(?)) WHERE attempt_id = ?",
+          )
+          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), attemptId);
+      },
+    });
+
+    const env = await h.makeEnv({ DB: racing as never });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
+
+    expect(recorded).toBe(true);
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.error_code).toBe("review.paid.reply_lost");
+    expect(String(settled[0]!.error)).toContain(cause);
+    expect(String(settled[0]!.message)).toContain("Runner rpc failed: check the diff");
+  });
+
+  test("a cause recorded between the pass's read and its insert corrects the row it owns", async () => {
+    // The narrower window the re-read cannot close: the phase records after the
+    // pass has re-read the handoff. The insert already happened, so the ONLY way
+    // the cause reaches the author is the owner correcting its own row — same
+    // id, same attempt: one row, still.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-mid-insert";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const observedError = "Error: socket hang up (after 800ms)";
+    let injected = false;
+    // The settlement-effect batch is the only one with exactly two statements
+    // (the attempt-keyed insert + its landed mark); the lost-reply gate is three.
+    const racing = withReconcilerRace(db, {
+      beforeBatch: async (statements) => {
+        if (injected || statements.length !== 2) return;
+        injected = true;
+        db.raw
+          .prepare(
+            "UPDATE review_attempt_handoffs SET payload_json = json_set(payload_json, '$.attemptObservation', json(?)) WHERE attempt_id = ?",
+          )
+          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), attemptId);
+      },
+    });
+
+    const env = await h.makeEnv({ DB: racing as never });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
+
+    expect(injected).toBe(true);
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(String(settled[0]!.error)).toBe(observedError);
+    expect(String(settled[0]!.message)).toContain("Socket hang up");
+    expect(String(settled[0]!.message)).not.toContain("800ms");
+    // Same row identity throughout: the correction is an UPDATE, never a second row.
+    expect(settled[0]!.id).toBe(attemptId);
   });
 
   test("a failure row another producer wrote is never promoted into this lane's settlement", async () => {
