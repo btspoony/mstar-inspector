@@ -401,6 +401,50 @@ describe("claimAttempt (spec §7.9 claim protocol)", () => {
     expect(old?.terminalMs).toBe(T0);
   });
 
+  test("two reruns of one head claim fresh attempts; the ordinary key is untouched", async () => {
+    const db = seededDb();
+    const base = {
+      appId: APP_ID,
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      headSha: SHA,
+      triggeredBy: "check_run",
+      action: "rerequested",
+    };
+    const rerun = (rerunCheckRunId: number, holder: string) =>
+      claim(db, { triggeredBy: "check_run", action: "rerequested", rerunCheckRunId, holder });
+
+    const first = await rerun(4242, "run-rerun-a");
+    const second = await rerun(4243, "run-rerun-b");
+
+    // Each rerun is its own attempt: a shared key would have answered `busy`
+    // and the operator would never see the second run.
+    expect(first.attempt.identity.generation).toBe(1);
+    expect(second.attempt.identity.generation).toBe(1);
+    expect(second.attempt.identity.attemptId).not.toBe(first.attempt.identity.attemptId);
+    expect((await rawRow(db, second.attempt.identity.attemptId)).attempt_key).toBe(
+      attemptKey({ ...base, rerunCheckRunId: 4243 }),
+    );
+    expect((await rawRow(db, first.attempt.identity.attemptId)).attempt_key).not.toBe(
+      (await rawRow(db, second.attempt.identity.attemptId)).attempt_key,
+    );
+    expect(await rowCount(db)).toBe(2);
+
+    // The same rerequested event (GitHub's redelivery) still dedups.
+    const duplicate = await claimAttempt(
+      db,
+      claimInput({ triggeredBy: "check_run", action: "rerequested", rerunCheckRunId: 4243, holder: "run-rerun-c" }),
+    );
+    expect(duplicate.kind).toBe("busy");
+
+    // An ordinary delivery has no suffix: the canonical tuple stays byte-identical.
+    expect(attemptKey({ ...base, triggeredBy: "pull_request", action: "opened" })).toBe(
+      JSON.stringify([APP_ID, 123, "acme", "widgets", 42, SHA, "pull_request", "opened"]),
+    );
+  });
+
   test("claim refuses a blank holder and a deadline that is not in the future", async () => {
     const db = seededDb();
     await expect(claimAttempt(db, claimInput({ holder: "" }))).rejects.toThrow(/nonblank holder/);

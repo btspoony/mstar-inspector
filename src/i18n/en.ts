@@ -989,7 +989,7 @@ export const en = {
       slugWebhook: "Slug {slug} · webhook URL {webhookUrl}",
       appIdWebhook: "App ID {id} · webhook URL {webhookUrl}",
       note:
-        "Connecting delivers this App's pull_request and issue_comment webhooks to this Worker. Reviews are controlled per App — pause an App to stop its reviews.",
+        "Connecting delivers this App's pull_request, issue_comment and check_run webhooks to this Worker. Reviews are controlled per App — pause an App to stop its reviews.",
       create: "Create App",
       cancel: "Cancel",
     },

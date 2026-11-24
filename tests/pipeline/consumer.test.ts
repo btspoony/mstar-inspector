@@ -52,6 +52,7 @@ import {
   CHECK_NAME,
   CHECK_RECOVERY_LEASE_MS,
   attachCheckRunId,
+  attemptKey,
   claimAttempt,
   claimCheckRecovery,
   setCheckCreateState,
@@ -3516,6 +3517,254 @@ describe("createReviewConsumer", () => {
     expect(reviewCount(db)).toBe(1);
     expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
     expect(h.logLines.filter((l) => l.level === "warn" && l.msg.includes("supersede KV read failed"))).toHaveLength(1);
+  });
+
+  // A rerun's KV claim lives under `{idemKey}:rerun:{check_run_id}`, so the
+  // supersede gate's plain-key read can never see it — the D1 leg finds the
+  // row, then corroborates it with that rerun claim (the row alone cannot
+  // tell "queued" from "refused at the door").
+  const RERUN_KEY = (sha: string, checkRunId: number): string => `${ENQUEUED_KEY(sha)}:rerun:${checkRunId}`;
+
+  // The attempt key a rerequested delivery carries: `{canonical
+  // tuple}#rerun:{rerequested run id}` — the id is the CONCLUDED run GitHub
+  // asked to re-run, which is what the KV claim key uses; the attempt's own
+  // `check_run_id` is a DIFFERENT id (or NULL while the create call is in
+  // flight), so the probe must read the id from the key.
+  const RERUN_ATTEMPT_KEY = (rerequestedId: number): string =>
+    attemptKey({
+      appId: TEST_APP_ID,
+      installationId: 123,
+      owner: "acme",
+      repo: "widgets",
+      prNumber: 42,
+      headSha: NEW_SHA,
+      triggeredBy: "check_run",
+      action: "rerequested",
+      rerunCheckRunId: rerequestedId,
+    });
+
+  // Per §2.2 a rerun only really re-reviews while its head is still the PR
+  // head; here NEW_SHA IS the head. The row's `check_run_id` is still NULL
+  // (mid-attach) — only `attempt_key` names the rerequested run 7002 the
+  // claim keys on — so its in-flight attempt supersedes the stale delivery
+  // rather than letting it pay for a review of old code.
+  test("a newer head whose only job proof is a rerun's in-flight check row AND its rerun claim still supersedes the delivery", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('rerun-check', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'check_run', 'rerequested', ?, 1, 'mstar-check:v1:rerun-check:1', NULL,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', 'rerunning',
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(TEST_APP_ID, NEW_SHA, RERUN_ATTEMPT_KEY(7002));
+    h.kvState.entries.set(RERUN_KEY(NEW_SHA, 7002), "1");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(h.kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(SHA),
+      value: "superseded",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  // The reverse of the rerun row: a REFUSED delivery (quota / entitlement)
+  // attaches the same nonterminal `review_checks` row at beforeEnqueue yet
+  // never enqueues, so the row carries `triggered_by='pull_request'` and no
+  // rerun claim exists. The probe must NOT supersede the stale delivery —
+  // otherwise the newer head is never reviewed at all.
+  test("a newer head whose only check row is a refused delivery's attach does NOT supersede", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('refused-check', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'pull_request', 'synchronize', 'refused-attempt-key', 1, 'mstar-check:v1:refused:1', NULL,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', 'pending',
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(TEST_APP_ID, NEW_SHA);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  // Same row as the supersede case (`triggered_by='check_run'`, a real
+  // `#rerun:7002` attempt key, `check_run_id` still NULL mid-attach) but the
+  // matching `{idemKey}:rerun:{id}` claim is absent — the attach may still be
+  // settling its own delivery, so the row alone is not queue proof.
+  test("a rerun check row without its rerun claim does NOT supersede the delivery", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('rerun-check-no-claim', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'check_run', 'rerequested', ?, 1, 'mstar-check:v1:rerun-check-no-claim:1', NULL,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', 'rerunning',
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(TEST_APP_ID, NEW_SHA, RERUN_ATTEMPT_KEY(7002));
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  // A nonterminal `review_checks` row seed; `id` doubles as the external_id
+  // stem so two rows never collide on the UNIQUE(external_id) constraint.
+  const seedOpenCheckRow = (
+    db: TestD1,
+    row: { id: string; triggeredBy: string; action: string; attemptKey: string; summary: string },
+  ): void => {
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES (?, ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 ?, ?, ?, 1, ?, NULL,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', ?,
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(
+        row.id,
+        TEST_APP_ID,
+        NEW_SHA,
+        row.triggeredBy,
+        row.action,
+        row.attemptKey,
+        `mstar-check:v1:${row.id}:1`,
+        row.summary,
+      );
+  };
+
+  // One head can hold MULTIPLE nonterminal rows: a quota-refused
+  // `pull_request` attach (no claim) plus a real `check_run` rerun (claim
+  // under `:rerun:7002`). A `LIMIT 1` probe that happened to pick the refused
+  // row returned false and let the stale delivery pay for old code. The
+  // refused row is seeded FIRST so a first-row pick would hit it — the scan
+  // must look past it and find the rerun's claim.
+  test("a refused check row beside a rerun row does not hide the rerun's claim — the delivery still supersedes", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    seedOpenCheckRow(db, {
+      id: "refused-check-mixed",
+      triggeredBy: "pull_request",
+      action: "synchronize",
+      attemptKey: "refused-attempt-key-mixed",
+      summary: "pending",
+    });
+    seedOpenCheckRow(db, {
+      id: "rerun-check-mixed",
+      triggeredBy: "check_run",
+      action: "rerequested",
+      attemptKey: RERUN_ATTEMPT_KEY(7002),
+      summary: "rerunning",
+    });
+    h.kvState.entries.set(RERUN_KEY(NEW_SHA, 7002), "1");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  // Same two rows, but no `{idemKey}:rerun:7002` claim exists — the rerun
+  // row alone cannot prove a queued job, and the refused row proves nothing.
+  test("refused + rerun rows without the rerun claim do NOT supersede", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    seedOpenCheckRow(db, {
+      id: "refused-check-mixed2",
+      triggeredBy: "pull_request",
+      action: "synchronize",
+      attemptKey: "refused-attempt-key-mixed2",
+      summary: "pending",
+    });
+    seedOpenCheckRow(db, {
+      id: "rerun-check-mixed2",
+      triggeredBy: "check_run",
+      action: "rerequested",
+      attemptKey: RERUN_ATTEMPT_KEY(7002),
+      summary: "rerunning",
+    });
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(false);
+  });
+
+  // Same gate, other D1 leg: a finished `reviews` row for the newer head is
+  // proof the head needs no second delivery, even with no KV claim at all.
+  test("a newer head whose only proof is a finished reviews row still supersedes the delivery", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict)
+         VALUES ('review-of-new-head', 123, 'acme', 'widgets', 42, ?, 'ship it')`,
+      )
+      .run(NEW_SHA);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(h.kvPuts.some((p) => p.key === ENQUEUED_KEY(SHA) && p.value === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(1);
   });
 
   test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {
@@ -8321,6 +8570,121 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.messageRetryCalls).toHaveLength(0);
   });
 
+  test("check lifecycle: a rerun whose commit is no longer the head settles the check instead of reviewing the live head", async () => {
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    await createArtifactStore(db).put({
+      kind: "review",
+      key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      schema: "mstar.review/v1",
+      payload: GATED_OUTPUT,
+      appId: TEST_APP_ID,
+      targetId: `target-${TEST_APP_ID}`,
+    });
+    await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
+    const adapter = checksAdapterFor(db);
+    const rerunCheckRunId = 4242;
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: TEST_APP_ID,
+          installationId: 123,
+          owner: "acme",
+          repo: "widgets",
+          prNumber: 42,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: "check_run",
+        action: "rerequested",
+        rerunCheckRunId,
+        deliveryId: "stale-rerun-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(
+      h.makeBatch(
+        makePayload({
+          attachDeliveryId: attached.deliveryId,
+          head_sha: SHA,
+          triggered_by: "check_run",
+          action: "rerequested",
+          rerun_check_run_id: rerunCheckRunId,
+        }),
+      ),
+    );
+
+    // The rerun names SHA; the PR has moved on. Reviewing SHA2 would pay for a
+    // commit nobody asked about and hang its result on SHA's run.
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    const stale = checkRowFor(db, SHA);
+    expect(stale.terminal_ms).not.toBeNull();
+    expect(stale.desired).not.toBe("in_progress");
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+    expect(
+      h.logLines.some((line) => line.msg.includes("settling the check instead of reviewing the live head")),
+    ).toBe(true);
+  });
+
+  test("check lifecycle: a rerun of an unreviewed old head also settles instead of reviewing the live head", async () => {
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
+    const adapter = checksAdapterFor(db);
+    const rerunCheckRunId = 4343;
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: TEST_APP_ID,
+          installationId: 123,
+          owner: "acme",
+          repo: "widgets",
+          prNumber: 42,
+        },
+        githubAppId: 424242,
+        headSha: SHA,
+        triggeredBy: "check_run",
+        action: "rerequested",
+        rerunCheckRunId,
+        deliveryId: "stale-unreviewed-rerun",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`fixture: expected attached, got ${attached.kind}`);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(adapter),
+    });
+
+    await consumer(
+      h.makeBatch(
+        makePayload({
+          attachDeliveryId: attached.deliveryId,
+          head_sha: SHA,
+          triggered_by: "check_run",
+          action: "rerequested",
+          rerun_check_run_id: rerunCheckRunId,
+        }),
+      ),
+    );
+
+    // No reviews row for SHA — the settled arms below would not fire, so the
+    // gate itself must stop the checkout from following the moved PR ref.
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
+    expect(checkRowFor(db, SHA).terminal_ms).not.toBeNull();
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.messageRetryCalls).toHaveLength(0);
+  });
+
   test("check lifecycle: a stale PUBLISHED head settles from its proof and reviews the live head", async () => {
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
@@ -9770,4 +10134,67 @@ describe("comment-trigger claim consumption (migration 0048)", () => {
       expect(h.commenterCalls).toHaveLength(0);
     });
   }
+});
+
+describe("check_run.rerequested rerun (the rerun id is its own idempotency dimension)", () => {
+  const RERUN_CHECK_RUN_ID = 4242;
+  const plainDoneKey = (sha: string): string => {
+    const { installation_id, owner, repo, pr_number } = makePayload();
+    return idemKey({ installation_id, owner, repo, pr_number, head_sha: sha });
+  };
+  const rerunPayload = () =>
+    makePayload({
+      action: "rerequested",
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      attachDeliveryId: "delivery-rerun",
+    });
+
+  test("a rerun whose head was never reviewed runs the review — the plain done claim cannot skip it", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    h.kvState.entries.set(plainDoneKey(SHA), "done");
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(rerunPayload()));
+
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    const doneWrites = h.kvPuts.filter((p) => p.value === "done");
+    expect(doneWrites).toHaveLength(1);
+    expect(doneWrites[0]!.key).toBe(`${plainDoneKey(SHA)}:rerun:${RERUN_CHECK_RUN_ID}`);
+  });
+
+  test("a rerun of an already-reviewed head settles its attached check instead of paying a second review", async () => {
+    const db = await createSeededTestD1();
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?)`,
+      )
+      .run(`idem:123:acme/widgets:42:${SHA}`, SHA, TEST_APP_ID, `target-${TEST_APP_ID}`);
+    h.kvState.entries.set(plainDoneKey(SHA), "done");
+    const settled: Array<{ reason: string; attachDeliveryId?: string }> = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        settleSkipped: async (input: { reason: string; attachDeliveryId?: string }) => {
+          settled.push(input);
+          return true;
+        },
+      },
+    });
+
+    await consumer(h.makeBatch(rerunPayload()));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(h.messageAckCalls).toHaveLength(0);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.reason).toContain("already reviewed for this head");
+    expect(settled[0]!.attachDeliveryId).toBe("delivery-rerun");
+  });
 });

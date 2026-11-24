@@ -3,7 +3,7 @@ import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes"
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
   IDEMPOTENCY_SECONDS,
-  idemKey,
+  kvClaimKey,
 } from "../contracts/idem";
 import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
 import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
@@ -86,7 +86,9 @@ async function readFrozenIdentityHead(env: ReviewRouteEnv, attemptId: string): P
   if (row?.attempt_key == null) return null;
   let tuple: unknown;
   try {
-    tuple = JSON.parse(row.attempt_key);
+    // A rerun key appends `#rerun:<id>` to the canonical tuple; `#` cannot
+    // occur in any tuple field, so the base is the prefix before it.
+    tuple = JSON.parse(row.attempt_key.split("#rerun:")[0] as string);
   } catch {
     return null;
   }
@@ -285,13 +287,7 @@ async function landSettlementEffects(
     // delivery's claim. See `stampOwedSettlementClaim`'s residual note.
     const stamped = await stampOwedSettlementClaim(env.DB, env.IDEMPOTENCY_KV, {
       attemptId: handoff.attemptId,
-      key: idemKey({
-        installation_id: handoff.payload.installation_id,
-        owner: handoff.payload.owner,
-        repo: handoff.payload.repo,
-        pr_number: handoff.payload.pr_number,
-        head_sha: handoff.payload.head_sha,
-      }),
+      key: kvClaimKey(handoff.payload, handoff.payload.head_sha),
       ttlSeconds: IDEMPOTENCY_SECONDS,
       owned,
     });

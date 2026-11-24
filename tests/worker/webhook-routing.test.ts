@@ -2763,3 +2763,271 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
   });
 });
+
+describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
+  const RERUN_HEAD = "0123456789abcdef0123456789abcdef01234567";
+  const RERUN_CHECK_RUN_ID = 4242;
+
+  function checkRunPayload(
+    checkRunId = RERUN_CHECK_RUN_ID,
+    repo = FIXTURE_REPO,
+    installationId = 123,
+  ): string {
+    return JSON.stringify({
+      action: "rerequested",
+      installation: { id: installationId },
+      repository: { name: repo.name, owner: { login: repo.owner }, id: 555 },
+      check_run: {
+        id: checkRunId,
+        head_sha: RERUN_HEAD,
+        app: { id: 1000 },
+        pull_requests: [{ number: 42 }],
+      },
+    });
+  }
+
+  async function seedAttachedCheck(
+    db: TestD1,
+    appRow: { id: string },
+    repo: { owner: string; name: string } = FIXTURE_REPO,
+  ): Promise<void> {
+    const bot = db.raw.query("SELECT github_app_id FROM review_bots WHERE id = ?").get(appRow.id) as {
+      github_app_id: number;
+    };
+    const octokit: ChecksOctokit = {
+      rest: {
+        checks: {
+          create: async (params: ChecksCreateParams) => ({
+            data: {
+              id: RERUN_CHECK_RUN_ID,
+              name: params.name,
+              head_sha: params.head_sha,
+              external_id: params.external_id,
+              status: "queued",
+              conclusion: null,
+              app: { id: bot.github_app_id },
+            },
+          }),
+          update: async () => {
+            throw new Error("seed must never update");
+          },
+          get: async () => {
+            throw new Error("seed must never get");
+          },
+          listForRef: async () => {
+            throw new Error("seed must never list");
+          },
+        },
+      },
+    };
+    const adapter = createChecksAdapter({
+      db: db as never,
+      nowMs: () => Date.now(),
+      getOctokit: async () => octokit,
+    });
+    const attached = await attachCheckAtAcceptance(
+      { db: db as never, adapter, nowMs: () => Date.now() },
+      {
+        scope: {
+          appId: appRow.id,
+          installationId: 123,
+          owner: repo.owner,
+          repo: repo.name,
+          prNumber: 42,
+        },
+        githubAppId: bot.github_app_id,
+        headSha: RERUN_HEAD,
+        triggeredBy: "pull_request",
+        action: "opened",
+        deliveryId: "seed-delivery",
+      },
+    );
+    if (attached.kind !== "attached") throw new Error(`check seed failed: ${JSON.stringify(attached)}`);
+  }
+
+  test("a rerequested run backed by a review_checks row enqueues a check_run job and attaches a fresh attempt", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload();
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    const { attachDeliveryId, ...queued } = sent[0]!;
+    expect(attachDeliveryId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(queued).toEqual({
+      installation_id: 123,
+      owner: "test-owner",
+      repo: "test-repo",
+      pr_number: 42,
+      head_sha: RERUN_HEAD,
+      action: "rerequested",
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      botRef: { appId: appRow.id },
+      targetId: appRow.targetId,
+    });
+    const attempts = db.raw
+      .query("SELECT triggered_by, action, check_run_id FROM review_checks ORDER BY created_ms")
+      .all() as Array<{ triggered_by: string; action: string; check_run_id: number | null }>;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]).toMatchObject({ triggered_by: "pull_request", check_run_id: RERUN_CHECK_RUN_ID });
+    expect(attempts[1]).toMatchObject({ triggered_by: "check_run", action: "rerequested" });
+  });
+
+  test("a rerun of a renamed repository enqueues under the delivery's current owner/repo", async () => {
+    const db = createMigratedTestD1();
+    const current = { owner: "new-owner", name: "new-name" };
+    const appRow = await seedApp(db, {
+      slug: "app-x",
+      secret: "secret-x",
+      githubAppId: 1000,
+      targets: [{ repoId: 555, repoOwner: current.owner, repoName: current.name }],
+    });
+    // The Check was created before the rename; the delivery names today's repo.
+    await seedAttachedCheck(db, appRow, { owner: "old-owner", name: "old-name" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload(RERUN_CHECK_RUN_ID, current);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      owner: current.owner,
+      repo: current.name,
+      pr_number: 42,
+      head_sha: RERUN_HEAD,
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      targetId: appRow.targetId,
+    });
+  });
+
+  test("a rerun whose attempt row predates a reinstall enqueues under the DELIVERY's installation_id", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    // The Check was created under installation 123; the App has since been
+    // reinstalled and this delivery arrives under installation 999.
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload(RERUN_CHECK_RUN_ID, FIXTURE_REPO, 999);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      installation_id: 999,
+      owner: FIXTURE_REPO.owner,
+      repo: FIXTURE_REPO.name,
+      pr_number: 42,
+      head_sha: RERUN_HEAD,
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+    });
+  });
+
+  test("a rerequested run with no review_checks row is 200 ignored — zero enqueue, delivery recorded ignored", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload(9999);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const delivery = db.raw
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .get(appRow.id) as { event_name: string; outcome: string };
+    expect(delivery).toEqual({ event_name: "check_run", outcome: "ignored" });
+  });
+
+  test("a redelivery of the same check_run id enqueues once — the rerun claim dedups it", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload();
+    const headers = {
+      "x-hub-signature-256": await signatureFor("secret-x", body),
+      "x-github-event": "check_run",
+    };
+
+    const first = await postWebhook("/webhook/default/app-x", body, headers, env);
+    const second = await postWebhook("/webhook/default/app-x", body, headers, env);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(sent).toHaveLength(1);
+  });
+
+  test("a faulted review_checks lookup is 200 ignored with only check_rerun_lookup_failed — never reported as no_attempt", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(
+      failingDb(db, (query) => query.includes("WHERE github_app_id = ? AND check_run_id = ?")),
+      { REVIEW_QUEUE: queue as never },
+    );
+    const body = checkRunPayload();
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("check_rerun_lookup_failed"))).toBe(true);
+    expect(lines.some((entry) => entry.includes("check_rerun_no_attempt"))).toBe(false);
+    const delivery = db.raw
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .get(appRow.id) as { event_name: string; outcome: string };
+    expect(delivery).toEqual({ event_name: "check_run", outcome: "ignored" });
+  });
+});

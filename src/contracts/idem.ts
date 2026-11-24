@@ -111,13 +111,60 @@ export function isReviewClaim(value: string | null): boolean {
  * Build the KV idempotency key: `idem:{installation_id}:{owner}/{repo}:{pr_number}:{head_sha}`.
  * Throws on empty head_sha — a null/empty sha must never become a KV key
  * (compass contracts B: a comment mention has no sha → enqueue without KV
- * write).
+ * write). This string is also the `reviews` primary key via
+ * `parseIdemKey`'s strict five-part shape — it never gains a suffix; a
+ * rerun delivery keys its KV claims through {@link rerunIdemKey} instead.
  */
 export function idemKey(key: IdempotencyKey): string {
   if (!key.head_sha) {
     throw new Error("idemKey: head_sha must be a non-empty string");
   }
   return `idem:${key.installation_id}:${key.owner}/${key.repo}:${key.pr_number}:${key.head_sha}`;
+}
+
+/**
+ * The KV-only sibling key for a `check_run.rerequested` delivery:
+ * `{idemKey(key)}:rerun:{checkRunId}`. A rerun's claims never collide with
+ * the ordinary trigger's `done` on the same head (which would otherwise
+ * skip it at acceptance), and a redelivery of the same rerequested event
+ * enqueues exactly once. KV claims only — `reviews.id` /
+ * `parseIdemKey` keep the strict five-part shape above.
+ */
+export function rerunIdemKey(key: IdempotencyKey, checkRunId: number): string {
+  if (!Number.isInteger(checkRunId) || checkRunId <= 0) {
+    throw new Error(`rerunIdemKey: check_run_id must be a positive integer, got ${String(checkRunId)}`);
+  }
+  return `${idemKey(key)}:rerun:${checkRunId}`;
+}
+
+/**
+ * The KV claim key for one review job: a `check_run.rerequested` delivery
+ * keys through {@link rerunIdemKey} — its claims must never collide with
+ * the ordinary trigger's `done` on the same head — everything else keeps
+ * {@link idemKey}'s five-part shape. The ONLY claim-key policy: every KV
+ * read/write of a delivery claim routes here, while D1 lookups and the
+ * `reviews` primary key use the five-tuple directly.
+ */
+export function kvClaimKey(
+  payload: {
+    installation_id: number;
+    owner: string;
+    repo: string;
+    pr_number: number;
+    rerun_check_run_id?: number;
+  },
+  headSha: string,
+): string {
+  const key: IdempotencyKey = {
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: headSha,
+  };
+  return payload.rerun_check_run_id === undefined
+    ? idemKey(key)
+    : rerunIdemKey(key, payload.rerun_check_run_id);
 }
 
 /** The comment-trigger sibling of `IdempotencyKey` — a comment id, no sha. */

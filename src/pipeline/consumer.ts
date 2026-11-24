@@ -109,6 +109,8 @@ import {
 import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes";
 import {
   idemKey,
+  kvClaimKey,
+  rerunIdemKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DROPPED,
   IDEM_FAILED,
@@ -124,6 +126,7 @@ import { redactExactSecrets, redactSecrets } from "./redact";
 import { createArtifactStore } from "../store/artifact-store";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 import { type PublicationRow } from "../store/finding-lifecycle";
+import { rerunCheckRunIdOfAttemptKey } from "../store/review-checks";
 import { type Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -293,6 +296,7 @@ async function markQueuedBehindInflightRow(
         headSha: attachedHeadSha,
         triggeredBy: payload.triggered_by,
         action: payload.action,
+        rerunCheckRunId: payload.rerun_check_run_id,
         attachDeliveryId: payload.attachDeliveryId,
         summary: `Queued — the review in flight for this pull request (head ${heldHeadSha.slice(0, 7)}) holds the slot; this commit starts when it finishes.`,
         updateBudgetMs: budgets.updateMs,
@@ -412,13 +416,7 @@ async function handleGuardHeld(
   message.ack();
   const headSha = payloadSha ?? "";
   if (headSha !== "") {
-    const claimKey = idemKey({
-      installation_id: message.body.installation_id,
-      owner: message.body.owner,
-      repo: message.body.repo,
-      pr_number: message.body.pr_number,
-      head_sha: headSha,
-    });
+    const claimKey = kvClaimKey(message.body, headSha);
     try {
       await putAbandonClaim(deps.env.IDEMPOTENCY_KV, claimKey, IDEM_DROPPED, IDEMPOTENCY_SECONDS);
     } catch (err) {
@@ -669,19 +667,96 @@ async function newerCommitHasJob(
   fields: ConsumerLogFields,
 ): Promise<boolean> {
   if (!headSha) return false;
+  // The claim belongs to ANOTHER commit's delivery, so it carries no rerun
+  // dimension of ours — `kvClaimKey(payload, headSha)` would append this
+  // delivery's `:rerun:{id}` and never find it. The plain key is only the fast
+  // path: a newer head whose job arrived via check_run.rerequested claims
+  // under `{idemKey}:rerun:{rerequested run id}` — the CONCLUDED run it was
+  // asked to rerun, kept only on the attempt's `attempt_key` suffix — so the
+  // D1 probe below supplies that leg instead. A bare nonterminal
+  // `review_checks` row is NOT job proof on its own — a refused delivery
+  // (quota / entitlement) attaches a check at beforeEnqueue yet never
+  // enqueues — so the row must be corroborated: a `check_run` row by its
+  // rerun KV claim, any other row by the plain claim already missed above.
+  const idempotencyKey: IdempotencyKey = {
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: headSha,
+  };
   try {
-    const key = idemKey({
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      head_sha: headSha,
-    });
-    const claim = await deps.env.IDEMPOTENCY_KV.get(key);
-    return isReviewClaim(claim);
+    const claim = await deps.env.IDEMPOTENCY_KV.get(idemKey(idempotencyKey));
+    if (isReviewClaim(claim)) return true;
+    // A non-review claim value still falls through to D1: the KV value records
+    // how a write went, not whether the head's review is really in flight.
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
+    deps.log.warn(fields, `supersede KV read failed — probing D1 instead: ${detail}`);
+  }
+  try {
+    const reviewed = await deps.env.DB.prepare(
+      `SELECT 1 FROM reviews
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
+       LIMIT 1`,
+    )
+      .bind(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        headSha,
+      )
+      .first();
+    if (reviewed !== null) return true;
+    const openRows = await deps.env.DB.prepare(
+      `SELECT check_run_id, triggered_by, attempt_key FROM review_checks
+         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
+    )
+      .bind(
+        payload.botRef.appId,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        headSha,
+      )
+      .all<{ check_run_id: number | null; triggered_by: string; attempt_key: string }>();
+    // One head can hold SEVERAL nonterminal rows — e.g. a refused
+    // `pull_request` attach (no claim) beside a real `check_run` rerun — so
+    // every row gets a say, not just the first one LIMIT picked.
+    const rerunIds = new Set<number>();
+    for (const row of openRows.results) {
+      // The claim lives under the REREQUESTED (concluded) run id — the row's
+      // own `check_run_id` is the new run GitHub created for this attempt,
+      // which can never be the claim's run id (and may still be NULL
+      // mid-attach). A non-`check_run` row names no claim: its plain key is
+      // exactly what the fast path already missed, so it proves nothing.
+      if (row.triggered_by !== "check_run") continue;
+      const rerunCheckRunId = rerunCheckRunIdOfAttemptKey(row.attempt_key);
+      if (rerunCheckRunId !== null) rerunIds.add(rerunCheckRunId);
+    }
+    // A rerun writes its enqueue claim under `{idemKey}:rerun:{rerequested
+    // id}`; the row alone cannot distinguish "queued" from "refused at the
+    // door". One failed read only forfeits that row's say — a sibling row
+    // may still carry proof.
+    for (const rerunCheckRunId of rerunIds) {
+      try {
+        const rerunClaim = await deps.env.IDEMPOTENCY_KV.get(
+          rerunIdemKey(idempotencyKey, rerunCheckRunId),
+        );
+        if (isReviewClaim(rerunClaim)) return true;
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        deps.log.warn(
+          fields,
+          `supersede rerun-claim read failed — checking remaining rows: ${detail}`,
+        );
+      }
+    }
+    return false;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `supersede D1 probe failed — reviewing normally: ${detail}`);
     return false;
   }
 }
@@ -1238,6 +1313,10 @@ export function createReviewConsumer(
         message.ack();
       } else if (outcome.kind === "superseded") {
         message.ack();
+      } else if (outcome.kind === "rerun-stale") {
+        // Already settled above: the stale run was closed, so a redelivery
+        // would only re-settle it.
+        message.ack();
       } else if (outcome.kind === "routed") {
         message.ack();
       } else if (outcome.kind === "unknown") {
@@ -1392,13 +1471,7 @@ async function processMessage(
         try {
           await putAbandonClaim(
             deps.env.IDEMPOTENCY_KV,
-            idemKey({
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: payload.head_sha,
-            }),
+            kvClaimKey(payload, payload.head_sha!),
             IDEM_PAUSED,
             IDEMPOTENCY_SECONDS,
           );
@@ -1445,6 +1518,23 @@ async function processMessage(
     };
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
+    // A rerun must review the commit its check names, never a newer one: the
+    // checkout follows the PR ref, so without this gate a rerun of an old
+    // check would pay for the live head and hang the result on the old run.
+    // This runs before any sandbox work and regardless of whether the named
+    // head was ever reviewed (the settled arms below only cover a reviewed
+    // or journaled head).
+    if (payload.triggered_by === "check_run" && payloadHeadSha) {
+      const live = await readWatermark("fail-open: reviewing the rerun's own head");
+      if (live?.headSha && live.headSha !== payloadHeadSha) {
+        deps.log.info(
+          { ...baseFields, event: "review_superseded", reason: "superseded" },
+          `rerun-stale: rerun targets ${payloadHeadSha.slice(0, 7)} but the PR head is ${live.headSha.slice(0, 7)} — settling the check instead of reviewing the live head`,
+        );
+        await settleSkippedRow(deps, payload, payloadHeadSha, "rerun targets a commit that is no longer the PR head");
+        return { kind: "rerun-stale" };
+      }
+    }
     if (payloadHeadSha && payloadHeadAt) {
       const ledgerHead = await readWatermark("fail-open: reviewing normally");
       if (
@@ -1460,13 +1550,7 @@ async function processMessage(
         try {
           await putAbandonClaim(
             deps.env.IDEMPOTENCY_KV,
-            idemKey({
-              installation_id: payload.installation_id,
-              owner: payload.owner,
-              repo: payload.repo,
-              pr_number: payload.pr_number,
-              head_sha: payloadHeadSha,
-            }),
+            kvClaimKey(payload, payloadHeadSha),
             IDEM_SUPERSEDED,
             IDEMPOTENCY_SECONDS,
           );
@@ -1613,7 +1697,7 @@ async function processMessage(
         const earlyFields: ConsumerLogFields = {
           ...(baseFields ?? payloadIdentityFields(payload)),
           head_sha: earlyHeadSha,
-          idempotency_key: idemKey(earlyKey),
+          idempotency_key: kvClaimKey(payload, earlyHeadSha),
         };
         let liveHeadSha: string | null | undefined;
         const liveHead = async (): Promise<string | null> => {
@@ -1636,7 +1720,7 @@ async function processMessage(
           }
           return liveHeadSha;
         };
-        const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, idemKey(earlyKey), earlyFields, deps.log);
+        const earlyDone = await kvDoneHit(deps.env.IDEMPOTENCY_KV, kvClaimKey(payload, earlyHeadSha), earlyFields, deps.log);
         let earlyReviewed = earlyDone;
         if (!earlyReviewed) {
           try {
@@ -1685,6 +1769,16 @@ async function processMessage(
             `delivery keyed on ${earlyHeadSha.slice(0, 7)} but the PR head is ${movedHeadSha.slice(0, 7)} — reviewing the live head`,
           );
           await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", { announceNoOp: true });
+          // A rerun names the commit its run was created for. Reviewing the live
+          // head would attach that result to a check the operator never asked
+          // about (and pay twice), so the run is settled as skipped instead.
+          if (payload.triggered_by === "check_run") {
+            deps.log.info(
+              earlyFields,
+              "rerun targets a commit that is no longer the PR head — settling the check instead of reviewing the live head",
+            );
+            return { kind: "rerun-stale" };
+          }
         }
         checkClaimSha = movedHeadSha ?? earlyHeadSha;
       }
@@ -1838,13 +1932,7 @@ async function processMessage(
       try {
         await putAbandonClaim(
           deps.env.IDEMPOTENCY_KV,
-          idemKey({
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: payload.head_sha,
-          }),
+          kvClaimKey(payload, payload.head_sha!),
           IDEM_FAILED,
           IDEMPOTENCY_SECONDS,
         );

@@ -1889,6 +1889,7 @@ export function checkKeyOf(payload: ReviewJobPayload, headSha: string | null): s
     headSha,
     triggeredBy: payload.triggered_by,
     action: payload.action,
+    rerunCheckRunId: payload.rerun_check_run_id,
   });
 }
 

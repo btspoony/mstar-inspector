@@ -307,8 +307,9 @@ export function attemptKey(input: {
   headSha: string;
   triggeredBy: string;
   action: string;
+  rerunCheckRunId?: number;
 }): string {
-  return JSON.stringify([
+  const base = JSON.stringify([
     input.appId,
     input.installationId,
     input.owner,
@@ -318,6 +319,22 @@ export function attemptKey(input: {
     input.triggeredBy,
     input.action,
   ]);
+  // A `check_run.rerequested` rerun keys on the run it was asked to rerun:
+  // two reruns of one head get fresh checks, an ordinary key stays byte-
+  // identical so nothing else sees a new shape.
+  return input.rerunCheckRunId === undefined ? base : `${base}#rerun:${input.rerunCheckRunId}`;
+}
+
+/**
+ * The rerequested check run id a rerun `attempt_key` names — the run the
+ * reviewer asked to re-run (NOT the new run attached to this attempt, whose
+ * `check_run_id` is filled in later). `null` for a non-rerun key or a key
+ * whose `#rerun:` suffix is absent or not a positive integer; the caller
+ * treats `null` as "no rerun identity", never as a guess.
+ */
+export function rerunCheckRunIdOfAttemptKey(attemptKey: string): number | null {
+  const id = Number(attemptKey.split("#rerun:")[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
 }
 
 const NEXT_GENERATION_SQL = `(SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks m WHERE m.attempt_key = ?)`;
@@ -507,6 +524,7 @@ export async function claimAttempt(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     holder: string;
     nowMs: number;
     executionDeadlineMs: number;
@@ -530,6 +548,7 @@ export async function claimAttempt(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   if (input.expect !== undefined) {
     const active = await db
@@ -685,6 +704,37 @@ export async function readOpenCheckIdentityForKey(
     .bind(key)
     .first<{ generation: number }>();
   return row === null ? null : { key, generation: row.generation };
+}
+
+/**
+ * The `check_run.rerequested` lookup (webhook route): which attempt a remote
+ * check run id names, scoped to the GitHub App id — a run another App
+ * created never resolves, so this is both the "is it ours" proof and the
+ * authoritative owner/repo/pr/head source (a fork PR's delivery carries an
+ * empty `pull_requests` list). A remote run id names at most one attempt in
+ * practice; the ORDER BY only keeps a duplicate-write accident deterministic.
+ */
+export async function findCheckAttemptByRunId(
+  db: D1Like,
+  githubAppId: number,
+  checkRunId: number,
+): Promise<{ owner: string; repo: string; prNumber: number; headSha: string; installationId: number } | null> {
+  const row = await db
+    .prepare(
+      `SELECT installation_id, owner, repo, pr_number, head_sha FROM review_checks
+        WHERE github_app_id = ? AND check_run_id = ?
+        ORDER BY created_ms DESC LIMIT 1`,
+    )
+    .bind(githubAppId, checkRunId)
+    .first<{ installation_id: number; owner: string; repo: string; pr_number: number; head_sha: string }>();
+  if (row === null) return null;
+  return {
+    installationId: row.installation_id,
+    owner: row.owner,
+    repo: row.repo,
+    prNumber: row.pr_number,
+    headSha: row.head_sha,
+  };
 }
 
 export async function getCheckAttempt(db: D1Like, id: string): Promise<CheckAttempt | null> {
@@ -874,6 +924,7 @@ export async function claimAttachedCheckForSettlement(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     holder: string;
     executionDeadlineMs: number;
@@ -898,6 +949,7 @@ export async function claimAttachedCheckForSettlement(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   const claimable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL
@@ -1437,6 +1489,7 @@ export async function markCheckQueuedBehindInflight(
     headSha: string;
     triggeredBy: string;
     action: string;
+    rerunCheckRunId?: number;
     attachDeliveryId?: string;
     title: string;
     summary: string;
@@ -1453,6 +1506,7 @@ export async function markCheckQueuedBehindInflight(
     headSha: input.headSha,
     triggeredBy: input.triggeredBy,
     action: input.action,
+    rerunCheckRunId: input.rerunCheckRunId,
   });
   const relabelable = `terminal_ms IS NULL
           AND create_state = 'known' AND check_run_id IS NOT NULL

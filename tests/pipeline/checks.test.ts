@@ -2353,6 +2353,41 @@ describe("adoption of a released attach row (spec §7.9)", () => {
     expect(recorded.terminalize_outcome).toBe("completed");
   });
 
+  test("a rerun adopts the Check its own delivery attached — the rerun key never mints a second run", async () => {
+    const db = await seededDb();
+    CLOCK = T0;
+    const fake = fakeChecks({ create: echoCreate });
+    const adapter = adapterFor(db, fake.octokit);
+    const rerun = { triggeredBy: "check_run", action: "rerequested", rerunCheckRunId: 4242 } as const;
+    expect(
+      (
+        await attachCheckAtAcceptance(
+          { db, adapter, nowMs: () => CLOCK },
+          { ...ATTACH_INPUT, ...rerun, deliveryId: "rerun-delivery" },
+        )
+      ).kind,
+    ).toBe("attached");
+    const attemptId = (await attachRow(db)).id as string;
+
+    const lifecycle = createCheckLifecycle({
+      db,
+      nowMs: () => CLOCK,
+      getAdapter: () => adapter,
+      getCheckGate: async () => GATE,
+    });
+    const handle = await lifecycle.begin({
+      ...ATTACH_INPUT,
+      ...rerun,
+      executionDeadlineMs: CLOCK + CHECK_LEASE_MS,
+    });
+
+    // The consumer's own claim must land on the attach's key: a plain-key
+    // claim would create a second Check nobody asked for and orphan the first.
+    expect(handle).not.toBeNull();
+    expect(handle!.attemptId).toBe(attemptId);
+    expect(fake.creates).toHaveLength(1);
+  });
+
   test("a row a live holder owns is not adopted, so the review proceeds without a handle", async () => {
     const db = await seededDb();
     CLOCK = T0;
