@@ -314,6 +314,11 @@ describe("the 待安装 filter (mounted)", () => {
       await act(async () => {
         segment?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
       });
+      const narrowed = container.textContent ?? "";
+      expect(narrowed).toContain("acme/web");
+      expect(narrowed).not.toContain("acme/api");
+      expect(narrowed).not.toContain("acme/docs");
+      expect(segment?.getAttribute("data-state")).toBe("on");
 
       const reloaded = targets.map((target) =>
         target.target_id === "t-2" ? { ...target, repo_id: 501 } : target,
