@@ -329,8 +329,11 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     reviewsRunning: {
       // The shared derivation verbatim — `paused-maintenance` included — so
       // the card can never name a cause the queue did not act on.
+      // `unreadableSource` rides along so an `unreadable-state` sentence names
+      // WHICH read failed instead of blaming the gate beside its own `on`.
       answer: reviews.state,
       platform: reviews.platform,
+      unreadableSource: reviews.unreadableSource ?? null,
       pausedApps,
       appsHref,
     },

@@ -1135,6 +1135,12 @@ export const zhCN: Dictionary = {
         "审查已被维护窗口暂停：所有队列投递都会被延后，直到窗口关闭后在有界的重试次数内重新投递。",
       reviewsAnswerUnreadableState:
         "无法读取审查状态：平台开关或部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadableGate:
+        "无法读取审查状态：部署门禁未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadablePlatform:
+        "无法读取审查状态：平台开关未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
+      reviewsAnswerUnreadableMaintenance:
+        "无法读取审查状态：维护窗口未能应答，因此此处不做任何结论。队列中的投递不会被结算——队列在有界的重试次数内重新投递；重试用尽的批次会进入死信队列，而不会运行。",
       reviewsPlatformLabel: "平台开关",
       reviewsPlatformOn: "on — 允许审查",
       reviewsPlatformOff: "off — 审查已暂停",

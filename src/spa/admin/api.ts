@@ -182,6 +182,9 @@ export type ReviewsRunningAnswer = ReviewsRunAnswer;
 export type ReviewsRunningConfig = {
   answer: ReviewsRunningAnswer;
   platform: { enabled: boolean; unreadable: boolean };
+  // Which read failed on `unreadable-state` — gate, platform, maintenance —
+  // so the card names the failing fact instead of blaming the gate.
+  unreadableSource: "gate" | "platform" | "maintenance" | null;
   pausedApps: number | null;
   appsHref: string | null;
 };
@@ -420,9 +423,20 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
     return null;
   }
   if (block.pausedApps !== null && typeof block.pausedApps !== "number") return null;
+  const source = block.unreadableSource;
+  if (
+    source !== undefined &&
+    source !== null &&
+    source !== "gate" &&
+    source !== "platform" &&
+    source !== "maintenance"
+  ) {
+    return null;
+  }
   return {
     answer: block.answer as ReviewsRunningAnswer,
     platform: { enabled: facts.enabled, unreadable: facts.unreadable },
+    unreadableSource: source ?? null,
     pausedApps: block.pausedApps as number | null,
     appsHref: typeof block.appsHref === "string" ? block.appsHref : null,
   };

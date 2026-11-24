@@ -21,6 +21,7 @@ const settleRuns: Array<{ batch: unknown; halt: unknown }> = [];
 function envWithGate(
   extra: Record<string, unknown>,
   maintenanceRows: Array<{ key: string; value: string }> = [],
+  throwAll = false,
 ): QueueEnv {
   const db = {
     prepare: (sql: string) => ({
@@ -33,9 +34,12 @@ function envWithGate(
           sql.includes("server_flags")
             ? { enabled: extra.__platformEnabled === 0 ? 0 : 1 }
             : { value: "on" },
-        all: async () => ({
-          results: sql.includes("review_runtime_settings WHERE key IN") ? maintenanceRows : [],
-        }),
+        all: async () => {
+          if (throwAll) throw new Error("settings read failed");
+          return {
+            results: sql.includes("review_runtime_settings WHERE key IN") ? maintenanceRows : [],
+          };
+        },
       }),
     }),
   };
@@ -156,5 +160,22 @@ describe("worker queue wiring (spec §7.10)", () => {
     expect(settleRuns).toHaveLength(settleCallsBefore + 1);
     expect(settleRuns.at(-1)!.batch).toBe(batch);
     expect(settleRuns.at(-1)!.halt).toBe("paused-platform");
+  });
+
+  test("a failed maintenance read names maintenance in the redelivery error — not the gate", async () => {
+    // Gate and platform read healthy; only the window's row-set read throws.
+    // The batch fails closed for redelivery, and the error must say which
+    // read fault it was — never "the review route gate is unreadable" beside
+    // a gate that answered.
+    const batch = { queue: "review", messages: [] } as unknown as MessageBatch<ReviewJobPayload>;
+    const ctx = {
+      waitUntil: () => {},
+      passThroughOnException: () => {},
+    } as unknown as ExecutionContext;
+    const env = envWithGate({ REVIEW_WORKFLOW: { create: async () => ({}) } }, [], true);
+
+    await expect(runReviewQueueBatch(batch, env, ctx, async () => fakeConsumerModule())).rejects.toThrow(
+      "the maintenance window is unreadable",
+    );
   });
 });

@@ -91,6 +91,12 @@ const REVIEWS_ANSWER_KEYS: Record<ReviewsRunningAnswer, DictionaryKey> = {
   "unreadable-state": "admin.runtime.reviewsAnswerUnreadableState",
 };
 
+const REVIEWS_UNREADABLE_KEYS: Record<string, DictionaryKey> = {
+  maintenance: "admin.runtime.reviewsAnswerUnreadableMaintenance",
+  platform: "admin.runtime.reviewsAnswerUnreadablePlatform",
+  gate: "admin.runtime.reviewsAnswerUnreadableGate",
+};
+
 function reviewsPlatform(locale: Locale, platform: ReviewsRunningConfig["platform"]): string {
   if (platform.unreadable) return t(locale, "admin.runtime.reviewsPlatformUnreadable");
   return t(
@@ -121,7 +127,13 @@ function ReviewsRunningCard({
       <CardContent>
         <p className="text-sm text-muted-foreground">{t(locale, "admin.runtime.reviewsDescription")}</p>
         <p className="mt-4 text-base font-medium" data-reviews-running="answer">
-          {t(locale, REVIEWS_ANSWER_KEYS[data.answer])}
+          {t(
+            locale,
+            data.answer === "unreadable-state" && data.unreadableSource !== null
+              ? (REVIEWS_UNREADABLE_KEYS[data.unreadableSource] ??
+                  "admin.runtime.reviewsAnswerUnreadableState")
+              : REVIEWS_ANSWER_KEYS[data.answer],
+          )}
         </p>
         <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
           <div className="flex flex-col gap-1">

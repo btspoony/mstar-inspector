@@ -756,16 +756,23 @@ export async function runReviewQueueBatch(
   // A read fault is not a cause: nothing routed, nothing settled, batch thrown
   // back for redelivery. `settleHaltedBatch` only accepts PROVEN halt states.
   if (run.state === "unreadable-state") {
+    // `unreadableSource` names WHICH read failed — the gate's own fields stay
+    // printed beside it, so a healthy gate under a failed maintenance read
+    // can never look like a gate fault.
+    const source = run.unreadableSource ?? "gate";
     console.warn(
       JSON.stringify({
         ...fields,
+        unreadable_source: source,
         msg: "review run state could not be read — fail-closed: nothing routed, nothing settled, the batch is redelivered",
       }),
     );
     throw new Error(
-      run.platform.unreadable
+      source === "platform"
         ? "the platform review switch is unreadable — the batch is redelivered"
-        : `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`,
+        : source === "maintenance"
+          ? "the maintenance window is unreadable — the batch is redelivered"
+          : `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`,
     );
   }
   const consumer = await loadConsumer();

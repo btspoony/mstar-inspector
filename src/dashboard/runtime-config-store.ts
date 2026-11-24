@@ -772,12 +772,14 @@ export type ReviewRunState = {
   gate: ReviewRouteWorkflowGate;
   platform: ReviewPlatformRead;
   /**
-   * The maintenance read behind `paused-maintenance` — present whenever the
-   * derivation reached the running branch (the halt answers return before it
-   * is read). A caller that already fetched one may pass it in so the answer
-   * and its own maintenance view can never disagree.
+   * Which READ failed when `state` is `unreadable-state` — the gate row, the
+   * platform switch, or the maintenance window. Never two at once (the first
+   * fault wins), and absent on every answer the read actually proves. The
+   * worker names it in the redelivery error and the card names it in the
+   * unreadable copy; without it both surfaces would blame the gate while
+   * printing the gate healthy.
    */
-  maintenance?: MaintenanceMode;
+  unreadableSource?: "gate" | "platform" | "maintenance";
 };
 
 /**
@@ -787,9 +789,11 @@ export type ReviewRunState = {
  * Precedence is the queue's, because the queue is the thing that acts:
  *
  * 1. An UNKNOWABLE fact is `unreadable-state`: the gate read itself failed
- *    (`read-failed` — the row could not be asked) or the platform switch read
- *    threw. The queue throws and the delivery is redelivered, so nothing was
- *    settled and the answer must not claim a cause.
+ *    (`read-failed` — the row could not be asked), the platform switch read
+ *    threw, or the maintenance read answered unreadable. `unreadableSource`
+ *    names which read failed so the card and the worker never blame the gate
+ *    while printing it healthy. The queue throws and the delivery is
+ *    redelivered, so nothing was settled and the answer must not claim a cause.
  * 2. A gate that is not `on` is `blocked-deployment-gate`, and that includes a
  *    readable-but-untrusted or malformed row: the gate's documented answer for
  *    those is the safe default `off` (`degraded` says the value could not be
@@ -811,8 +815,11 @@ export async function reviewRunState(db: DashboardD1, knownMaintenance?: Mainten
   } catch {
     platform = { enabled: false, unreadable: true };
   }
-  if (gate.reason === "read-failed" || platform.unreadable) {
-    return { state: "unreadable-state", gate, platform };
+  if (gate.reason === "read-failed") {
+    return { state: "unreadable-state", gate, platform, unreadableSource: "gate" };
+  }
+  if (platform.unreadable) {
+    return { state: "unreadable-state", gate, platform, unreadableSource: "platform" };
   }
   if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
   if (!platform.enabled) return { state: "paused-platform", gate, platform };
@@ -821,14 +828,9 @@ export async function reviewRunState(db: DashboardD1, knownMaintenance?: Mainten
   // `paused-maintenance` would claim a proven cause, minting `running` would
   // let a settings outage unlock traffic. Only a KNOWN closed window pauses.
   if (maintenance.unreadable) {
-    return { state: "unreadable-state", gate, platform, maintenance };
+    return { state: "unreadable-state", gate, platform, unreadableSource: "maintenance" };
   }
-  return {
-    state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running",
-    gate,
-    platform,
-    maintenance,
-  };
+  return { state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running", gate, platform };
 }
 
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";

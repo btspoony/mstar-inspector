@@ -56,6 +56,7 @@ function setRouteGate(db: TestD1, value: string): void {
 async function readAnswer(db: TestD1): Promise<{
   answer: string;
   platform: { enabled: boolean; unreadable: boolean };
+  unreadableSource: "gate" | "platform" | "maintenance" | null;
   pausedApps: number | null;
   appsHref: string | null;
 }> {
@@ -83,6 +84,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect(await readAnswer(db)).toEqual({
       answer: "running",
       platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
       pausedApps: 0,
       appsHref: null,
     });
@@ -136,7 +138,9 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     // `paused-maintenance` (a proven cause it is not) or `running` (unlocking
     // traffic on a settings outage) — the derivation refuses both.
     const unreadable = { enabled: false, reason: null, since: null, unreadable: true };
-    expect((await reviewRunState(db, unreadable)).state).toBe("unreadable-state");
+    const run = await reviewRunState(db, unreadable);
+    expect(run.state).toBe("unreadable-state");
+    expect(run.unreadableSource).toBe("maintenance");
   });
 
   test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {
@@ -145,6 +149,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect(await readAnswer(db)).toEqual({
       answer: "blocked-deployment-gate",
       platform: { enabled: false, unreadable: false },
+      unreadableSource: null,
       pausedApps: 0,
       appsHref: null,
     });
@@ -169,8 +174,11 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       } as unknown as Env,
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { reviewsRunning: { answer: string; platform: unknown } };
+    const body = (await res.json()) as {
+      reviewsRunning: { answer: string; platform: unknown; unreadableSource: unknown };
+    };
     expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.reviewsRunning.unreadableSource).toBe("platform");
     expect(body.reviewsRunning.platform).toEqual({ enabled: false, unreadable: true });
   });
 
@@ -181,6 +189,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect(await readAnswer(db)).toEqual({
       answer: "paused-platform",
       platform: { enabled: false, unreadable: false },
+      unreadableSource: null,
       pausedApps: 0,
       appsHref: null,
     });
@@ -191,6 +200,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect(await readAnswer(db)).toEqual({
       answer: "blocked-deployment-gate",
       platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
       pausedApps: 0,
       appsHref: null,
     });
@@ -377,6 +387,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     expect(await readAnswer(db)).toEqual({
       answer: "running",
       platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
       pausedApps: 1,
       appsHref: null,
     });

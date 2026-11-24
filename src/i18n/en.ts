@@ -1225,6 +1225,12 @@ export const en = {
         "Reviews are paused by the maintenance window: every queued delivery is deferred until the window closes, then retried within the queue's bounded attempts.",
       reviewsAnswerUnreadableState:
         "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadableGate:
+        "The review state could not be read: the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadablePlatform:
+        "The review state could not be read: the platform switch did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
+      reviewsAnswerUnreadableMaintenance:
+        "The review state could not be read: the maintenance window did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
       reviewsPlatformLabel: "Platform switch",
       reviewsPlatformOn: "on — reviews are allowed",
       reviewsPlatformOff: "off — reviews are paused",

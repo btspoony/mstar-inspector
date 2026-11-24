@@ -1487,6 +1487,24 @@ describe("Runtime screen", () => {
     await surface.close();
   });
 
+  test("an unreadable maintenance read names the window — never the gate beside its own on", async () => {
+    const surface = await runtimeScreen(() =>
+      json({
+        ...reviews({
+          answer: "unreadable-state",
+          platform: { enabled: true, unreadable: false },
+          unreadableSource: "maintenance",
+          pausedApps: null,
+        }),
+        routeWorkflow: { mode: "on", saved: true, degraded: false, reason: null, rejected: null },
+      }),
+    );
+    const answer = surface.container.querySelector('[data-reviews-running="answer"]')?.textContent ?? "";
+    expect(answer).toContain("the maintenance window did not answer");
+    expect(answer).not.toContain("routing gate did not answer");
+    await surface.close();
+  });
+
   test("a readable but untrusted gate reads as closed, and the answer says blocked", async () => {
     // The row WAS read: closed is the gate's documented safe default and the
     // queue settles it, so this must not borrow the unknowable state's copy.
