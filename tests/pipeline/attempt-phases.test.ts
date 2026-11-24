@@ -3802,6 +3802,64 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(failureRows(db)[0]!.error_code).toBe("review.container.lost_after_claim");
   });
 
+  test("an unobservable outcome records the phase's own cause, and the container is still not destroyed", async () => {
+    // The reported shape: the paid exec was issued, its reply never arrived, and
+    // the launch row is the only authority — it cannot say what happened. The
+    // phase's own message must survive into the failure row, because the
+    // reconciler that eventually settles the attempt can only see "no reply".
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+
+    const cause = "Error: runner rpc failed: check the diff (after 1200ms)";
+    const detail = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "unknown",
+        phase: "collect",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: false,
+        containerStateUnknown: true,
+        code: "review.paid.reply_lost",
+        message: detail,
+      },
+      null,
+    );
+
+    expect(settlement).toEqual({ kind: "unknown" });
+    // ONE row, written by the settlement itself: no reconciler has run yet.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.error_code).toBe("review.paid.reply_lost");
+    expect(rows[0]!.track_id).toBe(ATTEMPT_ID);
+    expect(String(rows[0]!.message)).toContain(cause);
+    expect(String(rows[0]!.error)).toContain(cause);
+    // The record is attempt-keyed and its `failure-row` fact landed beside it, so
+    // the reconciler can settle the attempt without writing a second row.
+    expect(rows[0]!.id).toBe(ATTEMPT_ID);
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.settledEffects).toContain("failure-row");
+    // ... and nothing is concluded: the launch row still holds the container and
+    // the capacity slot, which is the retention veto the reconciler later lifts.
+    expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
+    expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "unknown" });
+    expect(h.sandbox.destroyCalls).toBe(0);
+  });
+
   test("no secret value appears in any step return value", async () => {
     const paidKey = "sk-step-boundary-secret-1";
     const { deps, db } = await makeDeps();

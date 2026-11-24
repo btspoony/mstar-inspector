@@ -58,6 +58,7 @@ import {
   clearRefusalPending,
   clearRecheckDuty,
   deliveryKeyOf,
+  landFailureEffect,
   readRecheckAttribution,
   markRefusalPending,
   recordRecheckAttribution,
@@ -4886,6 +4887,41 @@ export async function settleAttemptFailure(
     launchJudgement.kind === "unrecognised" ||
     (launchJudgement.kind === "paid-unknown" && !paidStateObserved);
   if (outcomeUnobservable) {
+    // The cause has to outlive this invocation: the reconciler that eventually
+    // settles the attempt can only observe that no reply arrived, and its own
+    // sentence would replace the phase's. The row and its `failure-row` fact
+    // land in ONE attempt-keyed batch, so the lost-reply lane finds the phase's
+    // own (code, message) already durable and writes no second record. Nothing
+    // is concluded here — the launch row keeps holding the container and the
+    // slot until the deadline plus grace proves the paid child gone.
+    const observed = redactExactSecrets(redactSecrets(detail), await sealedSecretValues(deps, attemptId));
+    const record = {
+      target_id: payload.targetId,
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: fields?.head_sha ?? payload.head_sha ?? "",
+      stage: failure.stage,
+      code,
+      trackId: attemptId,
+      // For this class the phase's own message IS the author-facing reason: the
+      // code's generic summary would only restate that nothing was published.
+      message: observed,
+      error: observed,
+    };
+    try {
+      const landed = await landFailureEffect(deps.env.DB, { attemptId, landed: [], failure: record }, Date.now());
+      // No handoff row to key the fact on: keep the record for an operator, and
+      // leave the fact unwritten — no recovery lane could have read it anyway.
+      if (!landed.landed) await deps.failureStore.record({ ...record, id: attemptId });
+    } catch (recordErr) {
+      const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
+      deps.log.warn(
+        fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId },
+        `review_failures insert failed (an unobservable outcome stays a warn): ${recordDetail}`,
+      );
+    }
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),

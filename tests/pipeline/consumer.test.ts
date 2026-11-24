@@ -254,9 +254,15 @@ function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
-function expectUnknownOutcome(db: TestD1, terminalized: number): void {
+/**
+ * `recordedFailures` is the count of `review_failures` rows the phase's own
+ * cause produced: an unobservable outcome records it (the reconciler that later
+ * releases the slot can otherwise only see that no reply arrived), a paid state
+ * the row can still explain records none.
+ */
+function expectUnknownOutcome(db: TestD1, terminalized: number, recordedFailures = 0): void {
   expect(terminalized).toBe(0);
-  expect(failureRows(db)).toHaveLength(0);
+  expect(failureRows(db)).toHaveLength(recordedFailures);
   expect(h.sandbox.destroyCalls).toBe(0);
   expect(inflightRows(db)).toHaveLength(1);
   expect(h.messageAckCalls).toHaveLength(1);
@@ -842,7 +848,10 @@ describe("createReviewConsumer", () => {
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
     expect(inflightRows(db)).toHaveLength(1);
-    expect(failureRows(db)).toHaveLength(0);
+    // The paid state is unobservable, so the phase's own cause is recorded — and
+    // the launch row still holds the slot, which is the veto cleanup reads.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("exec reply lost");
     expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
   });
 
@@ -979,7 +988,8 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expectUnknownOutcome(db, check.state.terminalized);
+    expectUnknownOutcome(db, check.state.terminalized, 1);
+    expect(String(failureRows(db)[0]!.error)).toContain("guarded clone reply lost");
     expect(h.sandbox.markedCalls).toHaveLength(2);
     expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });

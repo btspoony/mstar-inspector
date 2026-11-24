@@ -69,10 +69,13 @@ export type ReviewRouteEnv = {
  * adds nothing.
  *
  * `failure.code` defaults to the unclassified crash-window code; a caller that
- * knows why it settled names it. `failure.statements` are extra writes that must
- * land in that same batch first — the lost-reply pass uses them to move a
- * `launched` row to `failed` AND revoke it, which is what releases both arms of
- * the capacity hold.
+ * knows why it settled names it. `failure.owned` is the caller's OWN exclusivity
+ * proof when the record it settles was landed by someone else: the lost-reply
+ * pass proved it by winning the guarded `launched → failed` move in its batch
+ * (`changes() === 1`), which no other pass can win either. `failure.statements`
+ * are extra writes that must land in that same batch first — the lost-reply pass
+ * uses them to move a `launched` row to `failed` AND revoke it, which is what
+ * releases both arms of the capacity hold.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -80,15 +83,16 @@ async function landSettlementEffects(
   landed: Set<SettlementEffect>,
   detail: string,
   nowMs: number,
-  failure: { code?: FailureCode } = {},
+  failure: { code?: FailureCode; owned?: boolean } = {},
 ): Promise<void> {
   // The refused round's accounting comes FIRST: its writes are not part of any
   // claim (F6), so a fault here leaves the duty for the next pass without ever
   // orphaning a landed claim.
   await ensureRecheckAccounting(env, handoff, nowMs);
   // The pass that LANDS the record owns the head-wide claim; an overlapping pass
-  // that lost the insert race owns nothing and must not touch it.
-  let owned = false;
+  // that lost the insert race owns nothing and must not touch it. A record the
+  // dead host already landed needs its own proof, which the caller supplies.
+  let owned = failure.owned === true;
   if (!landed.has("failure-row")) {
     const code = failure.code ?? "review.internal.unclassified";
     const recorded = await landFailureEffect(
@@ -112,7 +116,7 @@ async function landSettlementEffects(
       },
       nowMs,
     );
-    owned = recorded.owned;
+    owned = owned || recorded.owned;
     landed.add("failure-row");
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
@@ -277,6 +281,10 @@ async function settleLostReplies(
         nowMs,
         {
           code: "review.paid.reply_lost",
+          // The guarded batch above moved this attempt's launch row — a one-way
+          // CAS no other pass can win — so this pass owns the head-wide claim
+          // even when the dead host already landed the failure record itself.
+          owned: true,
         },
       );
       log?.info?.(

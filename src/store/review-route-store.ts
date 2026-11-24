@@ -867,7 +867,11 @@ export async function listUnpublishedLaunchSettlements(
  *
  * The anti-join on `review_failures` is the idempotence guard: the failure row
  * is keyed by the attempt, so a row that already settled once is never selected
- * again and a concurrent pass can never mint a second one.
+ * again and a concurrent pass can never mint a second one. A row whose OWN
+ * settlement already landed `failure-row` stays selected: that record came from
+ * this attempt's settlement (the live host writes it when the outcome is
+ * unobservable), and the terminal move plus the capacity release are still
+ * owed — the insert it skips is attempt-keyed, so it cannot mint a second row.
  *
  * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
  * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
@@ -889,8 +893,14 @@ export async function listLostReplyLaunchSettlements(
             (h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?1)
             OR (h.deadline_ms IS NULL AND l.launched_at_ms <= ?2)
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
+          AND (
+            NOT EXISTS (
+              SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
+            )
+            OR EXISTS (
+              SELECT 1 FROM json_each(COALESCE(h.settled_effects, '[]'))
+               WHERE value = 'failure-row'
+            )
           )
         ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?3`,

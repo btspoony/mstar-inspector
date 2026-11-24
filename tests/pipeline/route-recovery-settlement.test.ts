@@ -561,8 +561,12 @@ describe("a rejection is not an observation", () => {
     );
 
     // The row is `launched` and the paid state was never observed: unobservable.
+    // The phase's own cause IS recorded (the reconciler would otherwise only see
+    // that no reply arrived), but nothing is concluded: the launch row is
+    // untouched, so the container and the capacity slot stay held.
     expect(outcome).toEqual({ kind: "unknown" });
-    expect(failureRows(db)).toHaveLength(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("the review step timed out waiting for the reply");
     expect(launchState(db)).toBe("launched");
   });
 
@@ -599,7 +603,10 @@ describe("a rejection is not an observation", () => {
     const outcome = await settleAttemptFailure(deps, ref, phase, null);
 
     expect(outcome).toEqual({ kind: "unknown" });
-    expect(failureRows(db)).toHaveLength(0);
+    // The reason is durable; the ATTEMPT is what stays un-settled: no mark, no
+    // terminal move, the slot still held.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toContain("runner signalled budget exhaustion");
     expect(settledMark(db)).toBeNull();
     expect(launchState(db)).toBe("launched");
   });
@@ -1305,6 +1312,76 @@ describe("a launched attempt whose paid reply was lost", () => {
 
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+  });
+
+  test("the settlement's own record of the cause is what the reconciler keeps, and it writes no second row", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-cause";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    // The LIVE settlement, on the real branch: the launch row proves the paid
+    // step was sent and cannot say what happened, so nothing is concluded — and
+    // the phase's own cause is recorded before the reconciler can only see that
+    // no reply arrived.
+    const cause = "Error: runner rpc failed: check the diff (after 1200ms)";
+    const deps = await makeDeps(db);
+    const ref = { ...makeRef(payload), attemptId };
+    expect(
+      await settleAttemptFailure(
+        deps,
+        ref,
+        {
+          class: "unknown",
+          phase: "collect",
+          stage: "runner",
+          headSha: payload.head_sha!,
+          runnerReturned: false,
+          containerStateUnknown: true,
+          code: "review.paid.reply_lost",
+          message: `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`,
+        },
+        null,
+      ),
+    ).toEqual({ kind: "unknown" });
+    const seeded = failureRows(db);
+    expect(seeded).toHaveLength(1);
+    expect(String(seeded[0]!.message)).toContain(cause);
+    // Nothing was released yet: the launch row still holds the slot.
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // The row the settlement wrote stands — SAME row, same cause, no second one:
+    // the reconciler adopted the attempt's own record instead of minting its
+    // generic "no reply ever arrived" sentence.
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.id).toBe(attemptId);
+    expect(String(settled[0]!.message)).toContain(cause);
+    expect(String(settled[0]!.error)).toContain(cause);
+    expect(String(settled[0]!.error)).not.toContain("no reply ever arrived");
+    // ... and the release it owns did happen: the terminal move, the revoke and
+    // the head's claim stamp all landed, so the settlement can discharge.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    const released = db.raw
+      .prepare("SELECT revoked_ms FROM review_launches WHERE attempt_id = ?")
+      .get(attemptId) as { revoked_ms: number | null };
+    expect(released.revoked_ms).toEqual(expect.any(Number));
+    const mark = db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+    expect(JSON.parse(mark.settled_effects ?? "[]") as string[]).toEqual(
+      expect.arrayContaining(["failure-row", "claim-stamp"]),
+    );
+    expect(h.kvPuts.map((put) => put.value)).toContain("failed");
+    expect(mark.settled_ms).toEqual(expect.any(Number));
+
+    // A second pass writes nothing new.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toEqual(settled);
   });
 });
 

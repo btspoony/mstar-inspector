@@ -185,7 +185,7 @@ describe("the paid exec at the frozen deadline", () => {
     });
   });
 
-  test("a lost reply is unknown: no failure row, no Check conclusion, nothing destroyed", async () => {
+  test("a lost reply is unknown: its own cause is recorded, no Check conclusion, nothing destroyed", async () => {
     const { deps, db } = await makeDeps();
     h.sandbox.runnerError = new Error("the exec's reply was lost");
     let terminalizeCalls = 0;
@@ -206,7 +206,11 @@ describe("the paid exec at the frozen deadline", () => {
       expect(reviewed.failure.class).toBe("unknown");
 
       expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toEqual({ kind: "unknown" });
-      expect(failureRows(db)).toHaveLength(0);
+      // The phase's own cause is durable (the reconciler that later releases the
+      // slot can otherwise only observe that no reply arrived); the ATTEMPT is
+      // what stays un-settled: no Check conclusion, no terminal move.
+      expect(failureRows(db)).toHaveLength(1);
+      expect(String(failureRows(db)[0]!.error)).toContain("the exec's reply was lost");
       expect(terminalizeCalls).toBe(0);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");
 
