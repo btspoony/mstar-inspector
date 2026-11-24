@@ -19,7 +19,7 @@ import {
 } from "../../src/store/review-route-store";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { idemKey } from "../../src/contracts/idem";
-import { HANDOFF_RECOVERY_AFTER_MS, LOST_REPLY_FALLBACK_ERROR, reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import { HANDOFF_RECOVERY_AFTER_MS, reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { LOST_REPLY_SETTLE_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
@@ -662,7 +662,7 @@ describe("a rejection is not an observation", () => {
     // what stays un-settled: no row, no mark, no terminal move, the slot held.
     expect(failureRows(db)).toHaveLength(0);
     const observed = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
-    expect(observed?.observation?.error).toContain("runner signalled budget exhaustion");
+    expect(observed?.observation?.message).toContain("runner signalled budget exhaustion");
     expect(settledMark(db)).toBeNull();
     expect(launchState(db)).toBe("launched");
   });
@@ -1147,7 +1147,9 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
     expect(failureRows(db)[0]!.track_id).toBe(attemptId);
-    expect(failureRows(db)[0]!.error).toBe(LOST_REPLY_FALLBACK_ERROR);
+    expect(failureRows(db)[0]!.error).toBe(
+      "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived",
+    );
     expect(failureRows(db)[0]!.message).toContain("never came back");
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
     // note: That move IS the capacity release. Both arms of the hold are gone: the
@@ -1394,6 +1396,7 @@ describe("a launched attempt whose paid reply was lost", () => {
           containerStateUnknown: true,
           code: "review.paid.reply_lost",
           message: `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`,
+          cause,
         },
         null,
       ),
@@ -1480,8 +1483,9 @@ describe("a launched attempt whose paid reply was lost", () => {
         attemptId,
         observation: {
           code: "review.paid.reply_lost",
-          error:
+          message:
             "the attempt container could not be read at the review step (reply-lost) — Error: late cause (after 900ms) — nothing may be concluded",
+          cause: "Error: late cause (after 900ms)",
         },
         nowMs: SETTLES_AT,
       }),
@@ -1524,7 +1528,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
 
     const cause = "Error: runner rpc failed: check the diff (after 1200ms)";
-    const observedError = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
+    const observedMessage = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
     let recorded = false;
     const racing = withReconcilerRace(db, {
       afterSelection: () => {
@@ -1534,7 +1538,7 @@ describe("a launched attempt whose paid reply was lost", () => {
           .prepare(
             "UPDATE review_attempt_handoffs SET payload_json = json_set(payload_json, '$.attemptObservation', json(?)) WHERE attempt_id = ?",
           )
-          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), attemptId);
+          .run(JSON.stringify({ code: "review.paid.reply_lost", message: observedMessage, cause }), attemptId);
       },
     });
 
@@ -1559,7 +1563,8 @@ describe("a launched attempt whose paid reply was lost", () => {
     const attemptId = "attempt-lost-reply-mid-insert";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
 
-    const observedError = "Error: socket hang up (after 800ms)";
+    const observedCause = "Error: socket hang up (after 800ms)";
+    const observedMessage = `the attempt container could not be read at the review step (reply-lost) — ${observedCause} — nothing may be concluded`;
     let injected = false;
     // The settlement-effect batch is the only one with exactly two statements
     // (the attempt-keyed insert + its landed mark); the lost-reply gate is three.
@@ -1571,7 +1576,7 @@ describe("a launched attempt whose paid reply was lost", () => {
         // `created_at` — the sync selects on content, never on time.
         await recordAttemptObservation(db as never, {
           attemptId,
-          observation: { code: "review.paid.reply_lost", error: observedError },
+          observation: { code: "review.paid.reply_lost", message: observedMessage, cause: observedCause },
           nowMs: SETTLES_AT,
         });
       },
@@ -1583,7 +1588,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(injected).toBe(true);
     const settled = failureRows(db);
     expect(settled).toHaveLength(1);
-    expect(String(settled[0]!.error)).toBe(observedError);
+    expect(String(settled[0]!.error)).toBe(observedMessage);
     expect(String(settled[0]!.message)).toContain("Socket hang up");
     expect(String(settled[0]!.message)).not.toContain("800ms");
     // Same row identity throughout: the sync is an UPDATE, never a second row.
@@ -1597,7 +1602,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
 
     const cause = "Error: runner rpc failed: check the diff (after 1200ms)";
-    const observedError = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
+    const observedMessage = `the attempt container could not be read at the review step (reply-lost) — ${cause} — nothing may be concluded`;
 
     // The composition read fails. A lost read is NOT evidence that nothing was
     // observed, so the pass must skip this attempt rather than settle it from the
@@ -1617,7 +1622,7 @@ describe("a launched attempt whose paid reply was lost", () => {
                     updated_ms = ?
               WHERE attempt_id = ?`,
           )
-          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), SETTLES_AT, attemptId);
+          .run(JSON.stringify({ code: "review.paid.reply_lost", message: observedMessage, cause }), SETTLES_AT, attemptId);
       },
     });
     const faulty: D1Like = {
@@ -1662,9 +1667,8 @@ describe("a launched attempt whose paid reply was lost", () => {
   });
 
   test("a cause carrying the delimiter and a negative reason keeps its distinguishing text", async () => {
-    // The cause itself uses the throw sites' ` — ` convention, so a parser that
-    // drops segments by their opening words would delete the only reason worth
-    // reading. Only the wrapper and disposition sentences may be dropped.
+    // The cause itself uses the throw sites' ` — ` convention: it is carried as
+    // data, never split, so the whole reason reaches the author-facing sentence.
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-negative-cause";
@@ -1673,8 +1677,9 @@ describe("a launched attempt whose paid reply was lost", () => {
       attemptId,
       observation: {
         code: "review.paid.reply_lost",
-        error:
+        message:
           "the attempt container could not be read at the review step (reply-lost) — Error: request rejected — no capacity available (after 1200ms) — nothing may be concluded",
+        cause: "Error: request rejected — no capacity available (after 1200ms)",
       },
       nowMs: Date.now(),
     });
@@ -1739,7 +1744,9 @@ describe("a launched attempt whose paid reply was lost", () => {
       attemptId,
       observation: {
         code: "review.paid.reply_lost",
-        error: "the attempt container could not be read (reply-lost) — Error: the real cause (after 500ms) — its result is not collected",
+        message:
+          "the attempt container could not be read (reply-lost) — Error: the real cause (after 500ms) — its result is not collected",
+        cause: "Error: the real cause (after 500ms)",
       },
       nowMs: SETTLES_AT,
     });
@@ -1766,7 +1773,9 @@ describe("a launched attempt whose paid reply was lost", () => {
 
     const fallback = failureRows(db);
     expect(fallback).toHaveLength(1);
-    expect(String(fallback[0]!.error)).toBe(LOST_REPLY_FALLBACK_ERROR);
+    expect(String(fallback[0]!.error)).toBe(
+      "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived",
+    );
 
     // The observation lands with a stamp BEFORE the row's own creation — the
     // ordering the old timestamp predicate could never see.
@@ -1774,7 +1783,9 @@ describe("a launched attempt whose paid reply was lost", () => {
       attemptId,
       observation: {
         code: "review.paid.reply_lost",
-        error: "the attempt container could not be read (reply-lost) — Error: boundary cause (after 700ms) — its result is not collected",
+        message:
+          "the attempt container could not be read (reply-lost) — Error: boundary cause (after 700ms) — its result is not collected",
+        cause: "Error: boundary cause (after 700ms)",
       },
       nowMs: CREATED_AT,
     });
@@ -1787,10 +1798,10 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(String(synced[0]!.message)).toContain("Boundary cause");
   });
 
-  test("a cause segment that reads like a disposition is kept verbatim", async () => {
-    // `nothing was charged because the account is suspended` is the CAUSE, not
-    // the wrapper's own `nothing was charged, a new attempt runs` disposition:
-    // only an exact constant may be dropped, so the reason survives.
+  test("a cause that reads like a disposition is kept verbatim", async () => {
+    // `nothing was charged because the account is suspended` is the CAUSE the
+    // throw site carried, not a wrapper disposition: it reaches the
+    // author-facing sentence verbatim.
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-disposition-cause";
@@ -1799,7 +1810,9 @@ describe("a launched attempt whose paid reply was lost", () => {
       attemptId,
       observation: {
         code: "review.paid.reply_lost",
-        error: "Error: request rejected — nothing was charged because the account is suspended (after 1200ms)",
+        message:
+          "the attempt container could not be read (reply-lost) — Error: request rejected — nothing was charged because the account is suspended (after 1200ms)",
+        cause: "Error: request rejected — nothing was charged because the account is suspended (after 1200ms)",
       },
       nowMs: SETTLES_AT,
     });

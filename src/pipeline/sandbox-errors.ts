@@ -25,7 +25,7 @@ export class ContainerNotRunningError extends Error {
 }
 
 /** Characters of an exec cause the failure message and log field keep. */
-export const EXEC_CAUSE_MAX_CHARS = 300;
+const EXEC_CAUSE_MAX_CHARS = 300;
 
 /** Error names are a fixed vocabulary; anything longer is attacker-controlled. */
 const CAUSE_NAME_MAX_CHARS = 40;

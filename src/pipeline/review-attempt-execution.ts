@@ -1785,6 +1785,13 @@ type PhaseFailureBase = {
   runnerReturned: boolean;
   message: string;
   /**
+   * The throw site's own evidence, carried as data next to `message` — never
+   * reconstructed from it. Settlement forwards it to the handoff observation
+   * so the reconciler renders the author-facing sentence without reparsing
+   * the composed text.
+   */
+  cause?: string;
+  /**
    * Which GitHub limit, if any, refused the step. The wrapper sees the response
    * headers; the record carries the verdict as data so settlement can prefix the
    * persisted error without the original error object.
@@ -2537,12 +2544,17 @@ export function transientFactsOf(err: unknown): TransientFacts | undefined {
  * an ordinary error (clone failed, D1 fault) is transient by default.
  */
 export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): PhaseFailure | null {
+  // The throw site's evidence crosses as data: any error that carries a string
+  // `cause` hands it to the record, and settlement forwards it to the handoff
+  // observation. Nothing is parsed out of the composed message.
+  const cause = (err as { cause?: unknown } | null)?.cause;
   const base = {
     phase: ctx.phase,
     stage: ctx.stage,
     headSha: ctx.headSha,
     runnerReturned: ctx.runnerReturned,
     message: strippedMessage(err),
+    ...(typeof cause === "string" ? { cause } : {}),
     ...(ctx.rateLimited === undefined || ctx.rateLimited === null ? {} : { rateLimited: ctx.rateLimited }),
   };
   if (err instanceof BudgetExhaustedError) {
@@ -4892,14 +4904,23 @@ export async function settleAttemptFailure(
     // sentence would then stand in for the phase's. It is recorded as
     // OBSERVATION on this attempt's handoff row — the durable evidence the
     // recovery lane already reads — so the reconciler stays the ONE failure-row
-    // writer and composes that row's `error` from the real cause. Nothing is
-    // concluded here: the launch row keeps holding the container and the slot
-    // until the deadline plus grace proves the paid child gone.
-    const observed = redactExactSecrets(redactSecrets(detail), await sealedSecretValues(deps, attemptId));
+    // writer and renders that row from the real cause — `message` keeps the
+    // composed text for `error`, `cause` carries the throw site's evidence for
+    // the author-facing sentence. Nothing is concluded here: the launch row
+    // keeps holding the container and the slot until the deadline plus grace
+    // proves the paid child gone.
+    const secrets = await sealedSecretValues(deps, attemptId);
+    const observedMessage = redactExactSecrets(redactSecrets(detail), secrets);
+    const observedCause =
+      failure.cause === undefined ? undefined : redactExactSecrets(redactSecrets(failure.cause), secrets);
     try {
       await recordAttemptObservation(deps.env.DB, {
         attemptId,
-        observation: { code, error: observed },
+        observation: {
+          code,
+          message: observedMessage,
+          ...(observedCause === undefined ? {} : { cause: observedCause }),
+        },
         nowMs: Date.now(),
       });
     } catch (recordErr) {

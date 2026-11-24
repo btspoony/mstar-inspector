@@ -6,7 +6,7 @@ import {
   idemKey,
 } from "../contracts/idem";
 import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
-import { ATTEMPT_WRAPPER_SENTENCES, markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
+import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
 import { settlementFailureRowStatement } from "../store/failure-store";
@@ -83,25 +83,15 @@ const MECHANISM_TERMS: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
- * The sentences OUR OWN throw sites prepend or append around a cause
- * (`ATTEMPT_WRAPPER_SENTENCES`, `src/pipeline/review-attempt.ts` — the throw
- * sites' owner module). A segment is dropped only when it equals one of these
- * constants byte for byte; provenance, not prefix, is what classifies it, so a
- * real cause that merely reads like a disposition ("nothing was charged
- * because the account is suspended") keeps all of its words.
- */
-const CAUSE_WRAPPERS: ReadonlySet<string> = new Set(ATTEMPT_WRAPPER_SENTENCES);
-
-/**
  * The fallback `review_failures.error` the lost-reply lane writes when no
  * observation existed yet — two constants (anchored / pre-column), which is
  * what lets the late-observation sync PROVE a row is this reconciler's own
  * before rewriting it. The deadline and the grace are durable on the launch
  * and handoff rows; the sentence states the conclusion.
  */
-export const LOST_REPLY_FALLBACK_ERROR =
+const LOST_REPLY_FALLBACK_ERROR =
   "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived";
-export const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
+const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
   "a pre-column legacy attempt carries no frozen deadline; its launch outlived the maximum attempt cap plus the post-deadline grace, and no reply ever arrived";
 
 /**
@@ -117,22 +107,14 @@ const LOST_REPLY_FALLBACK_SHAPE = {
 } as const;
 
 /**
- * The cause an author can be shown, out of the phase's own sentence.
- *
- * A throw site writes `<wrapper — cause — disposition>`; only the middle is the
- * site's evidence. A segment is dropped only when it IS one of the shared
- * wrapper constants (exact match, not a prefix rule) and everything else is
- * kept verbatim, so a cause that itself carries the ` — ` convention — or that
- * merely begins like a disposition — keeps all of its words. The `Name:`
- * prefix and the `(after <n>ms)` suffix are the throw boundary's own
- * envelope; what remains is elided term by term and bounded.
+ * The cause an author can be shown, read as DATA off the observation: the
+ * throw site carried it next to its composed message, so nothing here parses
+ * the message back apart. The `Name:` prefix and the `(after <n>ms)` suffix
+ * are the throw boundary's own envelope; what remains is elided term by term
+ * and bounded.
  */
 function authorFacingCause(observed: AttemptObservation): string {
-  let cause = observed.error
-    .split(" — ")
-    .map((segment) => segment.trim())
-    .filter((segment) => segment !== "" && !CAUSE_WRAPPERS.has(segment))
-    .join(" — ")
+  let cause = (observed.cause ?? "")
     .replace(/^[A-Za-z]*Error:\s*/, "")
     .replace(/\(\s*after\s+\d+\s*ms\s*\)/gi, "")
     .replace(/\s+/g, " ")
@@ -147,9 +129,9 @@ function authorFacingCause(observed: AttemptObservation): string {
 /**
  * The `review_failures.message` sentence for a row: the code's own summary
  * ("what happened, was anything charged") and then the cause the phase actually
- * observed in author-facing words. The raw cause stays in `error`, which is the
- * operator's text — that is the whole split, so this function grows no option,
- * no policy read and no second dialect.
+ * observed in author-facing words. The observation's composed text stays in
+ * `error`, which is the operator's text — that is the whole split, so this
+ * function grows no option, no policy read and no second dialect.
  *
  * No observation means no cause to name: the summary alone stands, which is the
  * pass's honest statement of what IT saw (a deadline that passed in silence).
@@ -197,8 +179,8 @@ export type ReviewRouteEnv = {
  * written, and the lane that selected the attempt retries on the next pass — a
  * lost read is never evidence that nothing was observed, so no snapshot is ever
  * settled in its place. What the read returns composes the row: its code names
- * the row, its cause lands in `error`, and `message` carries that cause in
- * author-facing words (see `authorFacingMessage`), because `error` is the
+ * the row, its composed text lands in `error`, and `message` carries the cause
+ * in author-facing words (see `authorFacingMessage`), because `error` is the
  * operator's raw text. An observation recorded after the insert is applied to
  * the same row by the pass's own late-observation sync.
  *
@@ -239,7 +221,7 @@ async function landSettlementEffects(
           code,
           trackId: handoff.attemptId,
           message: authorFacingMessage(code, observed),
-          error: observed?.error ?? detail,
+          error: observed?.message ?? detail,
         },
       },
       nowMs,
@@ -547,7 +529,7 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
       await syncSettledFailureRow(env.DB, {
         attemptId: handoff.attemptId,
         code: observed.code,
-        error: observed.error,
+        error: observed.message,
         message: authorFacingMessage(observed.code, observed),
       });
     } catch {

@@ -224,7 +224,7 @@ describe("the paid exec at the frozen deadline", () => {
       // terminal move.
       expect(failureRows(db)).toHaveLength(0);
       const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(ref.payload));
-      expect(handoff?.observation?.error).toContain("the exec's reply was lost");
+      expect(handoff?.observation?.message).toContain("the exec's reply was lost");
       expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
       expect(terminalizeCalls).toBe(0);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");

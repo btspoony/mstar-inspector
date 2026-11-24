@@ -3837,6 +3837,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
         containerStateUnknown: true,
         code: "review.paid.reply_lost",
         message: detail,
+        cause,
       },
       null,
     );
@@ -3847,7 +3848,8 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     // What the phase leaves is the OBSERVATION — the cause it actually saw.
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
     expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
-    expect(handoff?.observation?.error).toContain(cause);
+    expect(handoff?.observation?.message).toContain(detail);
+    expect(handoff?.observation?.cause).toBe(cause);
     // The observation is row state, never queue payload: a recovery re-enqueue
     // must not hand the next delivery a polluted body.
     expect(handoff?.payload).not.toHaveProperty("attemptObservation");

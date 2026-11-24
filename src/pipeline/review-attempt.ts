@@ -1627,53 +1627,6 @@ function toBase64Utf8(text: string): string {
 }
 
 /**
- * The fixed sentences the throw sites in this family prepend or append around
- * a cause: each is one verbatim ` — ` segment of an error message these sites
- * compose (`AttemptUnknownError`, `AttemptRetiredError`, `ContainerLost*Error`,
- * and the sandbox boundary's own refusals). The author-facing cause in
- * `route-reconcile` removes ONLY these constants — never anything that merely
- * shares their opening words — so a real cause whose text happens to begin
- * like a disposition ("nothing was charged because …") keeps every word.
- * Keep this list identical to the sites below: a stale entry costs nothing
- * (the segment is kept, which is the safe direction).
- */
-export const ATTEMPT_WRAPPER_SENTENCES: readonly string[] = [
-  // The unreadable-container wrappers; the marked outcome rides in the parens.
-  ...["reply-lost", "not-running", "marker-mismatch", "marker-unreadable", "retired", "deadline-spent"].flatMap(
-    (kind) => [
-      `the attempt container could not be read (${kind})`,
-      `the attempt container could not be read at the review step (${kind})`,
-    ],
-  ),
-  "the attempt container did not carry this attempt's preparation (not-running)",
-  "the attempt container did not carry this attempt's preparation (marker-mismatch)",
-  // The trailing dispositions the sites append after ` — `.
-  "its result is not collected",
-  "nothing may be concluded",
-  "nothing may be concluded about its container",
-  "nothing is provisioned for it",
-  "nothing was charged, a new attempt runs",
-  "nothing may run on it and nothing is charged",
-  "nothing may ever start on it",
-  "nothing was started",
-  "nothing is proven, the next entry re-provisions it",
-  "nothing was launched",
-  "nothing was launched for it",
-  "nothing may start",
-  "the container's state is unknown",
-  "the paid exec was never sent",
-  "the process may still be running",
-  "the paid step is not taken",
-  "refusing a second launch",
-  "refusing to run the paid step on it",
-  "refusing the paid step",
-  "no send authority can be established",
-  "the paid outcome is unconfirmed",
-  "nothing may be published from it",
-  "completion is not confirmed",
-];
-
-/**
  * The cause suffix a lost reply's message carries. The boundary hands back
  * bounded evidence (error name, message, elapsed time) or nothing; this never
  * invents text, so an older outcome keeps its exact wording.

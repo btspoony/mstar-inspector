@@ -29,7 +29,10 @@ export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
 
 /**
  * What a live settlement OBSERVED about an outcome it could not conclude: the
- * throw site's own classification and its bounded, already-redacted cause.
+ * throw site's own classification, its composed message verbatim (`error` on
+ * the failure row is that raw text) and the bounded, already-redacted cause
+ * it carried as data (`cause`), which is what the reconciler renders into the
+ * author-facing message. No part is reconstructed from another part.
  *
  * It rides the delivery's handoff row because that row is the durable evidence
  * the recovery lanes already read for this attempt, and because neither
@@ -39,7 +42,7 @@ export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
  * the observation is row state, never queue payload (`toHandoff` keeps it out
  * of `payload`), and the reconciler remains the ONLY failure-row writer.
  */
-export type AttemptObservation = { code: FailureCode; error: string };
+export type AttemptObservation = { code: FailureCode; message: string; cause?: string };
 
 /** The `payload_json` key the observation rides under, never part of the payload. */
 const OBSERVATION_KEY = "attemptObservation";
@@ -203,16 +206,17 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
 }
 
 /**
- * Anything off the vocabulary — a foreign key, a non-string cause, a payload
- * from another build — reads as "nothing was observed", so the recovery pass
- * falls back to its own sentence instead of rendering an unknown string as an
- * author-facing code.
+ * Anything off the vocabulary — a foreign key, a non-string message or cause,
+ * a payload from another build — reads as "nothing was observed", so the
+ * recovery pass falls back to its own sentence instead of rendering an unknown
+ * string as an author-facing code.
  */
 function toObservation(value: unknown): AttemptObservation | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { code, error } = value as Record<string, unknown>;
-  if (!isFailureCode(code) || typeof error !== "string" || error === "") return null;
-  return { code, error };
+  const { code, message, cause } = value as Record<string, unknown>;
+  if (!isFailureCode(code) || typeof message !== "string" || message === "") return null;
+  if (cause !== undefined && typeof cause !== "string") return null;
+  return { code, message, ...(cause === undefined ? {} : { cause }) };
 }
 
 /**
@@ -252,7 +256,7 @@ export async function recordAttemptObservation(
  * compared anywhere here, so an observation recorded between the composer's
  * read and its insert — across any second boundary — still reaches the row.
  *
- * `f.error IS NOT` the observation's own error is exactly "not synced yet": a
+ * `f.error IS NOT` the observation's own message is exactly "not synced yet": a
  * synced row leaves this lane for good, a second pass selects nothing and
  * writes nothing.
  *
@@ -272,8 +276,8 @@ export async function listLateObservedFailures(
               h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
          FROM review_attempt_handoffs h
          JOIN review_failures f ON f.id = h.attempt_id
-        WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error') IS NOT NULL
-          AND f.error IS NOT json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error')
+        WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.message') IS NOT NULL
+          AND f.error IS NOT json_extract(h.payload_json, '$.${OBSERVATION_KEY}.message')
           AND f.track_id = h.attempt_id
           AND f.error_code = ?
           AND f.error IN (${input.fallbackErrors.map(() => "?").join(",")})

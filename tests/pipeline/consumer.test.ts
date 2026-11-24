@@ -254,15 +254,15 @@ function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
-/** The cause the phase recorded for an attempt it could not conclude. */
+/** The composed message the phase recorded for an attempt it could not conclude. */
 function observationOf(db: TestD1): string {
   const row = db.raw
     .query(
-      `SELECT json_extract(payload_json, '$.attemptObservation.error') AS error
+      `SELECT json_extract(payload_json, '$.attemptObservation.message') AS message
          FROM review_attempt_handoffs ORDER BY created_ms DESC LIMIT 1`,
     )
-    .get() as { error: string | null } | null;
-  return row?.error ?? "";
+    .get() as { message: string | null } | null;
+  return row?.message ?? "";
 }
 
 /**

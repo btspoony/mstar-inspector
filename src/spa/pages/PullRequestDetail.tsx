@@ -377,20 +377,17 @@ export function PullRequestDetailView({
   records,
   onEnsureSection,
   onLoadPage,
-  initialFamily,
 }: {
   locale: SpaBoot["locale"];
   detail: PullRequestDetail;
   records: RecordSections;
   onEnsureSection: (section: RecordSection) => void;
   onLoadPage: (section: RecordSection, page: Partial<PageRequest>) => void;
-  /** Mount-time family override — the counts default holds otherwise. */
-  initialFamily?: RecordFamily;
 }) {
   const pr = detail.pull_request;
   const counts = detail.counts;
   const pill = pullRequestStatePill(locale, pr.state);
-  const [family, setFamily] = useState<RecordFamily>(() => initialFamily ?? defaultFamily(counts));
+  const [family, setFamily] = useState<RecordFamily>(() => defaultFamily(counts));
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
 
