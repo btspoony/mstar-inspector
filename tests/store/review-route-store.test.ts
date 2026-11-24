@@ -1,11 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "./helpers";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "./helpers";
 import {
+  attemptFailureStoryExists,
   deliveryKeyOf,
+  LOST_REPLY_FALLBACK_ERROR,
+  LOST_REPLY_FALLBACK_SHAPE,
   readAttemptHandoff,
   recordReviewedHead,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
+import { createFailureStore } from "../../src/store/failure-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 /**
@@ -16,6 +20,13 @@ import type { ReviewJobPayload } from "../../src/contracts/review-job";
  * has to hold on every engine, so both shapes are pinned here.
  */
 const BOT_ID = "bot-reviewed-head";
+const TARGET_ID = `target-${BOT_ID}`;
+
+/** The bot + target the failure row's foreign keys need; one call per database. */
+function seedTargetOnce(db: TestD1): void {
+  seedBot(db, BOT_ID, 424242);
+  seedTarget(db, BOT_ID, { id: TARGET_ID, name: "widgets" });
+}
 
 function payloadFor(): ReviewJobPayload {
   return {
@@ -27,7 +38,7 @@ function payloadFor(): ReviewJobPayload {
     action: "created",
     triggered_by: "issue_comment",
     botRef: { appId: BOT_ID },
-    targetId: `target-${BOT_ID}`,
+    targetId: TARGET_ID,
   };
 }
 
@@ -83,4 +94,81 @@ describe("recordReviewedHead row state", () => {
       expect(again?.payload).not.toHaveProperty("reviewedHeadSha");
     });
   }
+});
+
+describe("attemptFailureStoryExists", () => {
+  const ATTEMPT = "attempt-story-guard";
+
+  /** The row a recovery lane composes for this attempt: attempt-keyed (`id`). */
+  async function recordRow(
+    db: TestD1,
+    input: { id: string; code: string; error: string; message: string },
+  ): Promise<void> {
+    await createFailureStore(db as never).record({
+      id: input.id,
+      target_id: TARGET_ID,
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 7,
+      head_sha: "a".repeat(40),
+      stage: "pipeline",
+      code: input.code as never,
+      trackId: ATTEMPT,
+      message: input.message,
+      error: input.error,
+    });
+  }
+
+  test("no row at all lets the observation through", async () => {
+    const db = createMigratedTestD1();
+    await seedHandoff(db, ATTEMPT);
+    expect(await attemptFailureStoryExists(db, ATTEMPT)).toBe(false);
+  });
+
+  test("the lost-reply lane's placeholder is not a story", async () => {
+    // Written exactly the way `settleLostReplies` writes it: attempt-keyed, the
+    // lane's code, its fallback sentence and the fallback summary.
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    await seedHandoff(db, ATTEMPT);
+    await recordRow(db, {
+      id: ATTEMPT,
+      code: LOST_REPLY_FALLBACK_SHAPE.fallbackCode,
+      error: LOST_REPLY_FALLBACK_ERROR,
+      message: LOST_REPLY_FALLBACK_SHAPE.fallbackMessage,
+    });
+    expect(await attemptFailureStoryExists(db, ATTEMPT)).toBe(false);
+  });
+
+  test("a lane-authored row refuses the observation", async () => {
+    // The persisted-but-unpublished lane's own sentence: it saw the durable
+    // result and the missing publication, so the phase must not replace it.
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    await seedHandoff(db, ATTEMPT);
+    await recordRow(db, {
+      id: ATTEMPT,
+      code: "review.internal.unclassified",
+      error: "publication never started: the attempt persisted its paid result but nothing was staged",
+      message: "the review's result never reached the PR",
+    });
+    expect(await attemptFailureStoryExists(db, ATTEMPT)).toBe(true);
+  });
+
+  test("a row keyed by anything but the attempt is not the attempt's story", async () => {
+    // The live phase's own row (random id, same track id) and the per-stage
+    // recheck row are never composed by a recovery lane for this attempt, so they
+    // do not refuse the observation — and the lookup stays a primary-key hit.
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    await seedHandoff(db, ATTEMPT);
+    await recordRow(db, {
+      id: `${ATTEMPT}:recheck`,
+      code: "review.recheck.unaccounted",
+      error: "the refused round was never accounted",
+      message: "the review was refused before it started",
+    });
+    expect(await attemptFailureStoryExists(db, ATTEMPT)).toBe(false);
+  });
 });

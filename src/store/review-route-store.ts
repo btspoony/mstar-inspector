@@ -581,6 +581,12 @@ const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE i
  * row is a lane-authored story ("publication never started …") and the phase's
  * later observation must not replace it.
  *
+ * Keyed on `id`, which the recovery writers set to the ATTEMPT id
+ * (`landFailureEffect` inserts with it), so the guard is a primary-key lookup.
+ * `track_id` carries the same value but has no index, and this predicate runs
+ * precisely while no row matches yet — a scan of every workspace's failure
+ * history per lost reply.
+ *
  * A fallback-shaped row is deliberately NOT a story: it exists precisely because
  * no observation had arrived, and the late-observation sync rewrites it in place
  * — so recording the observation is what makes that repair possible. COALESCE
@@ -588,7 +594,7 @@ const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE i
  */
 const ATTEMPT_FAILURE_STORY_SQL = `
 SELECT 1 AS present FROM review_failures
- WHERE track_id = ?
+ WHERE id = ?
    AND NOT (
      COALESCE(error_code, '') = ?
      AND COALESCE(error, '') IN (?, ?)
@@ -596,11 +602,17 @@ SELECT 1 AS present FROM review_failures
    )`;
 
 /**
- * Whether a failure row already tells this attempt's story in words the phase
- * cannot improve on. The live settlement records only an OBSERVATION — never a
- * row — so a row that exists here came from a recovery lane that saw materially
- * more (a durable paid result with nothing staged), and its sentence must stand.
- * A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
+ * Whether the attempt's own failure row already tells its story in words the
+ * phase cannot improve on. The live settlement records only an OBSERVATION —
+ * never a row — so a row that exists here came from a recovery lane that saw
+ * materially more (a durable paid result with nothing staged), and its sentence
+ * must stand. A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
+ *
+ * Only the ATTEMPT-KEYED row is consulted, which is the row those lanes compose
+ * and the only indexed key. A row the live phase wrote under a random id (or the
+ * per-stage `<attempt>:recheck` row) is not a story: a lane's later insert is
+ * attempt-keyed with ON CONFLICT DO NOTHING and the sync lane only rewrites
+ * fallback shapes, so recording the observation over such a row changes nothing.
  */
 export async function attemptFailureStoryExists(db: D1Like, attemptId: string): Promise<boolean> {
   const row = await db
