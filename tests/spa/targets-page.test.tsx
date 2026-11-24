@@ -273,9 +273,11 @@ describe("the 待安装 filter (mounted)", () => {
       });
       const text = container.textContent ?? "";
       expect(text).toContain("acme/web");
-      expect(text).toContain(t("en", "targets.status.uninstalled"));
       expect(text).not.toContain("acme/api");
       expect(text).not.toContain("acme/docs");
+      const pendingRow = rowMarkup(container.innerHTML, "acme/web");
+      expect(pendingRow).toContain(t("en", "targets.status.uninstalled"));
+      expect(pendingRow).toContain('data-tone="warn"');
       expect(text).toContain(t("en", "targets.allRepositories"));
       expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
 
@@ -333,7 +335,20 @@ describe("the 待安装 filter (mounted)", () => {
       expect(text).toContain("acme/docs");
       const toggleLabels = [...container.querySelectorAll("button")].map((node) => node.textContent);
       expect(toggleLabels).not.toContain(t("en", "targets.filterAvailable"));
-      expect(toggleLabels).not.toContain(t("en", "targets.filterUninstalled", { count: 1 }));
+      expect(toggleLabels).not.toContain(t("en", "targets.filterUninstalled", { count: 0 }));
+
+      const reloadedAgain = reloaded.map((target) =>
+        target.target_id === "t-2" ? { ...target, repo_id: null } : target,
+      );
+      await act(async () =>
+        root.render(
+          createElement(TargetsView, { locale: "en", state: "ok", targets: reloadedAgain, onRetry: () => {} }),
+        ),
+      );
+      const textAgain = container.textContent ?? "";
+      expect(textAgain).toContain("acme/api");
+      expect(textAgain).toContain("acme/docs");
+      expect(textAgain).not.toContain("acme/web");
     } finally {
       await act(async () => root.unmount());
       cleanup();

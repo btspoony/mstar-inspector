@@ -191,8 +191,13 @@ export function TargetsView({
   const allHref = `${base}/repos/all`;
   const [uninstalledOnly, setUninstalledOnly] = useState(false);
   const uninstalledCount = all.filter((target) => target.repo_id === null).length;
-  // The toggle disappears when nothing awaits install; the stored selection
-  // may then be stale, so the effective face falls back to available.
+  // The toggle disappears when nothing awaits install; clear the stored
+  // selection too, so a later reload that brings a pending row back does not
+  // silently jump the table to the 待安装 face.
+  useEffect(() => {
+    if (uninstalledCount === 0 && uninstalledOnly) setUninstalledOnly(false);
+  }, [uninstalledCount, uninstalledOnly]);
+  // Same-render fallback while the stored selection is stale.
   const showUninstalled = uninstalledOnly && uninstalledCount > 0;
   const rows = showUninstalled
     ? all.filter((target) => target.repo_id === null)
