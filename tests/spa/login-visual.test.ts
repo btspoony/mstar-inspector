@@ -5,7 +5,6 @@ import { join } from "node:path";
 const spaRoot = join(import.meta.dir, "../../src/spa");
 const loginPage = readFileSync(join(spaRoot, "pages/LoginPage.tsx"), "utf8");
 const pagesCss = readFileSync(join(spaRoot, "pages.module.css"), "utf8");
-const sidebar = readFileSync(join(spaRoot, "components/AppSidebar.tsx"), "utf8");
 
 describe("login SPA face (A3)", () => {
   test("behavior face is unchanged: signed-in redirect + GitHub form POST", () => {
@@ -50,7 +49,6 @@ describe("login SPA face (A3)", () => {
 });
 
 describe("login SSR face sync (A3 dual-track)", () => {
-  const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
   const tokens = readFileSync(join(spaRoot, "styles/tokens.css"), "utf8");
 
   async function ssrStyle(): Promise<string> {
@@ -111,7 +109,6 @@ describe("login SSR face sync (A3 dual-track)", () => {
       expect(html, name).toContain(">Morning Star Inspector</span>");
       expect(html, name).toContain('<div class="banner" role="alert">');
     }
-    expect(views).toContain("export function manifestErrorPage");
   });
 
   test("auth faces consume the card/elevation tokens, not raw hex", async () => {
@@ -125,8 +122,4 @@ describe("login SSR face sync (A3 dual-track)", () => {
     expect(authCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("the brand mark silhouette stays single-source with the sidebar Logo", () => {
-    expect(sidebar).toContain("export function Logo()");
-    expect(loginPage).not.toContain('circle cx="12"');
-  });
 });

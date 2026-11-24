@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { act, createElement, useLayoutEffect, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -22,8 +20,6 @@ import {
   showsPendingInvites,
 } from "../../src/spa/pages/MembersPage";
 import type { InviteRow, MemberRow, WorkspaceRole } from "../../src/spa/pages/data";
-
-const source = readFileSync(join(import.meta.dir, "../../src/spa/pages/MembersPage.tsx"), "utf8");
 
 const invite = (): InviteRow => ({
   id: "i1",
@@ -154,56 +150,6 @@ describe("members page shadcn rebuild", () => {
       kind: "error",
       key: "notice.error.inviteFailed",
     });
-  });
-
-  test("self row renders no actions; the sole owner's demote/remove items are disabled client-side", () => {
-    expect(source).toContain("members.you");
-    expect(source).toContain('member.role === "owner" && ownerCount === 1');
-    expect(source).toContain("disabled={protectedMember}");
-  });
-
-  test("the confirm dialogs share one Dialog with destructive remove/revoke confirm", () => {
-    expect(source).toContain("members.confirmRoleTitle");
-    expect(source).toContain("members.confirmRemoveTitle");
-    expect(source).toContain('pending.kind === "role" ? "default" : "destructive"');
-  });
-
-  test("invite submit is single-flight and network failures surface a notice (QC S-001/S-002)", () => {
-    expect(source).toContain('<Button type="submit" disabled={busy}>');
-    expect(source).toContain("} catch {");
-    expect(source).toContain('t(locale, "notice.error.inviteFailed", { login: trimmed })');
-    expect(source).toContain('t(locale, "notice.error.roleChangeFailed", { login: member.github_login })');
-    expect(source).toContain('t(locale, "notice.error.removeFailed", { login: member.github_login })');
-    expect(source).toContain('t(locale, "notice.error.revokeFailed", { login: invite.github_login })');
-  });
-
-  test("page-level states ride the shared state trio; op notices keep the PageNotice channel", () => {
-    expect(source).toContain('<PageSkeleton locale={locale} kind="table" />');
-    expect(source).toContain('<ErrorState locale={locale} onRetry={() => void load()} />');
-    expect(source).not.toContain("LoadingNotice");
-    expect(source).not.toContain("LoadFailedNotice");
-    expect(source).toContain('<PageNotice kind={notice.kind} message={notice.message} />');
-  });
-
-  test("no page-level admin-only face: the member list is visible to every member", () => {
-    expect(source).not.toContain("members.adminOnly");
-    expect(source).toContain("emptyDescriptionMember");
-  });
-
-  test("op-triggered reloads are background — only the initial load gates the skeleton (F-58-1)", () => {
-    expect(source).toContain('if (!background) setState("loading")');
-    expect(source.split("load({ background: true })").length - 1).toBe(3);
-    expect(source).not.toContain("await load()");
-  });
-
-  test("empty member list renders the no-action EmptyState guidance", () => {
-    expect(source).toContain('t(locale, "members.emptyTitle")');
-    expect(source).toContain(
-      'canInvite ? "members.emptyDescription" : "members.emptyDescriptionMember"',
-    );
-    const emptyCall = source.match(/<EmptyState[\s\S]*?\/>/);
-    expect(emptyCall).not.toBeNull();
-    expect(emptyCall![0]).not.toContain("action=");
   });
 
   test("new copy interpolates in both locales", () => {

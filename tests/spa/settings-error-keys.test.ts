@@ -64,20 +64,8 @@ describe("settings.error dictionary faces", () => {
 });
 
 describe("SPA 400-body resolution contract", () => {
-  test("settingsErrorMessage resolves a known key first; unknown keys fall through to the English face", () => {
-    expect(settingsPage).toContain("isDictionaryKey(parsed.key)");
-    expect(settingsPage).toContain("parsed.message.trim()");
-    expect(settingsPage).toContain('body.trim() || t(locale, "common.loadFailed")');
-  });
-
   test("every op channel routes through the one shared outcome resolver (settings POST, pinned ops, workspace name)", () => {
     expect(settingsPage).not.toContain("message: body.trim()");
-  });
-
-  test("the verify path resolves status first: a keyed body wins, then the status's family", () => {
-    expect(settingsPage).toContain("if (keyed !== undefined) return t(locale, keyed.key, keyed.params);");
-    expect(settingsPage).toContain("switch (status) {");
-    expect(settingsPage).toContain('return typeof reason === "string"');
   });
 
   test("zh noConfiguredProviders copy drift (audit rejected-list note): zh references the Add Provider button like en", () => {

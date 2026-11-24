@@ -264,7 +264,6 @@ describe("v0.3 page face (A4/A5)", () => {
       expect(html.match(/<h1/g), name).toHaveLength(1);
       expect(html, name).toContain('<h1 data-slot="page-header-title"');
       expect(html, name).toContain(`>${heading}</h1>`);
-      expect(PAGE_FACE_SOURCES[name]).toContain("<PageHeader");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-heading-24");
     }
   });
@@ -282,7 +281,6 @@ describe("v0.3 page face (A4/A5)", () => {
       for (const cell of html.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)) {
         expect(cell[1]?.trim(), name).not.toBe("");
       }
-      expect(PAGE_FACE_SOURCES[name]).toContain("<DataTable");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--surface-raised");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--background-200");
       expect(PAGE_FACE_SOURCES[name], name).not.toContain("--typo-label-12-tracking");

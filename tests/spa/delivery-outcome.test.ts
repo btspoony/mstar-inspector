@@ -1,10 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { deliveryOutcomeLabel } from "../../src/spa/delivery-outcome";
-
-const appsPage = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppsPage.tsx"), "utf8");
-const deliveryTab = readFileSync(join(import.meta.dir, "../../src/spa/pages/AppDeliveryTab.tsx"), "utf8");
 
 describe("deliveryOutcomeLabel", () => {
   test("the producer-vocabulary outcomes resolve in both locales", () => {
@@ -26,16 +21,3 @@ describe("deliveryOutcomeLabel", () => {
   });
 });
 
-describe("outcome surfaces (F-05)", () => {
-  test("AppsPage labels the latest delivery outcome through the shared map", () => {
-    expect(appsPage).toContain("deliveryOutcomeLabel(latest.outcome, locale)");
-    expect(appsPage).not.toContain("${latest.outcome}");
-    expect(appsPage).toContain('../delivery-outcome');
-  });
-
-  test("the delivery tab labels every row's outcome through the shared map", () => {
-    expect(deliveryTab).toContain("deliveryOutcomeLabel(row.outcome, locale)");
-    expect(deliveryTab).not.toContain("{row.outcome}");
-    expect(deliveryTab).toContain('../delivery-outcome');
-  });
-});

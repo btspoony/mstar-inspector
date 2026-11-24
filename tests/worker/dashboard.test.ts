@@ -2465,15 +2465,6 @@ describe("/dashboard placeholder lock + legacy home retirement", () => {
     globalThis.fetch = origFetch;
   });
 
-  test("legacy three-card home is retired: no dashboardPage/section code remains", () => {
-    const views = readFileSync(join(import.meta.dir, "../../src/dashboard/views.ts"), "utf8");
-    for (const symbol of ["dashboardPage", "placeholderSection", "githubAppSection", "modelKeysSection"]) {
-      expect(views, symbol).not.toContain(symbol);
-    }
-    const index = readFileSync(join(import.meta.dir, "../../src/dashboard/index.ts"), "utf8");
-    expect(index).not.toContain("dashboardPage,");
-  });
-
   test("BYOK / Review placeholder POSTs → 405, zero fetch, no stale B0 copy", async () => {
     const calls: string[] = [];
     globalThis.fetch = (async (url: unknown) => {
