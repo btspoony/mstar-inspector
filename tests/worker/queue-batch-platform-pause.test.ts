@@ -40,7 +40,7 @@ afterAll(() => {
   mock.restore();
 });
 
-const CTX = { waitUntil: () => {}, passUntil: () => {} } as unknown as ExecutionContext;
+const CTX = { waitUntil: () => {}, passThroughOnException: () => {} } as unknown as ExecutionContext;
 
 function linesOf(event: string): Array<Record<string, unknown>> {
   return lines

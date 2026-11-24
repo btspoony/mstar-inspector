@@ -199,6 +199,16 @@ for (const { file, migrations, refIdentity, refNeedles, redNeedles, serving, dis
       expect(step.run, `${file}: the gate must be an idempotent wrangler d1 execute --file`).toBe(
         `bunx wrangler d1 execute ${gateDb} --remote${file === "deploy-prod.yml" ? " --env production" : ""} --file scripts/review-route-gate.sql`,
       );
+      // The stamp must match the shape every operator write stores, so one
+      // column never mixes ISO-8601 with SQLite's `YYYY-MM-DD HH:MM:SS`.
+      const sql = readFileSync(join(REPO_ROOT, "scripts/review-route-gate.sql"), "utf8").replace(
+        /--.*$/gm,
+        "",
+      );
+      expect(sql, `${file}: the gate row must stamp ISO-8601 updated_at`).toMatch(
+        /strftime\('%Y-%m-%dT%H:%M:%fZ'\s*,\s*'now'\)/,
+      );
+      expect(sql, `${file}: the gate row must not use datetime('now')`).not.toMatch(/datetime\s*\(/i);
       // The gate opens only after the deploy AND every proof step — a failed
       // smoke or orphan re-check must never leave the gate open.
       const proof = steps
