@@ -520,6 +520,7 @@ describe("add-entry visibility + picker usability at breadth", () => {
     const payload: ProviderManagementPayload = {
       ...detailPayload(),
       provider_catalog: [],
+      model_limits_snapshot: "fixture-snapshot",
     };
     const html = renderToStaticMarkup(
       createElement(LoadedProvidersSection, {
