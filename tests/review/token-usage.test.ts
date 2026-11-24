@@ -18,6 +18,7 @@ import {
   bucketFromSubagent,
   bucketsFromSession,
   deepSeatRemainder,
+  deepTokenUsage,
   mergeBuckets,
 } from "../../packages/runner/src/token-usage";
 import { main } from "../../packages/runner/src/runner";
@@ -374,6 +375,63 @@ describe("deepSeatRemainder", () => {
   test("absent stats yield no bucket", () => {
     expect(deepSeatRemainder(undefined, folded)).toBeUndefined();
     expect(deepSeatRemainder(null, folded)).toBeUndefined();
+  });
+});
+
+describe("deepTokenUsage — deep-seat remainder composition", () => {
+  // why: BUG-02 regression — the recheck/report seats run in their OWN
+  // sessions, so their buckets are absent from the parent's
+  // `getUsageStatistics()`. Subtracting them from the stats (the old bug)
+  // would erase the nested-seat remainder entirely.
+  test("parent stats = journal + nested seats; a recheck/report bucket does NOT reduce the remainder", () => {
+    // Parent journal: one 100-total call on ark/deepseek-v4.
+    const entries = [
+      assistantEntry("p1", "ark", "deepseek-v4", { input: 60, output: 20, cacheRead: 10, cacheWrite: 5, total: 95, costUsd: 0.3 }),
+      modelUsageEntry("p2", "ark", "deepseek-v4", { input: 4, output: 1, total: 5, costUsd: 0.2 }),
+    ];
+    // Stats: journal totals (100) PLUS 300 total of task-dispatched nested
+    // seat spend — present in the stats but journaled nowhere.
+    const stats = { input: 264, output: 81, cacheRead: 10, cacheWrite: 5, totalTokens: 400, cost: 1.5 };
+    // Recheck + report seats settle in their own sessions: 500 total that is
+    // NOT inside the parent's stats.
+    const singles = [
+      subagentResult({ resolvedModelIdentity: "ark/deepseek-v4", requests: 2, usage: { input: 300, output: 120, total: 420, costUsd: 2 } }),
+      subagentResult({ resolvedModelIdentity: "moonshot/kimi-k2", requests: 1, usage: { input: 60, output: 20, total: 80, costUsd: 0.3 } }),
+    ];
+
+    const doc = deepTokenUsage(stats, entries, singles);
+
+    // The remainder keeps the full nested spend — child buckets never enter
+    // the subtraction (the old bug would have zeroed it: 400 − (100+500)).
+    const remainder = doc.find((bucket) => bucket.model === "deep-seat-spend");
+    expect(remainder).toEqual({
+      provider: "unattributed",
+      model: "deep-seat-spend",
+      input: 200,
+      output: 60,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 300,
+      requests: 0,
+      costUsd: 1,
+    });
+    // Same-model parent + recheck buckets merge: 100 + 420 = 520 total.
+    const parent = doc.find((bucket) => bucket.provider === "ark");
+    expect(parent?.total).toBe(520);
+    expect(parent?.requests).toBe(4);
+    const reportBucket = doc.find((bucket) => bucket.provider === "moonshot");
+    expect(reportBucket?.total).toBe(80);
+  });
+
+  test("child spend inside the same fold still leaves the journal-only remainder", () => {
+    // Stats carry no nested spend: remainder is the stats' own excess over
+    // the parent journal — child buckets are irrelevant to it.
+    const entries = [assistantEntry("p1", "ark", "deepseek-v4", { input: 10, output: 5, total: 15 })];
+    const stats = { input: 10, output: 5, totalTokens: 15, cost: 0 };
+    const singles = [subagentResult({ resolvedModelIdentity: "moonshot/kimi-k2", requests: 1, usage: { input: 50, output: 10, total: 60 } })];
+    const doc = deepTokenUsage(stats, entries, singles);
+    expect(doc.find((bucket) => bucket.model === "deep-seat-spend")).toBeUndefined();
+    expect(doc).toHaveLength(2);
   });
 });
 

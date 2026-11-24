@@ -40,8 +40,8 @@ import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/rech
 import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 import {
   bucketsFromSession,
-  bucketFromSubagent,
-  deepSeatRemainder,
+  bucketsFromSubagents,
+  deepTokenUsage,
   mergeBuckets,
   type SubagentUsageSource,
 } from "./token-usage";
@@ -837,15 +837,9 @@ function sessionUsageStats(
  */
 function runTokenUsage(
   entries: readonly SessionEntry[],
-  singles: readonly SubagentUsageSource[],
+  singles: readonly (SubagentUsageSource | undefined)[],
 ): TokenUsageBucket[] {
-  return mergeBuckets(
-    bucketsFromSession(entries),
-    singles.flatMap((single) => {
-      const bucket = bucketFromSubagent(single);
-      return bucket === undefined ? [] : [bucket];
-    }),
-  );
+  return mergeBuckets(bucketsFromSession(entries), bucketsFromSubagents(singles));
 }
 
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
@@ -1087,23 +1081,25 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         }
       }
       const appliedModel = servedModel(session);
-      const folded = runTokenUsage(
-        sessionEntries(parentSession),
-        [settled?.usage, ...reportSingles].flatMap((single) => (single === undefined ? [] : [single])),
-      );
       // why: The parent's `task`-dispatched review seats spend inside
       // `getUsageStatistics()` without journaling entries or reporting a
-      // subagent result, so `folded` never sees them. The remainder bucket is
-      // stats minus the folded spend — deep path only (the quick path folds
-      // its seat results and would double-count).
-      const remainder = deepSeatRemainder(sessionUsageStats(parentSession), folded);
+      // subagent result; the recheck/report seats run in their OWN sessions,
+      // so their spend is NOT in the parent's stats — the remainder may
+      // subtract only the parent's journaled buckets, never the child
+      // buckets (deep path only: the quick path folds its seat results and
+      // would double-count).
+      const tokenUsage = deepTokenUsage(
+        sessionUsageStats(parentSession),
+        sessionEntries(parentSession),
+        [settled?.usage, ...reportSingles],
+      );
       return {
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
         ...(appliedModel === undefined ? {} : { appliedModel }),
-        tokenUsage: mergeBuckets(folded, remainder === undefined ? [] : [remainder]),
+        tokenUsage,
       };
     });
   } finally {
@@ -1373,9 +1369,7 @@ export const ompAgentRuntime: AgentRuntime = {
         ...(appliedModel === undefined ? {} : { appliedModel }),
         tokenUsage: runTokenUsage(
           sessionEntries(session),
-          [settled?.usage, ...seatSingles, ...reportSingles].flatMap((single) =>
-            single === undefined ? [] : [single],
-          ),
+          [settled?.usage, ...seatSingles, ...reportSingles],
         ),
       };
     } finally {

@@ -140,6 +140,17 @@ export function bucketFromSubagent(result: SubagentUsageSource | undefined): Tok
   foldUsage(bucket, result?.usage, requests);
   return bucket;
 }
+/**
+ * Fold every settled subagent `SingleResult` into buckets — the child-seat
+ * half of the fold. A result that yields no bucket drops out (see
+ * `bucketFromSubagent`).
+ */
+export function bucketsFromSubagents(singles: readonly (SubagentUsageSource | undefined)[]): TokenUsageBucket[] {
+  return singles.flatMap((single) => {
+    const bucket = bucketFromSubagent(single);
+    return bucket === undefined ? [] : [bucket];
+  });
+}
 
 /**
  * Merge bucket lists into one sorted list — the session fold and each
@@ -189,7 +200,10 @@ function remainderField(value: number | undefined, folded: number): number {
  * subagent results, so `runTokenUsage` cannot see them. Emit ONE
  * `unattributed/deep-seat-spend` bucket carrying stats minus the folded
  * buckets, per field clamped at 0 — the seat spend that would otherwise be
- * silently dropped. `requests` is 0 because the stats expose no per-request
+ * silently dropped. `folded` must contain ONLY buckets whose spend is inside
+ * `stats` — the recheck/report seats run in their own sessions, so their
+ * buckets stay OUT of the parent's stats and subtracting them would erase
+ * the remainder. `requests` is 0 because the stats expose no per-request
  * count (`premiumRequests` counts premium requests only, not the seats').
  * Deep path only: the quick path already folds its seat results and would
  * double-count. A remainder total of 0 emits nothing.
@@ -209,4 +223,26 @@ export function deepSeatRemainder(
   bucket.total = remainderField(stats.totalTokens, sum("total"));
   bucket.costUsd = remainderField(stats.cost, sum("costUsd"));
   return bucket.total > 0 ? bucket : undefined;
+}
+
+/**
+ * why: The deep path's token-usage document: parent journaled buckets + the
+ * recheck/report child buckets + the nested-seat remainder. The child seats
+ * run in their own sessions — their spend is NOT inside the parent's
+ * `getUsageStatistics()` — so the remainder subtracts ONLY the parent's own
+ * journaled buckets; folding the child buckets into the subtraction would
+ * under-count or erase the nested seat spend.
+ */
+export function deepTokenUsage(
+  stats: UsageStatsSource,
+  entries: readonly SessionEntry[],
+  singles: readonly (SubagentUsageSource | undefined)[],
+): TokenUsageBucket[] {
+  const parentBuckets = bucketsFromSession(entries);
+  const remainder = deepSeatRemainder(stats, parentBuckets);
+  return mergeBuckets(
+    parentBuckets,
+    bucketsFromSubagents(singles),
+    remainder === undefined ? [] : [remainder],
+  );
 }
