@@ -257,6 +257,7 @@ describe("deploy-prod.yml guards", () => {
       "Deploy serving version (prod)",
       "Re-capture live Worker version",
       "Assert zero orphan Apps (post-deploy)",
+      "Open the review routing gate (idempotent)",
     ]) {
       expectSecrets(n, [TOKEN]);
     }
@@ -278,6 +279,7 @@ describe("deploy-prod.yml guards", () => {
         "Assert zero orphan Apps (pre-deploy gate)",
         "Deploy serving version (prod)",
         "Deploy Worker (prod)",
+        "Open the review routing gate (idempotent)",
         "Re-capture live Worker version",
         "Re-run App attribution repair (workspace-backfill.sql, idempotent)",
         "Verify Cloudflare account",

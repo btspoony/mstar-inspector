@@ -303,6 +303,12 @@ jobs:
       # pre-deploy gate approved; the same question is asked against it.
       - name: Assert zero orphan Apps (post-deploy)
         run: bun scripts/assert-tenant-attribution.ts --db mstar-inspector-db
+      # The routing gate is deployment-owned (docs/deploy.md): a successful
+      # deploy opens `review.route.workflow` so the just-shipped Workflow route
+      # serves. The upsert is idempotent and runs against THIS environment's
+      # own database — the operator surface no longer writes it.
+      - name: Open the review routing gate (idempotent)
+        run: bunx wrangler d1 execute mstar-inspector-db --remote --file scripts/review-route-gate.sql
 
       - name: Upload deploy evidence artifacts
         uses: actions/upload-artifact@v7

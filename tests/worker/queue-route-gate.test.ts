@@ -25,12 +25,16 @@ afterAll(() => {
 const KEY = "review.route.workflow";
 
 let consumerLoads = 0;
+const settlements: string[] = [];
 
 async function fakeConsumer(): Promise<never> {
   consumerLoads += 1;
   return {
     createReviewConsumer: () => async (): Promise<{ errors: number }> => ({ errors: 0 }),
     createWorkflowInstance: async () => {},
+    settleHaltedBatch: async (_batch: unknown, _env: unknown, state: string) => {
+      settlements.push(state);
+    },
   } as never;
 }
 
@@ -45,6 +49,7 @@ function store(db: TestD1, value: string): void {
 
 function reset(): void {
   consumerLoads = 0;
+  settlements.length = 0;
   logLines.length = 0;
   warnLines.length = 0;
 }
@@ -56,10 +61,11 @@ describe("the review route's deployment gate", () => {
 
     await runReviewQueueBatch(BATCH, { DB: db } as never, CTX, fakeConsumer);
 
-    expect(consumerLoads).toBe(0);
+    expect(settlements).toEqual(["blocked-deployment-gate"]);
     expect(logLines).toHaveLength(1);
     const line = JSON.parse(logLines[0]!) as Record<string, unknown>;
     expect(line.event).toBe("review_route_gate_closed");
+    expect(line.answer).toBe("blocked-deployment-gate");
     expect(line.review_route_workflow).toBe("off");
     expect(line.gate_saved).toBe(false);
     expect(line.gate_degraded).toBe(false);
@@ -80,11 +86,15 @@ describe("the review route's deployment gate", () => {
     );
 
     expect(consumerLoads).toBe(1);
+    expect(settlements).toHaveLength(0);
     expect(logLines).toHaveLength(0);
     expect(warnLines).toHaveLength(0);
   });
 
-  test("an unreadable row refuses, and says why", async () => {
+  test("a readable but untrusted row is closed — it settles as blocked, not as a fault", async () => {
+    // The row WAS read; the value is simply not on/off. The gate's documented
+    // answer is the safe default `off`, which the batch settles visibly. Only a
+    // read that could not happen is unknowable.
     for (const raw of ["on ", " on", "on\t", "\non", "ON", "1", "true", "maybe"]) {
       reset();
       const db = createMigratedTestD1();
@@ -92,18 +102,19 @@ describe("the review route's deployment gate", () => {
 
       await runReviewQueueBatch(BATCH, { DB: db } as never, CTX, fakeConsumer);
 
-      expect(consumerLoads).toBe(0);
-      expect(logLines).toHaveLength(0);
-      expect(warnLines).toHaveLength(1);
-      const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;
-      expect(line.event).toBe("review_route_gate_closed");
-      expect(line.gate_degraded).toBe(true);
-      expect(line.gate_reason).toBe("untrusted");
-      expect(line.gate_rejected).toBe(JSON.stringify(raw));
+      expect(settlements, raw).toEqual(["blocked-deployment-gate"]);
+      expect(logLines, raw).toHaveLength(1);
+      expect(warnLines, raw).toHaveLength(0);
+      const line = JSON.parse(logLines[0]!) as Record<string, unknown>;
+      expect(line.event, raw).toBe("review_route_gate_closed");
+      expect(line.answer, raw).toBe("blocked-deployment-gate");
+      expect(line.gate_degraded, raw).toBe(true);
+      expect(line.gate_reason, raw).toBe("untrusted");
+      expect(line.gate_rejected, raw).toBe(JSON.stringify(raw));
     }
   });
 
-  test("a failing read refuses too — never permission", async () => {
+  test("a failing read refuses too — never permission, and nothing is settled", async () => {
     reset();
     const failing = {
       prepare() {
@@ -111,10 +122,14 @@ describe("the review route's deployment gate", () => {
       },
     };
 
-    await runReviewQueueBatch(BATCH, { DB: failing } as never, CTX, fakeConsumer);
+    await expect(runReviewQueueBatch(BATCH, { DB: failing } as never, CTX, fakeConsumer)).rejects.toThrow(
+      "unreadable",
+    );
 
-    expect(consumerLoads).toBe(0);
+    expect(settlements).toHaveLength(0);
+    expect(logLines).toHaveLength(0);
     const line = JSON.parse(warnLines[0]!) as Record<string, unknown>;
+    expect(line.answer).toBe("unreadable-state");
     expect(line.gate_reason).toBe("read-failed");
   });
 });

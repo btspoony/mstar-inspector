@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { RECONCILE_FIELDS, type ReconcileConfig, type ReconcileLimits, type ReconcileValues } from "../../contracts/reconcile-settings";
 import { SWEEP_FIELDS, type SweepConfig, type SweepField, type SweepLimits, type SweepValues } from "../../contracts/sweep-settings";
+import { REVIEW_ANSWERS, type ReviewsRunAnswer } from "../../contracts/review-answer";
 import { fetchJson } from "../api";
 
 const BASE = "/_internal_admin/api";
@@ -166,6 +167,28 @@ export type RouteWorkflowConfig = {
   rejected: string | null;
 };
 
+// The card's answer IS the shared derivation's state — the canonical union
+// comes from the contract, so a new state minted server-side is visible here
+// by structure, never by a string literal kept in parallel.
+export type ReviewsRunningAnswer = ReviewsRunAnswer;
+
+/**
+ * One operations answer for "are reviews running": the derived answer plus the
+ * two facts behind it that the page does not already carry (the routing gate is
+ * the top-level `routeWorkflow`). `pausedApps` is `null` when the App count
+ * could not be read — never `0`; `appsHref` is the workspace-scoped Apps list,
+ * `null` when no workspace ref could be resolved.
+ */
+export type ReviewsRunningConfig = {
+  answer: ReviewsRunningAnswer;
+  platform: { enabled: boolean; unreadable: boolean };
+  // Which read failed on `unreadable-state` — gate, platform, maintenance —
+  // so the card names the failing fact instead of blaming the gate.
+  unreadableSource: "gate" | "platform" | "maintenance" | null;
+  pausedApps: number | null;
+  appsHref: string | null;
+};
+
 /**
  * The maintenance window (D20): whether the platform is closed, the Operator's
  * reason and when it closed. `reason` / `since` are `null` whenever the window
@@ -210,6 +233,7 @@ export type RuntimeConfig = {
   attemptCap: AttemptCapConfig | null;
   lostReplySettle: LostReplySettleConfig | null;
   routeWorkflow: RouteWorkflowConfig | null;
+  reviewsRunning: ReviewsRunningConfig | null;
   maintenance: MaintenanceConfig | null;
   admissionDrops24h: AdmissionDropCounts | null;
   queue: QueueBacklog | null;
@@ -384,6 +408,40 @@ function parseQueue(row: Json): QueueBacklog | null {
   };
 }
 
+function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
+  const raw = row.reviewsRunning;
+  if (typeof raw !== "object" || raw === null) return null;
+  const block = raw as Json;
+  const platform = block.platform;
+  if (typeof platform !== "object" || platform === null) return null;
+  const facts = platform as Json;
+  if (
+    !(REVIEW_ANSWERS as readonly string[]).includes(block.answer as string) ||
+    typeof facts.enabled !== "boolean" ||
+    typeof facts.unreadable !== "boolean"
+  ) {
+    return null;
+  }
+  if (block.pausedApps !== null && typeof block.pausedApps !== "number") return null;
+  const source = block.unreadableSource;
+  if (
+    source !== undefined &&
+    source !== null &&
+    source !== "gate" &&
+    source !== "platform" &&
+    source !== "maintenance"
+  ) {
+    return null;
+  }
+  return {
+    answer: block.answer as ReviewsRunningAnswer,
+    platform: { enabled: facts.enabled, unreadable: facts.unreadable },
+    unreadableSource: source ?? null,
+    pausedApps: block.pausedApps as number | null,
+    appsHref: typeof block.appsHref === "string" ? block.appsHref : null,
+  };
+}
+
 function parseGithubRateLimited(row: Json): number {
   const value = row.githubRateLimited24h;
   return typeof value === "number" ? value : 0;
@@ -404,6 +462,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     attemptCap: parseAttemptCap(body),
     lostReplySettle: parseLostReplySettle(body),
     routeWorkflow: parseRouteWorkflow(body),
+    reviewsRunning: parseReviewsRunning(body),
     maintenance: parseMaintenance(body),
     admissionDrops24h: parseAdmissionDrops(body),
     queue: parseQueue(body),
@@ -666,25 +725,6 @@ export async function setLostReplySettleMs(
     }
   }
   return { ...stored, settleMs, degraded: false };
-}
-
-/**
- * Save the route switch, answering the gate read-back the server returned —
- * the mode the queue handler will act on, not this page's assumption. `null`
- * means the write landed but its echo carried no readable gate answer: the
- * request value is NOT substituted for it, because a page that shows `on`
- * while the gate reads `off` is the failure this control exists to prevent.
- * The caller re-reads the store and renders that answer.
- */
-export async function setRouteWorkflow(
-  value: "on" | "off",
-): Promise<RouteWorkflowConfig | null> {
-  const answer = await write("PATCH", "/runtime", { routeWorkflow: { value } });
-  const saved =
-    typeof answer === "object" && answer !== null ? (answer as Json).routeWorkflow : undefined;
-  return typeof saved === "object" && saved !== null
-    ? routeWorkflowGate((saved as Json).effective)
-    : null;
 }
 
 /**

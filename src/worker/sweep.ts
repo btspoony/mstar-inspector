@@ -9,7 +9,7 @@ import type { ConsumerLog } from "../pipeline/consumer";
 import { redactExactSecrets, redactSecrets } from "../pipeline/redact";
 import { createReviewBotsStore } from "../dashboard/apps-store";
 import { expireLapsedInvites } from "../dashboard/invite-store";
-import { getMaintenanceMode, getSweepSettings, maintenanceClosed } from "../dashboard/runtime-config-store";
+import { getMaintenanceMode, getSweepSettings, maintenanceClosed, reviewRunState } from "../dashboard/runtime-config-store";
 import { retryMaintenanceReplay } from "../admin/maintenance-replay";
 import {
   MAINTENANCE_DEFERRED_STAGE,
@@ -17,6 +17,7 @@ import {
   sqlStageList,
 } from "../store/failure-store";
 import { QUOTA_STAGE } from "../contracts/failure-stages";
+import { REVIEW_HALT_CODES } from "../contracts/failure-codes";
 import type { D1Like } from "../store/types";
 import type { WebhookStageWarnLog } from "./handlers";
 
@@ -201,7 +202,8 @@ const QUOTA_SPREAD_SQL = `(SELECT COUNT(DISTINCT t.workspace_id)
 const FAILURE_PAGING_WHERE_SQL = `created_at > datetime('now', ?1)
          AND (stage NOT IN (${sqlStageList(PAGING_EXCLUDED_STAGES)})
               OR (stage = '${QUOTA_STAGE}' AND ${QUOTA_SPREAD_SQL}))
-         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'`;
+         AND stage <> '${MAINTENANCE_DEFERRED_STAGE}'
+         AND COALESCE(error_code, '') NOT IN (${sqlStageList(REVIEW_HALT_CODES)})`;
 
 const MAINTENANCE_DEFERRED_COUNT_SQL = `SELECT COUNT(*) AS count FROM review_failures
        WHERE stage = '${MAINTENANCE_DEFERRED_STAGE}'
@@ -441,7 +443,13 @@ export async function runSweep(db: D1Like, deps: SweepDeps = {}): Promise<SweepR
         "comment trigger outbox sweep failed — continuing",
       );
     }
-    if (outboxRemaining > 0 && replayOpen) {
+    // The replay outbox is the ONE lane a deferred row can leave by, and it
+    // only runs while reviews can actually run: a send while the platform is
+    // paused or the route gate closed would be acked by `settleHaltedBatch`
+    // and stamped `sent` without ever reviewing. Unreadability keeps the lane
+    // closed too — the queue's own halt branch does the same.
+    const reviewsRunning = replayOpen && (await reviewRunState(db)).state === "running";
+    if (outboxRemaining > 0 && replayOpen && reviewsRunning) {
       try {
         const now = new Date().toISOString();
         const tried: string[] = [];

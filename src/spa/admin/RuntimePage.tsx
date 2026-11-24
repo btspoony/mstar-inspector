@@ -29,7 +29,6 @@ import {
   setLostReplySettleMs,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
-  setRouteWorkflow,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
@@ -41,6 +40,8 @@ import {
   type MaintenanceConfig,
   type QueueBacklog,
   type RecheckAssignmentConfig,
+  type ReviewsRunningAnswer,
+  type ReviewsRunningConfig,
   type RouteWorkflowConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
@@ -80,6 +81,106 @@ function routeWorkflowEffective(locale: Locale, gate: RouteWorkflowConfig): stri
 /** A failed read trusts no stored value; an invalid row distrusts only its own field. */
 function sweepFieldUnreadable(sweep: SweepConfig, field: SweepField): boolean {
   return sweep.degraded && (sweep.invalid.length === 0 || sweep.invalid.includes(field));
+}
+
+const REVIEWS_ANSWER_KEYS: Record<ReviewsRunningAnswer, DictionaryKey> = {
+  running: "admin.runtime.reviewsAnswerRunning",
+  "paused-platform": "admin.runtime.reviewsAnswerPausedPlatform",
+  "blocked-deployment-gate": "admin.runtime.reviewsAnswerBlockedDeploymentGate",
+  "paused-maintenance": "admin.runtime.reviewsAnswerPausedMaintenance",
+  "unreadable-state": "admin.runtime.reviewsAnswerUnreadableState",
+};
+
+const REVIEWS_UNREADABLE_KEYS: Record<string, DictionaryKey> = {
+  maintenance: "admin.runtime.reviewsAnswerUnreadableMaintenance",
+  platform: "admin.runtime.reviewsAnswerUnreadablePlatform",
+  gate: "admin.runtime.reviewsAnswerUnreadableGate",
+};
+
+function reviewsPlatform(locale: Locale, platform: ReviewsRunningConfig["platform"]): string {
+  if (platform.unreadable) return t(locale, "admin.runtime.reviewsPlatformUnreadable");
+  return t(
+    locale,
+    platform.enabled ? "admin.runtime.reviewsPlatformOn" : "admin.runtime.reviewsPlatformOff",
+  );
+}
+
+/**
+ * The one answer to "are reviews running": the derived sentence plus the three
+ * gate facts behind it. The paused-App count links to the App list instead of
+ * repeating its per-App toggles here.
+ */
+function ReviewsRunningCard({
+  locale,
+  data,
+  routeWorkflow,
+}: {
+  locale: Locale;
+  data: ReviewsRunningConfig;
+  routeWorkflow: RouteWorkflowConfig | null;
+}) {
+  return (
+    <SectionCard tier="primary">
+      <CardHeader>
+        <SectionCardTitle>{t(locale, "admin.runtime.reviewsTitle")}</SectionCardTitle>
+      </CardHeader>
+      <CardContent>
+        <p className="text-sm text-muted-foreground">{t(locale, "admin.runtime.reviewsDescription")}</p>
+        <p className="mt-4 text-base font-medium" data-reviews-running="answer">
+          {t(
+            locale,
+            data.answer === "unreadable-state" && data.unreadableSource !== null
+              ? (REVIEWS_UNREADABLE_KEYS[data.unreadableSource] ??
+                  "admin.runtime.reviewsAnswerUnreadableState")
+              : REVIEWS_ANSWER_KEYS[data.answer],
+          )}
+        </p>
+        <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-3">
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsPlatformLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="platform">
+              {reviewsPlatform(locale, data.platform)}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsRouteLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="route">
+              {t(locale, routeWorkflow === null
+                ? "admin.runtime.reviewsRouteUnreadable"
+                : routeWorkflow.reason === "read-failed"
+                  ? "admin.runtime.reviewsRouteDegraded"
+                  : routeWorkflow.degraded
+                    // Readable but not on/off: the gate's safe default is closed
+                    // and deliveries ARE settled as blocked — not unknowable.
+                    ? "admin.runtime.reviewsRouteUntrusted"
+                    : routeWorkflow.mode === "on"
+                      ? "admin.runtime.reviewsRouteOn"
+                      : "admin.runtime.reviewsRouteOff")}
+            </dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">{t(locale, "admin.runtime.reviewsPausedAppsLabel")}</dt>
+            <dd className="font-medium" data-reviews-running="paused-apps">
+              {data.pausedApps === null
+                ? t(locale, "admin.runtime.reviewsPausedAppsUnreadable")
+                : data.pausedApps}
+            </dd>
+          </div>
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground" data-reviews-running="precedence">
+          {t(locale, "admin.runtime.reviewsPrecedence")}
+        </p>
+        {data.appsHref === null ? null : (
+          <a
+            className="mt-4 inline-flex w-fit text-sm text-primary hover:underline"
+            href={data.appsHref}
+          >
+            {t(locale, "admin.runtime.reviewsPausedAppsLink")}
+          </a>
+        )}
+      </CardContent>
+    </SectionCard>
+  );
 }
 
 function CardOutcome({
@@ -302,7 +403,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
   const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
-  const [routeWorkflowTarget, setRouteWorkflowTarget] = useState<"on" | "off" | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const concurrencySignal = useSaveSignal();
@@ -313,7 +413,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const recheckAssignmentSignal = useSaveSignal();
   const lostReplySignal = useSaveSignal();
   const attemptCapSignal = useSaveSignal();
-  const routeWorkflowSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
@@ -327,7 +426,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "recheckAssignment"
       | "lostReplySettle"
       | "attemptCap"
-      | "routeWorkflow"
       | "maintenance";
   } | null>(null);
 
@@ -670,49 +768,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       setBusy(false);
     }
   }
-
-  async function onSaveRouteWorkflow(value: "on" | "off"): Promise<void> {
-    if (busy) return;
-    setBusy(true);
-    setNotice(null);
-    routeWorkflowSignal.start();
-    try {
-      const saved = await setRouteWorkflow(value);
-      const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
-      if (answer === null) {
-        setRouteWorkflowTarget(null);
-        setNotice({
-          kind: "error",
-          message: t(locale, "admin.runtime.routeWorkflowUnconfirmed"),
-          source: "routeWorkflow",
-        });
-        routeWorkflowSignal.fail();
-        return;
-      }
-      update((data) => ({ ...data, routeWorkflow: answer }));
-      setRouteWorkflowTarget(null);
-      setNotice({
-        kind: "success",
-        message: t(locale, "admin.runtime.routeWorkflowSaved"),
-        source: "routeWorkflow",
-      });
-      routeWorkflowSignal.succeed();
-    } catch (error) {
-      const generic = t(locale, "admin.runtime.routeWorkflowFailed");
-      setNotice({
-        kind: "error",
-        message:
-          error instanceof AdminWriteError
-            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
-            : generic,
-        source: "routeWorkflow",
-      });
-      routeWorkflowSignal.fail();
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function onSaveMaintenance(stored: MaintenanceConfig, enabled: boolean): Promise<void> {
     if (busy) return;
     setBusy(true);
@@ -772,11 +827,14 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const routeWorkflow = data.routeWorkflow;
           const drops = data.admissionDrops24h;
           const queue = data.queue;
+          const reviewsRunning = data.reviewsRunning;
           const maintenance = data.maintenance;
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
-          const routeWorkflowOn = (routeWorkflowTarget ?? routeWorkflow?.mode ?? "off") === "on";
           return (
           <div className="flex flex-col gap-4">
+            {reviewsRunning === null ? null : (
+              <ReviewsRunningCard locale={locale} data={reviewsRunning} routeWorkflow={routeWorkflow} />
+            )}
             {maintenance === null ? null : (
             <SectionCard tier="secondary">
               <CardHeader>
@@ -1117,9 +1175,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.routeWorkflowDescription")}
                 </p>
-                {notice?.source === "routeWorkflow" ? (
-                  <CardOutcome notice={notice} status={routeWorkflowSignal.status} />
-                ) : null}
                 <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">
@@ -1138,40 +1193,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     </dd>
                   </div>
                 </dl>
-                <form
-                  className="mt-4 flex flex-wrap items-end gap-2"
-                  data-route-workflow="form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void onSaveRouteWorkflow(routeWorkflowOn ? "on" : "off");
-                  }}
-                >
-                  <Toggle
-                    variant="outline"
-                    pressed={routeWorkflowOn}
-                    disabled={busy}
-                    aria-label={t(locale, "admin.flags.stateAria", {
-                      flag: t(locale, "admin.runtime.routeWorkflowTitle"),
-                      state: t(
-                        locale,
-                        routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff",
-                      ),
-                    })}
-                    onPressedChange={(next) => setRouteWorkflowTarget(next ? "on" : "off")}
-                  >
-                    {t(locale, routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff")}
-                  </Toggle>
-                  <Button
-                    type="submit"
-                    disabled={busy}
-                    status={
-                      routeWorkflowSignal.status === "idle" ? undefined : routeWorkflowSignal.status
-                    }
-                  >
-                    {t(locale, "admin.runtime.routeWorkflowSave")}
-                  </Button>
-                  <SaveInFlight show={routeWorkflowSignal.status === "loading"} locale={locale} />
-                </form>
               </CardContent>
             </SectionCard>
             )}

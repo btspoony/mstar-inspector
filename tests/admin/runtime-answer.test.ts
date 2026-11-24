@@ -1,0 +1,395 @@
+import { describe, expect, test } from "bun:test";
+import worker from "../../src/worker/index";
+import type { Env } from "../../src/worker/env";
+import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { reviewRunState } from "../../src/dashboard/runtime-config-store";
+
+const SESSION_SECRET = ["test", "reviews", "answer", "session", "32-bytes!"].join("-");
+const OPERATOR = "Support-Bot";
+
+function envFor(db: TestD1): Env {
+  return {
+    REVIEW_QUEUE: { send: async () => {}, metrics: async () => ({ backlogCount: 0, backlogBytes: 0 }) },
+    IDEMPOTENCY_KV: { get: async () => null, put: async () => {} },
+    GITHUB_OAUTH_CLIENT_ID: "oauth-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: "oauth-client-secret",
+    DEPLOYMENT_MODE: "saas",
+    DASHBOARD_SESSION_SECRET: SESSION_SECRET,
+    PLATFORM_OPERATORS: OPERATOR.toLowerCase(),
+    DB: db,
+  } as unknown as Env;
+}
+
+function seed(db: TestD1, sql: string, ...params: Array<string | number | null>): void {
+  db.raw.prepare(sql).run(...params);
+}
+
+function seedOperator(db: TestD1): void {
+  seed(
+    db,
+    "INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)",
+    crypto.randomUUID(),
+    OPERATOR,
+    new Date().toISOString(),
+  );
+}
+
+function setPlatformSwitch(db: TestD1, enabled: 0 | 1): void {
+  seed(
+    db,
+    "INSERT INTO server_flags (key, enabled, updated_at, updated_by) VALUES ('review_global', ?, ?, 'fixture')",
+    enabled,
+    new Date().toISOString(),
+  );
+}
+
+function setRouteGate(db: TestD1, value: string): void {
+  seed(
+    db,
+    "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.route.workflow', ?, ?)",
+    value,
+    new Date().toISOString(),
+  );
+}
+
+async function readAnswer(db: TestD1): Promise<{
+  answer: string;
+  platform: { enabled: boolean; unreadable: boolean };
+  unreadableSource: "gate" | "platform" | "maintenance" | null;
+  pausedApps: number | null;
+  appsHref: string | null;
+}> {
+  const res = await worker.fetch(
+    new Request("https://worker.local/_internal_admin/api/runtime", {
+      headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+    }),
+    envFor(db),
+  );
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { reviewsRunning: never };
+  return body.reviewsRunning;
+}
+
+function fixture(): TestD1 {
+  const db = createMigratedTestD1();
+  seedOperator(db);
+  return db;
+}
+
+describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
+  test("platform on and the routing gate on answer running", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    expect(await readAnswer(db)).toEqual({
+      answer: "running",
+      platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
+      pausedApps: 0,
+      appsHref: null,
+    });
+  });
+
+  test("running with a closed maintenance window answers paused-maintenance, and the platform block stays truthful", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 1);
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+      new Date().toISOString(),
+    );
+    // The answer names the window, but the platform switch is still ON —
+    // folding maintenance into `paused-platform` would contradict this block.
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "paused-maintenance",
+      platform: { enabled: true, unreadable: false },
+    });
+    seed(
+      db,
+      "UPDATE review_runtime_settings SET value = '0' WHERE key = 'platform.maintenance.enabled'",
+    );
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "running",
+      platform: { enabled: true, unreadable: false },
+    });
+  });
+
+  test("a real platform pause keeps answering paused-platform under maintenance — the switch's own cause wins", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 0);
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+      new Date().toISOString(),
+    );
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "paused-platform",
+      platform: { enabled: false, unreadable: false },
+    });
+  });
+
+  test("an unreadable maintenance read is an unknowable fact — unreadable-state, never a pause claim", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 1);
+    // The window cannot be READ. A closed-looking guess would mint
+    // `paused-maintenance` (a proven cause it is not) or `running` (unlocking
+    // traffic on a settings outage) — the derivation refuses both.
+    const unreadable = { enabled: false, reason: null, since: null, unreadable: true };
+    const run = await reviewRunState(db, unreadable);
+    expect(run.state).toBe("unreadable-state");
+    expect(run.unreadableSource).toBe("maintenance");
+  });
+
+  test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {
+    const db = fixture();
+    setPlatformSwitch(db, 0);
+    expect(await readAnswer(db)).toEqual({
+      answer: "blocked-deployment-gate",
+      platform: { enabled: false, unreadable: false },
+      unreadableSource: null,
+      pausedApps: 0,
+      appsHref: null,
+    });
+  });
+
+  test("an unreadable platform switch answers unreadable-state, never blocked and never running", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      {
+        ...envFor(db),
+        DB: {
+          prepare: (sql: string) => {
+            if (sql.includes("server_flags")) throw new Error("flags unavailable");
+            return db.prepare(sql);
+          },
+          batch: (statements: never[]) => db.batch(statements),
+        },
+      } as unknown as Env,
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      reviewsRunning: { answer: string; platform: unknown; unreadableSource: unknown };
+    };
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.reviewsRunning.unreadableSource).toBe("platform");
+    expect(body.reviewsRunning.platform).toEqual({ enabled: false, unreadable: true });
+  });
+
+  test("the platform switch off answers paused-platform even with the gate on", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 0);
+    expect(await readAnswer(db)).toEqual({
+      answer: "paused-platform",
+      platform: { enabled: false, unreadable: false },
+      unreadableSource: null,
+      pausedApps: 0,
+      appsHref: null,
+    });
+  });
+
+  test("a routing gate that was never set answers blocked-deployment-gate", async () => {
+    const db = fixture();
+    expect(await readAnswer(db)).toEqual({
+      answer: "blocked-deployment-gate",
+      platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
+      pausedApps: 0,
+      appsHref: null,
+    });
+  });
+
+  test("a readable but untrusted gate answers blocked-deployment-gate — closed is settled, not unknown", async () => {
+    const db = fixture();
+    // A readable row the gate refuses to read as on/off: the documented answer is
+    // the safe default `off`, which the queue settles. This is NOT a read fault.
+    setRouteGate(db, "ON");
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      envFor(db),
+    );
+    const body = (await res.json()) as {
+      reviewsRunning: { answer: string };
+      routeWorkflow: { mode: string; degraded: boolean; reason: string };
+    };
+    expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
+    expect(body.routeWorkflow).toMatchObject({ mode: "off", degraded: true, reason: "untrusted" });
+  });
+
+  test("a gate READ FAULT answers unreadable-state — the row could not be asked", async () => {
+    const db = fixture();
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      {
+        ...envFor(db),
+        // Only the GATE's own point read fails; every other settings reader keeps
+        // working, so the fault is the gate's and nothing else's.
+        DB: {
+          prepare: (sql: string) => {
+            const statement = db.prepare(sql) as unknown as Record<string, unknown> & {
+              bind: (...args: unknown[]) => unknown;
+            };
+            return new Proxy(statement, {
+              get(target, property, receiver) {
+                if (property !== "bind") return Reflect.get(target, property, receiver);
+                return (...args: unknown[]) => {
+                  if (args[0] === "review.route.workflow") throw new Error("settings unavailable");
+                  return target.bind(...args);
+                };
+              },
+            });
+          },
+          batch: (statements: never[]) => db.batch(statements),
+        },
+      } as unknown as Env,
+    );
+    const body = (await res.json()) as {
+      reviewsRunning: { answer: string };
+      routeWorkflow: { degraded: boolean; reason: string };
+    };
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.routeWorkflow).toMatchObject({ degraded: true, reason: "read-failed" });
+  });
+
+  test("the Apps link is workspace-scoped when the operator has a workspace", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    seed(
+      db,
+      "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws-admin', 'admin-ws', 'Admin', NULL, ?, NULL)",
+      new Date().toISOString(),
+    );
+    const operatorId = db.raw
+      .prepare("SELECT id FROM users WHERE github_login = ?")
+      .get(OPERATOR) as { id: string };
+    seed(
+      db,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws-admin', ?, 'owner', ?)",
+      operatorId.id,
+      new Date().toISOString(),
+    );
+    expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-admin/apps");
+  });
+
+  test("the Apps link prefers a workspace the operator manages over a member-only one", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    seed(
+      db,
+      "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws-viewer', 'viewer-ws', 'A viewer', NULL, ?, NULL), ('ws-managed', 'managed-ws', 'Z managed', NULL, ?, NULL)",
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+    const operatorId = db.raw
+      .prepare("SELECT id FROM users WHERE github_login = ?")
+      .get(OPERATOR) as { id: string };
+    seed(
+      db,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws-viewer', ?, 'member', ?), ('ws-managed', ?, 'admin', ?)",
+      operatorId.id,
+      new Date().toISOString(),
+      operatorId.id,
+      new Date().toISOString(),
+    );
+    // 'A viewer' sorts first by name, so it is what memberships[0] would pick —
+    // but a member cannot change review state there, so the link names the
+    // managed workspace.
+    expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-managed/apps");
+  });
+
+  test("the card and the queue read ONE state machine", async () => {
+    // The payload answer is the shared derivation verbatim — the queue settles
+    // by the same value, so the card can never name a cause the batch did not act on.
+    const cases: Array<{ gate: string | null; flag: 0 | 1 | null; maintenance?: boolean }> = [
+      { gate: "on", flag: 1 },
+      { gate: "on", flag: 0 },
+      { gate: null, flag: 1 },
+      { gate: null, flag: 0 },
+      { gate: "ON", flag: 1 },
+      // The maintenance overlay lives INSIDE the derivation — a running state
+      // under a closed window answers paused-maintenance on both surfaces.
+      { gate: "on", flag: 1, maintenance: true },
+      { gate: "on", flag: 0, maintenance: true },
+    ];
+    for (const entry of cases) {
+      const db = fixture();
+      if (entry.gate !== null) setRouteGate(db, entry.gate);
+      if (entry.flag !== null) setPlatformSwitch(db, entry.flag);
+      if (entry.maintenance === true) {
+        seed(
+          db,
+          "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+          new Date().toISOString(),
+        );
+      }
+      const label = JSON.stringify(entry);
+      expect((await readAnswer(db)).answer, label).toBe((await reviewRunState(db)).state);
+    }
+  });
+
+  test("a read fault is never folded into blocked-deployment-gate", async () => {
+    // Same gate row, same flag: only the READ fault differs, and the answers
+    // must differ too — the card's blocked copy promises a settlement the fault
+    // path never performs.
+    const closed = fixture();
+    expect((await readAnswer(closed)).answer).toBe("blocked-deployment-gate");
+    // An untrusted readable row shares the blocked answer, because it IS closed.
+    const untrusted = fixture();
+    setRouteGate(untrusted, "ON");
+    expect((await readAnswer(untrusted)).answer).toBe("blocked-deployment-gate");
+
+    const degraded = fixture();
+    setRouteGate(degraded, "on");
+    const faulting = {
+      prepare: (sql: string) => {
+        if (sql.includes("server_flags")) throw new Error("flags unavailable");
+        return degraded.prepare(sql);
+      },
+      batch: (statements: never[]) => degraded.batch(statements),
+    };
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      { ...envFor(degraded), DB: faulting } as unknown as Env,
+    );
+    const body = (await res.json()) as { reviewsRunning: { answer: string } };
+    expect(body.reviewsRunning.answer).toBe("unreadable-state");
+    expect(body.reviewsRunning.answer).not.toBe("blocked-deployment-gate");
+  });
+
+  test("the paused-App count reads the App pause of live Apps only", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    seedBot(db, "bot-live-paused", 1);
+    seedBot(db, "bot-live-running", 2);
+    seedBot(db, "bot-deleted-paused", 3);
+    seed(
+      db,
+      "UPDATE review_bots SET review_enabled = 0 WHERE id IN ('bot-live-paused', 'bot-deleted-paused')",
+    );
+    seed(db, "UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-deleted-paused'");
+    // A per-repository pause answers a different question and is not this count.
+    const target = seedTarget(db, "bot-live-running");
+    seed(db, "UPDATE review_targets SET review_enabled = 0 WHERE id = ?", target);
+
+    expect(await readAnswer(db)).toEqual({
+      answer: "running",
+      platform: { enabled: true, unreadable: false },
+      unreadableSource: null,
+      pausedApps: 1,
+      appsHref: null,
+    });
+  });
+});

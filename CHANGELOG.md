@@ -8,6 +8,14 @@ fragment format and the per-change commit flow.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-24
+
+### Changed
+
+- **The repositories list's default face shows only installed repositories**: rows whose installation has not reported its `repo_id` no longer sit in the default list — they move behind a counted 待安装（<n>）/ Awaiting install (<n>) tab that appears only while such rows exist. The fixed 所有仓库 aggregate row and the header metric band stay workspace-wide, and when the last pending target becomes installed the selection falls back to 可用仓库 / Available.
+- **The green state tag now reads 可审查 / Reviewable** instead of 审查中 / Reviewing, so it no longer suggests a review is currently running.
+- **Draft review and the business pause are now workspace defaults**: the two admission switches a repository owned alone become `workspaces.default_review_drafts` and `workspaces.default_review_enabled` (migration 0108), edited on the 所有仓库 page. A target that follows the workspace defaults answers them from there; turning inheritance off snapshots the values it was running with into its row — in the same statement as the flag — so the toggle still changes no live behaviour. The upgrade detaches only a following repository whose admission answer is not the new default, keeping its behaviour. The repositories list, the application list and the application detail report the EFFECTIVE pause.
+
 ## [1.1.0] - 2026-11-24
 
 ### Changed

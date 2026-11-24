@@ -1413,3 +1413,26 @@ export async function clearCommentClaimPayload(db: D1Like, payload: ReviewJobPay
     .bind(payload.installation_id, payload.owner, payload.repo, payload.pr_number, payload.comment_id)
     .run();
 }
+
+/**
+ * Close a comment claim the halt settlement ended WITHOUT a review: the row
+ * flips to 'consumed' and drops its payload, so the sweep's outbox scan (which
+ * reads only 'queued' rows) and the orphaned-payload recovery pass (which
+ * requires `payload_json`) both leave it alone — the mention cannot resend
+ * itself into a platform that cannot run it, or replay on resume. The
+ * tombstone stays the dedup proof: a redelivery of the same comment finds a
+ * non-'queued' row and acks without running, and a mention that was never
+ * claimed ('expired') is left as it is.
+ */
+export async function closeCommentClaim(db: D1Like, payload: ReviewJobPayload): Promise<void> {
+  if (payload.comment_id === undefined) return;
+  await db
+    .prepare(
+      `UPDATE comment_trigger_claims
+          SET state = 'consumed', consumed_ms = COALESCE(consumed_ms, ?), payload_json = NULL
+        WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND comment_id = ?
+          AND state IN ('queued', 'consumed')`,
+    )
+    .bind(Date.now(), payload.installation_id, payload.owner, payload.repo, payload.pr_number, payload.comment_id)
+    .run();
+}

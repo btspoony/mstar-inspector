@@ -42,6 +42,8 @@ import {
   getReviewRouteWorkflowGate,
   maintenanceClosed,
   readDefaultReviewLevel,
+  REVIEW_ROUTE_WORKFLOW_KEY,
+  reviewRunState,
 } from "../dashboard/runtime-config-store";
 import { checkEntitlement } from "../dashboard/entitlement";
 import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
@@ -766,12 +768,23 @@ type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRe
 
 type ReviewQueueConsumerModule = Pick<
   typeof ConsumerModule,
-  "createReviewConsumer" | "createWorkflowInstance"
+  | "createReviewConsumer"
+  | "createWorkflowInstance"
+  | "createProcessDeps"
+  | "deferMaintenanceBatch"
+  | "settleHaltedBatch"
 >;
 
 /**
- * ONE queue batch, end to end: the deployment gate, then the consumer through
+ * ONE queue batch, end to end: the shared run state, then the consumer through
  * the Workflow starter.
+ *
+ * The state is `reviewRunState` — the SAME derivation the operator answer
+ * reads, so the console and the queue can never name different causes for the
+ * same deployment. Two answers halt the batch visibly (`settleHaltedBatch`,
+ * each with its own failure code and Check settlement) and one is a read FAULT:
+ * nothing routes and nothing is fabricated as a pause, so the batch throws and
+ * the queue redelivers it instead of dropping reviews.
  *
  * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
  * test can drive this wiring with a fake module instead of stubbing
@@ -785,34 +798,91 @@ export async function runReviewQueueBatch(
   ctx: ExecutionContext,
   loadConsumer: () => Promise<ReviewQueueConsumerModule> = () => import("../pipeline/consumer"),
 ): Promise<void> {
-  const gate = await getReviewRouteWorkflowGate(env.DB);
-  if (gate.mode !== "on") {
-    const line = JSON.stringify({
-      event: "review_route_gate_closed",
-      review_route_workflow: "off",
-      gate_saved: gate.saved,
-      gate_degraded: gate.degraded,
-      gate_reason: gate.reason ?? null,
-      gate_rejected: gate.rejected ?? null,
-      batch_messages: batch.messages.length,
-      msg: "review route is off (review.route.workflow) — the batch was acknowledged and no Workflow instance was created",
-    });
-    if (gate.degraded) console.warn(line);
-    else console.log(line);
+  const run = await reviewRunState(env.DB);
+  if (run.state === "running") {
+    const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
+    const workflow = env.REVIEW_WORKFLOW;
+    if (workflow === undefined) {
+      throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+    }
+    await createReviewConsumer(
+      env,
+      undefined,
+      {},
+      { waitUntil: (promise) => ctx.waitUntil(promise) },
+      (_deps, ref) => createWorkflowInstance(workflow, ref),
+    )(batch);
     return;
   }
-  const workflow = env.REVIEW_WORKFLOW;
-  if (workflow === undefined) {
-    throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
+  const gate = run.gate;
+  const fields = {
+    event: "review_route_gate_closed",
+    answer: run.state,
+    review_route_workflow: gate.mode,
+    gate_saved: gate.saved,
+    gate_degraded: gate.degraded,
+    gate_reason: gate.reason ?? null,
+    gate_rejected: gate.rejected ?? null,
+    platform_enabled: run.platform.enabled,
+    platform_unreadable: run.platform.unreadable,
+    batch_messages: batch.messages.length,
+  };
+  // A read fault is not a cause: nothing routed, nothing settled, batch thrown
+  // back for redelivery. `settleHaltedBatch` only accepts PROVEN halt states.
+  if (run.state === "unreadable-state") {
+    // `unreadableSource` names WHICH read failed — the gate's own fields stay
+    // printed beside it, so a healthy gate under a failed maintenance read
+    // can never look like a gate fault.
+    const source = run.unreadableSource ?? "gate";
+    console.warn(
+      JSON.stringify({
+        ...fields,
+        unreadable_source: source,
+        msg: "review run state could not be read — fail-closed: nothing routed, nothing settled, the batch is redelivered",
+      }),
+    );
+    throw new Error(
+      source === "platform"
+        ? "the platform review switch is unreadable — the batch is redelivered"
+        : source === "maintenance"
+          ? "the maintenance window is unreadable — the batch is redelivered"
+          : `the review route gate is unreadable (${gate.reason ?? "unknown"}) — the batch is redelivered`,
+    );
   }
-  const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
-  await createReviewConsumer(
-    env,
-    undefined,
-    {},
-    { waitUntil: (promise) => ctx.waitUntil(promise) },
-    (_deps, ref) => createWorkflowInstance(workflow, ref),
-  )(batch);
+  const consumer = await loadConsumer();
+  // The maintenance window defers EVERY settlement face, not just the running
+  // path: a halted batch acked here would drop the review without retry. The
+  // consumer's deferral path carries the halt through instead of
+  // `settleHaltedBatch` — a spent delivery still writes the pause/gate-cause
+  // row, settles its Check and stamps its own replay-outbox mark, so the
+  // sweep re-issues it once reviews run again. `paused-maintenance` is the
+  // derivation's own name for this defer: it carries no halt of its own, so a
+  // spent row is a genuine maintenance deferral, not a pause/gate row.
+  if (run.state === "paused-maintenance") {
+    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env), undefined);
+    return;
+  }
+  // A proven halt under a closed window defers too: this second read happens
+  // only for halt states (they skip the derivation's window read), so the
+  // answer and the action can never disagree. A stale OPEN answer is harmless
+  // — the batch then settles by its halt like it always did; never throws.
+  if (maintenanceClosed(await getMaintenanceMode(env.DB))) {
+    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env), run.state);
+    return;
+  }
+  if (run.state === "paused-platform") {
+    // The settlement logs the batch line itself; a second gate-shaped line here
+    // would name the wrong cause.
+    await consumer.settleHaltedBatch(batch, env, run.state);
+    return;
+  }
+  console.log(
+    JSON.stringify({
+      ...fields,
+      msg: `review route is closed (${REVIEW_ROUTE_WORKFLOW_KEY}) — every delivery in this batch is settled with a durable failure row and acked`,
+    }),
+  );
+  await consumer.settleHaltedBatch(batch, env, run.state);
 }
 
 export default {
