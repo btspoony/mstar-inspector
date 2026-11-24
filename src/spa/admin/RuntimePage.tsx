@@ -149,7 +149,7 @@ function ReviewsRunningCard({
         </dl>
         <a
           className="mt-4 inline-flex w-fit text-sm text-primary hover:underline"
-          href="/_internal_admin/bots"
+          href="/dashboard"
         >
           {t(locale, "admin.runtime.reviewsPausedAppsLink")}
         </a>

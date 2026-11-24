@@ -1401,9 +1401,8 @@ describe("Runtime screen", () => {
     );
     expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe("2");
     expect(
-      (surface.container.querySelector('a[href="/_internal_admin/bots"]') as unknown as Element | null)
-        ?.textContent,
-    ).toBe("Pause or resume a single App in the App list");
+      (surface.container.querySelector('a[href="/dashboard"]') as unknown as Element | null)?.textContent,
+    ).toBe("Pause or resume a single App in the App settings");
     await surface.close();
   });
 

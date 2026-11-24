@@ -1231,7 +1231,7 @@ export const en = {
       reviewsRouteUnreadable: "not reported by this server",
       reviewsPausedAppsLabel: "Apps with reviews paused",
       reviewsPausedAppsUnreadable: "not readable",
-      reviewsPausedAppsLink: "Pause or resume a single App in the App list",
+      reviewsPausedAppsLink: "Pause or resume a single App in the App settings",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
         "Reviews the pipeline refused to admit, counted by reason. A dropped review never started; the counts read the failure rows the pipeline already writes.",
