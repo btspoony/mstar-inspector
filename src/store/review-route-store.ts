@@ -277,6 +277,13 @@ function toObservation(value: unknown): AttemptObservation | null {
  * can attribute a failure to the head that was reviewed even when the host that
  * knew it is gone.
  *
+ * The value is bound through `json_quote`, not as bare text: `json_set`'s value
+ * argument is JSON-text-typed on some engines, so a digits-only SHA would land
+ * as a JSON NUMBER (which `toHandoff`'s string guard would then drop) and a bare
+ * SHA is not well-formed JSON at all (`json(?)` would raise `malformed JSON`).
+ * Quoting makes the stored leaf a string on every engine, which is what the
+ * reader's type check relies on.
+ *
  * The write is not guarded on an existing value: a re-prepared attempt resolves
  * its head again, and the LAST resolution is the one its paid step used. `false`
  * means no handoff row carries this attempt (a delivery that never reached
@@ -289,7 +296,7 @@ export async function recordReviewedHead(
   const written = await db
     .prepare(
       `UPDATE review_attempt_handoffs
-          SET payload_json = json_set(payload_json, '$.${REVIEWED_HEAD_KEY}', ?),
+          SET payload_json = json_set(payload_json, '$.${REVIEWED_HEAD_KEY}', json_quote(?)),
               updated_ms = ?
         WHERE attempt_id = ?`,
     )
