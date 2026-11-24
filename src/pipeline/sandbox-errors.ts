@@ -37,26 +37,47 @@ const CAUSE_MIN_SENSITIVE_CHARS = 4;
 const STDIN_WALK_DEPTH = 8;
 const STDIN_WALK_NODES = 2_000;
 
+/** An error name is a fixed vocabulary; only these characters are ever emitted. */
+const CAUSE_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.]*$/;
+
+/**
+ * The values one exec carries that its own exception text must never echo —
+ * plus whether that collection is COMPLETE. A walk that stopped at its own
+ * depth/node bound leaves values nobody can name, so a message cannot be
+ * proven clean and `execCause` must degrade instead of guessing.
+ */
+export type ExecSensitiveSet = {
+  readonly values: readonly string[];
+  readonly complete: boolean;
+};
+
 /**
  * The values one exec carries that its own exception text must never echo:
- * the shell command (whose interpolated values are the point), every env value,
- * the stdin payload, and every string leaf of that payload — the credential
- * transport is base64 JSON, and a provider key echoed by a platform error has
- * no recognizable shape of its own.
+ * the shell command (whose interpolated values are the point), every command
+ * token WITH and without its surrounding quotes (a platform error echoes the
+ * argument, not the quoting), every env value, the stdin payload, and every
+ * string leaf of that payload — the credential transport is base64 JSON, and a
+ * provider key echoed by a platform error has no recognizable shape of its own.
  */
 export function execSensitiveValues(
   command: string,
   opts?: { env?: Record<string, string>; stdin?: string },
-): string[] {
+): ExecSensitiveSet {
   const values = [command];
-  for (const token of command.split(/\s+/)) values.push(token);
+  for (const token of command.split(/\s+/)) {
+    values.push(token);
+    // `--token 'value'` is reported as `value`; keep both spellings.
+    const unquoted = token.replace(/^['"]+|['"]+$/g, "");
+    if (unquoted !== token) values.push(unquoted);
+  }
   for (const value of Object.values(opts?.env ?? {})) values.push(value);
   const stdin = opts?.stdin;
+  let complete = true;
   if (stdin !== undefined && stdin !== "") {
     values.push(stdin);
-    collectStrings(decodedStdin(stdin), values);
+    complete = collectStrings(decodedStdin(stdin), values);
   }
-  return values.filter((value) => value.length >= CAUSE_MIN_SENSITIVE_CHARS);
+  return { values: values.filter((value) => value.length >= CAUSE_MIN_SENSITIVE_CHARS), complete };
 }
 
 function decodedStdin(stdin: string): unknown {
@@ -75,30 +96,53 @@ function decodedStdin(stdin: string): unknown {
   }
 }
 
-function collectStrings(value: unknown, into: string[], depth = 0, budget = { nodes: STDIN_WALK_NODES }): void {
-  if (budget.nodes <= 0 || depth > STDIN_WALK_DEPTH) return;
+function collectStrings(value: unknown, into: string[], depth = 0, budget = { nodes: STDIN_WALK_NODES }): boolean {
+  if (budget.nodes <= 0 || depth > STDIN_WALK_DEPTH) return false;
   budget.nodes -= 1;
   if (typeof value === "string") {
     into.push(value);
-    return;
+    return true;
   }
   if (Array.isArray(value)) {
-    for (const item of value) collectStrings(item, into, depth + 1, budget);
-    return;
+    let complete = true;
+    for (const item of value) complete = collectStrings(item, into, depth + 1, budget) && complete;
+    return complete;
   }
   if (value !== null && typeof value === "object") {
-    for (const item of Object.values(value)) collectStrings(item, into, depth + 1, budget);
+    let complete = true;
+    for (const item of Object.values(value)) complete = collectStrings(item, into, depth + 1, budget) && complete;
+    return complete;
   }
+  return true;
 }
 
 /**
- * Remove every known value and secret shape, then collapse every whitespace run
- * (a stack trace, a multi-line command dump) to one space.
+ * The message only when it is PROVABLY safe: single-line (a stack frame starts
+ * at the first newline, so everything from there is dropped, not collapsed),
+ * free of every collected value after removal, and free of secret shapes that
+ * the removal could not name. `null` means "cannot be proven" — the caller
+ * degrades rather than emit it.
  */
-function cleanCauseMessage(raw: string, sensitive: readonly string[]): string {
-  let out = raw;
-  for (const value of sensitive) out = out.split(value).join(REDACTED);
-  return redactSecretShapes(out).replace(/\s+/g, " ").trim();
+function cleanCauseMessage(raw: string, sensitive: ExecSensitiveSet): string | null {
+  if (!sensitive.complete) return null;
+  const firstLine = raw.split(/\r?\n/, 1)[0]!.trim();
+  if (firstLine === "") return null;
+  let out = firstLine;
+  for (const value of sensitive.values) out = out.split(value).join(REDACTED);
+  out = redactSecretShapes(out).replace(/\s+/g, " ").trim();
+  if (out === "") return null;
+  // A value that survived removal means this message cannot be made safe.
+  if (sensitive.values.some((value) => out.includes(value))) return null;
+  return out;
+}
+
+/**
+ * Error names come from a fixed vocabulary; anything else is attacker text. An
+ * unsafe name degrades to `Error` — never echoed, never guessed.
+ */
+function safeCauseName(raw: unknown): string {
+  if (typeof raw !== "string" || raw.length > CAUSE_NAME_MAX_CHARS) return "Error";
+  return CAUSE_NAME_PATTERN.test(raw) ? raw : "Error";
 }
 
 /**
@@ -106,20 +150,17 @@ function cleanCauseMessage(raw: string, sensitive: readonly string[]): string {
  * failure row: error name, sanitized message, and how long the exec had been
  * open. No stack, no command text, no env value, no credential.
  *
- * The elapsed suffix is reserved BEFORE the message is truncated, so a long
- * message can never cost the one measurement that diagnoses a lost reply. A
- * message that cannot be proven safe is dropped entirely: the cause degrades to
- * `<name> (after <n>ms)` instead of echoing anything.
+ * FAIL CLOSED: the message is kept only when its safety is established, so the
+ * cause degrades to `<name> (after <n>ms)` whenever it is not. The elapsed
+ * suffix is reserved BEFORE truncation, so a long message can never cost the one
+ * measurement that diagnoses a lost reply.
  */
-export function execCause(err: unknown, openedAtMs: number, sensitive: readonly string[]): string {
+export function execCause(err: unknown, openedAtMs: number, sensitive: ExecSensitiveSet): string {
   const rawName = err instanceof Error ? err.name : typeof err;
-  const name = (rawName === "" ? "Error" : rawName).slice(0, CAUSE_NAME_MAX_CHARS);
+  const name = safeCauseName(rawName === "" ? "Error" : rawName);
   const suffix = ` (after ${Math.max(0, Date.now() - openedAtMs)}ms)`;
   const message = cleanCauseMessage(err instanceof Error ? err.message : String(err), sensitive);
   const room = EXEC_CAUSE_MAX_CHARS - name.length - 2 - suffix.length;
-  if (message === "" || room <= 0) return `${name}${suffix}`;
-  const kept = message.slice(0, room);
-  // A value that survived sanitization means this message cannot be made safe.
-  if (sensitive.some((value) => kept.includes(value))) return `${name}${suffix}`;
-  return `${name}: ${kept}${suffix}`;
+  if (message === null || room <= 0) return `${name}${suffix}`;
+  return `${name}: ${message.slice(0, room)}${suffix}`;
 }

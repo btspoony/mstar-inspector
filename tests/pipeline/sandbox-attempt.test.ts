@@ -586,8 +586,18 @@ describe("collection refuses an unproven container", () => {
     // The REAL settlement branch: an unobservable paid step concludes nothing.
     const { createFailureStore } = await import("../../src/store/failure-store");
     const settlementLog: Array<{ fields: Record<string, unknown>; msg: string | undefined }> = [];
+    // Cleanup reaches its container through the SAME handle the attempt used:
+    // without this wiring a broken veto could not be told apart from a broken
+    // handle resolver, which is exactly what the previous round failed to test.
+    const destroyMarked = sandbox.destroyMarked.bind(sandbox);
+    let destroyAttempts = 0;
+    sandbox.destroyMarked = async (...args) => {
+      destroyAttempts += 1;
+      return destroyMarked(...args);
+    };
     const deps = {
-      env: { DB: db },
+      env: { DB: db, SANDBOX: "sandbox-binding" },
+      getSandbox: async () => sandbox,
       log: {
         info: () => {},
         warn: (fields: Record<string, unknown>, msg?: string) => settlementLog.push({ fields, msg }),
@@ -606,10 +616,20 @@ describe("collection refuses an unproven container", () => {
     expect(await settleAttemptFailure(deps, ref, failure, null)).toEqual({ kind: "unknown" });
     expect(settlementLog.some((line) => line.fields["event"] === "review_unresolved")).toBe(true);
     // And the retention veto the settlement leaves behind: nothing destroys a
-    // container whose paid state was never observed.
+    // container whose paid state was never observed. Two independent paths to
+    // the same veto: the unreadable `launched` row alone, and the workflow's
+    // derived `unproven` flag.
     expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "unknown" });
+    expect(await cleanupAttempt(deps, ref, { headSha: SHA, unproven: true })).toEqual({ retention: "unknown" });
+    // The wired handle WOULD destroy this container, so a cleanup that reached
+    // it is observable: zero attempts is the veto, not a failed resolution.
+    expect(destroyAttempts).toBe(0);
     expect(container.destroyed).toBe(false);
     expect(container.running).toBe(true);
+    // Prove that observation is real (fails-first): the same handle destroys on
+    // a retained proof.
+    expect(await discardReviewAttempt(sandbox, ATTEMPT_A, RETAINED)).toBe("destroyed");
+    expect(container.destroyed).toBe(true);
   });
 
   test("boundedRead's refusal message names the outcome it observed", async () => {
