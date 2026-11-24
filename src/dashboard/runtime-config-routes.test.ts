@@ -204,6 +204,16 @@ const DEFAULT_ATTEMPT_CAP = {
   degraded: false,
 };
 
+const DEFAULT_SEAT_SETTINGS = {
+  smallDiffMaxLines: 120,
+  smallDiffSeats: 1,
+  linesMin: 1,
+  linesMax: 20_000,
+  seatsMin: 1,
+  seatsMax: 2,
+  degraded: false,
+};
+
 const DEFAULT_ROUTE_WORKFLOW = { mode: "off", saved: false, degraded: false };
 
 const DEFAULT_REVIEWS_RUNNING = {
@@ -401,6 +411,7 @@ describe("PUT /dashboard/<ref>/api/settings/concurrency", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      seatSettings: DEFAULT_SEAT_SETTINGS,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       reviewsRunning: DEFAULT_REVIEWS_RUNNING,
       lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
@@ -502,6 +513,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      seatSettings: DEFAULT_SEAT_SETTINGS,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       reviewsRunning: DEFAULT_REVIEWS_RUNNING,
       lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
@@ -524,6 +536,7 @@ describe("GET/PATCH /_internal_admin/api/runtime", () => {
       reviewLevel: DEFAULT_REVIEW_LEVEL,
       recheckAssignment: DEFAULT_RECHECK_ASSIGNMENT,
       attemptCap: DEFAULT_ATTEMPT_CAP,
+      seatSettings: DEFAULT_SEAT_SETTINGS,
       routeWorkflow: DEFAULT_ROUTE_WORKFLOW,
       reviewsRunning: DEFAULT_REVIEWS_RUNNING,
       lostReplySettle: DEFAULT_LOST_REPLY_SETTLE,
