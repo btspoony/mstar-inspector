@@ -6,6 +6,62 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-24
+
+### Changed
+
+- 测试辅助、测试套件与基准脚本中的 `bun:sqlite` 调用从已弃用的 `Database.exec` 别名改为 `Database.run`。仅涉及测试与工具，不影响发布代码。
+- **harness engine、CLI 与镜像 ref 升至 4.8.2**：根目录与 `packages/runner` 的 `@mstar-harness/engine` pin 从 `^4.8.1`/`4.8.1` 升到 `^4.8.2`/`4.8.2`，两个 lock 重新解析。镜像 pin 一并移动——`HARNESS_VERSION`/`harnessRef`（tag v4.8.2，deref `a3b2763a7f33a14c1193aee5ac8880dda970d218`）、全局安装的 `@mstar-harness/cli` 4.8.2 及其 lock、以及 Dockerfile 克隆 ref。omp SDK 仍停留在 19.0.1。同一提交中刷新了 `# image-inputs:` 指纹，因为 `packages/runner/package.json` 及其 lock 是镜像输入。
+- **harness engine、CLI 与镜像 ref 升至 4.8.4**：根目录与 `packages/runner` 的 `@mstar-harness/engine` pin 从 `^4.8.2`/`4.8.2` 升到 `^4.8.4`/`4.8.4`，两个 lock 重新解析。镜像 pin 一并移动——`HARNESS_VERSION`/`harnessRef`（tag v4.8.4，deref `27bf4e42338386e417008f4cdee1b80677c71216`）、全局安装的 `@mstar-harness/cli` 4.8.4 及其 lock、以及 Dockerfile 克隆 ref。中间已发布的 v4.8.3 随这次跳跃一并覆盖。omp SDK 仍停留在 19.0.1。同一提交中刷新了 `# image-inputs:` 指纹，因为 `packages/runner/package.json` 及其 lock 是镜像输入。
+- **omp SDK 升至 19.0.1（根与 runner）**：根目录与 `packages/runner` 的 `@oh-my-pi/pi-coding-agent` pin 均从 `18.22.2` 升到 `19.0.1`，两个 lock 重新解析，整组 `@oh-my-pi/*` 保持单一的 19.0.1 副本。harness engine、CLI 与镜像 ref 仍停留在 4.8.0。19.0.0 的 SDK 破坏性变更（`createAgentSession.cacheWarming` 由布尔值改为 `"off" | "streaming" | "idle"`、`session.handoff` 改为 `session.compact(..., { mode: "handoff" })`、`artifact://` 改为 `local://`，以及 `deferSkillDescriptionCompression` / `startSkillDescriptionCompression()` 更名）未被本仓库的 session 选项或 review runner 使用，因此没有运行时契约改动。从已安装的 `@oh-my-pi/pi-catalog` 19.0.1 重新提取了 vendored provider-catalog 快照；提供方与模型词汇未变，仅记录的源版本与提取日期更新。同一提交中刷新了 `# image-inputs:` 指纹，因为 `packages/runner/package.json` 及其 lock 是镜像输入。
+- **harness 升至 4.8.0（根、runner 与审查镜像）**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.8.0`，`packages/runner` 的精确 pin 改为 `4.8.0`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `74fc9ae4457f78bd8f170705edb48a58fceacdd8`，tag `v4.8.0`）与 Dockerfile 克隆 ref 一并向 4.8.0 移动；所有 lock 重新生成，并在同一提交中刷新 image-inputs 指纹——这些 manifest、lock 与所 pin 的 ref 都是镜像输入。4.8.0 将 harness 根固定为 `<git 主 worktree 根>/.mstar`（`.mstarc` 的 `harness_dir`、`MSTAR_HARNESS_DIR` 以及旧的 `.agents/` / `.plans/` / `plans/` 候选不再作为选择器），MCP 不再钉死连接根，linked worktree 的 scaffold 与 PM/persist/dashboard 选择器都指向主 worktree，并新增 Devin 原生插件支持、按需 `mstar-issue-mirror` skill、owner-feedback disposition、将 PR CI/审查结果路由回所属 implementer、`code-reviewer` / `ops-engineer` 的直接调用，以及 Codex `code-reviewer` agent，同时完成 monorepo 版本对齐。这些都落在 harness 自身表面上；本仓库已声明的语料布局，以及所消费的 review/seat 契约，不因这次 pin 升级而改变。
+- **harness 升至 4.8.1（根、runner 与审查镜像）；总体评论不再重复 suggestion 围栏**：根 manifest 的 `@mstar-harness/engine` 区间改为 `^4.8.1`，`packages/runner` 的精确 pin 改为 `4.8.1`，镜像全局安装的 `@mstar-harness/cli`、`HARNESS_VERSION` / `harnessRef` pin（ref `021b28e9b92e1b1981043a393e107bd121a84b7b`，tag `v4.8.1`）与 Dockerfile 克隆 ref 一并移动；所有 lock 重新生成，并在同一提交中刷新 image-inputs 指纹。审查总体 summary 不再重复 finding 的 ````suggestion` 块——围栏属于该 finding 的行内评论；保留周围散文，不改动调用方的 findings，无围栏的正文逐字节不变。
+- runner 测试不再使用 omp 已弃用的扁平 `AuthStorage.getApiKey` / `AuthStorage.reload` 转发方法，改用 `AuthStorage.keys.get` / `AuthStorage.credentials.reload`。仅涉及测试，runner 与镜像不变。
+- **PR ledger 保留期改为运维运行时设置。** 新增两项巡检设置 `platform.sweep.pull_request_retention_days`（默认 90，范围 1–365）和 `platform.sweep.pull_request_retention_cap`（默认 500，范围 1–500），取代原先写死的保留窗口和每次巡检删除上限，只清理 `closed` / `merged` 的 ledger 行，open PR 永不删除；可在 admin → Runtime 与其他巡检设置一起修改。
+- **巡检设置无法读取或任一存储值无效时，PR ledger 清理也会暂停。** 此时巡检与 Webhook 保留期清理一起跳过 PR ledger 删除，警告同时列出两者，直到设置修复。
+- 控制台表单提交处理函数改用 React 的 `SubmitEvent` 类型（由 `@types/react` 19.3 导出），替换已弃用的 `FormEvent` 别名。仅类型变更，运行时行为不变。
+- **恢复协调器：** 平台操作员可在 Admin → Runtime 配置生命周期与 Check 恢复的请求预算、超时、批量大小和尝试次数上限。每轮使用一次快照；设置无效或无法读取时，保留原有默认行为并记录脱敏诊断。
+- **长审查改由 Cloudflare Workflow 执行，不再挤在单次队列调用里。** 队列消费者仍负责准入、去重和被跳过投递的收尾，但不再亲自执行审查：一次被准入的尝试恰好对应一个 Workflow 实例（实例 id 即 attempt id），投递只有在实例创建成功后（或创建结果不确定时）才 ack——重投会生成新的 attempt id，可能重复付费。旧的 inline 执行路径已删除，因此只剩一条执行路径，而不是开关或回退。审查轮次被拆成可恢复的持久步骤（`prepare → review → collect → publish → cleanup`），每步都从持久记录恢复；付费的模型步骤声明为不可重试，重启或含糊的回复都不会二次启动。head 已前进的投递也不再只 ack 后消失：该尝试按跳过收尾，实际观察到的 head 会写入持久化的后继 outbox，由新的尝试接管它。
+- **A review attempt now has one absolute end-to-end deadline instead of the queue's 15-minute wall clock.** The deadline is the original queue send timestamp plus an operator-set cap (20 minutes until `review.attempt.duration_cap_ms` is saved), frozen when the attempt is first admitted and stored on its delivery record and its Check run — a redelivery or a recovery replay reuses the same instant and never extends it. The paid model call is bounded by the time left to that instant, so a hung call is killed there and recorded as a confirmed stop; a lost reply is reported as unknown, and neither destroys the container nor concludes the Check.
+- **一次审查尝试现在只有一个绝对的端到端截止时间，不再受队列 15 分钟墙钟限制。** 该时间点等于原始队列发送时间加上运营方设置的时长上限（在保存 `review.attempt.duration_cap_ms` 之前默认为 20 分钟），在尝试首次被准入时冻结，并写入其投递记录与 Check 运行记录——重投或恢复重放复用同一时间点，绝不延长。付费模型调用以到该时间点剩余的时间为界，挂起的调用会在此被杀掉并记为已确认的停止；丢失的回复记为未知，既不会销毁容器，也不会给出 Check 结论。
+
+### Fixed
+
+- **每日 Catalog refresh 不再因自身的 snapshot 轮换而失败。** provider-catalog 布局测试把 README 的固定日期反例写死为某个真实 snapshot 日期，refresh 替换该 snapshot 后 Test step 即变红。现在该用例从 tracked snapshot 派生日期，并仍证明固定日期的 README 行会拒绝其他日期。
+- **能安装但无法加载的 SDK 版本会被保留旧 pin，而不是进入 Test。** `bump-pins.ts` 现在会在 bump 后的根依赖树和镜像安装的 runner 精确 pin 依赖树中，导入 runner manifest 所声明依赖中、且 runner 源码运行时加载的每个 specifier；若某版本的 tarball 缺少其导入的文件（`@oh-my-pi/pi-coding-agent@19.1.0` 即如此），bump 中止，workflow 恢复原 pin 并继续 catalog refresh。
+- **被预算推迟的 Check 更正不再丢失。** 当请求预算在 §7.9a 更正的 `checks.update` 发出前拦住它时，被重开的行已经消费了终态标记，于是下一轮 reconcile 没有可执行的更正，只会拒绝 GitHub 上仍存在的 failure——该 Check 永久变红。现在重开行的那次写入会同时记录该更正应交付的结论及其目标 generation，后续轮次据此补发，且只有真正交付该结论的已验证响应才结清记录、否则该行保持可重试；gate/review 读取失败不算证据变化，本轮保留欠账、下轮重试；若更正尚未发出而其结论发生变化（例如评分下限调整），则就地改判该次更正——"纠正原 failure"的授权独立于当前欠下的结论，只有可能已经发出的版本才被丢弃并改为回读；不再适用的欠账连同它冻结的意图一并丢弃，目标 generation 已移动时把该行置为本地终态，后续轮次不会复活过期结论。
+- 为 `review_launches` 上的 Check 待结算标记添加部分索引，每分钟的 Check reconcile 在选择到期批次和清理已结束标记时，不再为每个等待中的 Check 扫描整张 attempt 历史表。
+- **留存评审结果中的凭据变形回显已清除**：写入付费 attempt 结果的语句现在会在载荷的字符串叶子内清除会话所持凭据的有限变形集合——原文、JSON 转义、URL 编码、base64、base64url 与 hex。结构、键、`head_sha` 以及数值/布尔叶子保持逐字节不变；不含凭据的载荷仍与改动前逐字节相同。
+- **在未变化的 head 上重复触发不再把通过的检查变红。** 消费者原本在准入时就占用 Check，随后才发现该 head 已被审查，于是留下一个没有 handle 的第二次尝试，reconciler 只能以 `failure` 收尾，覆盖该 head 自己的 `success`。现在在占用之前，先用投递自身的 head（负载里的 sha，或评论所带的 PR head 水位）查询 KV 完成标记、已落库的审查与发布日志：已被审查或已发布的 head 在此 ack，不创建 Check 尝试、不启动沙箱。未命中或读到无法解析的答案时行为与之前一致；clone 之后按 checkout 键的两道闸（去重、发布日志）仍会拦住 force-push，且 checkout 自身的 head 只在两者都未命中后才占用。命中只有在 keyed head 仍是 PR 实时 head 时才 ack（见下一条）；keyed head 已前进的投递会继续落入正常流程并审查实时 head。
+- **过期的重复投递不再吞掉最新提交，被跳过的投递也不再在审查未过闸时报 `neutral`。** 占用前的 ack 现在会把命中所用的 head 与 PR 的实时 head（App 账本水位）比对：head 已前进则不再 ack，本轮直接审查最新提交——`manual` 模式下 push 不会入队审查，这次投递就是该提交唯一的机会。该读取只在命中时发生，并与命中键所用的 head 比对（绝不与自身比对）；水位不可读时保持原有 ack 并记一条 warning，绝不产生第二次付费审查。head 已前进时，本次投递为旧 head 附着的 Check 也会被收尾，不会一直停在 in-progress。被跳过的投递（幂等命中、发布日志交接、guard 拒绝、App 暂停）现在按该 head 自身已发布的结果对照 App 当前闸门收尾：先读已确认发布的证明，投影滞后或证明无法解析时再读 `reviews` 行——过闸 `success`、未过闸 `failure`；分数不可读时与同 head 自身轮次一样 fail closed；degraded 发布按其自身提示收为 `failure`；已确认发布但负载读不出审查时同样 fail closed。闸门**读不出来**（闸门行损坏或读取失败）时不做任何收尾，交给 reconciler；webhook 拒绝车道会读取 App 的真实闸门（仍为零凭据、零 GitHub 调用），因此已确认通过的 head 不会被延迟成 `failure`。只有毫无可继承证据（既无可读证明也无可读审查）时才回落 `neutral`。证明**读不出来**时不做任何收尾——留给 recovery 车道；读不到的证据绝不猜测成判定。`prepared` 日志行仍只是把投递交给 recovery，不代表审查已可见。已知缺口（接受的残留）：webhook 为不带 SHA 的 mention 注入 attach 身份的这条路径未被端到端覆盖。
+- 为已开始但未完成结算的 review handoff 添加部分索引，每 15 分钟的 route reconcile 查找未完成结算时不再扫描整张投递历史表。
+- **补记 harness 4.8.2 合入后的 sandbox image-inputs 指纹**：`#346` 合入时 main 已包含 `#347` comment-cleanup 的镜像输入变更，但合并结果保留了合入前的 `# image-inputs:` 哈希。当前树的指纹是 `79603ea40080b0644d37e71929b630d6`。刷新该标记后，镜像重建门禁可通过，`wrangler deploy` 也会看到 harness 4.8.2 的 runner 输入。
+- **补记 omp 19.0.1 合入后的 sandbox image-inputs 指纹**：`#333` 合入时 main 已包含 review-budget 的镜像输入变更，但合并结果保留了合入前的 `# image-inputs:` 哈希。当前树的指纹是 `4a561c8ff56113083dd6f9b3636b41e1`。刷新该标记后，镜像重建门禁可通过，`wrangler deploy` 也会看到 omp 19.0.1 的 runner 输入。
+- **行内评论恢复不再停在永远读不回来的批次上。** 已 apply 的发布若其远端行内评论批次始终无法发现，就会永久留在候选集里，占据每次扫描的最旧位置；一旦这类行填满有界选择，更新的批次就永远选不到。现在每次失败的回读都会持久计数在该发布行上（`review_publications` 新增发现计数与不可解析列），达到既有的五次恢复上限时该批次带着最后一次回读观察到的原因（缺少标记、评论已消失、回读范围不可用、id 无法落库，或预算拒绝导致请求未发出）离开候选集，而行、计数与原因都保留供运维查看。恢复通道只报告一次这次停止，选择顺序仍在可解析的批次内保持最旧优先。
+- 发现回读现在会给出各自的失败原因（`marker-missing` / `ambiguous` / `comment-gone` / `readback-scope` / `capture-failed`），不再把所有未命中都归为“什么都没抓到”，因此记录的原因是观察结果而非猜测。
+- **付费回执丢失不再永久占用容量。** 付费审查步骤已发出但回执一直未到的时候，该次审查会正确地保持 `launched` 且不记录结果——付费子进程可能仍在运行——但此后没有任何机制推进该行：容量槽一直占用，Check 也始终不结束。现在由一个有界的 deadline 后宽限窗口在到期后把该行判定为终止的回执丢失（`review.paid.reply_lost`），释放容量槽并让 Check 报告失败。宽限是运维配置 `review.lostReply.settle_ms`（缺行默认 15 分钟，范围 3–60 分钟），每轮定时巡检读取一次；窗口锚定在该次审查自身的 deadline——付费子进程被终止的时刻——加上宽限，因此不会把仍在运行的付费子进程判定为丢失。只有 launch 行仍是选取时的 `launched` 形态才会写入失败记录：期间已终态化的行其可发布结果不受影响。该巡检为至少一次语义，失败行以 attempt 为键，第二次巡检不会重复写入。
+- 为 `pull_requests` ledger 的终态行按最后活动时间添加部分索引，每 15 分钟的保留期清理直接定位过期的 `closed` / `merged` 行，不再每次扫描整张 ledger。
+- **线程冷启动恢复：** 生命周期请求下限计入线程所属 App 配对的凭据探测与令牌签发，确保发布和线程使用不同 App 配对时仍有恢复余量。现有默认预算保持不变。
+- **恢复通道余量：** 拒绝发布请求配额与线程操作配额之和超过整轮请求数的生命周期预算，为线程通道保留准入余量。已存储的无效组合回退默认值，诊断仅包含键名。
+- **恢复请求预算：** 拒绝不足以处理冷启动恢复行的预算。Admin → Runtime 与 API 共用从 reconciler 预检估算推导的请求下限；现有默认值不变。
+- **恢复超时预算：** reconciler 单请求超时复用现有 Check 终态更新的 500 毫秒下限，整轮预算下限按最少请求数推导。Admin → Runtime 拒绝更小值，已存无效值安全回退至不变的默认值。
+- **从应用设置中移除「认领安装」流程。** 该操作原本用于预先记录 GitHub App 安装所属的 target，因为 GitHub 的 Setup 重定向不携带 `state`。但创建 App 的 manifest 从未设置 `setup_url`，这条重定向根本不会发生，认领也从未被消费。按钮、其路由、`/bot/setup` 回调、`install_claims` 表（迁移 `0081_drop_install_claims`）以及应用设置中的认领文案均已删除；未绑定的共享 bot 现在与自有 bot 一样显示普通安装链接，在 GitHub 上安装后由 `installation.created` webhook 记录安装。
+- **「绑定到本目标」改为直接绑定。** 待绑定安装的操作直接 upsert `bot_installations`——即 webhook 自己那套冲突容忍的 upsert——而不再先创建再消费一条认领，因此绑定不再依赖一张其余无人读取的表。
+- **`default` 档 review 获得更多 runner 墙钟时间。** 单个 review 席位的计价从 150 s 提高到 220 s，因此按 diff 大小推导的请求下限在 `default` 档由 360 000 ms 升至 500 000 ms（`quick` 由 210 000 升至 280 000；`deep` 仍被 646 000 ms 上限钳制）。旧价格把两席 `default` 下限压在 360 s——高于实测 p50 的 305 s、但低于 p90 的 509 s，因此会切进普通轮次中最慢的十分之一；实际观测到的失败更极端：同一个 head 曾在 362 s 被停止、又在同一预算内通过。各档上限、整轮预算与预留账本均未改动。
+- **共享 App 的读取按调用方工作区限定。** 使用但不拥有共享 App 的工作区，在 bot 页面不再看到该 App 的安装、提供方密钥、模型链或自定义提供方；其 webhook 投递记录（列表、仓库与事件筛选项、投递摘要）只包含该工作区存在有效 target 的仓库；App 列表的健康状态列使用同样限定后的摘要。
+- **共享 bot 的安装只归属一个工作区。** 共享 bot 的安装现在只绑定到其管理员用自己的 GitHub 令牌证明管理该安装账号的工作区；仓库遍历和创建 target 只读取绑定到调用方工作区的安装，绑定会拒绝已绑定到其他活跃工作区的安装，一个租户不再能列出、认领或绑定其他租户的仓库。升级时已有的共享 bot 安装一律处于未绑定状态：管理员需用管理该安装账号的 GitHub 账号逐个重新绑定（应用 → 该 App → 已安装 → 等待绑定），其仓库才会出现在“添加仓库”中。每个安装只绑定一个工作区；绑定后它不再出现在其他工作区的“等待绑定”列表中，其他工作区需要在其管理的账号上另行安装。
+- **删除工作区会释放其仓库。** 删除工作区现在会同时停用该工作区的 review target，并由迁移停用此前删除遗留的 target，重新绑定该安装的工作区可以添加这些仓库。
+- Runtime 页的「定时失败巡检」卡片在某一项已存巡检设置无效时不再清空全部输入：有效的已存值保持显示，只清空并标出无效字段，提示文案点名该字段并要求填写有效值后保存，而不是提供无法修复坏数据行的「重试」。设置读取整体失败时仍清空全部字段并保留「重试」。
+- 为 `review_threads` 添加按存活 finding 与按 publication 的索引，每轮评审的线程关联、绑定、讨论采集、supersede 写入和行批次读取不再扫描整张评论线程历史表。
+- 为尚未捕获行评论的 review thread 添加部分索引，并让 line-batch recovery 从这些 thread 出发选择 publication，每 15 分钟的 lifecycle reconcile 不再遍历所有已 applied 的 publication。
+
+### Added
+
+- **运营控制台现在可以设置平台唯一的端到端审查时长上限。** 运行时页面新增卡片，通过既有的 `PATCH /api/runtime` 保存 `review.attempt.duration_cap_ms`（每次接受的保存写入一行系统设置与一条审计记录），说明接受范围 900000–3600000 毫秒（15–60 分钟），超出范围的值会被拒绝并在拒绝信息中点明该范围。卡片始终显示生效值及其来源：已存值显示为已保存值，行缺失则显示 20 分钟的平台默认值——绝不把默认值显示成存储中的值。之后准入的每次尝试都会把该数值冻结进自己的截止时间；已存值无法读取时不准入任何审查，而不是凭空发明一个上限。
+- **运营控制台新增审查时长分布报告，为时长上限的选择提供依据。** 运行时页面的只读报告会说明其 30 天窗口与样本量，给出端到端时长以及三个互不重叠阶段（队列等待、执行、发布或恢复）的 p50 / p90 / 最大值，并以五个独立计数说明哪些尝试未计入百分位——只有结算时点已写入、且该次结算把发布义务记为已解除的尝试才进入百分位——尝试若有冻结的 Check，还须该 Check 不晚于该时点得出结论——因此被排除的一律注明原因：结算时 Check 未被证明关闭、没有结算记录、没有可测量的边界（缺 launch 行、没有持久结果、缺队列时间戳或边界乱序）、从未结算，或在 prepare 之前就终止的创建拒绝。空窗口显示为空样本，绝不显示为 0。输入候选上限后，报告会给出会被排除的已观测尝试数量、占比，以及首个越过上限的阶段；报告同时说明被上限终止的尝试即为最终状态，且被终止的付费审查是否计费仍无定论。卡片还会在计数旁说明被排除的失败形状（付费步骤失败且没有产出持久结果的 launch 行），以及「样本可测是因为结算把发布义务记为已解除」，投递幂等性不属于该区间。队列发送时间戳现在会在准入时复制到尝试的交接行，成功尝试也会记录其发布结算，因此第三个阶段的起点与终点都来自尝试自身的持久事实。
+- **运维控制台可写审查路由开关**：`review.route.workflow` 现在可从运行时设置页写入。存储层只接受精确字符串 `on` 与 `off`（其他输入一律拒绝且不改动已存储行），在审计行记录操作者与先前值，并以闸门自身的回读结果作为 `effective` 返回。卡片同时展示存储行与闸门回答，因此读取路径拒绝的手工值显示为 `off — untrusted` 并附原始值，保存即可修复。
+- 新增 `SECURITY_MODEL.md`：平台威胁模型（组件、信任边界、入口、关键资产、攻击者画像、现有控制与范围外风险），供安全审查与代码扫描使用。
+
 ## [1.0.2] - 2026-11-19
 
 ### Changed
