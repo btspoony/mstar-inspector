@@ -232,3 +232,38 @@ describe("migration 0068: one repository, one workspace per bot", () => {
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
   });
 });
+
+const MIGRATION_0108 = "0108_workspace_admission_defaults.sql";
+const BEFORE_0108 = migrationsAfter(2).filter(
+  (name) => migrationNumber(name) < migrationNumber(MIGRATION_0108),
+);
+
+describe("migration 0108: the workspace carries the admission defaults", () => {
+  test("adds two NOT NULL default-1 columns; every existing workspace keeps today's behaviour", () => {
+    const db = createTestD1();
+    applyMigrations(db, BEFORE_0108);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('legacy', 'legacy', 'legacy', 'acme', '2026-01-01')`,
+      )
+      .run();
+
+    applyMigrations(db, [MIGRATION_0108]);
+
+    const byName = new Map(columns(db, "workspaces").map((column) => [column.name, column]));
+    expect(byName.get("default_review_drafts")).toMatchObject({ notnull: 1, dflt_value: "1" });
+    expect(byName.get("default_review_enabled")).toMatchObject({ notnull: 1, dflt_value: "1" });
+    expect(
+      db.raw
+        .query("SELECT default_review_drafts, default_review_enabled FROM workspaces WHERE id = 'legacy'")
+        .get(),
+    ).toEqual({ default_review_drafts: 1, default_review_enabled: 1 });
+    expect(() =>
+      db.raw.prepare("UPDATE workspaces SET default_review_drafts = 2 WHERE id = 'legacy'").run(),
+    ).toThrow();
+    expect(() =>
+      db.raw.prepare("UPDATE workspaces SET default_review_enabled = -1 WHERE id = 'legacy'").run(),
+    ).toThrow();
+  });
+});

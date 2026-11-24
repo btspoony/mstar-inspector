@@ -84,18 +84,30 @@ export type ReviewTargetRow = {
  * A row of the repository list (product spec J1): the target's own columns plus
  * the bot's display name and the newest review stamp. `last_reviewed_at` is
  * `null` for a repository no review has finished on yet.
+ *
+ * The `workspace_default_*` columns ride the same statement so the list face
+ * computes effective settings without a second read (the three-read budget in
+ * tests/worker/dashboard-tenancy.test.ts). They are `null` only when the
+ * workspace row is missing or retired.
  */
 export type LiveTargetListRow = ReviewTargetRow & {
   app_name: string;
   last_reviewed_at: string | null;
   reviews_total: number;
   reviews_7d: number;
+  workspace_default_check_min_score: number | null;
+  workspace_default_review_trigger_mode: string | null;
+  workspace_default_review_level: string | null;
+  workspace_default_check_pass_verdicts: string | null;
+  workspace_default_review_drafts: number | null;
+  workspace_default_review_enabled: number | null;
 };
 
 /**
  * The workspace-level answers a following target inherits (`workspaces`
- * columns): the floor is the existing `check_min_score` (0049), the other three
- * are the `default_*` columns of 0067.
+ * columns): the floor is the existing `check_min_score` (0049), the policy
+ * defaults are the `default_*` columns of 0067, and the two admission defaults
+ * (draft review, business pause) are 0108's.
  */
 export type WorkspaceReviewDefaults = {
   triggerMode: ReviewTriggerMode;
@@ -103,6 +115,8 @@ export type WorkspaceReviewDefaults = {
   checkMinScore: number;
   checkPassVerdicts: readonly PrVerdict[];
   checkPassVerdictsReadable: boolean;
+  reviewDrafts: boolean;
+  reviewEnabled: boolean;
 };
 
 /** What a target runs with, whichever side of the inheritance switch answers. */
@@ -112,17 +126,12 @@ export type EffectiveTargetSettings = {
   checkMinScore: number;
   checkPassVerdicts: readonly PrVerdict[];
   checkPassVerdictsReadable: boolean;
+  reviewDrafts: boolean;
+  reviewEnabled: boolean;
 };
 
-/**
- * A TARGET's settings: the inheritable policy answers plus the target-owned
- * facts. `reviewDrafts` is answered from the row in BOTH inheritance branches
- * (D12) — the workspace defaults carry no such answer, so this stays off
- * `WorkspaceReviewDefaults` and off the workspace-defaults payload.
- */
-export type EffectiveReviewTargetSettings = EffectiveTargetSettings & {
-  reviewDrafts: boolean;
-};
+/** The effective settings of a target — the same shape the defaults answer. */
+export type EffectiveReviewTargetSettings = EffectiveTargetSettings;
 
 /**
  * The Check gate these settings authorise, or `null` when the verdict array
@@ -210,26 +219,47 @@ export async function getWorkspaceReviewDefaults(
   const row = await db
     .prepare(
       `SELECT check_min_score, default_review_trigger_mode, default_review_level,
-              default_check_pass_verdicts
+              default_check_pass_verdicts, default_review_drafts, default_review_enabled
          FROM workspaces WHERE id = ? AND deleted_at IS NULL`,
     )
     .bind(workspaceId)
-    .first<{
-      check_min_score: number | null;
-      default_review_trigger_mode: string;
-      default_review_level: string | null;
-      default_check_pass_verdicts: string;
-    }>();
-  if (row === null) {
+    .first<WorkspaceDefaultsColumns>();
+  return parseWorkspaceDefaults(row);
+}
+
+/** The `workspaces` columns that answer the defaults, as stored. */
+export type WorkspaceDefaultsColumns = {
+  check_min_score: number | null;
+  default_review_trigger_mode: string | null;
+  default_review_level: string | null;
+  default_check_pass_verdicts: string | null;
+  default_review_drafts: number | null;
+  default_review_enabled: number | null;
+};
+
+const DEFAULT_VERDICTS_JSON = '["ship it"]';
+
+/**
+ * One parser for the defaults, whichever statement read the columns: the
+ * defaults read and the repository-list join. A missing or retired workspace
+ * (`null`, or a null trigger column) answers the conservative defaults instead
+ * of throwing on a webhook path.
+ */
+export function parseWorkspaceDefaults(
+  row: WorkspaceDefaultsColumns | null,
+): WorkspaceReviewDefaults {
+  if (row === null || row.default_review_trigger_mode === null) {
     return {
       triggerMode: "every_push",
       level: null,
       checkMinScore: DEFAULT_CHECK_MIN_SCORE,
       checkPassVerdicts: ["ship it"],
       checkPassVerdictsReadable: true,
+      reviewDrafts: true,
+      reviewEnabled: true,
     };
   }
-  const verdicts = storedPassVerdicts(row.default_check_pass_verdicts);
+  const verdicts = storedPassVerdicts(row.default_check_pass_verdicts ?? DEFAULT_VERDICTS_JSON);
   return {
     triggerMode: (REVIEW_TRIGGER_MODES as readonly string[]).includes(row.default_review_trigger_mode)
       ? (row.default_review_trigger_mode as ReviewTriggerMode)
@@ -240,12 +270,34 @@ export async function getWorkspaceReviewDefaults(
       : DEFAULT_CHECK_MIN_SCORE,
     checkPassVerdicts: [...(verdicts ?? [])],
     checkPassVerdictsReadable: verdicts !== null,
+    reviewDrafts: row.default_review_drafts !== 0,
+    reviewEnabled: row.default_review_enabled !== 0,
   };
 }
 
 /**
+ * The defaults a repository-list row carries (joined in the same statement), or
+ * the conservative answer for an empty list / missing workspace row.
+ */
+export function workspaceDefaultsOfListRow(
+  row: LiveTargetListRow | undefined,
+): WorkspaceReviewDefaults {
+  if (row === undefined || row.workspace_default_review_trigger_mode === null) {
+    return parseWorkspaceDefaults(null);
+  }
+  return parseWorkspaceDefaults({
+    check_min_score: row.workspace_default_check_min_score,
+    default_review_trigger_mode: row.workspace_default_review_trigger_mode,
+    default_review_level: row.workspace_default_review_level,
+    default_check_pass_verdicts: row.workspace_default_check_pass_verdicts,
+    default_review_drafts: row.workspace_default_review_drafts,
+    default_review_enabled: row.workspace_default_review_enabled,
+  });
+}
+
+/**
  * `setWorkspaceReviewDefaults`'s input: the `workspaces` columns a caller
- * names — the three `default_*` review answers plus the gate floor
+ * names — the `default_*` review and admission answers plus the gate floor
  * (`check_min_score`, 0049). An absent key is left untouched, like
  * `setReviewConfig`; `level: null` is a real value.
  */
@@ -254,6 +306,8 @@ export type WorkspaceReviewDefaultPatch = {
   level?: ReviewLevel | null;
   checkPassVerdicts?: readonly PrVerdict[];
   checkMinScore?: number;
+  reviewDrafts?: boolean;
+  reviewEnabled?: boolean;
 };
 
 const CHECK_MIN_SCORE_AUDIT_SQL = `
@@ -328,6 +382,14 @@ export async function setWorkspaceReviewDefaults(
     assignments.push("check_min_score = ?");
     values.push(patch.checkMinScore);
   }
+  if (patch.reviewDrafts !== undefined) {
+    assignments.push("default_review_drafts = ?");
+    values.push(patch.reviewDrafts ? 1 : 0);
+  }
+  if (patch.reviewEnabled !== undefined) {
+    assignments.push("default_review_enabled = ?");
+    values.push(patch.reviewEnabled ? 1 : 0);
+  }
   if (assignments.length === 0) return false;
   const update = db.prepare(
     `UPDATE workspaces SET ${assignments.join(", ")}
@@ -365,17 +427,15 @@ function ownTargetSettings(target: ReviewTargetRow): EffectiveReviewTargetSettin
     checkPassVerdicts: [...(verdicts ?? [])],
     checkPassVerdictsReadable: verdicts !== null,
     reviewDrafts: target.review_drafts !== 0,
+    reviewEnabled: target.review_enabled !== 0,
   };
 }
 
 /**
  * What the target runs with (D16). `follow_workspace_defaults = 1` answers the
  * workspace defaults — computed here, every read, never copied into the row
- * while inheriting. `= 0` answers the row's own four columns.
- *
- * `reviewDrafts` is answered from the ROW in both branches: it is a
- * target-owned admission fact like the pause, and the workspace defaults carry
- * no such answer (D12).
+ * while inheriting. `= 0` answers the row's own columns, including the two
+ * admission facts (draft review and the business pause).
  */
 export function effectiveTargetSettings(
   target: ReviewTargetRow,
@@ -388,7 +448,8 @@ export function effectiveTargetSettings(
     checkMinScore: defaults.checkMinScore,
     checkPassVerdicts: [...defaults.checkPassVerdicts],
     checkPassVerdictsReadable: defaults.checkPassVerdictsReadable,
-    reviewDrafts: target.review_drafts !== 0,
+    reviewDrafts: defaults.reviewDrafts,
+    reviewEnabled: defaults.reviewEnabled,
   };
 }
 
@@ -411,9 +472,10 @@ export async function readEffectiveTargetSettings(
  * Flip the inheritance switch (D16). `1` sets the flag only: the row's own
  * policy columns become inert, never read again. `0` snapshots the values the
  * target is running with right now into the row — reading the defaults when it
- * was inheriting, its own columns otherwise — so the toggle itself changes no
- * live behaviour. A later toggle-off re-snapshots from the then-current
- * defaults. An unknown or deleted target writes nothing.
+ * was inheriting, its own columns otherwise — including the two admission
+ * facts, so the toggle itself changes no live behaviour. A later toggle-off
+ * re-snapshots from the then-current defaults. An unknown or deleted target
+ * writes nothing.
  */
 export async function setInheritance(
   db: TargetsStoreD1,
@@ -441,7 +503,8 @@ export async function setInheritance(
     .prepare(
       `UPDATE review_targets
           SET follow_workspace_defaults = 0, review_trigger_mode = ?, review_level = ?,
-              check_min_score = ?, check_pass_verdicts = ?, updated_at = datetime('now')
+              check_min_score = ?, check_pass_verdicts = ?, review_drafts = ?, review_enabled = ?,
+              updated_at = datetime('now')
         WHERE ${LIVE_TARGET}`,
     )
     .bind(
@@ -449,6 +512,8 @@ export async function setInheritance(
       effective.level,
       effective.checkMinScore,
       JSON.stringify(effective.checkPassVerdicts),
+      effective.reviewDrafts ? 1 : 0,
+      effective.reviewEnabled ? 1 : 0,
       targetId,
       workspaceId,
     )
@@ -522,9 +587,16 @@ export function createTargetsStore(db: TargetsStoreD1) {
                   (SELECT COUNT(*) FROM reviews r WHERE r.target_id = t.id) AS reviews_total,
                   (SELECT COUNT(*) FROM reviews r
                     WHERE r.target_id = t.id
-                      AND r.reviewed_at >= datetime('now', '-7 days')) AS reviews_7d
+                      AND r.reviewed_at >= datetime('now', '-7 days')) AS reviews_7d,
+                  w.check_min_score AS workspace_default_check_min_score,
+                  w.default_review_trigger_mode AS workspace_default_review_trigger_mode,
+                  w.default_review_level AS workspace_default_review_level,
+                  w.default_check_pass_verdicts AS workspace_default_check_pass_verdicts,
+                  w.default_review_drafts AS workspace_default_review_drafts,
+                  w.default_review_enabled AS workspace_default_review_enabled
              FROM review_targets t
              LEFT JOIN review_bots b ON b.id = t.bot_id
+             LEFT JOIN workspaces w ON w.id = t.workspace_id AND w.deleted_at IS NULL
             WHERE t.workspace_id = ? AND t.deleted_at IS NULL
             ORDER BY (last_reviewed_at IS NULL), last_reviewed_at DESC, t.id`,
         )

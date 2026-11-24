@@ -564,6 +564,22 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
     expect(bot.review_enabled).toBe(1);
   });
 
+  test("a following target inherits the workspace pause over its own row → direct ack, ZERO review work", async () => {
+    reset();
+    const db = createMigratedD1();
+    const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 1 WHERE id = ?").run(appX.targetId);
+    db.raw.prepare("UPDATE workspaces SET default_review_enabled = 0 WHERE id = 'default'").run();
+    const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
+
+    await consumer(makeBatch(makePayload({ botRef: { appId: appX.id }, targetId: appX.targetId })));
+
+    expect(ackIds).toEqual(["m0"]);
+    expect(retryIds).toEqual([]);
+    expect(appCalls).toHaveLength(0);
+    expect(sandboxCalls).toHaveLength(0);
+  });
+
   test("paused App (review_enabled=0) → direct ack, ZERO sandbox/guard/token/config/GitHub calls, no retry, no DLQ", async () => {
     reset();
     const db = createMigratedD1();

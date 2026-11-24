@@ -41,14 +41,9 @@ export type TargetPolicySettings = {
   check_min_score: number;
   check_pass_verdicts: string[];
   check_pass_verdicts_readable: boolean;
+  review_drafts: boolean;
+  review_enabled: boolean;
 };
-
-/**
- * What the TARGET runs with: the four answers plus the draft switch, which is
- * a target-owned admission fact (D12). The workspace defaults answer no such
- * question, so the switch rides only this face.
- */
-export type TargetPolicyEffective = TargetPolicySettings & { reviewDrafts: boolean };
 
 /**
  * `GET /:ref/api/targets/:targetId`. Named apart from `data.ts`'s
@@ -67,7 +62,7 @@ export type TargetPolicyPayload = {
     follow_workspace_defaults: number;
     review_drafts: 0 | 1;
   };
-  effective: TargetPolicyEffective;
+  effective: TargetPolicySettings;
   defaults: TargetPolicySettings;
 };
 
@@ -80,13 +75,10 @@ function isPolicySettings(value: unknown): value is TargetPolicySettings {
     typeof row.check_min_score === "number" &&
     Array.isArray(row.check_pass_verdicts) &&
     row.check_pass_verdicts.every((verdict) => typeof verdict === "string") &&
-    typeof row.check_pass_verdicts_readable === "boolean"
+    typeof row.check_pass_verdicts_readable === "boolean" &&
+    typeof row.review_drafts === "boolean" &&
+    typeof row.review_enabled === "boolean"
   );
-}
-
-function isEffectivePolicySettings(value: unknown): value is TargetPolicyEffective {
-  if (!isPolicySettings(value)) return false;
-  return "reviewDrafts" in value && typeof value.reviewDrafts === "boolean";
 }
 
 /**
@@ -115,7 +107,7 @@ export function parseTargetPolicyPayload(data: unknown): TargetPolicyPayload | n
   if (typeof row.follow_workspace_defaults !== "number") return null;
   const draftSwitch = row.review_drafts;
   if (draftSwitch !== 0 && draftSwitch !== 1) return null;
-  if (!isEffectivePolicySettings(effective) || !isPolicySettings(defaults)) return null;
+  if (!isPolicySettings(effective) || !isPolicySettings(defaults)) return null;
   return {
     target: {
       target_id: row.target_id,
@@ -146,7 +138,6 @@ type ReviewPolicyProps = {
   settings: TargetPolicySettings;
   levelDefault: ReviewLevel | null;
   readOnly: boolean;
-  afterTrigger?: ReactNode;
   onSave: (fields: Record<string, unknown>) => Promise<void>;
 };
 
@@ -154,32 +145,64 @@ export function ReviewTriggerField({
   locale,
   settings,
   readOnly,
-  afterTrigger,
   onSave,
-}: Pick<ReviewPolicyProps, "locale" | "settings" | "readOnly" | "afterTrigger" | "onSave">) {
+}: Pick<ReviewPolicyProps, "locale" | "settings" | "readOnly" | "onSave">) {
+  return (
+    <div className="w-fit">
+      <ToggleGroup
+        type="single"
+        variant="outline"
+        size="sm"
+        value={settings.trigger_mode}
+        disabled={readOnly}
+        onValueChange={(value) => {
+          if (value !== "") void onSave({ trigger_mode: value });
+        }}
+        aria-label={t(locale, "settings.triggerMode")}
+      >
+        {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
+          <ToggleGroupItem key={mode} value={mode} title={mode}>
+            {t(locale, TRIGGER_LABEL_KEYS[mode])}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+    </div>
+  );
+}
+
+/**
+ * The two admission switches — draft PRs and the pause — as the server states
+ * them. The pause checkbox is checked when reviews are paused, so it inverts
+ * `review_enabled`.
+ */
+export function ReviewAdmissionFields({
+  locale,
+  settings,
+  readOnly,
+  onSave,
+}: Pick<ReviewPolicyProps, "locale" | "settings" | "readOnly" | "onSave">) {
   return (
     <>
-      <div className="w-fit">
-        <ToggleGroup
-          type="single"
-          variant="outline"
-          size="sm"
-          value={settings.trigger_mode}
+      <label className="flex w-fit items-center gap-2 text-sm font-medium">
+        <input
+          type="checkbox"
+          className={SWITCH_CLASS}
+          checked={settings.review_drafts}
           disabled={readOnly}
-          onValueChange={(value) => {
-            if (value !== "") void onSave({ trigger_mode: value });
-          }}
-          aria-label={t(locale, "settings.triggerMode")}
-        >
-          {(Object.keys(TRIGGER_LABEL_KEYS) as ReviewTriggerMode[]).map((mode) => (
-            <ToggleGroupItem key={mode} value={mode} title={mode}>
-              {t(locale, TRIGGER_LABEL_KEYS[mode])}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-      </div>
-
-      {afterTrigger}
+          onChange={(event) => void onSave({ review_drafts: event.target.checked })}
+        />
+        {t(locale, "settings.reviewDrafts")}
+      </label>
+      <label className="flex w-fit items-center gap-2 text-sm font-medium">
+        <input
+          type="checkbox"
+          className={SWITCH_CLASS}
+          checked={!settings.review_enabled}
+          disabled={readOnly}
+          onChange={(event) => void onSave({ review_enabled: !event.target.checked })}
+        />
+        {t(locale, settings.review_enabled ? "settings.pauseReviews" : "settings.resumeReviews")}
+      </label>
     </>
   );
 }
@@ -322,7 +345,7 @@ export function ReviewPolicySections({
   readOnly,
   afterTrigger,
   onSave,
-}: ReviewPolicyProps) {
+}: ReviewPolicyProps & { afterTrigger?: ReactNode }) {
   return (
     <>
       <FlowSection title={t(locale, "settings.triggerMode")}>
@@ -330,9 +353,9 @@ export function ReviewPolicySections({
           locale={locale}
           settings={settings}
           readOnly={readOnly}
-          afterTrigger={afterTrigger}
           onSave={onSave}
         />
+        {afterTrigger}
       </FlowSection>
       <FlowSection title={t(locale, "settings.reviewDepth")}>
         <ReviewDepthField
@@ -387,19 +410,6 @@ export function TargetSettingsTab({
   const savePolicy = (fields: Record<string, unknown>): Promise<void> =>
     save({ ...fields, follow: 0 });
 
-  const draftSwitch = (
-    <label className="flex w-fit items-center gap-2 text-sm font-medium">
-      <input
-        type="checkbox"
-        className={SWITCH_CLASS}
-        checked={effective.reviewDrafts}
-        disabled={busy}
-        onChange={(event) => void save({ review_drafts: event.target.checked })}
-      />
-      {t(locale, "settings.reviewDrafts")}
-    </label>
-  );
-
   return (
     <div className="flex flex-col">
       <FlowSection title={t(locale, "targets.settings.boundApp")}>
@@ -420,7 +430,6 @@ export function TargetSettingsTab({
         settings={effective}
         levelDefault={defaults.review_level}
         readOnly={busy || inheriting || gateUnreadable}
-        afterTrigger={draftSwitch}
         onSave={savePolicy}
       />
       <FlowSection title={t(locale, "targets.settings.sectionState")}>
@@ -438,16 +447,12 @@ export function TargetSettingsTab({
           <p className="text-sm text-muted-foreground">{t(locale, "targets.settings.following")}</p>
         ) : null}
 
-        <label className="flex w-fit items-center gap-2 text-sm font-medium">
-          <input
-            type="checkbox"
-            className={SWITCH_CLASS}
-            checked={target.review_enabled === 0}
-            disabled={busy}
-            onChange={(event) => void save({ review_enabled: event.target.checked ? 0 : 1 })}
-          />
-          {t(locale, target.review_enabled === 0 ? "settings.resumeReviews" : "settings.pauseReviews")}
-        </label>
+        <ReviewAdmissionFields
+          locale={locale}
+          settings={effective}
+          readOnly={busy || inheriting}
+          onSave={save}
+        />
       </FlowSection>
     </div>
   );
