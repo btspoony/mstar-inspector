@@ -3,7 +3,10 @@
  * published envelope is the engine's schema and must not grow fields, so the
  * per-(provider, model) token spend crosses the container boundary as its OWN
  * document — mirrors `APPLIED_MODEL_PATH`. ABSENCE of the file means the run
- * produced no attributable usage (capture faults never fail the review).
+ * produced no attributable usage (capture faults never fail the review). The
+ * `nonce` binds the document to one consumer-issued run: a stale document a
+ * failed clear left behind carries a foreign (or no) nonce and the reader
+ * drops it — never this run reading a previous run's usage.
  */
 export const TOKEN_USAGE_PATH = "/workspace/review-token-usage.json";
 
@@ -34,7 +37,7 @@ export type TokenUsageBucket = {
   costUsd: number;
 };
 
-export type TokenUsageDoc = { version: 1; buckets: TokenUsageBucket[] };
+export type TokenUsageDoc = { version: 1; nonce: string; buckets: TokenUsageBucket[] };
 
 export type TokenUsageGateResult = { ok: true; doc: TokenUsageDoc } | { ok: false; error: string };
 
@@ -70,12 +73,12 @@ function nameCheck(value: unknown, field: string): { ok: true; name: string } | 
 
 /**
  * Validate one container-written token-usage document. Document-level
- * distrust: a non-object, an unknown/missing key, a wrong `version`, a count
- * that is not a non-negative SAFE integer (so downstream D1 aggregation can
- * never overflow), a negative or non-finite `costUsd`, a blank or over-long
- * provider/model, or more buckets than the bound rejects the WHOLE document.
- * `total` is required and non-negative but is NOT constrained to the sum of
- * the other buckets — providers report orchestration tokens inconsistently.
+ * distrust: a non-object, an unknown/missing key, a wrong `version`, a
+ * blank/over-long `nonce`, a count that is not a non-negative SAFE integer
+ * (so downstream D1 aggregation can never overflow), a negative or non-finite
+ * `costUsd`, a blank or over-long provider/model, or more buckets than the
+ * bound rejects the WHOLE document. `nonce` is only shape-checked here — the
+ * run-scoped equality check lives consumer-side. `total` is required and
  */
 export function validateTokenUsageDoc(value: unknown): TokenUsageGateResult {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -83,12 +86,15 @@ export function validateTokenUsageDoc(value: unknown): TokenUsageGateResult {
   }
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record).sort();
-  if (keys.length !== 2 || keys[0] !== "buckets" || keys[1] !== "version") {
-    return { ok: false, error: "keys must be exactly {version, buckets}" };
+  if (keys.length !== 3 || keys[0] !== "buckets" || keys[1] !== "nonce" || keys[2] !== "version") {
+    return { ok: false, error: "keys must be exactly {version, nonce, buckets}" };
   }
   if (record["version"] !== 1) {
     return { ok: false, error: "version must be 1" };
   }
+  const nonce = nameCheck(record["nonce"], "nonce");
+  if (!nonce.ok) return nonce;
+
   const raw = record["buckets"];
   if (!Array.isArray(raw)) {
     return { ok: false, error: "buckets must be an array" };
@@ -139,5 +145,5 @@ export function validateTokenUsageDoc(value: unknown): TokenUsageGateResult {
     bucket.costUsd = costUsd;
     buckets.push(bucket);
   }
-  return { ok: true, doc: { version: 1, buckets } };
+  return { ok: true, doc: { version: 1, nonce: nonce.name, buckets } };
 }

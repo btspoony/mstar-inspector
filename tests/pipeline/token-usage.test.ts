@@ -11,7 +11,7 @@ const {
   readReviewLaunch,
   runReviewAttempt,
 } = await import("../../src/pipeline/review-attempt");
-const { RUNNER_PATH } = await import("../../src/pipeline/gitops");
+const { RUNNER_INPUT_PATH } = await import("../../src/pipeline/gitops");
 const { TOKEN_USAGE_PATH } = await import("../../packages/shared/src/token-usage-wire");
 
 const ATTEMPT = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
@@ -19,13 +19,20 @@ const SHA = "a".repeat(40);
 const TARGET = "target-id-1";
 const WORKSPACE = "workspace-id-1";
 
-const VALID_DOC = JSON.stringify({
+// `__NONCE__` is the slot the sandbox double fills with the nonce the attempt
+// minted into its runner input — the document the runner WOULD have written.
+const VALID_DOC_TEMPLATE = JSON.stringify({
   version: 1,
+  nonce: "__NONCE__",
   buckets: [
     { provider: "ark", model: "deepseek-v4-flash", input: 100, output: 40, cacheRead: 10, cacheWrite: 5, total: 155, requests: 3, costUsd: 0.0123 },
     { provider: "openai", model: "gpt-5.2", input: 7, output: 3, cacheRead: 0, cacheWrite: 0, total: 10, requests: 1, costUsd: 0.0004 },
   ],
 });
+
+// A readable leftover from an earlier run: a well-formed document whose nonce
+// is not the one this attempt minted.
+const STALE_DOC = VALID_DOC_TEMPLATE.replace("__NONCE__", "an-older-run");
 
 const INVALID_DOC = JSON.stringify({ version: 2, buckets: [] });
 
@@ -33,27 +40,36 @@ type Warn = { fields: Record<string, unknown>; msg?: string };
 
 type SandboxDouble = {
   events: string[];
-  runMarked(marker: string, command: string): Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number }>;
+  runMarked(marker: string, command: string, opts?: { stdin?: string }): Promise<{ kind: "ran"; stdout: string; stderr: string; exitCode: number }>;
   runCommand(command: string): Promise<{ stdout: string; stderr: string; exitCode: number }>;
 };
 
 /**
  * `usageDoc`: the bytes the container's side document carries — `null` emits
- * the transport's absent proof (`\n2\n`), a string the document itself. Every
- * other read answers like `paid-launch-fence`'s double: the runner exec exits
- * 0 with empty stdout, the applied-model path parses as unreadable (harmless:
- * it only warns), and `rev-parse` answers the fixture head.
+ * the transport's absent proof (`\n2\n`), a string the document itself; the
+ * `"__NONCE__"` slot is filled with the nonce the attempt wrote into its
+ * runner input (captured off the input-write's stdin). Every other read
+ * answers like `paid-launch-fence`'s double: the runner exec exits 0 with
+ * empty stdout, the applied-model path parses as unreadable (harmless: it
+ * only warns), and `rev-parse` answers the fixture head.
  */
 function sandboxDouble(usageDoc: string | null): SandboxDouble {
   const events: string[] = [];
+  let nonce = "";
   return {
     events,
-    async runMarked(_marker: string, command: string) {
+    async runMarked(_marker: string, command: string, opts?: { stdin?: string }) {
       events.push(`marked:${command}`);
+      if (command === `base64 -d > '${RUNNER_INPUT_PATH}'` && opts?.stdin !== undefined) {
+        const input = JSON.parse(Buffer.from(opts.stdin, "base64").toString("utf8")) as { tokenUsageNonce?: string };
+        nonce = input.tokenUsageNonce ?? "";
+        return { kind: "ran" as const, stdout: "", stderr: "", exitCode: 0 };
+      }
       if (command.includes(TOKEN_USAGE_PATH)) {
+        const doc = usageDoc?.replace("__NONCE__", nonce) ?? null;
         return {
           kind: "ran" as const,
-          stdout: usageDoc === null ? "\n2\n" : `${usageDoc}\n0\n`,
+          stdout: doc === null ? "\n2\n" : `${doc}\n0\n`,
           stderr: "",
           exitCode: 0,
         };
@@ -141,7 +157,7 @@ describe("the runner's token-usage side document", () => {
   test("a valid document lands one row per (provider, model) in the SAME write that settles the review", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
-    const sandbox = sandboxDouble(VALID_DOC);
+    const sandbox = sandboxDouble(VALID_DOC_TEMPLATE);
 
     const execution = await runReviewAttempt(executionInput(sandbox, db));
 
@@ -194,12 +210,25 @@ describe("the runner's token-usage side document", () => {
     const warnings = log.warnings.filter((warning) => warning.fields["token_usage"] === "invalid-document");
     expect(warnings).toHaveLength(1);
   });
+  test("a readable stale document with a foreign nonce writes no rows and still settles the review", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const log = logCapture();
+
+    const execution = await runReviewAttempt(executionInput(sandboxDouble(STALE_DOC), db, log));
+
+    expect(execution.run.exitCode).toBe(0);
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("persisted");
+    expect(usageRows(db)).toEqual([]);
+    const warnings = log.warnings.filter((warning) => warning.fields["token_usage"] === "foreign-nonce");
+    expect(warnings).toHaveLength(1);
+  });
 
   test("a usage write that cannot land is not recorded as finished — the completion batch rolls back", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
     const broken = failingDb(db, "INSERT INTO review_token_usage");
-    const sandbox = sandboxDouble(VALID_DOC);
+    const sandbox = sandboxDouble(VALID_DOC_TEMPLATE);
 
     await expect(
       runReviewAttempt({ ...executionInput(sandbox, db), deps: { log: logCapture(), env: { DB: broken, DASHBOARD_ENCRYPTION_KEY: TEST_KEY } } }),

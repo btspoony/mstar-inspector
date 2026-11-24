@@ -34,6 +34,11 @@
  *         declaration whose id collides with a base provider is skipped
  *         (base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the (empty) base alone.
+ *       - `tokenUsageNonce` (string) — the consumer-issued run nonce the
+ *         token-usage side document is stamped with; the consumer drops a
+ *         document whose nonce is absent, malformed or foreign, so a stale
+ *         document a failed clear left behind can never be read as this
+ *         run's usage;
  *   - stdout carries ONLY one JSON document: the mstar.review/v1 envelope
  *     (validated by validateMstarReviewV1 inside the runtime), OR — when the
  *     runner's own deadline evidence stops the review — the
@@ -132,8 +137,8 @@ const USAGE =
   "[--recheck-out <path>] [--report-out <path>] " +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids, models_meta? }], recheck?: mstar.recheck-input/v1 document, " +
   "recheckAssignmentMaxBytes?: integer > 0, outerDeadlineEpochMs?: integer epoch ms, " +
+  "tokenUsageNonce?: string, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 function parseCustomProviderEntry(entry: unknown, index: number): CustomProviderDeclaration {
@@ -229,6 +234,7 @@ export type RunnerInputJson = {
   recheckAssignmentMaxBytes?: number;
   outerDeadlineEpochMs?: number;
   prContext?: PrContext;
+  tokenUsageNonce?: string;
 };
 
 function parseArgs(argv: string[]): {
@@ -444,6 +450,13 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
       return { number: issue.number, title: issue.title, body: issue.body };
     });
     input.prContext = { prBody: prContext.prBody, issues };
+  }
+  if (record.tokenUsageNonce !== undefined) {
+    const nonce = record.tokenUsageNonce;
+    if (typeof nonce !== "string" || nonce.trim() === "") {
+      throw new Error("input JSON field `tokenUsageNonce` must be a non-blank string when present");
+    }
+    input.tokenUsageNonce = nonce;
   }
   return input;
 }
@@ -718,9 +731,10 @@ export async function main(
   // its startup clear degrades to a logged fault and the run still reaches
   // runReview. Rule: an unremovable stale document is a capture fault for
   // this run — the write below is suppressed so this run's own write path
-  // cannot leave stale content in place; the reader sees absence or a
-  // cleared file, never a document.
+  // cannot replace the survivor; the consumer's nonce check then provably
+  // rejects whatever old document is still readable there.
   const tokenUsageClearFailed = !clearTokenUsageDoc(tokenUsagePath);
+  let tokenUsageNonce: string | undefined;
   let agentDir: string | undefined;
   const removeAgentDir = (): void => {
     if (agentDir === undefined) return;
@@ -738,6 +752,7 @@ export async function main(
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
       const json = parseRunnerInput(parsed);
+      tokenUsageNonce = json.tokenUsageNonce;
       anchorRecheckDeadline(Date.now(), level, json.outerDeadlineEpochMs);
       const skippedCollisions: string[] = [];
       const dir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
@@ -809,14 +824,21 @@ export async function main(
           );
         }
       }
-      // why: Same side-document discipline as appliedModel — a stale document
-      // from a previous run must not ride this run's output, and a capture or
-      // write fault is logged, never thrown: usage is analysis data, not a gate.
-      if (tokenUsageClearFailed || tokenUsage === undefined || tokenUsage.length === 0) {
+      // why: Same side-document discipline as appliedModel — the document is
+      // stamped with THIS run's consumer-issued nonce, so a stale document a
+      // failed clear left readable is rejected consumer-side instead of being
+      // read as this run's usage. A missing input nonce or a failed clear
+      // suppresses the write (a nonce-less document is never consumable); a
+      // capture or write fault is logged, never thrown: usage is analysis
+      // data, not a gate.
+      if (tokenUsageClearFailed || tokenUsageNonce === undefined || tokenUsage === undefined || tokenUsage.length === 0) {
         clearTokenUsageDoc(tokenUsagePath);
       } else {
         try {
-          writeFileSync(tokenUsagePath, JSON.stringify({ version: 1, buckets: tokenUsage } satisfies TokenUsageDoc));
+          writeFileSync(
+            tokenUsagePath,
+            JSON.stringify({ version: 1, nonce: tokenUsageNonce, buckets: tokenUsage } satisfies TokenUsageDoc),
+          );
         } catch (error) {
           console.error(
             JSON.stringify({

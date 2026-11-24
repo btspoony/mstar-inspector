@@ -1388,11 +1388,14 @@ function readTokenUsageCommand(): ShellCommand {
  * never a gate on review correctness: an absent document means the run had
  * nothing attributable, and an unreadable, overflowing or invalid one is
  * logged once and dropped — never re-fetched, never fabricated. `null`
- * therefore means "nothing to write" for either reason.
+ * therefore means "nothing to write" for either reason. A valid document
+ * must additionally carry THIS attempt's nonce: a stale document a failed
+ * clear left behind is provably foreign and dropped the same way.
  */
 async function readTokenUsage(
   sandbox: ReviewSandbox,
   marker: string,
+  expectedNonce: string,
   log: AttemptLog,
   fields: AttemptLogFields,
 ): Promise<TokenUsageDoc | null> {
@@ -1422,6 +1425,13 @@ async function readTokenUsage(
     log.warn(
       { ...fields, token_usage: "invalid-document", token_usage_error: gate.error },
       `token-usage document failed its gate — left unrecorded: ${gate.error}`,
+    );
+    return null;
+  }
+  if (gate.doc.nonce !== expectedNonce) {
+    log.warn(
+      { ...fields, token_usage: "foreign-nonce" },
+      "token-usage document carries a foreign nonce — a stale document, left unrecorded",
     );
     return null;
   }
@@ -2141,6 +2151,10 @@ export async function runReviewAttempt(input: {
     default:
       return noLaunchState(entry);
   }
+  // The run-scoped nonce the runner stamps its usage document with: minted
+  // here, transported on the runner input, and checked on read-back, so an
+  // old document that survived a failed clear is provably not this run's.
+  const tokenUsageNonce = crypto.randomUUID();
   const runnerInput = {
     worktreePath: CLONE_DIR,
     reconFacts,
@@ -2153,6 +2167,7 @@ export async function runReviewAttempt(input: {
     ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
     ...(prContext !== undefined ? { prContext } : {}),
+    tokenUsageNonce,
   };
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
   const inputWriteWindowMs = deadlineMs - Date.now();
@@ -2363,7 +2378,7 @@ export async function runReviewAttempt(input: {
   // spend to the attempt's own target — an unattributable row is never written.
   const tokenUsage =
     targetId !== undefined && usageWorkspaceId !== undefined
-      ? await readTokenUsage(sandbox, marker, deps.log, fields)
+      ? await readTokenUsage(sandbox, marker, tokenUsageNonce, deps.log, fields)
       : null;
 
   const secretValues = progress.secretValues;

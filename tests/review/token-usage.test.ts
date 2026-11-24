@@ -303,7 +303,7 @@ function validBucket(overrides: Record<string, unknown> = {}): Record<string, un
 }
 
 describe("validateTokenUsageDoc", () => {
-  const valid = { version: 1, buckets: [validBucket()] } as unknown as TokenUsageDoc;
+  const valid = { version: 1, nonce: "nonce-1", buckets: [validBucket()] } as unknown as TokenUsageDoc;
 
   test("accepts a valid document and returns the typed buckets", () => {
     const gate = validateTokenUsageDoc(valid);
@@ -312,37 +312,45 @@ describe("validateTokenUsageDoc", () => {
   });
 
   test("accepts a document with an empty buckets list", () => {
-    expect(validateTokenUsageDoc({ version: 1, buckets: [] }).ok).toBe(true);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [] }).ok).toBe(true);
+  });
+  test("rejects a missing, blank, non-string or over-long nonce", () => {
+    expect(validateTokenUsageDoc({ version: 1, buckets: [] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "", buckets: [] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "   ", buckets: [] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: 7, buckets: [] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "x".repeat(129), buckets: [] }).ok).toBe(false);
   });
 
   test("rejects an extra document key and an extra bucket key", () => {
     expect(validateTokenUsageDoc({ ...valid, extra: true }).ok).toBe(false);
-    expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ note: "x" })] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ note: "x" })] }).ok).toBe(false);
   });
 
   test("rejects a negative count, a non-integer count and a negative costUsd", () => {
     for (const field of ["input", "output", "cacheRead", "cacheWrite", "total", "requests"] as const) {
-      expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ [field]: -1 })] }).ok).toBe(false);
-      expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ [field]: 1.5 })] }).ok).toBe(false);
+      expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ [field]: -1 })] }).ok).toBe(false);
+      expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ [field]: 1.5 })] }).ok).toBe(false);
     }
-    expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ costUsd: -0.1 })] }).ok).toBe(false);
-    expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ costUsd: Number.NaN })] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ costUsd: -0.1 })] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ costUsd: Number.NaN })] }).ok).toBe(false);
   });
 
   test("rejects a blank or over-long provider/model", () => {
     for (const field of ["provider", "model"] as const) {
-      expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ [field]: "   " })] }).ok).toBe(false);
-      expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ [field]: "x".repeat(129) })] }).ok).toBe(false);
-      expect(validateTokenUsageDoc({ version: 1, buckets: [validBucket({ [field]: 7 })] }).ok).toBe(false);
+      expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ [field]: "   " })] }).ok).toBe(false);
+      expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ [field]: "x".repeat(129) })] }).ok).toBe(false);
+      expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: [validBucket({ [field]: 7 })] }).ok).toBe(false);
     }
   });
 
   test("rejects a wrong version, a non-array buckets field and over-bound bucket count", () => {
-    expect(validateTokenUsageDoc({ version: 2, buckets: [] }).ok).toBe(false);
-    expect(validateTokenUsageDoc({ version: 1, buckets: "x" }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 2, nonce: "n", buckets: [] }).ok).toBe(false);
+    expect(validateTokenUsageDoc({ version: 1, nonce: "n", buckets: "x" }).ok).toBe(false);
     expect(
       validateTokenUsageDoc({
         version: 1,
+        nonce: "n",
         buckets: Array.from({ length: 65 }, (_, index) => validBucket({ model: `m-${index}` })),
       }).ok,
     ).toBe(false);
@@ -356,10 +364,19 @@ describe("validateTokenUsageDoc", () => {
 describe("runner token-usage side document", () => {
   const ENVELOPE = { schema: "mstar.review/v1", verdict: "blocked", summary_md: "s", findings: [] } as MstarReviewV1;
 
-  function writeInput(): string {
+  const NONCE = "test-run-nonce";
+
+  function writeInput(withNonce = true): string {
     const dir = mkdtempSync(join(tmpdir(), "token-usage-input-"));
     const path = join(dir, "input.json");
-    writeFileSync(path, JSON.stringify({ capabilityHosts: [], worktreePath: "/workspace/clone" }));
+    writeFileSync(
+      path,
+      JSON.stringify({
+        capabilityHosts: [],
+        worktreePath: "/workspace/clone",
+        ...(withNonce ? { tokenUsageNonce: NONCE } : {}),
+      }),
+    );
     return path;
   }
 
@@ -420,7 +437,7 @@ describe("runner token-usage side document", () => {
     );
     expect(code).toBe(0);
     const doc = JSON.parse(readFileSync(path, "utf8"));
-    expect(doc).toEqual({ version: 1, buckets });
+    expect(doc).toEqual({ version: 1, nonce: NONCE, buckets });
     const gate = validateTokenUsageDoc(doc);
     expect(gate.ok).toBe(true);
     expect(stderr).not.toContain("token_usage");
@@ -429,7 +446,7 @@ describe("runner token-usage side document", () => {
   test("an empty fold removes a stale document", async () => {
     const dir = mkdtempSync(join(tmpdir(), "token-usage-out-"));
     const path = join(dir, "review-token-usage.json");
-    writeFileSync(path, JSON.stringify({ version: 1, buckets: [] }));
+    writeFileSync(path, JSON.stringify({ version: 1, nonce: "an-older-run", buckets: [] }));
     const { code } = await runCli(
       ["--level", "quick", "--input", writeInput()],
       runtimeWith([]),
@@ -498,6 +515,30 @@ describe("runner token-usage side document", () => {
     // No document was persisted under the unremovable path — a consumer's
     // existence probe would read a fault, never a stale usage document.
     expect(() => readFileSync(path)).toThrow();
+  });
+  test("no usage nonce in the input suppresses the write — a nonce-less document is never consumable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "token-usage-out-"));
+    const path = join(dir, "review-token-usage.json");
+    const { code, stdout } = await runCli(
+      ["--level", "quick", "--input", writeInput(false)],
+      runtimeWith([
+        {
+          provider: "ark",
+          model: "deepseek-v4",
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          total: 2,
+          requests: 1,
+          costUsd: 0,
+        },
+      ]),
+      path,
+    );
+    expect(code).toBe(0);
+    expect(JSON.parse(stdout)).toEqual(ENVELOPE);
+    expect(existsSync(path)).toBe(false);
   });
 
   test("the fixed wire path is the applied-model sibling", () => {
