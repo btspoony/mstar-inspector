@@ -330,7 +330,7 @@ export function TargetsView({
           ) : null}
           {all.length > 0 && rows.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              {t(locale, showUninstalled ? "targets.filterEmpty" : "targets.filterEmptyAvailable")}
+              {t(locale, "targets.filterEmptyAvailable")}
             </p>
           ) : null}
         </div>

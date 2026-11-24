@@ -192,7 +192,6 @@ describe("repository list (static SSR)", () => {
       row({ target_id: "t-web", repo_id: null, repo_owner: "acme", repo_name: "web" }),
     ]);
     expect(markup).toContain(t("en", "targets.filterEmptyAvailable"));
-    expect(markup).not.toContain(t("en", "targets.filterEmpty"));
   });
 
   test("the overview band reports review volume summed from the row aggregates", () => {

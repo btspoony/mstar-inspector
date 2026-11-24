@@ -207,7 +207,6 @@ export const zhCN: Dictionary = {
       duplicates: "以下仓库已存在：{names}",
       confirm: "添加",
     },
-    filterEmpty: "没有等待安装的仓库。",
     filterEmptyAvailable: "还没有可审查的仓库。",
     appsReadFailed: "无法读取本工作区的应用 — 暂时无法添加仓库。",
   },

@@ -250,6 +250,7 @@ describe("App detail IA copy", () => {
     expect(isDictionaryKey("targets.status.reviewing")).toBe(false);
     expect(t("en", "targets.filterEmptyAvailable")).toBe("No repository is available yet.");
     expect(t("zh_CN", "targets.filterEmptyAvailable")).toBe("还没有可审查的仓库。");
+    expect(isDictionaryKey("targets.filterEmpty")).toBe(false);
     expect(t("en", "targets.tabInsights")).toBe("Insights");
     expect(t("zh_CN", "targets.tabPullRequests")).toBe("拉取请求");
     expect(t("en", "targets.settings.heading")).toBe("Review settings");

@@ -231,7 +231,6 @@ export const en = {
       duplicates: "Already added: {names}",
       confirm: "Add",
     },
-    filterEmpty: "No repository is awaiting its install.",
     filterEmptyAvailable: "No repository is available yet.",
     appsReadFailed: "Could not read this workspace's applications — adding a repository is unavailable for now.",
   },
