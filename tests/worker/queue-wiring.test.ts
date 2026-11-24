@@ -17,8 +17,13 @@ type QueueEnv = Parameters<typeof runReviewQueueBatch>[1];
 
 function envWithGate(extra: Record<string, unknown>): QueueEnv {
   const db = {
-    prepare: () => ({
-      bind: () => ({ first: async () => ({ value: "on" }) }),
+    prepare: (sql: string) => ({
+      bind: () => ({
+        // The route gate reads `value`; the platform switch (`server_flags`)
+        // reads `enabled`. Both answer "open" so the wiring tests exercise the
+        // review path, not either gate.
+        first: async () => (sql.includes("server_flags") ? { enabled: 1 } : { value: "on" }),
+      }),
     }),
   };
   return { DB: db, ...extra } as unknown as QueueEnv;

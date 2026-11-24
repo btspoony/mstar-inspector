@@ -914,6 +914,94 @@ export async function priorAttemptStopEvidence(
 }
 
 /**
+ * The `review_failures.error` cause token a platform pause writes beside its
+ * code — the same shape `maintenance_window` uses, so an operator counter can
+ * name the cause without parsing the sentence.
+ */
+export const PLATFORM_PAUSE_REASON = "platform_paused";
+
+/**
+ * End a whole queue batch VISIBLY while the platform switch (`review_global`)
+ * is off.
+ *
+ * A pause is not a silent ack: each delivery's attached run is settled through
+ * the SAME paused skip the per-App pause uses (`settleSkippedRow`), one
+ * `review_failures` row names the platform pause, the commit's idempotency
+ * claim is handed back as `paused` (so a resume re-enqueues it instead of
+ * skipping it for a day), and the message is acked. Nothing here creates a
+ * Workflow instance or starts a container.
+ *
+ * The row's `id` is deterministic per delivery identity, so a redelivery of the
+ * same message cannot append a second row for one fact.
+ */
+export async function settlePausedPlatformBatch(
+  batch: MessageBatch<ReviewJobPayload>,
+  env: PipelineEnv,
+  log: ConsumerLog = defaultConsumerLog,
+  overrides: ConsumerOverrides = {},
+): Promise<void> {
+  const deps = createProcessDeps(env, log, overrides);
+  const first = batch.messages[0];
+  if (first === undefined) return;
+  log.warn(
+    {
+      ...payloadIdentityFields(first.body),
+      event: "review_paused",
+      queue: batch.queue,
+      batch_size: batch.messages.length,
+    },
+    "review platform paused (review_global off) — every delivery in this batch is settled as paused and acked; no Workflow instance is created",
+  );
+  for (const message of batch.messages) {
+    const payload = message.body;
+    const fields = { ...payloadIdentityFields(payload), event: "review_paused" as const };
+    if (payload.head_sha) {
+      try {
+        await putAbandonClaim(
+          deps.env.IDEMPOTENCY_KV,
+          idemKey({
+            installation_id: payload.installation_id,
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: payload.head_sha,
+          }),
+          IDEM_PAUSED,
+          IDEMPOTENCY_SECONDS,
+        );
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        log.warn(fields, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+      }
+    }
+    await settleSkippedRow(deps, payload, payload.head_sha, "review paused", { paused: true });
+    const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
+    await deps.failureStore
+      .record({
+        id: `${PLATFORM_PAUSE_REASON}:${payload.installation_id}:${identity}@${payload.head_sha ?? ""}`,
+        target_id: payload.targetId,
+        installation_id: payload.installation_id,
+        owner: payload.owner,
+        repo: payload.repo,
+        pr_number: payload.pr_number,
+        head_sha: payload.head_sha ?? "",
+        stage: "pipeline",
+        code: "review.paused.platform",
+        trackId: `${identity}@${payload.head_sha ?? ""}`,
+        message: FAILURE_SUMMARIES["review.paused.platform"],
+        error: `${PLATFORM_PAUSE_REASON}: the review switch (review_global) is off, so this queued delivery ended without a review — PR ${identity}, head_sha ${
+          payload.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : payload.head_sha
+        }`,
+      })
+      .catch((err: unknown) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        log.warn(fields, `review_failures insert failed (pause trace lost): ${detail}`);
+      });
+    message.ack();
+  }
+}
+
+/**
  * Create the queue consumer: admission, dedupe, skip settlement and the
  * hand-off only. One admitted delivery becomes one Workflow instance through
  * the caller's `startAttempt` (or the `startAttempt` override); the consumer

@@ -692,12 +692,21 @@ type ReviewQueueEnv = Env & PipelineEnv & { REVIEW_WORKFLOW?: Workflow<AttemptRe
 
 type ReviewQueueConsumerModule = Pick<
   typeof ConsumerModule,
-  "createReviewConsumer" | "createWorkflowInstance"
+  "createReviewConsumer" | "createWorkflowInstance" | "settlePausedPlatformBatch"
 >;
 
 /**
- * ONE queue batch, end to end: the deployment gate, then the consumer through
- * the Workflow starter.
+ * ONE queue batch, end to end: the deployment gate, the platform switch, then
+ * the consumer through the Workflow starter.
+ *
+ * The deployment gate is read FIRST and is unchanged: it is the deployment's own
+ * fact (a route that is not wired up yet), so a closed gate keeps today's
+ * single-line refusal and must not be re-explained as a customer-facing pause.
+ * The operator's platform switch is read SECOND, in the branch that would
+ * otherwise create a Workflow instance: off ends every delivery visibly
+ * (`settlePausedPlatformBatch`), a read FAULT keeps the fail-closed meaning —
+ * nothing routes, and nothing is fabricated as a pause — so the batch throws and
+ * the queue redelivers it instead of dropping reviews.
  *
  * The consumer is a LOADER parameter (defaulting to the dynamic import) so a
  * test can drive this wiring with a fake module instead of stubbing
@@ -727,11 +736,30 @@ export async function runReviewQueueBatch(
     else console.log(line);
     return;
   }
+  let reviewGlobal: boolean;
+  try {
+    reviewGlobal = await isFlagEnabled(env.DB, "review_global");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      JSON.stringify({
+        event: "review_global_read_failed",
+        batch_messages: batch.messages.length,
+        detail: redactSecrets(detail),
+        msg: "review_global flag read failed — fail-closed: nothing routed, nothing settled as paused, the batch is redelivered",
+      }),
+    );
+    throw err;
+  }
+  const { createReviewConsumer, createWorkflowInstance, settlePausedPlatformBatch } = await loadConsumer();
+  if (!reviewGlobal) {
+    await settlePausedPlatformBatch(batch, env);
+    return;
+  }
   const workflow = env.REVIEW_WORKFLOW;
   if (workflow === undefined) {
     throw new Error("REVIEW_WORKFLOW binding is not configured — the review route cannot create an attempt");
   }
-  const { createReviewConsumer, createWorkflowInstance } = await loadConsumer();
   await createReviewConsumer(
     env,
     undefined,

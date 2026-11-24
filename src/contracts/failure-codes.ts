@@ -28,6 +28,7 @@ export const FAILURE_CODES = [
   "review.github.rate_limited",
   "review.github.cleanup_limited",
   "review.admission.refused",
+  "review.paused.platform",
   "review.delivery.deferred",
   "review.delivery.quota_exhausted",
   "review.delivery.entitlement_unreadable",
@@ -74,6 +75,8 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
     "GitHub rate-limited cleanup of an older review comment. The review itself was published; an older comment may remain.",
   "review.admission.refused":
     "This commit was not reviewed: another review holds a slot for this pull request, or a concurrent-review limit (workspace or platform) was reached. Nothing was charged.",
+  "review.paused.platform":
+    "This commit was not reviewed: the platform has paused code reviews. Nothing was charged; the review runs again once the operator resumes the service.",
   "review.delivery.deferred":
     "This commit was not reviewed: the platform was closed and the queued delivery expired. Nothing was charged.",
   "review.delivery.quota_exhausted":
