@@ -2959,4 +2959,40 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(second.status).toBe(200);
     expect(sent).toHaveLength(1);
   });
+
+  test("a faulted review_checks lookup is 200 ignored with only check_rerun_lookup_failed — never reported as no_attempt", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(
+      failingDb(db, (query) => query.includes("WHERE github_app_id = ? AND check_run_id = ?")),
+      { REVIEW_QUEUE: queue as never },
+    );
+    const body = checkRunPayload();
+
+    const { warn, stop } = captureWarn();
+    let res: Response;
+    try {
+      res = await postWebhook(
+        "/webhook/default/app-x",
+        body,
+        { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+        env,
+      );
+    } finally {
+      stop();
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.some((entry) => entry.includes("check_rerun_lookup_failed"))).toBe(true);
+    expect(lines.some((entry) => entry.includes("check_rerun_no_attempt"))).toBe(false);
+    const delivery = db.raw
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .get(appRow.id) as { event_name: string; outcome: string };
+    expect(delivery).toEqual({ event_name: "check_run", outcome: "ignored" });
+  });
 });

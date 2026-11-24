@@ -665,13 +665,15 @@ async function newerCommitHasJob(
   fields: ConsumerLogFields,
 ): Promise<boolean> {
   if (!headSha) return false;
+  // The claim belongs to ANOTHER commit's delivery, so it carries no rerun
+  // dimension of ours — `kvClaimKey(payload, headSha)` would append this
+  // delivery's `:rerun:{id}` and never find it. The plain key is only the fast
+  // path: a newer head whose job arrived via check_run.rerequested claims
+  // under `{idemKey}:rerun:{check_run_id}`, invisible to this read, so the D1
+  // probe below is the authority — a finished `reviews` row or an in-flight
+  // `review_checks` attempt (a rerun attaches one at enqueue time) proves the
+  // head's review is coming.
   try {
-    // The claim belongs to ANOTHER commit's delivery, so it carries no rerun
-    // dimension of ours — `kvClaimKey(payload, headSha)` would append this
-    // delivery's `:rerun:{id}` and never find it.
-    // shortcut: a newer head whose job came from a RERUN claim is invisible
-    // here (its key ends `:rerun:{id}`), so this pass may not supersede; that
-    // delivery settles itself in the rerun stale-head gate in `processMessage`.
     const key = idemKey({
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -680,10 +682,39 @@ async function newerCommitHasJob(
       head_sha: headSha,
     });
     const claim = await deps.env.IDEMPOTENCY_KV.get(key);
-    return isReviewClaim(claim);
+    if (isReviewClaim(claim)) return true;
+    // A non-review claim value still falls through to D1: the KV value records
+    // how a write went, not whether the head's review is really in flight.
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    deps.log.warn(fields, `supersede KV read failed — reviewing normally: ${detail}`);
+    deps.log.warn(fields, `supersede KV read failed — probing D1 instead: ${detail}`);
+  }
+  try {
+    const row = await deps.env.DB.prepare(
+      `SELECT 1 FROM reviews
+         WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
+       UNION ALL
+       SELECT 1 FROM review_checks
+         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL
+       LIMIT 1`,
+    )
+      .bind(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        headSha,
+        payload.botRef.appId,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        headSha,
+      )
+      .first();
+    return row !== null;
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    deps.log.warn(fields, `supersede D1 probe failed — reviewing normally: ${detail}`);
     return false;
   }
 }

@@ -162,6 +162,8 @@ CREATE UNIQUE INDEX idx_check_one_open ON review_checks(attempt_key) WHERE termi
 CREATE INDEX idx_check_recovery ON review_checks(recovery_state,next_attempt_ms,lease_until_ms);
 -- migration 0109; the rerequested Re-run reverse lookup:
 CREATE INDEX idx_review_checks_app_run ON review_checks(github_app_id, check_run_id) WHERE check_run_id IS NOT NULL;
+-- migration 0109; the supersede probe's "does this head have an in-flight attempt?" (nonterminal only):
+CREATE INDEX idx_review_checks_open_head ON review_checks(bot_id, head_sha) WHERE terminal_ms IS NULL;
 ```
 
 The partial unique index, not merely `(key,generation)` uniqueness, prevents simultaneous active generations. A generation, `external_id` and known remote ID are never recycled. `terminal_ms` records local completion/give-up; remote observation remains separate. Terminal history is never silently overwritten by a fresh attempt.

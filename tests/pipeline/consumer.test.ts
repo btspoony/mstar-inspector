@@ -3518,6 +3518,69 @@ describe("createReviewConsumer", () => {
     expect(h.logLines.filter((l) => l.level === "warn" && l.msg.includes("supersede KV read failed"))).toHaveLength(1);
   });
 
+  // A rerun's KV claim lives under `{idemKey}:rerun:{check_run_id}`, so the
+  // supersede gate's plain-key read can never see it — the D1 probe is the
+  // proof instead (the `review_checks` row the rerun attached at enqueue).
+  // Per §2.2 a rerun only really re-reviews while its head is still the PR
+  // head; here NEW_SHA IS the head, so its in-flight attempt supersedes the
+  // stale delivery rather than letting it pay for a review of old code.
+  test("a newer head whose only job proof is a rerun's in-flight check row still supersedes the delivery", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO review_checks
+           (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+            triggered_by, action, attempt_key, generation, external_id, check_run_id,
+            create_state, holder, lease_epoch, lease_until_ms, execution_deadline_ms,
+            desired, desired_title, desired_summary, observed, recovery_state,
+            publication_id, attempts, next_attempt_ms, last_error, terminal_ms,
+            created_ms, updated_ms)
+         VALUES ('rerun-check', ?, 424242, 123, 'acme', 'widgets', 42, ?,
+                 'check_run', 'rerequested', 'rerun-attempt-key', 1, 'mstar-check:v1:rerun:1', 7002,
+                 'known', NULL, 1, NULL, 900, 'in_progress', 'mstar review', 'rerunning',
+                 'in_progress', 'pending', NULL, 0, NULL, NULL, NULL, 1, 1)`,
+      )
+      .run(TEST_APP_ID, NEW_SHA);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(h.kvPuts).toContainEqual({
+      key: ENQUEUED_KEY(SHA),
+      value: "superseded",
+      options: { expirationTtl: IDEMPOTENCY_SECONDS },
+    });
+    expect(reviewCount(db)).toBe(0);
+  });
+
+  // Same gate, other D1 leg: a finished `reviews` row for the newer head is
+  // proof the head needs no second delivery, even with no KV claim at all.
+  test("a newer head whose only proof is a finished reviews row still supersedes the delivery", async () => {
+    h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
+    const db = await createSeededTestD1();
+    await seedPrHead(db, { headSha: NEW_SHA, headAt: NEW_AT });
+    db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict)
+         VALUES ('review-of-new-head', 123, 'acme', 'widgets', 42, ?, 'ship it')`,
+      )
+      .run(NEW_SHA);
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(makePayload({ head_sha: SHA, head_at: OLD_AT })));
+
+    expect(h.sandbox.calls).toHaveLength(0);
+    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    expect(h.logLines.some((l) => l.fields.reason === "superseded")).toBe(true);
+    expect(h.kvPuts.some((p) => p.key === ENQUEUED_KEY(SHA) && p.value === "superseded")).toBe(true);
+    expect(reviewCount(db)).toBe(1);
+  });
+
   test("the ledger's own sha is never skipped, whatever the stamps say (AC-2)", async () => {
     for (const [ledgerAt, payloadAt] of [
       [OLD_AT, OLD_AT],

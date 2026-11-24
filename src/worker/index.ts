@@ -122,14 +122,21 @@ async function resolveCheckRerunOutcome(
   rerun: Extract<WebhookOutcome, { kind: "check_rerun" }>,
   webhookRef: string,
 ): Promise<Exclude<WebhookOutcome, { kind: "check_rerun" }>> {
-  const attempt = await findCheckAttemptByRunId(db, row.github_app_id, rerun.checkRunId).catch((err: unknown) => {
-    webhookWarn(
-      "check_rerun_lookup_failed",
-      `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
-      "per-App webhook could not resolve the rerequested check run — answering ignored (fail-closed)",
-    );
-    return null;
-  });
+  // `undefined` = the lookup faulted; `null` = the lookup ran and no row owns
+  // the run — the two must not share the `check_rerun_no_attempt` reason.
+  const attempt = await findCheckAttemptByRunId(db, row.github_app_id, rerun.checkRunId).catch(
+    (err: unknown) => {
+      webhookWarn(
+        "check_rerun_lookup_failed",
+        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "per-App webhook could not resolve the rerequested check run — answering ignored (fail-closed)",
+      );
+      return undefined;
+    },
+  );
+  if (attempt === undefined) {
+    return { kind: "ignore", reason: "check run lookup failed" };
+  }
   if (attempt === null) {
     webhookWarn(
       "check_rerun_no_attempt",
