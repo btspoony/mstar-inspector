@@ -75,9 +75,34 @@ export function execSensitiveValues(
   let complete = true;
   if (stdin !== undefined && stdin !== "") {
     values.push(stdin);
-    complete = collectStrings(decodedStdin(stdin), values);
+    const decoded = decodedStdin(stdin);
+    if (decoded === undefined) {
+      // Not a document, so no leaf can be named. The raw text alone is not
+      // enough either: a platform error echoes ONE field, not the blob. Hold
+      // every token of it to the same proof, and degrade when the payload is
+      // too large to enumerate.
+      if (stdin.length > STDIN_RAW_MAX_CHARS) complete = false;
+      else collectTokens(stdin, values);
+    } else {
+      complete = collectStrings(decoded, values);
+    }
   }
   return { values: values.filter((value) => value.length >= CAUSE_MIN_SENSITIVE_CHARS), complete };
+}
+
+/** A credential payload that does not parse is bounded before it is enumerated. */
+const STDIN_RAW_MAX_CHARS = 4_096;
+
+/** Payload fields are separated by JSON/shell/query punctuation, not only spaces. */
+const STDIN_TOKEN_DELIMITERS = /[\s,;:"'`{}[\]()<>=&?\\|/]+/;
+
+function collectTokens(text: string, into: string[]): void {
+  for (const token of text.split(STDIN_TOKEN_DELIMITERS)) {
+    if (token === "") continue;
+    into.push(token);
+    const unquoted = token.replace(/^['"]+|['"]+$/g, "");
+    if (unquoted !== token) into.push(unquoted);
+  }
 }
 
 function decodedStdin(stdin: string): unknown {
@@ -137,12 +162,19 @@ function cleanCauseMessage(raw: string, sensitive: ExecSensitiveSet): string | n
 }
 
 /**
- * Error names come from a fixed vocabulary; anything else is attacker text. An
- * unsafe name degrades to `Error` — never echoed, never guessed.
+ * Error names come from a fixed vocabulary; anything else is attacker text. A
+ * character pattern alone is not that vocabulary: `providerkey9a1fbc` is
+ * pattern-clean and still a credential. So the name is held to the SAME proof
+ * as the message — no collected value, no secret shape — and degrades to
+ * `Error` otherwise. Never echoed, never guessed.
  */
-function safeCauseName(raw: unknown): string {
+function safeCauseName(raw: unknown, sensitive: ExecSensitiveSet): string {
   if (typeof raw !== "string" || raw.length > CAUSE_NAME_MAX_CHARS) return "Error";
-  return CAUSE_NAME_PATTERN.test(raw) ? raw : "Error";
+  if (!sensitive.complete) return "Error";
+  if (!CAUSE_NAME_PATTERN.test(raw)) return "Error";
+  if (redactSecretShapes(raw) !== raw) return "Error";
+  if (sensitive.values.some((value) => raw.includes(value))) return "Error";
+  return raw;
 }
 
 /**
@@ -157,7 +189,7 @@ function safeCauseName(raw: unknown): string {
  */
 export function execCause(err: unknown, openedAtMs: number, sensitive: ExecSensitiveSet): string {
   const rawName = err instanceof Error ? err.name : typeof err;
-  const name = safeCauseName(rawName === "" ? "Error" : rawName);
+  const name = safeCauseName(rawName === "" ? "Error" : rawName, sensitive);
   const suffix = ` (after ${Math.max(0, Date.now() - openedAtMs)}ms)`;
   const message = cleanCauseMessage(err instanceof Error ? err.message : String(err), sensitive);
   const room = EXEC_CAUSE_MAX_CHARS - name.length - 2 - suffix.length;

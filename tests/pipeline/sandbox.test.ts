@@ -529,6 +529,70 @@ describe("SandboxV1 Durable Object", () => {
     });
   });
 
+  test("an error name that IS a collected credential degrades to Error", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      const credential = "providerkey9a1fbc";
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        // Pattern-clean, so the character check alone would echo it.
+        const err = new Error("exec failed");
+        err.name = credential;
+        throw err;
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand("bun run runner.ts"), {
+        env: { REVIEW_API_KEY: credential },
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      expect(read.cause).toBe("Error: exec failed (after 1200ms)");
+      expect(read.cause).not.toContain(credential);
+    });
+  });
+
+  test("a raw non-JSON stdin payload is unprovable: a substring the error reports is still removed", async () => {
+    reset();
+    running = true;
+    await withFrozenClock(async (clock) => {
+      const { sandbox, container } = makeDo(true);
+      const credential = "providerkey9a1fbc";
+      // Not JSON, not base64: the walk can name no leaf of it.
+      const stdin = `apikey=${credential};region=us-east`;
+      container.exec = mock(async (cmd: string[]) => {
+        execCalls.push({ cmd });
+        if ((cmd[cmd.length - 1] ?? "").includes("/tmp/mstar-review-attempt")) {
+          return {
+            stdin: null,
+            output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+          };
+        }
+        clock.now += 1_200;
+        throw new Error(`exec failed: ${credential} rejected`);
+      });
+
+      const read = await sandbox.runMarked(MARKER, shellCommand("bun run runner.ts"), {
+        stdin,
+        deadlineEpochMs: clock.now + 60_000,
+      });
+
+      if (read.kind !== "reply-lost") throw new Error(`expected reply-lost, got ${read.kind}`);
+      expect(read.cause).toContain("exec failed:");
+      expect(read.cause).toContain("[REDACTED]");
+      expect(read.cause).not.toContain(credential);
+    });
+  });
+
   test("a marker write that never resolves answers unavailable AT the caller's deadline, not after a fixed wait", async () => {
     reset();
     const { sandbox, container } = makeDo(false);
