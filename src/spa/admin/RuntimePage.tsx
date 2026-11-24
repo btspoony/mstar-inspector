@@ -147,12 +147,17 @@ function ReviewsRunningCard({
             </dd>
           </div>
         </dl>
-        <a
-          className="mt-4 inline-flex w-fit text-sm text-primary hover:underline"
-          href="/dashboard"
-        >
-          {t(locale, "admin.runtime.reviewsPausedAppsLink")}
-        </a>
+        <p className="mt-3 text-xs text-muted-foreground" data-reviews-running="precedence">
+          {t(locale, "admin.runtime.reviewsPrecedence")}
+        </p>
+        {data.appsHref === null ? null : (
+          <a
+            className="mt-4 inline-flex w-fit text-sm text-primary hover:underline"
+            href={data.appsHref}
+          >
+            {t(locale, "admin.runtime.reviewsPausedAppsLink")}
+          </a>
+        )}
       </CardContent>
     </SectionCard>
   );

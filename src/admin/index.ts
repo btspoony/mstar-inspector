@@ -1,6 +1,6 @@
 import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
-import { isPlatformOperator } from "../dashboard/index";
+import { isPlatformOperator, workspaceBoot } from "../dashboard/index";
 import { listBotScopes, setBotScope } from "../dashboard/apps-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
@@ -207,6 +207,22 @@ async function readPausedApps(db: DashboardD1): Promise<number | null> {
 }
 
 /**
+ * The Apps list the pause link opens. `/dashboard` alone lands on the
+ * repository overview, and the unscoped `/dashboard/apps` is one of the two
+ * redirect roots (also the repository overview), so the address needs a
+ * workspace segment — the same one sign-in would land this operator on.
+ */
+async function readAppsHref(env: Env, login: string): Promise<string | null> {
+  try {
+    const boot = await workspaceBoot(env, login);
+    const ref = boot.workspaceRef ?? boot.memberships[0]?.id;
+    return ref === undefined ? null : `/dashboard/${ref}/apps`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One answer for "are reviews running": the platform switch first, then the
  * deployment's routing gate. An unreadable gate is never permission, so it
  * answers blocked rather than running.
@@ -243,6 +259,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     queue,
     platform,
     pausedApps,
+    appsHref,
   ] = await Promise.all([
     getSystemConcurrency(db),
     getCheckBudgets(db),
@@ -260,6 +277,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readQueueBacklog(c.env.REVIEW_QUEUE),
     readPlatformSwitch(db),
     readPausedApps(db),
+    readAppsHref(c.env, login),
   ]);
   return c.json({
     concurrency: system.concurrency,
@@ -323,6 +341,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       answer: deriveReviewsAnswer(platform, routeWorkflow),
       platform: { enabled: platform.enabled, unreadable: platform.unreadable },
       pausedApps,
+      appsHref,
     },
     maintenance: await getMaintenanceMode(db),
   });

@@ -210,6 +210,7 @@ const DEFAULT_REVIEWS_RUNNING = {
   answer: "blocked-deployment-gate",
   platform: { enabled: true, unreadable: false },
   pausedApps: 0,
+  appsHref: null,
 };
 
 const DEFAULT_LOST_REPLY_SETTLE = {

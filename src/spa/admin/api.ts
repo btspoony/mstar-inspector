@@ -172,12 +172,14 @@ export type ReviewsRunningAnswer = "running" | "paused-platform" | "blocked-depl
  * One operations answer for "are reviews running": the derived answer plus the
  * two facts behind it that the page does not already carry (the routing gate is
  * the top-level `routeWorkflow`). `pausedApps` is `null` when the App count
- * could not be read — never `0`.
+ * could not be read — never `0`; `appsHref` is the workspace-scoped Apps list,
+ * `null` when no workspace ref could be resolved.
  */
 export type ReviewsRunningConfig = {
   answer: ReviewsRunningAnswer;
   platform: { enabled: boolean; unreadable: boolean };
   pausedApps: number | null;
+  appsHref: string | null;
 };
 
 /**
@@ -420,6 +422,7 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
     answer: block.answer,
     platform: { enabled: facts.enabled, unreadable: facts.unreadable },
     pausedApps: block.pausedApps as number | null,
+    appsHref: typeof block.appsHref === "string" ? block.appsHref : null,
   };
 }
 

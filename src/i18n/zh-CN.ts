@@ -1141,6 +1141,7 @@ export const zhCN: Dictionary = {
       reviewsRouteUnreadable: "本服务器未报告该字段",
       reviewsPausedAppsLabel: "已暂停审查的 App 数",
       reviewsPausedAppsUnreadable: "无法读取",
+      reviewsPrecedence: "平台开关与部署门禁同时关闭时，此处显示的是平台暂停这一原因。",
       reviewsPausedAppsLink: "在 App 设置中暂停或恢复单个 App",
       admissionDropsTitle: "准入拒绝（最近 24 小时）",
       admissionDropsDescription:

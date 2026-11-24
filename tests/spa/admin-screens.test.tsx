@@ -1382,6 +1382,7 @@ describe("Runtime screen", () => {
       answer: "running",
       platform: { enabled: true, unreadable: false },
       pausedApps: 0,
+      appsHref: "/dashboard/acme/apps",
       ...over,
     },
   });
@@ -1401,8 +1402,21 @@ describe("Runtime screen", () => {
     );
     expect(surface.container.querySelector('[data-reviews-running="paused-apps"]')?.textContent).toBe("2");
     expect(
-      (surface.container.querySelector('a[href="/dashboard"]') as unknown as Element | null)?.textContent,
+      (surface.container.querySelector('a[href="/dashboard/acme/apps"]') as unknown as Element | null)
+        ?.textContent,
     ).toBe("Pause or resume a single App in the App settings");
+    expect(surface.container.querySelector('[data-reviews-running="precedence"]')?.textContent).toBe(
+      "When the platform switch and the deployment gate are both off, the platform pause is the one named here.",
+    );
+    await surface.close();
+  });
+
+  test("no workspace ref means no App link, but the answer still renders", async () => {
+    const surface = await runtimeScreen(() => json(reviews({ appsHref: null })));
+    expect(surface.container.querySelector("[data-reviews-running] a")).toBeNull();
+    expect(surface.container.querySelector('[data-reviews-running="answer"]')?.textContent).toBe(
+      "Reviews are running.",
+    );
     await surface.close();
   });
 

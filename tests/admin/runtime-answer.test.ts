@@ -56,6 +56,7 @@ async function readAnswer(db: TestD1): Promise<{
   answer: string;
   platform: { enabled: boolean; unreadable: boolean };
   pausedApps: number | null;
+  appsHref: string | null;
 }> {
   const res = await worker.fetch(
     new Request("https://worker.local/_internal_admin/api/runtime", {
@@ -82,6 +83,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       answer: "running",
       platform: { enabled: true, unreadable: false },
       pausedApps: 0,
+      appsHref: null,
     });
   });
 
@@ -93,6 +95,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       answer: "paused-platform",
       platform: { enabled: false, unreadable: false },
       pausedApps: 0,
+      appsHref: null,
     });
   });
 
@@ -102,6 +105,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       answer: "blocked-deployment-gate",
       platform: { enabled: true, unreadable: false },
       pausedApps: 0,
+      appsHref: null,
     });
   });
 
@@ -120,6 +124,26 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     };
     expect(body.reviewsRunning.answer).toBe("blocked-deployment-gate");
     expect(body.routeWorkflow).toMatchObject({ mode: "off", degraded: true, reason: "untrusted" });
+  });
+
+  test("the Apps link is workspace-scoped when the operator has a workspace", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    seed(
+      db,
+      "INSERT INTO workspaces (id, slug, name, created_by, created_at, deleted_at) VALUES ('ws-admin', 'admin-ws', 'Admin', NULL, ?, NULL)",
+      new Date().toISOString(),
+    );
+    const operatorId = db.raw
+      .prepare("SELECT id FROM users WHERE github_login = ?")
+      .get(OPERATOR) as { id: string };
+    seed(
+      db,
+      "INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('ws-admin', ?, 'owner', ?)",
+      operatorId.id,
+      new Date().toISOString(),
+    );
+    expect((await readAnswer(db)).appsHref).toBe("/dashboard/ws-admin/apps");
   });
 
   test("the paused-App count reads the App pause of live Apps only", async () => {
@@ -141,6 +165,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       answer: "running",
       platform: { enabled: true, unreadable: false },
       pausedApps: 1,
+      appsHref: null,
     });
   });
 });

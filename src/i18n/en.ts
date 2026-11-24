@@ -1231,6 +1231,8 @@ export const en = {
       reviewsRouteUnreadable: "not reported by this server",
       reviewsPausedAppsLabel: "Apps with reviews paused",
       reviewsPausedAppsUnreadable: "not readable",
+      reviewsPrecedence:
+        "When the platform switch and the deployment gate are both off, the platform pause is the one named here.",
       reviewsPausedAppsLink: "Pause or resume a single App in the App settings",
       admissionDropsTitle: "Admission drops (last 24 hours)",
       admissionDropsDescription:
