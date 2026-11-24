@@ -25,12 +25,17 @@ import {
   parseInsights,
   readScopeKey,
   scopedInsightsSummaryUrl,
+  parseTargetTokenUsage,
+  targetTokenUsageUrl,
+  type TargetTokenUsage,
+  type TokenUsageBucket,
   verdictLine,
   type AppDetailSearch,
   type FindingsDistributionBucket,
   type InsightsSummary,
   type ReadScope,
 } from "./data";
+import { DataTable, type DataTableColumn } from "../components/DataTable";
 import { StackedBarChart, type StackedSeries } from "@/components/charts/StackedBarChart";
 import type { ChartSlot } from "@/components/charts/chartSlots";
 import type { FindingSeverity } from "../../contracts/finding-severity";
@@ -170,6 +175,117 @@ export function AppInsightsTab({
         </p>
       ) : null}
       {data !== null ? <InsightsRecordsView locale={locale} data={data} /> : null}
+      {scope.kind === "target" ? (
+        <TokenUsageSection locale={locale} targetId={scope.targetId} windowDays={search.window} />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * The token-usage card's fetch owner — the target-scoped read rides the
+ * page's insights window (`windowDays` is the shell-derived search value,
+ * never a second selector), refetches when it changes, and keeps its own
+ * load/error state so a failed usage read never disturbs the summary.
+ * Mounted for target scopes only: the workspace scope has no token-usage
+ * face (a workspace-wide aggregate is deferred in the plan).
+ */
+export function TokenUsageSection({
+  locale,
+  targetId,
+  windowDays,
+}: {
+  locale: SpaBoot["locale"];
+  targetId: string;
+  windowDays: string;
+}) {
+  const [data, setData] = useState<TargetTokenUsage | null>(null);
+  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
+
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    fetchJson(targetTokenUsageUrl(apiBase(), targetId, windowDays))
+      .then((raw) => {
+        if (cancelled) return;
+        const parsed = parseTargetTokenUsage(raw);
+        if (!parsed) {
+          setState("error");
+          return;
+        }
+        setData(parsed);
+        setState("ok");
+      })
+      .catch(() => {
+        if (!cancelled) setState("error");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [targetId, windowDays]);
+
+  const windowLabel =
+    data === null
+      ? null
+      : t(locale, data.window_days === 1 ? "insights.lastDay" : "insights.lastDays", {
+          count: data.window_days,
+        });
+
+  return (
+    <FlowSection
+      title={t(locale, "insights.tokenUsage.heading")}
+      subtitle={windowLabel === null ? undefined : t(locale, "insights.window", { label: windowLabel })}
+    >
+      {state === "loading" ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          {t(locale, "common.loading")}
+        </p>
+      ) : state === "error" || data === null ? (
+        <p role="alert" className="text-sm text-muted-foreground">
+          {t(locale, "common.loadFailed")}
+        </p>
+      ) : (
+        <TokenUsageTable locale={locale} usage={data} />
+      )}
+    </FlowSection>
+  );
+}
+
+/**
+ * One row per (provider, model) bucket plus a total line, in the shared
+ * DataTable — no chart. Exported (like InsightsRecordsView) so tests can
+ * render it from a fixture without a fetch.
+ */
+export function TokenUsageTable({
+  locale,
+  usage,
+}: {
+  locale: SpaBoot["locale"];
+  usage: TargetTokenUsage;
+}) {
+  if (usage.buckets.length === 0) {
+    return <p className="text-sm text-muted-foreground">{t(locale, "insights.tokenUsage.empty")}</p>;
+  }
+  const columns: DataTableColumn<TokenUsageBucket>[] = [
+    { header: t(locale, "insights.tokenUsage.provider"), cell: (row) => row.provider },
+    { header: t(locale, "insights.tokenUsage.model"), cell: (row) => row.model },
+    { header: t(locale, "insights.tokenUsage.requests"), cell: (row) => row.requests, align: "right" },
+    { header: t(locale, "insights.tokenUsage.input"), cell: (row) => row.input, align: "right" },
+    { header: t(locale, "insights.tokenUsage.cacheRead"), cell: (row) => row.cache_read, align: "right" },
+    { header: t(locale, "insights.tokenUsage.cacheWrite"), cell: (row) => row.cache_write, align: "right" },
+    { header: t(locale, "insights.tokenUsage.output"), cell: (row) => row.output, align: "right" },
+    { header: t(locale, "insights.tokenUsage.total"), cell: (row) => row.total, align: "right" },
+    { header: t(locale, "insights.tokenUsage.cost"), cell: (row) => `$${row.cost_usd.toFixed(4)}`, align: "right" },
+  ];
+  return (
+    <div className="flex flex-col gap-3">
+      <DataTable columns={columns} rows={usage.buckets} rowKey={(row) => `${row.provider}/${row.model}`} />
+      <p className="text-sm text-muted-foreground tabular-nums">
+        {t(locale, "insights.tokenUsage.totalSummary", {
+          tokens: usage.total.total,
+          cost: usage.total.cost_usd.toFixed(4),
+        })}
+      </p>
     </div>
   );
 }

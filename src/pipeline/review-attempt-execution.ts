@@ -3654,6 +3654,8 @@ export async function reviewAttempt(
       observedChangedLines: prepared.observedChangedLines,
       progress,
       attemptId,
+      targetId: payload.targetId,
+      usageWorkspaceId: ref.usageWorkspaceId,
     });
   } catch (err) {
     const failure = phaseFailureRecord(

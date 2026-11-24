@@ -92,7 +92,9 @@ export async function readReviewAttemptCapMs(db: DashboardD1, log: ReviewAttempt
 
 /** Per-call bound for the bounded reads issued AFTER the paid runner (ms):
  * the recheck document, the recheck status, the report document and the
- * applied-model document — local file reads, never a git-sized window. */
+ * applied-model document — local file reads, never a git-sized window. The
+ * token-usage read rides the applied-model read's concurrent window, so the
+ * count stays the sequential WINDOWS the tail can owe. */
 export const POST_RUNNER_READ_TIMEOUT_MS = 30_000;
 const POST_RUNNER_READ_COUNT = 3;
 /** Worst case the post-runner tail owes those reads (ms). 90_000 at the current count. */
@@ -117,17 +119,20 @@ const GUARD_SLACK_MS = 120_000;
 /**
  * The timed sandbox steps the admission guard bills, ONE conservative
  * `EXEC_TIMEOUT_GIT_MS` window each — the TTL's single source of truth.
- * A maximal round requires exactly this many bounded commands, and steps
- * that run under a tighter per-command bound still bill at 120s here — a
- * deliberate over-count, so the TTL stays conservative: the four PR-context
- * reads run under `PR_CONTEXT_EXEC_TIMEOUT_MS`, the post-runner reads under
- * `POST_RUNNER_READ_TIMEOUT_MS`. `full-diff` bills ONE complete diff stage:
- * the `gh pr diff` exec and the oversized fallback draw their timeouts from
- * the SAME deadline window, so the stage spends at most one 120s window
- * however it splits between the refused capture and the fallback — the
- * fallback adds no window and the TTL/backoff pins stay put. An uncounted
- * step lets the row expire while a legal review is still posting, so a new
- * one must fail the consumer suite until it is added here.
+ * A maximal round requires this many billed windows, and windows that run
+ * under a tighter per-command bound still bill at 120s here — a deliberate
+ * over-count, so the TTL stays conservative: the four PR-context reads run
+ * under `PR_CONTEXT_EXEC_TIMEOUT_MS`, the post-runner reads under
+ * `POST_RUNNER_READ_TIMEOUT_MS`. Concurrent command groups bill ONE window:
+ * the recheck document+status pair shares `recheck-reads`, and the
+ * token-usage read rides `applied-model-read` the same way. `full-diff`
+ * bills ONE complete diff stage: the `gh pr diff` exec and the oversized
+ * fallback draw their timeouts from the SAME deadline window, so the stage
+ * spends at most one 120s window however it splits between the refused
+ * capture and the fallback — the fallback adds no window and the
+ * TTL/backoff pins stay put. An uncounted window lets the row expire while
+ * a legal review is still posting, so a new one must fail the consumer
+ * suite until it is added here.
  */
 export const GUARD_TIMED_SANDBOX_STEPS: readonly string[] = [
   "clone",

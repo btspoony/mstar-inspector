@@ -11,6 +11,7 @@ import type { RecheckDoc, RecheckInput } from "../../shared/src/recheck-wire";
 import { redactSecretShapes } from "../../shared/src/secret-shapes";
 import type { ReviewLevel } from "../../shared/src/runtime";
 import { remainingOuterMs } from "./recheck";
+import type { SubagentUsageSource } from "./token-usage";
 
 /**
  * Strict shape schema for the report seat's structured yield: exactly the six
@@ -157,6 +158,8 @@ export async function runReportSeat(input: {
   model: string[];
   level: ReviewLevel;
   signal?: AbortSignal;
+  /** Collects the settled subagent `SingleResult` for the token-usage fold; the caller may ignore it. */
+  usage?: SubagentUsageSource[];
 }): Promise<ReportDoc | null> {
   const external = input.signal ?? new AbortController().signal;
   if (external.aborted) {
@@ -195,8 +198,11 @@ export async function runReportSeat(input: {
       maxRuntimeMs,
       signal: controller.signal,
     });
+    input.usage?.push(result.result);
     data = structuredData(result);
   } catch (error) {
+    const settled = (error as { result?: unknown } | null | undefined)?.result;
+    if (settled !== null && typeof settled === "object") input.usage?.push(settled as SubagentUsageSource);
     if (external.aborted) {
       console.error(JSON.stringify({ event: "report_seat_aborted" }));
       return null;

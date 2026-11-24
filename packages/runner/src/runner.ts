@@ -34,6 +34,11 @@
  *         declaration whose id collides with a base provider is skipped
  *         (base wins, AL-23-1) with a structured stderr warn
  *         (id + count, no keys); absent/empty = the (empty) base alone.
+ *       - `tokenUsageNonce` (string) — the consumer-issued run nonce the
+ *         token-usage side document is stamped with; the consumer drops a
+ *         document whose nonce is absent, malformed or foreign, so a stale
+ *         document a failed clear left behind can never be read as this
+ *         run's usage;
  *   - stdout carries ONLY one JSON document: the mstar.review/v1 envelope
  *     (validated by validateMstarReviewV1 inside the runtime), OR — when the
  *     runner's own deadline evidence stops the review — the
@@ -125,14 +130,15 @@ import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 import { type PrContext } from "../../shared/src/report-wire";
+import { TOKEN_USAGE_PATH, type TokenUsageDoc } from "../../shared/src/token-usage-wire";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
   "[--recheck-out <path>] [--report-out <path>] " +
   "(input JSON: { capabilityHosts: [{ id, catalogProviderId, apiKeyEnv, baseUrl, api, auth, models }], " +
   "worktreePath?: string, reconFacts?: string[], modelOverrides?: Record<string, string>, " +
-  "customProviders?: [{ provider_id, base_url, api, model_ids, models_meta? }], recheck?: mstar.recheck-input/v1 document, " +
   "recheckAssignmentMaxBytes?: integer > 0, outerDeadlineEpochMs?: integer epoch ms, " +
+  "tokenUsageNonce?: string, " +
   "prContext?: { prBody: string, issues: [{ number, title, body }] } })";
 
 function parseCustomProviderEntry(entry: unknown, index: number): CustomProviderDeclaration {
@@ -228,6 +234,7 @@ export type RunnerInputJson = {
   recheckAssignmentMaxBytes?: number;
   outerDeadlineEpochMs?: number;
   prContext?: PrContext;
+  tokenUsageNonce?: string;
 };
 
 function parseArgs(argv: string[]): {
@@ -444,6 +451,13 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
     });
     input.prContext = { prBody: prContext.prBody, issues };
   }
+  if (record.tokenUsageNonce !== undefined) {
+    const nonce = record.tokenUsageNonce;
+    if (typeof nonce !== "string" || nonce.trim() === "") {
+      throw new Error("input JSON field `tokenUsageNonce` must be a non-blank string when present");
+    }
+    input.tokenUsageNonce = nonce;
+  }
   return input;
 }
 
@@ -641,6 +655,34 @@ export function chainAttributionBlock(
     return formatFailureAttribution(cause, [`chain attribution unavailable: ${(error as Error).message}`]);
   }
 }
+/**
+ * Remove the token-usage document without letting a removal fault become a
+ * second failure — the startup clear and the empty-fold clear share it. If
+ * unlink fails, the stale content is truncated to zero bytes as a fallback
+ * where the file stays writable, so the reader sees absence or "not a
+ * document", never this run reading a previous run's usage. Both legs are
+ * logged, never thrown: usage is analysis data, not a gate.
+ */
+function clearTokenUsageDoc(path: string): boolean {
+  try {
+    rmSync(path, { force: true });
+    return true;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        event: "token_usage_clear_failed",
+        path,
+        reason: (error as Error).message,
+      }),
+    );
+  }
+  try {
+    writeFileSync(path, "");
+  } catch {
+    // Removal and truncation both failed; the clear already logged its fault.
+  }
+  return false;
+}
 
 /**
  * Run the CLI. Returns the process exit code; prints the mstar.review/v1
@@ -655,6 +697,7 @@ export async function main(
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
   appliedModelPath: string = APPLIED_MODEL_PATH,
+  tokenUsagePath: string = TOKEN_USAGE_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -684,6 +727,14 @@ export async function main(
       return 1;
     }
   }
+  // why: Unlike the paths above, the token-usage document is analysis-only —
+  // its startup clear degrades to a logged fault and the run still reaches
+  // runReview. Rule: an unremovable stale document is a capture fault for
+  // this run — the write below is suppressed so this run's own write path
+  // cannot replace the survivor; the consumer's nonce check then provably
+  // rejects whatever old document is still readable there.
+  const tokenUsageClearFailed = !clearTokenUsageDoc(tokenUsagePath);
+  let tokenUsageNonce: string | undefined;
   let agentDir: string | undefined;
   const removeAgentDir = (): void => {
     if (agentDir === undefined) return;
@@ -701,6 +752,7 @@ export async function main(
     try {
       const parsed: unknown = JSON.parse(readFileSync(inputPath, "utf8"));
       const json = parseRunnerInput(parsed);
+      tokenUsageNonce = json.tokenUsageNonce;
       anchorRecheckDeadline(Date.now(), level, json.outerDeadlineEpochMs);
       const skippedCollisions: string[] = [];
       const dir = await writePerReviewModelsYaml(json.capabilityHosts, json.customProviders ?? [], (providerId) => {
@@ -746,7 +798,7 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report, appliedModel, tokenUsage } = await runtime.runReview(input);
       if (appliedModel === undefined) {
         try {
           rmSync(appliedModelPath, { force: true });
@@ -767,6 +819,31 @@ export async function main(
             JSON.stringify({
               event: "applied_model_write_failed",
               path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      }
+      // why: Same side-document discipline as appliedModel — the document is
+      // stamped with THIS run's consumer-issued nonce, so a stale document a
+      // failed clear left readable is rejected consumer-side instead of being
+      // read as this run's usage. A missing input nonce or a failed clear
+      // suppresses the write (a nonce-less document is never consumable); a
+      // capture or write fault is logged, never thrown: usage is analysis
+      // data, not a gate.
+      if (tokenUsageClearFailed || tokenUsageNonce === undefined || tokenUsage === undefined || tokenUsage.length === 0) {
+        clearTokenUsageDoc(tokenUsagePath);
+      } else {
+        try {
+          writeFileSync(
+            tokenUsagePath,
+            JSON.stringify({ version: 1, nonce: tokenUsageNonce, buckets: tokenUsage } satisfies TokenUsageDoc),
+          );
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "token_usage_write_failed",
+              path: tokenUsagePath,
               reason: (error as Error).message,
             }),
           );

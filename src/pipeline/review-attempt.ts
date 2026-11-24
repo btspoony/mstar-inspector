@@ -1,6 +1,7 @@
 
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
+import { validateTokenUsageDoc, type TokenUsageDoc } from "../../packages/shared/src/token-usage-wire";
 import type { FailureCode } from "../contracts/failure-codes";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
@@ -52,11 +53,13 @@ import {
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
+  readTokenUsageCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
   writeJsonCommand,
 } from "./gitops";
+import { tokenUsageStatements, type ReviewTokenUsageWrite } from "../store/token-usage-store";
 import type { DestroyOutcome, MarkedRun, RetentionProof, ReviewSandbox } from "./sandbox";
 import { ContainerNotRunningError, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
@@ -737,8 +740,14 @@ export async function claimReviewLaunch(
  * `persisted` only in the statement that stores the result, so completion
  * cannot be recorded before the result is durable (the schema refuses the
  * combination). `false` means the row did not move — nothing is confirmed.
- */
-/**
+ *
+ * When the attempt's token-usage write rides along (`usage`), the completion
+ * statement and every usage upsert go in ONE D1 batch — a transaction — so a
+ * successful execution is never recorded as finished without its usage rows:
+ * a fault rolls both back and the existing `false`/unknown path decides the
+ * attempt. The completion statement leads, so `meta.changes` of the FIRST
+ * batch result keeps its `=== 1` meaning.
+ *
  * @param gateSecretsEnc the seal taken BEFORE the exec (see `runReviewAttempt`).
  *   A `null` is only legitimate for a row that predates the seal (or a test that
  *   writes the result directly) — never for an attempt this build paid, whose
@@ -750,12 +759,14 @@ export async function completeReviewLaunch(
   execution: ReviewAttemptExecution,
   nowMs: number,
   gateSecretsEnc: string | null = null,
+  usage: ReviewTokenUsageWrite | null = null,
 ): Promise<boolean> {
-  const written = await db
+  const complete = db
     .prepare(COMPLETE_LAUNCH_SQL)
-    .bind(nowMs, encodeExecution(execution), gateSecretsEnc, attemptId)
-    .run();
-  return written.meta.changes === 1;
+    .bind(nowMs, encodeExecution(execution), gateSecretsEnc, attemptId);
+  const statements = usage === null ? [complete] : [complete, ...tokenUsageStatements(db, usage)];
+  const written = statements.length === 1 ? [await complete.run()] : await db.batch(statements);
+  return written[0]!.meta.changes === 1;
 }
 
 /**
@@ -1372,6 +1383,73 @@ async function readAppliedProvider(
     return null;
   }
   return redacted;
+}
+
+/**
+ * The runner's per-(provider, model) token spend. Usage is analysis data and
+ * never a gate on review correctness: an absent document means the run had
+ * nothing attributable, and an unreadable, overflowing or invalid one is
+ * logged once and dropped — never re-fetched, never fabricated. `null`
+ * therefore means "nothing to write" for either reason. A valid document
+ * must additionally carry THIS attempt's nonce: a stale document a failed
+ * clear left behind is provably foreign and dropped the same way.
+ */
+async function readTokenUsage(
+  sandbox: ReviewSandbox,
+  marker: string,
+  expectedNonce: string,
+  log: AttemptLog,
+  fields: AttemptLogFields,
+): Promise<TokenUsageDoc | null> {
+  let read: ReportBoundedRead;
+  try {
+    read = await boundedRead(
+      sandbox,
+      marker,
+      readTokenUsageCommand(),
+      POST_RUNNER_READ_TIMEOUT_MS,
+      true,
+    );
+  } catch (err) {
+    // Usage is never a gate on review correctness: a transport fault on this
+    // read alone cannot discard a valid paid result — log it once and record
+    // nothing, unlike the proof readers whose faults must stay fatal.
+    log.warn(
+      { ...fields, token_usage: "read-failed", error: err instanceof Error ? err.message : String(err) },
+      "token-usage document read faulted — left unrecorded",
+    );
+    return null;
+  }
+  if (read.failure !== null) {
+    if (read.failure !== "absent") {
+      log.warn({ ...fields, token_usage: read.failure }, `token-usage document ${read.failure}`);
+    }
+    return null;
+  }
+  if (read.text === null || read.text.trim() === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    log.warn({ ...fields, token_usage: "invalid-json" }, "token-usage document is not JSON — left unrecorded");
+    return null;
+  }
+  const gate = validateTokenUsageDoc(parsed);
+  if (!gate.ok) {
+    log.warn(
+      { ...fields, token_usage: "invalid-document", token_usage_error: gate.error },
+      `token-usage document failed its gate — left unrecorded: ${gate.error}`,
+    );
+    return null;
+  }
+  if (gate.doc.nonce !== expectedNonce) {
+    log.warn(
+      { ...fields, token_usage: "foreign-nonce" },
+      "token-usage document carries a foreign nonce — a stale document, left unrecorded",
+    );
+    return null;
+  }
+  return gate.doc;
 }
 
 async function readReportDoc(
@@ -2098,6 +2176,15 @@ export async function runReviewAttempt(input: {
   observedChangedLines: number | null;
   progress: ReviewAttemptProgress;
   attemptId: string;
+  /**
+   * The attempt's own attribution for its token-usage rows: `payload.targetId`
+   * and `ref.usageWorkspaceId` as the caller resolved them for THIS attempt —
+   * never a re-query that could disagree. With either absent the usage
+   * document is not read: rows that cannot be attributed to the attempt's own
+   * target are never written.
+   */
+  targetId?: string;
+  usageWorkspaceId?: string;
 }): Promise<ReviewAttemptExecution> {
   const {
     deps,
@@ -2118,6 +2205,8 @@ export async function runReviewAttempt(input: {
     observedChangedLines,
     progress,
     attemptId,
+    targetId,
+    usageWorkspaceId,
   } = input;
   let entry: LaunchVerdict;
   try {
@@ -2170,6 +2259,10 @@ export async function runReviewAttempt(input: {
     default:
       return noLaunchState(entry);
   }
+  // The run-scoped nonce the runner stamps its usage document with: minted
+  // here, transported on the runner input, and checked on read-back, so an
+  // old document that survived a failed clear is provably not this run's.
+  const tokenUsageNonce = crypto.randomUUID();
   const runnerInput = {
     worktreePath: CLONE_DIR,
     reconFacts,
@@ -2182,6 +2275,7 @@ export async function runReviewAttempt(input: {
     ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
     ...(prContext !== undefined ? { prContext } : {}),
+    tokenUsageNonce,
   };
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));
   const inputWriteWindowMs = deadlineMs - Date.now();
@@ -2410,7 +2504,17 @@ export async function runReviewAttempt(input: {
       ? await readReportDoc(sandbox, marker, progress.secretValues, headSha, deps.log, fields)
       : null;
 
-  const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
+  // The token-usage read rides the applied-model read's billed window —
+  // the same concurrent-window rule as the recheck document+status pair
+  // (GUARD_TIMED_SANDBOX_STEPS). The token-usage document is read only for
+  // a caller that can attribute the spend to the attempt's own target — an
+  // unattributable row is never written.
+  const [appliedProvider, tokenUsage] = await Promise.all([
+    readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields),
+    targetId !== undefined && usageWorkspaceId !== undefined
+      ? readTokenUsage(sandbox, marker, tokenUsageNonce, deps.log, fields)
+      : Promise.resolve(null),
+  ]);
 
   const secretValues = progress.secretValues;
   const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");
@@ -2425,7 +2529,21 @@ export async function runReviewAttempt(input: {
   };
   let recorded = false;
   try {
-    recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, Date.now(), gateSecretsEnc);
+    const completedAtMs = Date.now();
+    const usageWrite: ReviewTokenUsageWrite | null =
+      targetId !== undefined &&
+      usageWorkspaceId !== undefined &&
+      tokenUsage !== null &&
+      tokenUsage.buckets.length > 0
+        ? {
+            attemptId,
+            targetId,
+            workspaceId: usageWorkspaceId,
+            occurredAt: new Date(completedAtMs).toISOString(),
+            buckets: tokenUsage.buckets,
+          }
+        : null;
+    recorded = await completeReviewLaunch(deps.env.DB, attemptId, execution, completedAtMs, gateSecretsEnc, usageWrite);
   } catch (err) {
     const detail = redactExactSecrets(
       redactSecrets(err instanceof Error ? err.message : String(err)),

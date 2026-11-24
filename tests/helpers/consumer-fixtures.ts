@@ -3,6 +3,7 @@ import { DEFAULT_CHECK_MIN_SCORE } from "../../src/contracts/review-gate";
 import type { ReviewOutput } from "../../src/review/schema";
 import type { ConsumerLog, ConsumerLogFields } from "../../src/pipeline/consumer";
 import {
+  BOUNDED_READ_ABSENT_FLAG,
   boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
@@ -19,16 +20,16 @@ import {
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
+  readTokenUsageCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
   writeJsonCommand,
 } from "../../src/pipeline/gitops";
 import type { GitOpsCommands } from "../../src/pipeline/gitops";
-import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
+import { APPLIED_MODEL_PATH, REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
-import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import type { D1Like, D1StatementLike } from "../../src/store/types";
 import { createAppConfigStore } from "../../src/dashboard/app-config-store";
@@ -348,6 +349,7 @@ const RECHECK_DOC_READ = readRecheckCommand(RECHECK_OUTPUT_PATH);
 const RECHECK_STATUS_READ = readRecheckStatusCommand(RECHECK_STATUS_PATH);
 const REPORT_READ = readReportCommand();
 const APPLIED_MODEL_READ = readReportCommand(APPLIED_MODEL_PATH);
+const TOKEN_USAGE_READ = readTokenUsageCommand();
 const PR_BODY_READ = prBodyCommand(TEST_OWNER, TEST_REPO, TEST_PR_NUMBER);
 const SHA_PROBE = "0".repeat(40);
 function aroundSha(command: string): { head: string; tail: string } {
@@ -406,6 +408,9 @@ export type FakeSandboxState = {
   reportFileContent: string;
   reportFileOverflow: string;
   reportFileExitCode: number;
+  tokenUsageFileContent: string | null;
+  tokenUsageFileOverflow: string;
+  tokenUsageFileExitCode: number;
   runnerStdout: string;
   runnerStderr: string;
   runnerExitCode: number;
@@ -467,6 +472,9 @@ export function initialFakeSandboxState(): FakeSandboxState {
     reportFileContent: "",
     reportFileOverflow: "0",
     reportFileExitCode: 0,
+    tokenUsageFileContent: null,
+    tokenUsageFileOverflow: "0",
+    tokenUsageFileExitCode: 0,
     runnerStdout: "",
     runnerStderr: "",
     runnerExitCode: 0,
@@ -609,6 +617,15 @@ function answerCommand(cmd: string, opts: unknown, state: FakeSandboxState): Exe
       return { stdout: "", stderr: "read failed", exitCode: state.reportFileExitCode };
     }
     return { stdout: `${state.reportFileContent}\n${state.reportFileOverflow}\n`, stderr: "", exitCode: 0 };
+  }
+  if (cmd === TOKEN_USAGE_READ) {
+    if (state.tokenUsageFileExitCode !== 0) {
+      return { stdout: "", stderr: "read failed", exitCode: state.tokenUsageFileExitCode };
+    }
+    if (state.tokenUsageFileContent === null) {
+      return { stdout: `\n${BOUNDED_READ_ABSENT_FLAG}\n`, stderr: "", exitCode: 0 };
+    }
+    return { stdout: `${state.tokenUsageFileContent}\n${state.tokenUsageFileOverflow}\n`, stderr: "", exitCode: 0 };
   }
   if (RUNNER_CMDS.has(cmd)) {
     return { stdout: state.runnerStdout, stderr: state.runnerStderr, exitCode: state.runnerExitCode };

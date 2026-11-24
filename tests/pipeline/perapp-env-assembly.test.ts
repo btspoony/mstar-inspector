@@ -280,7 +280,7 @@ function expectOuterDeadline(input: Record<string, unknown>): void {
   expect(input.outerDeadlineEpochMs).toBe(execDeadline);
 }
 
-const RUNNER_INPUT_BASE_FIELDS = ["capabilityHosts", "outerDeadlineEpochMs", "reconFacts", "worktreePath"];
+const RUNNER_INPUT_BASE_FIELDS = ["capabilityHosts", "outerDeadlineEpochMs", "reconFacts", "tokenUsageNonce", "worktreePath"];
 
 function expectRunnerInputFields(input: Record<string, unknown>, extra: string[] = []): void {
   expect(Object.keys(input).sort()).toEqual([...RUNNER_INPUT_BASE_FIELDS, ...extra].sort());

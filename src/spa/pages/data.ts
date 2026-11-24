@@ -1053,6 +1053,66 @@ export function scopedInsightsSummaryUrl(
   return `${base}${scopePath(scope)}/insights/summary?${params.toString()}`;
 }
 
+/** The bucket sums one token-usage row (or the payload's `total`) carries. */
+export type TokenUsageTotals = {
+  requests: number;
+  input: number;
+  cache_read: number;
+  cache_write: number;
+  output: number;
+  total: number;
+  cost_usd: number;
+};
+
+/** One (provider, model) bucket of `GET /api/targets/:targetId/token-usage`. */
+export type TokenUsageBucket = TokenUsageTotals & { provider: string; model: string };
+
+/** The token-usage payload — mirrors the dashboard store's wire shape. */
+export type TargetTokenUsage = {
+  window_days: number;
+  buckets: TokenUsageBucket[];
+  total: TokenUsageTotals;
+};
+
+function isTokenUsageTotals(value: unknown): value is TokenUsageTotals {
+  return (
+    isRecord(value) &&
+    typeof value.requests === "number" &&
+    typeof value.input === "number" &&
+    typeof value.cache_read === "number" &&
+    typeof value.cache_write === "number" &&
+    typeof value.output === "number" &&
+    typeof value.total === "number" &&
+    typeof value.cost_usd === "number"
+  );
+}
+
+function isTokenUsageBucket(value: unknown): value is TokenUsageBucket {
+  return (
+    isRecord(value) &&
+    typeof value.provider === "string" &&
+    typeof value.model === "string" &&
+    isTokenUsageTotals(value)
+  );
+}
+
+/** `GET /api/targets/:targetId/token-usage`'s 200 body, validated field by field — unknown shapes → null. */
+export function parseTargetTokenUsage(data: unknown): TargetTokenUsage | null {
+  if (!isRecord(data) || typeof data.window_days !== "number") return null;
+  if (!Array.isArray(data.buckets) || !isTokenUsageTotals(data.total)) return null;
+  if (!data.buckets.every(isTokenUsageBucket)) return null;
+  return data as TargetTokenUsage;
+}
+
+/**
+ * Token-usage URL — the target face only (`GET /api/targets/:targetId/
+ * token-usage`); the workspace has no token-usage read (the plan defers a
+ * workspace aggregate). `window` rides the page's insights window verbatim.
+ */
+export function targetTokenUsageUrl(base: string, targetId: string, window: string): string {
+  return `${base}/api/targets/${encodeURIComponent(targetId)}/token-usage?${new URLSearchParams({ window }).toString()}`;
+}
+
 export type PullRequestState = "open" | "closed" | "merged";
 
 /**

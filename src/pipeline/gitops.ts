@@ -2,6 +2,7 @@
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { RECHECK_FILE_MAX_BYTES, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import { REPORT_FILE_MAX_BYTES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
+import { TOKEN_USAGE_MAX_BYTES, TOKEN_USAGE_PATH } from "../../packages/shared/src/token-usage-wire";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 export type GitOpsInput = {
@@ -435,6 +436,20 @@ export function readReportCommand(path: string = REPORT_OUTPUT_PATH): ShellComma
   assertShellSafe(path, IN_IMAGE_PATH_RE, "bounded read path");
   return shellCommand(
     `if [ -e '${path}' ]; then ${boundedFileReadCommand(path, REPORT_FILE_MAX_BYTES)}; ` +
+      `else printf '\\n${BOUNDED_READ_ABSENT_FLAG}\\n'; fi`,
+  );
+}
+
+/**
+ * Bounded read of the runner's token-usage side document — the same transport
+ * as `readReportCommand` (existence probe → absent flag, `head -c` byte bound
+ * → overflow flag) at the wire's own bound. It lives beside the other audited
+ * reads rather than in `review-attempt.ts` so the test double can match it
+ * without importing the attempt module.
+ */
+export function readTokenUsageCommand(): ShellCommand {
+  return shellCommand(
+    `if [ -e '${TOKEN_USAGE_PATH}' ]; then ${boundedFileReadCommand(TOKEN_USAGE_PATH, TOKEN_USAGE_MAX_BYTES)}; ` +
       `else printf '\\n${BOUNDED_READ_ABSENT_FLAG}\\n'; fi`,
   );
 }

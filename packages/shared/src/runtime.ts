@@ -3,6 +3,7 @@ import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
 import type { RecheckDoc, RecheckInput, RecheckStatus } from "./recheck-wire";
 import type { PrContext, ReportDoc } from "./report-wire";
+import type { TokenUsageBucket } from "./token-usage-wire";
 
 /**
  * Full review-tier universe. `deep` is a first-class tier
@@ -134,6 +135,8 @@ export type ReviewRunResult = {
   recheckStatus?: RecheckStatus;
   report: ReportDoc | null;
   appliedModel?: string;
+  /** The run's per-(provider, model) token spend; absent/empty means nothing attributable. */
+  tokenUsage?: TokenUsageBucket[];
 };
 
 /**
