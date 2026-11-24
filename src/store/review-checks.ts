@@ -325,6 +325,18 @@ export function attemptKey(input: {
   return input.rerunCheckRunId === undefined ? base : `${base}#rerun:${input.rerunCheckRunId}`;
 }
 
+/**
+ * The rerequested check run id a rerun `attempt_key` names — the run the
+ * reviewer asked to re-run (NOT the new run attached to this attempt, whose
+ * `check_run_id` is filled in later). `null` for a non-rerun key or a key
+ * whose `#rerun:` suffix is absent or not a positive integer; the caller
+ * treats `null` as "no rerun identity", never as a guess.
+ */
+export function rerunCheckRunIdOfAttemptKey(attemptKey: string): number | null {
+  const id = Number(attemptKey.split("#rerun:")[1]);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
 const NEXT_GENERATION_SQL = `(SELECT COALESCE(MAX(generation), 0) + 1 FROM review_checks m WHERE m.attempt_key = ?)`;
 
 const EXTERNAL_ID_SQL =

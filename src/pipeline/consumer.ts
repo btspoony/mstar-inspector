@@ -110,6 +110,7 @@ import { FAILURE_SUMMARIES, type FailureCode } from "../contracts/failure-codes"
 import {
   idemKey,
   kvClaimKey,
+  rerunIdemKey,
   IDEMPOTENCY_SECONDS,
   IDEM_DROPPED,
   IDEM_FAILED,
@@ -125,6 +126,7 @@ import { redactExactSecrets, redactSecrets } from "./redact";
 import { createArtifactStore } from "../store/artifact-store";
 import { createFailureStore, QUEUE_MAX_ATTEMPTS } from "../store/failure-store";
 import { type PublicationRow } from "../store/finding-lifecycle";
+import { rerunCheckRunIdOfAttemptKey } from "../store/review-checks";
 import { type Scope } from "../../packages/shared/src/recheck-wire";
 import type { D1Like } from "../store/types";
 import { getSandbox, type ReviewSandbox } from "./sandbox";
@@ -669,19 +671,22 @@ async function newerCommitHasJob(
   // dimension of ours — `kvClaimKey(payload, headSha)` would append this
   // delivery's `:rerun:{id}` and never find it. The plain key is only the fast
   // path: a newer head whose job arrived via check_run.rerequested claims
-  // under `{idemKey}:rerun:{check_run_id}`, invisible to this read, so the D1
-  // probe below is the authority — a finished `reviews` row or an in-flight
-  // `review_checks` attempt (a rerun attaches one at enqueue time) proves the
-  // head's review is coming.
+  // under `{idemKey}:rerun:{rerequested run id}` — the CONCLUDED run it was
+  // asked to rerun, kept only on the attempt's `attempt_key` suffix — so the
+  // D1 probe below supplies that leg instead. A bare nonterminal
+  // `review_checks` row is NOT job proof on its own — a refused delivery
+  // (quota / entitlement) attaches a check at beforeEnqueue yet never
+  // enqueues — so the row must be corroborated: a `check_run` row by its
+  // rerun KV claim, any other row by the plain claim already missed above.
+  const idempotencyKey: IdempotencyKey = {
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: headSha,
+  };
   try {
-    const key = idemKey({
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      head_sha: headSha,
-    });
-    const claim = await deps.env.IDEMPOTENCY_KV.get(key);
+    const claim = await deps.env.IDEMPOTENCY_KV.get(idemKey(idempotencyKey));
     if (isReviewClaim(claim)) return true;
     // A non-review claim value still falls through to D1: the KV value records
     // how a write went, not whether the head's review is really in flight.
@@ -690,12 +695,9 @@ async function newerCommitHasJob(
     deps.log.warn(fields, `supersede KV read failed — probing D1 instead: ${detail}`);
   }
   try {
-    const row = await deps.env.DB.prepare(
+    const reviewed = await deps.env.DB.prepare(
       `SELECT 1 FROM reviews
          WHERE installation_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ?
-       UNION ALL
-       SELECT 1 FROM review_checks
-         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL
        LIMIT 1`,
     )
       .bind(
@@ -704,14 +706,42 @@ async function newerCommitHasJob(
         payload.repo,
         payload.pr_number,
         headSha,
+      )
+      .first();
+    if (reviewed !== null) return true;
+    const open = await deps.env.DB.prepare(
+      `SELECT check_run_id, triggered_by, attempt_key FROM review_checks
+         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL
+       LIMIT 1`,
+    )
+      .bind(
         payload.botRef.appId,
         payload.owner,
         payload.repo,
         payload.pr_number,
         headSha,
       )
-      .first();
-    return row !== null;
+      .first<{ check_run_id: number | null; triggered_by: string; attempt_key: string }>();
+    if (open === null) return false;
+    // The claim lives under the REREQUESTED (concluded) run id — the row's own
+    // `check_run_id` is the new run GitHub created for this attempt, which can
+    // never be the claim's run id (and may still be NULL mid-attach). A
+    // non-rerun or unparseable key is not job proof.
+    const rerunCheckRunId =
+      open.triggered_by === "check_run" ? rerunCheckRunIdOfAttemptKey(open.attempt_key) : null;
+    if (rerunCheckRunId === null) return false;
+    // A rerun writes its enqueue claim under `{idemKey}:rerun:{rerequested id}`;
+    // the row alone cannot distinguish "queued" from "refused at the door".
+    try {
+      const rerunClaim = await deps.env.IDEMPOTENCY_KV.get(
+        rerunIdemKey(idempotencyKey, rerunCheckRunId),
+      );
+      return isReviewClaim(rerunClaim);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      deps.log.warn(fields, `supersede rerun-claim read failed — reviewing normally: ${detail}`);
+      return false;
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `supersede D1 probe failed — reviewing normally: ${detail}`);

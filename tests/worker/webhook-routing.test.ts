@@ -2768,10 +2768,14 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
   const RERUN_HEAD = "0123456789abcdef0123456789abcdef01234567";
   const RERUN_CHECK_RUN_ID = 4242;
 
-  function checkRunPayload(checkRunId = RERUN_CHECK_RUN_ID, repo = FIXTURE_REPO): string {
+  function checkRunPayload(
+    checkRunId = RERUN_CHECK_RUN_ID,
+    repo = FIXTURE_REPO,
+    installationId = 123,
+  ): string {
     return JSON.stringify({
       action: "rerequested",
-      installation: { id: 123 },
+      installation: { id: installationId },
       repository: { name: repo.name, owner: { login: repo.owner }, id: 555 },
       check_run: {
         id: checkRunId,
@@ -2914,6 +2918,37 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
       triggered_by: "check_run",
       rerun_check_run_id: RERUN_CHECK_RUN_ID,
       targetId: appRow.targetId,
+    });
+  });
+
+  test("a rerun whose attempt row predates a reinstall enqueues under the DELIVERY's installation_id", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    // The Check was created under installation 123; the App has since been
+    // reinstalled and this delivery arrives under installation 999.
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload(RERUN_CHECK_RUN_ID, FIXTURE_REPO, 999);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      installation_id: 999,
+      owner: FIXTURE_REPO.owner,
+      repo: FIXTURE_REPO.name,
+      pr_number: 42,
+      head_sha: RERUN_HEAD,
+      triggered_by: "check_run",
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
     });
   });
 

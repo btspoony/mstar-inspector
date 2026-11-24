@@ -158,11 +158,13 @@ CREATE TABLE review_checks (
   created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL,
   UNIQUE(attempt_key,generation)
 );
+-- post-0021: migration 0056 renamed review_checks.app_id → bot_id; the
+-- indexes below (0109, 0110) declare the names that rename produced.
 CREATE UNIQUE INDEX idx_check_one_open ON review_checks(attempt_key) WHERE terminal_ms IS NULL;
 CREATE INDEX idx_check_recovery ON review_checks(recovery_state,next_attempt_ms,lease_until_ms);
 -- migration 0109; the rerequested Re-run reverse lookup:
 CREATE INDEX idx_review_checks_app_run ON review_checks(github_app_id, check_run_id) WHERE check_run_id IS NOT NULL;
--- migration 0109; the supersede probe's "does this head have an in-flight attempt?" (nonterminal only):
+-- migration 0110; the supersede probe's "does this head have an in-flight attempt?" (nonterminal only):
 CREATE INDEX idx_review_checks_open_head ON review_checks(bot_id, head_sha) WHERE terminal_ms IS NULL;
 ```
 

@@ -79,14 +79,17 @@ rerequested is a trigger, never a bypass.
   key under `{idemKey}:rerun:{check_run_id}`, so the plain key's `done`
   never swallows it and the redelivery of the same rerequested event still
   dedups; the pipeline's existing `reviews` lookup then settles its attached
-  run `neutral` with the existing conclusion ("already reviewed for this
-  head") instead of running the model again (RL-10). There is no
-  force-rerun-a-reviewed-head path — `reviews`'s unique constraint stands.
+  run with the head's persisted review against the App's current gate
+  (`success`/`failure`), or `neutral` with the skip reason when there is
+  nothing to inherit, instead of running the model again (RL-10). There is no
 - **A head that was never successfully reviewed really re-reviews — while it
   is still the PR head.** When the run's head has been overtaken, the rerun
-  never reviews new code: the consumer settles its attached run `neutral`
-  ("rerun targets a commit that is no longer the PR head") and acks, whatever
-  that head's review history is.
+  never reviews new code: the consumer settles its attached run with the old
+  head's persisted review against the App's current gate (`success`/`failure`)
+  when that head was reviewed, or `neutral` with the skip reason ("rerun
+  targets a commit that is no longer the PR head") when it was not, and acks.
+  On either leg, a persisted review/publication row that EXISTS but cannot be
+  READ settles `unknown-failure` → `failure` (fail-closed), never `neutral`.
 
 
 ### 3. Bot-mention comment trigger (normative)
@@ -129,7 +132,7 @@ rerequested is a trigger, never a bypass.
 - `src/contracts/review-job.ts`: `ReviewJobPayload`.
 - `src/contracts/idem.ts`: `rerunIdemKey`, `kvClaimKey` — the rerun's KV claim dimension (`reviews.id`/`parseIdemKey` keep the strict five-part key).
 - `src/dashboard/index.ts`: the target and defaults settings routes, OAuth bootstrap and removal; `src/dashboard/targets-store.ts`: `readEffectiveTargetSettings`.
-- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`, `migrations/0067_repo_target_identity.sql` (target columns and workspace defaults), `migrations/0109_check_run_id_index.sql` (`idx_review_checks_app_run`, the rerequested lookup; `idx_review_checks_open_head`, the supersede probe's nonterminal head): storage contracts.
+- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`, `migrations/0067_repo_target_identity.sql` (target columns and workspace defaults), `migrations/0109_check_run_id_index.sql` (`idx_review_checks_app_run`, the rerequested lookup), `migrations/0110_review_checks_open_head_index.sql` (`idx_review_checks_open_head`, the supersede probe's nonterminal head): storage contracts.
 - `src/admin/index.ts`: operator runtime settings for `review.comment_claim.*`.
 
 ## Change obligations

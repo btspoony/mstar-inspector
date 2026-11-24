@@ -113,8 +113,10 @@ export function deliveryOutcomeFromWebhook(
  * `(github_app_id, check_run_id)` is the only "this App owns that run"
  * proof. `owner`/`repo` come from the DELIVERY instead, because the row may
  * name a repository that has since been renamed while `target` was resolved
- * by the payload's current name: the job and the target must agree. The
- * run's own `pr_number`/`head_sha`/`installation_id` stay authoritative.
+ * by the payload's current name: the job and the target must agree.
+ * `installation_id` likewise comes from the DELIVERY — classification already
+ * bound the run to this installation, so the row's recorded (possibly stale)
+ * id must not override it; only `pr_number`/`head_sha` stay row-authoritative.
  */
 async function resolveCheckRerunOutcome(
   db: D1Database,
@@ -155,7 +157,7 @@ async function resolveCheckRerunOutcome(
   return {
     kind: "job",
     payload: {
-      installation_id: attempt.installationId,
+      installation_id: rerun.installationId,
       owner: rerun.owner,
       repo: rerun.repo,
       pr_number: attempt.prNumber,

@@ -38,3 +38,23 @@ describe("check_run.rerequested reverse lookup (0109 idx_review_checks_app_run)"
     expect(detail).not.toMatch(/^SCAN review_checks$/m);
   });
 });
+
+describe("supersede probe head lookup (0110 idx_review_checks_open_head)", () => {
+  test("the nonterminal head probe seeks the partial index — never a table scan", () => {
+    const db = createMigratedTestD1();
+    const index = db.raw
+      .query(
+        `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_review_checks_open_head'`,
+      )
+      .get() as { sql: string } | null;
+    expect(index?.sql).toContain("terminal_ms IS NULL");
+
+    const detail = plan(
+      db,
+      `SELECT 1 FROM review_checks
+         WHERE bot_id = ? AND owner = ? AND repo = ? AND pr_number = ? AND head_sha = ? AND terminal_ms IS NULL`,
+    );
+    expect(detail).toMatch(/review_checks USING (COVERING )?INDEX idx_review_checks_open_head/);
+    expect(detail).not.toMatch(/^SCAN review_checks$/m);
+  });
+});
