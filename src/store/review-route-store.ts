@@ -47,6 +47,15 @@ export type AttemptObservation = { code: FailureCode; message: string; cause?: s
 /** The `payload_json` key the observation rides under, never part of the payload. */
 const OBSERVATION_KEY = "attemptObservation";
 
+/**
+ * The `payload_json` key the reviewed head rides under, never part of the
+ * payload: the same row-state convention the observation uses, because
+ * `payload` is what a recovery re-enqueue sends and what `deliveryKeyOf`
+ * hashes, so a second key in the body would change an existing attempt's
+ * delivery identity.
+ */
+const REVIEWED_HEAD_KEY = "reviewedHeadSha";
+
 export type AttemptHandoff = {
   deliveryKey: string;
   attemptId: string;
@@ -76,6 +85,14 @@ export type AttemptHandoff = {
    * its own deadline sentence only when no observation exists.
    */
   observation: AttemptObservation | null;
+  /**
+   * The head this attempt's checkout actually resolved, recorded by prepare
+   * before any paid step, or `null` when no head was resolved (or the row
+   * predates the write). Recovery attributes the failure row to THIS — never to
+   * the frozen Check identity, which admission can pin to an older commit than
+   * the checkout landed on.
+   */
+  reviewedHeadSha: string | null;
 };
 
 /**
@@ -184,12 +201,16 @@ type HandoffRow = {
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
-  // The observation shares the row but never the payload: `payload` is what a
-  // recovery re-enqueue sends and what `deliveryKeyOf` hashes, so leaking the
-  // key would change the delivery identity of an existing attempt. Destructuring
-  // keeps the parse fail-fast (a non-object body throws, as before).
-  const { [OBSERVATION_KEY]: raw, ...payload } = JSON.parse(row.payload_json) as ReviewJobPayload &
-    Record<string, unknown>;
+  // The observation and the reviewed head share the row but never the payload:
+  // `payload` is what a recovery re-enqueue sends and what `deliveryKeyOf`
+  // hashes, so leaking either key would change the delivery identity of an
+  // existing attempt. Destructuring keeps the parse fail-fast (a non-object body
+  // throws, as before).
+  const {
+    [OBSERVATION_KEY]: raw,
+    [REVIEWED_HEAD_KEY]: reviewedHead,
+    ...payload
+  } = JSON.parse(row.payload_json) as ReviewJobPayload & Record<string, unknown>;
   return {
     deliveryKey: row.delivery_key,
     attemptId: row.attempt_id,
@@ -202,6 +223,7 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
     settlingMs: row.settling_ms,
     observation: toObservation(raw),
+    reviewedHeadSha: typeof reviewedHead === "string" && reviewedHead !== "" ? reviewedHead : null,
   };
 }
 
@@ -217,6 +239,34 @@ function toObservation(value: unknown): AttemptObservation | null {
   if (!isFailureCode(code) || typeof message !== "string" || message === "") return null;
   if (cause !== undefined && typeof cause !== "string") return null;
   return { code, message, ...(cause === undefined ? {} : { cause }) };
+}
+
+/**
+ * Record the head this attempt's checkout actually resolved — the commit its
+ * review runs on. Row state, never queue payload (same convention as the
+ * observation above), and written by prepare BEFORE the paid step, so recovery
+ * can attribute a failure to the head that was reviewed even when the host that
+ * knew it is gone.
+ *
+ * The write is not guarded on an existing value: a re-prepared attempt resolves
+ * its head again, and the LAST resolution is the one its paid step used. `false`
+ * means no handoff row carries this attempt (a delivery that never reached
+ * admission), which leaves the frozen Check identity as the only evidence.
+ */
+export async function recordReviewedHead(
+  db: D1Like,
+  input: { attemptId: string; headSha: string; nowMs: number },
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET payload_json = json_set(payload_json, '$.${REVIEWED_HEAD_KEY}', ?),
+              updated_ms = ?
+        WHERE attempt_id = ?`,
+    )
+    .bind(input.headSha, input.nowMs, input.attemptId)
+    .run();
+  return written.meta.changes === 1;
 }
 
 /**
@@ -489,6 +539,18 @@ ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+const ATTEMPT_FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE track_id = ?`;
+
+/**
+ * Whether a failure row already tells this attempt's story. The live settlement
+ * records only an OBSERVATION — never a row — so a row existing here belongs to
+ * a recovery lane that observed the outcome with more evidence than the phase
+ * has, and its sentence must stand.
+ */
+export async function attemptFailureRowExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(ATTEMPT_FAILURE_ROW_EXISTS_SQL).bind(attemptId).first<{ present: number }>();
+  return row !== null;
+}
 const MARK_REFUSAL_PENDING_SQL = `
 INSERT INTO review_refusal_pending (attempt_id, created_ms) VALUES (?, ?)
 ON CONFLICT(attempt_id) DO NOTHING

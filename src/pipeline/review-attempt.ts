@@ -1630,7 +1630,9 @@ const STAGE_NAME_MAX_CHARS = 60;
  * out.
  *
  * Read line by line, last match wins: a stage line is one JSON object on its
- * own line, and the LAST one is the stage that was running when the exec ended.
+ * own line, and the LAST one is the last stage the runner ENTERED — the trace
+ * marks entry, not completion, so a failure inside that stage (or after it)
+ * names the stage that started last, never one proven to have been running.
  * A malformed line, a non-string stage or an empty one is skipped rather than
  * ending the scan — the earlier stage is still better evidence than nothing.
  *
@@ -1664,10 +1666,22 @@ export function lastRunnerStage(stderr: string, secretValues: readonly string[] 
 /**
  * The text a failure message appends for an already-redacted stage. Derived from
  * the ONE parse above: a caller that needs both the field and the sentence reads
- * stderr once and passes the result here, so the two can never disagree.
+ * stderr once and passes the result here, so the two can never disagree. The
+ * sentence says "last stage", not "running stage": the trace marks entry.
  */
 export function lastStageNote(stage: string | undefined): string {
   return stage === undefined ? "" : ` (last stage: ${stage})`;
+}
+
+/**
+ * The `last_stage` log field, spreadable into every settlement line. Absent
+ * when no stage was traced: an empty field would claim a stage nobody observed.
+ * The value is shape-redacted again HERE because a throw site can carry a stage
+ * it did not obtain from `lastRunnerStage`, and this is the last boundary before
+ * the field reaches a durable log line.
+ */
+export function lastStageField(stage: string | undefined): { last_stage?: string } {
+  return stage === undefined ? {} : { last_stage: redactSecrets(stage) };
 }
 
 function runnerFailureDetail(

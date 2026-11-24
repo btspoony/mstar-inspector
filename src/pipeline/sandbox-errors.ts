@@ -166,6 +166,23 @@ function safeCauseName(raw: unknown, sensitive: ExecSensitiveSet): string {
 }
 
 /**
+ * The cause of a fault THIS code authored — the exec boundaries' own timeout
+ * sentences. The text is a compile-time constant, so it can carry none of the
+ * exec's values and needs no proof against them: it survives even when the
+ * sensitive set is unprovable (an over-bound stdin payload), which is exactly
+ * when the bare `<name> (after <n>ms)` would cost the one sentence that says
+ * WHICH bound expired. Bounded the same way, and the elapsed suffix is reserved
+ * before truncation so the measurement never drops.
+ */
+export function constantCause(sentence: string, openedAtMs: number): string {
+  const name = "Error";
+  const suffix = ` (after ${Math.max(0, Date.now() - openedAtMs)}ms)`;
+  const room = EXEC_CAUSE_MAX_CHARS - name.length - 2 - suffix.length;
+  if (room <= 0) return `${name}${suffix}`;
+  return `${name}: ${sentence.slice(0, room)}${suffix}`;
+}
+
+/**
  * The evidence a thrown exec leaves behind, bounded for a log field and a
  * failure row: error name, sanitized message, and how long the exec had been
  * open. No stack, no command text, no env value, no credential.

@@ -61,6 +61,8 @@ import {
   readRecheckAttribution,
   markRefusalPending,
   recordAttemptObservation,
+  recordReviewedHead,
+  attemptFailureRowExists,
   recordRecheckAttribution,
   recordRecheckDuty,
   readAttemptCheckKey,
@@ -139,6 +141,7 @@ import {
   MovedHeadError,
   noLaunchState,
   noteCheckOwed,
+  lastStageField,
   openGateSecrets,
   runReviewAttempt,
   readGateSecretsEnvelope,
@@ -2816,6 +2819,12 @@ async function preparePhase(
   const cmds = prepared.cmds;
   const headSha = prepared.headSha;
   observed.headSha = headSha;
+  // The commit this attempt actually reviews, durable BEFORE any paid step: a
+  // failure recovered later is attributed to it, never to the frozen Check
+  // identity (admission can pin that to a commit the PR ledger already knew,
+  // while the checkout lands on a newer one). A fault here fails the prepare —
+  // the attempt's own record must exist before anything is spent on it.
+  await recordReviewedHead(deps.env.DB, { attemptId, headSha, nowMs: Date.now() });
   // A MOVED HEAD never continues on the old identity. The identity frozen below
   // is the one the LIVE claim owns — the claim the checkout settled on, after
   // any supersede — so a frozen key that disagrees with it can only mean another
@@ -4967,10 +4976,18 @@ export async function settleAttemptFailure(
     // stage the phase already parsed out of the runner's stderr.
     const observedMessage = redactExactSecrets(redactSecrets(detail), secrets);
     const messageWithStage =
-      failure.lastStage === undefined ? observedMessage : `${observedMessage} (last stage: ${failure.lastStage})`;
+      failure.lastStage === undefined
+        ? observedMessage
+        : `${observedMessage} (last stage: ${redactSecrets(failure.lastStage)})`;
     const observedCause =
       failure.cause === undefined ? undefined : redactExactSecrets(redactSecrets(failure.cause), secrets);
     try {
+      // A row that already tells this attempt's story — a recovery lane that saw
+      // the outcome with more evidence than this phase has — is the authoritative
+      // account. Recording an observation here would let that lane's next pass
+      // compose its row from this stale text instead of its own sentence, so the
+      // phase stays silent and the durable story stands.
+      if (await attemptFailureRowExists(deps.env.DB, attemptId)) return;
       await recordAttemptObservation(deps.env.DB, {
         attemptId,
         observation: {
@@ -4996,6 +5013,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
@@ -5030,7 +5048,7 @@ export async function settleAttemptFailure(
         ...elapsed,
         error_code: code,
         attempt_id: attemptId,
-        ...(failure.lastStage === undefined ? {} : { last_stage: failure.lastStage }),
+        ...lastStageField(failure.lastStage),
       },
       `review failed: ${budgetDetail}`,
     );
@@ -5070,6 +5088,7 @@ export async function settleAttemptFailure(
           event: "review_unresolved",
           error_code: code,
           attempt_id: attemptId,
+          ...lastStageField(failure.lastStage),
         },
         `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
       );
@@ -5103,6 +5122,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — nothing was collected, destroyed or reclaimed`,
     );
@@ -5121,7 +5141,7 @@ export async function settleAttemptFailure(
       ...elapsed,
       error_code: code,
       attempt_id: attemptId,
-      ...(failure.lastStage === undefined ? {} : { last_stage: failure.lastStage }),
+      ...lastStageField(failure.lastStage),
     },
     `review failed: ${detail}`,
   );
@@ -5166,6 +5186,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
+        ...lastStageField(failure.lastStage),
       },
       `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
     );

@@ -321,9 +321,12 @@ describe("SandboxV1 Durable Object", () => {
 
     const started = Date.now();
     const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
-      // Just above the pre-exec guard, so the drain bound is the shortest one
-      // this path can honestly reach (deadline + KILL_GRACE_MS).
-      deadlineEpochMs: started + 5_100,
+      // The pre-exec guard needs KILL_GRACE_MS of real time left at entry AND
+      // after the marker read; the drain bound is then deadline + the same
+      // grace. That slack matches the sibling lost-reply test, so a scheduling
+      // stall on a loaded runner cannot turn this into `deadline-spent` and
+      // silently drop the drain-cause coverage.
+      deadlineEpochMs: started + 5_000 + 2_000,
     });
 
     expect(read.kind).toBe("reply-lost");
@@ -332,6 +335,38 @@ describe("SandboxV1 Durable Object", () => {
       /^Error: the host timer expired while the exec output was being drained \(after \d+ms\)$/,
     );
   }, 20_000);
+
+  test("a host timer keeps its own sentence even when the exec stdin cannot be proven", async () => {
+    // The stdin walk is bounded (nodes/depth), so a big document leaves a set
+    // whose values nobody can name — every message built from it has to degrade.
+    // The timer sentence is this file's own constant and must NOT degrade with
+    // it: it is the only thing that says WHICH bound expired.
+    reset();
+    const { sandbox, container } = makeDo(true);
+    markerBytes = MARKER;
+    container.exec = mock(async (cmd: string[]) => {
+      execCalls.push({ cmd });
+      const line = cmd[cmd.length - 1] ?? "";
+      if (line.includes("/tmp/mstar-review-attempt")) {
+        return { stdin: null, output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }) };
+      }
+      return Promise.withResolvers<{ output: () => Promise<ExecOutput>; stdin: null }>().promise;
+    });
+
+    // 2 500 leaves: past STDIN_WALK_NODES, so the collection is incomplete.
+    const overBoundStdin = JSON.stringify({ leaves: Array.from({ length: 2_500 }, (_, index) => `v${index}`) });
+    const started = Date.now();
+    const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+      stdin: overBoundStdin,
+      deadlineEpochMs: started + 5_000 + 2_000,
+    });
+
+    expect(read.kind).toBe("reply-lost");
+    if (read.kind !== "reply-lost") throw new Error("unreachable");
+    expect(read.cause).toMatch(
+      /^Error: the host timer expired before the exec dispatch answered \(after \d+ms\)$/,
+    );
+  }, 15_000);
 
   test("a throwing exec carries a bounded cause and the reply-lost classification is unchanged", async () => {
     reset();

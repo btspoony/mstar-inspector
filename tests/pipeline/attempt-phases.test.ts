@@ -3900,6 +3900,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
         code: "review.paid.reply_lost",
         message: detail,
         cause,
+        lastStage: "synthesize",
       },
       null,
     );
@@ -3911,6 +3912,73 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
     expect(handoff?.observation?.cause).toBe(cause);
     expect(handoff?.observation?.message).toContain("report read: transport closed");
+    expect(handoff?.observation?.message).toContain("(last stage: synthesize)");
+    // The unresolved LINE carries the same field: an operator filtering the log
+    // stream by `last_stage` must see where an unobservable outcome stopped.
+    const unresolved = h.logLines.find((entry) => entry.msg.startsWith("review unresolved:"));
+    expect(unresolved?.fields.last_stage).toBe("synthesize");
+  });
+
+  test("a failure row that already tells the attempt's story is not replaced by the phase's observation", async () => {
+    // The ordering the recovery lanes depend on. A row written first (the
+    // persisted-but-unpublished lane, which saw the durable result) is the
+    // authoritative account; the phase's later "reply lost" observation must not
+    // be recorded, or that lane's next pass would compose its row from the stale
+    // text instead of its own sentence.
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    const laneStory = "publication never started: the attempt persisted its paid result but nothing was staged";
+    await createFailureStore(db as never).record({
+      id: ATTEMPT_ID,
+      target_id: payload.targetId,
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      head_sha: payload.head_sha!,
+      stage: "pipeline",
+      code: "review.internal.unclassified",
+      trackId: ATTEMPT_ID,
+      message: "the review's result never reached the PR",
+      error: laneStory,
+    });
+
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "unknown",
+        phase: "collect",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: false,
+        containerStateUnknown: true,
+        code: "review.paid.reply_lost",
+        message: "the attempt container could not be read (reply-lost) — nothing may be concluded",
+        cause: "Error: read failed (after 900ms)",
+      },
+      null,
+    );
+
+    expect(settlement).toEqual({ kind: "unknown" });
+    // Nothing was recorded over the lane's row...
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.observation).toBeNull();
+    // ... and the durable row still carries the lane's own sentence.
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(1);
+    expect(String(rows[0]!.error)).toBe(laneStory);
+    expect(rows[0]!.error_code).toBe("review.internal.unclassified");
   });
 
   test("a CLASSIFIED post-runner throw records the stage the attempt already holds", async () => {
@@ -4055,6 +4123,12 @@ describe("the runner's last traced stage", () => {
     expect(row.message).not.toContain("synthesize");
     const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
     expect(line?.fields.last_stage).toBe("synthesize");
+    // Prepare recorded the head the checkout resolved on the attempt's OWN row,
+    // before any paid step: a failure recovered later is attributed to it rather
+    // than to the Check identity admission pinned.
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.reviewedHeadSha).toBe(SHA);
+    expect(handoff?.payload).not.toHaveProperty("reviewedHeadSha");
   });
 
   test("an exact session secret in a stage never reaches the row or the log field", async () => {
@@ -4186,12 +4260,14 @@ describe("the runner's last traced stage — settlement text", () => {
     expect(line?.fields.last_stage).toBeUndefined();
   });
 
-  test("a secret-shaped stage name is redacted by the existing helper", async () => {
-    // The stage name is runner-controlled text, so it passes the same shape
-    // redaction the stderr tail does — a credential pasted into a stage name
-    // cannot ride this field out.
+  test("a stage name carrying a credential shape never reaches the row or its log field", async () => {
+    // The stage is runner-controlled text. A throw site that did NOT obtain it
+    // from `lastRunnerStage` (which already redacts shape and exact values) must
+    // still not be able to leak it: the raw value goes in here, and the settled
+    // row and its log field must carry the marker instead.
     const { deps, db } = await makeDeps();
     const ref = makeRef(makePayload());
+    const rawStage = "leak ghp_abcdefghijklmnop";
     await settleAttemptFailure(
       deps,
       ref,
@@ -4201,16 +4277,16 @@ describe("the runner's last traced stage — settlement text", () => {
         stage: "runner",
         headSha: SHA,
         runnerReturned: true,
-        message: `runner failed: exit 1, stdout 0B, stderr tail: boom (last stage: ${REDACTED})`,
-        lastStage: REDACTED,
+        message: `runner failed: exit 1, stdout 0B, stderr tail: boom (last stage: ${rawStage})`,
+        lastStage: rawStage,
         sendAttemptPublicationId: null,
       },
       null,
     );
     const row = failureRows(db)[0]!;
-    expect(String(row.error)).toContain(`(last stage: ${REDACTED})`);
+    expect(String(row.error)).toContain(`(last stage: leak ${REDACTED})`);
     expect(String(row.error)).not.toContain("ghp_");
     const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
-    expect(line?.fields.last_stage).toBe(REDACTED);
+    expect(line?.fields.last_stage).toBe(`leak ${REDACTED}`);
   });
 });

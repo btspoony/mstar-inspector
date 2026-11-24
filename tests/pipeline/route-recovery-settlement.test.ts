@@ -14,6 +14,7 @@ import {
   markAttemptSettled,
   readAttemptHandoff,
   recordAttemptObservation,
+  recordReviewedHead,
   reserveAttemptHandoff,
   stampOwedSettlementClaim,
 } from "../../src/store/review-route-store";
@@ -1452,31 +1453,39 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toEqual(settled);
   });
 
-  test("a comment-triggered lost reply lands on the head it actually reviewed, not an empty one", async () => {
+  test("a comment-triggered lost reply lands on the head it actually reviewed, not the Check identity", async () => {
     // The reported shape: a `@bot review` comment carries NO head, so the
-    // delivery cannot name one — yet the checkout DID settle on a commit and
-    // froze it in the attempt's identity. Writing `''` there hides the failure
-    // from the current-head view although that very commit was reviewed.
+    // delivery cannot name one. Admission pinned the GitHub Check identity to a
+    // commit the PR ledger already knew, the checkout landed on a NEWER one, and
+    // the superseded Check's handoff failed — so the frozen identity keeps the
+    // OLDER commit. The failure must name the commit that was reviewed, or the
+    // row is filed under a commit nobody reviewed and disappears from the
+    // current-head view.
     const db = await createSeededTestD1();
     const payload = makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" });
     const attemptId = "attempt-lost-reply-comment";
+    const supersededSha = "b".repeat(40);
     const reviewedSha = "a".repeat(40);
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    // The identity prepare freezes once the checkout knows its head: the
-    // canonical attempt key's flat tuple carries it at index 5.
+    // The identity the attempt froze: the Check's key, whose tuple head is the
+    // admitted commit (index 5 of the canonical attempt key).
     const key = JSON.stringify([
       TEST_APP_ID,
       123,
       TEST_OWNER,
       TEST_REPO,
       TEST_PR_NUMBER,
-      reviewedSha,
+      supersededSha,
       "octocat",
       "created",
     ]);
     db.raw
       .prepare("UPDATE review_launches SET attempt_key = ?, attempt_generation = 1 WHERE attempt_id = ?")
       .run(key, attemptId);
+    // What prepare recorded once the checkout resolved its head.
+    expect(
+      await recordReviewedHead(db as never, { attemptId, headSha: reviewedSha, nowMs: LAUNCHED_AT }),
+    ).toBe(true);
 
     const env = await h.makeEnv({ DB: db as never });
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
@@ -1484,8 +1493,10 @@ describe("a launched attempt whose paid reply was lost", () => {
     const settled = failureRows(db);
     expect(settled).toHaveLength(1);
     expect(settled[0]!.error_code).toBe("review.paid.reply_lost");
-    // The row names the reviewed head, so the head-scoped query sees it.
+    // The row names the reviewed head, so the head-scoped query sees it...
     expect(settled[0]!.head_sha).toBe(reviewedSha);
+    // ... and never the identity's superseded commit.
+    expect(settled[0]!.head_sha).not.toBe(supersededSha);
   });
 
   test("a settlement whose attempt froze no identity keeps the empty-head rule", async () => {

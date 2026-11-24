@@ -67,17 +67,16 @@ async function readObservedCause(
 const ATTEMPT_KEY_HEAD_INDEX = 5;
 
 /**
- * The head this attempt actually reviewed, from the identity it FROZE on its
- * launch row. A comment-triggered delivery carries no head in its payload, so
- * the delivery cannot answer; the frozen key can, because its tuple carries the
- * head the attempt's checkout settled on (migration 0082: frozen "the instant
- * the checkout first knows one"). `null` when the attempt froze no key or the
- * value is not this build's shape — a head is never guessed.
- *
- * A FAILED read throws, exactly like `readObservedCause`: a row whose head
- * cannot be read is not evidence that it names none, so the lane retries.
+ * The frozen Check identity's head — the LAST resort for a row whose own
+ * reviewed-head record is missing (an attempt prepared before that record
+ * existed). Admission can pin this identity to a commit the PR ledger already
+ * knew while the checkout landed on a newer one, so it is never preferred over
+ * the attempt's own record; `null` when it names no head at all, so the
+ * dashboard's empty-head rule keeps its own case. A FAILED read throws, exactly
+ * like `readObservedCause`: a row whose head cannot be read is not evidence that
+ * it names none, so the lane retries.
  */
-async function readReviewedHead(env: ReviewRouteEnv, attemptId: string): Promise<string | null> {
+async function readFrozenIdentityHead(env: ReviewRouteEnv, attemptId: string): Promise<string | null> {
   const row = await env.DB.prepare(`SELECT attempt_key FROM review_launches WHERE attempt_id = ?`)
     .bind(attemptId)
     .first<{ attempt_key: string | null }>();
@@ -206,17 +205,22 @@ export type ReviewRouteEnv = {
 };
 
 /**
- * The head the settled row is attributed to: the delivery's own when it names
- * one, otherwise the head the attempt actually reviewed. A comment-triggered
- * delivery names no head, and attributing its failure to `''` hides the row
- * from the current-head view although the attempt reviewed that very commit.
- * Only a row that truly names no head stays empty — the dashboard's empty-head
- * rule keeps it out of the current-head scope, as it must.
+ * The head the settled row is attributed to — the head the attempt actually
+ * REVIEWED, which its prepare recorded before any paid step. The delivery's own
+ * head is only the fallback (a head can move between the delivery and the
+ * checkout, and the review that failed ran on the newer one), and the frozen
+ * Check identity is the LAST resort for a row written before that record
+ * existed: admission can pin it to a commit the PR ledger already knew, so
+ * attributing the failure to it stores the row under a commit nobody reviewed,
+ * which hides it from the current-head view. Only a row that truly names no head
+ * stays empty — the dashboard's empty-head rule keeps it out of the current-head
+ * scope, as it must.
  */
 async function settledHeadSha(env: ReviewRouteEnv, handoff: AttemptHandoff): Promise<string> {
+  if (handoff.reviewedHeadSha !== null) return handoff.reviewedHeadSha;
   const carried = handoff.payload.head_sha;
   if (carried !== null && carried !== undefined && carried !== "") return carried;
-  return (await readReviewedHead(env, handoff.attemptId)) ?? "";
+  return (await readFrozenIdentityHead(env, handoff.attemptId)) ?? "";
 }
 
 /**

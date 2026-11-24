@@ -1,7 +1,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import type { Container, DurableObjectState } from "@cloudflare/workers-types";
-import { ContainerNotRunningError, execCause, execSensitiveValues } from "./sandbox-errors";
+import { ContainerNotRunningError, constantCause, execCause, execSensitiveValues } from "./sandbox-errors";
 import { shellCommand, type ShellCommand } from "./shell-command";
 
 /** The Worker binding shape (pinned; `PipelineEnv.SANDBOX`). */
@@ -533,17 +533,14 @@ export class SandboxV1 extends DurableObject {
         : await boundedAwait(container.exec(argv, execOptions), deadlineMs);
     // The open may already have been dispatched by the platform, so a host
     // timer here proves neither "did not run" nor "no result": lost reply. The
-    // cause is sanitized against what THIS exec carried, so a host-timer
-    // sentence is as bounded as a thrown one, and the two timer paths below
-    // stay distinguishable in the row.
+    // sentence is this file's own constant — it names WHICH bound expired, and
+    // it survives an exec whose carried values cannot all be enumerated (an
+    // over-bound stdin), which is why it is not routed through the message
+    // sanitizer. The two timer paths stay distinguishable in the row.
     if (opened === AWAIT_EXPIRED) {
       return {
         kind: "reply-lost",
-        cause: execCause(
-          new Error("the host timer expired before the exec dispatch answered"),
-          openedAtMs,
-          execSensitiveValues(command, opts),
-        ),
+        cause: constantCause("the host timer expired before the exec dispatch answered", openedAtMs),
       };
     }
     const process = opened;
@@ -563,11 +560,7 @@ export class SandboxV1 extends DurableObject {
     if (output === AWAIT_EXPIRED) {
       return {
         kind: "reply-lost",
-        cause: execCause(
-          new Error("the host timer expired while the exec output was being drained"),
-          openedAtMs,
-          execSensitiveValues(command, opts),
-        ),
+        cause: constantCause("the host timer expired while the exec output was being drained", openedAtMs),
       };
     }
     if (stdinFailure !== undefined && output.exitCode === 0) {
