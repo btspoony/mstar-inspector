@@ -774,7 +774,7 @@ export async function runReviewQueueBatch(
   // never enter the maintenance replay outbox, so it takes the consumer's
   // deferral path instead of `settleHaltedBatch`.
   if (maintenanceClosed(await getMaintenanceMode(env.DB))) {
-    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env));
+    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env), run.state);
     return;
   }
   if (run.state === "paused-platform") {

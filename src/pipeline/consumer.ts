@@ -955,6 +955,17 @@ const HALT_SETTLEMENT = {
 >;
 
 /**
+ * The halt row's durable identity: the comment id when the delivery is a bot
+ * mention, otherwise the delivery key. A mention's webhook copy and its outbox
+ * resend disagree on `deliveryKeyOf` — the claim's `payload_json` is saved
+ * before the webhook attaches a delivery id — so keying on the comment id is
+ * what keeps both copies on ONE row (and two different mentions on two).
+ */
+function haltRowIdentity(payload: ReviewJobPayload): string {
+  return payload.comment_id !== undefined ? `comment:${payload.comment_id}` : deliveryKeyOf(payload);
+}
+
+/**
  * End a whole queue batch VISIBLY while reviews provably cannot run — the
  * platform switch is off, or the deployment's routing gate is not open.
  *
@@ -969,9 +980,9 @@ const HALT_SETTLEMENT = {
  * caught: a failed insert must leave the message unacked so the queue
  * redelivers it — the plan's "every queued delivery ends with a durable failure
  * row" cannot hold on a best-effort write. The row's `id` is the delivery's
- * own identity (`deliveryKeyOf`) and the insert is `ON CONFLICT DO NOTHING`,
- * so two mentions of one PR each keep their row while a replay of one
- * delivery rewrites nothing.
+ * mention identity (`haltRowIdentity`) and the insert is `ON CONFLICT DO
+ * NOTHING`, so two mentions of one PR each keep their row while a replay of
+ * either copy of one delivery rewrites nothing.
  *
  * An acked bot mention with an open comment claim is a resend the sweep would
  * deliver to a platform that cannot run it (or replay once it resumes), so
@@ -1022,7 +1033,7 @@ export async function settleHaltedBatch(
     }
     const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
     await deps.failureStore.record({
-      id: `${halt.cause}:${deliveryKeyOf(payload)}`,
+      id: `${halt.cause}:${haltRowIdentity(payload)}`,
       target_id: payload.targetId,
       installation_id: payload.installation_id,
       owner: payload.owner,
@@ -1060,6 +1071,13 @@ export async function settleHaltedBatch(
  * (stage `maintenance_deferred`) the 15-min sweep counts and alerts on, then
  * an ack.
  *
+ * A batch that was ALREADY halted (`halt` set — the platform switch off or
+ * the route gate closed) keeps its halt cause on that last-attempt row: the
+ * operator card and the halt contract name the pause/gate, so the row takes
+ * the halt's code and author-facing summary and mentions the maintenance
+ * deferral in `error`. Its `id` is the same mention-keyed identity
+ * `settleHaltedBatch` writes, so both settlement faces land on one row.
+ *
  * shortcut: retry cover is max_retries × 300s (5 × 5 min); a window open
  * longer spends every delivery, and each spent one is now alerted through
  * `review_failures` — upgrade: a re-enqueue-on-close drain, once a window
@@ -1068,6 +1086,7 @@ export async function settleHaltedBatch(
 export async function deferMaintenanceBatch(
   batch: MessageBatch<ReviewJobPayload>,
   deps: ProcessDeps,
+  halt?: ReviewHaltState,
 ): Promise<void> {
   if (batch.messages[0] === undefined) return;
   const deferral = {
@@ -1083,19 +1102,29 @@ export async function deferMaintenanceBatch(
       continue;
     }
     const body = message.body;
+    const settled = halt === undefined ? null : HALT_SETTLEMENT[halt];
+    const identity = `${body.owner}/${body.repo}#${body.pr_number}`;
+    const headSha = body.head_sha ?? "";
     await deps.failureStore
       .record({
+        ...(settled === null ? {} : { id: `${settled.cause}:${haltRowIdentity(body)}` }),
         target_id: body.targetId,
         installation_id: body.installation_id,
         owner: body.owner,
         repo: body.repo,
         pr_number: body.pr_number,
-        head_sha: body.head_sha ?? "",
-        stage: MAINTENANCE_DEFERRED_STAGE,
-        code: "review.delivery.deferred",
-        trackId: `${body.owner}/${body.repo}#${body.pr_number}@${body.head_sha ?? ""}`,
-        message: FAILURE_SUMMARIES["review.delivery.deferred"],
-        error: `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${body.owner}/${body.repo}#${body.pr_number} was never reviewed`,
+        head_sha: headSha,
+        stage: settled === null ? MAINTENANCE_DEFERRED_STAGE : "pipeline",
+        code: settled === null ? "review.delivery.deferred" : settled.code,
+        trackId: `${identity}@${headSha}`,
+        message:
+          settled === null ? FAILURE_SUMMARIES["review.delivery.deferred"] : FAILURE_SUMMARIES[settled.code],
+        error:
+          settled === null
+            ? `maintenance_window: the platform is closed and this delivery has no redelivery left (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS}) — PR ${identity} was never reviewed`
+            : `${settled.cause}: ${settled.why}, so this queued delivery ended without a review — PR ${identity}, head_sha ${
+                body.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : body.head_sha
+              }; the maintenance window's deferral spent its last redelivery (attempt ${message.attempts} of ${QUEUE_MAX_ATTEMPTS})`,
       })
       .catch((err: unknown) => {
         const detail = err instanceof Error ? err.message : String(err);

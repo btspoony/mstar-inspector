@@ -18,7 +18,7 @@ import {
 } from "../../src/pipeline/checks";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { reviewRunState, setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
-
+import { QUEUE_MAX_ATTEMPTS } from "../../src/store/failure-store";
 // Static import cannot work here: `src/worker/index` loads the workerd shim at
 // module scope, so the shim above must be registered first (same seam as
 // tests/worker/queue-route-gate.test.ts).
@@ -66,7 +66,7 @@ function storeSwitch(db: TestD1, enabled: 0 | 1): void {
     .run(enabled, new Date().toISOString());
 }
 
-function batchOf(payload: ReviewJobPayload) {
+function batchOf(payload: ReviewJobPayload, attempts = 1) {
   const acks: number[] = [];
   const retries: number[] = [];
   return {
@@ -78,7 +78,7 @@ function batchOf(payload: ReviewJobPayload) {
         {
           id: "m1",
           timestamp: new Date(),
-          attempts: 1,
+          attempts,
           body: payload,
           ack: () => acks.push(1),
           retry: () => retries.push(1),
@@ -499,5 +499,57 @@ describe("the platform switch ends a queued batch visibly", () => {
     expect(failures).toHaveLength(2);
     expect(failures.map((row) => row.error_code)).toEqual(["review.paused.platform", "review.paused.platform"]);
     expect(new Set(failures.map((row) => row.id)).size).toBe(2);
+  });
+
+  test("the webhook copy and the outbox resend of one mention share its halt row", async () => {
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    // The claim's payload_json is saved BEFORE the webhook attaches a delivery
+    // id, so the outbox resend omits it and the webhook copy carries it — one
+    // mention, two deliveryKey identities.
+    const outboxCopy = mentionPayload(9521);
+    const webhookCopy = { ...outboxCopy, attachDeliveryId: "attach-9521" };
+    seedClaim(db, outboxCopy);
+    const { kv } = kvDouble();
+    const env = { DB: db as never, IDEMPOTENCY_KV: kv } as never;
+
+    await runReviewQueueBatch(batchOf(webhookCopy).batch, env, CTX);
+    await runReviewQueueBatch(batchOf(outboxCopy).batch, env, CTX);
+
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.error_code).toBe("review.paused.platform");
+  });
+
+  test("a halted batch that spends its last maintenance deferral keeps the halt cause on the row", async () => {
+    const db = await createSeededTestD1();
+    openRouteGate(db);
+    storeSwitch(db, 0);
+    await setMaintenanceMode(
+      db,
+      { enabled: true, reason: "repository backfill", actor: "tester" },
+      "2026-11-24T09:00:00.000Z",
+    );
+    const payload = makePayload();
+    await attachRun(db, payload, "pause-delivery-10");
+    const { batch, acks, retries } = batchOf(payload, QUEUE_MAX_ATTEMPTS);
+    const { kv, puts } = kvDouble();
+
+    await runReviewQueueBatch(batch, { DB: db as never, IDEMPOTENCY_KV: kv } as never, CTX);
+
+    expect(retries).toHaveLength(0);
+    expect(acks).toHaveLength(1);
+    expect(puts).toHaveLength(0);
+    const failures = failureRows(db);
+    expect(failures).toHaveLength(1);
+    // The card and the row name the same cause: the pause, not the window —
+    // the window only appears as the reason the last redelivery was spent.
+    expect(failures[0]!.error_code).toBe("review.paused.platform");
+    expect(failures[0]!.stage).toBe("pipeline");
+    expect(failures[0]!.message).toBe(FAILURE_SUMMARIES["review.paused.platform"]);
+    expect(String(failures[0]!.error)).toContain("platform_paused");
+    expect(String(failures[0]!.error)).toContain("maintenance window");
+    expect(checkRow(db).terminal_failure_status).toBeNull();
   });
 });
