@@ -21,10 +21,28 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
+import { isFailureCode, type FailureCode } from "../contracts/failure-codes";
 import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
+
+/**
+ * What a live settlement OBSERVED about an outcome it could not conclude: the
+ * throw site's own classification and its bounded, already-redacted cause.
+ *
+ * It rides the delivery's handoff row because that row is the durable evidence
+ * the recovery lanes already read for this attempt, and because neither
+ * `review_launches` slot could hold it: `result_json` is CHECK-coupled to
+ * `state = 'persisted'` (writing one would forge a durable result), and the
+ * frozen Check triple is coupled to `check_owed_ms`. No new column is needed —
+ * the observation is row state, never queue payload (`toHandoff` keeps it out
+ * of `payload`), and the reconciler remains the ONLY failure-row writer.
+ */
+export type AttemptObservation = { code: FailureCode; error: string };
+
+/** The `payload_json` key the observation rides under, never part of the payload. */
+const OBSERVATION_KEY = "attemptObservation";
 
 export type AttemptHandoff = {
   deliveryKey: string;
@@ -47,6 +65,14 @@ export type AttemptHandoff = {
   settledMs: number | null;
   settledEffects: SettlementEffect[] | null;
   settlingMs: number | null;
+  /**
+   * The live settlement's own record of why this attempt's outcome could not be
+   * concluded, or `null` when nothing was observed (or the row predates the
+   * write). The recovery pass composes its failure row from THIS — the observed
+   * cause is the operator's, the code is the throw site's — and falls back to
+   * its own deadline sentence only when no observation exists.
+   */
+  observation: AttemptObservation | null;
 };
 
 /**
@@ -155,10 +181,16 @@ type HandoffRow = {
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
+  // The observation shares the row but never the payload: `payload` is what a
+  // recovery re-enqueue sends and what `deliveryKeyOf` hashes, so leaking the
+  // key would change the delivery identity of an existing attempt. Destructuring
+  // keeps the parse fail-fast (a non-object body throws, as before).
+  const { [OBSERVATION_KEY]: raw, ...payload } = JSON.parse(row.payload_json) as ReviewJobPayload &
+    Record<string, unknown>;
   return {
     deliveryKey: row.delivery_key,
     attemptId: row.attempt_id,
-    payload: JSON.parse(row.payload_json) as ReviewJobPayload,
+    payload: payload as ReviewJobPayload,
     state: row.state,
     deadlineMs: row.deadline_ms,
     enqueuedMs: row.enqueued_ms,
@@ -166,7 +198,43 @@ function toHandoff(row: HandoffRow): AttemptHandoff {
     settledMs: row.settled_ms,
     settledEffects: row.settled_effects === null ? null : (JSON.parse(row.settled_effects) as SettlementEffect[]),
     settlingMs: row.settling_ms,
+    observation: toObservation(raw),
   };
+}
+
+/**
+ * Anything off the vocabulary — a foreign key, a non-string cause, a payload
+ * from another build — reads as "nothing was observed", so the recovery pass
+ * falls back to its own sentence instead of rendering an unknown string as an
+ * author-facing code.
+ */
+function toObservation(value: unknown): AttemptObservation | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const { code, error } = value as Record<string, unknown>;
+  if (!isFailureCode(code) || typeof error !== "string" || error === "") return null;
+  return { code, error };
+}
+
+/**
+ * Record what the live settlement observed about an outcome it could not
+ * conclude. The FIRST observation for the attempt stands: a replay of the same
+ * settlement carries the same cause, and a later lane has strictly less
+ * evidence than the phase that was there. `false` means the row does not exist,
+ * or an observation was already recorded.
+ */
+export async function recordAttemptObservation(
+  db: D1Like,
+  input: { attemptId: string; observation: AttemptObservation },
+): Promise<boolean> {
+  const written = await db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET payload_json = json_set(payload_json, '$.${OBSERVATION_KEY}', json(?))
+        WHERE attempt_id = ? AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL`,
+    )
+    .bind(JSON.stringify(input.observation), input.attemptId)
+    .run();
+  return written.meta.changes === 1;
 }
 
 /** The delivery's handoff record, or `null` when this body was never handed off. */
@@ -867,11 +935,10 @@ export async function listUnpublishedLaunchSettlements(
  *
  * The anti-join on `review_failures` is the idempotence guard: the failure row
  * is keyed by the attempt, so a row that already settled once is never selected
- * again and a concurrent pass can never mint a second one. A row whose OWN
- * settlement already landed `failure-row` stays selected: that record came from
- * this attempt's settlement (the live host writes it when the outcome is
- * unobservable), and the terminal move plus the capacity release are still
- * owed — the insert it skips is attempt-keyed, so it cannot mint a second row.
+ * again and a concurrent pass can never mint a second one. That row is written
+ * by THIS lane alone — the live settlement records only an OBSERVATION on the
+ * handoff row (see `AttemptObservation`), never a failure row — so a row
+ * existing here means the settlement already ran.
  *
  * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
  * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
@@ -893,14 +960,8 @@ export async function listLostReplyLaunchSettlements(
             (h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?1)
             OR (h.deadline_ms IS NULL AND l.launched_at_ms <= ?2)
           )
-          AND (
-            NOT EXISTS (
-              SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
-            )
-            OR EXISTS (
-              SELECT 1 FROM json_each(COALESCE(h.settled_effects, '[]'))
-               WHERE value = 'failure-row'
-            )
+          AND NOT EXISTS (
+            SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
           )
         ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?3`,

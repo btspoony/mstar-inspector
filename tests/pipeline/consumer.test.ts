@@ -254,15 +254,26 @@ function inflightRows(db: TestD1): Array<Record<string, unknown>> {
   return db.raw.query("SELECT * FROM review_inflight ORDER BY rowid").all() as Array<Record<string, unknown>>;
 }
 
+/** The cause the phase recorded for an attempt it could not conclude. */
+function observationOf(db: TestD1): string {
+  const row = db.raw
+    .query(
+      `SELECT json_extract(payload_json, '$.attemptObservation.error') AS error
+         FROM review_attempt_handoffs ORDER BY created_ms DESC LIMIT 1`,
+    )
+    .get() as { error: string | null } | null;
+  return row?.error ?? "";
+}
+
 /**
- * `recordedFailures` is the count of `review_failures` rows the phase's own
- * cause produced: an unobservable outcome records it (the reconciler that later
- * releases the slot can otherwise only see that no reply arrived), a paid state
- * the row can still explain records none.
+ * An unobservable outcome concludes nothing and writes NO failure row: the
+ * recovery pass is that row's only writer. What the phase leaves behind is an
+ * OBSERVATION on the attempt's handoff row, which the pass composes its row
+ * from — so the slot stays held here, and the cause is not lost.
  */
-function expectUnknownOutcome(db: TestD1, terminalized: number, recordedFailures = 0): void {
+function expectUnknownOutcome(db: TestD1, terminalized: number): void {
   expect(terminalized).toBe(0);
-  expect(failureRows(db)).toHaveLength(recordedFailures);
+  expect(failureRows(db)).toHaveLength(0);
   expect(h.sandbox.destroyCalls).toBe(0);
   expect(inflightRows(db)).toHaveLength(1);
   expect(h.messageAckCalls).toHaveLength(1);
@@ -848,10 +859,11 @@ describe("createReviewConsumer", () => {
     expect(h.messageRetryCalls).toHaveLength(0);
     expect(h.sandbox.destroyCalls).toBe(0);
     expect(inflightRows(db)).toHaveLength(1);
-    // The paid state is unobservable, so the phase's own cause is recorded — and
-    // the launch row still holds the slot, which is the veto cleanup reads.
-    expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toContain("exec reply lost");
+    // The paid state is unobservable: no row is written here (the recovery pass
+    // is its only writer), the cause rides the handoff row, and the launch row
+    // still holds the slot — the veto cleanup reads.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(observationOf(db)).toContain("exec reply lost");
     expect(h.logLines.filter((line) => line.fields.event === "sandbox_teardown_unproven")).toHaveLength(1);
   });
 
@@ -988,8 +1000,10 @@ describe("createReviewConsumer", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
-    expectUnknownOutcome(db, check.state.terminalized, 1);
-    expect(String(failureRows(db)[0]!.error)).toContain("guarded clone reply lost");
+    expectUnknownOutcome(db, check.state.terminalized);
+    // The cause is not lost: it rides the attempt's handoff row as the phase's
+    // observation, which the recovery pass turns into the failure row.
+    expect(await observationOf(db)).toContain("guarded clone reply lost");
     expect(h.sandbox.markedCalls).toHaveLength(2);
     expect(h.sandbox.calls.filter((call) => call.cmd.includes("bun run"))).toHaveLength(0);
   });

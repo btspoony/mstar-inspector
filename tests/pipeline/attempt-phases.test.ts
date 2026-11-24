@@ -3805,8 +3805,9 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
   test("an unobservable outcome records the phase's own cause, and the container is still not destroyed", async () => {
     // The reported shape: the paid exec was issued, its reply never arrived, and
     // the launch row is the only authority — it cannot say what happened. The
-    // phase's own message must survive into the failure row, because the
-    // reconciler that eventually settles the attempt can only see "no reply".
+    // phase's own cause must survive to the reconciler, which can only see "no
+    // reply"; it carries it as an OBSERVATION on the attempt's handoff row and
+    // writes NO failure row of its own.
     const { deps, db } = await makeDeps();
     const payload = makePayload();
     const ref = makeRef(payload);
@@ -3841,18 +3842,15 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     );
 
     expect(settlement).toEqual({ kind: "unknown" });
-    // ONE row, written by the settlement itself: no reconciler has run yet.
-    const rows = failureRows(db);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]!.error_code).toBe("review.paid.reply_lost");
-    expect(rows[0]!.track_id).toBe(ATTEMPT_ID);
-    expect(String(rows[0]!.message)).toContain(cause);
-    expect(String(rows[0]!.error)).toContain(cause);
-    // The record is attempt-keyed and its `failure-row` fact landed beside it, so
-    // the reconciler can settle the attempt without writing a second row.
-    expect(rows[0]!.id).toBe(ATTEMPT_ID);
+    // No failure row: the reconciler is the ONE writer, and no reconciler has run.
+    expect(failureRows(db)).toHaveLength(0);
+    // What the phase leaves is the OBSERVATION — the cause it actually saw.
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
-    expect(handoff?.settledEffects).toContain("failure-row");
+    expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
+    expect(handoff?.observation?.error).toContain(cause);
+    // The observation is row state, never queue payload: a recovery re-enqueue
+    // must not hand the next delivery a polluted body.
+    expect(handoff?.payload).not.toHaveProperty("attemptObservation");
     // ... and nothing is concluded: the launch row still holds the container and
     // the capacity slot, which is the retention veto the reconciler later lifts.
     expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("launched");

@@ -66,16 +66,19 @@ export type ReviewRouteEnv = {
  * The failure row and its landed fact are ONE persistence step (`landFailureEffect`
  * commits them in a single D1 batch): no interruption and no second pass can see
  * the row without the fact, and the insert is attempt-keyed so a concurrent pass
- * adds nothing.
+ * adds nothing. This pass is the ONLY failure-row writer for a settlement (the
+ * phase records an observation instead), so no ownership proof exists beyond
+ * the insert's own `meta.changes`.
  *
  * `failure.code` defaults to the unclassified crash-window code; a caller that
- * knows why it settled names it. `failure.owned` is the caller's OWN exclusivity
- * proof when the record it settles was landed by someone else: the lost-reply
- * pass proved it by winning the guarded `launched → failed` move in its batch
- * (`changes() === 1`), which no other pass can win either. `failure.statements`
- * are extra writes that must land in that same batch first — the lost-reply pass
- * uses them to move a `launched` row to `failed` AND revoke it, which is what
- * releases both arms of the capacity hold.
+ * knows why it settled names it. The handoff's own `observation` — what the LIVE
+ * settlement recorded before it could conclude anything — WINS over both: the
+ * row is then composed from that observation, its code and its cause in `error`,
+ * while `message` stays the code's own author-facing summary so no internal
+ * mechanism wording reaches the PR author. `failure.statements` are extra writes
+ * that must land in that same batch first — the lost-reply pass uses them to
+ * move a `launched` row to `failed` AND revoke it, which is what releases both
+ * arms of the capacity hold.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -83,18 +86,18 @@ async function landSettlementEffects(
   landed: Set<SettlementEffect>,
   detail: string,
   nowMs: number,
-  failure: { code?: FailureCode; owned?: boolean } = {},
+  failure: { code?: FailureCode } = {},
 ): Promise<void> {
   // The refused round's accounting comes FIRST: its writes are not part of any
   // claim (F6), so a fault here leaves the duty for the next pass without ever
   // orphaning a landed claim.
   await ensureRecheckAccounting(env, handoff, nowMs);
   // The pass that LANDS the record owns the head-wide claim; an overlapping pass
-  // that lost the insert race owns nothing and must not touch it. A record the
-  // dead host already landed needs its own proof, which the caller supplies.
-  let owned = failure.owned === true;
+  // that lost the insert race owns nothing and must not touch it.
+  let owned = false;
   if (!landed.has("failure-row")) {
-    const code = failure.code ?? "review.internal.unclassified";
+    const observed = handoff.observation;
+    const code = observed?.code ?? failure.code ?? "review.internal.unclassified";
     const recorded = await landFailureEffect(
       env.DB,
       {
@@ -111,12 +114,12 @@ async function landSettlementEffects(
           code,
           trackId: handoff.attemptId,
           message: FAILURE_SUMMARIES[code],
-          error: detail,
+          error: observed?.error ?? detail,
         },
       },
       nowMs,
     );
-    owned = owned || recorded.owned;
+    owned = recorded.owned;
     landed.add("failure-row");
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
@@ -279,13 +282,7 @@ async function settleLostReplies(
         new Set<SettlementEffect>(handoff.settledEffects ?? []),
         detail,
         nowMs,
-        {
-          code: "review.paid.reply_lost",
-          // The guarded batch above moved this attempt's launch row — a one-way
-          // CAS no other pass can win — so this pass owns the head-wide claim
-          // even when the dead host already landed the failure record itself.
-          owned: true,
-        },
+        { code: "review.paid.reply_lost" },
       );
       log?.info?.(
         { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
