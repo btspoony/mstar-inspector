@@ -320,18 +320,20 @@ function seatLabel(dirs: readonly string[]): string {
 }
 
 /**
- * Deterministic seat partition (spec § 席位范围规则 — no LLM dispatch):
- *   quick → one seat covering everything (domain `full-diff`, seat `combined`);
- *   default → cluster changed files by top-level directory, then merge the
+ * Deterministic seat partition (spec § 席位范围规则 — no LLM dispatch) into
+ * exactly `seats` plans (quick is always 1):
+ *   1 seat → one seat covering everything (domain `full-diff`, seat
+ *   `combined`) at any level;
+ *   2 seats → cluster changed files by top-level directory, then merge the
  *   clusters into two groups balanced on changed lines (longest-processing-
  *   time greedy); degenerate inputs (fewer than 2 files, or a single cluster)
  *   fall back to sorted-path halves with domains `changeset-1`/`changeset-2`.
  *   An empty universe (no numstat facts) gives both seats full coverage —
  *   overlap is allowed and the merge step dedupes.
  */
-export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel): SeatPlan[] {
+export function partitionSeats(reconFacts: readonly string[], level: ReviewLevel, seats: number): SeatPlan[] {
   const files = parseChangedFiles(reconFacts);
-  if (level === "quick") {
+  if (level === "quick" || seats === 1) {
     return [{ domain: "full-diff", seat: "combined", scope: files.map((file) => file.path).sort() }];
   }
 
@@ -1195,10 +1197,11 @@ export const ompAgentRuntime: AgentRuntime = {
       session = created.session;
       traceStage("session_ready");
 
-      const plans = partitionSeats(input.reconFacts, input.level);
-      if (plans.length !== REVIEW_SEATS[input.level]) {
+      const requestedSeats = input.seats ?? REVIEW_SEATS[input.level];
+      const plans = partitionSeats(input.reconFacts, input.level, requestedSeats);
+      if (plans.length !== requestedSeats) {
         throw new Error(
-          `seat partition produced ${plans.length} seats for level ${input.level} (expected ${REVIEW_SEATS[input.level]})`,
+          `seat partition produced ${plans.length} seats for level ${input.level} (expected ${requestedSeats})`,
         );
       }
       const toolSession = asToolSession(session, cwd);

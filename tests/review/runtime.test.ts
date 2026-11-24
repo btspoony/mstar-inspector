@@ -30,7 +30,7 @@ describe("REVIEW_SEATS (harness tier table)", () => {
 describe("partitionSeats", () => {
   test("quick: one full-diff/combined seat covering every changed file", () => {
     const facts = [numstat(10, 2, "src/a.ts"), numstat(1, 0, "docs/b.md")];
-    const plans = partitionSeats(facts, "quick");
+    const plans = partitionSeats(facts, "quick", 1);
 
     expect(plans).toHaveLength(1);
     expect(plans[0]).toEqual({
@@ -46,7 +46,7 @@ describe("partitionSeats", () => {
       numstat(5, 0, "src/b.ts"),
       numstat(8, 1, "lib/c.ts"),
     ];
-    const plans = partitionSeats(facts, "default");
+    const plans = partitionSeats(facts, "default", 2);
 
     expect(plans).toHaveLength(2);
     expect(plans[0]!.domain).toBe("changeset-1");
@@ -65,7 +65,7 @@ describe("partitionSeats", () => {
       numstat(1, 0, "lib/small.ts"),
       numstat(40, 0, "src/big.ts"),
     ];
-    const [first, second] = partitionSeats(facts, "default");
+    const [first, second] = partitionSeats(facts, "default", 2);
 
     expect(first!.seat).toBe("src");
     expect(first!.scope).toEqual(["src/big.ts"]);
@@ -74,7 +74,7 @@ describe("partitionSeats", () => {
 
   test("default: equal-weight clusters — the greedy tie goes to group 0", () => {
     const facts = [numstat(3, 0, "src/a.ts"), numstat(3, 0, "lib/b.ts")];
-    const [first, second] = partitionSeats(facts, "default");
+    const [first, second] = partitionSeats(facts, "default", 2);
 
     expect(first!.seat).toBe("lib");
     expect(first!.scope).toEqual(["lib/b.ts"]);
@@ -84,7 +84,7 @@ describe("partitionSeats", () => {
 
   test("default: root files cluster under one bucket; single (root) cluster → degenerate half split", () => {
     const facts = [numstat(3, 0, "README.md"), numstat(3, 0, "package.json")];
-    const plans = partitionSeats(facts, "default");
+    const plans = partitionSeats(facts, "default", 2);
 
     expect(plans).toHaveLength(2);
     expect(plans[0]!.seat).toBe("part-1");
@@ -95,7 +95,7 @@ describe("partitionSeats", () => {
 
   test("default: single top-level cluster falls back to sorted-path halves", () => {
     const facts = [numstat(4, 0, "src/c.ts"), numstat(2, 1, "src/a.ts"), numstat(1, 0, "src/b.ts")];
-    const plans = partitionSeats(facts, "default");
+    const plans = partitionSeats(facts, "default", 2);
 
     expect(plans[0]!.domain).toBe("changeset-1");
     expect(plans[0]!.scope).toEqual(["src/a.ts", "src/b.ts"]);
@@ -103,7 +103,7 @@ describe("partitionSeats", () => {
   });
 
   test("default: one changed file → both seats take it (overlap allowed)", () => {
-    const plans = partitionSeats([numstat(7, 0, "src/solo.ts")], "default");
+    const plans = partitionSeats([numstat(7, 0, "src/solo.ts")], "default", 2);
 
     expect(plans).toHaveLength(2);
     expect(plans[0]!.scope).toEqual(["src/solo.ts"]);
@@ -111,7 +111,7 @@ describe("partitionSeats", () => {
   });
 
   test("default: no numstat facts → both seats get full coverage, no scope list", () => {
-    const plans = partitionSeats(["acme/widgets#7", "head abc1234"], "default");
+    const plans = partitionSeats(["acme/widgets#7", "head abc1234"], "default", 2);
 
     expect(plans).toHaveLength(2);
     expect(plans[0]!.scope).toEqual([]);
@@ -122,9 +122,28 @@ describe("partitionSeats", () => {
     const plans = partitionSeats(
       ["some prose fact", numstat(2, 0, "src/a.ts"), numstat(3, 0, "lib/b.ts")],
       "default",
+      2,
     );
 
     expect(plans.flatMap((plan) => [...plan.scope]).sort()).toEqual(["lib/b.ts", "src/a.ts"]);
+  });
+
+  test("default at seats=1: one full-diff/combined seat covering every changed file", () => {
+    const facts = [numstat(10, 2, "src/a.ts"), numstat(5, 0, "lib/b.ts")];
+    const plans = partitionSeats(facts, "default", 1);
+
+    expect(plans).toEqual([
+      { domain: "full-diff", seat: "combined", scope: ["lib/b.ts", "src/a.ts"] },
+    ]);
+  });
+
+  test("quick asked for seats above its count still produces one plan (the plan check refuses)", () => {
+    // runReview partitions with `input.seats ?? REVIEW_SEATS[level]` and
+    // refuses `plans.length !== requested`: quick can only ever produce one
+    // plan, so a request for two fails that check rather than silently
+    // widening the tier.
+    const plans = partitionSeats([numstat(4, 0, "src/a.ts")], "quick", 2);
+    expect(plans).toHaveLength(1);
   });
 });
 

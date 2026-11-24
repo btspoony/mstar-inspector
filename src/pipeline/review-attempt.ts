@@ -2174,6 +2174,8 @@ export async function runReviewAttempt(input: {
   prContext: PrContext | undefined;
   runnerAnchor: RunnerBudgetAnchor;
   observedChangedLines: number | null;
+  /** The resolved seat count the runner partitions into; absent = `REVIEW_SEATS[level]`. */
+  seats?: number;
   progress: ReviewAttemptProgress;
   attemptId: string;
   /**
@@ -2203,6 +2205,7 @@ export async function runReviewAttempt(input: {
     prContext,
     runnerAnchor,
     observedChangedLines,
+    seats,
     progress,
     attemptId,
     targetId,
@@ -2275,6 +2278,7 @@ export async function runReviewAttempt(input: {
     ...(recheckInput !== undefined ? { recheck: recheckInput } : {}),
     ...(recheckAssignmentMaxBytes !== undefined ? { recheckAssignmentMaxBytes } : {}),
     ...(prContext !== undefined ? { prContext } : {}),
+    ...(seats !== undefined ? { seats } : {}),
     tokenUsageNonce,
   };
   const runnerInputStdin = toBase64Utf8(JSON.stringify(runnerInput));

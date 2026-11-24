@@ -393,3 +393,46 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 });
+
+describe("GET /_internal_admin/api/runtime seatSettings", () => {
+  async function readPayload(db: TestD1): Promise<Record<string, unknown>> {
+    const res = await worker.fetch(
+      new Request("https://worker.local/_internal_admin/api/runtime", {
+        headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue(OPERATOR, null, SESSION_SECRET)}` },
+      }),
+      envFor(db),
+    );
+    expect(res.status).toBe(200);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
+  test("absent rows report the documented defaults and their bounds", async () => {
+    const db = fixture();
+    const body = await readPayload(db);
+    expect(body.seatSettings).toEqual({
+      smallDiffMaxLines: 120,
+      smallDiffSeats: 1,
+      linesMin: 1,
+      linesMax: 20_000,
+      seatsMin: 1,
+      seatsMax: 2,
+      degraded: false,
+    });
+  });
+
+  test("stored rows report the effective values", async () => {
+    const db = fixture();
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.seats.smallDiffMaxLines', '60', ?)",
+      new Date().toISOString(),
+    );
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at) VALUES ('review.seats.smallDiffSeats', '2', ?)",
+      new Date().toISOString(),
+    );
+    const body = await readPayload(db);
+    expect(body.seatSettings).toMatchObject({ smallDiffMaxLines: 60, smallDiffSeats: 2 });
+  });
+});
