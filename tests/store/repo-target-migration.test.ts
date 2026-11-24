@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createTestD1, migrationNumber, migrationsAfter, seedBot, seedTarget, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
+import { createTargetsStore, readEffectiveTargetSettings } from "../../src/dashboard/targets-store";
 
 const MIGRATION = "0067_repo_target_identity.sql";
 const PREVIOUS = "0066_usage_events_month_rp_index.sql";
@@ -267,7 +268,7 @@ describe("migration 0108: the workspace carries the admission defaults", () => {
     ).toThrow();
   });
 
-  test("the transition detaches only targets whose admission answer differs from the new defaults", () => {
+  test("the transition detaches only targets whose admission answer differs from the new defaults", async () => {
     const db = createTestD1();
     applyMigrations(db, BEFORE_0108);
     seedBot(db, "bot-1", 7001);
@@ -311,5 +312,12 @@ describe("migration 0108: the workspace carries the admission defaults", () => {
       review_enabled: 1,
       review_drafts: 1,
     });
+
+    // The transition's point: the detached target keeps answering the values it
+    // was running with, not the new workspace defaults.
+    const store = createTargetsStore(db);
+    expect(
+      await readEffectiveTargetSettings(db, (await store.getInWorkspace("default", affected))!),
+    ).toMatchObject({ reviewDrafts: false, reviewEnabled: false });
   });
 });

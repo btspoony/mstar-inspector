@@ -2705,7 +2705,9 @@ function createDashboardTestD1(
     }
     for (const column of ["default_review_drafts", "default_review_enabled"]) {
       if (!workspaceColumns.some((existing) => existing.name === column)) {
-        db.run(`ALTER TABLE workspaces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 1`);
+        db.run(
+          `ALTER TABLE workspaces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 1 CHECK (${column} IN (0, 1))`,
+        );
       }
     }
   }
