@@ -774,10 +774,21 @@ export async function runReviewQueueBatch(
   // consumer's deferral path carries the halt through instead of
   // `settleHaltedBatch` — a spent delivery still writes the pause/gate-cause
   // row, settles its Check and stamps its own replay-outbox mark, so the
-  // sweep re-issues it once reviews run again.
+  // sweep re-issues it once reviews run again. `paused-maintenance` is the
+  // derivation's own name for THIS branch: it carries no halt of its own, so
+  // a spent row is a genuine maintenance deferral, not a pause/gate row.
   if (maintenanceClosed(await getMaintenanceMode(env.DB))) {
-    await consumer.deferMaintenanceBatch(batch, consumer.createProcessDeps(env), run.state);
+    await consumer.deferMaintenanceBatch(
+      batch,
+      consumer.createProcessDeps(env),
+      run.state === "paused-maintenance" ? undefined : run.state,
+    );
     return;
+  }
+  if (run.state === "paused-maintenance") {
+    // Unreachable: the derivation only mints it when the window was closed,
+    // and a second read that now answers open has no settlement face.
+    throw new Error("the maintenance window closed between reads — the batch is redelivered");
   }
   if (run.state === "paused-platform") {
     // The settlement logs the batch line itself; a second gate-shaped line here

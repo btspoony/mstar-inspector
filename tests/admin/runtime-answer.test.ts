@@ -290,17 +290,28 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
   test("the card and the queue read ONE state machine", async () => {
     // The payload answer is the shared derivation verbatim — the queue settles
     // by the same value, so the card can never name a cause the batch did not act on.
-    const cases: Array<{ gate: string | null; flag: 0 | 1 | null }> = [
+    const cases: Array<{ gate: string | null; flag: 0 | 1 | null; maintenance?: boolean }> = [
       { gate: "on", flag: 1 },
       { gate: "on", flag: 0 },
       { gate: null, flag: 1 },
       { gate: null, flag: 0 },
       { gate: "ON", flag: 1 },
+      // The maintenance overlay lives INSIDE the derivation — a running state
+      // under a closed window answers paused-maintenance on both surfaces.
+      { gate: "on", flag: 1, maintenance: true },
+      { gate: "on", flag: 0, maintenance: true },
     ];
     for (const entry of cases) {
       const db = fixture();
       if (entry.gate !== null) setRouteGate(db, entry.gate);
       if (entry.flag !== null) setPlatformSwitch(db, entry.flag);
+      if (entry.maintenance === true) {
+        seed(
+          db,
+          "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+          new Date().toISOString(),
+        );
+      }
       const label = JSON.stringify(entry);
       expect((await readAnswer(db)).answer, label).toBe((await reviewRunState(db)).state);
     }

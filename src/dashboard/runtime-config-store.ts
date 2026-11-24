@@ -756,14 +756,15 @@ export type ReviewPlatformRead = { enabled: boolean; unreadable: boolean };
 
 /**
  * The ONE answer to "are reviews running": a deliberate pause, a deployment
- * that has not opened the route, running, or a state that could not be read.
- * Never a boolean, and never two states folded together — each one names a
- * different operator action (or none at all).
+ * that has not opened the route, a closed maintenance window, running, or a
+ * state that could not be read. Never a boolean, and never two states folded
+ * together — each one names a different operator action (or none at all).
  */
 export type ReviewsRunAnswer =
   | "running"
   | "paused-platform"
   | "blocked-deployment-gate"
+  | "paused-maintenance"
   | "unreadable-state";
 
 /** The answer plus the two raw facts it was derived from. */
@@ -791,6 +792,10 @@ export type ReviewRunState = {
  * 3. A readable `off` platform switch is `paused-platform`, after the gate —
  *    with both closed the deliveries are settled by the gate, so the answer
  *    must not name the platform pause instead.
+ * 4. Only a proven `running` is overlaid by the maintenance window into
+ *    `paused-maintenance`: every delivery defers, so the answer cannot claim
+ *    reviews flow. It stays BELOW the halt states — a real pause still names
+ *    the switch, and the pause's settlement is what the queue performs.
  */
 export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
   const gate = await getReviewRouteWorkflowGate(db);
@@ -804,7 +809,9 @@ export async function reviewRunState(db: DashboardD1): Promise<ReviewRunState> {
     return { state: "unreadable-state", gate, platform };
   }
   if (gate.mode !== "on") return { state: "blocked-deployment-gate", gate, platform };
-  return { state: platform.enabled ? "running" : "paused-platform", gate, platform };
+  if (!platform.enabled) return { state: "paused-platform", gate, platform };
+  const maintenance = await getMaintenanceMode(db);
+  return { state: maintenanceClosed(maintenance) ? "paused-maintenance" : "running", gate, platform };
 }
 
 const REVIEW_ATTEMPT_CAP_TARGET = "review.attempt.duration_cap";

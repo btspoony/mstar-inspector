@@ -29,7 +29,6 @@ import {
   getCommentClaimSettings,
   getLostReplySettleMs,
   getMaintenanceMode,
-  maintenanceClosed,
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
   getSweepSettings,
@@ -325,11 +324,9 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     githubRateLimited24h,
     queue,
     reviewsRunning: {
-      // "running" claims reviews flow; a closed maintenance window defers
-      // every delivery instead. It gets its OWN answer — not `paused-platform`,
-      // which would contradict the platform block's honest "on" — so the card
-      // can tell "the switch is off" from "the window is closed".
-      answer: reviews.state === "running" && maintenanceClosed(maintenance) ? "paused-maintenance" : reviews.state,
+      // The shared derivation verbatim — `paused-maintenance` included — so
+      // the card can never name a cause the queue did not act on.
+      answer: reviews.state,
       platform: reviews.platform,
       pausedApps,
       appsHref,
