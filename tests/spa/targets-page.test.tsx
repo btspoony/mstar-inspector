@@ -174,10 +174,12 @@ describe("repository list (static SSR)", () => {
     expect(markup).toContain(t("en", "targets.emptyDescription"));
   });
 
-  test("the default face omits a 待安装 row", () => {
-    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    expect(markup).not.toContain('data-tone="warn"');
-    expect(markup).not.toContain("null/null");
+  test("the default face omits a pending target's row link", () => {
+    const markup = renderView([
+      row({ target_id: "t-web", repo_id: null, repo_owner: "acme", repo_name: "web" }),
+    ]);
+    expect(markup).not.toContain('href="/dashboard/acme/repos/t-web"');
+    expect(markup).not.toContain("acme/web");
   });
 
   test("a target without repo_id but with owner/name is hidden from the default face", () => {
@@ -185,9 +187,12 @@ describe("repository list (static SSR)", () => {
     expect(markup).not.toContain("42ch-dev/nexus");
   });
 
-  test("a target with neither an id nor a name stays off the default face too", () => {
-    const markup = renderView([row({ repo_id: null, repo_owner: null, repo_name: null })]);
-    expect(markup).not.toContain(">—</a>");
+  test("an all-pending workspace shows the available-empty copy on the default face", () => {
+    const markup = renderView([
+      row({ target_id: "t-web", repo_id: null, repo_owner: "acme", repo_name: "web" }),
+    ]);
+    expect(markup).toContain(t("en", "targets.filterEmptyAvailable"));
+    expect(markup).not.toContain(t("en", "targets.filterEmpty"));
   });
 
   test("the overview band reports review volume summed from the row aggregates", () => {
@@ -272,6 +277,7 @@ describe("the 待安装 filter (mounted)", () => {
       expect(text).toContain(t("en", "targets.status.uninstalled"));
       expect(text).not.toContain("acme/api");
       expect(text).not.toContain("acme/docs");
+      expect(text).toContain(t("en", "targets.allRepositories"));
       expect(text.indexOf(t("en", "targets.allRepositories"))).toBeLessThan(text.indexOf("acme/web"));
 
       const all = [...container.querySelectorAll("button")].find(
@@ -283,6 +289,47 @@ describe("the 待安装 filter (mounted)", () => {
       const restored = container.textContent ?? "";
       expect(restored).not.toContain("acme/web");
       expect(restored.indexOf("acme/api")).toBeLessThan(restored.indexOf("acme/docs"));
+    } finally {
+      await act(async () => root.unmount());
+      cleanup();
+    }
+  });
+
+  test("a reload that empties the pending set restores the available face and drops the toggle", async () => {
+    const targets = [
+      row({ target_id: "t-1", repo_name: "api" }),
+      row({ target_id: "t-2", repo_id: null, repo_name: "web" }),
+      row({ target_id: "t-3", repo_name: "docs" }),
+    ];
+    const { win, cleanup } = installDom("http://localhost/dashboard/acme/repos");
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () =>
+      root.render(createElement(TargetsView, { locale: "en", state: "ok", targets, onRetry: () => {} })),
+    );
+    try {
+      const segment = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "targets.filterUninstalled", { count: 1 }),
+      );
+      await act(async () => {
+        segment?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+      });
+
+      const reloaded = targets.map((target) =>
+        target.target_id === "t-2" ? { ...target, repo_id: 501 } : target,
+      );
+      await act(async () =>
+        root.render(createElement(TargetsView, { locale: "en", state: "ok", targets: reloaded, onRetry: () => {} })),
+      );
+
+      const text = container.textContent ?? "";
+      expect(text).toContain("acme/api");
+      expect(text).toContain("acme/web");
+      expect(text).toContain("acme/docs");
+      const toggleLabels = [...container.querySelectorAll("button")].map((node) => node.textContent);
+      expect(toggleLabels).not.toContain(t("en", "targets.filterAvailable"));
+      expect(toggleLabels).not.toContain(t("en", "targets.filterUninstalled", { count: 1 }));
     } finally {
       await act(async () => root.unmount());
       cleanup();

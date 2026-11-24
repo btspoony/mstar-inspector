@@ -191,7 +191,10 @@ export function TargetsView({
   const allHref = `${base}/repos/all`;
   const [uninstalledOnly, setUninstalledOnly] = useState(false);
   const uninstalledCount = all.filter((target) => target.repo_id === null).length;
-  const rows = uninstalledOnly
+  // The toggle disappears when nothing awaits install; the stored selection
+  // may then be stale, so the effective face falls back to available.
+  const showUninstalled = uninstalledOnly && uninstalledCount > 0;
+  const rows = showUninstalled
     ? all.filter((target) => target.repo_id === null)
     : all.filter((target) => target.repo_id !== null);
   const reviewsTotal = all.reduce((sum, target) => sum + target.reviews_total, 0);
@@ -297,7 +300,7 @@ export function TargetsView({
                 type="single"
                 variant="outline"
                 size="sm"
-                value={uninstalledOnly ? "uninstalled" : "available"}
+                value={showUninstalled ? "uninstalled" : "available"}
                 onValueChange={(next) => {
                   if (next !== "") setUninstalledOnly(next === "uninstalled");
                 }}
@@ -326,7 +329,9 @@ export function TargetsView({
             <EmptyState title={t(locale, "targets.emptyTitle")} description={t(locale, "targets.emptyDescription")} />
           ) : null}
           {all.length > 0 && rows.length === 0 ? (
-            <p className="text-sm text-muted-foreground">{t(locale, "targets.filterEmpty")}</p>
+            <p className="text-sm text-muted-foreground">
+              {t(locale, showUninstalled ? "targets.filterEmpty" : "targets.filterEmptyAvailable")}
+            </p>
           ) : null}
         </div>
       ) : null}
