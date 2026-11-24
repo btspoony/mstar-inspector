@@ -2,7 +2,7 @@ import type { D1Like, D1StatementLike } from "./types";
 
 /**
  * note: One (provider, model) bucket of a completed review attempt — the
- * payload columns of `review_token_usage` (migration 0108). Structurally
+ * payload columns of `review_token_usage` (migration 0109). Structurally
  * identical to the wire's `TokenUsageBucket`, declared here because store
  * leaves keep their "type imports from ./types only" boundary.
  */

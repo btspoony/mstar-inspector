@@ -9,7 +9,6 @@ import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
 import type { AgentRuntime, AgentRuntimeRunInput, ReviewRunResult } from "../../packages/shared/src/runtime";
 import {
   TOKEN_USAGE_MAX_BYTES,
-  TOKEN_USAGE_PATH,
   validateTokenUsageDoc,
   type TokenUsageBucket,
   type TokenUsageDoc,
@@ -87,11 +86,13 @@ function modelUsageEntry(id: string, provider: string, model: string, fields: Pa
 
 function subagentResult(opts: {
   resolvedModel?: string;
+  resolvedModelIdentity?: string;
   requests?: number;
   usage?: Partial<Bucket>;
 }): Parameters<typeof bucketFromSubagent>[0] {
   return {
     resolvedModel: opts.resolvedModel,
+    resolvedModelIdentity: opts.resolvedModelIdentity,
     requests: opts.requests,
     ...(opts.usage === undefined
       ? {}
@@ -225,6 +226,28 @@ describe("bucketFromSubagent", () => {
       subagentResult({ resolvedModel: "ollama/llama3.1:latest", requests: 1, usage: { input: 5, total: 5 } }),
     );
     expect(bucket).toMatchObject({ provider: "ollama", model: "llama3.1:latest", requests: 1 });
+  });
+  test("a literal model id ending in :<level> survives through resolvedModelIdentity", () => {
+    const bucket = bucketFromSubagent(
+      subagentResult({
+        resolvedModelIdentity: "nanogpt/coding-router:high",
+        requests: 1,
+        usage: { input: 5, total: 5 },
+      }),
+    );
+    expect(bucket).toMatchObject({ provider: "nanogpt", model: "coding-router:high", requests: 1 });
+  });
+
+  test("the identity wins over a display-only :<thinking> suffix on resolvedModel", () => {
+    const bucket = bucketFromSubagent(
+      subagentResult({
+        resolvedModel: "ark/deepseek-v4:high",
+        resolvedModelIdentity: "ark/deepseek-v4",
+        requests: 1,
+        usage: { input: 5, total: 5 },
+      }),
+    );
+    expect(bucket).toMatchObject({ provider: "ark", model: "deepseek-v4", requests: 1 });
   });
 
   test("an absent, blank or malformed resolvedModel yields no bucket", () => {
@@ -541,7 +564,4 @@ describe("runner token-usage side document", () => {
     expect(existsSync(path)).toBe(false);
   });
 
-  test("the fixed wire path is the applied-model sibling", () => {
-    expect(TOKEN_USAGE_PATH).toBe("/workspace/review-token-usage.json");
-  });
 });

@@ -16,7 +16,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import type { TokenUsageBucket } from "../../shared/src/token-usage-wire";
 
 /** The slice of a settled subagent result the fold needs — all-optional so an error-carried partial still folds. */
-export type SubagentUsageSource = Partial<Pick<SingleResult, "usage" | "requests" | "resolvedModel">>;
+export type SubagentUsageSource = Partial<Pick<SingleResult, "usage" | "requests" | "resolvedModel" | "resolvedModelIdentity">>;
 
 /** SDK thinking levels a `resolvedModel` may suffix as `:<level>` — anything else is part of the model id. */
 const THINKING_LEVELS: Record<string, true> = {
@@ -107,21 +107,27 @@ export function bucketsFromSession(entries: readonly SessionEntry[]): TokenUsage
 
 /**
  * Fold one settled subagent `SingleResult`: its aggregate `usage` plus
- * `requests`, attributed to the `<provider>/<id>` in `resolvedModel` with a
- * `:<thinking>` suffix stripped (the suffix is a display annotation, not part
- * of the model id). An absent, blank or malformed `resolvedModel` yields no
- * bucket — the caller drops the result rather than invent a provider.
+ * `requests`, attributed to the `<provider>/<id>` in `resolvedModelIdentity` —
+ * the identity never carries the thinking suffix, so a literal model id that
+ * itself ends in `:<level>` (e.g. `coding-router:high`) stays intact.
+ * `resolvedModel` (which may suffix `:<thinking>`) is the fallback for an
+ * older result without the identity and is stripped as before. An absent,
+ * blank or malformed resolved value yields no bucket — the caller drops the
+ * result rather than invent a provider.
  */
 export function bucketFromSubagent(result: SubagentUsageSource | undefined): TokenUsageBucket | undefined {
-  const resolved = result?.resolvedModel;
+  const identity = result?.resolvedModelIdentity;
+  const resolved = identity ?? result?.resolvedModel;
   if (resolved === undefined || resolved === null) return undefined;
   const slash = resolved.indexOf("/");
   if (slash < 0) return undefined;
   const provider = resolved.slice(0, slash);
   let model = resolved.slice(slash + 1);
-  const suffix = model.lastIndexOf(":");
-  if (suffix >= 0 && THINKING_LEVELS[model.slice(suffix + 1)] === true) {
-    model = model.slice(0, suffix);
+  if (identity === undefined) {
+    const suffix = model.lastIndexOf(":");
+    if (suffix >= 0 && THINKING_LEVELS[model.slice(suffix + 1)] === true) {
+      model = model.slice(0, suffix);
+    }
   }
   if (provider.trim() === "" || model.trim() === "") return undefined;
   const bucket = newBucket(provider, model);

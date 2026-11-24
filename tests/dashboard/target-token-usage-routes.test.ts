@@ -76,7 +76,10 @@ async function seedUsage(
       attemptId: `attempt-${(attemptCounter += 1)}`,
       targetId,
       workspaceId,
-      occurredAt: new Date(Date.now() - daysAgo * DAY_MS).toISOString(),
+      // -1ms keeps `daysAgo = 0` deterministically inside the half-open
+      // [lower, now) window: a seed at the exact query instant would be
+      // excluded whenever the seed and the read share the millisecond.
+      occurredAt: new Date(Date.now() - daysAgo * DAY_MS - 1).toISOString(),
       buckets: [bucket],
     }),
   );

@@ -1,12 +1,7 @@
 
 import type { CustomProviderDeclaration, ReviewLevel } from "../../packages/shared/src/runtime";
 import { APPLIED_MODEL_MAX_CHARS, APPLIED_MODEL_PATH, APPLIED_MODEL_PATTERN } from "../../packages/shared/src/runtime";
-import {
-  TOKEN_USAGE_MAX_BYTES,
-  TOKEN_USAGE_PATH,
-  validateTokenUsageDoc,
-  type TokenUsageDoc,
-} from "../../packages/shared/src/token-usage-wire";
+import { validateTokenUsageDoc, type TokenUsageDoc } from "../../packages/shared/src/token-usage-wire";
 import type { FailureCode } from "../contracts/failure-codes";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import {
@@ -51,7 +46,6 @@ import {
 import { assertSandboxGrant, type ReviewCommenter } from "./comment";
 import {
   BOUNDED_READ_ABSENT_FLAG,
-  boundedFileReadCommand,
   buildGitOpsCommands,
   CLONE_DIR,
   DIFF_PATH,
@@ -59,6 +53,7 @@ import {
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
+  readTokenUsageCommand,
   RUNNER_INPUT_PATH,
   RUNNER_PATH,
   runnerCommand,
@@ -1391,20 +1386,6 @@ async function readAppliedProvider(
 }
 
 /**
- * Bounded read of the runner's token-usage side document — the same transport
- * as `readReportCommand` (existence probe → absent flag, `head -c` byte bound
- * → overflow flag) at the wire's own bound. Defined here rather than in
- * `gitops.ts` because it is the only bounded read whose byte bound is not
- * `REPORT_FILE_MAX_BYTES`.
- */
-function readTokenUsageCommand(): ShellCommand {
-  return shellCommand(
-    `if [ -e '${TOKEN_USAGE_PATH}' ]; then ${boundedFileReadCommand(TOKEN_USAGE_PATH, TOKEN_USAGE_MAX_BYTES)}; ` +
-      `else printf '\\n${BOUNDED_READ_ABSENT_FLAG}\\n'; fi`,
-  );
-}
-
-/**
  * The runner's per-(provider, model) token spend. Usage is analysis data and
  * never a gate on review correctness: an absent document means the run had
  * nothing attributable, and an unreadable, overflowing or invalid one is
@@ -1420,13 +1401,25 @@ async function readTokenUsage(
   log: AttemptLog,
   fields: AttemptLogFields,
 ): Promise<TokenUsageDoc | null> {
-  const read = await boundedRead(
-    sandbox,
-    marker,
-    readTokenUsageCommand(),
-    POST_RUNNER_READ_TIMEOUT_MS,
-    true,
-  );
+  let read: ReportBoundedRead;
+  try {
+    read = await boundedRead(
+      sandbox,
+      marker,
+      readTokenUsageCommand(),
+      POST_RUNNER_READ_TIMEOUT_MS,
+      true,
+    );
+  } catch (err) {
+    // Usage is never a gate on review correctness: a transport fault on this
+    // read alone cannot discard a valid paid result — log it once and record
+    // nothing, unlike the proof readers whose faults must stay fatal.
+    log.warn(
+      { ...fields, token_usage: "read-failed", error: err instanceof Error ? err.message : String(err) },
+      "token-usage document read faulted — left unrecorded",
+    );
+    return null;
+  }
   if (read.failure !== null) {
     if (read.failure !== "absent") {
       log.warn({ ...fields, token_usage: read.failure }, `token-usage document ${read.failure}`);
@@ -2510,14 +2503,17 @@ export async function runReviewAttempt(input: {
       ? await readReportDoc(sandbox, marker, progress.secretValues, headSha, deps.log, fields)
       : null;
 
-  const appliedProvider = await readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields);
-
-  // The token-usage document is read only for a caller that can attribute the
-  // spend to the attempt's own target — an unattributable row is never written.
-  const tokenUsage =
+  // The token-usage read rides the applied-model read's billed window —
+  // the same concurrent-window rule as the recheck document+status pair
+  // (GUARD_TIMED_SANDBOX_STEPS). The token-usage document is read only for
+  // a caller that can attribute the spend to the attempt's own target — an
+  // unattributable row is never written.
+  const [appliedProvider, tokenUsage] = await Promise.all([
+    readAppliedProvider(sandbox, marker, progress.secretValues, deps.log, fields),
     targetId !== undefined && usageWorkspaceId !== undefined
-      ? await readTokenUsage(sandbox, marker, tokenUsageNonce, deps.log, fields)
-      : null;
+      ? readTokenUsage(sandbox, marker, tokenUsageNonce, deps.log, fields)
+      : Promise.resolve(null),
+  ]);
 
   const secretValues = progress.secretValues;
   const stdoutRedaction = redactDocument(run.stdout, secretValues, "run");

@@ -80,6 +80,7 @@ import {
   readRecheckCommand,
   readRecheckStatusCommand,
   readReportCommand,
+  readTokenUsageCommand,
 } from "../../src/pipeline/gitops";
 import { sk, gh, AWS_CANARY_KEY } from "../helpers/fake-secrets";
 import {
@@ -478,6 +479,7 @@ describe("createReviewConsumer", () => {
         "bun run '/opt/runner/packages/runner/src/runner.ts' --level 'default' --input '/workspace/review-input.json'",
       ),
       expect.stringContaining("review-applied-model.json"),
+      expect.stringContaining("review-token-usage.json"),
     ]);
     const runnerInput = JSON.parse(h.sandbox.writtenInputJson!) as Record<string, unknown>;
     expect(runnerInput).toEqual({
@@ -485,6 +487,7 @@ describe("createReviewConsumer", () => {
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: [],
       outerDeadlineEpochMs: expect.any(Number),
+      tokenUsageNonce: expect.any(String),
     });
     expect(h.sandbox.calls[0]!.opts).toEqual({
       env: {
@@ -4098,12 +4101,13 @@ describe("createReviewConsumer", () => {
       readRecheckStatusCommand(RECHECK_STATUS_PATH),
       readReportCommand(REPORT_OUTPUT_PATH),
       readReportCommand(APPLIED_MODEL_PATH),
+      readTokenUsageCommand(),
     ]);
     const timed = h.sandbox.calls.filter(
       (call) => (call.opts as { timeout?: number } | undefined)?.timeout === EXEC_TIMEOUT_GIT_MS,
     );
     const postRunner = h.sandbox.calls.filter((call) => postRunnerCmds.has(call.cmd));
-    expect(postRunner).toHaveLength(4);
+    expect(postRunner).toHaveLength(5);
     for (const read of postRunner) {
       expect((read.opts as { timeout?: number } | undefined)?.timeout).toBe(POST_RUNNER_READ_TIMEOUT_MS);
     }
@@ -4115,7 +4119,10 @@ describe("createReviewConsumer", () => {
     expect(captured).toHaveLength(1 + PR_CONTEXT_MAX_ISSUES);
     expect(GUARD_TIMED_SANDBOX_STEPS).toContain("applied-model-read");
     expect(GUARD_TIMED_SANDBOX_STEPS).toContain("report-document-read");
-    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 1);
+    // Concurrent groups add commands without windows: the recheck pair bills
+    // `recheck-reads` once (+1) and the token-usage read rides
+    // `applied-model-read` (+1), so issued = billed + 2.
+    expect(timed.length + captured.length + postRunner.length).toBe(GUARD_TIMED_SANDBOX_STEPS.length + 2);
   });
 
   test("guardRetryDelaysSeconds per level — the schedule covers the guard TTL (AC-4)", () => {

@@ -184,6 +184,26 @@ describe("the runner's token-usage side document", () => {
     expect(sandbox.events.filter((event) => event.includes(TOKEN_USAGE_PATH))).toHaveLength(1);
   });
 
+  test("a reply-lost usage read alone cannot abort the review — the launch still persists", async () => {
+    const db = createMigratedTestD1();
+    await claimedAttempt(db);
+    const log = logCapture();
+    const sandbox = sandboxDouble(VALID_DOC_TEMPLATE);
+    const runMarked = sandbox.runMarked.bind(sandbox);
+    sandbox.runMarked = async (marker: string, command: string, opts?: { stdin?: string }) => {
+      if (command.includes(TOKEN_USAGE_PATH)) throw new Error("transport dropped the read reply");
+      return runMarked(marker, command, opts);
+    };
+
+    const execution = await runReviewAttempt(executionInput(sandbox, db, log));
+
+    expect(execution.run.exitCode).toBe(0);
+    expect((await readReviewLaunch(db, ATTEMPT))?.state).toBe("persisted");
+    expect(usageRows(db)).toEqual([]);
+    const warnings = log.warnings.filter((warning) => warning.fields["token_usage"] === "read-failed");
+    expect(warnings).toHaveLength(1);
+  });
+
   test("an absent document writes nothing and still settles the review", async () => {
     const db = createMigratedTestD1();
     await claimedAttempt(db);
