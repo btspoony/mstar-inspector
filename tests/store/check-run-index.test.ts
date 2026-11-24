@@ -19,7 +19,7 @@ function plan(db: TestD1, sql: string): string {
     .join("\n");
 }
 
-describe("check_run.rerequested reverse lookup (0108 idx_review_checks_app_run)", () => {
+describe("check_run.rerequested reverse lookup (0109 idx_review_checks_app_run)", () => {
   test("findCheckAttemptByRunId probes (github_app_id, check_run_id) through the partial index — never a table scan", async () => {
     const db = createMigratedTestD1();
     const index = db.raw

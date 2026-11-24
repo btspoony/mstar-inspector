@@ -25,7 +25,7 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | Scope | Per review target, which may inherit the workspace default (`follow_workspace_defaults`). No deployment-level override; the target's business pause or the bot's operational pause governs every enqueue path alongside the platform flag |
 | Default | the workspace default is `every_push` (`default_review_trigger_mode`); a new target is created inheriting it |
 | Write path | the repository detail's 评审配置 tab (`POST …/api/targets/:targetId`) and its 所有仓库 twin (`POST …/api/targets/defaults`), one validated body parser each; an off-vocabulary mode is a keyed 400 with nothing stored |
-| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no subscription work: Apps holding `checks: write` are auto-subscribed to the event; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0108`) — which is the authoritative owner/repo/pr/head source because a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch` |
+| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no subscription work: Apps holding `checks: write` are auto-subscribed to the event; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0109`) — which is the authoritative owner/repo/pr/head source because a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch` |
 
 ### 2.1 Auto-trigger classification matrix
 
@@ -126,7 +126,7 @@ rerequested is a trigger, never a bypass.
 - `src/contracts/review-job.ts`: `ReviewJobPayload`.
 - `src/contracts/idem.ts`: `rerunIdemKey`, `kvClaimKey` — the rerun's KV claim dimension (`reviews.id`/`parseIdemKey` keep the strict five-part key).
 - `src/dashboard/index.ts`: the target and defaults settings routes, OAuth bootstrap and removal; `src/dashboard/targets-store.ts`: `readEffectiveTargetSettings`.
-- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`, `migrations/0067_repo_target_identity.sql` (target columns and workspace defaults), `migrations/0108_check_run_id_index.sql` (`idx_review_checks_app_run`, the rerequested lookup): storage contracts.
+- `migrations/0022_app_trigger_mode.sql`, `migrations/0023_removed_logins.sql`, `migrations/0048_comment_trigger_claims.sql`, `migrations/0067_repo_target_identity.sql` (target columns and workspace defaults), `migrations/0109_check_run_id_index.sql` (`idx_review_checks_app_run`, the rerequested lookup): storage contracts.
 - `src/admin/index.ts`: operator runtime settings for `review.comment_claim.*`.
 
 ## Change obligations

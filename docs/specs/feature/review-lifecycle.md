@@ -160,7 +160,7 @@ CREATE TABLE review_checks (
 );
 CREATE UNIQUE INDEX idx_check_one_open ON review_checks(attempt_key) WHERE terminal_ms IS NULL;
 CREATE INDEX idx_check_recovery ON review_checks(recovery_state,next_attempt_ms,lease_until_ms);
--- migration 0108; the rerequested Re-run reverse lookup:
+-- migration 0109; the rerequested Re-run reverse lookup:
 CREATE INDEX idx_review_checks_app_run ON review_checks(github_app_id, check_run_id) WHERE check_run_id IS NOT NULL;
 ```
 

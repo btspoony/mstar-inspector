@@ -1,4 +1,4 @@
--- 0108_check_run_id_index.sql — the check_run.rerequested reverse lookup.
+-- 0109_check_run_id_index.sql — the check_run.rerequested reverse lookup.
 --
 -- A rerequested delivery resolves its PR identity from the attempt row the
 -- remote run id names: `WHERE github_app_id = ? AND check_run_id = ?` on the
