@@ -248,6 +248,7 @@ function ordinaryFailure(
     // reads this field to decide whether an unconfirmed row may be concluded.
     runnerReturned: transient?.runnerReturned ?? false,
     message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
+    ...(transient?.lastStage === undefined ? {} : { lastStage: transient.lastStage }),
     sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
     rateLimited: transient?.rateLimited ?? null,
   };

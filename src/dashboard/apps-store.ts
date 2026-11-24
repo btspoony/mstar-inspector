@@ -220,6 +220,21 @@ const PULL_REQUEST_LEDGER_ORDER = "last_seen_at DESC, pr_number DESC";
 const PULL_REQUEST_REPO_PREDICATE = " AND owner = ? AND repo = ?";
 
 /**
+ * The current-head failure predicate, appended to every failure count the
+ * dashboard reports and to the failures page unless it asks for history: a
+ * `review_failures` row is attributed to the PR's CURRENT head only when its
+ * own `head_sha` equals the head recorded on the same-target ledger row.
+ * Empty-head rule: a row with `head_sha = ''` names no head, so it is never
+ * attributed to a head — the `<> ''` half excludes it even when the PR's own
+ * head_sha is NULL or empty. A NULL ledger head compares false and also
+ * matches nothing. Correlation runs through `target_id` (the ledger key), so
+ * a same-named PR on a different target's head cannot leak in.
+ */
+const PULL_REQUEST_HEAD_FAILURE_SQL = `AND f.head_sha <> '' AND f.head_sha = (
+    SELECT p.head_sha FROM pull_requests p
+    WHERE p.target_id = f.target_id AND p.owner = f.owner AND p.repo = f.repo AND p.pr_number = f.pr_number)`;
+
+/**
  * The tenant scope every ledger read binds: ONE repository target, or every
  * live target of a workspace (which spans bots, so no bot rides here). The
  * route resolves both from the session.
@@ -1203,6 +1218,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                FROM review_failures f
                WHERE ${ledgerScopeSql("f", scope)}
                  AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
+                 ${PULL_REQUEST_HEAD_FAILURE_SQL}
                  AND (f.owner, f.repo, f.pr_number) IN (${window})
                GROUP BY f.owner, f.repo, f.pr_number`,
             )
@@ -1291,6 +1307,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT COUNT(*) AS n FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
                AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
+               ${PULL_REQUEST_HEAD_FAILURE_SQL}
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -1414,6 +1431,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       prNumber: number,
       page: PullRequestPageRequest,
     ): Promise<PullRequestRecordPage<PullRequestFailureDetailRow> | null> {
+      // `page.history === true` is the failures tab's all-history scope: no
+      // head predicate at all, so rows the count already excludes — old heads
+      // and empty-head rows alike — stay reachable. Any other value is the
+      // default current-head scope.
+      const headPredicate = page.history === true ? "" : ` ${PULL_REQUEST_HEAD_FAILURE_SQL}`;
       const scopeBinds = ledgerScopeBinds(scope);
       const results = await db.batch([
         db.prepare(pullRequestExistsSql(scope)).bind(...scopeBinds, owner, repo, prNumber),
@@ -1422,7 +1444,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT COUNT(*) AS n
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})${headPredicate}
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?`,
           )
           .bind(...scopeBinds, owner, repo, prNumber),
@@ -1431,7 +1453,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
             `SELECT f.stage, f.error, f.message, f.error_code, f.track_id, f.created_at
              FROM review_failures f
              WHERE ${ledgerScopeSql("f", scope)}
-               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})
+               AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})${headPredicate}
                AND f.owner = ? AND f.repo = ? AND f.pr_number = ?
              ORDER BY f.created_at DESC, f.rowid DESC
              LIMIT ? OFFSET ?`,
@@ -1692,12 +1714,15 @@ export type PullRequestRecordCounts = {
   must_fix: number;
 };
 
-/** One record section's page request — the route validates the bounds before this. */
+/** One record section's page request — the route validates the bounds before this.
+ * `history` is the failures section's only scope flag: `true` asks for the whole
+ * row set (every head plus the headless ones); absent/false means the current head. */
 export type PullRequestPageRequest = {
   offset: number;
   limit: number;
   severity?: string | null;
   unclassified?: boolean;
+  history?: boolean;
 };
 
 /** One record section's page: the rows plus the total the pager counts against. */
