@@ -4897,7 +4897,11 @@ export async function settleAttemptFailure(
     // until the deadline plus grace proves the paid child gone.
     const observed = redactExactSecrets(redactSecrets(detail), await sealedSecretValues(deps, attemptId));
     try {
-      await recordAttemptObservation(deps.env.DB, { attemptId, observation: { code, error: observed } });
+      await recordAttemptObservation(deps.env.DB, {
+        attemptId,
+        observation: { code, error: observed },
+        nowMs: Date.now(),
+      });
     } catch (recordErr) {
       const recordDetail = recordErr instanceof Error ? recordErr.message : String(recordErr);
       deps.log.warn(

@@ -19,6 +19,7 @@ import {
   clearRefusalPending,
   clearRecheckDuty,
   listIncompleteSettlements,
+  listLateObservedFailures,
   listLostReplyLaunchSettlements,
   readAttemptHandoffByAttempt,
   readRefusalPending,
@@ -26,7 +27,6 @@ import {
   readRecheckDuty,
   recordRecheckDuty,
   recordRecheckAttribution,
-  recorrectSettledFailureRow,
   recheckRowExists,
   listOwedSuccessors,
   listUnpublishedLaunchSettlements,
@@ -35,6 +35,7 @@ import {
   settleAttemptIfDischarged,
   stampOwedSettlementClaim,
   successorGeneration,
+  syncSettledFailureRow,
   touchAttemptHandoff,
   type AttemptHandoff,
   type AttemptObservation,
@@ -49,19 +50,17 @@ export const ROUTE_RECOVERY_LIMIT = 25;
 /**
  * The observation the attempt holds RIGHT NOW — never the selector's copy: the
  * selector read the row before it decided to settle, and the live phase may have
- * recorded its cause since. A failed read is the same fact as "nothing recorded"
- * for this decision: the row must still be inserted (the settlement cannot hang
- * on a lost cause), and the pass's own sentence is the honest fallback.
+ * recorded its cause since. A FAILED read throws on purpose: it is not evidence
+ * that nothing was observed, so the attempt is skipped for this pass and its
+ * lane selects it again (the next cron pass retries). A successful read returns
+ * exactly what the row holds, `null` included.
  */
 async function readObservedCause(
   env: ReviewRouteEnv,
   handoff: AttemptHandoff,
 ): Promise<AttemptObservation | null> {
-  try {
-    return (await readAttemptHandoffByAttempt(env.DB, handoff.attemptId))?.observation ?? null;
-  } catch {
-    return handoff.observation;
-  }
+  const row = await readAttemptHandoffByAttempt(env.DB, handoff.attemptId);
+  return row?.observation ?? null;
 }
 
 /**
@@ -83,28 +82,42 @@ const MECHANISM_TERMS: readonly (readonly [RegExp, string])[] = [
   [/\b(?:\d+|thousands?)\s*ms\b/gi, "a short time"],
 ];
 
-/** A segment that states what we did NOT conclude — never the cause. */
-const DISPOSITION_SEGMENT = /^(?:nothing|no\s|its result\b)/i;
-/** A segment that is our own wrapper around the cause: it names the mechanism. */
-const WRAPPER_SEGMENT = /\b(?:container|sandbox|marker|exec|durable\s+object|workflow|launch row)\b/i;
+/**
+ * The wrapper and disposition sentences OUR OWN throw sites put around a cause
+ * (`src/pipeline/review-attempt.ts`): a leading "…could not be read…" and a
+ * trailing statement of what was NOT concluded. A closed, prefix-anchored list
+ * on purpose — the cause text itself is never filtered, so a real reason that
+ * merely reads like a disposition ("no capacity available") keeps its words.
+ */
+const CAUSE_NOISE: readonly RegExp[] = [
+  /^the attempt container could not be read\b/i,
+  /^nothing may be concluded\b/i,
+  /^nothing is provisioned for it\b/i,
+  /^nothing may run on it\b/i,
+  /^nothing may start\b/i,
+  /^nothing was charged\b/i,
+  /^its result is not collected\b/i,
+  /^the paid step is not taken\b/i,
+  /^the paid outcome is unconfirmed\b/i,
+  /^no send authority can be established\b/i,
+  /^refusing a second launch\b/i,
+];
 
 /**
  * The cause an author can be shown, out of the phase's own sentence.
  *
- * A throw site writes `<wrapper — cause — disposition>`; only the middle
- * segments are the site's evidence. The disposition is dropped, a leading
- * wrapper is dropped when it names the mechanism (substituting it would read
- * "the attempt environment could not be read"), and what remains is elided term
- * by term. A cause with no wrapper — the sandbox boundary's `<Name>: <message>
- * (after <n>ms)` — is kept whole apart from that elision.
+ * A throw site writes `<wrapper — cause — disposition>`; only the middle is the
+ * site's evidence. Exactly the known wrapper/disposition segments are dropped
+ * (prefix-anchored, closed list above) and everything else is kept verbatim, so
+ * a cause that itself carries the ` — ` convention keeps all of its words. The
+ * `Name:` prefix and the `(after <n>ms)` suffix are the throw boundary's own
+ * envelope; what remains is elided term by term and bounded.
  */
 function authorFacingCause(observed: AttemptObservation): string {
-  let segments = observed.error
+  let cause = observed.error
     .split(" — ")
     .map((segment) => segment.trim())
-    .filter((segment) => segment !== "" && !DISPOSITION_SEGMENT.test(segment));
-  if (segments.length > 1 && WRAPPER_SEGMENT.test(segments[0]!)) segments = segments.slice(1);
-  let cause = segments
+    .filter((segment) => segment !== "" && !CAUSE_NOISE.some((noise) => noise.test(segment)))
     .join(" — ")
     .replace(/^[A-Za-z]*Error:\s*/, "")
     .replace(/\(\s*after\s+\d+\s*ms\s*\)/gi, "")
@@ -164,23 +177,19 @@ export type ReviewRouteEnv = {
  * `failure.code` defaults to the unclassified crash-window code; a caller that
  * knows why it settled names it. The handoff's own `observation` — what the LIVE
  * settlement recorded before it could conclude anything — WINS over both, and it
- * is re-read HERE rather than taken from the selector's snapshot: a phase that
+ * is read HERE rather than taken from the selector's snapshot: a phase that
  * records its cause between this pass's selection and its insert must still be
- * reflected. Its code names the row and its cause lands in `error`; `message`
- * carries that cause in author-facing words, with the mechanism vocabulary
- * elided (see `authorFacingMessage`), because `error` is the operator's raw text.
- * `failure.statements` are extra writes
- * that must land in that same batch first — the lost-reply pass uses them to
- * move a `launched` row to `failed` AND revoke it, which is what releases both
- * arms of the capacity hold.
+ * described. That read is a GATE: if it fails, the read throws, the row is not
+ * written, and the lane that selected the attempt retries on the next pass — a
+ * lost read is never evidence that nothing was observed, so no snapshot is ever
+ * settled in its place. What the read returns composes the row: its code names
+ * the row, its cause lands in `error`, and `message` carries that cause in
+ * author-facing words (see `authorFacingMessage`), because `error` is the
+ * operator's raw text. An observation recorded after the insert is applied to
+ * the same row by the pass's own late-observation sync.
  *
  * One row per attempt, in every interleaving: the insert is attempt-keyed
- * (`ON CONFLICT DO NOTHING`), so a concurrent pass adds nothing and only the
- * pass whose insert returned `meta.changes === 1` may correct it afterwards —
- * that correction is an UPDATE of the same row, so the identity never changes.
- * And no observation can arrive behind a settled row's back:
- * `recordAttemptObservation` refuses once the row exists, so the row a phase
- * lost the race to write never silently contradicts itself later.
+ * (`ON CONFLICT DO NOTHING`), so a concurrent pass adds nothing.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -223,20 +232,6 @@ async function landSettlementEffects(
     );
     owned = recorded.owned;
     landed.add("failure-row");
-    if (owned) {
-      // The re-read above narrows the window but cannot close it: the phase can
-      // record between that read and this insert. Re-read once as the row's
-      // owner and let the observation that arrived late win — same row, same id.
-      const later = await readObservedCause(env, handoff);
-      if (later !== null && (later.error !== observed?.error || later.code !== observed?.code)) {
-        await recorrectSettledFailureRow(env.DB, {
-          attemptId: handoff.attemptId,
-          code: later.code,
-          error: later.error,
-          message: authorFacingMessage(later.code, later),
-        });
-      }
-    }
   }
   if (!landed.has("claim-stamp") && handoff.payload.head_sha) {
     // ONLY the pass that landed the record may move the head-wide key (a loser or a
@@ -515,6 +510,33 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   // move a live child's stop earlier.
   const lostReply = await getLostReplySettleMs(env.DB);
   await settleLostReplies(env, lostReply.settleMs, nowMs, env.log);
+  // The late observation, once. The settlement composes its row from the
+  // observation it can read at insertion time; a phase that records its cause
+  // afterwards — after the pass settled the attempt — would otherwise leave a row
+  // stating only the fallback. This is the ONE repair: attempt-keyed, in place,
+  // and the selector drops a row as soon as it carries the observation, so a
+  // second pass selects nothing. The reconciler stays the only failure-row writer;
+  // a fault leaves the row selected for the next pass.
+  let lateObserved: AttemptHandoff[] = [];
+  try {
+    lateObserved = await listLateObservedFailures(env.DB, ROUTE_RECOVERY_LIMIT);
+  } catch {
+    lateObserved = [];
+  }
+  for (const handoff of lateObserved) {
+    const observed = handoff.observation;
+    if (observed === null) continue;
+    try {
+      await syncSettledFailureRow(env.DB, {
+        attemptId: handoff.attemptId,
+        code: observed.code,
+        error: observed.error,
+        message: authorFacingMessage(observed.code, observed),
+      });
+    } catch {
+      // Stays selected; the next pass retries it.
+    }
+  }
   // A claim whose delivery died before recording anything. The state transition
   // is the exclusive hand-back (a second pass finds it `queued`), and sending
   // AFTER it means a failed send is still owned by the comment outbox lane,

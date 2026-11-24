@@ -219,47 +219,81 @@ function toObservation(value: unknown): AttemptObservation | null {
  * Record what the live settlement observed about an outcome it could not
  * conclude. The FIRST observation for the attempt stands: a replay of the same
  * settlement carries the same cause, and a later lane has strictly less
- * evidence than the phase that was there. `false` means the row does not exist,
- * an observation was already recorded, or the attempt already HAS its failure
- * row.
+ * evidence than the phase that was there. `false` means the row does not exist
+ * or an observation was already recorded.
  *
- * That last arm is the invariant the reconciler relies on: once the row exists,
- * its `message`/`error` are the author's story of the attempt, so no observation
- * may be written behind it and quietly disagree. A phase that observes after
- * the reconciler settled the attempt adds nothing — the row stands.
+ * An existing `review_failures` row is deliberately NOT a reason to refuse: the
+ * pass may settle the attempt before the phase records its cause, and the late
+ * observation is then applied to that same row by
+ * `listLateObservedFailures`/`syncSettledFailureRow`. `nowMs` lands on
+ * `updated_ms` — the clock that tells that sync the observation is newer than
+ * the row it has to correct.
  */
 export async function recordAttemptObservation(
   db: D1Like,
-  input: { attemptId: string; observation: AttemptObservation },
+  input: { attemptId: string; observation: AttemptObservation; nowMs: number },
 ): Promise<boolean> {
   const written = await db
     .prepare(
       `UPDATE review_attempt_handoffs
-          SET payload_json = json_set(payload_json, '$.${OBSERVATION_KEY}', json(?))
+          SET payload_json = json_set(payload_json, '$.${OBSERVATION_KEY}', json(?)),
+              updated_ms = ?
         WHERE attempt_id = ?
-          AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL
-          AND NOT EXISTS (SELECT 1 FROM review_failures f WHERE f.id = ?)`,
+          AND json_extract(payload_json, '$.${OBSERVATION_KEY}') IS NULL`,
     )
-    .bind(JSON.stringify(input.observation), input.attemptId, input.attemptId)
+    .bind(JSON.stringify(input.observation), input.nowMs, input.attemptId)
     .run();
   return written.meta.changes === 1;
 }
 
 /**
- * Correct the row a settlement pass just INSERTED from an observation it could
- * not read in time: the phase may record its cause between that pass's own read
- * and its insert. Only the insert's owner calls this (`meta.changes === 1`), so
- * it never rewrites a record another producer wrote, and the row keeps its
- * identity — one attempt, one row, one story.
+ * Failure rows whose attempt recorded its observation AFTER the row was written.
+ *
+ * The settlement composes its row from the observation it reads at insertion
+ * time; an observation the phase writes afterwards would otherwise die with it.
+ * `f.error` differing from the observation's own error is exactly "not synced
+ * yet", so a synced row leaves this lane for good — a second pass selects
+ * nothing and writes nothing.
+ *
+ * `updated_ms > created_at` is the "newer" test. `created_at` is a
+ * second-resolution `datetime('now')`, so an observation inside the row's own
+ * second also counts as newer; that is the harmless direction (the row then
+ * carries the story it should have carried anyway).
  */
-export async function recorrectSettledFailureRow(
+export async function listLateObservedFailures(db: D1Like, limit: number): Promise<AttemptHandoff[]> {
+  const rows = await db
+    .prepare(
+      `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+         FROM review_attempt_handoffs h
+         JOIN review_failures f ON f.id = h.attempt_id
+        WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error') IS NOT NULL
+          AND f.error IS NOT json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error')
+          AND h.updated_ms > CAST(strftime('%s', f.created_at) AS INTEGER) * 1000
+        ORDER BY h.updated_ms
+        LIMIT ?`,
+    )
+    .bind(limit)
+    .all<HandoffRow>();
+  return rows.results.map(toHandoff);
+}
+
+/**
+ * Apply a late observation to the attempt's existing failure row: the SAME row,
+ * keyed by the attempt, rewritten to the story the phase actually observed. Only
+ * the reconciler calls this — it is the only failure-row writer — and the
+ * selector above stops selecting the row once it carries the observation, so
+ * this lands once per attempt.
+ */
+export async function syncSettledFailureRow(
   db: D1Like,
   input: { attemptId: string; code: FailureCode; error: string; message: string },
-): Promise<void> {
-  await db
+): Promise<boolean> {
+  const written = await db
     .prepare(`UPDATE review_failures SET error_code = ?, error = ?, message = ? WHERE id = ?`)
     .bind(input.code, input.error, input.message, input.attemptId)
     .run();
+  return written.meta.changes === 1;
 }
 
 /** The delivery's handoff record, or `null` when this body was never handed off. */
