@@ -3,13 +3,13 @@
  * provider catalog. DO NOT EDIT BY HAND — regenerate with
  * `bun run scripts/generate-provider-catalog.ts`.
  *
- * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-23.json` (fetched
- * 2026-11-23 from https://models.dev/api.json; each model carries
+ * Source: `scripts/provider-catalog/inputs/models.dev-2026-11-24.json` (fetched
+ * 2026-11-24 from https://models.dev/api.json; each model carries
  * `limit: { context, output }`). Only providers and model ids that the
  * generated provider catalog lists are carried here — the table exists to fill
  * an operator's blank size fields, not to mirror the whole directory.
  *
- * Coverage: 326 of 334 catalog providers, 9880 model entries. The omitted
+ * Coverage: 326 of 334 catalog providers, 9852 model entries. The omitted
  * 8 providers carry no models.dev model row at all (their
  * vocabulary comes from the vendored omp provider snapshot, or the row is
  * local-only metadata), so the table states no number for them instead of
@@ -24,7 +24,7 @@
 export type ModelLimit = { contextWindow: number; maxTokens: number };
 
 /** The snapshot date the table was generated from (shown as the value's source). */
-export const MODEL_LIMITS_SNAPSHOT = "2026-11-23";
+export const MODEL_LIMITS_SNAPSHOT = "2026-11-24";
 
 /** provider id → model id → sizes. */
 export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, ModelLimit>>>> = Object.freeze({
@@ -103,18 +103,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     }
   },
   "openai": {
-    "gpt-3.5-turbo": {
-      "contextWindow": 16385,
-      "maxTokens": 4096
-    },
-    "gpt-4": {
-      "contextWindow": 8192,
-      "maxTokens": 8192
-    },
-    "gpt-4-turbo": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
-    },
     "gpt-4.1": {
       "contextWindow": 1047576,
       "maxTokens": 32768
@@ -123,17 +111,9 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1047576,
       "maxTokens": 32768
     },
-    "gpt-4.1-nano": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
     "gpt-4o": {
       "contextWindow": 128000,
       "maxTokens": 16384
-    },
-    "gpt-4o-2024-05-13": {
-      "contextWindow": 128000,
-      "maxTokens": 4096
     },
     "gpt-4o-2024-08-06": {
       "contextWindow": 128000,
@@ -178,10 +158,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "gpt-5.3-codex": {
       "contextWindow": 400000,
       "maxTokens": 128000
-    },
-    "gpt-5.3-codex-spark": {
-      "contextWindow": 128000,
-      "maxTokens": 32000
     },
     "gpt-5.4": {
       "contextWindow": 1050000,
@@ -259,31 +235,11 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 400000,
       "maxTokens": 128000
     },
-    "gpt-realtime-2.1": {
-      "contextWindow": 128000,
-      "maxTokens": 32000
-    },
-    "o1": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o1-pro": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "o3": {
       "contextWindow": 200000,
       "maxTokens": 100000
     },
-    "o3-mini": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
     "o3-pro": {
-      "contextWindow": 200000,
-      "maxTokens": 100000
-    },
-    "o4-mini": {
       "contextWindow": 200000,
       "maxTokens": 100000
     },
@@ -308,10 +264,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "deep-research-preview-04-2026": {
       "contextWindow": 1048576,
       "maxTokens": 65536
-    },
-    "gemini-2.5-computer-use-preview-10-2025": {
-      "contextWindow": 128000,
-      "maxTokens": 64000
     },
     "gemini-2.5-flash": {
       "contextWindow": 1048576,
@@ -356,10 +308,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "gemini-3.1-flash-lite-image": {
       "contextWindow": 65536,
       "maxTokens": 4096
-    },
-    "gemini-3.1-flash-lite-preview": {
-      "contextWindow": 1048576,
-      "maxTokens": 65536
     },
     "gemini-3.1-flash-live-preview": {
       "contextWindow": 131072,
@@ -431,10 +379,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "gemini-flash-lite-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 65536
-    },
-    "gemini-omni-flash-preview": {
-      "contextWindow": 131072,
       "maxTokens": 65536
     },
     "gemini-pro-latest": {
@@ -1551,7 +1495,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "meta-llama/llama-3.1-8b-instruct": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "meta-llama/llama-3.2-3b-instruct": {
       "contextWindow": 131072,
@@ -1627,7 +1571,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "minimax/minimax-m3.1-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 512000
+      "maxTokens": 943718
     },
     "mistralai/codestral-2508": {
       "contextWindow": 256000,
@@ -1720,18 +1664,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "moondream/moondream3.1-9b-a2b": {
       "contextWindow": 32000,
       "maxTokens": 4096
-    },
-    "moonshotai/kimi-k2": {
-      "contextWindow": 131072,
-      "maxTokens": 98304
-    },
-    "moonshotai/kimi-k2-0905": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
-    },
-    "moonshotai/kimi-k2-thinking": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
     },
     "moonshotai/kimi-k2.5": {
       "contextWindow": 262144,
@@ -2354,7 +2286,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 4000
     },
     "stepfun/step-3.7-flash": {
-      "contextWindow": 262144,
+      "contextWindow": 256000,
       "maxTokens": 230400
     },
     "stepfun/step-5-preview": {
@@ -2375,7 +2307,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "tencent/hy3": {
       "contextWindow": 262144,
-      "maxTokens": 235929
+      "maxTokens": 128000
     },
     "tencent/hy4": {
       "contextWindow": 1048576,
@@ -2402,7 +2334,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 819200
     },
     "thinkingmachines/inkling": {
-      "contextWindow": 524288,
+      "contextWindow": 1048576,
       "maxTokens": 471859
     },
     "thinkingmachines/inkling-2-mini": {
@@ -2473,10 +2405,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 65536
     },
-    "xiaomi/mimo-v2.5-pro": {
-      "contextWindow": 262144,
-      "maxTokens": 235929
-    },
     "xiaomi/mimo-v2.6-flash": {
       "contextWindow": 1048576,
       "maxTokens": 131072
@@ -2539,7 +2467,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "z-ai/glm-5.3-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 943718
     },
     "z-ai/glm-5.3-flashx": {
       "contextWindow": 1048576,
@@ -2575,7 +2503,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-flash-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 393216
     },
     "~deepseek/deepseek-pro-latest": {
       "contextWindow": 1048576,
@@ -3084,7 +3012,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 250000
     },
     "inclusionai/ling-3.1-flash": {
-      "contextWindow": 1000000,
+      "contextWindow": 1048576,
       "maxTokens": 262144
     },
     "inclusionai/ling-3.1-flash-1019": {
@@ -3157,7 +3085,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "meta-llama/llama-3.1-8b-instruct": {
       "contextWindow": 131072,
-      "maxTokens": 16384
+      "maxTokens": 117964
     },
     "meta-llama/llama-3.2-3b-instruct": {
       "contextWindow": 131072,
@@ -3236,8 +3164,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 235929
     },
     "minimax/minimax-m3.1-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 512000
+      "contextWindow": 1048576,
+      "maxTokens": 943718
     },
     "mistralai/codestral": {
       "contextWindow": 128000,
@@ -3357,15 +3285,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "moonshotai/kimi-k2": {
       "contextWindow": 131072,
-      "maxTokens": 98304
-    },
-    "moonshotai/kimi-k2-0905": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
-    },
-    "moonshotai/kimi-k2-thinking": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
+      "maxTokens": 131072
     },
     "moonshotai/kimi-k2.5": {
       "contextWindow": 262144,
@@ -3971,10 +3891,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 235929
     },
-    "qwen/qwen3-max-thinking": {
-      "contextWindow": 256000,
-      "maxTokens": 65536
-    },
     "qwen/qwen3-next-80b-a3b-instruct": {
       "contextWindow": 262144,
       "maxTokens": 235929
@@ -4209,7 +4125,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "tencent/hy3": {
       "contextWindow": 262144,
-      "maxTokens": 235929
+      "maxTokens": 128000
     },
     "tencent/hy4": {
       "contextWindow": 1048576,
@@ -4327,10 +4243,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 65536
     },
-    "xiaomi/mimo-v2.5-pro": {
-      "contextWindow": 262144,
-      "maxTokens": 235929
-    },
     "xiaomi/mimo-v2.6-flash": {
       "contextWindow": 1048576,
       "maxTokens": 131072
@@ -4405,7 +4317,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "z-ai/glm-5.3-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 943718
     },
     "z-ai/glm-5.3-flashx": {
       "contextWindow": 1048576,
@@ -4441,7 +4353,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "~deepseek/deepseek-flash-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 943718
+      "maxTokens": 393216
     },
     "~deepseek/deepseek-pro-latest": {
       "contextWindow": 1048576,
@@ -4513,35 +4425,19 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 128000
     },
-    "devstral-2512": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "devstral-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
-    "devstral-medium-latest": {
-      "contextWindow": 262144,
-      "maxTokens": 262144
-    },
     "glm-5-2": {
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "labs-devstral-small-2512": {
-      "contextWindow": 256000,
-      "maxTokens": 256000
-    },
-    "labs-leanstral-1-5-1": {
-      "contextWindow": 262144,
-      "maxTokens": 128000
-    },
     "magistral-medium-latest": {
       "contextWindow": 262144,
-      "maxTokens": 16384
+      "maxTokens": 262144
     },
     "ministral-14b-2512": {
+      "contextWindow": 262144,
+      "maxTokens": 262144
+    },
+    "ministral-14b-latest": {
       "contextWindow": 262144,
       "maxTokens": 262144
     },
@@ -4551,7 +4447,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "ministral-3b-latest": {
       "contextWindow": 131072,
-      "maxTokens": 128000
+      "maxTokens": 131072
     },
     "ministral-8b-2512": {
       "contextWindow": 262144,
@@ -4559,7 +4455,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "ministral-8b-latest": {
       "contextWindow": 262144,
-      "maxTokens": 128000
+      "maxTokens": 262144
     },
     "mistral-embed": {
       "contextWindow": 8000,
@@ -4573,20 +4469,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 262144
     },
-    "mistral-large-4-0-8": {
-      "contextWindow": 1048576,
-      "maxTokens": 262144
-    },
     "mistral-large-latest": {
       "contextWindow": 1048576,
-      "maxTokens": 262144
-    },
-    "mistral-medium-2505": {
-      "contextWindow": 131072,
-      "maxTokens": 131072
-    },
-    "mistral-medium-2508": {
-      "contextWindow": 262144,
       "maxTokens": 262144
     },
     "mistral-medium-2604": {
@@ -4597,10 +4481,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 262144,
       "maxTokens": 262144
     },
-    "mistral-small-2506": {
-      "contextWindow": 128000,
-      "maxTokens": 16384
-    },
     "mistral-small-2603": {
       "contextWindow": 262144,
       "maxTokens": 256000
@@ -4608,14 +4488,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "mistral-small-latest": {
       "contextWindow": 262144,
       "maxTokens": 256000
-    },
-    "open-mistral-nemo": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
-    },
-    "pixtral-12b": {
-      "contextWindow": 128000,
-      "maxTokens": 128000
     },
     "voxtral-small-2507": {
       "contextWindow": 32768,
@@ -5170,6 +5042,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 262144
     },
     "kimi-k3": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "kimi-k3.1-pro": {
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
@@ -7073,6 +6949,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
+    "deepseek-ai/deepseek-v4-pro-0813": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
     "deepseek-ai/deepseek-v4.1-flash-1017": {
       "contextWindow": 1048576,
       "maxTokens": 384000
@@ -8115,15 +7995,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
-    "moonshotai/kimi-k2": {
-      "contextWindow": 131072,
-      "maxTokens": 98304
-    },
     "moonshotai/kimi-k2-0905": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
-    },
-    "moonshotai/kimi-k2-thinking": {
       "contextWindow": 262144,
       "maxTokens": 98304
     },
@@ -8396,10 +8268,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 1999000
     },
     "xiaomi/mimo-v2.5": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
-    },
-    "xiaomi/mimo-v2.5-pro": {
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
@@ -12336,8 +12204,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 16384
     },
     "muse-ember": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
+      "contextWindow": 1048576,
+      "maxTokens": 524288
     },
     "muse-spark-1.1": {
       "contextWindow": 1048576,
@@ -13643,15 +13511,15 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "glm-5.2": {
       "contextWindow": 262144,
-      "maxTokens": 131072
+      "maxTokens": 262144
     },
     "glm-5.3": {
       "contextWindow": 1048576,
-      "maxTokens": 128000
+      "maxTokens": 1048576
     },
     "glm-5.3-flash": {
       "contextWindow": 1048576,
-      "maxTokens": 131072
+      "maxTokens": 1048576
     },
     "gte-large-en-v1.5": {
       "contextWindow": 8192,
@@ -13839,7 +13707,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "qwen3.8-max": {
       "contextWindow": 1000000,
-      "maxTokens": 262144
+      "maxTokens": 1000000
     },
     "reflection-beam": {
       "contextWindow": 1048576,
@@ -18243,6 +18111,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
+    "thinkingmachines/Inkling-2-Mini": {
+      "contextWindow": 262144,
+      "maxTokens": 65536
+    },
     "thinkingmachines/Inkling-2-Small": {
       "contextWindow": 1048576,
       "maxTokens": 131072
@@ -19755,12 +19627,8 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 131072,
       "maxTokens": 131072
     },
-    "qwen/qwen3.8-2.4t-a95b": {
-      "contextWindow": 1000000,
-      "maxTokens": 131072
-    },
     "qwen/qwen3.8-27b": {
-      "contextWindow": 1000000,
+      "contextWindow": 262144,
       "maxTokens": 32768
     },
     "zai-org/glm-5.2": {
@@ -19948,6 +19816,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "hy4-flash:free": {
       "contextWindow": 1048576,
       "maxTokens": 65536
+    },
+    "inkling-2-mini-uncensored": {
+      "contextWindow": 262144,
+      "maxTokens": 32768
     },
     "kimi-k2-6": {
       "contextWindow": 262144,
@@ -20315,9 +20187,17 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "claude-fable-5-2": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
     "claude-haiku-4-5": {
       "contextWindow": 200000,
       "maxTokens": 64000
+    },
+    "claude-haiku-5-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
     },
     "claude-opus-4-6": {
       "contextWindow": 1000000,
@@ -20344,6 +20224,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 64000
     },
     "claude-sonnet-5": {
+      "contextWindow": 1000000,
+      "maxTokens": 128000
+    },
+    "claude-sonnet-5-5": {
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
@@ -20914,7 +20798,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 65536
     },
     "hy4-flash": {
-      "contextWindow": 1000000,
+      "contextWindow": 1048576,
       "maxTokens": 65536
     },
     "hy4-preview": {
@@ -22014,6 +21898,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "deepinfra/hy4": {
       "contextWindow": 1048576,
       "maxTokens": 1048576
+    },
+    "deepinfra/hy4-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
     },
     "deepinfra/hy4-preview": {
       "contextWindow": 1048576,
@@ -23175,6 +23063,14 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
+    "vertex-openai/deepseek-v4.1-flash-1017": {
+      "contextWindow": 1048576,
+      "maxTokens": 393216
+    },
+    "vertex-openai/deepseek-v4.1-flash-latest": {
+      "contextWindow": 1048576,
+      "maxTokens": 393216
+    },
     "vertex-openai/grok-4-20-non-reasoning": {
       "contextWindow": 2000000,
       "maxTokens": 30000
@@ -23468,6 +23364,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "LongCat-2.0": {
       "contextWindow": 1048576,
       "maxTokens": 131072
+    },
+    "LongCat-2.5": {
+      "contextWindow": 1048576,
+      "maxTokens": 262144
     },
     "LongCat-2.5-Preview": {
       "contextWindow": 1048576,
@@ -24384,12 +24284,12 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 16384
     },
     "openai/gpt-oss-120b": {
-      "contextWindow": 128000,
-      "maxTokens": 32000
+      "contextWindow": 131072,
+      "maxTokens": 32768
     },
     "openai/gpt-oss-20b": {
-      "contextWindow": 128000,
-      "maxTokens": 32000
+      "contextWindow": 131072,
+      "maxTokens": 32768
     },
     "openai/gpt-oss-safeguard-120b": {
       "contextWindow": 4096,
@@ -25677,26 +25577,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 128000
     },
-    "anthropic/claude-opus-4.1": {
-      "contextWindow": 200000,
-      "maxTokens": 32000
-    },
-    "anthropic/claude-opus-4.1:thinking": {
-      "contextWindow": 200000,
-      "maxTokens": 32000
-    },
-    "anthropic/claude-opus-4.1:thinking:1024": {
-      "contextWindow": 200000,
-      "maxTokens": 32000
-    },
-    "anthropic/claude-opus-4.1:thinking:32768": {
-      "contextWindow": 200000,
-      "maxTokens": 32000
-    },
-    "anthropic/claude-opus-4.1:thinking:8192": {
-      "contextWindow": 200000,
-      "maxTokens": 32000
-    },
     "anthropic/claude-opus-4.5": {
       "contextWindow": 200000,
       "maxTokens": 64000
@@ -25807,10 +25687,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "baidu/ernie-light-dt-1.0-intl": {
       "contextWindow": 1024000,
-      "maxTokens": 131072
-    },
-    "baseten/Kimi-K2-Instruct-FP4": {
-      "contextWindow": 131072,
       "maxTokens": 131072
     },
     "bytedance-seed/seed-2-1-turbo": {
@@ -26357,10 +26233,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 256000,
       "maxTokens": 8192
     },
-    "kimi-k2-instruct-fast": {
-      "contextWindow": 131072,
-      "maxTokens": 16384
-    },
     "kitani/clover-2": {
       "contextWindow": 200000,
       "maxTokens": 8192
@@ -26569,10 +26441,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 131072,
       "maxTokens": 32768
     },
-    "mistralai/mistral-medium-3.1": {
-      "contextWindow": 131072,
-      "maxTokens": 32768
-    },
     "mistralai/mistral-medium-3.5": {
       "contextWindow": 256000,
       "maxTokens": 32768
@@ -26632,14 +26500,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "moonshotai/kimi-k2-instruct": {
       "contextWindow": 256000,
       "maxTokens": 8192
-    },
-    "moonshotai/kimi-k2-instruct-0711": {
-      "contextWindow": 128000,
-      "maxTokens": 8192
-    },
-    "moonshotai/kimi-k2-thinking": {
-      "contextWindow": 262144,
-      "maxTokens": 98304
     },
     "moonshotai/kimi-k2.5": {
       "contextWindow": 256000,
@@ -26766,10 +26626,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 32768
     },
     "openai/gpt-4.1-mini": {
-      "contextWindow": 1047576,
-      "maxTokens": 32768
-    },
-    "openai/gpt-4.1-nano": {
       "contextWindow": 1047576,
       "maxTokens": 32768
     },
@@ -27001,9 +26857,21 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048064,
       "maxTokens": 65536
     },
+    "orca/orcacyber-hy4-flash": {
+      "contextWindow": 1048064,
+      "maxTokens": 65536
+    },
+    "orca/orcacyber-inkling-2-mini": {
+      "contextWindow": 1048064,
+      "maxTokens": 65536
+    },
     "orca/orcacyber-k3.1-pro": {
       "contextWindow": 1048064,
       "maxTokens": 943718
+    },
+    "orca/orcacyber-ling-3.2-flash": {
+      "contextWindow": 1048064,
+      "maxTokens": 262144
     },
     "orca/orcacyber-mimo-flash": {
       "contextWindow": 1048064,
@@ -27016,6 +26884,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "orca/orcacyber-qwen3.8-flash-next": {
       "contextWindow": 261632,
       "maxTokens": 131072
+    },
+    "orca/orcacyber-step-5-preview": {
+      "contextWindow": 999488,
+      "maxTokens": 64000
     },
     "orca/orcacyber-ultra-1.0": {
       "contextWindow": 1048064,
@@ -27314,7 +27186,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 32768
     },
     "qwen/qwen3.8-27b-swift": {
-      "contextWindow": 262144,
+      "contextWindow": 65536,
       "maxTokens": 32768
     },
     "qwen/qwen3.8-27b-synthia": {
@@ -27544,10 +27416,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "x-ai/grok-4.7": {
       "contextWindow": 500000,
       "maxTokens": 500000
-    },
-    "x-ai/grok-build-0.1": {
-      "contextWindow": 256000,
-      "maxTokens": 230400
     },
     "x-ai/grok-latest": {
       "contextWindow": 500000,
@@ -28038,6 +27906,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "maxTokens": 979000
     },
     "deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017-fast": {
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
@@ -31633,7 +31505,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek/deepseek-v4-flash-0731": {
       "contextWindow": 1048576,
-      "maxTokens": 65536
+      "maxTokens": 943718
     },
     "deepseek/deepseek-v4-pro": {
       "contextWindow": 1048576,
@@ -31847,6 +31719,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 1048576
     },
+    "thinkingmachines/inkling-2-small-fast": {
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
+    },
     "x-ai/grok-4.6": {
       "contextWindow": 500000,
       "maxTokens": 450000
@@ -31858,6 +31734,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "z-ai/glm-5.2": {
       "contextWindow": 1048576,
       "maxTokens": 943718
+    },
+    "z-ai/glm-5.3-flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 131072
     }
   },
   "privatemode-ai": {
@@ -32601,7 +32481,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "deepseek-v4-pro-0813@eu": {
       "contextWindow": 1048576,
-      "maxTokens": 65536
+      "maxTokens": 1048576
     },
     "deepseek-v4-pro@eu": {
       "contextWindow": 1048576,
@@ -32989,7 +32869,7 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     },
     "kimi-k3@eu": {
       "contextWindow": 1048576,
-      "maxTokens": 65536
+      "maxTokens": 262144
     },
     "mimo-v2.5": {
       "contextWindow": 262144,
@@ -33007,21 +32887,13 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
-    "minimax-m2.7": {
-      "contextWindow": 200000,
-      "maxTokens": 128000
-    },
-    "minimax-m2.7-highspeed": {
-      "contextWindow": 200000,
-      "maxTokens": 128000
-    },
     "minimax-m3": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
+      "contextWindow": 512000,
+      "maxTokens": 512000
     },
     "minimax-m3.1-flash": {
-      "contextWindow": 1000000,
-      "maxTokens": 128000
+      "contextWindow": 1048576,
+      "maxTokens": 1048576
     },
     "minimax-m3.1-flash@eu": {
       "contextWindow": 1048576,
@@ -35683,6 +35555,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 524288,
       "maxTokens": 524288
     },
+    "MiniMaxAI/MiniMax-M3.1-Flash": {
+      "contextWindow": 1048576,
+      "maxTokens": 512000
+    },
     "Qwen/Qwen2.5-7B-Instruct-Turbo": {
       "contextWindow": 32768,
       "maxTokens": 32768
@@ -35715,6 +35591,10 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1000000,
       "maxTokens": 131072
     },
+    "Qwen/Qwen4-Max": {
+      "contextWindow": 1000000,
+      "maxTokens": 262144
+    },
     "deepseek-ai/DeepSeek-R1": {
       "contextWindow": 163839,
       "maxTokens": 163839
@@ -35739,11 +35619,19 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 384000
     },
+    "deepseek-ai/DeepSeek-V4.1-Flash-1017": {
+      "contextWindow": 1048576,
+      "maxTokens": 384000
+    },
     "essentialai/Rnj-1-Instruct": {
       "contextWindow": 32768,
       "maxTokens": 32768
     },
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": {
+      "contextWindow": 131072,
+      "maxTokens": 131072
+    },
+    "meta-models/Muse-Glimmer-30B": {
       "contextWindow": 131072,
       "maxTokens": 131072
     },
@@ -35775,8 +35663,16 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 1048576,
       "maxTokens": 131072
     },
+    "tencent/Hy4": {
+      "contextWindow": 1048576,
+      "maxTokens": 65536
+    },
     "thinkingmachines/Inkling": {
       "contextWindow": 524288,
+      "maxTokens": 131072
+    },
+    "thinkingmachines/Inkling-2-Small": {
+      "contextWindow": 1048576,
       "maxTokens": 131072
     },
     "zai-org/GLM-5": {
@@ -36459,10 +36355,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
       "contextWindow": 500000,
       "maxTokens": 200000
     },
-    "grok-build-0-1": {
-      "contextWindow": 256000,
-      "maxTokens": 65536
-    },
     "hy4-preview": {
       "contextWindow": 1048576,
       "maxTokens": 64000
@@ -36800,10 +36692,6 @@ export const MODEL_LIMITS: Readonly<Record<string, Readonly<Record<string, Model
     "alibaba/qwen3-coder-next": {
       "contextWindow": 256000,
       "maxTokens": 256000
-    },
-    "alibaba/qwen3-max-thinking": {
-      "contextWindow": 256000,
-      "maxTokens": 65536
     },
     "alibaba/qwen3-next-80b-a3b-instruct": {
       "contextWindow": 262144,
