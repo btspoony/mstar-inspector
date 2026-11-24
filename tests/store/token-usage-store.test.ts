@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createMigratedTestD1, execMigrationScript, type TestD1 } from "./helpers";
 import { tokenUsageStatements, type TokenUsageRow } from "../../src/store/token-usage-store";
 
-const MIGRATION = "0109_review_token_usage.sql";
+const MIGRATION = "0111_review_token_usage.sql";
 const ATTEMPT_A = "2b0c4f8e-7a11-4a4e-9b1f-2a5f4f2f1c01";
 const ATTEMPT_B = "8f3d1a2b-9c44-4e55-b6d7-0e8f9a0b1c02";
 const TARGET = "target-id-1";
@@ -28,7 +28,7 @@ function rowsFor(db: TestD1, attemptId: string) {
     .all(attemptId) as Array<Record<string, unknown>>;
 }
 
-describe("migrations/0109_review_token_usage.sql", () => {
+describe("migrations/0111_review_token_usage.sql", () => {
   test("applies to bun:sqlite as DDL and the row shape matches the writer", async () => {
     const db = new Database(":memory:");
     execMigrationScript(db, readFileSync(join(import.meta.dir, "../../migrations", MIGRATION), "utf8"));
