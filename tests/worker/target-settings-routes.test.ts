@@ -168,7 +168,8 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
         check_min_score: 45,
         check_pass_verdicts: ["ship it", "blocked"],
         check_pass_verdicts_readable: true,
-        reviewDrafts: true,
+        review_drafts: true,
+        review_enabled: true,
       },
       defaults: {
         trigger_mode: "open",
@@ -176,6 +177,8 @@ describe("GET /dashboard/:workspaceRef/api/targets/:targetId", () => {
         check_min_score: 45,
         check_pass_verdicts: ["ship it", "blocked"],
         check_pass_verdicts_readable: true,
+        review_drafts: true,
+        review_enabled: true,
       },
     });
   });
@@ -226,6 +229,8 @@ describe("GET /dashboard/:workspaceRef/api/targets/all", () => {
       check_min_score: 45,
       check_pass_verdicts: ["ship it", "blocked"],
       check_pass_verdicts_readable: true,
+      review_drafts: true,
+      review_enabled: true,
     });
   });
 });
@@ -247,7 +252,8 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       check_min_score: 45,
       check_pass_verdicts: ["ship it", "blocked"],
       check_pass_verdicts_readable: true,
-      reviewDrafts: true,
+      review_drafts: true,
+      review_enabled: true,
     });
     expect(targetRow(db, targetId)).toMatchObject({
       follow_workspace_defaults: 0,
@@ -255,6 +261,35 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
       review_level: "deep",
       check_min_score: 45,
       check_pass_verdicts: '["ship it","blocked"]',
+    });
+  });
+
+  test("dropping inheritance snapshots the effective admission values, not the row's stale overrides", async () => {
+    const { db, targetId } = await seededWorld();
+    db.raw
+      .prepare(
+        "UPDATE workspaces SET default_review_drafts = 0, default_review_enabled = 0 WHERE id = 'default'",
+      )
+      .run();
+    // The row's own copies say "on" while the workspace default says "off";
+    // detaching must keep the target on the values it was running with.
+    db.raw
+      .prepare(
+        "UPDATE review_targets SET follow_workspace_defaults = 1, review_drafts = 1, review_enabled = 1 WHERE id = ?",
+      )
+      .run(targetId);
+
+    const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      trigger_mode: "manual",
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { effective: { review_drafts: boolean; review_enabled: boolean } };
+    expect(body.effective).toMatchObject({ review_drafts: false, review_enabled: false });
+    expect(targetRow(db, targetId)).toMatchObject({
+      follow_workspace_defaults: 0,
+      review_drafts: 0,
+      review_enabled: 0,
     });
   });
 
@@ -273,25 +308,31 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     });
   });
 
-  test("review_enabled pauses the target without touching its policy", async () => {
+  test("review_enabled pauses an explicit target without touching its policy", async () => {
     const { db, targetId } = await seededWorld();
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?").run(targetId);
 
     const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_enabled: false,
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { target: { review_enabled: number } };
+    const body = (await res.json()) as {
+      target: { review_enabled: number };
+      effective: { review_enabled: boolean };
+    };
     expect(body.target.review_enabled).toBe(0);
+    expect(body.effective.review_enabled).toBe(false);
     expect(targetRow(db, targetId)).toMatchObject({
       review_enabled: 0,
-      follow_workspace_defaults: 1,
+      follow_workspace_defaults: 0,
       review_trigger_mode: "manual",
     });
   });
 
   test("review_enabled accepts the 0|1 wire value and its string form", async () => {
     const { db, targetId } = await seededWorld();
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?").run(targetId);
 
     for (const value of [0, "0"]) {
       await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", { review_enabled: 1 });
@@ -315,6 +356,25 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(targetRow(db, targetId).review_enabled).toBe(1);
   });
 
+  test("an inheriting target ignores both admission switches instead of storing dead overrides", async () => {
+    const { db, targetId } = await seededWorld();
+    const before = targetRow(db, targetId);
+
+    const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
+      review_drafts: false,
+      review_enabled: false,
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      target: { follow_workspace_defaults: number };
+      effective: { review_drafts: boolean; review_enabled: boolean };
+    };
+    expect(body.target.follow_workspace_defaults).toBe(1);
+    expect(body.effective).toMatchObject({ review_drafts: true, review_enabled: true });
+    expect(targetRow(db, targetId)).toEqual(before);
+  });
+
   test("a policy save is refused while the effective gate is unreadable", async () => {
     const { db, targetId } = await seededWorld();
     const before = targetRow(db, targetId);
@@ -329,21 +389,23 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     }
     expect(targetRow(db, targetId)).toEqual(before);
 
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?").run(targetId);
     const paused = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_enabled: 0,
     });
     expect(paused.status).toBe(200);
-    expect(targetRow(db, targetId)).toMatchObject({ review_enabled: 0, follow_workspace_defaults: 1 });
+    expect(targetRow(db, targetId)).toMatchObject({ review_enabled: 0, follow_workspace_defaults: 0 });
 
     const draft = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_drafts: false,
     });
     expect(draft.status).toBe(200);
-    expect(targetRow(db, targetId)).toMatchObject({ review_drafts: 0, follow_workspace_defaults: 1 });
+    expect(targetRow(db, targetId)).toMatchObject({ review_drafts: 0, follow_workspace_defaults: 0 });
   });
 
-  test("review_drafts is target-owned: it writes alone, keeps follow, and survives a reload", async () => {
+  test("review_drafts writes alone on an explicit target and survives a reload", async () => {
     const { db, targetId } = await seededWorld();
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?").run(targetId);
 
     const res = await post(db, `/dashboard/default/api/targets/${targetId}`, "mallory", {
       review_drafts: false,
@@ -352,15 +414,14 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       target: { review_drafts: number; follow_workspace_defaults: number };
-      effective: { reviewDrafts: boolean; trigger_mode: string };
+      effective: { review_drafts: boolean; trigger_mode: string };
     };
     expect(body.target.review_drafts).toBe(0);
-    expect(body.target.follow_workspace_defaults).toBe(1);
-    expect(body.effective.reviewDrafts).toBe(false);
-    expect(body.effective.trigger_mode).toBe("open");
+    expect(body.target.follow_workspace_defaults).toBe(0);
+    expect(body.effective.review_drafts).toBe(false);
     expect(targetRow(db, targetId)).toMatchObject({
       review_drafts: 0,
-      follow_workspace_defaults: 1,
+      follow_workspace_defaults: 0,
       review_trigger_mode: "manual",
       check_min_score: 90,
     });
@@ -369,10 +430,10 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
     expect(reloaded.status).toBe(200);
     const read = (await reloaded.json()) as {
       target: { review_drafts: number };
-      effective: { reviewDrafts: boolean };
+      effective: { review_drafts: boolean };
     };
     expect(read.target.review_drafts).toBe(0);
-    expect(read.effective.reviewDrafts).toBe(false);
+    expect(read.effective.review_drafts).toBe(false);
   });
 
   test("a non-boolean review_drafts is a 400 that writes nothing", async () => {
@@ -391,6 +452,7 @@ describe("POST /dashboard/:workspaceRef/api/targets/:targetId", () => {
 
   test("the draft switch keeps the family's 403 and 404 refusals and writes nothing", async () => {
     const { db, targetId } = await seededWorld();
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 0 WHERE id = ?").run(targetId);
     const before = targetRow(db, targetId);
     db.raw
       .prepare(
@@ -475,10 +537,50 @@ describe("POST /dashboard/:workspaceRef/api/targets/defaults", () => {
       check_min_score: 75,
       check_pass_verdicts: ["ship it"],
       check_pass_verdicts_readable: true,
+      review_drafts: true,
+      review_enabled: true,
     });
 
     const read = await get(db, "/dashboard/default/api/targets/all", "trudy");
     expect(((await read.json()) as { defaults: unknown }).defaults).toEqual(body.defaults);
+  });
+
+  test("the two admission defaults round-trip and reach an inheriting target", async () => {
+    const { db, targetId } = await seededWorld();
+
+    const res = await post(db, "/dashboard/default/api/targets/defaults", "mallory", {
+      review_drafts: false,
+      review_enabled: false,
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { defaults: Record<string, unknown> };
+    expect(body.defaults).toMatchObject({ review_drafts: false, review_enabled: false });
+    const row = db.raw
+      .query("SELECT default_review_drafts, default_review_enabled FROM workspaces WHERE id = 'default'")
+      .get();
+    expect(row).toEqual({ default_review_drafts: 0, default_review_enabled: 0 });
+
+    const read = await get(db, `/dashboard/default/api/targets/${targetId}`, "trudy");
+    const effective = (await read.json()) as { effective: Record<string, unknown> };
+    expect(effective.effective).toMatchObject({ review_drafts: false, review_enabled: false });
+
+    const list = await get(db, "/dashboard/default/api/targets", "trudy");
+    const rows = (await list.json()) as { targets: Array<{ review_enabled: number }> };
+    expect(rows.targets[0]!.review_enabled).toBe(0);
+  });
+
+  test("a non-boolean admission default is a 400 and the columns stay put", async () => {
+    const { db } = await seededWorld();
+
+    for (const body of [{ review_drafts: 0 }, { review_drafts: "false" }, { review_enabled: 2 }]) {
+      const res = await post(db, "/dashboard/default/api/targets/defaults", "mallory", body);
+      expect(res.status).toBe(400);
+    }
+    const row = db.raw
+      .query("SELECT default_review_drafts, default_review_enabled FROM workspaces WHERE id = 'default'")
+      .get();
+    expect(row).toEqual({ default_review_drafts: 1, default_review_enabled: 1 });
   });
 
   test("an inheriting target answers the NEW defaults on its next read", async () => {

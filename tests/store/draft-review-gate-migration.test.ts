@@ -3,10 +3,7 @@ import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter, s
 import { applyMigrations } from "../helpers/migration-shapes";
 import {
   createTargetsStore,
-  effectiveTargetSettings,
-  getWorkspaceReviewDefaults,
   readEffectiveTargetSettings,
-  setInheritance,
 } from "../../src/dashboard/targets-store";
 
 const MIGRATION = "0070_draft_review_gate.sql";
@@ -132,34 +129,14 @@ describe("the store exposes the target-owned draft switch", () => {
       check_pass_verdicts: '["ship it"]',
     });
 
+    // 0108: the workspace default answers while inheriting, so the row's copy
+    // is inert exactly like the policy columns.
     expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-follow"))!)).reviewDrafts).toBe(
-      false,
+      true,
     );
     expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(true);
 
-    expect(await store.setReviewConfig(WS, "t-own", { reviewDrafts: true })).toBe(true);
-    expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(true);
-  });
-
-  test("toggling inheritance, or saving a policy column, never rewrites the switch", async () => {
-    const d = db();
-    seedStoreTarget(d, "t-keep", 11003, 1);
-    const store = createTargetsStore(d);
-    expect(await store.setReviewConfig(WS, "t-keep", { reviewDrafts: false })).toBe(true);
-
-    await setInheritance(d, WS, "t-keep", 0);
-    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
-      review_drafts: 0,
-    });
-    await setInheritance(d, WS, "t-keep", 1);
-    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
-      review_drafts: 0,
-    });
-
-    expect(await store.setReviewConfig(WS, "t-keep", { triggerMode: "open", follow: 0 })).toBe(true);
-    expect(
-      effectiveTargetSettings((await store.getInWorkspace(WS, "t-keep"))!, await getWorkspaceReviewDefaults(d, WS))
-        .reviewDrafts,
-    ).toBe(false);
+    expect(await store.setReviewConfig(WS, "t-own", { reviewDrafts: false })).toBe(true);
+    expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(false);
   });
 });

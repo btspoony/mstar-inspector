@@ -2688,6 +2688,29 @@ function createDashboardTestD1(
     }
     applyMigrationFile(db, name);
   }
+  // This shortened sequence skips 0067 (it drops an index 0062 creates), so the
+  // workspace review defaults 0067 introduces are added here; the settings and
+  // repository-list faces read them. 0108's two admission columns join them so
+  // its read paths work without replaying the migration's transition UPDATE.
+  const workspaceColumns = db.query("PRAGMA table_info(workspaces)").all() as Array<{ name: string }>;
+  if (workspaceColumns.length > 0) {
+    if (!workspaceColumns.some((column) => column.name === "default_review_trigger_mode")) {
+      db.run(
+        "ALTER TABLE workspaces ADD COLUMN default_review_trigger_mode TEXT NOT NULL DEFAULT 'every_push'",
+      );
+      db.run("ALTER TABLE workspaces ADD COLUMN default_review_level TEXT");
+      db.run(
+        `ALTER TABLE workspaces ADD COLUMN default_check_pass_verdicts TEXT NOT NULL DEFAULT '["ship it"]'`,
+      );
+    }
+    for (const column of ["default_review_drafts", "default_review_enabled"]) {
+      if (!workspaceColumns.some((existing) => existing.name === column)) {
+        db.run(
+          `ALTER TABLE workspaces ADD COLUMN ${column} INTEGER NOT NULL DEFAULT 1 CHECK (${column} IN (0, 1))`,
+        );
+      }
+    }
+  }
   let batchQueue: Promise<void> = Promise.resolve();
   return {
     raw: db,

@@ -5,7 +5,11 @@ import { apiBase } from "../workspace-base";
 import { isReviewLevel, isReviewTriggerMode, type ReviewLevel } from "./data";
 import { settingsOpOutcome } from "./SettingsPage";
 import type { OpNotice } from "./PageNotice";
-import { ReviewPolicySections, type TargetPolicySettings } from "./TargetSettingsTab";
+import {
+  ReviewAdmissionFields,
+  ReviewPolicySections,
+  type TargetPolicySettings,
+} from "./TargetSettingsTab";
 
 /** `GET /api/targets/all` — the workspace defaults the fixed list row opens. */
 export type WorkspaceDefaultsPayload = {
@@ -26,6 +30,8 @@ export function parseWorkspaceDefaults(data: unknown): WorkspaceDefaultsPayload 
     !Array.isArray(row.check_pass_verdicts) ||
     !row.check_pass_verdicts.every((verdict) => typeof verdict === "string") ||
     typeof row.check_pass_verdicts_readable !== "boolean" ||
+    typeof row.review_drafts !== "boolean" ||
+    typeof row.review_enabled !== "boolean" ||
     typeof target_count !== "number"
   ) {
     return null;
@@ -37,6 +43,8 @@ export function parseWorkspaceDefaults(data: unknown): WorkspaceDefaultsPayload 
       check_min_score: row.check_min_score,
       check_pass_verdicts: row.check_pass_verdicts as string[],
       check_pass_verdicts_readable: row.check_pass_verdicts_readable,
+      review_drafts: row.review_drafts,
+      review_enabled: row.review_enabled,
     },
     target_count,
   };
@@ -82,6 +90,14 @@ export function WorkspaceDefaultsTab({
         settings={defaults}
         levelDefault={defaults.review_level}
         readOnly={busy || !canManage}
+        afterTrigger={
+          <ReviewAdmissionFields
+            locale={locale}
+            settings={defaults}
+            readOnly={busy || !canManage}
+            onSave={save}
+          />
+        }
         onSave={save}
       />
     </div>

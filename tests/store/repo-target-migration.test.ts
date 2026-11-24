@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { createTestD1, migrationNumber, migrationsAfter, seedBot, type TestD1 } from "./helpers";
+import { createTestD1, migrationNumber, migrationsAfter, seedBot, seedTarget, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
+import { createTargetsStore, readEffectiveTargetSettings } from "../../src/dashboard/targets-store";
 
 const MIGRATION = "0067_repo_target_identity.sql";
 const PREVIOUS = "0066_usage_events_month_rp_index.sql";
@@ -230,5 +231,93 @@ describe("migration 0068: one repository, one workspace per bot", () => {
     db.raw.run("DROP INDEX review_targets_bot_repo_unique");
     insert("t-second", "default", "bot-1", 501);
     expect((db.raw.query("SELECT count(*) AS n FROM review_targets").get() as { n: number }).n).toBe(6);
+  });
+});
+
+const MIGRATION_0108 = "0108_workspace_admission_defaults.sql";
+const BEFORE_0108 = migrationsAfter(2).filter(
+  (name) => migrationNumber(name) < migrationNumber(MIGRATION_0108),
+);
+
+describe("migration 0108: the workspace carries the admission defaults", () => {
+  test("adds two NOT NULL default-1 columns; every existing workspace keeps today's behaviour", () => {
+    const db = createTestD1();
+    applyMigrations(db, BEFORE_0108);
+    db.raw
+      .prepare(
+        `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+         VALUES ('legacy', 'legacy', 'legacy', 'acme', '2026-01-01')`,
+      )
+      .run();
+
+    applyMigrations(db, [MIGRATION_0108]);
+
+    const byName = new Map(columns(db, "workspaces").map((column) => [column.name, column]));
+    expect(byName.get("default_review_drafts")).toMatchObject({ notnull: 1, dflt_value: "1" });
+    expect(byName.get("default_review_enabled")).toMatchObject({ notnull: 1, dflt_value: "1" });
+    expect(
+      db.raw
+        .query("SELECT default_review_drafts, default_review_enabled FROM workspaces WHERE id = 'legacy'")
+        .get(),
+    ).toEqual({ default_review_drafts: 1, default_review_enabled: 1 });
+    expect(() =>
+      db.raw.prepare("UPDATE workspaces SET default_review_drafts = 2 WHERE id = 'legacy'").run(),
+    ).toThrow();
+    expect(() =>
+      db.raw.prepare("UPDATE workspaces SET default_review_enabled = -1 WHERE id = 'legacy'").run(),
+    ).toThrow();
+  });
+
+  test("the transition detaches only targets whose admission answer differs from the new defaults", async () => {
+    const db = createTestD1();
+    applyMigrations(db, BEFORE_0108);
+    seedBot(db, "bot-1", 7001);
+    const affected = seedTarget(db, "bot-1", { id: "target-paused", name: "acme/paused", repoId: 501 });
+    const unaffected = seedTarget(db, "bot-1", { id: "target-live", name: "acme/live", repoId: 502 });
+    // A following target keeps its own answer for both admission facts today;
+    // its policy columns are inert and may hold anything.
+    db.raw
+      .prepare(
+        `UPDATE review_targets
+            SET follow_workspace_defaults = 1, review_trigger_mode = 'manual',
+                review_level = 'deep', check_min_score = 90,
+                check_pass_verdicts = '["ship it","blocked"]', review_drafts = 0, review_enabled = 0
+          WHERE id = ?`,
+      )
+      .run(affected);
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 1 WHERE id = ?").run(unaffected);
+
+    applyMigrations(db, [MIGRATION_0108]);
+
+    const rows = db.raw
+      .query(
+        `SELECT id, follow_workspace_defaults, review_enabled, review_drafts,
+                review_trigger_mode, review_level, check_min_score, check_pass_verdicts
+           FROM review_targets WHERE id IN (?, ?)`,
+      )
+      .all(affected, unaffected) as Array<Record<string, unknown>>;
+    const byId = new Map(rows.map((row) => [row.id as string, row]));
+    expect(byId.get(affected)).toEqual({
+      id: affected,
+      follow_workspace_defaults: 0,
+      review_enabled: 0,
+      review_drafts: 0,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      check_min_score: 60,
+      check_pass_verdicts: '["ship it"]',
+    });
+    expect(byId.get(unaffected)).toMatchObject({
+      follow_workspace_defaults: 1,
+      review_enabled: 1,
+      review_drafts: 1,
+    });
+
+    // The transition's point: the detached target keeps answering the values it
+    // was running with, not the new workspace defaults.
+    const store = createTargetsStore(db);
+    expect(
+      await readEffectiveTargetSettings(db, (await store.getInWorkspace("default", affected))!),
+    ).toMatchObject({ reviewDrafts: false, reviewEnabled: false });
   });
 });
