@@ -1452,6 +1452,58 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toEqual(settled);
   });
 
+  test("a comment-triggered lost reply lands on the head it actually reviewed, not an empty one", async () => {
+    // The reported shape: a `@bot review` comment carries NO head, so the
+    // delivery cannot name one — yet the checkout DID settle on a commit and
+    // froze it in the attempt's identity. Writing `''` there hides the failure
+    // from the current-head view although that very commit was reviewed.
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" });
+    const attemptId = "attempt-lost-reply-comment";
+    const reviewedSha = "a".repeat(40);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // The identity prepare freezes once the checkout knows its head: the
+    // canonical attempt key's flat tuple carries it at index 5.
+    const key = JSON.stringify([
+      TEST_APP_ID,
+      123,
+      TEST_OWNER,
+      TEST_REPO,
+      TEST_PR_NUMBER,
+      reviewedSha,
+      "octocat",
+      "created",
+    ]);
+    db.raw
+      .prepare("UPDATE review_launches SET attempt_key = ?, attempt_generation = 1 WHERE attempt_id = ?")
+      .run(key, attemptId);
+
+    const env = await h.makeEnv({ DB: db as never });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
+
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.error_code).toBe("review.paid.reply_lost");
+    // The row names the reviewed head, so the head-scoped query sees it.
+    expect(settled[0]!.head_sha).toBe(reviewedSha);
+  });
+
+  test("a settlement whose attempt froze no identity keeps the empty-head rule", async () => {
+    // The other half of the rule: an attempt that never learned a head names
+    // none, so the reader must answer nothing rather than invent a commit.
+    const db = await createSeededTestD1();
+    const payload = makePayload({ head_sha: null, triggered_by: "issue_comment", action: "created" });
+    const attemptId = "attempt-lost-reply-no-identity";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const env = await h.makeEnv({ DB: db as never });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
+
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.head_sha).toBe("");
+  });
+
   test("an observation recorded after the fallback row exists is synced into that same row once", async () => {
     // The other order. A recovery pass can win the row before the invocation has
     // recorded anything (only reachable when that invocation never got to its

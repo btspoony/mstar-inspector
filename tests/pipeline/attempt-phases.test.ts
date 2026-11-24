@@ -3860,6 +3860,56 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(h.sandbox.destroyCalls).toBe(0);
   });
 
+  test("a read that loses its reply AFTER the runner returns still carries its cause", async () => {
+    // The reported shape: the paid exec returned, then a post-runner document
+    // read lost its reply. The launch row is still `launched` with no outcome,
+    // so this settles as unknown and the reconciler writes the row later — from
+    // the observation this settlement records. Without it the reconciler can
+    // only say "no reply ever arrived", which names neither the read that
+    // failed nor its cause.
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+
+    const cause = "Error: report read: transport closed (after 1200ms)";
+    const detail = `the attempt container could not be read (reply-lost) — ${cause} — its result is not collected`;
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "unknown",
+        phase: "review",
+        stage: "pipeline",
+        headSha: SHA,
+        runnerReturned: true,
+        containerStateUnknown: false,
+        code: "review.paid.reply_lost",
+        message: detail,
+        cause,
+      },
+      null,
+    );
+
+    // A returned runner proves the paid child gone, so nothing is HELD — but the
+    // cause is still recorded, because it is the only evidence of the read.
+    expect(settlement).toEqual({ kind: "unknown" });
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.observation?.code).toBe("review.paid.reply_lost");
+    expect(handoff?.observation?.cause).toBe(cause);
+    expect(handoff?.observation?.message).toContain("report read: transport closed");
+  });
+
   test("no secret value appears in any step return value", async () => {
     const paidKey = "sk-step-boundary-secret-1";
     const { deps, db } = await makeDeps();

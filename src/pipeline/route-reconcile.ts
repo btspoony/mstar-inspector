@@ -63,6 +63,36 @@ async function readObservedCause(
   return row?.observation ?? null;
 }
 
+/** Position of the head in the canonical attempt key's flat tuple (`attemptKey`). */
+const ATTEMPT_KEY_HEAD_INDEX = 5;
+
+/**
+ * The head this attempt actually reviewed, from the identity it FROZE on its
+ * launch row. A comment-triggered delivery carries no head in its payload, so
+ * the delivery cannot answer; the frozen key can, because its tuple carries the
+ * head the attempt's checkout settled on (migration 0082: frozen "the instant
+ * the checkout first knows one"). `null` when the attempt froze no key or the
+ * value is not this build's shape — a head is never guessed.
+ *
+ * A FAILED read throws, exactly like `readObservedCause`: a row whose head
+ * cannot be read is not evidence that it names none, so the lane retries.
+ */
+async function readReviewedHead(env: ReviewRouteEnv, attemptId: string): Promise<string | null> {
+  const row = await env.DB.prepare(`SELECT attempt_key FROM review_launches WHERE attempt_id = ?`)
+    .bind(attemptId)
+    .first<{ attempt_key: string | null }>();
+  if (row?.attempt_key == null) return null;
+  let tuple: unknown;
+  try {
+    tuple = JSON.parse(row.attempt_key);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(tuple)) return null;
+  const head = tuple[ATTEMPT_KEY_HEAD_INDEX];
+  return typeof head === "string" && head !== "" ? head : null;
+}
+
 /**
  * Mechanism vocabulary a cause can carry, and the plain noun an author reads
  * instead. A closed list on purpose: whoever threw wrote the cause, and only
@@ -176,6 +206,20 @@ export type ReviewRouteEnv = {
 };
 
 /**
+ * The head the settled row is attributed to: the delivery's own when it names
+ * one, otherwise the head the attempt actually reviewed. A comment-triggered
+ * delivery names no head, and attributing its failure to `''` hides the row
+ * from the current-head view although the attempt reviewed that very commit.
+ * Only a row that truly names no head stays empty — the dashboard's empty-head
+ * rule keeps it out of the current-head scope, as it must.
+ */
+async function settledHeadSha(env: ReviewRouteEnv, handoff: AttemptHandoff): Promise<string> {
+  const carried = handoff.payload.head_sha;
+  if (carried !== null && carried !== undefined && carried !== "") return carried;
+  return (await readReviewedHead(env, handoff.attemptId)) ?? "";
+}
+
+/**
  * Land the effects a settlement owes that need no dead host's memory — the
  * failure row and the head's abandoned claim — then let the ONE settlement rule
  * decide completeness from durable facts: the Check must actually be terminal
@@ -236,7 +280,7 @@ async function landSettlementEffects(
           owner: handoff.payload.owner,
           repo: handoff.payload.repo,
           pr_number: handoff.payload.pr_number,
-          head_sha: handoff.payload.head_sha ?? "",
+          head_sha: await settledHeadSha(env, handoff),
           stage: "pipeline",
           code,
           trackId: handoff.attemptId,

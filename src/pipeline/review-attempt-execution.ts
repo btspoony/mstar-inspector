@@ -4898,17 +4898,23 @@ export async function settleAttemptFailure(
   const outcomeUnobservable =
     launchJudgement.kind === "unrecognised" ||
     (launchJudgement.kind === "paid-unknown" && !paidStateObserved);
-  if (outcomeUnobservable) {
-    // The cause has to outlive this invocation: the reconciler that eventually
-    // settles the attempt can only observe that no reply arrived, and its own
-    // sentence would then stand in for the phase's. It is recorded as
-    // OBSERVATION on this attempt's handoff row — the durable evidence the
-    // recovery lane already reads — so the reconciler stays the ONE failure-row
-    // writer and renders that row from the real cause — `message` keeps the
-    // composed text for `error`, `cause` carries the throw site's evidence for
-    // the author-facing sentence. Nothing is concluded here: the launch row
-    // keeps holding the container and the slot until the deadline plus grace
-    // proves the paid child gone.
+  /**
+   * The cause has to outlive this invocation: the reconciler that eventually
+   * settles the attempt can only observe that no reply arrived, and its own
+   * sentence would then stand in for the phase's. It is recorded as
+   * OBSERVATION on this attempt's handoff row — the durable evidence the
+   * recovery lane already reads — so the reconciler stays the ONE failure-row
+   * writer and renders that row from the real cause — `message` keeps the
+   * composed text for `error`, `cause` carries the throw site's evidence for
+   * the author-facing sentence.
+   *
+   * Recording is INDEPENDENT of the retention veto below: a returned runner
+   * means the paid child is provably gone, so nothing has to be held — but the
+   * cause a read lost AFTER that return is still the only evidence of what the
+   * failing read was, and it would otherwise be replaced by the reconciler's
+   * generic sentence.
+   */
+  const recordObservation = async (): Promise<void> => {
     const secrets = await sealedSecretValues(deps, attemptId);
     const observedMessage = redactExactSecrets(redactSecrets(detail), secrets);
     const observedCause =
@@ -4930,6 +4936,9 @@ export async function settleAttemptFailure(
         `the unobservable outcome's cause could not be recorded (the attempt stays unknown): ${recordDetail}`,
       );
     }
+  };
+  if (outcomeUnobservable) {
+    await recordObservation();
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),
@@ -5023,6 +5032,12 @@ export async function settleAttemptFailure(
   }
 
   if (failure.class === "unknown") {
+    // A returned runner does not make the outcome readable: a document read
+    // after it can still lose its reply, and this row is left un-settled for
+    // the reconciler. The phase's cause must survive that hand-off too, or the
+    // reconciler's generic lost-reply sentence stands in for the read that
+    // actually failed.
+    await recordObservation();
     deps.log.warn(
       {
         ...(fields ?? { ...(baseFields ?? payloadIdentityFields(payload)), sandbox_id: sandboxId }),

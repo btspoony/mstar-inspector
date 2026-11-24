@@ -288,8 +288,50 @@ describe("SandboxV1 Durable Object", () => {
     });
 
     expect(dispatched).toBe(1);
-    expect(read).toEqual({ kind: "reply-lost" });
+    // The classification is unchanged, and the timer is now distinguishable
+    // from a thrown fault: its own bounded cause names WHICH bound expired.
+    expect(read.kind).toBe("reply-lost");
+    if (read.kind !== "reply-lost") throw new Error("unreachable");
+    expect(read.cause).toMatch(
+      /^Error: the host timer expired before the exec dispatch answered \(after \d+ms\)$/,
+    );
   }, 15_000);
+
+  test("an exec whose output misses the host timer carries the drain cause", async () => {
+    // The second timer path: the command demonstrably ran, so only its reply
+    // (the drained output) missed the bound. It must not read like a dispatch
+    // timeout — the two are different incidents on the same row.
+    reset();
+    const { sandbox, container } = makeDo(true);
+    markerBytes = MARKER;
+    container.exec = mock(async (cmd: string[]) => {
+      execCalls.push({ cmd });
+      const line = cmd[cmd.length - 1] ?? "";
+      if (line.includes("/tmp/mstar-review-attempt")) {
+        return {
+          stdin: null,
+          output: async () => ({ stdout: bytes(MARKER), stderr: new ArrayBuffer(0), exitCode: 0 }),
+        };
+      }
+      return {
+        stdin: null,
+        output: () => Promise.withResolvers<ExecOutput>().promise,
+      };
+    });
+
+    const started = Date.now();
+    const read = await sandbox.runMarked(MARKER, shellCommand("true"), {
+      // Just above the pre-exec guard, so the drain bound is the shortest one
+      // this path can honestly reach (deadline + KILL_GRACE_MS).
+      deadlineEpochMs: started + 5_100,
+    });
+
+    expect(read.kind).toBe("reply-lost");
+    if (read.kind !== "reply-lost") throw new Error("unreachable");
+    expect(read.cause).toMatch(
+      /^Error: the host timer expired while the exec output was being drained \(after \d+ms\)$/,
+    );
+  }, 20_000);
 
   test("a throwing exec carries a bounded cause and the reply-lost classification is unchanged", async () => {
     reset();

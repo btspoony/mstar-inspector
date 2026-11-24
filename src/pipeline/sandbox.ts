@@ -343,8 +343,12 @@ export class SandboxV1 extends DurableObject {
     const result = await this.execCommand(container, command, opts, prepared);
     if ("kind" in result && result.kind === "reply-lost") {
       // The command was opened; only its reply is missing. A caller that mutates
-      // the slot must treat this exactly like a lost reply on any other path.
-      throw new Error("the exec was issued and its reply was lost — the command may have run");
+      // the slot must treat this exactly like a lost reply on any other path,
+      // and the bound's own cause (a thrown fault OR a host timer) rides the
+      // message — this path has no outcome field to carry it.
+      throw new Error(
+        `the exec was issued and its reply was lost — the command may have run${result.cause === undefined ? "" : ` — ${result.cause}`}`,
+      );
     }
     if ("kind" in result) {
       throw new Error("the exec deadline was spent before the process started");
@@ -522,14 +526,25 @@ export class SandboxV1 extends DurableObject {
       env: opts?.env,
       ...(stdinPayload === undefined ? {} : { stdin: "pipe" as const }),
     };
+    const openedAtMs = Date.now();
     const opened =
       deadlineMs === undefined
         ? await container.exec(argv, execOptions)
         : await boundedAwait(container.exec(argv, execOptions), deadlineMs);
     // The open may already have been dispatched by the platform, so a host
-    // timer here proves neither "did not run" nor "no result": lost reply.
+    // timer here proves neither "did not run" nor "no result": lost reply. The
+    // cause is sanitized against what THIS exec carried, so a host-timer
+    // sentence is as bounded as a thrown one, and the two timer paths below
+    // stay distinguishable in the row.
     if (opened === AWAIT_EXPIRED) {
-      return { kind: "reply-lost" };
+      return {
+        kind: "reply-lost",
+        cause: execCause(
+          new Error("the host timer expired before the exec dispatch answered"),
+          openedAtMs,
+          execSensitiveValues(command, opts),
+        ),
+      };
     }
     const process = opened;
     const drained = process.output();
@@ -546,7 +561,14 @@ export class SandboxV1 extends DurableObject {
     // The command demonstrably ran (it was opened); the reply missed the timer.
     // Its output may already be durable on the slot, so this is a lost reply.
     if (output === AWAIT_EXPIRED) {
-      return { kind: "reply-lost" };
+      return {
+        kind: "reply-lost",
+        cause: execCause(
+          new Error("the host timer expired while the exec output was being drained"),
+          openedAtMs,
+          execSensitiveValues(command, opts),
+        ),
+      };
     }
     if (stdinFailure !== undefined && output.exitCode === 0) {
       throw stdinFailure;
