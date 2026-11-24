@@ -87,6 +87,7 @@ const REVIEWS_ANSWER_KEYS: Record<ReviewsRunningAnswer, DictionaryKey> = {
   running: "admin.runtime.reviewsAnswerRunning",
   "paused-platform": "admin.runtime.reviewsAnswerPausedPlatform",
   "blocked-deployment-gate": "admin.runtime.reviewsAnswerBlockedDeploymentGate",
+  "paused-maintenance": "admin.runtime.reviewsAnswerPausedMaintenance",
   "unreadable-state": "admin.runtime.reviewsAnswerUnreadableState",
 };
 

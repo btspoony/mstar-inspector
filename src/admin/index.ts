@@ -326,9 +326,10 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     queue,
     reviewsRunning: {
       // "running" claims reviews flow; a closed maintenance window defers
-      // every delivery instead, so the answer degrades to the pause vocabulary
-      // — `paused-platform` — rather than assert a state the queue contradicts.
-      answer: reviews.state === "running" && maintenanceClosed(maintenance) ? "paused-platform" : reviews.state,
+      // every delivery instead. It gets its OWN answer — not `paused-platform`,
+      // which would contradict the platform block's honest "on" — so the card
+      // can tell "the switch is off" from "the window is closed".
+      answer: reviews.state === "running" && maintenanceClosed(maintenance) ? "paused-maintenance" : reviews.state,
       platform: reviews.platform,
       pausedApps,
       appsHref,

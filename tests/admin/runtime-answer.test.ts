@@ -88,7 +88,7 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
     });
   });
 
-  test("running with a closed maintenance window degrades to paused-platform — the queue defers everything", async () => {
+  test("running with a closed maintenance window answers paused-maintenance, and the platform block stays truthful", async () => {
     const db = fixture();
     setRouteGate(db, "on");
     setPlatformSwitch(db, 1);
@@ -97,12 +97,35 @@ describe("GET /_internal_admin/api/runtime reviewsRunning", () => {
       "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
       new Date().toISOString(),
     );
-    expect((await readAnswer(db)).answer).toBe("paused-platform");
+    // The answer names the window, but the platform switch is still ON —
+    // folding maintenance into `paused-platform` would contradict this block.
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "paused-maintenance",
+      platform: { enabled: true, unreadable: false },
+    });
     seed(
       db,
       "UPDATE review_runtime_settings SET value = '0' WHERE key = 'platform.maintenance.enabled'",
     );
-    expect((await readAnswer(db)).answer).toBe("running");
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "running",
+      platform: { enabled: true, unreadable: false },
+    });
+  });
+
+  test("a real platform pause keeps answering paused-platform under maintenance — the switch's own cause wins", async () => {
+    const db = fixture();
+    setRouteGate(db, "on");
+    setPlatformSwitch(db, 0);
+    seed(
+      db,
+      "INSERT INTO review_runtime_settings (key, value, updated_at, updated_by) VALUES ('platform.maintenance.enabled', '1', ?, 'fixture')",
+      new Date().toISOString(),
+    );
+    expect(await readAnswer(db)).toMatchObject({
+      answer: "paused-platform",
+      platform: { enabled: false, unreadable: false },
+    });
   });
 
   test("both closed answers blocked-deployment-gate — the gate the queue acts on", async () => {

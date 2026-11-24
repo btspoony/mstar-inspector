@@ -705,9 +705,13 @@ Merging this code does not by itself enable the review route. The queue handler
   reason (`malformed`, `untrusted`, `read-failed`).
 - When off, each delivery is settled visibly: a `review.paused.platform` (platform switch off)
   or `review.blocked.deployment_gate` (gate not open) failure row plus the paused Check
-  conclusion, then an ack — no Workflow instance is created. One structured line
-  (`event: "review_route_gate_closed"`) names the answer, the gate, its source and the batch
-  size. A gate whose READ failed, or an unreadable platform switch, is not a halt and not a
+  conclusion, then an ack — no Workflow instance is created. Each branch logs its own
+  structured line naming the answer, the gate, its source and the batch size: a platform
+  pause emits only `event: "review_paused"` (the settlement's own line — a second
+  gate-shaped line would name the wrong cause); a closed gate emits
+  `event: "review_route_gate_closed"` from the handler plus the settlement's
+  `event: "review_blocked_deployment_gate"` line. A gate whose READ failed, or an
+  unreadable platform switch, is not a halt and not a
   cause: nothing routes, nothing is settled, and the batch throws so the queue redelivers it.
   That state answers `unreadable-state` on the operator card, which claims no settlement. A
   readable row whose value is not `on`/`off` (`untrusted`, like `malformed`) is NOT that state:

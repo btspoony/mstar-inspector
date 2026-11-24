@@ -1221,6 +1221,8 @@ export const en = {
         "Reviews are paused by the platform switch: new deliveries are refused and queued ones end as paused.",
       reviewsAnswerBlockedDeploymentGate:
         "Reviews are blocked by the deployment gate: the routing gate is not on for this deployment, so queued deliveries end as blocked.",
+      reviewsAnswerPausedMaintenance:
+        "Reviews are paused by the maintenance window: every queued delivery is deferred until the window closes, then retried within the queue's bounded attempts.",
       reviewsAnswerUnreadableState:
         "The review state could not be read: the platform switch or the routing gate did not answer, so this page concludes nothing. Queued deliveries are not settled — the queue retries them within its bounded attempts, and a batch that exhausts them lands in the dead-letter queue instead of running.",
       reviewsPlatformLabel: "Platform switch",

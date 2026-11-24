@@ -170,6 +170,7 @@ export type ReviewsRunningAnswer =
   | "running"
   | "paused-platform"
   | "blocked-deployment-gate"
+  | "paused-maintenance"
   | "unreadable-state";
 
 /**
@@ -416,6 +417,7 @@ function parseReviewsRunning(row: Json): ReviewsRunningConfig | null {
     (block.answer !== "running" &&
       block.answer !== "paused-platform" &&
       block.answer !== "blocked-deployment-gate" &&
+      block.answer !== "paused-maintenance" &&
       block.answer !== "unreadable-state") ||
     typeof facts.enabled !== "boolean" ||
     typeof facts.unreadable !== "boolean"
