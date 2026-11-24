@@ -405,6 +405,15 @@ jobs:
         run: |
           bunx wrangler deploy --env production --var "DEPLOYMENT_MODE:saas" --var "PLATFORM_OPERATORS:${PLATFORM_OPERATORS:-}"
 
+      # The routing gate is deployment-owned (docs/deploy.md): the serving
+      # deploy opens `review.route.workflow` so the just-shipped Workflow route
+      # serves. The upsert is idempotent and runs against THIS environment's
+      # own database — the operator surface no longer writes it.
+      - name: Open the review routing gate (idempotent)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: bunx wrangler d1 execute mstar-inspector-prod-db --remote --env production --file scripts/review-route-gate.sql
+
       # Every `secret bulk` above creates AND immediately deploys a new Worker
       # version, so the id captured from the `wrangler deploy` log names a
       # PREDECESSOR of the version actually serving traffic. This is the LAST

@@ -29,7 +29,6 @@ import {
   setLostReplySettleMs,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
-  setRouteWorkflow,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
@@ -302,7 +301,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [attemptCapEcho, setAttemptCapEcho] = useState<number | null>(null);
   const [attemptCapChangedElsewhere, setAttemptCapChangedElsewhere] = useState<number | null>(null);
   const [maintenanceTarget, setMaintenanceTarget] = useState<boolean | null>(null);
-  const [routeWorkflowTarget, setRouteWorkflowTarget] = useState<"on" | "off" | null>(null);
   const [reasonDraft, setReasonDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const concurrencySignal = useSaveSignal();
@@ -313,7 +311,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const recheckAssignmentSignal = useSaveSignal();
   const lostReplySignal = useSaveSignal();
   const attemptCapSignal = useSaveSignal();
-  const routeWorkflowSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
   const [notice, setNotice] = useState<{
     kind: "success" | "error";
@@ -327,7 +324,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "recheckAssignment"
       | "lostReplySettle"
       | "attemptCap"
-      | "routeWorkflow"
       | "maintenance";
   } | null>(null);
 
@@ -670,49 +666,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       setBusy(false);
     }
   }
-
-  async function onSaveRouteWorkflow(value: "on" | "off"): Promise<void> {
-    if (busy) return;
-    setBusy(true);
-    setNotice(null);
-    routeWorkflowSignal.start();
-    try {
-      const saved = await setRouteWorkflow(value);
-      const answer = saved ?? (await readRuntime().catch(() => null))?.routeWorkflow ?? null;
-      if (answer === null) {
-        setRouteWorkflowTarget(null);
-        setNotice({
-          kind: "error",
-          message: t(locale, "admin.runtime.routeWorkflowUnconfirmed"),
-          source: "routeWorkflow",
-        });
-        routeWorkflowSignal.fail();
-        return;
-      }
-      update((data) => ({ ...data, routeWorkflow: answer }));
-      setRouteWorkflowTarget(null);
-      setNotice({
-        kind: "success",
-        message: t(locale, "admin.runtime.routeWorkflowSaved"),
-        source: "routeWorkflow",
-      });
-      routeWorkflowSignal.succeed();
-    } catch (error) {
-      const generic = t(locale, "admin.runtime.routeWorkflowFailed");
-      setNotice({
-        kind: "error",
-        message:
-          error instanceof AdminWriteError
-            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
-            : generic,
-        source: "routeWorkflow",
-      });
-      routeWorkflowSignal.fail();
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function onSaveMaintenance(stored: MaintenanceConfig, enabled: boolean): Promise<void> {
     if (busy) return;
     setBusy(true);
@@ -774,7 +727,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const queue = data.queue;
           const maintenance = data.maintenance;
           const maintenanceOn = maintenanceTarget ?? maintenance?.enabled ?? false;
-          const routeWorkflowOn = (routeWorkflowTarget ?? routeWorkflow?.mode ?? "off") === "on";
           return (
           <div className="flex flex-col gap-4">
             {maintenance === null ? null : (
@@ -1117,9 +1069,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 <p className="text-sm text-muted-foreground">
                   {t(locale, "admin.runtime.routeWorkflowDescription")}
                 </p>
-                {notice?.source === "routeWorkflow" ? (
-                  <CardOutcome notice={notice} status={routeWorkflowSignal.status} />
-                ) : null}
                 <dl className="mt-4 grid grid-cols-1 gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
                   <div className="flex flex-col gap-1">
                     <dt className="text-muted-foreground">
@@ -1138,40 +1087,6 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                     </dd>
                   </div>
                 </dl>
-                <form
-                  className="mt-4 flex flex-wrap items-end gap-2"
-                  data-route-workflow="form"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void onSaveRouteWorkflow(routeWorkflowOn ? "on" : "off");
-                  }}
-                >
-                  <Toggle
-                    variant="outline"
-                    pressed={routeWorkflowOn}
-                    disabled={busy}
-                    aria-label={t(locale, "admin.flags.stateAria", {
-                      flag: t(locale, "admin.runtime.routeWorkflowTitle"),
-                      state: t(
-                        locale,
-                        routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff",
-                      ),
-                    })}
-                    onPressedChange={(next) => setRouteWorkflowTarget(next ? "on" : "off")}
-                  >
-                    {t(locale, routeWorkflowOn ? "admin.flags.stateOn" : "admin.flags.stateOff")}
-                  </Toggle>
-                  <Button
-                    type="submit"
-                    disabled={busy}
-                    status={
-                      routeWorkflowSignal.status === "idle" ? undefined : routeWorkflowSignal.status
-                    }
-                  >
-                    {t(locale, "admin.runtime.routeWorkflowSave")}
-                  </Button>
-                  <SaveInFlight show={routeWorkflowSignal.status === "loading"} locale={locale} />
-                </form>
               </CardContent>
             </SectionCard>
             )}

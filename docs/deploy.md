@@ -1694,6 +1694,19 @@ docker run --rm --entrypoint /opt/verify-synthesis.sh <image>
    ```
    `model` is the effective chain head selector, or NULL meaning the in-image
    default ran (§ Image pins and digest record).
+5. **Review routing gate** — `review.route.workflow` is deployment-owned: the
+   workflow's `Open the review routing gate` step writes `on` after a
+   successful deploy, and the operator console reports the gate read-only (no
+   toggle; `PATCH /_internal_admin/api/runtime` refuses `routeWorkflow`). A
+   closed gate (`off`, absent, or an unreadable row) means the queue handler
+   refuses every delivery and no Workflow instance is created — reviews
+   silently do not run, so confirm the row:
+   ```bash
+   wrangler d1 execute mstar-inspector-db --remote --command \
+     "SELECT key, value FROM review_runtime_settings WHERE key = 'review.route.workflow'"
+   ```
+   `value = on` after every deploy; anything else means the pipeline step did
+   not run (production reads `mstar-inspector-prod-db --env production`).
 
 ### Production red-run equivalents
 
