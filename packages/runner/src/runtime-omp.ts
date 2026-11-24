@@ -38,6 +38,9 @@ import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
 import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
+import { bucketsFromSession, bucketFromSubagent, mergeBuckets, type SubagentUsageSource } from "./token-usage";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent";
+import type { TokenUsageBucket } from "../../shared/src/token-usage-wire";
 
 const HARNESS_ROOT_ENV = "HARNESS_PLUGIN_ROOT";
 
@@ -785,6 +788,43 @@ export function servedModel(
   return model === undefined ? undefined : `${model.provider}/${model.id}`;
 }
 
+/**
+ * why: The session's journaled entries for the token-usage fold. An
+ * unreadable or absent session manager yields an empty input — capture
+ * degrades to fewer buckets, never to a review failure.
+ */
+function sessionEntries(
+  session: { sessionManager?: { getEntries?: () => SessionEntry[] } } | undefined,
+): SessionEntry[] {
+  const manager = session?.sessionManager;
+  if (typeof manager?.getEntries !== "function") return [];
+  try {
+    return manager.getEntries();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * why: Merge the fold's two DISJOINT inputs — session entries (the parent/
+ * host session's own calls; a subagent's spend is journaled ONLY in the
+ * child's aggregate `SingleResult`, never duplicated into these entries) and
+ * every settled subagent result — into the run's per-(provider, model)
+ * buckets. Anything unusable drops out silently: analysis data, never a gate.
+ */
+function runTokenUsage(
+  entries: readonly SessionEntry[],
+  singles: readonly SubagentUsageSource[],
+): TokenUsageBucket[] {
+  return mergeBuckets(
+    bucketsFromSession(entries),
+    singles.flatMap((single) => {
+      const bucket = bucketFromSubagent(single);
+      return bucket === undefined ? [] : [bucket];
+    }),
+  );
+}
+
 async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResult> {
   const pluginRoot = resolveHarnessRoot();
   const skills = await loadHarnessSkills(pluginRoot);
@@ -1006,6 +1046,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       }
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
+      const reportSingles: SubagentUsageSource[] = [];
       let report: ReportDoc | null = null;
       if (input.prContext !== undefined) {
         try {
@@ -1016,6 +1057,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
             envelope,
             settled?.doc ?? null,
             runTeardownSignal(teardown, input),
+            reportSingles,
           );
         } catch (error) {
           console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
@@ -1028,6 +1070,10 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
         ...(appliedModel === undefined ? {} : { appliedModel }),
+        tokenUsage: runTokenUsage(
+          sessionEntries(parentSession),
+          [settled?.usage, ...reportSingles].flatMap((single) => (single === undefined ? [] : [single])),
+        ),
       };
     });
   } finally {
@@ -1055,6 +1101,7 @@ async function runReportSeatFor(
   envelope: MstarReviewV1,
   recheckDoc: RecheckDoc | null,
   signal: AbortSignal,
+  usage: SubagentUsageSource[] = [],
 ): Promise<ReportDoc | null> {
   if (input.prContext === undefined) return null;
   const headSha = envelope.target?.head_sha;
@@ -1078,6 +1125,7 @@ async function runReportSeatFor(
     model: seatModelChain(input),
     level: input.level,
     signal,
+    usage,
   });
 }
 
@@ -1146,6 +1194,7 @@ export const ompAgentRuntime: AgentRuntime = {
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
       const servedBySeat = new Map<string, string | undefined>();
       const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
+      const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
@@ -1163,7 +1212,12 @@ export const ompAgentRuntime: AgentRuntime = {
               enableIrc: false,
               maxRuntimeMs: seatCapMs,
             });
+            seatSingles.push(result.result);
             return seatOutput(result, index, plan);
+          } catch (error) {
+            const settled = (error as { result?: unknown } | null | undefined)?.result;
+            if (settled !== null && typeof settled === "object") seatSingles.push(settled as SubagentUsageSource);
+            throw error;
           } finally {
             // why: Capture the served model HERE, at the seat's own settlement: the
             // registry ref survives a keep-alive child
@@ -1266,12 +1320,14 @@ export const ompAgentRuntime: AgentRuntime = {
         const detail = gate.violations.map((violation) => `${violation.code}: ${violation.message}`).join("; ");
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
+      const reportSingles: SubagentUsageSource[] = [];
       const report = await runReportSeatFor(
         input,
         toolSession,
         envelope,
         settled?.doc ?? null,
         runTeardownSignal(teardown, input),
+        reportSingles,
       );
       const served = new Set<string>();
       for (const { id } of seats) {
@@ -1285,6 +1341,12 @@ export const ompAgentRuntime: AgentRuntime = {
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
         ...(appliedModel === undefined ? {} : { appliedModel }),
+        tokenUsage: runTokenUsage(
+          sessionEntries(session),
+          [settled?.usage, ...seatSingles, ...reportSingles].flatMap((single) =>
+            single === undefined ? [] : [single],
+          ),
+        ),
       };
     } finally {
       teardown.abort();

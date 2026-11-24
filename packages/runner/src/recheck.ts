@@ -67,6 +67,7 @@ import {
 } from "../../shared/src/recheck-wire";
 import { redactSecretShapes } from "../../shared/src/secret-shapes";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../shared/src/runtime";
+import type { SubagentUsageSource } from "./token-usage";
 
 export { recheckAssignment, RECHECK_ASSIGNMENT_MAX_BYTES };
 
@@ -306,8 +307,13 @@ function recheckStructuredData(single: Partial<StructuredSubagentResult["result"
   );
 }
 
-/** What the seat always resolves: the document (or null) plus the attributable status. */
-export type RecheckSeatResult = { doc: RecheckDoc | null; status: RecheckStatus };
+/** What the seat always resolves: the document (or null), the attributable status, and the settled child's usage slice. */
+export type RecheckSeatResult = {
+  doc: RecheckDoc | null;
+  status: RecheckStatus;
+  /** The seat's settled `SingleResult` when the child produced one — carries `usage`/`requests`/`resolvedModel` for the token-usage fold. */
+  usage?: SubagentUsageSource;
+};
 
 /**
  * The status a gate-accepted round reports (spec §7.8). Two empty shapes share
@@ -393,6 +399,7 @@ export async function runRecheckSeat(input: {
     );
   }
   let gate: RecheckGateResult;
+  let usage: SubagentUsageSource | undefined;
   try {
     const result = await runSeat({
       session: input.session,
@@ -407,11 +414,13 @@ export async function runRecheckSeat(input: {
       maxRuntimeMs,
       signal: input.signal,
     });
+    usage = result.result;
     gate = validateRecheckDoc(recheckStructuredData(result.result), ask.input);
   } catch (error) {
+    usage ??= settledChildResult(error);
     if (input.signal.aborted) {
       console.error(JSON.stringify({ event: "recheck_seat_aborted", reason: "aborted" }));
-      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null } };
+      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "skipped", reason: "aborted", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: null }, ...(usage === undefined ? {} : { usage }) };
     }
     const settled = settledChildResult(error);
     const yielded = usableRecheckData(settled);
@@ -424,16 +433,17 @@ export async function runRecheckSeat(input: {
           "exit unknown",
       );
       console.error(JSON.stringify({ event: "recheck_seat_failed", error: message }));
-      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: message } };
+      return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "seat-failed", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error: message }, ...(usage === undefined ? {} : { usage }) };
     }
   }
   if (!gate.ok) {
     const error = redactedStatusError(gate.error);
     console.error(JSON.stringify({ event: "recheck_seat_failed", error: `recheck document failed validation: ${error}` }));
-    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error } };
+    return { doc: null, status: { schema: "mstar.recheck-status/v1", headSha, outcome: "failed", reason: "invalid-document", rejected: 0, rejected_row_ids: [], rejected_unnamed: 0, error }, ...(usage === undefined ? {} : { usage }) };
   }
   return {
     doc: gate.doc,
     status: recheckRoundStatus(gate, input.input.targets.length, headSha),
+    ...(usage === undefined ? {} : { usage }),
   };
 }

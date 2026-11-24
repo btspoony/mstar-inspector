@@ -125,6 +125,7 @@ import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
 import { type PrContext } from "../../shared/src/report-wire";
+import { TOKEN_USAGE_PATH, type TokenUsageDoc } from "../../shared/src/token-usage-wire";
 
 const USAGE =
   `usage: bun run runner.ts --level <${REVIEW_LEVELS.join(", ")}> --input <json-file> ` +
@@ -655,6 +656,7 @@ export async function main(
   readStdin: () => Promise<string> = readCredentialStdin,
   statusPath: string = process.env.MSTAR_RECHECK_STATUS_PATH?.trim() || RECHECK_STATUS_PATH,
   appliedModelPath: string = APPLIED_MODEL_PATH,
+  tokenUsagePath: string = TOKEN_USAGE_PATH,
 ): Promise<number> {
   let level: string;
   let inputPath: string;
@@ -675,7 +677,7 @@ export async function main(
   const stale: string[] = [];
   if (recheckOutPath !== undefined) stale.push(recheckOutPath, statusPath);
   if (reportOutPath !== undefined) stale.push(reportOutPath);
-  stale.push(appliedModelPath);
+  stale.push(appliedModelPath, tokenUsagePath);
   for (const path of stale) {
     try {
       rmSync(path, { force: true });
@@ -746,7 +748,7 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report, appliedModel } = await runtime.runReview(input);
+      const { envelope, recheck, recheckStatus, report, appliedModel, tokenUsage } = await runtime.runReview(input);
       if (appliedModel === undefined) {
         try {
           rmSync(appliedModelPath, { force: true });
@@ -767,6 +769,34 @@ export async function main(
             JSON.stringify({
               event: "applied_model_write_failed",
               path: appliedModelPath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      }
+      // why: Same side-document discipline as appliedModel — a stale document
+      // from a previous run must not ride this run's output, and a capture or
+      // write fault is logged, never thrown: usage is analysis data, not a gate.
+      if (tokenUsage === undefined || tokenUsage.length === 0) {
+        try {
+          rmSync(tokenUsagePath, { force: true });
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "token_usage_clear_failed",
+              path: tokenUsagePath,
+              reason: (error as Error).message,
+            }),
+          );
+        }
+      } else {
+        try {
+          writeFileSync(tokenUsagePath, JSON.stringify({ version: 1, buckets: tokenUsage } satisfies TokenUsageDoc));
+        } catch (error) {
+          console.error(
+            JSON.stringify({
+              event: "token_usage_write_failed",
+              path: tokenUsagePath,
               reason: (error as Error).message,
             }),
           );
