@@ -189,6 +189,8 @@ export type TargetReviewConfig = {
   checkMinScore?: number;
   checkPassVerdicts?: readonly PrVerdict[];
   reviewDrafts?: boolean;
+  /** Written in the same UPDATE as `follow`, so detaching is atomic. */
+  reviewEnabled?: boolean;
   follow?: 0 | 1;
 };
 
@@ -468,58 +470,6 @@ export async function readEffectiveTargetSettings(
     : ownTargetSettings(target);
 }
 
-/**
- * Flip the inheritance switch (D16). `1` sets the flag only: the row's own
- * policy columns become inert, never read again. `0` snapshots the values the
- * target is running with right now into the row — reading the defaults when it
- * was inheriting, its own columns otherwise — including the two admission
- * facts, so the toggle itself changes no live behaviour. A later toggle-off
- * re-snapshots from the then-current defaults. An unknown or deleted target
- * writes nothing.
- */
-export async function setInheritance(
-  db: TargetsStoreD1,
-  workspaceId: string,
-  targetId: string,
-  follow: 0 | 1,
-): Promise<void> {
-  if (follow === 1) {
-    await db
-      .prepare(
-        `UPDATE review_targets SET follow_workspace_defaults = 1, updated_at = datetime('now')
-         WHERE ${LIVE_TARGET}`,
-      )
-      .bind(targetId, workspaceId)
-      .run();
-    return;
-  }
-  const target = await db
-    .prepare(`SELECT * FROM review_targets WHERE ${LIVE_TARGET}`)
-    .bind(targetId, workspaceId)
-    .first<ReviewTargetRow>();
-  if (!target) return;
-  const effective = effectiveTargetSettings(target, await getWorkspaceReviewDefaults(db, workspaceId));
-  await db
-    .prepare(
-      `UPDATE review_targets
-          SET follow_workspace_defaults = 0, review_trigger_mode = ?, review_level = ?,
-              check_min_score = ?, check_pass_verdicts = ?, review_drafts = ?, review_enabled = ?,
-              updated_at = datetime('now')
-        WHERE ${LIVE_TARGET}`,
-    )
-    .bind(
-      effective.triggerMode,
-      effective.level,
-      effective.checkMinScore,
-      JSON.stringify(effective.checkPassVerdicts),
-      effective.reviewDrafts ? 1 : 0,
-      effective.reviewEnabled ? 1 : 0,
-      targetId,
-      workspaceId,
-    )
-    .run();
-}
-
 /** Create the `review_targets` store over one D1 handle. */
 export function createTargetsStore(db: TargetsStoreD1) {
   return {
@@ -772,6 +722,10 @@ export function createTargetsStore(db: TargetsStoreD1) {
       if (config.reviewDrafts !== undefined) {
         assignments.push("review_drafts = ?");
         values.push(config.reviewDrafts ? 1 : 0);
+      }
+      if (config.reviewEnabled !== undefined) {
+        assignments.push("review_enabled = ?");
+        values.push(config.reviewEnabled ? 1 : 0);
       }
       if (config.follow !== undefined) {
         assignments.unshift("follow_workspace_defaults = ?");

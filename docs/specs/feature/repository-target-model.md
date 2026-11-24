@@ -48,7 +48,7 @@ A row that migration produced now carries three NULL repository columns (`repo_i
 | E1 | One read decides what a target runs with: `follow_workspace_defaults = 1` answers the workspace defaults (trigger mode, review level, gate floor, passing verdicts, draft review, business pause), `= 0` answers the row's own columns. The two admission facts are inheritable like the policy ones: while following, `default_review_drafts` / `default_review_enabled` (0108) answer them; with inheritance off, `review_targets.review_drafts` / `.review_enabled` do. The workspace defaults are read only for a target that actually inherits, so an overridden target pays no second round trip. |
 | E2 | While a target inherits, its effective settings are computed on every read and never copied into the row. A defaults change therefore reaches all inheriting targets immediately; no propagation job exists. |
 | E3 | Turning inheritance off snapshots the currently effective values into the row, the two admission values included; turning it on sets the flag only, leaving the stored overrides inert. A target that never overrode anything and a target whose overrides are inert answer the same policy, so the toggle itself changes no live behaviour. |
-| E4 | New targets created through the surface inherit (`= 1`); targets created by the historical backfill do not (`= 0`, with the winner's configuration copied), so the upgrade changes no live review behaviour. |
+| E4 | New targets created through the surface inherit (`= 1`); targets created by the historical backfill do not (`= 0`, with the winner's configuration copied), so the upgrade changes no live review behaviour. The 0108 upgrade detaches only a following target whose own admission answer differs from the new default, snapshotting the policy values it was running with; a target that already answered drafts-reviewed / reviews-enabled keeps inheriting. |
 | E5 | An unreadable stored `check_pass_verdicts` fails closed (an empty verdict list) with a `check_pass_verdicts_readable: false` flag on the wire, so a page can tell "saved nothing" from "could not read it" and refuse the policy save instead of overwriting the gate. |
 
 ### Store surface
@@ -128,7 +128,7 @@ Execution reads — webhook bot lookup, consumer credential load, publication re
 ## Where it lives
 
 - `migrations/0067_repo_target_identity.sql`, `migrations/0068_target_repo_global_unique.sql`
-- `src/dashboard/targets-store.ts` (`resolveByRepo`, `create`, `listLiveWithApp`, `countLive`, `getInWorkspace`, `getForExecution`, `readEffectiveTargetSettings`, `setInheritance`, `setReviewConfig`, `setReviewEnabled`)
+- `src/dashboard/targets-store.ts` (`resolveByRepo`, `create`, `listLiveWithApp`, `countLive`, `getInWorkspace`, `getForExecution`, `readEffectiveTargetSettings`, `setReviewConfig`, `setReviewEnabled`)
 - `src/worker/index.ts`, `src/worker/webhooks.ts` (repository classifier and target resolution)
 - `src/dashboard/index.ts` (the target and defaults routes, the application-settings gates), `src/dashboard/apps-store.ts` (application visibility and installations)
 - `src/pipeline/consumer.ts`, `src/contracts/review-job.ts` (execution reads)

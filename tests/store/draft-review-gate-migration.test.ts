@@ -3,10 +3,7 @@ import { createMigratedTestD1, createTestD1, migrationNumber, migrationsAfter, s
 import { applyMigrations } from "../helpers/migration-shapes";
 import {
   createTargetsStore,
-  effectiveTargetSettings,
-  getWorkspaceReviewDefaults,
   readEffectiveTargetSettings,
-  setInheritance,
 } from "../../src/dashboard/targets-store";
 
 const MIGRATION = "0070_draft_review_gate.sql";
@@ -141,28 +138,5 @@ describe("the store exposes the target-owned draft switch", () => {
 
     expect(await store.setReviewConfig(WS, "t-own", { reviewDrafts: false })).toBe(true);
     expect((await readEffectiveTargetSettings(d, (await store.getInWorkspace(WS, "t-own"))!)).reviewDrafts).toBe(false);
-  });
-
-  test("toggling inheritance snapshots the admission answer the target is running with", async () => {
-    const d = db();
-    seedStoreTarget(d, "t-keep", 11003, 1);
-    const store = createTargetsStore(d);
-    expect(await store.setReviewConfig(WS, "t-keep", { reviewDrafts: false })).toBe(true);
-    d.raw.prepare("UPDATE workspaces SET default_review_drafts = 0 WHERE id = 'default'").run();
-
-    await setInheritance(d, WS, "t-keep", 0);
-    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
-      review_drafts: 0,
-    });
-    await setInheritance(d, WS, "t-keep", 1);
-    expect(d.raw.query("SELECT review_drafts FROM review_targets WHERE id = 't-keep'").get()).toEqual({
-      review_drafts: 0,
-    });
-
-    expect(await store.setReviewConfig(WS, "t-keep", { triggerMode: "open", follow: 0 })).toBe(true);
-    expect(
-      effectiveTargetSettings((await store.getInWorkspace(WS, "t-keep"))!, await getWorkspaceReviewDefaults(d, WS))
-        .reviewDrafts,
-    ).toBe(false);
   });
 });

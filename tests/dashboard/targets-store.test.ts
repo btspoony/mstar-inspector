@@ -8,7 +8,6 @@ import {
   getWorkspaceReviewDefaults,
   parseTargetReviewLevel,
   readEffectiveTargetSettings,
-  setInheritance,
   setWorkspaceReviewDefaults,
 } from "../../src/dashboard/targets-store";
 import { UnknownWorkspaceError } from "../../src/dashboard/runtime-config-store";
@@ -157,7 +156,7 @@ describe("tenant reads bind workspace_id", () => {
     expect(await store.setReviewEnabled(WS, targetId, false)).toBe(false);
     expect(await store.delete(WS, targetId)).toBe(false);
     expect(await store.setReviewConfig(WS, targetId, { triggerMode: "manual" })).toBe(false);
-    await setInheritance(db, WS, targetId, 1);
+    expect(await store.setReviewConfig(WS, targetId, { follow: 1 })).toBe(false);
     expect(await store.getInWorkspace(WS, targetId)).toBeNull();
 
     const row = targetRow(db, targetId);
@@ -562,7 +561,9 @@ describe("effective settings and inheritance", () => {
     const ownSettings = await readEffectiveTargetSettings(db, (await store.getInWorkspace(WS, own))!);
     expect(ownSettings).toMatchObject({ reviewDrafts: false, reviewEnabled: false });
 
-    await setInheritance(db, WS, following, 0);
+    expect(await store.setReviewConfig(WS, following, { follow: 0, reviewDrafts: false, reviewEnabled: false })).toBe(
+      true,
+    );
     expect(targetRow(db, following)).toMatchObject({
       follow_workspace_defaults: 0,
       review_drafts: 0,
@@ -582,7 +583,7 @@ describe("effective settings and inheritance", () => {
     });
   });
 
-  test("inheriting never copies the defaults into the row, and toggling off snapshots them", async () => {
+  test("inheriting never copies the defaults into the row", async () => {
     const db = createMigratedTestD1();
     db.raw
       .prepare(
@@ -608,24 +609,6 @@ describe("effective settings and inheritance", () => {
     db.raw.prepare("UPDATE workspaces SET default_review_trigger_mode = 'manual' WHERE id = ?").run(WS);
     expect((await getWorkspaceReviewDefaults(db, WS)).triggerMode).toBe("manual");
     expect(targetRow(db, targetId).review_trigger_mode).toBe("every_push");
-
-    await setInheritance(db, WS, targetId, 0);
-    expect(targetRow(db, targetId)).toMatchObject({
-      follow_workspace_defaults: 0,
-      review_trigger_mode: "manual",
-      review_level: "quick",
-      check_min_score: 45,
-      check_pass_verdicts: '["ship it"]',
-      review_drafts: 1,
-      review_enabled: 1,
-    });
-
-    await setInheritance(db, WS, targetId, 1);
-    expect(targetRow(db, targetId)).toMatchObject({
-      follow_workspace_defaults: 1,
-      review_trigger_mode: "manual",
-      check_min_score: 45,
-    });
   });
 
   test("an unreadable stored verdict array fails closed instead of admitting nobody's gate", async () => {

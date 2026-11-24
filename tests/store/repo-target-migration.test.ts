@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createTestD1, migrationNumber, migrationsAfter, seedBot, type TestD1 } from "./helpers";
+import { createTestD1, migrationNumber, migrationsAfter, seedBot, seedTarget, type TestD1 } from "./helpers";
 import { applyMigrations } from "../helpers/migration-shapes";
 
 const MIGRATION = "0067_repo_target_identity.sql";
@@ -265,5 +265,51 @@ describe("migration 0108: the workspace carries the admission defaults", () => {
     expect(() =>
       db.raw.prepare("UPDATE workspaces SET default_review_enabled = -1 WHERE id = 'legacy'").run(),
     ).toThrow();
+  });
+
+  test("the transition detaches only targets whose admission answer differs from the new defaults", () => {
+    const db = createTestD1();
+    applyMigrations(db, BEFORE_0108);
+    seedBot(db, "bot-1", 7001);
+    const affected = seedTarget(db, "bot-1", { id: "target-paused", name: "acme/paused", repoId: 501 });
+    const unaffected = seedTarget(db, "bot-1", { id: "target-live", name: "acme/live", repoId: 502 });
+    // A following target keeps its own answer for both admission facts today;
+    // its policy columns are inert and may hold anything.
+    db.raw
+      .prepare(
+        `UPDATE review_targets
+            SET follow_workspace_defaults = 1, review_trigger_mode = 'manual',
+                review_level = 'deep', check_min_score = 90,
+                check_pass_verdicts = '["ship it","blocked"]', review_drafts = 0, review_enabled = 0
+          WHERE id = ?`,
+      )
+      .run(affected);
+    db.raw.prepare("UPDATE review_targets SET follow_workspace_defaults = 1 WHERE id = ?").run(unaffected);
+
+    applyMigrations(db, [MIGRATION_0108]);
+
+    const rows = db.raw
+      .query(
+        `SELECT id, follow_workspace_defaults, review_enabled, review_drafts,
+                review_trigger_mode, review_level, check_min_score, check_pass_verdicts
+           FROM review_targets WHERE id IN (?, ?)`,
+      )
+      .all(affected, unaffected) as Array<Record<string, unknown>>;
+    const byId = new Map(rows.map((row) => [row.id as string, row]));
+    expect(byId.get(affected)).toEqual({
+      id: affected,
+      follow_workspace_defaults: 0,
+      review_enabled: 0,
+      review_drafts: 0,
+      review_trigger_mode: "every_push",
+      review_level: null,
+      check_min_score: 60,
+      check_pass_verdicts: '["ship it"]',
+    });
+    expect(byId.get(unaffected)).toMatchObject({
+      follow_workspace_defaults: 1,
+      review_enabled: 1,
+      review_drafts: 1,
+    });
   });
 });

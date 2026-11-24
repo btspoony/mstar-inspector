@@ -2656,9 +2656,11 @@ const appSettingsRoute = async (c: DashboardContext) => {
     : gate.app;
   const blockedReason = blockedReasonFor(app, gate.scope.workspaceId);
   const target = gate.target;
-  const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
   try {
     c.header("Cache-Control", "private, no-store");
+    // Inside the try, like every other settings read: the route's catch is the
+    // only guard that logs `api_render` and answers the controlled 500.
+    const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
     if (!canManageApp(gate.scope)) {
       return c.json({
         can_manage: false,
@@ -4874,31 +4876,33 @@ const targetSettingsWriteRoute = async (c: DashboardContext): Promise<Response> 
   // The admission pair is answered by the DEFAULTS while the target inherits,
   // so a save that leaves it inheriting must not write the row's copies.
   const inheriting = (follow ?? target.follow_workspace_defaults) === 1;
+  // Only a transition from inheriting to own-columns snapshots unnamed values;
+  // an already-detached target writes an admission column only when the patch
+  // names it, so a concurrent admission save is never reverted by a policy save.
+  const detaching = target.follow_workspace_defaults === 1 && follow === 0;
   const config: TargetReviewConfig = {
     triggerMode: follow === 1 ? undefined : patch.triggerMode,
     level: follow === 1 ? undefined : patch.level,
     checkMinScore: follow === 1 ? undefined : patch.checkMinScore,
     checkPassVerdicts: follow === 1 ? undefined : patch.checkPassVerdicts,
     reviewDrafts: inheriting ? undefined : patch.reviewDrafts,
+    reviewEnabled: inheriting ? undefined : patch.reviewEnabled,
     follow,
   };
-  if (follow === 0 && current !== null) {
+  if (detaching && current !== null) {
     config.triggerMode ??= current.triggerMode;
     if (config.level === undefined) config.level = current.level;
     config.checkMinScore ??= current.checkMinScore;
     config.checkPassVerdicts ??= current.checkPassVerdicts;
     // Dropping inheritance must keep the target on the admission values it is
-    // running with right now; the row's copies may be stale overrides.
+    // running with right now; the row's copies may be stale overrides. The
+    // pause rides the same UPDATE as `follow`, so no read can see follow = 0
+    // beside the row's old pause.
     config.reviewDrafts ??= current.reviewDrafts;
+    config.reviewEnabled ??= current.reviewEnabled;
   }
-  // Same snapshot for the pause, which lives in its own column.
-  const reviewEnabled =
-    patch.reviewEnabled ?? (follow === 0 && current !== null ? current.reviewEnabled : undefined);
   try {
     await store.setReviewConfig(member.scope.workspaceId, target.id, config);
-    if (reviewEnabled !== undefined && !inheriting) {
-      await store.setReviewEnabled(member.scope.workspaceId, target.id, reviewEnabled);
-    }
   } catch (err) {
     logSettingsFailure("target_settings_save", target.id, err);
     return c.json({ error: "save failed" }, 500);
