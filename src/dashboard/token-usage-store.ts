@@ -42,15 +42,17 @@ export type TokenUsageD1 = {
  * applies). Scope is the caller-resolved target plus its workspace: the
  * target/workspace pair rides the rows at write time and both must match,
  * so a path-supplied workspace can never widen the read. `occurred_at` is
- * the write-time instant (`new Date().toISOString()`), lexicographically
- * ordered, so the half-open `[now - window, now)` predicate is a UTC string
- * comparison identical to the insights `reviewed_at` cut — no live rows in
- * the window yields an empty `buckets` list and a zero total.
+ * the write-time instant (`new Date().toISOString()`), so both half-open
+ * `[now - window, now)` bounds are generated as ISO-8601 UTC strings from
+ * one `nowMs` and bound verbatim — a pure string comparison over the
+ * production format. No live rows in the window yields an empty `buckets`
+ * list and a zero total.
  */
 export async function readTargetTokenUsage(
   db: TokenUsageD1,
   scope: { targetId: string; workspaceId: string },
   windowDays?: number,
+  nowMs: number = Date.now(),
 ): Promise<TargetTokenUsage> {
   const days = clampWindow(windowDays);
   const { results } = await db
@@ -68,14 +70,13 @@ export async function readTargetTokenUsage(
        FROM review_token_usage u
        WHERE u.target_id = ?
          AND u.workspace_id = ?
-         AND u.occurred_at >= datetime('now', '-' || ? || ' days')
-         AND u.occurred_at < datetime('now')
+         AND u.occurred_at >= ?
+         AND u.occurred_at < ?
        GROUP BY u.provider, u.model
        ORDER BY u.provider ASC, u.model ASC`,
     )
-    .bind(scope.targetId, scope.workspaceId, days)
+    .bind(scope.targetId, scope.workspaceId, new Date(nowMs - days * 86_400_000).toISOString(), new Date(nowMs).toISOString())
     .all<TokenUsageBucketRow>();
-
   const total: TokenUsageTotals = {
     requests: 0,
     input: 0,

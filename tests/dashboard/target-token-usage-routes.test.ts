@@ -5,7 +5,13 @@ import type { Env } from "../../src/worker/env";
 import { tokenUsageStatements, type TokenUsageRow } from "../../src/store/token-usage-store";
 import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 import { withSpaAssets } from "../helpers/spa";
-import { reviewedAt } from "../../src/dashboard/insights-dates";
+
+/**
+ * Seed ages land on `occurred_at` in the exact `new Date().toISOString()`
+ * format the pipeline writes — matching the production write face is what
+ * makes the window predicate's string comparison exercised at all.
+ */
+const DAY_MS = 86_400_000;
 
 const SESSION_SECRET = ["test", "token", "usage", "session", "32-bytes!"].join("-");
 
@@ -70,7 +76,7 @@ async function seedUsage(
       attemptId: `attempt-${(attemptCounter += 1)}`,
       targetId,
       workspaceId,
-      occurredAt: reviewedAt(daysAgo),
+      occurredAt: new Date(Date.now() - daysAgo * DAY_MS).toISOString(),
       buckets: [bucket],
     }),
   );
@@ -137,11 +143,12 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/token-usage", () => {
     });
   });
 
-  test("the window predicate is UTC and half-open: old rows fall out, the default is 30", async () => {
+  test("the window predicate is UTC and half-open: old rows fall out, a just-written row stays in", async () => {
     const { db, widgets } = fixture();
     await seedUsage(db, widgets, "ws-two", { ...ARK, input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15, requests: 1, costUsd: 0.001 }, 2);
+    // Written at the current instant — the case a space-formatted upper bound hid.
+    await seedUsage(db, widgets, "ws-two", { ...ARK, input: 2, output: 1, cacheRead: 0, cacheWrite: 0, total: 7, requests: 1, costUsd: 0.001 }, 0);
     await seedUsage(db, widgets, "ws-two", { ...ARK, input: 40, output: 8, cacheRead: 0, cacheWrite: 0, total: 48, requests: 1, costUsd: 0.004 }, 40);
-
     const res = await get(db, "ws-two/api/targets/t-widgets/token-usage", "dana");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -151,8 +158,8 @@ describe("GET /dashboard/<ref>/api/targets/:targetId/token-usage", () => {
     };
     expect(body.window_days).toBe(30);
     expect(body.buckets).toHaveLength(1);
-    expect(body.buckets[0]).toMatchObject({ input: 10, total: 15 });
-    expect(body.total.total).toBe(15);
+    expect(body.buckets[0]).toMatchObject({ input: 12, total: 22 });
+    expect(body.total.total).toBe(22);
   });
 
   test("a target with no rows answers the empty shape, not an error", async () => {
