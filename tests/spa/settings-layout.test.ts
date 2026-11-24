@@ -9,7 +9,7 @@ import { appAvatarUrl } from "../../src/contracts/app-avatar";
 import { t, type DictionaryKey } from "../../src/i18n";
 import { composeModelOptions } from "../../src/dashboard/model-membership";
 import { PROVIDER_CATALOG, PROVIDER_IDS_COMMON } from "../../src/contracts/provider-catalog.generated";
-import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
+import { parseModels, modelChainTabs, seatRoleValues, seatSelectValue, splitModelChain, type CatalogProvider, type ProviderManagementPayload, type SettingsAppMeta, type SettingsManagePayload } from "../../src/spa/pages/data";
 import {
   ProviderCombobox,
   ProviderComboboxPanel,
@@ -21,12 +21,16 @@ import {
   DraftChainPanel,
   OpsSection,
   REVIEW_DEPTH_INHERIT,
+  RuntimeHarnessEditor,
+  SeatsSection,
   SettingsView,
   draftChainTabLabel,
   githubAppSettingsUrl,
   reviewDepthOptions,
 } from "../../src/spa/pages/SettingsPage";
 import { ProviderConfigForm } from "../../src/spa/pages/providers-dialogs";
+import { LoadedProvidersSection } from "../../src/spa/pages/settings-providers";
+import type { OpNotice } from "../../src/spa/pages/PageNotice";
 import type { SpaBoot } from "../../src/spa/boot";
 import { SupportNotice } from "../../src/spa/components/SupportNotice";
 import { AppDetailPage, AppDetailView } from "../../src/spa/pages/AppDetailPage";
@@ -513,12 +517,54 @@ describe("provider combobox", () => {
 
 describe("add-entry visibility + picker usability at breadth", () => {
   test("the Add Provider entry is a labeled, bordered control heading the providers section", () => {
-    const source = readSettingsSource();
-    const body = source.slice(source.indexOf("function ProvidersSection"), source.indexOf("function groupMeta"));
-    expect(body).toContain('aria-haspopup="dialog"');
-    const triggerPos = body.indexOf('aria-haspopup="dialog"');
-    const rowsPos = body.indexOf("settings.noConfiguredProviders");
-    expect(rowsPos).toBeGreaterThan(triggerPos);
+    const payload: ProviderManagementPayload = {
+      ...detailPayload(),
+      provider_catalog: [
+        {
+          id: "anthropic",
+          label: "Anthropic",
+          tier: "builtin",
+          base_url: null,
+          api: null,
+          models: [],
+          verifiable: true,
+          usage_probe: false,
+          eligibility: "builtin",
+          display_group: "catalog",
+        },
+      ],
+      model_limits_snapshot: "2026-01-01",
+      keys: [{ provider: "anthropic", keyId: "k1", last4: "4242", updatedAt: null, verifiedAt: null, verifiedStatus: null }],
+    };
+    const html = renderToStaticMarkup(
+      createElement(LoadedProvidersSection, {
+        locale: "en",
+        payload,
+        onVerify: noopSave,
+        onSettings: noopSave,
+        onPending: () => {},
+        notice: null,
+        removeOutcome: null,
+        onOutcome: () => {},
+        onReload: async () => {},
+      }),
+    );
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+    try {
+      win.document.body.innerHTML = html;
+      const doc = win.document;
+      const add = [...doc.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "settings.addProvider"),
+      );
+      expect(add).toBeDefined();
+      expect(add!.getAttribute("aria-haspopup")).toBe("dialog");
+      expect(add!.getAttribute("data-variant")).toBe("outline");
+      const group = doc.querySelector('[data-slot="group-card"]');
+      expect(group).not.toBeNull();
+      expect(add!.compareDocumentPosition(group!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    } finally {
+      cleanup();
+    }
   });
 
   test("the catalog picker is the provider combobox: common group first, then catalog, height-capped to an internal scroll", () => {
@@ -793,9 +839,52 @@ describe("seat assignment section", () => {
     expect(seatsBody).toContain("settings.seatsCopy");
   });
 
-  test("seat selects offer Default first, then current named tabs; values coerce before render and save", () => {
-    const source = readSettingsSource();
-    expect(source).toContain('op: "save-roles"');
+  test("seat selects offer Default first, then current named tabs; values coerce before render and save", async () => {
+    const chains = [
+      { name: "deep", chain: "ark/deep", is_default: false, created_at: "t", updated_at: "t" },
+      { name: "fast", chain: "ark/fast", is_default: false, created_at: "t", updated_at: "t" },
+    ];
+    const tabs = modelChainTabs(chains);
+    expect(tabs.map((tab) => tab.id)).toEqual(["default", "deep", "fast"]);
+    expect(seatRoleValues(["review", "deep"], { review: "gone", deep: "fast" }, tabs)).toEqual({
+      review: "default",
+      deep: "fast",
+    });
+
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      const saved: Array<Record<string, string>> = [];
+      await act(async () =>
+        root.render(
+          createElement(SeatsSection, {
+            locale: "en",
+            payload: {
+              ...detailPayload(),
+              model_chains: chains,
+              model_role_ids: ["review", "deep"],
+              model_roles: { review: "gone", deep: "fast" },
+            },
+            onSettings: async (fields) => {
+              saved.push(fields);
+              return { kind: "success", message: "Changes saved." };
+            },
+          }),
+        ),
+      );
+      const saveButton = [...container.querySelectorAll("button")].find(
+        (node) => node.textContent === t("en", "settings.saveRoleModels"),
+      );
+      await act(async () => {
+        saveButton?.dispatchEvent(new win.MouseEvent("click", { bubbles: true }));
+      });
+      expect(saved).toEqual([{ op: "save-roles", role_review: "default", role_deep: "fast" }]);
+      await act(async () => root.unmount());
+    } finally {
+      cleanup();
+    }
   });
   test("seat values resolve against the current tab model: Default, named, and the delete cascade", () => {
     const tabs = modelChainTabs([
@@ -1049,10 +1138,64 @@ describe("section-scoped op feedback", () => {
     expect(t("zh_CN", "settings.removeNoChange")).toContain("未做任何更改");
   });
 
-  test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", () => {
-    const source = readSettingsSource();
-    expect(source).toContain('op: "save-sandbox-image"');
-    expect(source).toContain("sandbox_image_id");
+  test("save triggers carry a busy guard; every op replaces its region (stale-error rule)", async () => {
+    const { win, cleanup } = installDom("http://localhost/dashboard/apps/1/settings");
+    try {
+      const container = win.document.createElement("div");
+      win.document.body.appendChild(container);
+      const root = createRoot(container as unknown as Element);
+      const payload = detailPayload();
+      const sent: Array<Record<string, string>> = [];
+      let settle: ((notice: OpNotice) => void) | null = null;
+      await act(async () =>
+        root.render(
+          createElement(RuntimeHarnessEditor, {
+            locale: "en",
+            payload: {
+              ...payload,
+              app: { ...payload.app, sandbox_image_id: "legacy" },
+              sandbox_images: [{ id: "omp", enabled: true }, { id: "legacy", enabled: true }],
+            },
+            onSettings: async (fields) => {
+              sent.push(fields);
+              return await new Promise<OpNotice>((resolve) => {
+                settle = resolve;
+              });
+            },
+          }),
+        ),
+      );
+      const save = (): HTMLButtonElement =>
+        [...container.querySelectorAll("button")].find(
+          (node) => node.textContent === t("en", "settings.saveRuntimeHarness"),
+        ) as unknown as HTMLButtonElement;
+      const alert = (): string | undefined =>
+        container.querySelector('[role="alert"]')?.textContent ?? undefined;
+      const click = () =>
+        act(async () => {
+          save().dispatchEvent(new win.MouseEvent("click", { bubbles: true }) as unknown as Event);
+        });
+
+      expect(save().disabled).toBe(false);
+      await click();
+      expect(sent).toEqual([{ op: "save-sandbox-image", sandbox_image_id: "legacy" }]);
+      expect(save().disabled).toBe(true);
+      expect(save().getAttribute("data-status")).toBe("loading");
+
+      await act(async () => settle?.({ kind: "error", message: "image unavailable" }));
+      expect(save().disabled).toBe(false);
+      expect(alert()).toContain("image unavailable");
+
+      await click();
+      expect(sent).toHaveLength(2);
+      expect(alert()).toBeUndefined();
+      await act(async () => settle?.({ kind: "success", message: "Changes saved." }));
+      expect(container.querySelector('[role="status"]')?.textContent).toBe("Changes saved.");
+
+      await act(async () => root.unmount());
+    } finally {
+      cleanup();
+    }
   });
 });
 

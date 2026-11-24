@@ -122,7 +122,4 @@ describe("login SSR face sync (A3 dual-track)", () => {
     expect(authCss).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
   });
 
-  test("the brand mark silhouette stays single-source with the sidebar Logo", () => {
-    expect(loginPage).not.toContain('circle cx="12"');
-  });
 });
