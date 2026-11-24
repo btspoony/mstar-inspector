@@ -19,7 +19,7 @@ import {
 } from "../../src/store/review-route-store";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { idemKey } from "../../src/contracts/idem";
-import { HANDOFF_RECOVERY_AFTER_MS, reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
+import { HANDOFF_RECOVERY_AFTER_MS, LOST_REPLY_FALLBACK_ERROR, reconcileReviewRoute } from "../../src/pipeline/route-reconcile";
 import { LOST_REPLY_SETTLE_MIN_MS, REVIEW_ATTEMPT_CAP_MAX_MS } from "../../src/dashboard/runtime-config-store";
 import { claimAttempt } from "../../src/store/review-checks";
 import { acquireInflight } from "../../src/store/inflight-store";
@@ -1147,9 +1147,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)).toHaveLength(1);
     expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
     expect(failureRows(db)[0]!.track_id).toBe(attemptId);
-    expect(String(failureRows(db)[0]!.error)).toBe(
-      `attempt deadline ${new Date(DEADLINE_MS).toISOString()} passed more than ${WINDOW_MS} ms ago, and no reply ever arrived`,
-    );
+    expect(failureRows(db)[0]!.error).toBe(LOST_REPLY_FALLBACK_ERROR);
     expect(failureRows(db)[0]!.message).toContain("never came back");
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
     // note: That move IS the capacity release. Both arms of the hold are gone: the
@@ -1474,9 +1472,9 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
 
     // The phase records what it actually saw. An existing row is NOT a reason to
-    // refuse it — the write lands, and its clock is what tells the sync it is
-    // newer than the row (a second ahead, so the row's second-resolution
-    // `created_at` cannot tie with it).
+    // refuse it — the write lands, and the sync needs no clock: the row is
+    // selected while its content is still the reconciler's own fallback, and
+    // `nowMs` here even sits BEHIND the row's insert instant.
     expect(
       await recordAttemptObservation(db as never, {
         attemptId,
@@ -1485,7 +1483,7 @@ describe("a launched attempt whose paid reply was lost", () => {
           error:
             "the attempt container could not be read at the review step (reply-lost) — Error: late cause (after 900ms) — nothing may be concluded",
         },
-        nowMs: Date.now() + 1_000,
+        nowMs: SETTLES_AT,
       }),
     ).toBe(true);
 
@@ -1569,12 +1567,12 @@ describe("a launched attempt whose paid reply was lost", () => {
       beforeBatch: async (statements) => {
         if (injected || statements.length !== 2) return;
         injected = true;
-        // The phase's own writer. Its clock is stamped a second ahead of the
-        // row's second-resolution `created_at` so "newer" is deterministic.
+        // The phase's own writer. Its stamp deliberately sits BEHIND the row's
+        // `created_at` — the sync selects on content, never on time.
         await recordAttemptObservation(db as never, {
           attemptId,
           observation: { code: "review.paid.reply_lost", error: observedError },
-          nowMs: Date.now() + 1_000,
+          nowMs: SETTLES_AT,
         });
       },
     });
@@ -1619,7 +1617,7 @@ describe("a launched attempt whose paid reply was lost", () => {
                     updated_ms = ?
               WHERE attempt_id = ?`,
           )
-          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), Date.now() + 1_000, attemptId);
+          .run(JSON.stringify({ code: "review.paid.reply_lost", error: observedError }), SETTLES_AT, attemptId);
       },
     });
     const faulty: D1Like = {
@@ -1732,6 +1730,87 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
     expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
     expect(h.kvPuts).toHaveLength(0);
+
+    // The sync lane must not adopt it either: the phase's observation arrives
+    // after the foreign row exists, and the row is not the reconciler's own
+    // fallback shape — so the pass leaves it byte-identical.
+    const before = failureRows(db)[0]!;
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        error: "the attempt container could not be read (reply-lost) — Error: the real cause (after 500ms) — its result is not collected",
+      },
+      nowMs: SETTLES_AT,
+    });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toEqual([before]);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+  });
+
+  test("an observation stamped behind the row's creation still syncs onto the fallback row", async () => {
+    // The reported second-boundary interleaving: the pass read the handoff at
+    // .100, the phase recorded its cause at .900, and the fallback row was
+    // inserted a second LATER — so the observation's `updated_ms` sits behind
+    // the row's `created_at`. No clock decides the lane: the row is selected
+    // while its content is still the reconciler's own fallback, and it leaves
+    // the lane the moment it carries the observation.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-second-boundary";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    const fallback = failureRows(db);
+    expect(fallback).toHaveLength(1);
+    expect(String(fallback[0]!.error)).toBe(LOST_REPLY_FALLBACK_ERROR);
+
+    // The observation lands with a stamp BEFORE the row's own creation — the
+    // ordering the old timestamp predicate could never see.
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        error: "the attempt container could not be read (reply-lost) — Error: boundary cause (after 700ms) — its result is not collected",
+      },
+      nowMs: CREATED_AT,
+    });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    const synced = failureRows(db);
+    expect(synced).toHaveLength(1);
+    expect(synced[0]!.id).toBe(attemptId);
+    expect(String(synced[0]!.error)).toContain("boundary cause");
+    expect(String(synced[0]!.message)).toContain("Boundary cause");
+  });
+
+  test("a cause segment that reads like a disposition is kept verbatim", async () => {
+    // `nothing was charged because the account is suspended` is the CAUSE, not
+    // the wrapper's own `nothing was charged, a new attempt runs` disposition:
+    // only an exact constant may be dropped, so the reason survives.
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-disposition-cause";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    await recordAttemptObservation(db as never, {
+      attemptId,
+      observation: {
+        code: "review.paid.reply_lost",
+        error: "Error: request rejected — nothing was charged because the account is suspended (after 1200ms)",
+      },
+      nowMs: SETTLES_AT,
+    });
+
+    const env = await h.makeEnv({ DB: db as never });
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: { send: async () => {} } as never }, SETTLES_AT);
+
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(String(settled[0]!.message)).toContain("Request rejected — nothing was charged because the account is suspended");
+    expect(String(settled[0]!.message)).not.toContain("1200ms");
   });
 });
 

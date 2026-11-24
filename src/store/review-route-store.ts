@@ -226,8 +226,8 @@ function toObservation(value: unknown): AttemptObservation | null {
  * pass may settle the attempt before the phase records its cause, and the late
  * observation is then applied to that same row by
  * `listLateObservedFailures`/`syncSettledFailureRow`. `nowMs` lands on
- * `updated_ms` — the clock that tells that sync the observation is newer than
- * the row it has to correct.
+ * `updated_ms` — the same clock the recovery quiet period reads (the sync
+ * orders by content, never by time).
  */
 export async function recordAttemptObservation(
   db: D1Like,
@@ -247,20 +247,25 @@ export async function recordAttemptObservation(
 }
 
 /**
- * Failure rows whose attempt recorded its observation AFTER the row was written.
+ * Failure rows still carrying the writer's own fallback while their attempt
+ * holds an observation. Idempotence is content, never a clock: no timestamp is
+ * compared anywhere here, so an observation recorded between the composer's
+ * read and its insert — across any second boundary — still reaches the row.
  *
- * The settlement composes its row from the observation it reads at insertion
- * time; an observation the phase writes afterwards would otherwise die with it.
- * `f.error` differing from the observation's own error is exactly "not synced
- * yet", so a synced row leaves this lane for good — a second pass selects
- * nothing and writes nothing.
+ * `f.error IS NOT` the observation's own error is exactly "not synced yet": a
+ * synced row leaves this lane for good, a second pass selects nothing and
+ * writes nothing.
  *
- * `updated_ms > created_at` is the "newer" test. `created_at` is a
- * second-resolution `datetime('now')`, so an observation inside the row's own
- * second also counts as newer; that is the harmless direction (the row then
- * carries the story it should have carried anyway).
+ * The writer's OWN shape is what keeps a foreign row out: `f.track_id` must
+ * name the attempt, `f.error_code` the lane's code, `f.error` one of the
+ * writer's exact fallback sentences and `f.message` its fallback summary — the
+ * caller binds its own constants, so a row another producer wrote is never
+ * selected even when an observation exists.
  */
-export async function listLateObservedFailures(db: D1Like, limit: number): Promise<AttemptHandoff[]> {
+export async function listLateObservedFailures(
+  db: D1Like,
+  input: { limit: number; fallbackCode: string; fallbackErrors: readonly string[]; fallbackMessage: string },
+): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
       `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
@@ -269,21 +274,24 @@ export async function listLateObservedFailures(db: D1Like, limit: number): Promi
          JOIN review_failures f ON f.id = h.attempt_id
         WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error') IS NOT NULL
           AND f.error IS NOT json_extract(h.payload_json, '$.${OBSERVATION_KEY}.error')
-          AND h.updated_ms > CAST(strftime('%s', f.created_at) AS INTEGER) * 1000
+          AND f.track_id = h.attempt_id
+          AND f.error_code = ?
+          AND f.error IN (${input.fallbackErrors.map(() => "?").join(",")})
+          AND f.message = ?
         ORDER BY h.updated_ms
         LIMIT ?`,
     )
-    .bind(limit)
+    .bind(input.fallbackCode, ...input.fallbackErrors, input.fallbackMessage, input.limit)
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
 }
 
 /**
  * Apply a late observation to the attempt's existing failure row: the SAME row,
- * keyed by the attempt, rewritten to the story the phase actually observed. Only
- * the reconciler calls this — it is the only failure-row writer — and the
- * selector above stops selecting the row once it carries the observation, so
- * this lands once per attempt.
+ * keyed by the attempt, rewritten to the story the phase actually observed.
+ * The selector above is the ownership proof — only the reconciler's own
+ * fallback shape reaches this call — so a keyed update is enough, and a row
+ * already carrying the observation leaves the lane for good.
  */
 export async function syncSettledFailureRow(
   db: D1Like,

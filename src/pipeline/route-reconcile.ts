@@ -5,8 +5,8 @@ import {
   IDEMPOTENCY_SECONDS,
   idemKey,
 } from "../contracts/idem";
-import { getLostReplySettleMs, REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
-import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
+import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
+import { ATTEMPT_WRAPPER_SENTENCES, markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
 import { settlementFailureRowStatement } from "../store/failure-store";
@@ -83,41 +83,55 @@ const MECHANISM_TERMS: readonly (readonly [RegExp, string])[] = [
 ];
 
 /**
- * The wrapper and disposition sentences OUR OWN throw sites put around a cause
- * (`src/pipeline/review-attempt.ts`): a leading "…could not be read…" and a
- * trailing statement of what was NOT concluded. A closed, prefix-anchored list
- * on purpose — the cause text itself is never filtered, so a real reason that
- * merely reads like a disposition ("no capacity available") keeps its words.
+ * The sentences OUR OWN throw sites prepend or append around a cause
+ * (`ATTEMPT_WRAPPER_SENTENCES`, `src/pipeline/review-attempt.ts` — the throw
+ * sites' owner module). A segment is dropped only when it equals one of these
+ * constants byte for byte; provenance, not prefix, is what classifies it, so a
+ * real cause that merely reads like a disposition ("nothing was charged
+ * because the account is suspended") keeps all of its words.
  */
-const CAUSE_NOISE: readonly RegExp[] = [
-  /^the attempt container could not be read\b/i,
-  /^nothing may be concluded\b/i,
-  /^nothing is provisioned for it\b/i,
-  /^nothing may run on it\b/i,
-  /^nothing may start\b/i,
-  /^nothing was charged\b/i,
-  /^its result is not collected\b/i,
-  /^the paid step is not taken\b/i,
-  /^the paid outcome is unconfirmed\b/i,
-  /^no send authority can be established\b/i,
-  /^refusing a second launch\b/i,
-];
+const CAUSE_WRAPPERS: ReadonlySet<string> = new Set(ATTEMPT_WRAPPER_SENTENCES);
+
+/**
+ * The fallback `review_failures.error` the lost-reply lane writes when no
+ * observation existed yet — two constants (anchored / pre-column), which is
+ * what lets the late-observation sync PROVE a row is this reconciler's own
+ * before rewriting it. The deadline and the grace are durable on the launch
+ * and handoff rows; the sentence states the conclusion.
+ */
+export const LOST_REPLY_FALLBACK_ERROR =
+  "its attempt deadline plus the post-deadline grace elapsed, and no reply ever arrived";
+export const LOST_REPLY_FALLBACK_ERROR_UNANCHORED =
+  "a pre-column legacy attempt carries no frozen deadline; its launch outlived the maximum attempt cap plus the post-deadline grace, and no reply ever arrived";
+
+/**
+ * The exact row shape this reconciler writes for a lost reply with no
+ * observation: attempt-keyed, the lane's own code, and one of its fallback
+ * sentences. The late-observation sync binds this shape — a row any other
+ * producer wrote is never selected, never rewritten.
+ */
+const LOST_REPLY_FALLBACK_SHAPE = {
+  fallbackCode: "review.paid.reply_lost",
+  fallbackErrors: [LOST_REPLY_FALLBACK_ERROR, LOST_REPLY_FALLBACK_ERROR_UNANCHORED],
+  fallbackMessage: FAILURE_SUMMARIES["review.paid.reply_lost"],
+} as const;
 
 /**
  * The cause an author can be shown, out of the phase's own sentence.
  *
  * A throw site writes `<wrapper — cause — disposition>`; only the middle is the
- * site's evidence. Exactly the known wrapper/disposition segments are dropped
- * (prefix-anchored, closed list above) and everything else is kept verbatim, so
- * a cause that itself carries the ` — ` convention keeps all of its words. The
- * `Name:` prefix and the `(after <n>ms)` suffix are the throw boundary's own
+ * site's evidence. A segment is dropped only when it IS one of the shared
+ * wrapper constants (exact match, not a prefix rule) and everything else is
+ * kept verbatim, so a cause that itself carries the ` — ` convention — or that
+ * merely begins like a disposition — keeps all of its words. The `Name:`
+ * prefix and the `(after <n>ms)` suffix are the throw boundary's own
  * envelope; what remains is elided term by term and bounded.
  */
 function authorFacingCause(observed: AttemptObservation): string {
   let cause = observed.error
     .split(" — ")
     .map((segment) => segment.trim())
-    .filter((segment) => segment !== "" && !CAUSE_NOISE.some((noise) => noise.test(segment)))
+    .filter((segment) => segment !== "" && !CAUSE_WRAPPERS.has(segment))
     .join(" — ")
     .replace(/^[A-Za-z]*Error:\s*/, "")
     .replace(/\(\s*after\s+\d+\s*ms\s*\)/gi, "")
@@ -367,13 +381,11 @@ async function settleLostReplies(
     return;
   }
   for (const handoff of candidates) {
-    // An anchored row settles at its frozen deadline; a pre-column legacy row has
-    // none and settles at the selector's cap-ceiling bound.
-    const deadlineMs = handoff.deadlineMs;
+    // The fallback sentence is a constant per row shape — the shared constant
+    // is also the PROOF the late-observation sync uses to tell a row this
+    // reconciler wrote from a row any other producer owns.
     const detail =
-      deadlineMs === null
-        ? `a pre-column legacy attempt carries no frozen deadline; its launch is older than the maximum attempt cap (${REVIEW_ATTEMPT_CAP_MAX_MS} ms) plus ${windowMs} ms of grace, and no reply ever arrived`
-        : `attempt deadline ${new Date(deadlineMs).toISOString()} passed more than ${windowMs} ms ago, and no reply ever arrived`;
+      handoff.deadlineMs === null ? LOST_REPLY_FALLBACK_ERROR_UNANCHORED : LOST_REPLY_FALLBACK_ERROR;
     let moved: D1Result[];
     try {
       moved = await env.DB.batch([
@@ -512,14 +524,19 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
   await settleLostReplies(env, lostReply.settleMs, nowMs, env.log);
   // The late observation, once. The settlement composes its row from the
   // observation it can read at insertion time; a phase that records its cause
-  // afterwards — after the pass settled the attempt — would otherwise leave a row
-  // stating only the fallback. This is the ONE repair: attempt-keyed, in place,
-  // and the selector drops a row as soon as it carries the observation, so a
-  // second pass selects nothing. The reconciler stays the only failure-row writer;
-  // a fault leaves the row selected for the next pass.
+  // afterwards — after the pass settled the attempt — would otherwise leave a
+  // row stating only the fallback. This is the ONE repair: attempt-keyed, in
+  // place. Idempotence is content, never a clock: only the reconciler's own
+  // fallback shape (its code, its sentence, its summary) is selected, a row
+  // already carrying the observation leaves the lane for good, and a row any
+  // other producer wrote is never touched. A fault leaves the row selected
+  // for the next pass.
   let lateObserved: AttemptHandoff[] = [];
   try {
-    lateObserved = await listLateObservedFailures(env.DB, ROUTE_RECOVERY_LIMIT);
+    lateObserved = await listLateObservedFailures(env.DB, {
+      ...LOST_REPLY_FALLBACK_SHAPE,
+      limit: ROUTE_RECOVERY_LIMIT,
+    });
   } catch {
     lateObserved = [];
   }
