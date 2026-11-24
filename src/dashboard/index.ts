@@ -4442,7 +4442,15 @@ const pullRequestRecordsRoute = async (
       limit,
     });
   }
-  const page = await gate.store.listPullRequestFailures(gate.scope, owner, repo, number, { offset, limit });
+  const rawScope = c.req.query("scope") ?? "";
+  if (rawScope !== "" && rawScope !== "head" && rawScope !== "all") {
+    return c.json({ error: "invalid scope" }, 400);
+  }
+  const page = await gate.store.listPullRequestFailures(gate.scope, owner, repo, number, {
+    offset,
+    limit,
+    history: rawScope === "all",
+  });
   if (page === null) return c.json({ error: "unknown pull request" }, 404);
   return c.json({ items: page.items, total: page.total, limit });
 };

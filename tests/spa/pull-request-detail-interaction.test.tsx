@@ -3,7 +3,7 @@ import { act, createElement, StrictMode } from "react";
 import { t } from "../../src/i18n";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import type { PullRequestFailure, PullRequestFinding } from "../../src/spa/pages/data";
-import { currentDetailRead, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
+import { currentDetailRead, PullRequestDetail, type DetailRead } from "../../src/spa/pages/PullRequestDetail";
 import {
   DETAIL,
   FAILURES,
@@ -11,6 +11,7 @@ import {
   jsonResponse,
   mountDetailView,
   mountTabAcrossTargets,
+  mountView,
   page,
   press,
   scene,
@@ -778,6 +779,110 @@ describe("pull request detail (mounted)", () => {
           (node.textContent ?? "").includes(t("en", "pullRequests.copyFailed")),
         ),
       ).toHaveLength(0);
+    } finally {
+      await unmount();
+    }
+  });
+});
+
+describe("the failures scope control reaches history over the wire", () => {
+  // A passing current head: the head-scope failures page is empty and the
+  // count is 0, while one failure stays reachable under `scope=all`. The
+  // stub enforces the route's scope vocabulary, so a request that forgets or
+  // misspells it answers the head page or a 400, not the history rows.
+  const headPassing = () =>
+    scene(
+      { findings: page([]), reviews: page([]), failures: page(FAILURES), headFailures: page([]) },
+      {},
+      DETAIL.latest_review,
+      0,
+    );
+  const scopeControl = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('[data-slot="failure-scope"] [role="combobox"]');
+
+  test("the default read is head-scoped and the scope select reaches the history rows", async () => {
+    const { container, win, fetches, unmount } = await mountDetailView(headPassing());
+    try {
+      const failuresTab = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) =>
+        (tab.getAttribute("aria-label") ?? "").startsWith(t("en", "pullRequests.failures")),
+      );
+      await press(win, failuresTab);
+
+      // The landing read asks the bare failures URL — no scope param — and a
+      // passing head shows zero rows, zero count, and no danger dot.
+      const failuresReads = fetches.filter((url) => url.includes("/failures?"));
+      expect(failuresReads).toHaveLength(1);
+      expect(failuresReads[0]).not.toContain("scope=");
+      expect(container.querySelectorAll('[data-slot="failure-stage"]')).toHaveLength(0);
+      expect(
+        [...container.querySelectorAll('[data-slot="metric"]')].find(
+          (metric) => metric.querySelector('[data-slot="metric-key"]')?.textContent === t("en", "pullRequests.failures"),
+        )?.querySelector('[data-slot="metric-value"]')?.textContent,
+      ).toBe("0");
+      expect(container.querySelector('[role="tabpanel"] p')?.textContent).toBe(
+        t("en", "pullRequests.noFailures"),
+      );
+      expect(scopeControl(container)?.getAttribute("aria-label")).toBe(
+        t("en", "pullRequests.failureScope"),
+      );
+      expect(scopeControl(container)?.textContent).toContain(t("en", "pullRequests.failureScopeHead"));
+
+      // "All history" must actually reach the route: scope=all on the wire,
+      // the historical row on screen.
+      await press(win, scopeControl(container));
+      const allOption = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === t("en", "pullRequests.failureScopeAll"),
+      );
+      expect(allOption).toBeDefined();
+      await press(win, allOption as unknown as Element);
+
+      const scoped = fetches.filter((url) => url.includes("/failures?")).at(-1) ?? "";
+      expect(scoped).toContain("scope=all");
+      expect(scoped).toContain("offset=0");
+      expect(container.querySelectorAll('[data-slot="failure-stage"]')).toHaveLength(1);
+      expect(container.textContent ?? "").toContain("sandbox");
+      expect(scopeControl(container)?.textContent).toContain(t("en", "pullRequests.failureScopeAll"));
+    } finally {
+      await unmount();
+    }
+  });
+
+  test("the scope control labels localize", async () => {
+    const built = headPassing();
+    const pr = built.detail.pull_request;
+    const stub = detailFetch(() => built);
+    const { container, win, unmount } = await mountView(
+      createElement(PullRequestDetail, {
+        locale: "zh_CN",
+        scope: { kind: "target", targetId: "1" },
+        prKey: `${pr.owner}/${pr.repo}/${pr.number}`,
+        prRef: { owner: pr.owner, repo: pr.repo, number: pr.number },
+        onBack: () => {},
+      }),
+      { fetch: stub.fetch },
+    );
+    try {
+      const failuresTab = [...container.querySelectorAll<HTMLElement>('[role="tab"]')].find((tab) =>
+        (tab.getAttribute("aria-label") ?? "").startsWith(t("zh_CN", "pullRequests.failures")),
+      );
+      await press(win, failuresTab);
+
+      expect(container.querySelectorAll('[data-slot="failure-stage"]')).toHaveLength(0);
+      expect(
+        [...container.querySelectorAll('[data-slot="metric"]')].find(
+          (metric) => metric.querySelector('[data-slot="metric-key"]')?.textContent === t("zh_CN", "pullRequests.failures"),
+        )?.querySelector('[data-slot="metric-value"]')?.textContent,
+      ).toBe("0");
+      expect(scopeControl(container)?.getAttribute("aria-label")).toBe(
+        t("zh_CN", "pullRequests.failureScope"),
+      );
+      await press(win, scopeControl(container));
+      const allOption = [...win.document.querySelectorAll('[role="option"]')].find(
+        (row) => row.textContent === t("zh_CN", "pullRequests.failureScopeAll"),
+      );
+      expect(allOption).toBeDefined();
+      await press(win, allOption as unknown as Element);
+      expect(container.querySelectorAll('[data-slot="failure-stage"]')).toHaveLength(1);
     } finally {
       await unmount();
     }

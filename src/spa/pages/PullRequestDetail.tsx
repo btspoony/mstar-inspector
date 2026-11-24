@@ -80,10 +80,13 @@ const SEVERITY_ALL = "all";
 
 type SectionStatus = "idle" | "loading" | "ok" | "error";
 
-/** One section's read state: the requested window, the filter and the loaded page. */
+/** One section's read state: the requested window, the filter, the failures
+ * scope (head vs all history — meaningful only on the failures section) and
+ * the loaded page. */
 export type SectionState<K extends RecordSection> = {
   offset: number;
   severity: string;
+  history?: boolean;
   status: SectionStatus;
   page: RecordPage<RecordPageItems[K]> | null;
   newest: RecordPage<RecordPageItems[K]> | null;
@@ -92,11 +95,11 @@ export type SectionState<K extends RecordSection> = {
 /** Every section's state, keyed by family. */
 export type RecordSections = { [K in RecordSection]: SectionState<K> };
 
-type PageRequest = { offset: number; severity: string };
+type PageRequest = { offset: number; severity: string; history?: boolean };
 
 function useRecordSection<K extends RecordSection>(
   section: K,
-  endpoint: (page: { offset: number; limit: number; severity?: string }) => string,
+  endpoint: (page: { offset: number; limit: number; severity?: string; history?: boolean }) => string,
 ): [SectionState<K>, (request: PageRequest) => void] {
   const [state, setState] = useState<SectionState<K>>({
     offset: 0,
@@ -108,12 +111,19 @@ function useRecordSection<K extends RecordSection>(
   const ticket = useRef(0);
   const inFlight = useRef<string | null>(null);
   const load = (request: PageRequest): void => {
-    const key = `${request.offset}\u0000${request.severity}`;
+    const key = `${request.offset}\u0000${request.severity}\u0000${request.history === true ? 1 : 0}`;
     if (inFlight.current === key) return;
     inFlight.current = key;
     const mine = (ticket.current += 1);
     setState((previous) => ({ ...previous, status: "loading" }));
-    fetchJson(endpoint({ offset: request.offset, limit: RECORD_PAGE_SIZE, severity: request.severity }))
+    fetchJson(
+      endpoint({
+        offset: request.offset,
+        limit: RECORD_PAGE_SIZE,
+        severity: request.severity,
+        history: request.history,
+      }),
+    )
       .then((raw) => {
         if (mine !== ticket.current) return;
         const page = parseRecordPage(section, raw);
@@ -121,10 +131,15 @@ function useRecordSection<K extends RecordSection>(
           ...previous,
           offset: request.offset,
           severity: request.severity,
+          history: request.history === true,
           status: page === null ? "error" : "ok",
           page: page ?? previous.page,
           newest:
-            previous.newest !== null || page === null || request.offset !== 0 || request.severity !== ""
+            previous.newest !== null ||
+            page === null ||
+            request.offset !== 0 ||
+            request.severity !== "" ||
+            request.history === true
               ? previous.newest
               : page,
         }));
@@ -135,6 +150,7 @@ function useRecordSection<K extends RecordSection>(
           ...previous,
           offset: request.offset,
           severity: request.severity,
+          history: request.history === true,
           status: "error",
         }));
       })
@@ -245,9 +261,12 @@ export function PullRequestDetail({
   const [reviews, loadReviews] = useRecordSection("reviews", (page) =>
     scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "reviews", page),
   );
-  const [failures, loadFailures] = useRecordSection("failures", (page) =>
-    scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "failures", page),
-  );
+  const [failures, loadFailures] = useRecordSection("failures", (page) => {
+    const url = scopedPullRequestRecordsUrl(apiBase(), scope, prRef, "failures", page);
+    // `scope=all` is the failures route's all-history scope (no head predicate);
+    // everything else — head scope included — sends no scope parameter.
+    return page.history === true ? `${url}&scope=all` : url;
+  });
   const records: RecordSections = { findings, reviews, failures };
 
   const loadPage = (section: RecordSection, page: Partial<PageRequest>): void => {
@@ -256,7 +275,11 @@ export function PullRequestDetail({
     } else if (section === "reviews") {
       loadReviews({ offset: page.offset ?? reviews.offset, severity: page.severity ?? reviews.severity });
     } else {
-      loadFailures({ offset: page.offset ?? failures.offset, severity: page.severity ?? failures.severity });
+      loadFailures({
+        offset: page.offset ?? failures.offset,
+        severity: page.severity ?? failures.severity,
+        history: page.history ?? (failures.history === true),
+      });
     }
   };
 
@@ -354,17 +377,20 @@ export function PullRequestDetailView({
   records,
   onEnsureSection,
   onLoadPage,
+  initialFamily,
 }: {
   locale: SpaBoot["locale"];
   detail: PullRequestDetail;
   records: RecordSections;
   onEnsureSection: (section: RecordSection) => void;
   onLoadPage: (section: RecordSection, page: Partial<PageRequest>) => void;
+  /** Mount-time family override — the counts default holds otherwise. */
+  initialFamily?: RecordFamily;
 }) {
   const pr = detail.pull_request;
   const counts = detail.counts;
   const pill = pullRequestStatePill(locale, pr.state);
-  const [family, setFamily] = useState<RecordFamily>(() => defaultFamily(counts));
+  const [family, setFamily] = useState<RecordFamily>(() => initialFamily ?? defaultFamily(counts));
   const [openFindings, setOpenFindings] = useState<Readonly<Record<string, boolean>>>({});
   const baseId = useId();
 
@@ -636,6 +662,29 @@ export function PullRequestDetailView({
                       {t(locale, option.labelKey)}
                     </SelectItem>
                   ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
+          {family === "failures" ? (
+            <div data-slot="failure-scope" className="flex items-center gap-2">
+              <Select
+                value={records.failures.history === true ? "all" : "head"}
+                disabled={records.failures.status === "loading"}
+                onValueChange={(next) =>
+                  onLoadPage("failures", { offset: 0, history: next === "all" })
+                }
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="min-w-40 shrink-0"
+                  aria-label={t(locale, "pullRequests.failureScope")}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="head">{t(locale, "pullRequests.failureScopeHead")}</SelectItem>
+                  <SelectItem value="all">{t(locale, "pullRequests.failureScopeAll")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>

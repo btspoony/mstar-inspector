@@ -1420,7 +1420,7 @@ describe("pull request detail face (static SSR)", () => {
   test("the findings filter lives in the toolbar row, only while the PR has findings", async () => {
     const filter = async (markup: string) =>
       withMarkup(markup, (container) => {
-        const trigger = container.querySelector('[role="combobox"]');
+        const trigger = container.querySelector(`[role="combobox"][aria-label="${t("en", "pullRequests.filterSeverity")}"]`);
         const toolbar = container.querySelector('[data-slot="record-toolbar"]');
         const findingsPanel = container.querySelector('[role="tabpanel"][data-state="active"]');
         return {
