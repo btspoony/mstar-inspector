@@ -144,14 +144,23 @@ export const DETAIL: PullRequestDetailPayload = {
   latest_review: LATEST_REVIEW,
 };
 
-/** A head and the pages it describes, as both mount helpers take them. */
-export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages };
+/** A head and the pages it describes, as both mount helpers take them.
+ * `pages.failures` is the ALL-HISTORY page (`scope=all`); `headFailures` is
+ * the head-scope page the bare failures read serves and the only total the
+ * head's failure count may claim. */
+export type DetailScene = {
+  detail: PullRequestDetailPayload;
+  pages: RecordPages;
+  headFailures: RecordPage<PullRequestFailure>;
+};
 
 /**
- * A detail scene: `over` replaces a family's page, and every count follows the
- * supplied totals — so a scene's head can never claim more records than the
- * stub will serve. `latest` overrides the head's newest review (the headline's
- * only source), leaving the section pages untouched.
+ * A detail scene: `over` replaces a family's page — plus `headFailures`, the
+ * failures page the head scope answers while `pages.failures` stays the
+ * all-history page — and every count follows the supplied totals, so a
+ * scene's head can never claim more records than the stub will serve.
+ * `latest` overrides the head's newest review (the headline's only source),
+ * leaving the section pages untouched.
  *
  * The findings count and the must-fix tally are both facts about the WHOLE
  * family, so both come from the scene's findings page: the count is the page's
@@ -167,12 +176,14 @@ export type DetailScene = { detail: PullRequestDetailPayload; pages: RecordPages
  * with whichever page the test loaded.
  */
 export function scene(
-  over: Partial<RecordPages> = {},
+  over: Partial<RecordPages> & { headFailures?: RecordPage<PullRequestFailure> } = {},
   row: Partial<PullRequestHead> = {},
   latest: Partial<PullRequestLatestReview> | null = DETAIL.latest_review,
   mustFix?: number,
 ): DetailScene {
-  const pages: RecordPages = { ...RECORDS, ...over };
+  const { headFailures, ...sectionPages } = over;
+  const pages: RecordPages = { ...RECORDS, ...sectionPages };
+  const failures = headFailures ?? pages.failures;
   const findings = pages.findings;
   if (mustFix === undefined && findings.items.length !== findings.total) {
     throw new Error(
@@ -186,13 +197,14 @@ export function scene(
       counts: {
         findings: findings.total,
         reviews: pages.reviews.total,
-        failures: pages.failures.total,
+        failures: failures.total,
         must_fix:
           mustFix ?? findings.items.filter((finding) => finding.severity === MUST_FIX_SEVERITY).length,
       },
       latest_review: latest === null || base === null ? null : { ...base, ...latest },
     },
     pages,
+    headFailures: failures,
   };
 }
 
@@ -280,7 +292,10 @@ export async function mountView(
 /**
  * A fetch stub for the detail host: the head read answers that TARGET's
  * `detail`, and each record read pages that target's family — `offset`/`limit` slice its
- * rows and `severity` filters findings, so a mounted test sees a real page
+ * rows and `severity` filters findings, and the failures read answers its
+ * `scope`: `all` pages `pages.failures`, absent/`head` pages `headFailures`,
+ * anything else the route's own `invalid scope` 400 — so a mounted test sees
+ * a real page
  * swap. `sceneFor` receives the target id the URL names (or "" for the
  * workspace scope), so one stub can serve different targets. Every request is
  * recorded for the "one read per switch"
@@ -296,7 +311,9 @@ export async function mountView(
  * not have, and a hand copy of the vocabulary would answer a set the route no
  * longer enforces. `unclassified=1` is the filter's complement (the catch-all
  * bucket), refused when combined with `severity` exactly as the route refuses
- * it.
+ * it. The failures `scope` is likewise the route's own vocabulary (`""`,
+ * `head`, `all`); `headFailures` models the head-scope page a scoped scene
+ * states.
  */
 export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetch: typeof globalThis.fetch; fetches: string[] } {
   const fetches: string[] = [];
@@ -314,6 +331,16 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
       if (section === "findings" && unclassified && severity !== "") {
         return jsonResponse({ error: "invalid filter" }, 400);
       }
+      const scopeParam = url.searchParams.get("scope") ?? "";
+      const failuresPage =
+        scopeParam === "" || scopeParam === "head"
+          ? sceneValue.headFailures
+          : scopeParam === "all"
+            ? sceneValue.pages.failures
+            : null;
+      if (section === "failures" && failuresPage === null) {
+        return jsonResponse({ error: "invalid scope" }, 400);
+      }
       const rows =
         section === "findings"
           ? sceneValue.pages.findings.items.filter((finding) =>
@@ -323,14 +350,15 @@ export function detailFetch(sceneFor: (targetId: string) => DetailScene): { fetc
             )
           : section === "reviews"
             ? sceneValue.pages.reviews.items
-            : sceneValue.pages.failures.items;
+            : failuresPage!.items;
+      const sectionPage = section === "failures" ? failuresPage! : sceneValue.pages[section];
       const offset = Number(url.searchParams.get("offset") ?? "0");
       const limit = Number(url.searchParams.get("limit") ?? "10");
-      const applied = Math.min(limit, sceneValue.pages[section].limit ?? limit);
+      const applied = Math.min(limit, sectionPage.limit ?? limit);
       const filtered = section === "findings" && (severity !== "" || unclassified);
       return jsonResponse({
         items: rows.slice(offset, offset + applied),
-        total: filtered ? rows.length : sceneValue.pages[section].total,
+        total: filtered ? rows.length : sectionPage.total,
         limit: applied,
       });
     }
