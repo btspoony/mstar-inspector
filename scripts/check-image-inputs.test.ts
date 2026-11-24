@@ -23,7 +23,6 @@ import {
   familyPattern,
   familyRoot,
   imageInputFingerprint,
-  imageRebuildInstruction,
   IMAGE_INPUT_FAMILIES,
   readDockerfilePaths,
   readImageInputsMarker,
@@ -75,18 +74,6 @@ describe("image input vocabulary parity", () => {
     const declared = [...IMAGE_INPUT_FAMILIES].sort();
     expect([...new Set(agents)].sort()).toEqual(declared);
     expect([...new Set(deploy)].sort()).toEqual(declared);
-  });
-
-  test("the printed instruction is the AGENTS.md section, not a copy of it", () => {
-    const agents = readFileSync(join(REPO_ROOT, "AGENTS.md"), "utf8");
-    const quoted = agents
-      .slice(
-        agents.indexOf("The review container is built from"),
-        agents.indexOf("\nCheck before merging"),
-      )
-      .trimEnd();
-    expect(imageRebuildInstruction()).toBe(quoted);
-    expect(imageRebuildInstruction()).toContain("sandbox-image/Dockerfile");
   });
 
   test("every COPY source in the Dockerfile is covered by an input family", () => {

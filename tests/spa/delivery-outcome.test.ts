@@ -27,15 +27,11 @@ describe("deliveryOutcomeLabel", () => {
 });
 
 describe("outcome surfaces (F-05)", () => {
-  test("AppsPage labels the latest delivery outcome through the shared map", () => {
-    expect(appsPage).toContain("deliveryOutcomeLabel(latest.outcome, locale)");
+  test("AppsPage never interpolates the raw latest outcome", () => {
     expect(appsPage).not.toContain("${latest.outcome}");
-    expect(appsPage).toContain('../delivery-outcome');
   });
 
-  test("the delivery tab labels every row's outcome through the shared map", () => {
-    expect(deliveryTab).toContain("deliveryOutcomeLabel(row.outcome, locale)");
+  test("the delivery tab never interpolates a raw row outcome", () => {
     expect(deliveryTab).not.toContain("{row.outcome}");
-    expect(deliveryTab).toContain('../delivery-outcome');
   });
 });

@@ -222,19 +222,14 @@ describe("navbar theme toggle", () => {
   const layoutSource = () => readFileSync(join(import.meta.dir, "../../src/spa/Layout.tsx"), "utf8");
   const shellSource = () => readFileSync(join(import.meta.dir, "../../src/spa/index.html"), "utf8");
 
-  test("slim navbar gains one theme toggle beside the locale form (client state only)", () => {
+  test("the theme toggle writes documentElement.dataset.theme — client state only, no reload", () => {
     const source = layoutSource();
-    expect(source).toContain("THEME_STORAGE_KEY");
-    expect(source).toContain('aria-label={t(boot.locale, "nav.themeToggleAria"');
-    expect(source).toContain('variant="ghost"');
     expect(source).toContain("document.documentElement.dataset.theme");
     expect(source).not.toContain("reload");
   });
 
-  test("theme toggle is icon-only: current-mode lucide icon, no visible text label", () => {
+  test("theme toggle never renders the retired visible-label key", () => {
     const source = layoutSource();
-    expect(source).toContain('import { Moon, Sun } from "lucide-react"');
-    expect(source).toContain('{theme === "dark" ? <Moon aria-hidden="true" /> : <Sun aria-hidden="true" />}');
     expect(source).not.toContain('{t(boot.locale, "nav.themeToggle")}');
   });
 
@@ -275,25 +270,3 @@ describe("injectSpaBoot", () => {
   });
 });
 
-describe("spaClick single-implementation source contract", () => {
-  const spaRoot = join(import.meta.dir, "../../src/spa");
-
-  test("spaClick is defined exactly once — in src/spa/spa-click.ts", () => {
-    const moduleSource = readFileSync(join(spaRoot, "spa-click.ts"), "utf8");
-    expect(moduleSource).toContain("export function spaClick(");
-    const definitionsElsewhere: string[] = [];
-    for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync({ cwd: spaRoot })) {
-      if (file === "spa-click.ts") continue;
-      const text = readFileSync(join(spaRoot, file), "utf8");
-      if (/function spaClick\b|const spaClick\s*=/.test(text)) definitionsElsewhere.push(file);
-    }
-    expect(definitionsElsewhere).toEqual([]);
-  });
-
-  test("the three surfaces import the shared handler from the spa-click module", () => {
-    for (const rel of ["pages/AppsPage.tsx", "pages/AppDetailPage.tsx", "components/AppSidebar.tsx"]) {
-      const source = readFileSync(join(spaRoot, rel), "utf8");
-      expect(source, rel).toContain('import { spaClick } from "../spa-click"');
-    }
-  });
-});

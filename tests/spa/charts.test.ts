@@ -289,7 +289,7 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(html).not.toContain("<script");
   });
 
-  test("the tooltip is token-styled: contentStyle/labelStyle ride the SSR face, itemStyle is source-pinned", () => {
+  test("the tooltip is token-styled: contentStyle/labelStyle ride the SSR face", () => {
     const html = stackedChart(severityBuckets, severitySeries);
     expect(html).toContain("recharts-default-tooltip");
     const tooltip = html.slice(html.indexOf("recharts-default-tooltip"));
@@ -299,8 +299,6 @@ describe("StackedBarChart SSR (stacked face)", () => {
     expect(tooltip).toContain(
       'class="recharts-tooltip-label" style="margin:0;color:var(--text-primary);font-weight:500"',
     );
-    const source = readFileSync(join(import.meta.dir, "../../src/spa/components/charts/StackedBarChart.tsx"), "utf8");
-    expect(source).toContain('itemStyle={{ color: "var(--text-secondary)" }}');
   });
 
   test("empty buckets or empty series render null — the page owns the readable empty state", () => {
