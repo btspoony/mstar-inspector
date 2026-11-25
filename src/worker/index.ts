@@ -578,14 +578,18 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       });
       if (routeGate.degraded) console.warn(line);
       else console.log(line);
+        // The outcome decides the reason: a paused App or a global kill switch
+        // still reads `paused` (and so records the same null reason the
+        // gate-on path would), never a gate it was never refused by.
+        const outcome = deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, false, true);
       try {
         await appsStore.recordDelivery({
           appId: row.id,
           eventName,
-          outcome: deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, false, true),
+          outcome: outcome,
           statusCode: null,
           repositoryFullName: webhookRepositoryFullName(classified),
-          reason: `review.route.workflow gate off (degraded=${routeGate.degraded})`,
+          reason: outcome === "refused" ? `review.route.workflow gate off (degraded=${routeGate.degraded})` : null,
         });
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
