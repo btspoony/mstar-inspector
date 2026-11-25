@@ -1063,6 +1063,10 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(deliveriesFor(db, appRow.id)).toEqual([
       { event_name: "pull_request", outcome: "paused", status_code: null },
     ]);
+    const reason = db.raw
+      .query("SELECT reason FROM webhook_deliveries WHERE bot_id = ?")
+      .all(appRow.id) as Array<{ reason: string | null }>;
+    expect(reason).toEqual([{ reason: null }]);
   });
 
   test("route gate off after a successful delivery: the refused row wins the dashboard's ordered read", async () => {
