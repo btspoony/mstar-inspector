@@ -1,6 +1,7 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import type { ReviewCoverage } from "./coverage-wire";
 import type { RecheckDoc, RecheckInput, RecheckStatus } from "./recheck-wire";
 import type { PrContext, ReportDoc } from "./report-wire";
 import type { TokenUsageBucket } from "./token-usage-wire";
@@ -137,6 +138,12 @@ export type AgentRuntimeRunInput = {
 /** One completed review run: the validated envelope plus its optional side documents. */
 export type ReviewRunResult = {
   envelope: MstarReviewV1;
+  /**
+   * The run's seat coverage, present on every delivered run and absent only
+   * when no seat produced usable output (that round is a failure, never a
+   * partial review). Transport metadata beside the closed envelope.
+   */
+  coverage?: ReviewCoverage;
   recheck: RecheckDoc | null;
   recheckStatus?: RecheckStatus;
   report: ReportDoc | null;
