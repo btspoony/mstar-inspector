@@ -1652,6 +1652,61 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(revokedAt(db, attemptId)).toEqual(expect.any(Number));
   });
 
+  test("a pre-batch read fault over an existing record revokes nothing and claims nothing", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-read-fault-recorded";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    // note: The composition read (the handoff) fails once. There is no record
+    // content to compose — and the durable record already exists — so the release
+    // must still land while nothing is revoked and nothing is claimed.
+    let faults = 1;
+    const racing = withReconcilerRace(db, {});
+    const faulty: D1Like = {
+      prepare: (sql: string) => {
+        if (faults > 0 && sql.includes("FROM review_attempt_handoffs WHERE attempt_id = ?")) {
+          faults -= 1;
+          throw new Error("handoff read unavailable");
+        }
+        return racing.prepare(sql);
+      },
+      batch: (statements: D1StatementLike[]) => racing.batch(statements),
+    } as unknown as D1Like;
+    const env = await h.makeEnv({ DB: faulty as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+    // note: The landed fact still rode in the batch: the record exists and the
+    // row was live, so a stop right after cannot leave the fact missing.
+    const ledger = db.raw
+      .prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_effects: string | null };
+    expect(JSON.parse(ledger.settled_effects ?? "[]") as string[]).toContain("failure-row");
+  });
+
   test("the release records its landed fact in the batch, so a mark fault still proves it", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
@@ -1698,20 +1753,26 @@ describe("a launched attempt whose paid reply was lost", () => {
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-recheck-only";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    for (const stageId of [`${attemptId}:recheck`, `${attemptId}:usage`]) {
+    const subRecords = [
+      { id: `${attemptId}:recheck`, stage: "recheck" },
+      { id: `${attemptId}:usage`, stage: "usage" },
+      { id: "6a2d9c41-3e58-4b06-9d77-2f5c8b0a1e34", stage: "usage" },
+    ];
+    for (const sub of subRecords) {
       db.raw
         .prepare(
           `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'a sub-record', 'review.internal.unclassified', ?, 'a sub-record', datetime('now'))`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'a sub-record', 'review.internal.unclassified', ?, 'a sub-record', datetime('now'))`,
         )
         .run(
-          stageId,
+          sub.id,
           payload.targetId,
           payload.installation_id,
           payload.owner,
           payload.repo,
           payload.pr_number,
           payload.head_sha,
+          sub.stage,
           attemptId,
         );
     }
@@ -1720,11 +1781,12 @@ describe("a launched attempt whose paid reply was lost", () => {
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
 
-    // note: Sub-stage rows share the attempt's `track_id` but are not the
-    // settlement record — the `<attempt>:<stage>` namespace is excluded by shape,
-    // so the lane still writes the attempt's own one row.
+    // note: The sub-records share the attempt's `track_id` but are not the
+    // settlement record — the `<attempt>:<stage>` namespace AND the attribution
+    // stage vocabulary both have to be outside the settlement's — so the lane
+    // still writes the attempt's own one row.
     expect(failureRows(db).map((row) => row.id).sort()).toEqual(
-      [`${attemptId}:recheck`, `${attemptId}:usage`, attemptId].sort(),
+      [...subRecords.map((sub) => sub.id), attemptId].sort(),
     );
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });

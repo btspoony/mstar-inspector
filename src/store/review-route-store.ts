@@ -22,6 +22,7 @@ import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
 import { FAILURE_SUMMARIES, isFailureCode, type FailureCode } from "../contracts/failure-codes";
+import { ATTRIBUTION_EXCLUDED_STAGES, sqlStageList } from "../contracts/failure-stages";
 import { assertFailureStage, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
@@ -586,16 +587,19 @@ const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE i
  * batch: a concurrent settlement cannot slip a record in between the decision
  * and the statement, and both statements that use it see the same rows.
  */
-const SETTLEMENT_RECORD_EXISTS = `(f.id = ?1 OR (f.track_id = ?1 AND f.id NOT LIKE ?1 || ':%'))`;
 /**
- * Why that shape and not a list of stage ids: a settlement record is the row
- * keyed by the ATTEMPT itself, or — for a build before that key — a plain row
- * carrying the attempt in `track_id`. Every SUB-record of an attempt lives in
- * the attempt's own namespace, `<attempt>:<stage>` (`:recheck`, `:usage`, and
- * whatever stage a later producer adds), so the namespace is the discriminator:
- * an enumerated exclusion list would silently admit the next stage's diagnostic
- * row as a settlement and suppress the real one.
+ * What a settlement record IS, positively: the row keyed by the ATTEMPT itself,
+ * or — for a build before that key — a row carrying the attempt in `track_id`,
+ * outside the attempt's `<attempt>:<stage>` sub-record namespace, in a STAGE the
+ * settlement writes. The last arm is the dashboard's own "this row is a review
+ * failure" test (`stage NOT IN (ATTRIBUTION_EXCLUDED_STAGES)`): a per-round or
+ * diagnostic row (`usage`, `recheck`, `rate-limit`) is attributed to the attempt
+ * but never settles it, so it cannot stand in for the settlement record — even
+ * when its id is a random uuid and only its `track_id` names the attempt.
  */
+const SETTLEMENT_RECORD_EXISTS = `(f.id = ?1 OR (f.track_id = ?1
+   AND f.id NOT LIKE ?1 || ':%'
+   AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})))`;
 const SETTLEMENT_RECORD_MISSING = `NOT EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
 const SETTLEMENT_RECORD_PRESENT = `EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
 

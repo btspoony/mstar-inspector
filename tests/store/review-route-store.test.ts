@@ -153,16 +153,24 @@ describe("the settlement record's insert", () => {
     const db = createMigratedTestD1();
     seedTargetOnce(db);
     const input = recordInput();
-    for (const stageId of [`${ATTEMPT}:recheck`, `${ATTEMPT}:usage`]) {
+    // Every sub-record of one attempt: two in the attempt's own id namespace
+    // (`<attempt>:<stage>`) and one diagnostics row whose id is a random uuid and
+    // whose only link to the attempt is `track_id`.
+    const subRecords = [
+      { id: `${ATTEMPT}:recheck`, stage: "recheck" },
+      { id: `${ATTEMPT}:usage`, stage: "usage" },
+      { id: "3f9c1a52-8b7e-4a51-9f0d-6d2b1c7e4a10", stage: "usage" },
+    ];
+    for (const sub of subRecords) {
       await createFailureStore(db as never).record({
-        id: stageId,
+        id: sub.id,
         target_id: TARGET_ID,
         installation_id: 123,
         owner: "acme",
         repo: "widgets",
         pr_number: 7,
         head_sha: "a".repeat(40),
-        stage: "pipeline",
+        stage: sub.stage as never,
         code: "review.internal.unclassified" as never,
         trackId: ATTEMPT,
         message: "a sub-record",
@@ -170,11 +178,11 @@ describe("the settlement record's insert", () => {
       });
     }
 
-    // Both carry the attempt's `track_id`, and neither is the settlement: the
-    // attempt's own namespace `<attempt>:<stage>` is excluded by shape.
+    // None of them is the settlement: the id namespace and the attribution stage
+    // vocabulary are both required for a cross-build row to count.
     const written = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
     expect(written.meta.changes).toBe(1);
-    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 3 });
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 4 });
   });
 });
 
