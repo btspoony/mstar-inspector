@@ -576,7 +576,7 @@ INSERT INTO review_recheck_attributions (attempt_id, created_ms) VALUES (?, ?)
 ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
-const RECHECK_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
 /**
  * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
  * outside the fallback sentences, or another code, or another summary. Any such
@@ -705,7 +705,19 @@ export async function recordRecheckAttribution(db: D1Like, attemptId: string, no
 
 /** Whether the attempt's `recheck` shipped-failure row is durable. */
 export async function recheckRowExists(db: D1Like, attemptId: string): Promise<boolean> {
-  const row = await db.prepare(RECHECK_ROW_EXISTS_SQL).bind(`${attemptId}:recheck`).first<{ present: number }>();
+  const row = await db.prepare(FAILURE_ROW_EXISTS_SQL).bind(`${attemptId}:recheck`).first<{ present: number }>();
+  return row !== null;
+}
+
+/**
+ * Whether this attempt's settlement record — its one attempt-keyed failure row —
+ * is already durable. The primary key IS that fact: every settlement writer
+ * keys its row by the attempt (the live settlement included), so the lookup is
+ * one indexed read and an existing row means the settlement's effects are
+ * somebody else's to finish.
+ */
+export async function settlementRowExists(db: D1Like, attemptId: string): Promise<boolean> {
+  const row = await db.prepare(FAILURE_ROW_EXISTS_SQL).bind(attemptId).first<{ present: number }>();
   return row !== null;
 }
 
@@ -1169,12 +1181,15 @@ export async function listUnpublishedLaunchSettlements(
  * not a tunable read, so neither a degraded read nor a lowered cap can move it
  * earlier. A row with no `launched_at_ms` matches neither branch.
  *
- * The anti-join on `review_failures` is the idempotence guard: the failure row
- * is keyed by the attempt, so a row that already settled once is never selected
- * again and a concurrent pass can never mint a second one. That row is written
- * by THIS lane alone — the live settlement records only an OBSERVATION on the
- * handoff row (see `AttemptObservation`), never a failure row — so a row
- * existing here means the settlement already ran.
+ * Idempotence is the launch row itself: `recordReviewFailureStatement` moves
+ * only a `launched` row, so a row that settled once — by this lane, or by the
+ * live settlement that got as far as its failure row — is never selected again,
+ * and a concurrent pass can never mint a second one. An anti-join on
+ * `review_failures` cannot stand in for that: the record is written BEFORE the
+ * row moves (it is what authorises the move), so a producer that died between
+ * the two leaves exactly the shape the join would hide — a `launched` row with
+ * no outcome and a durable failure record — holding its PR's slot forever with
+ * nothing left to release it.
  *
  * `state = 'launched'` and `result_outcome IS NULL` are the shape that holds
  * capacity (`PAID_STATE_UNKNOWN` in `inflight-store`); once the settlement
@@ -1195,9 +1210,6 @@ export async function listLostReplyLaunchSettlements(
           AND (
             (h.deadline_ms IS NOT NULL AND h.deadline_ms <= ?1)
             OR (h.deadline_ms IS NULL AND l.launched_at_ms <= ?2)
-          )
-          AND NOT EXISTS (
-            SELECT 1 FROM review_failures f WHERE f.id = h.attempt_id
           )
         ORDER BY h.deadline_ms, h.delivery_key
         LIMIT ?3`,

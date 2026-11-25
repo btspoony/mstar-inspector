@@ -10,6 +10,7 @@ import { createFailureStore, type FailureStore } from "../../src/store/failure-s
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import {
   deliveryKeyOf,
+  listLostReplyLaunchSettlements,
   listUnpublishedLaunchSettlements,
   markAttemptSettled,
   readAttemptHandoff,
@@ -667,8 +668,8 @@ function withReconcilerRace(
     prepare: (sql: string) => {
       const statement = db.prepare(sql);
       const isLostReplySelector =
-        sql.includes("FROM review_failures f WHERE f.id = h.attempt_id") &&
-        sql.includes("FROM review_attempt_handoffs h");
+        sql.includes("FROM review_attempt_handoffs h") &&
+        sql.includes("ORDER BY h.deadline_ms, h.delivery_key");
       if (isLostReplySelector) {
         let bound = statement;
         const racing: D1StatementLike = {
@@ -1567,13 +1568,14 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
   });
 
-  test("a row that already produced a failure record is never settled twice", async () => {
+  test("a row whose failure record is already durable is released, and never recorded twice", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-recorded";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    // note: Another producer already recorded this attempt's failure; the selector's
-    // anti-join must treat it as settled and mint nothing.
+    // note: The crash window's shape: a settlement recorded this attempt's failure
+    // and died before it could move the launch row — the slot stays held, and
+    // nothing can release it (the revoke is guarded on `launched`).
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
@@ -1591,11 +1593,30 @@ describe("a launched attempt whose paid reply was lost", () => {
       );
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
+    const selector = { deadlineBeforeMs: SETTLES_AT, limit: ROUTE_RECOVERY_LIMIT };
+
+    expect((await listLostReplyLaunchSettlements(db as never, selector)).map((row) => row.attemptId)).toEqual([
+      attemptId,
+    ]);
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
 
+    // note: The record stands untouched (ONE row), and the slot is released:
+    // revoked first, then terminal — the two moves that only a `launched` row
+    // can still take.
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toEqual(expect.any(Number));
+    // note: The foreign settlement is not adopted into this lane's: no claim
+    // stamp is written for a record this pass never landed.
+    expect(h.kvPuts).toHaveLength(0);
+
+    // note: The release is the ONE move: the selector has nothing left to reach.
+    expect(await listLostReplyLaunchSettlements(db as never, selector)).toEqual([]);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
   test("the phase's observation is what the row records, and the reconciler is its only writer", async () => {
@@ -2113,8 +2134,9 @@ describe("a launched attempt whose paid reply was lost", () => {
     // row's own settlement ledger. The re-admission arm that used to exist here
     // (row-OR-fact) would select this attempt, find the insert a no-op, and then
     // stamp the head-wide claim as its own — adopting a failure it never wrote.
-    // With one writer there is no promotion: the anti-join excludes the attempt,
-    // so the launch row is untouched and no claim is written.
+    // With one writer there is no promotion: the row is never landed or marked
+    // again and no claim is written. What this pass owes is only the RELEASE —
+    // the record it inherited authorises the launch row's move.
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-foreign";
@@ -2144,7 +2166,9 @@ describe("a launched attempt whose paid reply was lost", () => {
 
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
-    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    // The release the inherited record authorises: revoked, then terminal.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toEqual(expect.any(Number));
     expect(h.kvPuts).toHaveLength(0);
 
     // The sync lane must not adopt it either: the phase's observation arrives
@@ -2163,7 +2187,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     });
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
     expect(failureRows(db)).toEqual([before]);
-    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
   test("an observation stamped behind the row's creation still syncs onto the fallback row", async () => {

@@ -37,6 +37,7 @@ import {
   recordSettlementAttempt,
   restoreCommentClaimForRecovery,
   settleAttemptIfDischarged,
+  settlementRowExists,
   stampOwedSettlementClaim,
   successorGeneration,
   syncSettledFailureRow,
@@ -412,18 +413,33 @@ async function settleLostReplies(
     // reconciler wrote from a row any other producer owns.
     const detail =
       handoff.deadlineMs === null ? LOST_REPLY_FALLBACK_ERROR_UNANCHORED : LOST_REPLY_FALLBACK_ERROR;
+    // A record for this attempt is already durable (a settlement that got as far
+    // as its failure row and died before moving the launch row, or a producer
+    // that finished): the effects and the mark are that writer's, so this pass
+    // owes ONE thing — the release. Starting a settlement over it would mark a
+    // row whose effects can never land (the attempt-keyed insert is a no-op),
+    // parking it in the incomplete lane for good.
+    let recorded: boolean;
     let moved: D1Result[];
     try {
+      recorded = await settlementRowExists(env.DB, handoff.attemptId);
       moved = await env.DB.batch([
         markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs),
         recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
-        beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
+        ...(recorded ? [] : [beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs)]),
       ] as D1PreparedStatement[]);
     } catch {
       // The batch is atomic: nothing moved, the row is untouched and the next pass retries it.
       continue;
     }
     if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
+    if (recorded) {
+      log?.info?.(
+        { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
+        `lost reply settled past its attempt's hard-stop bound — the durable failure record stands, and the launch row is terminal: capacity released, the attempt is terminal`,
+      );
+      continue;
+    }
     try {
       await landSettlementEffects(
         env,
