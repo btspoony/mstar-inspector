@@ -1100,6 +1100,18 @@ export const zhCN: Dictionary = {
       recheckCurrent: "下一轮评审生效：{value} 字节。",
       recheckUnreadable:
         "无法读取已存储的重审提问预算，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查该行。",
+      seatSettingsTitle: "小 diff 席位",
+      seatSettingsDescription:
+        "变更行数不超过此阈值的 diff 按下方席位数展开，而非该档位自身的席位数。席位数不会超过档位的展开上限。",
+      seatSettingsLinesLabel: "小 diff 阈值（变更行数）",
+      seatSettingsSeatsLabel: "席位数",
+      seatSettingsSave: "保存",
+      seatSettingsSaved: "已保存。",
+      seatSettingsFailed: "修改小 diff 席位设置失败。",
+      seatSettingsCurrent:
+        "下一轮评审生效：变更行数不超过 {lines} 的 diff 使用 {seats} 个席位。",
+      seatSettingsUnreadable:
+        "无法读取已存储的小 diff 设置，因此正在使用文档默认值。输入范围内的数值可保存为新值，重新读取会重新检查这两行。",
       attemptCapTitle: "审查最长时长",
       attemptCapDescription:
         "整个审查尝试在此上限处停止：排队等待、执行与发布合计。被该上限停止的审查即终结，不会自动重跑。",

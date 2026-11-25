@@ -51,6 +51,7 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
+  setReviewSeatSettings,
   setSweepSettings,
   setSystemConcurrency,
   reviewRunState,
@@ -323,8 +324,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
     },
-    // Read-only by design: both rows are platform settings written through
-    // review_runtime_settings directly (no PATCH field is exposed for them).
+    // Effective values plus their bounds; PATCH `seatSettings` owns the writes.
     seatSettings: {
       smallDiffMaxLines: seats.smallDiffMaxLines,
       smallDiffSeats: seats.smallDiffSeats,
@@ -430,6 +430,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawLostReply: unknown;
   let rawMaintenance: unknown;
   let rawRouteWorkflow: unknown;
+  let rawSeatSettings: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -443,6 +444,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       lostReplySettle?: unknown;
       maintenance?: unknown;
       routeWorkflow?: unknown;
+      seatSettings?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
@@ -455,6 +457,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawLostReply = body.lostReplySettle;
     rawMaintenance = body.maintenance;
     rawRouteWorkflow = body.routeWorkflow;
+    rawSeatSettings = body.seatSettings;
   } catch {
   }
   // `routeWorkflow` is gone from this surface: name the removed capability
@@ -481,12 +484,13 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawAttemptCap,
       rawLostReply,
       rawMaintenance,
+      rawSeatSettings,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance | seatSettings",
       },
       400,
     );
@@ -588,6 +592,30 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     try {
       return c.json({
         reviewLevel: { value: await setDefaultReviewLevel(db, level as ReviewLevel, login) },
+      });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawSeatSettings !== undefined) {
+    const pair =
+      typeof rawSeatSettings === "object" && rawSeatSettings !== null
+        ? (rawSeatSettings as { smallDiffMaxLines?: unknown; smallDiffSeats?: unknown })
+        : {};
+    if (typeof pair.smallDiffMaxLines !== "number" || typeof pair.smallDiffSeats !== "number") {
+      return c.json(
+        { error: "body must be { seatSettings: { smallDiffMaxLines, smallDiffSeats } }" },
+        400,
+      );
+    }
+    try {
+      return c.json({
+        seatSettings: await setReviewSeatSettings(
+          db,
+          { smallDiffMaxLines: pair.smallDiffMaxLines, smallDiffSeats: pair.smallDiffSeats },
+          login,
+        ),
       });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);

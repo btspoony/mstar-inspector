@@ -790,6 +790,72 @@ describe("PATCH /_internal_admin/api/runtime commentClaim", () => {
   });
 });
 
+describe("PATCH /_internal_admin/api/runtime seatSettings", () => {
+  test("writes both rows with one audit row and reports the stored pair", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({ seatSettings: { smallDiffMaxLines: 60, smallDiffSeats: 2 } }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ seatSettings: { smallDiffMaxLines: 60, smallDiffSeats: 2 } });
+    expect(storedBudgets(db)).toEqual({
+      "review.seats.smallDiffMaxLines": "60",
+      "review.seats.smallDiffSeats": "2",
+    });
+    expect(auditRows(db)).toEqual([
+      {
+        action: "runtime.seat_settings.set",
+        actor_login: OPERATOR,
+        target_type: "runtime",
+        target_id: "review.seats",
+      },
+    ]);
+    const read = (await (await runtimeApi(db, { method: "GET" })).json()) as {
+      seatSettings: Record<string, unknown>;
+    };
+    expect(read.seatSettings).toEqual({
+      ...DEFAULT_SEAT_SETTINGS,
+      smallDiffMaxLines: 60,
+      smallDiffSeats: 2,
+    });
+  });
+
+  test("an out-of-range or malformed pair is a 400 that writes nothing", async () => {
+    const { db } = fixture();
+    for (const body of [
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: 0, smallDiffSeats: 1 } }),
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: 20_001, smallDiffSeats: 1 } }),
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: 120, smallDiffSeats: 0 } }),
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: 120, smallDiffSeats: 3 } }),
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: "60", smallDiffSeats: 2 } }),
+      JSON.stringify({ seatSettings: { smallDiffMaxLines: 60 } }),
+      JSON.stringify({ seatSettings: null }),
+    ]) {
+      const res = await runtimeApi(db, { method: "PATCH", body });
+      expect(res.status, body).toBe(400);
+      expect(await res.json()).toHaveProperty("error");
+    }
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+
+  test("a body carrying seatSettings plus any sibling parameter is refused whole", async () => {
+    const { db } = fixture();
+    const res = await runtimeApi(db, {
+      method: "PATCH",
+      body: JSON.stringify({
+        concurrency: 8,
+        seatSettings: { smallDiffMaxLines: 60, smallDiffSeats: 1 },
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(storedSystem(db)).toBeNull();
+    expect(storedBudgets(db)).toEqual({});
+    expect(auditRows(db)).toEqual([]);
+  });
+});
+
 describe("PATCH /_internal_admin/api/runtime sweep", () => {
   test("one operator save persists all overrides and records the before/after audit", async () => {
     const { db } = fixture();

@@ -1187,6 +1187,18 @@ export const en = {
       recheckCurrent: "Effective on the next review: {value} bytes.",
       recheckUnreadable:
         "The stored recheck assignment budget could not be read, so the documented default is in use. Entering a value in range saves a new one, and retrying the read re-checks the row.",
+      seatSettingsTitle: "Small-diff seats",
+      seatSettingsDescription:
+        "A diff at or under this many changed lines fans out to the seat count below instead of the level's own count. The count never exceeds the level's fan-out.",
+      seatSettingsLinesLabel: "Small-diff threshold (changed lines)",
+      seatSettingsSeatsLabel: "Seat count",
+      seatSettingsSave: "Save",
+      seatSettingsSaved: "Saved.",
+      seatSettingsFailed: "Could not change the small-diff seat settings.",
+      seatSettingsCurrent:
+        "Effective on the next review: diffs of {lines} changed lines or fewer get {seats} seat(s).",
+      seatSettingsUnreadable:
+        "A stored small-diff value could not be read, so the documented defaults are in use. Entering values in range saves a new pair, and retrying the read re-checks the rows.",
       attemptCapTitle: "Maximum review duration",
       attemptCapDescription:
         "The whole attempt stops at this cap: queue wait, execution and publication together. A review stopped by it is terminal and is not re-run automatically.",

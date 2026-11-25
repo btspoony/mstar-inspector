@@ -9,8 +9,8 @@ import {
   SEATS_SMALL_DIFF_SEATS_DEFAULT,
   SEATS_SMALL_DIFF_SEATS_KEY,
   getReviewSeatSettings,
+  setReviewSeatSettings,
 } from "../../src/dashboard/runtime-config-store";
-
 
 // `await import` keeps module evaluation AFTER the cloudflare-workers mock
 // registers — the same loading-boundary idiom as token-usage.test.ts.
@@ -25,11 +25,12 @@ function setSetting(db: TestD1, key: string, value: string): void {
 }
 
 describe("selectAttemptSeats", () => {
-  test("a 57-line diff takes the configured small-diff seats, not the tier's", async () => {
+  test("a 57-line diff takes the stored small-diff seats, not the tier's", async () => {
+    // Non-default stored value, so the assertion cannot pass on the default.
     const db = createMigratedTestD1();
-    setSetting(db, SEATS_SMALL_DIFF_SEATS_KEY, "1");
+    setSetting(db, SEATS_SMALL_DIFF_SEATS_KEY, "2");
     const selection = selectAttemptSeats("default", 57, await getReviewSeatSettings(db));
-    expect(selection).toEqual({ seats: 1, reason: "small-diff" });
+    expect(selection).toEqual({ seats: 2, reason: "small-diff" });
   });
 
   test("a 500-line diff takes the level's own seat count", async () => {
@@ -85,6 +86,34 @@ describe("selectAttemptSeats", () => {
       smallDiffMaxLines: SEATS_SMALL_DIFF_LINES_DEFAULT,
       smallDiffSeats: SEATS_SMALL_DIFF_SEATS_DEFAULT,
       degraded: true,
+    });
+  });
+});
+
+describe("setReviewSeatSettings", () => {
+  test("the write path lands both rows and the selection follows them", async () => {
+    const db = createMigratedTestD1();
+    const ACTOR = "operator@example.com";
+    await setReviewSeatSettings(db, { smallDiffMaxLines: 60, smallDiffSeats: 2 }, ACTOR);
+    const settings = await getReviewSeatSettings(db);
+    expect(settings).toEqual({ smallDiffMaxLines: 60, smallDiffSeats: 2, degraded: false });
+    // A 57-line diff — the issue's own case — now asks for the stored two
+    // seats; one line above the new threshold takes the level's count again.
+    expect(selectAttemptSeats("default", 57, settings)).toEqual({ seats: 2, reason: "small-diff" });
+    expect(selectAttemptSeats("default", 61, settings)).toEqual({ seats: 2, reason: "level" });
+  });
+
+  test("an out-of-range value refuses the whole write with no rows", async () => {
+    const db = createMigratedTestD1();
+    await expect(
+      setReviewSeatSettings(db, { smallDiffMaxLines: 0, smallDiffSeats: 1 }, "op"),
+    ).rejects.toThrow("small-diff line threshold");
+    await expect(
+      setReviewSeatSettings(db, { smallDiffMaxLines: 120, smallDiffSeats: 3 }, "op"),
+    ).rejects.toThrow("small-diff seat count");
+    expect(await getReviewSeatSettings(db)).toMatchObject({
+      smallDiffMaxLines: SEATS_SMALL_DIFF_LINES_DEFAULT,
+      smallDiffSeats: SEATS_SMALL_DIFF_SEATS_DEFAULT,
     });
   });
 });

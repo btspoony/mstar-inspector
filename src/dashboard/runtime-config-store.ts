@@ -131,6 +131,8 @@ export async function getReviewSeatSettings(db: DashboardD1): Promise<SeatSettin
   }
 }
 
+
+
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 }
@@ -1130,6 +1132,69 @@ export async function setRecheckAssignmentMaxBytes(
       .prepare(RECHECK_ASSIGNMENT_AUDIT_SQL)
       .bind(crypto.randomUUID(), actor, value, RECHECK_ASSIGNMENT_KEY, now),
     db.prepare(SYSTEM_UPSERT_SQL).bind(RECHECK_ASSIGNMENT_KEY, String(value), now, actor),
+  ]);
+  return value;
+}
+
+/** The two small-diff values one write carries. */
+export type SeatSettingsWrite = { smallDiffMaxLines: number; smallDiffSeats: number };
+
+const SEAT_SETTINGS_TARGET = "review.seats";
+
+const SEAT_SETTINGS_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.seat_settings.set', 'runtime', '${SEAT_SETTINGS_TARGET}',
+          json_object('before', json_object(
+                      'smallDiffMaxLines', ${storedBudgetSql("?6", "NULL", SEATS_SMALL_DIFF_LINES_MIN, SEATS_SMALL_DIFF_LINES_MAX)},
+                      'smallDiffSeats', ${storedBudgetSql("?7", "NULL", SEATS_SMALL_DIFF_SEATS_MIN, SEATS_SMALL_DIFF_SEATS_MAX)}),
+                      'after', json_object('smallDiffMaxLines', ?3, 'smallDiffSeats', ?4)),
+          ?5)`;
+
+/**
+ * Write both small-diff settings. Either value outside its own range refuses
+ * the whole write (`invalid_value`) with no row and no audit entry; an
+ * accepted pair is audited with the actor in ONE batch and returned. There is
+ * no cross-field relation to enforce: the threshold bounds a diff's line
+ * count, the seat count is bounded by the largest tier fan-out on its own
+ * (the selection still clamps it to the level's count at use time).
+ */
+export async function setReviewSeatSettings(
+  db: DashboardD1,
+  value: SeatSettingsWrite,
+  actor: string,
+): Promise<SeatSettingsWrite> {
+  if (!isIntegerIn(value.smallDiffMaxLines, SEATS_SMALL_DIFF_LINES_MIN, SEATS_SMALL_DIFF_LINES_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `small-diff line threshold must be an integer in ${SEATS_SMALL_DIFF_LINES_MIN}..${SEATS_SMALL_DIFF_LINES_MAX}`,
+    );
+  }
+  if (!isIntegerIn(value.smallDiffSeats, SEATS_SMALL_DIFF_SEATS_MIN, SEATS_SMALL_DIFF_SEATS_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `small-diff seat count must be an integer in ${SEATS_SMALL_DIFF_SEATS_MIN}..${SEATS_SMALL_DIFF_SEATS_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(SEAT_SETTINGS_AUDIT_SQL)
+      .bind(
+        crypto.randomUUID(),
+        actor,
+        value.smallDiffMaxLines,
+        value.smallDiffSeats,
+        now,
+        SEATS_SMALL_DIFF_LINES_KEY,
+        SEATS_SMALL_DIFF_SEATS_KEY,
+      ),
+    db
+      .prepare(SYSTEM_UPSERT_SQL)
+      .bind(SEATS_SMALL_DIFF_LINES_KEY, String(value.smallDiffMaxLines), now, actor),
+    db
+      .prepare(SYSTEM_UPSERT_SQL)
+      .bind(SEATS_SMALL_DIFF_SEATS_KEY, String(value.smallDiffSeats), now, actor),
   ]);
   return value;
 }
