@@ -27,6 +27,7 @@ import {
   type Scope,
 } from "../../src/store/review-checks";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -42,6 +43,7 @@ const BUDGET_RECORD = {
   kind: "budget-exhausted" as const,
   cause: "runner-deadline" as const,
   budgetWindow: "runner" as const,
+  cappedBy: "level-budget" as const,
   tier: "default" as const,
   budgetMs: 600_000,
   seatsDispatched: 3,
@@ -131,7 +133,17 @@ describe("every terminal path persists a category (or deliberately none)", () =>
   const verdictMissed = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("needs fixes", 40) });
   const verdictMet = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("ship it", 90) });
 
-  const paths: ReadonlyArray<{ path: string; decided: CheckConclusion; status: CheckFailureStatus | null }> = [
+  const PREPARATION_RECORD: BudgetExhaustedOutcome = {
+    ...BUDGET_RECORD,
+    cause: "consumer-deadline",
+    budgetWindow: "preparation",
+  };
+  const paths: ReadonlyArray<{
+    path: string;
+    decided: CheckConclusion;
+    status: CheckFailureStatus | null;
+    exhaustion?: BudgetExhaustedOutcome;
+  }> = [
     { path: "pre-publication-failure", decided: decideConclusion({ proof: null, outcome: "pre-publication-failure", gate: GATE, review: null }), status: "unknown-failure" },
     { path: "degraded-not-posted", decided: decideConclusion({ proof: null, outcome: "degraded-not-posted", gate: GATE, review: null }), status: "unknown-failure" },
     { path: "publication-unknown", decided: decideConclusion({ proof: null, outcome: "publication-unknown", gate: GATE, review: null }), status: "unknown-failure" },
@@ -173,9 +185,10 @@ describe("every terminal path persists a category (or deliberately none)", () =>
         outcome: "budget-exhausted",
         gate: null,
         review: null,
-        budgetExhaustion: { ...BUDGET_RECORD, cause: "consumer-deadline", budgetWindow: "preparation" },
+        budgetExhaustion: PREPARATION_RECORD,
       }),
       status: "cap-stop",
+      exhaustion: PREPARATION_RECORD,
     },
     { path: "gate-missed verdict", decided: verdictMissed, status: null },
     { path: "gate-met", decided: verdictMet, status: null },
@@ -184,12 +197,12 @@ describe("every terminal path persists a category (or deliberately none)", () =>
   ];
 
   test("each terminal path carries the approved category, or none by design", () => {
-    for (const { path, decided, status } of paths) {
+    for (const { path, decided, status, exhaustion } of paths) {
       expect({ path, status: decided.failureStatus ?? null }).toEqual({ path, status });
       if (status !== null) {
         expect({ path, summary: decided.summary }).toEqual({
           path,
-          summary: terminalFailureSummary(status, BUDGET_RECORD),
+          summary: terminalFailureSummary(status, exhaustion ?? BUDGET_RECORD),
         });
         expect(decided.desired).toBe("failure");
       }

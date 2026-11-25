@@ -1849,6 +1849,7 @@ describe("terminalize reads only this attempt's own publication (spec §7.9)", (
       kind: "budget-exhausted" as const,
       cause: "runner-deadline" as const,
       budgetWindow: "runner" as const,
+      cappedBy: "level-budget" as const,
       tier: "default" as const,
       budgetMs: 600_000,
       seatsDispatched: 5,
@@ -3661,6 +3662,7 @@ describe("budget-exhausted Check vocabulary", () => {
       kind: "budget-exhausted",
       cause: "runner-deadline",
       budgetWindow: "runner",
+      cappedBy: "level-budget",
       tier: "default",
       budgetMs: 600_000,
       seatsDispatched: 5,
@@ -3672,11 +3674,63 @@ describe("budget-exhausted Check vocabulary", () => {
     );
   });
 
+  test("a runner window capped by the derived remaining window records the cap category and names that clock", () => {
+    const outcome = {
+      kind: "budget-exhausted" as const,
+      cause: "sandbox-kill" as const,
+      budgetWindow: "runner" as const,
+      cappedBy: "remaining-window" as const,
+      tier: "default" as const,
+      budgetMs: 42_000,
+      seatsDispatched: null,
+      seatsStopped: null,
+      changedLines: 120,
+    };
+    const conclusion = decideConclusion({
+      proof: null,
+      outcome: "budget-exhausted",
+      gate: GATE,
+      review: null,
+      budgetExhaustion: outcome,
+    });
+    expect(conclusion.desired).toBe("failure");
+    expect(conclusion.failureStatus).toBe("cap-stop");
+    expect(conclusion.summary).toBe(
+      `Review cap exhausted: default review stopped at 42s — the runner was capped by the round's remaining window, not the default level budget; 120 changed lines${TAIL}`,
+    );
+  });
+
+  test("a genuine level-budget stop keeps its category and its copy", () => {
+    const outcome = {
+      kind: "budget-exhausted" as const,
+      cause: "runner-deadline" as const,
+      budgetWindow: "runner" as const,
+      cappedBy: "level-budget" as const,
+      tier: "default" as const,
+      budgetMs: 600_000,
+      seatsDispatched: 5,
+      seatsStopped: 3,
+      changedLines: 402,
+    };
+    const conclusion = decideConclusion({
+      proof: null,
+      outcome: "budget-exhausted",
+      gate: GATE,
+      review: null,
+      budgetExhaustion: outcome,
+    });
+    expect(conclusion.failureStatus).toBe("budget-stop");
+    expect(conclusion.summary).toBe(
+      `Review budget exhausted: default review stopped at 600s with 3/5 seats stopped before finishing (402 changed lines)${TAIL}`,
+    );
+  });
+
   test("short form appends only the observed counters, in order", () => {
     const summary = budgetExhaustedSummary({
       kind: "budget-exhausted",
       cause: "consumer-deadline",
       budgetWindow: "preparation",
+      cappedBy: "level-budget",
       tier: "quick",
       budgetMs: 12_500,
       seatsDispatched: 0,
@@ -3693,6 +3747,7 @@ describe("budget-exhausted Check vocabulary", () => {
         kind: "budget-exhausted",
         cause: "consumer-deadline",
         budgetWindow: "preparation",
+        cappedBy: "level-budget",
         tier: "quick",
         budgetMs,
         seatsDispatched: null,
@@ -3707,6 +3762,7 @@ describe("budget-exhausted Check vocabulary", () => {
       kind: "budget-exhausted",
       cause: "consumer-deadline",
       budgetWindow: "preparation",
+      cappedBy: "level-budget",
       tier: "quick",
       budgetMs: 46_500,
       seatsDispatched: null,
@@ -3723,6 +3779,7 @@ describe("budget-exhausted Check vocabulary", () => {
       kind: "budget-exhausted",
       cause: "sandbox-kill",
       budgetWindow: "runner",
+      cappedBy: "level-budget",
       tier: "deep",
       budgetMs: 900_000,
       seatsDispatched: null,
@@ -3739,6 +3796,7 @@ describe("budget-exhausted Check vocabulary", () => {
       kind: "budget-exhausted" as const,
       cause: "runner-deadline" as const,
       budgetWindow: "runner" as const,
+      cappedBy: "level-budget" as const,
       tier: "default" as const,
       budgetMs: 600_000,
       seatsDispatched: 5,
@@ -3762,6 +3820,7 @@ describe("budget-exhausted Check vocabulary", () => {
       kind: "budget-exhausted" as const,
       cause: "runner-deadline" as const,
       budgetWindow: "runner" as const,
+      cappedBy: "level-budget" as const,
       tier: "default" as const,
       budgetMs: 600_000,
       seatsDispatched: 5,

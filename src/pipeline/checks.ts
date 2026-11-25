@@ -1000,11 +1000,19 @@ export function terminalFailureSummary(
   status: CheckFailureStatus,
   budgetExhaustion?: BudgetExhaustedOutcome,
 ): string {
-  if (status !== "budget-stop") return TERMINAL_FAILURE_TEXT[status];
-  if (budgetExhaustion === undefined) {
-    throw new Error('terminalFailureSummary: "budget-stop" requires the resolved budgetExhaustion record');
+  if (status === "budget-stop") {
+    if (budgetExhaustion === undefined) {
+      throw new Error('terminalFailureSummary: "budget-stop" requires the resolved budgetExhaustion record');
+    }
+    return budgetExhaustedSummary(budgetExhaustion);
   }
-  return budgetExhaustedSummary(budgetExhaustion);
+  // A runner window the derivation clamped below the level's own budget takes
+  // the same category as a spent preparation window (the maximum-duration cap),
+  // and keeps the reasoned summary that names which clock actually stopped it.
+  if (status === "cap-stop" && budgetExhaustion?.budgetWindow === "runner") {
+    return budgetExhaustedSummary(budgetExhaustion);
+  }
+  return TERMINAL_FAILURE_TEXT[status];
 }
 
 function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetExhaustedOutcome): CheckConclusion {
@@ -1016,10 +1024,16 @@ function terminalFailure(status: CheckFailureStatus, budgetExhaustion?: BudgetEx
   };
 }
 
-const STOP_CATEGORY: Record<BudgetExhaustedOutcome["budgetWindow"], CheckFailureStatus> = {
-  preparation: "cap-stop",
-  runner: "budget-stop",
-};
+/**
+ * The Check category a budget stop records. A preparation window that expired
+ * before the runner got an allocation is the maximum-duration cap, and so is a
+ * runner window the derivation clamped below the level's own budget: both
+ * stopped on the round's remaining clock, not on the tier's budget.
+ */
+function stopCategory(outcome: BudgetExhaustedOutcome): CheckFailureStatus {
+  if (outcome.budgetWindow === "preparation") return "cap-stop";
+  return outcome.cappedBy === "remaining-window" ? "cap-stop" : "budget-stop";
+}
 
 const BUDGET_EXHAUSTED_CAUSE_TEXT: Record<BudgetExhaustedOutcome["cause"], string> = {
   "runner-deadline": "runner deadline reached",
@@ -1042,6 +1056,25 @@ export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string 
   const tail =
     " — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
   const { seatsDispatched, seatsStopped, changedLines } = outcome;
+  const counters: string[] = [];
+  if (seatsStopped !== null && seatsDispatched !== null) {
+    counters.push(`${seatsStopped}/${seatsDispatched} seats stopped before finishing`);
+  } else if (seatsStopped !== null) {
+    counters.push(`${seatsStopped} seats stopped`);
+  } else if (seatsDispatched !== null) {
+    counters.push(`${seatsDispatched} seats dispatched`);
+  }
+  if (changedLines !== null) counters.push(`${changedLines} changed lines`);
+  const counted = counters.length === 0 ? "" : `; ${counters.join("; ")}`;
+  if (outcome.cappedBy === "remaining-window") {
+    // The runner was clamped by the round's remaining window, not by the
+    // level's own budget: name that clock instead of the tier budget.
+    return (
+      `Review cap exhausted: ${outcome.tier} review stopped at ${budget}s — the runner was capped by the round's remaining window, not the ${outcome.tier} level budget` +
+      counted +
+      tail
+    );
+  }
   if (
     outcome.budgetWindow === "runner" &&
     seatsStopped !== null &&
@@ -1054,19 +1087,10 @@ export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string 
       `(${changedLines} changed lines)${tail}`
     );
   }
-  const counters: string[] = [];
-  if (seatsStopped !== null && seatsDispatched !== null) {
-    counters.push(`${seatsStopped}/${seatsDispatched} seats stopped before finishing`);
-  } else if (seatsStopped !== null) {
-    counters.push(`${seatsStopped} seats stopped`);
-  } else if (seatsDispatched !== null) {
-    counters.push(`${seatsDispatched} seats dispatched`);
-  }
-  if (changedLines !== null) counters.push(`${changedLines} changed lines`);
   return (
     `Review budget exhausted: ${outcome.tier} review reached its ${budget}s ${outcome.budgetWindow} budget ` +
     `(${BUDGET_EXHAUSTED_CAUSE_TEXT[outcome.cause]})` +
-    (counters.length === 0 ? "" : `; ${counters.join("; ")}`) +
+    counted +
     tail
   );
 }
@@ -1143,7 +1167,7 @@ export function decideConclusion(input: {
         'decideConclusion: outcome "budget-exhausted" requires the resolved budgetExhaustion record',
       );
     }
-    return terminalFailure(STOP_CATEGORY[input.budgetExhaustion.budgetWindow], input.budgetExhaustion);
+    return terminalFailure(stopCategory(input.budgetExhaustion), input.budgetExhaustion);
   }
   if (proof !== null) {
     if (proof.kind === "degraded") return terminalFailure("unknown-failure");

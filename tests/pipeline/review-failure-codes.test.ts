@@ -14,6 +14,7 @@ const BASE = {
 const BUDGET_OUTCOME = {
   kind: "budget-exhausted" as const,
   cause: "consumer-deadline" as const,
+  cappedBy: "level-budget" as const,
   tier: "default" as const,
   budgetMs: 233_000,
   seatsDispatched: 0,
