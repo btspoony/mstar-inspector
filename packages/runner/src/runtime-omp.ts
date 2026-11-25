@@ -36,6 +36,7 @@ import {
 } from "./recheck";
 import { runReportSeat, revalidatedNotes } from "./report";
 import type { ReportDoc } from "../../shared/src/report-wire";
+import type { ReviewCoverage } from "../../shared/src/coverage-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
 import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 import {
@@ -96,6 +97,92 @@ export function parseModelSelectors(raw: string | undefined): string[] {
 
 function traceStage(stage: string): void {
   console.error(JSON.stringify({ event: "review_stage", stage }));
+}
+
+/** Bound on a free-text slug inside a stage token (the reader caps at 60 chars). */
+const STAGE_SLUG_MAX_CHARS = 20;
+
+/** One token-safe word from a free-text cause: no whitespace, bounded. */
+function stageSlug(text: string | undefined): string {
+  if (text === undefined) return "";
+  const word = text.replace(/\s+/g, "-").replace(/[^\w.:=-]/g, "").slice(0, STAGE_SLUG_MAX_CHARS);
+  return word;
+}
+
+/**
+ * Per-seat trace tokens. `traceStage` marks ENTRY, and the worker prints the
+ * LAST line — so a seat's terminal token must be emitted when it settles, not
+ * when it starts, or a failure inside the seat would still read as running.
+ * These builders are pure so the exact vocabulary is testable without
+ * intercepting the module-bound console.
+ */
+export function seatStartStage(seat: string): string {
+  return `seat_start:${seat}`;
+}
+
+export function seatDoneStage(seat: string, turns: number | undefined): string {
+  return turns === undefined ? `seat_done:${seat}` : `seat_done:${seat}:turns=${turns}`;
+}
+
+export function seatGapStage(seat: string, reason: string | undefined): string {
+  const capMs = reason?.match(/task\.maxRuntimeMs=(\d+)/)?.[1];
+  if (capMs !== undefined) return `seat_gap:${seat}:cap:${capMs}ms`;
+  const slug = stageSlug(reason);
+  return slug === "" ? `seat_gap:${seat}` : `seat_gap:${seat}:${slug}`;
+}
+
+export function seatFailedStage(seat: string, cause: string | undefined): string {
+  const slug = stageSlug(cause);
+  return slug === "" ? `seat_failed:${seat}` : `seat_failed:${seat}:${slug}`;
+}
+
+/** The recheck seat's terminal token: its turn count, or why it ended empty. */
+export function recheckStage(result: RecheckSeatResult): string {
+  if (result.doc !== null) return `recheck_done:turns=${result.usage?.requests ?? 0}`;
+  return `recheck_gap:${result.status.outcome}${result.status.reason === undefined ? "" : `-${result.status.reason}`}`;
+}
+
+/** The report seat's terminal token: its turn count, or that it did not run. */
+export function reportStage(report: unknown, turns: number | undefined): string {
+  return report === null ? "report_skipped" : turns === undefined ? "report_done" : `report_done:turns=${turns}`;
+}
+
+/**
+ * Trace the side seats' boundaries exactly ONCE per run: `recheck_start` /
+ * `report_start` on entry, then the terminal token when the work settles. Both
+ * transports (and every throw path) then end on a stage that names the seat
+ * that actually ran last.
+ */
+function tracedRecheck(work: Promise<RecheckSeatResult>): Promise<RecheckSeatResult> {
+  traceStage("recheck_start");
+  return work.then(
+    (result) => {
+      traceStage(recheckStage(result));
+      return result;
+    },
+    (error: unknown) => {
+      traceStage(seatFailedStage("recheck", causeText(error)));
+      throw error;
+    },
+  );
+}
+
+async function tracedReportSeatFor(
+  input: AgentRuntimeRunInput,
+  session: ToolSession,
+  envelope: MstarReviewV1,
+  recheckDoc: RecheckDoc | null,
+  signal: AbortSignal,
+  usage: SubagentUsageSource[] = [],
+): Promise<ReportDoc | null> {
+  traceStage("report_start");
+  let report: ReportDoc | null = null;
+  try {
+    report = await runReportSeatFor(input, session, envelope, recheckDoc, signal, usage);
+    return report;
+  } finally {
+    traceStage(reportStage(report, usage[0]?.requests));
+  }
 }
 
 export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
@@ -588,7 +675,7 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
   });
 }
 
-type SeatGap = { plan: SeatPlan };
+type SeatGap = { plan: SeatPlan; reason?: string };
 
 type SeatOutcome = {
   output: SeatOutput | null;
@@ -652,6 +739,15 @@ function causeText(reason: unknown): string {
 
 const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRuntimeMs=[^)]+\)/;
 
+/**
+ * The runner-log line naming a capped seat and WHY it stopped. Exported so the
+ * test suite can pin the exact failure text without intercepting a module-bound
+ * console: the reason is the only evidence a zero-output round has.
+ */
+export function seatStopLine(seat: string, reason: string | undefined): string {
+  return `review seat ${seat} stopped by cap${reason === undefined ? "" : `: ${reason}`}`;
+}
+
 function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
   const structured = single.structuredOutput;
@@ -662,7 +758,7 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
     (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
   if (stoppedByCap !== undefined) {
-    return { output: rejectedPayload ? null : collected, gap: { plan }, failure: null };
+    return { output: rejectedPayload ? null : collected, gap: { plan, reason: stoppedByCap }, failure: null };
   }
   if (single.error) {
     return {
@@ -985,15 +1081,17 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (input.recheck !== undefined) {
         const liveRecheckSession = await createSeatSession();
         recheckSession = liveRecheckSession;
-        recheckWork = runRecheckSeat({
-          session: asToolSession(liveRecheckSession, cwd),
-          input: input.recheck,
-          model: seatModelChain(input),
-          signal: recheckController.signal,
-          ...(input.recheckAssignmentMaxBytes === undefined
-            ? {}
-            : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
-        });
+        recheckWork = tracedRecheck(
+          runRecheckSeat({
+            session: asToolSession(liveRecheckSession, cwd),
+            input: input.recheck,
+            model: seatModelChain(input),
+            signal: recheckController.signal,
+            ...(input.recheckAssignmentMaxBytes === undefined
+              ? {}
+              : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
+          }),
+        );
       }
 
       const runParentTurn = async (): Promise<MstarReviewV1> => {
@@ -1129,9 +1227,30 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       };
 
       let parentRunning = true;
-      const parentTurn = runParentTurn().finally(() => {
-        parentRunning = false;
-      });
+      const deepSeatId = parentSession.getAgentId() ?? "deep-parent";
+      traceStage(seatStartStage(deepSeatId));
+      const parentTurn = runParentTurn()
+        .then(
+          (ready) => {
+            // why: The deep parent IS the wave's seat. Its terminal token says
+            // whether the turn produced a usable review or stopped empty; the
+            // engine's parent session exposes no per-run turn count, so the
+            // token omits `turns` rather than inventing one.
+            traceStage(
+              ready.incomplete === undefined
+                ? seatDoneStage(deepSeatId, undefined)
+                : seatGapStage(deepSeatId, ready.incomplete.reason),
+            );
+            return ready;
+          },
+          (error: unknown) => {
+            traceStage(seatFailedStage(deepSeatId, causeText(error)));
+            throw error;
+          },
+        )
+        .finally(() => {
+          parentRunning = false;
+        });
       const supervision = superviseSeats({
         level: input.level,
         done: parentTurn.then(
@@ -1168,7 +1287,7 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (input.prContext !== undefined) {
         try {
           reportSession = await createSeatSession();
-          report = await runReportSeatFor(
+          report = await tracedReportSeatFor(
             input,
             asToolSession(reportSession, cwd),
             envelope,
@@ -1195,6 +1314,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       );
       return {
         envelope,
+        // why: The deep parent IS the seat. A yielded review is full coverage;
+        // a parent that produced nothing returns an incomplete envelope and
+        // carries NO coverage — that round is a failure, not a partial review.
+        ...(envelope.incomplete === undefined
+          ? { coverage: { seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] } satisfies ReviewCoverage }
+          : {}),
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
@@ -1302,21 +1427,24 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheckDoc = input.recheck;
       const recheckWork =
         recheckDoc !== undefined
-          ? runRecheckSeat({
-              session: toolSession,
-              input: recheckDoc,
-              model: seatModels,
-              signal: recheckController.signal,
-              ...(input.recheckAssignmentMaxBytes === undefined
-                ? {}
-                : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
-            })
+          ? tracedRecheck(
+              runRecheckSeat({
+                session: toolSession,
+                input: recheckDoc,
+                model: seatModels,
+                signal: recheckController.signal,
+                ...(input.recheckAssignmentMaxBytes === undefined
+                  ? {}
+                  : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
+              }),
+            )
           : null;
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
       const servedBySeat = new Map<string, string | undefined>();
       const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
       const runningSeats = new Set<string>();
+      const completedSeatIds = new Set<string>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
           // why: The SDK wall-clock timer is disabled (`maxRuntimeMs: 0`): it
@@ -1326,6 +1454,8 @@ export const ompAgentRuntime: AgentRuntime = {
           // aborts through the signal the seat consumes.
           const watch = startSeatWatch(input.level, () => runningSeats.size);
           runningSeats.add(id);
+          let terminalStage = seatFailedStage(id, "seat did not settle");
+          traceStage(seatStartStage(id));
           try {
             const result = await runStructuredSubagent({
               session: toolSession,
@@ -1345,10 +1475,17 @@ export const ompAgentRuntime: AgentRuntime = {
               },
             });
             seatSingles.push(result.result);
-            return seatOutput(result, index, plan);
+            const outcome = seatOutput(result, index, plan);
+            if (outcome.gap === null && outcome.output !== null) completedSeatIds.add(id);
+            terminalStage =
+              outcome.gap === null
+                ? seatDoneStage(id, result.result.requests)
+                : seatGapStage(id, outcome.gap.reason);
+            return outcome;
           } catch (error) {
             const settled = (error as { result?: unknown } | null | undefined)?.result;
             if (settled !== null && typeof settled === "object") seatSingles.push(settled as SubagentUsageSource);
+            terminalStage = seatFailedStage(id, causeText(error));
             throw error;
           } finally {
             // why: Capture the served model HERE, at the seat's own settlement: the
@@ -1361,6 +1498,7 @@ export const ompAgentRuntime: AgentRuntime = {
             settledSeats.add(id);
             runningSeats.delete(id);
             watch.stop();
+            traceStage(terminalStage);
           }
         }),
       );
@@ -1407,9 +1545,14 @@ export const ompAgentRuntime: AgentRuntime = {
       }
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
+      // why: A seat that finished its own scope is COMPLETED; a cap-stopped
+      // seat's collected payload still contributes findings, but that seat's
+      // scope was never finished, so it is not counted as completed and its
+      // seat lands in `unreviewed`. Only a round with no completed seat is a
+      // failure — everything else is a delivered partial review.
       const stoppedSeats =
         outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
-      if (gaps.length > 0) {
+      if (gaps.length > 0 && completedSeatIds.size === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         const served = new Set<string>();
@@ -1420,6 +1563,11 @@ export const ompAgentRuntime: AgentRuntime = {
         const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
         exhausted.recheck = settled?.doc ?? null;
         if (settled !== null) exhausted.recheckStatus = settled.status;
+        // why: The failure must name the seat reason, not just a count — the
+        // capped seat's abort reason is the only evidence of WHY it stopped.
+        for (const gap of gaps) {
+          console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+        }
         for (const { seat, detail } of siblingLosses) {
           console.error(
             `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
@@ -1428,6 +1576,26 @@ export const ompAgentRuntime: AgentRuntime = {
         if (served.size === 1) exhausted.appliedModel = [...served][0]!;
         throw exhausted;
       }
+      if (gaps.length > 0) {
+        // why: A delivered partial review keeps its seat losses visible in the
+        // runner log; the product statement about coverage rides the coverage
+        // block (the Check summary and the published body render it), never a
+        // second failure vocabulary.
+        for (const gap of gaps) {
+          console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+        }
+        for (const { seat, detail } of siblingLosses) {
+          console.error(`review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`);
+        }
+      }
+      const coverage: ReviewCoverage = {
+        seatsTotal: seats.length,
+        seatsCompleted: completedSeatIds.size,
+        stoppedReason: gaps.length > 0 ? "cap" : null,
+        unreviewed: seats
+          .filter(({ id }) => !completedSeatIds.has(id))
+          .map(({ plan }) => ({ seat: `${plan.domain}-${plan.seat}`, scope: [...plan.scope] })),
+      };
 
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
@@ -1438,7 +1606,11 @@ export const ompAgentRuntime: AgentRuntime = {
       const envelope = synthesizeReview({
         findings,
         target: parseTarget(input.reconFacts),
-        ...(stoppedSeats === 0
+        // why: `incomplete` is the nothing-usable verdict. A round that
+        // delivered at least one seat's findings is a review — its coverage
+        // gap is stated by the `coverage` block, not by claiming the whole
+        // result was incomplete (which would make the worker fail the Check).
+        ...(outputs.length > 0
           ? {}
           : {
               incomplete: {
@@ -1455,7 +1627,7 @@ export const ompAgentRuntime: AgentRuntime = {
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
       const reportSingles: SubagentUsageSource[] = [];
-      const report = await runReportSeatFor(
+      const report = await tracedReportSeatFor(
         input,
         toolSession,
         envelope,
@@ -1471,6 +1643,7 @@ export const ompAgentRuntime: AgentRuntime = {
       const appliedModel = served.size === 1 ? [...served][0]! : undefined;
       return {
         envelope,
+        coverage,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,

@@ -44,6 +44,7 @@ let seatResults: Array<{
   awaitAbort?: boolean;
   readDiff?: boolean;
   firstTurnAfterMs?: number;
+  requests?: number;
 }> = [];
 let installedSeatAgent: string | null = null;
 let installedAgentFiles: string[] | null = null;
@@ -323,6 +324,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         error: plan.error,
         aborted: plan.aborted,
         abortReason: plan.abortReason,
+        requests: plan.requests ?? 0,
         structuredOutput:
           status === "absent"
             ? undefined
@@ -338,7 +340,20 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 }));
 
 const RUNTIME_OMP_SPEC = "../../packages/runner/src/runtime-omp.ts?test=runtime-omp";
-const { ompAgentRuntime, superviseSeats, seatDeadlineMs, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS } = (await import(RUNTIME_OMP_SPEC)) as {
+const {
+  ompAgentRuntime,
+  superviseSeats,
+  seatDeadlineMs,
+  seatStopLine,
+  seatStartStage,
+  seatDoneStage,
+  seatGapStage,
+  seatFailedStage,
+  recheckStage,
+  reportStage,
+  SUMMARY_MD_BUDGET,
+  SEAT_GAP_MAX_CHARS,
+} = (await import(RUNTIME_OMP_SPEC)) as {
   ompAgentRuntime: AgentRuntime;
   superviseSeats: (opts: {
     seats: readonly SupervisedSeat[];
@@ -346,6 +361,17 @@ const { ompAgentRuntime, superviseSeats, seatDeadlineMs, SUMMARY_MD_BUDGET, SEAT
     done: Promise<void>;
   }) => Promise<void>;
   seatDeadlineMs: (nowMs: number, firstTurnMs: number, level: ReviewLevel, activeSeats: number) => number;
+  seatStopLine: (seat: string, reason: string | undefined) => string;
+  seatStartStage: (seat: string) => string;
+  seatDoneStage: (seat: string, turns: number | undefined) => string;
+  seatGapStage: (seat: string, reason: string | undefined) => string;
+  seatFailedStage: (seat: string, cause: string | undefined) => string;
+  recheckStage: (result: {
+    doc: unknown;
+    status: { outcome: string; reason?: string };
+    usage?: { requests?: number };
+  }) => string;
+  reportStage: (report: unknown, turns: number | undefined) => string;
   SUMMARY_MD_BUDGET: number;
   SEAT_GAP_MAX_CHARS: number;
 };
@@ -421,6 +447,9 @@ const TWO_CLUSTER_FACTS = [
   "5\t0\tsrc/b.ts",
   "8\t1\tlib/c.ts",
 ];
+
+/** The `src/` cluster's seat scope, in the order the fan-out sorts it. */
+const RECON_SRC_SCOPE = ["src/a.ts", "src/b.ts"];
 
 const AGENT_DIR = "/tmp/omp-agent-test";
 
@@ -868,54 +897,86 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     await flushMicrotasks();
 
     expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
-    const stop = (await run) as RunnerBudgetExhausted;
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    // The sibling completed, so the round delivers a partial review rather
+    // than a budget stop — the watchdog's abort is still the capped seat's.
+    const result = (await run) as ReviewRunResult;
+    expect(result).not.toBeInstanceOf(RunnerBudgetExhausted);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
   });
 
-  test("a seat that returns inside its cap is collected: findings land, no coverage note", async () => {
+  test("a full wave is collected with full coverage: findings land, stoppedReason null, nothing unreviewed", async () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
+    const { envelope, coverage } = await ompAgentRuntime.runReview(BASE_INPUT);
 
     expect(envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
     expect(envelope).not.toHaveProperty("summary_md");
+    expect(envelope).not.toHaveProperty("incomplete");
+    expect(coverage).toEqual({ seatsTotal: 2, seatsCompleted: 2, stoppedReason: null, unreviewed: [] });
   });
 
-  test("a seat stopped by its cap is a budget stop: the run reports the signal, never an envelope", async () => {
+  test("one capped seat and one completed seat deliver the completed findings with coverage naming 1/2 and the stopped scope", async () => {
     seatResults = [
       { status: "absent", aborted: true, abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)" },
       { data: seatPayload() },
     ];
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    // The delivered review is the completed seat's review — never a failure.
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.envelope).not.toHaveProperty("incomplete");
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
+    // The runner's log line names the seat and its abort reason verbatim.
+    expect(seatStopLine("changeset-1-part-1", "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)")).toBe(
+      "review seat changeset-1-part-1 stopped by cap: Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
+    );
   });
 
-  test("a cap that fires after the seat collected something is still a budget stop — partial findings are never published", async () => {
-    seatResults = [
-      {
-        aborted: true,
-        abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
-        data: {
-          findings: [
-            {
-              mergeClass: "should-fix",
-              title: "Missing null check",
-              body: "The handler assumes the payload is always present.",
-              file_path: "lib/c.ts",
-              line_start: 4,
-            },
-          ],
+  test("a cap that fires after the seat collected something delivers that payload but never counts the seat as reviewed", async () => {
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: ReviewRunResult;
+    try {
+      seatResults = [
+        {
+          aborted: true,
+          abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)",
+          data: {
+            findings: [
+              {
+                mergeClass: "should-fix",
+                title: "Missing null check",
+                body: "The handler assumes the payload is always present.",
+                file_path: "lib/c.ts",
+                line_start: 4,
+              },
+            ],
+          },
         },
-      },
-      { data: seatPayload({ findings: [] }) },
-    ];
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+        { data: seatPayload({ findings: [] }) },
+      ];
+      result = await ompAgentRuntime.runReview(BASE_INPUT);
+    } finally {
+      spy.mockRestore();
+    }
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    // what the seat found before the cap is delivered (the sibling found none)…
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Missing null check"]);
+    // …but the cut-off seat's scope is honestly reported as not reviewed.
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
   });
 
   test("an abort the runtime limit did not cause stays fatal — the flag alone is not coverage", async () => {
@@ -949,6 +1010,67 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     ];
 
     await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+  });
+
+  test("both seats capped before producing anything is still a failure: no envelope, no report, the reason named", async () => {
+    const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let stop: unknown;
+    try {
+      seatResults = [
+        { status: "absent", aborted: true, abortReason: CAP },
+        { status: "absent", aborted: true, abortReason: CAP },
+      ];
+      stop = await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
+    const exhausted = stop as RunnerBudgetExhausted;
+    expect(exhausted.seatsDispatched).toBe(2);
+    expect(exhausted.seatsStopped).toBe(2);
+    // Nothing was reviewed, so nothing is invented: no report seat, no envelope.
+    expect(subagentRequests).toHaveLength(2);
+    expect(exhausted.report).toBeNull();
+    // The failure text names each seat and its reason (the same line the
+    // runner writes to stderr); the module-bound console is not spyable here.
+    expect(seatStopLine("changeset-1-part-1", CAP)).toBe(
+      `review seat changeset-1-part-1 stopped by cap: ${CAP}`,
+    );
+    expect(seatStopLine("changeset-2-part-2", CAP)).toBe(
+      `review seat changeset-2-part-2 stopped by cap: ${CAP}`,
+    );
+  });
+
+  test("a partial delivery still runs the report seat, and a failed report never discards the found findings", async () => {
+    const spy = spyOn(console, "error").mockImplementation(() => {});
+    let result: ReviewRunResult;
+    try {
+      seatResults = [
+        { status: "absent", aborted: true, abortReason: "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)" },
+        { data: seatPayload() },
+        { error: "model unavailable" },
+      ];
+      result = await ompAgentRuntime.runReview({
+        ...BASE_INPUT,
+        prContext: { prBody: "Closes #7", issues: [] },
+      });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The report seat WAS dispatched (third request) and its failure is only
+    // narrative loss — the coverage and the findings stand.
+    expect(subagentRequests).toHaveLength(3);
+    expect(result.report).toBeNull();
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
   });
 });
 
@@ -1035,20 +1157,20 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(validateMstarReviewV1(envelope).ok).toBe(true);
   });
 
-  test("a cap that fired over an SDK error is still a budget stop, not a failure", async () => {
+  test("a cap over an SDK error in one seat no longer sinks the sibling's review", async () => {
     seatResults = [
       { status: "absent", aborted: true, abortReason: CAP_REASON, error: CAP_REASON },
       { data: seatPayload() },
     ];
 
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage?.seatsCompleted).toBe(1);
+    expect(result.coverage?.stoppedReason).toBe("cap");
   });
 
-  test("a cap that fired over a rejected payload is a budget stop — the refused payload rides nothing", async () => {
+  test("a cap over a schema-rejected payload delivers the sibling and never the refused payload", async () => {
     seatResults = [
       {
         status: "invalid",
@@ -1069,21 +1191,30 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
       { data: seatPayload() },
     ];
 
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
   });
 
-  test("one stopped seat of two: the run is a budget stop — the sibling's findings stay with it", async () => {
+  test("one stopped seat of two: the sibling's findings are delivered with 1/2 coverage", async () => {
     seatResults = [{ status: "absent", aborted: true, abortReason: CAP_REASON }, { data: seatPayload() }];
 
-    const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.envelope.incomplete).toBeUndefined();
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
   });
 
   test("no stopped seat: the envelope is the engine's own synthesis, fact and notes absent", async () => {
@@ -1113,35 +1244,21 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
 describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () => {
   const CAP_REASON = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
 
-  test("the signal reports ONLY the seat counts the runner observed", async () => {
+  test("the signal reports ONLY the seat counts the runner observed (no completed seat)", async () => {
     seatResults = [
-      {
-        aborted: true,
-        abortReason: CAP_REASON,
-        data: {
-          findings: [
-            {
-              mergeClass: "must-fix",
-              title: "Unbounded loop",
-              body: "The loop never terminates on empty input.",
-              file_path: "src/a.ts",
-              line_start: 10,
-            },
-          ],
-        },
-      },
-      { data: seatPayload({ findings: [] }) },
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
+      { status: "absent", aborted: true, abortReason: CAP_REASON },
     ];
 
     const stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
 
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
+    expect(stop.seatsStopped).toBe(2);
     expect(stop.signal()).toEqual({
       schema: "mstar.review-budget-exhausted/v1",
       seatsDispatched: 2,
-      seatsStopped: 1,
+      seatsStopped: 2,
     });
   });
 
@@ -1569,8 +1686,10 @@ describe("ompAgentRuntime.runReview — deep parent path", () => {
     } finally {
       spy.mockRestore();
     }
-    expect(errorCalls.length).toBeGreaterThan(0);
-    expect(String(errorCalls[0]![1])).toContain("provider connection dropped");
+    // Trace stages share the console; the warning is its own call, not first.
+    const raised = errorCalls.find((args) => String(args[0]).includes("deep parent turn raised"));
+    expect(raised).toBeDefined();
+    expect(String(raised![1])).toContain("provider connection dropped");
   });
 
   test("a prompt throw WITHOUT a yield rethrows the turn error", async () => {
@@ -2186,7 +2305,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       errorCalls.push(args);
     });
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
     } finally {
@@ -2238,7 +2357,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   test("a seat throw → recheck null + failed status (seat-failed) carrying the message", async () => {
     seatResults = [{ reject: "provider boom" }, { data: seatPayload() }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
     } finally {
@@ -2324,7 +2443,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   test("a seat rejecting with a plain string still resolves failed — never throws out of the catch", async () => {
     seatResults = [{ rejectWith: "provider boom" }, { data: seatPayload() }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
     } finally {
@@ -2344,7 +2463,7 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     const padding = "x".repeat(RECHECK_STATUS_ERROR_MAX_CHARS - 10);
     seatResults = [{ reject: `${padding} ${token} tail` }, { data: seatPayload() }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", recheck: recheckInput() });
     } finally {
@@ -2540,6 +2659,100 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
   });
 });
 
+describe("ompAgentRuntime.runReview — every seat is visible in the trace", () => {
+  /** Capture the trace lines a run writes; returns them in emission order. */
+  async function capturedTrace(run: () => Promise<unknown>): Promise<string[]> {
+    const lines: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      for (const arg of args) if (typeof arg === "string") lines.push(arg);
+    });
+    try {
+      await run();
+    } finally {
+      spy.mockRestore();
+    }
+    return lines
+      .filter((line) => line.includes('"event":"review_stage"'))
+      .map((line) => (JSON.parse(line) as { stage: string }).stage);
+  }
+
+  test("the stage builders name the seat, the stop reason and the turn count", () => {
+    expect(seatStartStage("changeset-1-src")).toBe("seat_start:changeset-1-src");
+    expect(seatDoneStage("changeset-1-src", 3)).toBe("seat_done:changeset-1-src:turns=3");
+    expect(seatDoneStage("deep-parent", undefined)).toBe("seat_done:deep-parent");
+    expect(seatGapStage("changeset-2-part-2", "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)")).toBe(
+      "seat_gap:changeset-2-part-2:cap:540000ms",
+    );
+    expect(seatGapStage("changeset-2-lib", "Provider stream closed unexpectedly")).toBe(
+      "seat_gap:changeset-2-lib:Provider-stream-clos",
+    );
+    expect(seatFailedStage("changeset-1-src", "review seat 0 (x) failed: boom")).toBe(
+      "seat_failed:changeset-1-src:review-seat-0-x-fail",
+    );
+    expect(recheckStage({ doc: null, status: { outcome: "skipped", reason: "budget" } })).toBe(
+      "recheck_gap:skipped-budget",
+    );
+    expect(recheckStage({ doc: {}, status: { outcome: "applied" }, usage: { requests: 4 } })).toBe(
+      "recheck_done:turns=4",
+    );
+    expect(reportStage(null, undefined)).toBe("report_skipped");
+    expect(reportStage({}, 2)).toBe("report_done:turns=2");
+    // Every token stays inside the worker's 60-char bound.
+    for (const token of [
+      seatGapStage("changeset-2-lib", "x".repeat(200)),
+      seatFailedStage("changeset-2-lib", "y".repeat(200)),
+      seatDoneStage("changeset-1-src", 1234),
+    ]) {
+      expect(token.length).toBeLessThanOrEqual(60);
+    }
+  });
+
+  test("a failing wave ends on the seat's gap stage, naming the seat and the cap reason", async () => {
+    const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+    const trace = await capturedTrace(async () => {
+      seatResults = [
+        { status: "absent", aborted: true, abortReason: CAP },
+        { status: "absent", aborted: true, abortReason: CAP },
+      ];
+      await ompAgentRuntime.runReview(BASE_INPUT).catch(() => undefined);
+    });
+
+    expect(trace).toContain("seat_start:changeset-1-src");
+    expect(trace).toContain("seat_start:changeset-2-lib");
+    expect(trace).toContain("seat_gap:changeset-1-src:cap:540000ms");
+    expect(trace).toContain("seat_gap:changeset-2-lib:cap:540000ms");
+    // The LAST stage the worker would print names a real seat stop.
+    expect(trace.at(-1)).toMatch(/^seat_gap:changeset-[12]-(src|lib):cap:540000ms$/);
+  });
+
+  test("a full success emits start and done with each seat's turn count", async () => {
+    const trace = await capturedTrace(async () => {
+      seatResults = [
+        { requests: 3, data: seatPayload() },
+        { requests: 5, data: seatPayload({ findings: [] }) },
+      ];
+      await ompAgentRuntime.runReview(BASE_INPUT).catch(() => undefined);
+    });
+
+    expect(trace).toContain("seat_start:changeset-1-src");
+    expect(trace).toContain("seat_start:changeset-2-lib");
+    expect(trace).toContain("seat_done:changeset-1-src:turns=3");
+    expect(trace).toContain("seat_done:changeset-2-lib:turns=5");
+    // The skipped report seat still closes the trace (nothing to narrate).
+    expect(trace.at(-1)).toBe("report_skipped");
+  });
+
+  test("the deep parent is traced as the wave's single seat", async () => {
+    const trace = await capturedTrace(async () => {
+      parentYields = [deepEnvelope()];
+      await ompAgentRuntime.runReview(DEEP_INPUT).catch(() => undefined);
+    });
+
+    expect(trace.filter((stage) => stage.startsWith("seat_start:"))).toHaveLength(1);
+    expect(trace).toContain(`seat_done:${trace.find((stage) => stage.startsWith("seat_start:"))!.slice("seat_start:".length)}`);
+  });
+});
+
 describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
   const REPORT = {
     schema: "mstar.report/v1" as const,
@@ -2590,7 +2803,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
   test("a failed report seat resolves null — the review is untouched", async () => {
     seatResults = [{ data: seatPayload() }, { error: "model unavailable" }];
     const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
     } finally {
@@ -2607,7 +2820,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
       { data: { ...REPORT, overview: "   " } },
     ];
     const spy = spyOn(console, "error").mockImplementation(() => {});
-    let result: Awaited<ReturnType<typeof ompAgentRuntime.runReview>>;
+    let result: ReviewRunResult;
     try {
       result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CONTEXT });
     } finally {
