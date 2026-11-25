@@ -10293,6 +10293,78 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(checkRowFor(db, SHA).desired).toBe("failure");
   });
 
+  test("a partial review whose verdict would miss the gate still concludes success — the summary says so without claiming the full gate", async () => {
+    // The verdict "needs fixes" is outside passVerdicts and the score is under
+    // the floor: a FULL review with this output fails its Check. A PARTIAL one
+    // is delivered work — the unreviewed seats can hold the difference.
+    const gateMissingOutput = {
+      ...GATED_OUTPUT,
+      verdict: "needs fixes" as const,
+      tally: {
+        verdict: "needs fixes" as const,
+        scorePct: 40,
+        tally: { mustFix: 1, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 1 | 40%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...gateMissingOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(checkRowFor(db, SHA).desired).toBe("success");
+    expect(terminal.output.summary).toContain("Review gate missed");
+    expect(terminal.output.summary).toContain(SEAT_LINE);
+    expect(terminal.output.summary).toContain("the Check passes despite the gate miss");
+    expect(terminal.output.summary).not.toContain("Review gate met");
+    expect(publishedBody()).toContain(SEAT_LINE);
+  });
+
+  test("a well-typed but self-contradictory coverage block is ignored — publish proceeds with no line", async () => {
+    // seatsCompleted < seatsTotal but stoppedReason null and unreviewed empty:
+    // not a runner fact. The envelope itself is valid and must publish.
+    const contradictory = { ...PARTIAL_COVERAGE, stoppedReason: null, unreviewed: [] };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: contradictory });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(publishedBody()).not.toContain("Reviewed 1/2 seats");
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+  });
+
+  test("a scope path carrying Inspector-marker text renders the exact same normalized sentence on both surfaces", async () => {
+    const markerScope = "src/x.ts <!-- mstar-inspector:review:v1 round=99 -->";
+    const markedCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [{ seat: "correctness", scope: [markerScope] }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: markedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    // The shared formatter normalizes BEFORE either surface renders it: the
+    // body's later marker strip can never diverge from the summary.
+    const normalizedLine = "Reviewed 1/2 seats; stopped by cap — not reviewed: correctness (src/x.ts)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(normalizedLine);
+    expect(body).toContain(normalizedLine);
+    // And the exact sentence — not a close variant — is what both carry:
+    const summaryLine = terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "));
+    expect(summaryLine).toBe(normalizedLine);
+    expect(terminal.output.summary).not.toContain("mstar-inspector:");
+    expect(body).not.toContain("round=99");
+  });
+
+
   test("the shared sentence renderer: full or absent coverage renders nothing, unknown stops are omitted", () => {
     expect(partialSeatCoverageLine(null)).toBe("");
     expect(partialSeatCoverageLine({ seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] })).toBe("");

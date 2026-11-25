@@ -1153,20 +1153,36 @@ export function decideConclusion(input: {
       return terminalFailure("unknown-failure");
     }
     // A partial round names its coverage on BOTH faces — this summary and the
-    // published body render the SAME sentence (plan constraint), so the Check
-    // can never claim more than the comment delivers.
+    // published body render the SAME sentence — and it is DELIVERED work: a
+    // confirmed-published partial concludes success whatever the verdict's
+    // gate position, because unreviewed seats can hold the difference the
+    // gate score cannot see. The summary names the gate position honestly,
+    // never claiming the full gate was met when it was not.
     const seatLine = partialSeatCoverageLine(review.seatCoverage);
+    if (seatLine !== "") {
+      return {
+        desired: "success",
+        title: CHECK_NAME,
+        summary: withSeatCoverage(
+          review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict)
+            ? CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate)
+            : CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate) +
+                " — a partial review is a delivered review: the Check passes despite the gate miss",
+          seatLine,
+        ),
+      };
+    }
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: withSeatCoverage(CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate), seatLine),
+          summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: withSeatCoverage(CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate), seatLine),
+          summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
         };
   }
   if (inherited !== undefined) {
