@@ -149,6 +149,27 @@ function settledMark(db: TestD1): number | null {
  * write. Batch members run unwrapped, so a release batch that already landed the
  * landed fact survives the fault.
  */
+/**
+ * A database whose settlement-record insert refuses at execution — and only that
+ * statement, so the batch stays atomic and the fault lands inside it.
+ */
+function insertFaults(db: TestD1): D1Like {
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (sql.includes("INSERT INTO review_failures")) throw new Error("insert unavailable");
+      return st.run();
+    },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+    raw: db.raw,
+  } as unknown as D1Like;
+}
+
 function markWriteFaults(db: TestD1): D1Like {
   const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
     bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
@@ -1599,6 +1620,38 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(h.kvPuts).toHaveLength(0);
   });
 
+  test("an insert fault revokes nothing and leaves the slot held", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-insert-fault";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    const env = await h.makeEnv({ DB: insertFaults(db) as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The insert never ran: the batch rolled back, so the row was neither
+    // retired nor released, and the lane retries it on the next pass.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...admissionAt(SETTLES_AT, payload), attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held" });
+
+    // note: The clean retry is the owner: one record, and the revoke that only a
+    // creating pass may write.
+    await reconcileReviewRoute(
+      { ...(await h.makeEnv({ DB: db as never })), REVIEW_QUEUE: queue as never },
+      SETTLES_AT + 60_000,
+    );
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toEqual(expect.any(Number));
+  });
+
   test("the release records its landed fact in the batch, so a mark fault still proves it", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
@@ -1645,29 +1698,34 @@ describe("a launched attempt whose paid reply was lost", () => {
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-recheck-only";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    db.raw
-      .prepare(
-        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'recheck', 'the recheck shipped', 'review.recheck.unaccounted', ?, 'the recheck shipped', datetime('now'))`,
-      )
-      .run(
-        `${attemptId}:recheck`,
-        payload.targetId,
-        payload.installation_id,
-        payload.owner,
-        payload.repo,
-        payload.pr_number,
-        payload.head_sha,
-        attemptId,
-      );
+    for (const stageId of [`${attemptId}:recheck`, `${attemptId}:usage`]) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'a sub-record', 'review.internal.unclassified', ?, 'a sub-record', datetime('now'))`,
+        )
+        .run(
+          stageId,
+          payload.targetId,
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.head_sha,
+          attemptId,
+        );
+    }
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
 
-    // note: The per-stage row shares the attempt's `track_id` but is not the
-    // settlement record, so the lane still writes its own one row.
-    expect(failureRows(db).map((row) => row.id).sort()).toEqual([`${attemptId}:recheck`, attemptId].sort());
+    // note: Sub-stage rows share the attempt's `track_id` but are not the
+    // settlement record — the `<attempt>:<stage>` namespace is excluded by shape,
+    // so the lane still writes the attempt's own one row.
+    expect(failureRows(db).map((row) => row.id).sort()).toEqual(
+      [`${attemptId}:recheck`, `${attemptId}:usage`, attemptId].sort(),
+    );
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 

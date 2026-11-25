@@ -491,18 +491,22 @@ async function settleLostReplies(
       failure = null;
     }
     const statements = [
-      // 0: revoke — the guarded move, gated by "no settlement record yet".
-      revokeUnsettledLaunchStatement(env.DB, handoff.attemptId, nowMs),
       ...(failure === null
         ? []
         : [
-            // 1: the record — `changes` is the proof THIS pass created it.
+            // The record FIRST — its own row count is what the revoke below is
+            // gated on (SQL cannot read a later statement's result).
             settlementRecordInsertStatement(env.DB, failure, handoff.attemptId, LAUNCH_STILL_LIVE_SQL),
-            // 2: the durable fact that the record now exists, same precondition.
-            recordLandedEffectStatement(env.DB, handoff.attemptId, "failure-row", LAUNCH_STILL_LIVE_SQL),
+            // Immediately after it: only a pass whose insert created the record
+            // retires the row, and the insert's own count is the gate.
+            revokeUnsettledLaunchStatement(env.DB, handoff.attemptId, nowMs),
           ]),
+      // The landed fact, in the batch that moves the row: it lands when a record
+      // is durable at this point (our insert above counts) and the row is still
+      // live, so a stop right after this batch never loses it.
+      recordLandedEffectStatement(env.DB, handoff.attemptId, "failure-row", LAUNCH_STILL_LIVE_SQL),
       // The release — only a `launched` row moves, so one pass wins it — and the
-      // settlement start, which closes the batch.
+      // settlement start, which closes the batch and reads the release's count.
       recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
       beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
     ];
@@ -528,10 +532,10 @@ async function settleLostReplies(
       );
       continue;
     }
-    // The ownership proof is the guarded insert's own row count: zero means the
-    // attempt's record already existed (any build's), and only the creating pass
-    // may stamp the head.
-    const owned = (moved[1]?.meta.changes ?? 0) === 1;
+    // The ownership proof is the guarded insert's own row count (statement 0):
+    // zero means the attempt's record already existed (any build's), and only the
+    // creating pass may stamp the head.
+    const owned = failure !== null && (moved[0]?.meta.changes ?? 0) === 1;
     const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
     landed.add("failure-row");
     try {

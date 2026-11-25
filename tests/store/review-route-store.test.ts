@@ -3,13 +3,14 @@ import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "./helper
 import {
   attemptFailureStoryExists,
   deliveryKeyOf,
+  settlementRecordInsertStatement,
   LOST_REPLY_FALLBACK_ERROR,
   LOST_REPLY_FALLBACK_SHAPE,
   readAttemptHandoff,
   recordReviewedHead,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
-import { createFailureStore } from "../../src/store/failure-store";
+import { createFailureStore, type ReviewFailureInput } from "../../src/store/failure-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 /**
@@ -94,6 +95,87 @@ describe("recordReviewedHead row state", () => {
       expect(again?.payload).not.toHaveProperty("reviewedHeadSha");
     });
   }
+});
+
+/**
+ * The settlement record's own guard: one record per attempt, for any build's
+ * row, decided in the insert rather than by a read before it.
+ */
+describe("the settlement record's insert", () => {
+  const ATTEMPT = "attempt-settlement-record";
+
+  function recordInput(): ReviewFailureInput {
+    return {
+      target_id: TARGET_ID,
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 7,
+      head_sha: "a".repeat(40),
+      stage: "pipeline",
+      code: "review.internal.unclassified",
+      trackId: ATTEMPT,
+      message: "the review failed",
+      error: "runner exited 1",
+    };
+  }
+
+  test("a retry carrying the same attempt id cannot add a second record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+
+    const first = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    const retry = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+
+    expect(first.meta.changes).toBe(1);
+    // The record the first attempt wrote IS the guard: a Workflow retry replaying
+    // the same attempt id finds it and writes nothing.
+    expect(retry.meta.changes).toBe(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
+  });
+
+  test("a new attempt id legitimately gets its own record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+
+    await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    const next = await settlementRecordInsertStatement(db as never, { ...input, trackId: "attempt-next" }, "attempt-next").run();
+
+    // A retry under a NEW attempt id is a different attempt: no guard may fold
+    // its record into the previous attempt's.
+    expect(next.meta.changes).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
+  test("a diagnostic sub-stage row never stands in for the attempt's record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+    for (const stageId of [`${ATTEMPT}:recheck`, `${ATTEMPT}:usage`]) {
+      await createFailureStore(db as never).record({
+        id: stageId,
+        target_id: TARGET_ID,
+        installation_id: 123,
+        owner: "acme",
+        repo: "widgets",
+        pr_number: 7,
+        head_sha: "a".repeat(40),
+        stage: "pipeline",
+        code: "review.internal.unclassified" as never,
+        trackId: ATTEMPT,
+        message: "a sub-record",
+        error: "a sub-record",
+      });
+    }
+
+    // Both carry the attempt's `track_id`, and neither is the settlement: the
+    // attempt's own namespace `<attempt>:<stage>` is excluded by shape.
+    const written = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    expect(written.meta.changes).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 3 });
+  });
 });
 
 describe("attemptFailureStoryExists", () => {

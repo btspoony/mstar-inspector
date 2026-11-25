@@ -586,16 +586,29 @@ const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE i
  * batch: a concurrent settlement cannot slip a record in between the decision
  * and the statement, and both statements that use it see the same rows.
  */
-const SETTLEMENT_RECORD_MISSING = `NOT EXISTS (
-  SELECT 1 FROM review_failures f
-   WHERE f.id = ?1 OR (f.track_id = ?1 AND f.id <> ?2)
-)`;
+const SETTLEMENT_RECORD_EXISTS = `(f.id = ?1 OR (f.track_id = ?1 AND f.id NOT LIKE ?1 || ':%'))`;
+/**
+ * Why that shape and not a list of stage ids: a settlement record is the row
+ * keyed by the ATTEMPT itself, or — for a build before that key — a plain row
+ * carrying the attempt in `track_id`. Every SUB-record of an attempt lives in
+ * the attempt's own namespace, `<attempt>:<stage>` (`:recheck`, `:usage`, and
+ * whatever stage a later producer adds), so the namespace is the discriminator:
+ * an enumerated exclusion list would silently admit the next stage's diagnostic
+ * row as a settlement and suppress the real one.
+ */
+const SETTLEMENT_RECORD_MISSING = `NOT EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
+const SETTLEMENT_RECORD_PRESENT = `EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
 
 /**
  * The settlement record's insert, guarded by its OWN existence predicate. One
  * row per attempt for any build's row, and the statement's `changes` is the
  * proof that THIS pass created it — the only proof the head-wide claim may rest
  * on. `ON CONFLICT(id)` keeps two simultaneous replays harmless.
+ *
+ * A retry that carries the SAME attempt id therefore cannot add a second record:
+ * the first record is keyed by that id and the guard sees it. A retry under a NEW
+ * attempt id is a different attempt and legitimately gets its own record — no
+ * guard may prevent that, and none does.
  */
 export function settlementRecordInsertStatement(
   db: D1Like,
@@ -603,9 +616,8 @@ export function settlementRecordInsertStatement(
   attemptId: string,
   /**
    * A caller's own precondition, ANDed into the guard. It may only use the same
-   * `?1` (attempt) / `?2` (per-stage row) binds — the release batch passes its
-   * launch precondition, so a race that terminalized the row another way writes
-   * no record at all.
+   * `?1` (attempt) bind — the release batch passes its launch precondition, so a
+   * race that terminalized the row another way writes no record at all.
    */
   extraGuard = "",
 ): D1StatementLike {
@@ -613,13 +625,12 @@ export function settlementRecordInsertStatement(
   return db
     .prepare(
       `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
-       SELECT ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+       SELECT ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
         WHERE ${SETTLEMENT_RECORD_MISSING}${extraGuard === "" ? "" : ` AND ${extraGuard}`}
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
       attemptId,
-      `${attemptId}:recheck`,
       attemptId,
       input.target_id,
       input.installation_id,
@@ -636,29 +647,32 @@ export function settlementRecordInsertStatement(
 }
 
 /**
- * The revocation, for a lane that must not retire a row whose record somebody
- * else already created: the same guarded move as `markAttemptRevokedStatement`
- * plus "no settlement record exists yet". It is evaluated in the settlement
- * batch BEFORE that batch's guarded insert, over the same rows, so it fires
- * exactly when the insert wins — a pass that finds an existing record (any
- * build's, including a legacy random-id one) never revokes, and the row stays
- * tearable down and open to the successor's stop proof.
+ * The revocation, for a lane that may only retire a row whose record THIS pass
+ * created: the same guarded move as `markAttemptRevokedStatement` plus
+ * `changes() > 0` — the row count of the statement placed IMMEDIATELY before it
+ * in the same batch, i.e. `settlementRecordInsertStatement`. SQL cannot read a
+ * later statement's result, so the insert goes FIRST and the revoke follows it:
+ * an insert that throws (the batch rolls back), that finds an existing record,
+ * or that a caller skipped therefore revokes nothing. The row keeps its stop
+ * proof and stays tearable down.
  */
 export function revokeUnsettledLaunchStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
   return db
     .prepare(
-      `UPDATE review_launches SET revoked_ms = ?3
+      `UPDATE review_launches SET revoked_ms = ?2
         WHERE attempt_id = ?1 AND state = 'launched' AND result_outcome IS NULL AND revoked_ms IS NULL
-          AND ${SETTLEMENT_RECORD_MISSING}`,
+          AND changes() > 0`,
     )
-    .bind(attemptId, `${attemptId}:recheck`, nowMs);
+    .bind(attemptId, nowMs);
 }
 
 /**
- * Record one landed settlement effect as a durable fact, for a batch that
- * terminalizes a record it did not write: a stop between the two writes would
- * otherwise leave the next pass with no proof that the record exists, and the
- * claim gate has to read that fact.
+ * Record one landed settlement effect as a durable fact, inside the batch that
+ * moves the attempt's launch row. It lands only when the attempt's settlement
+ * record is durable at this point of the batch — an insert earlier in the same
+ * batch counts, so a stop right after the batch never leaves the release without
+ * its fact — and a caller may AND in its own precondition on `?1`. `settled_ms`
+ * is NOT set here: the settlement rule still decides completeness.
  */
 export function recordLandedEffectStatement(
   db: D1Like,
@@ -677,7 +691,7 @@ export function recordLandedEffectStatement(
                   SELECT ?2
                 )
               )
-        WHERE attempt_id = ?1${extraGuard === "" ? "" : ` AND ${extraGuard}`}`,
+        WHERE attempt_id = ?1 AND ${SETTLEMENT_RECORD_PRESENT}${extraGuard === "" ? "" : ` AND ${extraGuard}`}`,
     )
     .bind(attemptId, effect);
 }
