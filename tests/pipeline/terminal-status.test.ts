@@ -148,6 +148,7 @@ describe("every terminal path persists a category (or deliberately none)", () =>
     ...BUDGET_RECORD,
     cause: "consumer-deadline",
     budgetWindow: "preparation",
+    cappedBy: "remaining-window",
   };
   const paths: ReadonlyArray<{
     path: string;

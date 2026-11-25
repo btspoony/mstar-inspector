@@ -3725,6 +3725,25 @@ describe("budget-exhausted Check vocabulary", () => {
     );
   });
 
+  test("a preparation-window stop keeps its own copy even when the clock that spent it is the remaining window", () => {
+    const summary = budgetExhaustedSummary({
+      kind: "budget-exhausted",
+      cause: "consumer-deadline",
+      budgetWindow: "preparation",
+      cappedBy: "remaining-window",
+      tier: "quick",
+      budgetMs: 12_500,
+      seatsDispatched: 0,
+      seatsStopped: 0,
+      changedLines: null,
+    });
+    // No runner ever ran, so the copy may not claim one was capped.
+    expect(summary).not.toContain("runner");
+    expect(summary).toBe(
+      `Review budget exhausted: quick review reached its 12.5s preparation budget (consumer deadline reached); 0/0 seats stopped before finishing${TAIL}`,
+    );
+  });
+
   test("short form appends only the observed counters, in order", () => {
     const summary = budgetExhaustedSummary({
       kind: "budget-exhausted",
