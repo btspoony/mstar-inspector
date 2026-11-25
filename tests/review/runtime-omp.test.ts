@@ -271,16 +271,19 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
     reservedSeatIds.push(identity?.id);
     seatDispatchQueue.shift()?.();
     const plan = seatResults.shift() ?? {};
-    // A seat that models its first model turn: the runner starts the seat's
-    // budget clock from this event, never from dispatch. The hook fires BEFORE
-    // the hold/abort waits — the first turn precedes the work, not the other
-    // way around; the delay simulates setup cost (session creation, skill
-    // load) — it must never be charged.
-    const progressHook = request.onProgress as ((progress: { status: string }) => void) | undefined;
+    // The SDK monitor reports `status: "running"` before any model call (a
+    // label or session event), so every seat emits that LABEL snapshot first.
+    // Only a snapshot with `requests >= 1` is a real model turn, and that is
+    // what starts the runner's budget clock: the delay simulates setup cost
+    // (session creation, skill load) and must never be charged.
+    const progressHook = request.onProgress as
+      | ((progress: { status: string; requests: number }) => void)
+      | undefined;
+    progressHook?.({ status: "running", requests: 0 });
     if (plan.firstTurnAfterMs !== undefined) {
       const delay = plan.firstTurnAfterMs;
       if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
-      progressHook?.({ status: "running" });
+      progressHook?.({ status: "running", requests: 1 });
     }
     if (holdSeats) {
       await new Promise<void>((resolve) => seatReleases.push(resolve));
@@ -349,8 +352,12 @@ const {
   seatDoneStage,
   seatGapStage,
   seatFailedStage,
+  seatTraceId,
+  startsFirstTurn,
   recheckStage,
   reportStage,
+  reportSkipStage,
+  reportFailedStage,
   SUMMARY_MD_BUDGET,
   SEAT_GAP_MAX_CHARS,
 } = (await import(RUNTIME_OMP_SPEC)) as {
@@ -360,11 +367,19 @@ const {
     level: ReviewLevel;
     done: Promise<void>;
   }) => Promise<void>;
-  seatDeadlineMs: (nowMs: number, firstTurnMs: number, level: ReviewLevel, activeSeats: number) => number;
+  seatDeadlineMs: (nowMs: number, firstTurnMs: number, level: ReviewLevel) => number;
+  startsFirstTurn: (progress: { status: string; requests?: number }) => boolean;
+  seatTraceId: (index: number, id: string) => string;
+  reportSkipStage: (reason: string) => string;
+  reportFailedStage: (cause: string | undefined) => string;
+  reportEligibility: (
+    input: AgentRuntimeRunInput,
+    envelope: { incomplete?: unknown; target?: { head_sha?: string } },
+  ) => { ok: true; headSha: string } | { ok: false; reason: string };
   seatStopLine: (seat: string, reason: string | undefined) => string;
   seatStartStage: (seat: string) => string;
   seatDoneStage: (seat: string, turns: number | undefined) => string;
-  seatGapStage: (seat: string, reason: string | undefined) => string;
+  seatGapStage: (seat: string, reason: string | undefined, turns?: number) => string;
   seatFailedStage: (seat: string, cause: string | undefined) => string;
   recheckStage: (result: {
     doc: unknown;
@@ -801,80 +816,107 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
     expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
   });
 
-  test("the shared window is the tier ceiling split across the running seats, bounded by the absolute deadline", async () => {
+  test("every seat's window is the FULL tier ceiling, bounded only by the absolute deadline", () => {
     const level = "default" as const;
     const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
     const turn = Date.now();
     anchorRecheckDeadline(turn, level, turn + 3_600_000);
 
-    const twoSeats = seatDeadlineMs(turn, turn, level, 2);
-    expect(twoSeats - turn).toBe(Math.ceil(ceiling / 2));
+    // One seat or many, early turn or late turn: the window is the ceiling.
+    expect(seatDeadlineMs(turn, turn, level) - turn).toBe(ceiling);
+    expect(seatDeadlineMs(turn + 400_000, turn, level) - turn).toBe(ceiling);
 
-    const oneSeat = seatDeadlineMs(turn, turn, level, 1);
-    expect(oneSeat - turn).toBe(ceiling);
-    expect(oneSeat).toBeGreaterThan(twoSeats);
-
-    // A deadline inside the two-seat share clamps the window; one beyond the
-    // full ceiling never widens it — the tier ceiling bounds both directions.
+    // The attempt's absolute deadline (less the publication tail) is the only
+    // thing that can shorten it — and nothing can widen it.
     anchorRecheckDeadline(turn, level, turn + 250_000 + TAIL_MS);
-    expect(seatDeadlineMs(turn + 1, turn, level, 2)).toBe(turn + 250_000);
-    anchorRecheckDeadline(turn, level, turn + ceiling * 3);
-    expect(seatDeadlineMs(turn + 1, turn, level, 2)).toBe(twoSeats);
+    expect(seatDeadlineMs(turn + 1, turn, level)).toBe(turn + 250_000);
   });
 
-  test("a seat's cap starts at its first model turn — slow setup is never charged to its window", async () => {
-    // Real timers: the watchdog ticks on wall time. The seat's setup costs
-    // 150 ms before its first turn; if the clock had started at dispatch the
-    // window would already be spent by the assertion point far past the
-    // tick cadence — an un-aborted signal after several ticks proves the cap
-    // re-anchored at the first turn instead.
-    anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
-    seatResults = [
-      { firstTurnAfterMs: 150, data: seatPayload() },
-      { firstTurnAfterMs: 150, data: seatPayload({ findings: [] }) },
-    ];
-
-    await ompAgentRuntime.runReview(BASE_INPUT);
-    await new Promise((resolve) => setTimeout(resolve, 700));
-
-    for (const request of subagentRequests) {
-      expect((request.signal as AbortSignal).aborted).toBe(false);
-    }
-  });
-
-  test("a seat that finishes early releases its share: the sibling's deadline is the full ceiling", async () => {
+  test("two concurrent seats each get the whole ceiling — neither dies at half the window", async () => {
     jest.useFakeTimers();
     const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
     anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
-    holdSeats = true;
     const dispatched = [deferred(), deferred()];
     seatDispatchQueue = dispatched.map((entry) => entry.resolve);
-    seatResults = [{ firstTurnAfterMs: 0, data: seatPayload() }, { firstTurnAfterMs: 0, data: seatPayload() }];
+    seatResults = [
+      { firstTurnAfterMs: 0, awaitAbort: true },
+      { firstTurnAfterMs: 0, awaitAbort: true },
+    ];
 
-    const run = ompAgentRuntime.runReview(BASE_INPUT);
-    await dispatched[1]!.promise;
+    const run = ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error);
+    await Promise.all([dispatched[0]!.promise, dispatched[1]!.promise]);
     await flushMicrotasks();
 
-    // Seat 1 finishes early — far inside the shared window — releasing its
-    // half while the sibling still thinks.
-    jest.advanceTimersByTime(Math.ceil(ceiling / 4) - 250);
+    // WHY this assertion is the fix's proof: the discarded design divided the
+    // ceiling across seats, so both would die just past ceiling/2 here.
+    jest.advanceTimersByTime(Math.ceil(ceiling / 2) + 5_000);
     await flushMicrotasks();
-    seatReleases[0]!();
-    await flushMicrotasks();
-    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
+    for (const request of subagentRequests) {
+      expect((request.signal as AbortSignal).aborted).toBe(false);
+    }
 
-    // The sibling's window moved forward with the release: it survives past
-    // the two-seat deadline, but not past the full ceiling.
-    jest.advanceTimersByTime(Math.ceil(ceiling / 4));
+    // Each seat aborts on its OWN ceiling, not on a share.
+    jest.advanceTimersByTime(Math.ceil(ceiling / 2) + 5_000);
     await flushMicrotasks();
-    const siblingSignal = subagentRequests[1]!.signal as AbortSignal;
-    expect(siblingSignal.aborted).toBe(false);
-    jest.advanceTimersByTime(Math.ceil(ceiling / 2) + 2_000);
-    await flushMicrotasks();
-    expect(siblingSignal.aborted).toBe(true);
-    expect(String((siblingSignal.reason as Error).message)).toMatch(/Subagent runtime limit exceeded/);
+    for (const request of subagentRequests) {
+      expect((request.signal as AbortSignal).aborted).toBe(true);
+      expect(String((request.signal as AbortSignal).reason as Error)).toMatch(
+        new RegExp(`task\\.maxRuntimeMs=${ceiling}`),
+      );
+    }
+    await run;
+  });
 
-    seatReleases[1]!();
+  test("a seat's clock starts at its first REAL model turn, not at the running label", async () => {
+    jest.useFakeTimers();
+    const level = "quick" as const;
+    const ceiling = PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes * 60_000;
+    // Setup longer than the whole ceiling: if the clock started at dispatch —
+    // or at the monitor's initial `running` label — the seat would already be
+    // dead by the first assertion.
+    const setupMs = ceiling + 50_000;
+    anchorRecheckDeadline(Date.now(), level, Date.now() + 3_600_000);
+    const dispatched = [deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ firstTurnAfterMs: setupMs, awaitAbort: true }];
+
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, level }).catch((error: unknown) => error);
+    await dispatched[0]!.promise;
+    await flushMicrotasks();
+
+    jest.advanceTimersByTime(ceiling + 1_000);
+    await flushMicrotasks();
+    const signal = subagentRequests[0]!.signal as AbortSignal;
+    expect(signal.aborted).toBe(false);
+
+    // Past the first real turn, the seat owns a fresh full ceiling.
+    jest.advanceTimersByTime(setupMs - ceiling);
+    await flushMicrotasks();
+    expect(signal.aborted).toBe(false);
+    jest.advanceTimersByTime(ceiling + 1_000);
+    await flushMicrotasks();
+    expect(signal.aborted).toBe(true);
+    await run;
+  });
+
+  test("a seat that never emits a model turn is still bounded — the absolute deadline stops it", async () => {
+    jest.useFakeTimers();
+    // A wedged child: no progress snapshot at all, so no first turn. Disabling
+    // the SDK timer may not leave its signal unbounded.
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 2_000);
+    const dispatched = [deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ awaitAbort: true }];
+
+    const run = ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" }).catch((error: unknown) => error);
+    await dispatched[0]!.promise;
+    await flushMicrotasks();
+    jest.advanceTimersByTime(3_000);
+    await flushMicrotasks();
+
+    const signal = subagentRequests[0]!.signal as AbortSignal;
+    expect(signal.aborted).toBe(true);
+    expect(String(signal.reason as Error)).toMatch(/Subagent runtime limit exceeded/);
     await run;
   });
 
@@ -1098,6 +1140,23 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
     expect(stop.seatsDispatched).toBe(2);
     expect(stop.seatsStopped).toBe(2);
+  });
+
+  test("a nothing-usable round is an actionable incomplete envelope: no coverage, and no report seat invented", async () => {
+    // QC F-001: a zero-completed coverage block would fail the runner's own
+    // transport guard and replace this failure with a shape error.
+    seatResults = [{ status: "absent" }, { status: "absent" }];
+    const result = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      prContext: { prBody: "Closes #7", issues: [] },
+    });
+
+    expect(result.envelope.verdict).toBe("incomplete");
+    expect(result.envelope.incomplete?.reason).toMatch(/^no dispatched seat produced a usable payload/);
+    expect(result.coverage).toBeUndefined();
+    // No report seat was dispatched: there is nothing to narrate.
+    expect(subagentRequests).toHaveLength(2);
+    expect(result.report).toBeNull();
   });
 
   test("a wave that produced nothing usable without any cap is delivered incomplete, every seat listed", async () => {
@@ -2660,6 +2719,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
 });
 
 describe("ompAgentRuntime.runReview — every seat is visible in the trace", () => {
+  const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
+  const PR_CTX = { prBody: "Closes #7", issues: [{ number: 7, title: "Guard", body: "- reject expired tokens" }] };
+
   /** Capture the trace lines a run writes; returns them in emission order. */
   async function capturedTrace(run: () => Promise<unknown>): Promise<string[]> {
     const lines: string[] = [];
@@ -2677,17 +2739,16 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
   }
 
   test("the stage builders name the seat, the stop reason and the turn count", () => {
-    expect(seatStartStage("changeset-1-src")).toBe("seat_start:changeset-1-src");
-    expect(seatDoneStage("changeset-1-src", 3)).toBe("seat_done:changeset-1-src:turns=3");
-    expect(seatDoneStage("deep-parent", undefined)).toBe("seat_done:deep-parent");
-    expect(seatGapStage("changeset-2-part-2", "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)")).toBe(
-      "seat_gap:changeset-2-part-2:cap:540000ms",
+    expect(seatStartStage("1-changeset-1-src")).toBe("seat_start:1-changeset-1-src");
+    expect(seatDoneStage("1-changeset-1-src", 3)).toBe("seat_done:1-changeset-1-src:turns=3");
+    expect(seatDoneStage("1-deep-parent", undefined)).toBe("seat_done:1-deep-parent");
+    expect(seatGapStage("2-changeset-2-lib", CAP)).toBe("seat_gap:2-changeset-2-lib:cap:540000ms");
+    expect(seatGapStage("2-changeset-2-lib", CAP, 7)).toBe("seat_gap:2-changeset-2-lib:cap:540000ms:turns=7");
+    expect(seatGapStage("2-changeset-2-lib", "Provider stream closed unexpectedly")).toBe(
+      "seat_gap:2-changeset-2-lib:Provider-str",
     );
-    expect(seatGapStage("changeset-2-lib", "Provider stream closed unexpectedly")).toBe(
-      "seat_gap:changeset-2-lib:Provider-stream-clos",
-    );
-    expect(seatFailedStage("changeset-1-src", "review seat 0 (x) failed: boom")).toBe(
-      "seat_failed:changeset-1-src:review-seat-0-x-fail",
+    expect(seatFailedStage("1-changeset-1-src", "provider exploded")).toBe(
+      "seat_failed:1-changeset-1-src:provider-exp",
     );
     expect(recheckStage({ doc: null, status: { outcome: "skipped", reason: "budget" } })).toBe(
       "recheck_gap:skipped-budget",
@@ -2695,20 +2756,29 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
     expect(recheckStage({ doc: {}, status: { outcome: "applied" }, usage: { requests: 4 } })).toBe(
       "recheck_done:turns=4",
     );
-    expect(reportStage(null, undefined)).toBe("report_skipped");
+    expect(reportStage(null, undefined)).toBe("report_absent");
     expect(reportStage({}, 2)).toBe("report_done:turns=2");
-    // Every token stays inside the worker's 60-char bound.
-    for (const token of [
-      seatGapStage("changeset-2-lib", "x".repeat(200)),
-      seatFailedStage("changeset-2-lib", "y".repeat(200)),
-      seatDoneStage("changeset-1-src", 1234),
-    ]) {
-      expect(token.length).toBeLessThanOrEqual(60);
-    }
+    expect(reportSkipStage("no-pr-context")).toBe("report_skip:no-pr-context");
+    expect(reportFailedStage("report boom")).toBe("report_failed:report-boom");
+  });
+
+  test("a long seat label keeps the reason and turn count inside the worker's 60-char field", () => {
+    // 48-char labels are the reported overflow: `changeset-1-<label>` alone
+    // already exceeded the field, dropping `:cap:…` / `:turns=…`.
+    const longId = `changeset-1-${"verylongsegment-".repeat(4)}`;
+    expect(longId.length).toBeGreaterThan(48);
+    const traceId = seatTraceId(1, longId);
+    expect(traceId.length).toBeLessThanOrEqual(24);
+    const gap = seatGapStage(traceId, CAP, 1234);
+    const done = seatDoneStage(traceId, 1234);
+    expect(gap).toContain(":cap:540000ms");
+    expect(gap).toContain(":turns=1234");
+    expect(done).toContain(":turns=1234");
+    expect(gap.length).toBeLessThanOrEqual(60);
+    expect(done.length).toBeLessThanOrEqual(60);
   });
 
   test("a failing wave ends on the seat's gap stage, naming the seat and the cap reason", async () => {
-    const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)";
     const trace = await capturedTrace(async () => {
       seatResults = [
         { status: "absent", aborted: true, abortReason: CAP },
@@ -2717,12 +2787,24 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
       await ompAgentRuntime.runReview(BASE_INPUT).catch(() => undefined);
     });
 
-    expect(trace).toContain("seat_start:changeset-1-src");
-    expect(trace).toContain("seat_start:changeset-2-lib");
-    expect(trace).toContain("seat_gap:changeset-1-src:cap:540000ms");
-    expect(trace).toContain("seat_gap:changeset-2-lib:cap:540000ms");
+    expect(trace).toContain("seat_start:1-changeset-1-src");
+    expect(trace).toContain("seat_start:2-changeset-2-lib");
+    expect(trace).toContain("seat_gap:1-changeset-1-src:cap:540000ms:turns=0");
+    expect(trace).toContain("seat_gap:2-changeset-2-lib:cap:540000ms:turns=0");
     // The LAST stage the worker would print names a real seat stop.
-    expect(trace.at(-1)).toMatch(/^seat_gap:changeset-[12]-(src|lib):cap:540000ms$/);
+    expect(trace.at(-1)).toMatch(/^seat_gap:[12]-changeset-[12]-(src|lib):cap:540000ms:turns=0$/);
+  });
+
+  test("a fulfilled seat carrying a provider error is traced as failed, never done", async () => {
+    const trace = await capturedTrace(async () => {
+      seatResults = [{ error: "provider exploded" }, { requests: 4, data: seatPayload() }];
+      await ompAgentRuntime.runReview(BASE_INPUT).catch(() => undefined);
+    });
+
+    expect(trace.filter((stage) => stage.startsWith("seat_failed:"))).toHaveLength(1);
+    expect(trace).toContain("seat_failed:1-changeset-1-src:provider-exp");
+    expect(trace).toContain("seat_done:2-changeset-2-lib:turns=4");
+    expect(trace.some((stage) => stage.startsWith("seat_done:1-"))).toBe(false);
   });
 
   test("a full success emits start and done with each seat's turn count", async () => {
@@ -2734,12 +2816,29 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
       await ompAgentRuntime.runReview(BASE_INPUT).catch(() => undefined);
     });
 
-    expect(trace).toContain("seat_start:changeset-1-src");
-    expect(trace).toContain("seat_start:changeset-2-lib");
-    expect(trace).toContain("seat_done:changeset-1-src:turns=3");
-    expect(trace).toContain("seat_done:changeset-2-lib:turns=5");
-    // The skipped report seat still closes the trace (nothing to narrate).
-    expect(trace.at(-1)).toBe("report_skipped");
+    expect(trace).toContain("seat_start:1-changeset-1-src");
+    expect(trace).toContain("seat_start:2-changeset-2-lib");
+    expect(trace).toContain("seat_done:1-changeset-1-src:turns=3");
+    expect(trace).toContain("seat_done:2-changeset-2-lib:turns=5");
+    // No PR context: the report seat never starts, and the trace says why.
+    expect(trace).toContain("report_skip:no-pr-context");
+    expect(trace).not.toContain("report_start");
+    expect(trace.at(-1)).toBe("report_skip:no-pr-context");
+  });
+
+  test("an attempted report seat with no document is absent; an eligible run starts it", async () => {
+    const trace = await capturedTrace(async () => {
+      seatResults = [
+        { data: seatPayload() },
+        { data: seatPayload({ findings: [] }) },
+        { status: "absent" },
+      ];
+      await ompAgentRuntime.runReview({ ...BASE_INPUT, prContext: PR_CTX }).catch(() => undefined);
+    });
+
+    expect(trace).toContain("report_start");
+    expect(trace).toContain("report_absent");
+    expect(trace).not.toContain("report_skip:no-pr-context");
   });
 
   test("the deep parent is traced as the wave's single seat", async () => {
@@ -2748,8 +2847,17 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
       await ompAgentRuntime.runReview(DEEP_INPUT).catch(() => undefined);
     });
 
-    expect(trace.filter((stage) => stage.startsWith("seat_start:"))).toHaveLength(1);
-    expect(trace).toContain(`seat_done:${trace.find((stage) => stage.startsWith("seat_start:"))!.slice("seat_start:".length)}`);
+    const starts = trace.filter((stage) => stage.startsWith("seat_start:"));
+    expect(starts).toHaveLength(1);
+    const id = starts[0]!.slice("seat_start:".length);
+    expect(trace).toContain(`seat_done:${id}`);
+  });
+
+  test("the first-turn signal is the assistant request count, never the running label", () => {
+    expect(startsFirstTurn({ status: "running", requests: 0 })).toBe(false);
+    expect(startsFirstTurn({ status: "pending", requests: 5 })).toBe(false);
+    expect(startsFirstTurn({ status: "running", requests: 1 })).toBe(true);
+    expect(startsFirstTurn({ status: "running" })).toBe(false);
   });
 });
 
