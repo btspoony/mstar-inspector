@@ -7,7 +7,6 @@ import {
   deriveReviewBudget,
   CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
-  PUBLICATION_TAIL_MS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
@@ -16,7 +15,6 @@ import {
   CHECK_TERMINALIZE_MIN,
   REVIEW_ATTEMPT_CAP_DEFAULT_MS,
 } from "../../src/dashboard/runtime-config-store";
-import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
