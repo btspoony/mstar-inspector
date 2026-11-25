@@ -21,3 +21,23 @@ A false "platform is broken" conclusion stops work that could ship, invites a wo
 ## When a failure genuinely has no record
 
 A check-run can fail with a generic "something went wrong" and leave no row in the product's own failure table — meaning it aborted before the pipeline wrote anything. That is a real defect worth its own issue (the abort must record the stage it reached), but it is a different claim from "the check keeps failing", and the rollup is what tells you which case you are in.
+
+## Where the failure records actually live
+
+The same product reviews different repositories from **different databases**, and a failure row only exists where its App runs:
+
+| What you are looking at | Database |
+|---|---|
+| The production App (`inspector.mstar.page`) | `mstar-inspector-prod-db` |
+| Pull requests in **this** repository (the App that reviews mstar-inspector itself) | `mstar-inspector-db` (the staging database) |
+
+Querying the wrong one returns "no rows", which reads exactly like "the failure left no record" — and that misdiagnosis is easy to make, because the check-run says the review ran. Before concluding a failure is untracked, confirm which database the reviewing App writes to:
+
+```bash
+npx wrangler d1 execute mstar-inspector-db --remote --json \
+  --command "SELECT created_at, error_code, substr(error,1,200) FROM review_failures ORDER BY created_at DESC LIMIT 5"
+```
+
+## When the message is not ours
+
+`Attempt failed due to internal workflows error` does not appear anywhere in this codebase: it is Cloudflare's own text for a Workflow instance whose step threw. Our failure row records that platform sentence verbatim under `review.internal.unclassified`, alongside `stage = pipeline`. Treat it as "the step threw and we did not classify it" — the cause lives in the Workflow instance's history (`wrangler workflows instances describe <name> <id>`), not in the row. A row that carries no cause is a gap in our error reporting, not evidence that nothing happened.
