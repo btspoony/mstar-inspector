@@ -10209,7 +10209,18 @@ describe("check_run.rerequested rerun (the rerun id is its own idempotency dimen
   test("a rerun whose checkout landed on a newer head settles without a paid review", async () => {
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
-    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+    const settled: Array<{ reason: string; attachDeliveryId?: string }> = [];
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      checks: {
+        begin: async () => null,
+        terminalize: async () => {},
+        settleSkipped: async (input: { reason: string; attachDeliveryId?: string }) => {
+          settled.push(input);
+          return true;
+        },
+      },
+    });
 
     await consumer(h.makeBatch(rerunPayload()));
 
@@ -10218,6 +10229,9 @@ describe("check_run.rerequested rerun (the rerun id is its own idempotency dimen
       expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
     ]);
     expect(reviewCount(db)).toBe(0);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.reason).toContain("rerun checkout landed on a head other than the rerun's own");
+    expect(settled[0]!.attachDeliveryId).toBe("delivery-rerun");
     expect(
       h.logLines.some((line) => line.level === "info" && line.msg.includes("settling without a paid review")),
     ).toBe(true);

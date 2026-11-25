@@ -118,10 +118,9 @@ export function deliveryOutcomeFromWebhook(
  * `installation_id` likewise comes from the DELIVERY — classification already
  * id must not override it; only `pr_number` stays row-authoritative.
  * The rerun targets the PR's CURRENT head, resolved from the `pull_requests`
- * watermark; the run's own `head_sha` is the fallback when the watermark is
- * absent, its read faults, or the row predates this attempt (the ledger write
- * is best-effort, so an older copy must never pull the rerun backwards). The
- * run id still proves App ownership of the review.
+ * watermark; the run's own `head_sha` is the fallback when the watermark row
+ * is absent or its read faults (fail-open, matching the watermark read posture
+ * elsewhere). The run id still proves App ownership of the review.
  */
 async function resolveCheckRerunOutcome(
   db: D1Database,
@@ -170,21 +169,17 @@ async function resolveCheckRerunOutcome(
         repo: rerun.repo,
         prNumber: attempt.prNumber,
       });
-      // The ledger write is best-effort and can lag the attempt's own head, so
-      // a differing head is adopted ONLY when the PR was updated after this
-      // attempt was created: otherwise the row is an older copy and the run's
-      // own head (the pre-existing behavior) is the safer target.
-      const watermarkAt =
-        watermark?.headAt === null || watermark?.headAt === undefined
-          ? Number.NaN
-          : Date.parse(watermark.headAt);
+      // The ledger row is a denormalized copy of the PR head: when it names a
+      // different commit, that is the head the operator's rerun should review.
+      // Comparing timestamps cannot decide which head is newer (the attempt is
+      // created after GitHub saw its own commit), so a lagging row is caught
+      // later by the checkout fence, which settles without paying rather than
+      // reviewing a stale commit.
       if (
         watermark !== null &&
         watermark.headSha !== null &&
         watermark.headSha !== "" &&
-        watermark.headSha !== attempt.headSha &&
-        Number.isFinite(watermarkAt) &&
-        watermarkAt > attempt.createdMs
+        watermark.headSha !== attempt.headSha
       ) {
         webhookInfo(
           "check_rerun_live_head",
