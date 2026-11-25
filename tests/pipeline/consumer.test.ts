@@ -127,6 +127,7 @@ import {
 } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
 import { AttemptUnknownError, ContainerUnavailableError } from "../../src/pipeline/review-attempt";
+import { findIncrementBase } from "../../src/pipeline/review-attempt-execution";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import {
@@ -10288,10 +10289,12 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(checkRowFor(db, SHA).desired).toBe("failure");
   });
 
-  test("a partial review whose verdict would miss the gate still concludes success — the summary says so without claiming the full gate", async () => {
+  test("a partial review whose verdict misses the gate concludes failure — delivered findings decide the gate exactly like a full review", async () => {
     // The verdict "needs fixes" is outside passVerdicts and the score is under
-    // the floor: a FULL review with this output fails its Check. A PARTIAL one
-    // is delivered work — the unreviewed seats can hold the difference.
+    // the floor: a FULL review with this output fails its Check, and a partial
+    // one must too — delivered work is published and its coverage is named,
+    // but branch protection is never satisfied over a verdict the review
+    // itself blocked.
     const gateMissingOutput = {
       ...GATED_OUTPUT,
       verdict: "needs fixes" as const,
@@ -10307,12 +10310,36 @@ describe("partial seat coverage — a delivered review passes and says what it c
     await (await consumerFor(db))(h.makeBatch(makePayload()));
 
     const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
-    expect(terminal.conclusion).toBe("success");
-    expect(checkRowFor(db, SHA).desired).toBe("success");
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
     expect(terminal.output.summary).toContain("Review gate missed");
     expect(terminal.output.summary).toContain(SEAT_LINE);
-    expect(terminal.output.summary).toContain("the Check passes despite the gate miss");
     expect(terminal.output.summary).not.toContain("Review gate met");
+    expect(publishedBody()).toContain(SEAT_LINE);
+  });
+
+  test("a partial review whose verdict is blocked concludes failure even though coverage is valid", async () => {
+    // SEC-01: the review itself blocked the change; valid partial coverage
+    // must not force the required Check green.
+    const blockedOutput = {
+      ...GATED_OUTPUT,
+      verdict: "blocked" as const,
+      tally: {
+        verdict: "blocked" as const,
+        scorePct: 10,
+        tally: { mustFix: 2, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 2 | 10%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...blockedOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+    expect(terminal.output.summary).toContain('verdict "blocked"');
+    expect(terminal.output.summary).toContain(SEAT_LINE);
     expect(publishedBody()).toContain(SEAT_LINE);
   });
 
@@ -10359,6 +10386,92 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(body).not.toContain("round=99");
   });
 
+
+  test("a re-request of the same head reproduces the first partial conclusion — success stays success, with the coverage line", async () => {
+    // Round one: a partial publish concludes success. A check re-request of
+    // the SAME head must inherit that exact position — never flip it, never
+    // lose the coverage statement the first pass ended with.
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+    expect((checkRequests.at(-1)!.params as unknown as ChecksUpdateParams).conclusion).toBe("success");
+    const firstDesired = checkRowFor(db, SHA).desired;
+    expect(firstDesired).toBe("success");
+
+    // The re-request sees the reviewed head (idempotency hit) and settles the
+    // attached check through the inherited path.
+    h.kvState.entries.set(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      "done",
+    );
+    const reconsumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+    await reconsumer(h.makeBatch(makePayload()));
+
+    expect(h.sandbox.calls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(SEAT_LINE);
+    expect(checkRowFor(db, SHA).desired).toBe("success");
+  });
+
+  test("a re-request of the same head reproduces a blocked partial's failure — failure stays failure", async () => {
+    const blockedOutput = {
+      ...GATED_OUTPUT,
+      verdict: "blocked" as const,
+      tally: {
+        verdict: "blocked" as const,
+        scorePct: 10,
+        tally: { mustFix: 2, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 2 | 10%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...blockedOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+    expect((checkRequests.at(-1)!.params as unknown as ChecksUpdateParams).conclusion).toBe("failure");
+
+    h.kvState.entries.set(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      "done",
+    );
+    const reconsumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+    await reconsumer(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+  });
+
+  test("a partial round is never the next increment's base — its row is context-incomplete and skipped by findIncrementBase", async () => {
+    // The next round must diff against the last FULL review, never against a
+    // partial one: files the stopped seat never reviewed would otherwise be
+    // silently inherited forever.
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const partialRow = db.raw
+      .query("SELECT context_incomplete FROM reviews WHERE head_sha = ?")
+      .get(SHA) as { context_incomplete: number } | null;
+    expect(partialRow?.context_incomplete).toBe(1);
+    expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBeNull();
+
+    // A full round on a newer head IS a valid base; the partial head stays excluded.
+    const fullRow = db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id, context_incomplete)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?, 0)`,
+      )
+      .run("idem:123:acme/widgets:42:fullsha", "f".repeat(40), TEST_APP_ID, `target-${TEST_APP_ID}`);
+    expect(fullRow).toBeDefined();
+    expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBe("f".repeat(40));
+  });
 
   test("the shared sentence renderer: full or absent coverage renders nothing, unknown stops are omitted", () => {
     expect(partialSeatCoverageLine(null)).toBe("");

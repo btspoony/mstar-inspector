@@ -19,6 +19,7 @@ import {
 import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
 import { REVIEW_SEATS } from "../../packages/shared/src/runtime";
 import {
   carriesSecretForm,
@@ -4430,7 +4431,12 @@ async function collectPhase(
       targetId: payload.targetId,
       model: chainHeadSelector(prepared.modelChain),
       provider: appliedProvider,
-      contextIncomplete: staleContext,
+      // A round that never scanned its whole scope is never the next
+      // increment's baseline: `findIncrementBase` excludes context-incomplete
+      // rows by exactly this column, so a partial round (seats missing) marks
+      // itself out the same way a stale-capture round does — its unreviewed
+      // files are diffed into the next round instead of silently inherited.
+      contextIncomplete: staleContext || partialSeatCoverageLine(seatCoverage) !== "",
       durationMs: Date.now() - roundStartedAt,
     },
     lifecycle: lifecycleRound,
