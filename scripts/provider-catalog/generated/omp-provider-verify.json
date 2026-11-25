@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "19.1.1",
-    "extracted": "2026-11-23",
+    "version": "19.2.0",
+    "extracted": "2026-11-25",
     "upstream": [
       "src/compat/rules/auth/*.kdl — every `login \"api-key\"` block carrying a `validate \"models-endpoint\"` entry",
       "src/compat/rules.json — the compiled auth rules (login kind + validate entry)"
@@ -99,10 +99,6 @@
     {
       "id": "nanogpt",
       "url": "https://nano-gpt.com/api/v1/models"
-    },
-    {
-      "id": "otari",
-      "url": "https://api.otari.ai/api/v1/models"
     },
     {
       "id": "sakana",

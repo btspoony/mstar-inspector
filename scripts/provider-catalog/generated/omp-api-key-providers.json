@@ -1,8 +1,8 @@
 {
   "source": {
     "package": "@oh-my-pi/pi-catalog",
-    "version": "19.1.1",
-    "extracted": "2026-11-23",
+    "version": "19.2.0",
+    "extracted": "2026-11-25",
     "upstream": [
       "src/compat/rules.json — `providers.<id>` seed rows (model ids, api, baseUrl) and `auth.providers` (login kind, display name, env keys)",
       "src/compat/rules/providers/<id>.kdl — authored provider contract (discovery label, seed api/base-url, default model)",
@@ -352,6 +352,8 @@
         "Qwen/Qwen3.8-27B",
         "Qwen/Qwen3.8-Flash",
         "Qwen/Qwen3.8-Max",
+        "Qwen/Qwen4-Max",
+        "RadixArk/DaisyRose-27B",
         "Sao10K/L3-8B-Lunaris-v1-Turbo",
         "Sao10K/L3.1-70B-Euryale-v2.2",
         "XiaomiMiMo/MiMo-V2.6-Flash",
@@ -412,7 +414,8 @@
         "openai/gpt-oss-120b",
         "openai/gpt-oss-120b-Ultra",
         "openai/gpt-oss-20b",
-        "tencent/Hy4-preview",
+        "tencent/Hy4",
+        "thinkingmachines/Inkling-2-Small",
         "thinkingmachines/Inkling-Small",
         "zai-org/GLM-4.6",
         "zai-org/GLM-4.7",
@@ -464,6 +467,7 @@
         "glm-5.3-flash",
         "hy3",
         "hy4",
+        "hy4-flash-free",
         "hy4-preview",
         "iceman-contributor-free",
         "kimi-k2.5",
@@ -472,6 +476,7 @@
         "kimi-k3",
         "kimi-k3.1-pro",
         "longcat-2.0",
+        "longcat-2.5",
         "longcat-2.5-free",
         "longcat-2.5-preview-free",
         "mimo-v2-omni",
@@ -505,7 +510,8 @@
         "minimax-m2.5",
         "qwen3.7-plus",
         "qwen3.8-flash",
-        "qwen3.8-max"
+        "qwen3.8-max",
+        "qwen4-max"
       ],
       "sourceProviderId": "opencode-go"
     },
@@ -524,6 +530,17 @@
         "grok-4.7",
         "muse-spark-1.2-contributor",
         "muse-spark-1.3-contributor"
+      ],
+      "sourceProviderId": "opencode-go"
+    },
+    {
+      "id": "opencode-go-typesafe",
+      "label": "OpenCode Go",
+      "env": "OPENCODE_API_KEY",
+      "baseUrl": "https://opencode.ai/inference/systemone",
+      "api": "typesafe",
+      "models": [
+        "jev-1.13-free"
       ],
       "sourceProviderId": "opencode-go"
     },
@@ -601,6 +618,7 @@
         "bytedance/doubao-seed-evolving",
         "bytedance/doubao-seedance-2.0",
         "bytedance/doubao-seedance-2.5",
+        "bytedance/doubao-seedance-2.5-flash",
         "cloudflare/clef",
         "cloudflare/clef-flash",
         "cloudflare/clef-omni",
@@ -640,6 +658,8 @@
         "google/gemini-3.8-flash-tts",
         "google/gemini-4-argon",
         "google/gemini-4-carbon",
+        "google/gemini-4-hydrogen",
+        "google/gemini-4-neon",
         "google/gemini-embedding-2",
         "google/gemma-3-12b-it",
         "google/gemma-4-26b-a4b-it",
@@ -653,6 +673,7 @@
         "inclusionai/ling-3.0-flash-vl",
         "inclusionai/ling-3.0-tiny",
         "inclusionai/ling-3.1-flash",
+        "inclusionai/ling-3.2-flash",
         "inclusionai/ling-flash-2.0",
         "inclusionai/ling-mini-2.0",
         "inclusionai/llada-image",
@@ -669,6 +690,7 @@
         "klingai/kling-3.0",
         "klingai/kling-3.0-omni",
         "klingai/kling-3.0-turbo",
+        "klingai/kling-4.0",
         "kuaishou/kat-coder-air-v2.5",
         "kuaishou/kat-coder-pro-v1",
         "kuaishou/kat-coder-pro-v1-free",
@@ -690,6 +712,8 @@
         "minimax/minimax-h3",
         "minimax/minimax-h3-fast",
         "minimax/minimax-h3-highspeed",
+        "minimax/minimax-h3-image",
+        "minimax/minimax-h3-image-highspeed",
         "minimax/minimax-h3-lite",
         "minimax/minimax-h3-max",
         "minimax/minimax-m2",
@@ -755,6 +779,8 @@
         "openai/gpt-6-sol",
         "openai/gpt-6.1-sol",
         "openai/gpt-6.1-terra",
+        "openai/gpt-6.2-astra",
+        "openai/gpt-6.2-sol",
         "openai/gpt-image-1.5",
         "openai/gpt-image-2",
         "openai/gpt-image-2.5-flare",
@@ -796,6 +822,7 @@
         "qwen/qwen3.8-max",
         "qwen/qwen3.8-max-0902",
         "qwen/qwen3.8-omni-flash",
+        "qwen/qwen4-max",
         "sakana/fugu-ultra-v2",
         "sapiens-ai/agnes-1.5-flash",
         "sapiens-ai/agnes-1.5-lite",
@@ -813,6 +840,7 @@
         "tencent/hy3",
         "tencent/hy3-preview",
         "tencent/hy4",
+        "tencent/hy4-flash",
         "tencent/hy4-preview",
         "volcengine/doubao-seed-1-6-vision",
         "volcengine/doubao-seed-1.8",
@@ -907,6 +935,7 @@
   "ompProviderIds": [
     "openai-codex",
     "anthropic",
+    "anthropic-long-lived",
     "zai",
     "zai-coding-plan",
     "kimi-code",
@@ -1051,7 +1080,6 @@
       "local",
       "nace",
       "ollama",
-      "otari",
       "parallel",
       "singularityapi-dev",
       "singularityapi-tech",
@@ -1060,6 +1088,7 @@
       "web"
     ],
     "oauthOrDeviceCode": [
+      "anthropic-long-lived",
       "antigravity-cli",
       "devin",
       "devin-cli",
@@ -1073,6 +1102,7 @@
       "muse-code",
       "openai-codex",
       "openai-codex-device",
+      "otari",
       "snowflake",
       "stencil",
       "xai-oauth"
