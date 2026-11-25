@@ -2,12 +2,14 @@
 
 ## The rule
 
-The review budget exists to bound the model's rendering cycle, not to decide whether a task succeeds. A round that produced usable findings **delivers** them, states what it did not cover, and passes its Check. Only a round with zero usable seat output is a failure.
+The review budget exists to bound the model's rendering cycle, not to decide whether a task succeeds. A round that produced usable findings **delivers** them and states what it did not cover. Only a round with zero usable seat output is a failure.
 
 Two consequences follow, and both are easy to get wrong:
 
-1. **A partial round is a delivered round.** Discarding completed seats because a sibling hit the cap converts a real review into a platform failure and teaches authors to distrust the Check.
+1. **A partial round is a delivered round — for any seat loss, not just a cap stop.** Discarding completed seats because a sibling hit the cap *or* failed converts a real review into a platform failure and teaches authors to distrust the Check. The lost seat is named in the coverage block with its reason.
 2. **Per-seat quotas manufacture failures.** Dividing a window across concurrent seats makes two slow seats die at half the ceiling. Give every seat the full tier ceiling, bounded only by the attempt's absolute deadline; a seat that finishes early simply stops competing.
+
+**The Check still follows the review's verdict.** "Do not fail a task because it ran out of time" does not mean "pass a review that found blocking problems". A partial round whose verdict is blocked, or whose score is under the floor, concludes **failure** while still publishing its findings and its coverage statement. Otherwise a PR the review itself blocked could satisfy a required branch-protection Check.
 
 ## What a seat must be given
 
@@ -15,19 +17,21 @@ A seat that never receives the diff cannot review it: it must infer the change b
 
 ## The transport
 
-A successful run carries a `coverage` block beside its envelope:
+A successful run of the quick/default path carries a `coverage` block beside its envelope:
 
 ```jsonc
 "coverage": {
   "seatsTotal": 2, "seatsCompleted": 1,
-  "stoppedReason": "cap" | null,
-  "unreviewed": [{ "seat": "correctness", "scope": ["src/a.ts"] }]
+  "stoppedReason": "cap" | "failed" | null,
+  "unreviewed": [{ "seat": "changeset-1-src", "scope": ["src/a.ts"], "reason": "cap" }]
 }
 ```
 
-Two legal states only: full (`stoppedReason: null`, empty `unreviewed`) and partial (`"cap"`, one entry per missing seat). A block that contradicts itself is ignored rather than trusted; a block with `seatsCompleted: 0` is absent because that round has nothing to deliver.
+Two legal states only: full (`null`, empty `unreviewed`) and partial (non-null reason, one entry per missing seat, `unreviewed.length === seatsTotal - seatsCompleted`). A `"cap"` headline requires at least one `cap` entry and a `"failed"` headline forbids any; a block that contradicts itself is ignored rather than trusted. A round with `seatsCompleted: 0` carries no block — it failed, and a failure is not a coverage statement.
 
-One formatter renders the partial sentence, and both the published body and the Check summary use it verbatim — including the normalization applied to repository-controlled scope text — so the two surfaces cannot disagree.
+The deep tier emits **no** coverage: its parent dispatches domain seats through the task tool and cannot observe their completion, so "no `incomplete` fact" must never be read as "every seat finished".
+
+One formatter renders the partial sentence, and both the published body and the Check summary use it verbatim — including Markdown-inert normalization of repository-controlled scope paths — so the two surfaces cannot disagree.
 
 ## Trace honesty
 
