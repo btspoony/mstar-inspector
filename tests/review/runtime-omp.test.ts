@@ -2900,6 +2900,53 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
     expect(trace).not.toContain("report_absent");
   });
 
+  test("a clock crossing between eligibility and dispatch is a cancellation — no call, never an empty seat", async () => {
+    // Shape implemented: `report_start` IS emitted (the trace marks entry, and
+    // eligibility had already passed), but the seat's own budget check refuses
+    // the call and reports WHY, so the terminal stage is `report_aborted` and
+    // no SDK call happens. The alternative — skipping the start — cannot be
+    // race-free: the window can close between any two instructions.
+    jest.useFakeTimers();
+    const lines: string[] = [];
+    anchorRecheckDeadline(Date.now(), "quick", Date.now() + 300_000);
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      for (const arg of args) if (typeof arg === "string") lines.push(arg);
+      // The moment the trace claims a start, time jumps past the deadline.
+      if (lines.at(-1)?.includes('"stage":"report_start"')) jest.advanceTimersByTime(400_000);
+    });
+    let result: ReviewRunResult;
+    try {
+      seatResults = [{ data: seatPayload() }];
+      result = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick", prContext: PR_CTX });
+    } finally {
+      spy.mockRestore();
+    }
+
+    const stages = lines
+      .filter((line) => line.includes('"event":"review_stage"'))
+      .map((line) => (JSON.parse(line) as { stage: string }).stage);
+    expect(stages).toContain("report_start");
+    expect(stages).toContain("report_aborted");
+    expect(stages).not.toContain("report_absent");
+    // No SDK call was made for the report seat: one seat request only.
+    expect(subagentRequests).toHaveLength(1);
+    expect(result.report).toBeNull();
+    expect(result.envelope.schema).toBe("mstar.review/v1");
+  });
+
+  test("the deep path skips an ineligible report seat with the SAME reason vocabulary", async () => {
+    const trace = await capturedTrace(async () => {
+      parentYields = [deepEnvelope()];
+      await ompAgentRuntime.runReview(DEEP_INPUT).catch(() => undefined);
+    });
+
+    expect(trace).toContain("report_skip:no-pr-context");
+    expect(trace).not.toContain("report_start");
+    // The seat never opened its own session either.
+    expect(subagentRequests).toHaveLength(0);
+    expect(createdOptions).toHaveLength(1);
+  });
+
   test("a torn-down run is ineligible for the report seat, with the reason named", () => {
     const envelope = synthesizeReview({
       findings: [],
