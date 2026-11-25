@@ -43,6 +43,7 @@ import { claimPublicationLease, releasePublicationLease } from "../store/finding
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
+import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
 
 
 /** A check-run payload as the installed octokit types deliver it. */
@@ -1151,17 +1152,21 @@ export function decideConclusion(input: {
     if (gate === null || review === null || review.scorePct === null) {
       return terminalFailure("unknown-failure");
     }
+    // A partial round names its coverage on BOTH faces — this summary and the
+    // published body render the SAME sentence (plan constraint), so the Check
+    // can never claim more than the comment delivers.
+    const seatLine = partialSeatCoverageLine(review.seatCoverage);
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate), seatLine),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate), seatLine),
         };
   }
   if (inherited !== undefined) {
@@ -1201,6 +1206,11 @@ export function decideConclusion(input: {
 function boundedText(text: string, fallback: string): string {
   const value = text.trim().length === 0 ? fallback : text;
   return redactSecrets(value).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+/** The gate summary and the partial-coverage sentence, one space apart; no sentence, no change. */
+function withSeatCoverage(summary: string, seatLine: string): string {
+  return seatLine === "" ? summary : `${summary} ${seatLine}`;
 }
 
 
