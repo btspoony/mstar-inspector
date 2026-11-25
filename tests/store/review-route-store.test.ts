@@ -3,13 +3,14 @@ import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "./helper
 import {
   attemptFailureStoryExists,
   deliveryKeyOf,
+  settlementRecordInsertStatement,
   LOST_REPLY_FALLBACK_ERROR,
   LOST_REPLY_FALLBACK_SHAPE,
   readAttemptHandoff,
   recordReviewedHead,
   reserveAttemptHandoff,
 } from "../../src/store/review-route-store";
-import { createFailureStore } from "../../src/store/failure-store";
+import { createFailureStore, type ReviewFailureInput } from "../../src/store/failure-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 /**
@@ -96,6 +97,141 @@ describe("recordReviewedHead row state", () => {
   }
 });
 
+/**
+ * The settlement record's own guard: one record per attempt, for any build's
+ * row, decided in the insert rather than by a read before it.
+ */
+describe("the settlement record's insert", () => {
+  const ATTEMPT = "attempt-settlement-record";
+
+  function recordInput(): ReviewFailureInput {
+    return {
+      target_id: TARGET_ID,
+      installation_id: 123,
+      owner: "acme",
+      repo: "widgets",
+      pr_number: 7,
+      head_sha: "a".repeat(40),
+      stage: "pipeline",
+      code: "review.internal.unclassified",
+      trackId: ATTEMPT,
+      message: "the review failed",
+      error: "runner exited 1",
+    };
+  }
+
+  test("a retry carrying the same attempt id cannot add a second record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+
+    const first = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    const retry = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+
+    expect(first.meta.changes).toBe(1);
+    // The record the first attempt wrote IS the guard: a Workflow retry replaying
+    // the same attempt id finds it and writes nothing.
+    expect(retry.meta.changes).toBe(0);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 1 });
+  });
+
+  test("a new attempt id legitimately gets its own record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+
+    await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    const next = await settlementRecordInsertStatement(db as never, { ...input, trackId: "attempt-next" }, "attempt-next").run();
+
+    // A retry under a NEW attempt id is a different attempt: no guard may fold
+    // its record into the previous attempt's.
+    expect(next.meta.changes).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
+  });
+
+  test("ids that differ only in a wildcard character each keep exactly one record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    // `_` is ANY character in an unescaped LIKE pattern, so `attempt_a:%` would
+    // also cover `attemptXa:<stage>`. The pattern is escaped and carries
+    // `ESCAPE '\'`, so each attempt's namespace is literally its own id.
+    const underscored = "attempt_a";
+    const lookalike = "attemptXa";
+    const base = recordInput();
+    const subRecord = (id: string, attemptId: string) =>
+      createFailureStore(db as never).record({
+        id,
+        target_id: TARGET_ID,
+        installation_id: 123,
+        owner: "acme",
+        repo: "widgets",
+        pr_number: 7,
+        head_sha: "a".repeat(40),
+        stage: "recheck",
+        code: "review.internal.unclassified" as never,
+        trackId: attemptId,
+        message: "a sub-record",
+        error: "a sub-record",
+      });
+    await subRecord(`${lookalike}:recheck`, lookalike);
+
+    const first = await settlementRecordInsertStatement(
+      db as never,
+      { ...base, trackId: underscored },
+      underscored,
+    ).run();
+    const second = await settlementRecordInsertStatement(db as never, { ...base, trackId: lookalike }, lookalike).run();
+    const retry = await settlementRecordInsertStatement(
+      db as never,
+      { ...base, trackId: underscored },
+      underscored,
+    ).run();
+
+    // Each attempt gets its own record exactly once; the foreign sub-record never
+    // stands in for the other's.
+    expect([first.meta.changes, second.meta.changes, retry.meta.changes]).toEqual([1, 1, 0]);
+    for (const id of [underscored, lookalike]) {
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures WHERE id = ?").get(id)).toEqual({ n: 1 });
+    }
+  });
+
+  test("a diagnostic sub-stage row never stands in for the attempt's record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    const input = recordInput();
+    // Every sub-record of one attempt: two in the attempt's own id namespace
+    // (`<attempt>:<stage>`) and one diagnostics row whose id is a random uuid and
+    // whose only link to the attempt is `track_id`.
+    const subRecords = [
+      { id: `${ATTEMPT}:recheck`, stage: "recheck" },
+      { id: `${ATTEMPT}:usage`, stage: "usage" },
+      { id: "3f9c1a52-8b7e-4a51-9f0d-6d2b1c7e4a10", stage: "usage" },
+    ];
+    for (const sub of subRecords) {
+      await createFailureStore(db as never).record({
+        id: sub.id,
+        target_id: TARGET_ID,
+        installation_id: 123,
+        owner: "acme",
+        repo: "widgets",
+        pr_number: 7,
+        head_sha: "a".repeat(40),
+        stage: sub.stage as never,
+        code: "review.internal.unclassified" as never,
+        trackId: ATTEMPT,
+        message: "a sub-record",
+        error: "a sub-record",
+      });
+    }
+
+    // None of them is the settlement: the id namespace and the attribution stage
+    // vocabulary are both required for a cross-build row to count.
+    const written = await settlementRecordInsertStatement(db as never, input, ATTEMPT).run();
+    expect(written.meta.changes).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 4 });
+  });
+});
+
 describe("attemptFailureStoryExists", () => {
   const ATTEMPT = "attempt-story-guard";
 
@@ -157,9 +293,9 @@ describe("attemptFailureStoryExists", () => {
   });
 
   test("a row keyed by anything but the attempt is not the attempt's story", async () => {
-    // The live phase's own row (random id, same track id) and the per-stage
-    // recheck row are never composed by a recovery lane for this attempt, so they
-    // do not refuse the observation — and the lookup stays a primary-key hit.
+    // The per-stage recheck row shares the attempt's `track_id` but is not the
+    // attempt's own settlement record, so it refuses nothing — and the lookup
+    // stays a primary-key hit.
     const db = createMigratedTestD1();
     seedTargetOnce(db);
     await seedHandoff(db, ATTEMPT);

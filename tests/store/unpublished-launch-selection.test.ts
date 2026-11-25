@@ -89,7 +89,7 @@ describe("the lost-reply selector", () => {
       .run(attemptId, createdMs, options.launchedAtMs);
   }
 
-  test("only a launched row past the bound with no failure record is selected", async () => {
+  test("only a launched row past the bound is selected, recorded or not", async () => {
     const db = createMigratedTestD1();
     seedBot(db, BOT_ID, 424242);
     seedTarget(db, BOT_ID, { id: TARGET_ID });
@@ -98,7 +98,10 @@ describe("the lost-reply selector", () => {
     await seedLaunched(db, "attempt-new", { launchedAtMs: NOW - 1, deadlineMs: NOW - 300_000 });
     await seedLaunched(db, "attempt-recorded", { launchedAtMs: NOW - 900_000, deadlineMs: NOW - 1_200_000 });
 
-    // A row another producer already recorded: the anti-join keeps it out.
+    // A row another producer already recorded. It is selected all the same: the
+    // record is what authorises the launch row's move, so a producer that died
+    // between the two left exactly this row holding its PR's slot — the release
+    // is this lane's to finish.
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
@@ -118,13 +121,13 @@ describe("the lost-reply selector", () => {
       deadlineBeforeMs: NOW - 600_000,
       limit: 25,
     });
-    expect(selected.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+    expect(selected.map((handoff) => handoff.attemptId).sort()).toEqual(["attempt-old", "attempt-recorded"]);
     // The window edge itself: a frozen deadline exactly at the bound is selected.
     const atBound = await listLostReplyLaunchSettlements(db, {
       deadlineBeforeMs: NOW - 1_200_000,
       limit: 25,
     });
-    expect(atBound.map((handoff) => handoff.attemptId)).toEqual(["attempt-old"]);
+    expect(atBound.map((handoff) => handoff.attemptId).sort()).toEqual(["attempt-old", "attempt-recorded"]);
     // A row inside the window is not selected.
     const insideWindow = await listLostReplyLaunchSettlements(db, {
       deadlineBeforeMs: NOW - 1_300_000,

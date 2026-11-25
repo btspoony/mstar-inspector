@@ -208,7 +208,7 @@ WHERE created_at > datetime('now', '-24 hours')
   AND error LIKE ?`;
 
 /** `review_failures.stage` is a producer vocabulary — reject anything off it before writing. */
-function assertFailureStage(stage: string): void {
+export function assertFailureStage(stage: string): void {
   if (!FAILURE_STAGES.includes(stage)) {
     throw new Error(
       `failure-store: stage ${JSON.stringify(stage)} is not on the producer vocabulary (${FAILURE_STAGES.join(" | ")}) — zero rows written`,
@@ -219,7 +219,7 @@ function assertFailureStage(stage: string): void {
 /**
  * The route recovery pass's terminal settlement failure: ONE row per ATTEMPT,
  * keyed by the attempt itself, so a re-pass or two concurrent passes can never
- * mint a second randomly identified row. The caller commits this in the SAME
+ * mint a second row for one attempt. The caller commits this in the SAME
  * D1 batch as the attempt's settle-once mark, which is what makes "the row
  * exists" and "the fact is recorded" a single step.
  */

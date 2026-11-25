@@ -134,7 +134,7 @@ import {
   parseBoundedRead,
   prepareReviewAttempt,
   readReviewLaunch,
-  recordReviewFailure,
+  recordReviewFailureStatement,
   abandonReviewLaunch,
   launchVerdict,
   readAttemptIdentity,
@@ -5001,6 +5001,21 @@ export async function settleAttemptFailure(
       );
     }
   };
+  /**
+   * Release the attempt's slot by terminalizing its launch row: the row stops
+   * matching `PAID_STATE_UNKNOWN`, which is the hold that survives the
+   * admission lease. The move is conditional on `launched`, so a replay or a
+   * second settlement changes nothing.
+   *
+   * The gate is the caller's: a returned runner is the proof the paid step
+   * ended — the same evidence the lost-reply lane waits a whole window for.
+   * The admission row and the container stay the cleanup's: revoking here would
+   * retire the attempt, and a retired row can never be torn down or retried
+   * (`reviewAttemptSandbox` refuses it), which holds the PR's slot forever.
+   */
+  const releaseLaunch = async (): Promise<void> => {
+    await recordReviewFailureStatement(deps.env.DB, attemptId, Date.now()).run();
+  };
   if (failure.class === "moved-head") {
     await markSettled(["skip"]);
     return { kind: "ok" };
@@ -5137,6 +5152,7 @@ export async function settleAttemptFailure(
         head_sha: fields?.head_sha ?? payload.head_sha ?? "",
         stage: failure.stage,
         code,
+        id: attemptId,
         trackId: attemptId,
         message: summary,
         error: redactExactSecrets(redactSecrets(budgetDetail), await sealedSecretValues(deps, attemptId)),
@@ -5169,7 +5185,7 @@ export async function settleAttemptFailure(
       );
       return { kind: "unknown" };
     }
-    if (paidStateObserved) await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    if (paidStateObserved) await releaseLaunch();
     await check?.terminalize(null, "budget-exhausted", undefined, budgetOutcome);
     const checkAttemptId = check?.handle?.attemptId;
     if (checkAttemptId !== undefined) await freezeKnownStop(deps, payload, checkAttemptId, budgetOutcome);
@@ -5235,6 +5251,7 @@ export async function settleAttemptFailure(
       head_sha: fields?.head_sha ?? payload.head_sha ?? "",
       stage: failure.stage,
       code,
+      id: attemptId,
       trackId: attemptId,
       message: summary,
       error: redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId)),
@@ -5268,7 +5285,7 @@ export async function settleAttemptFailure(
     return { kind: "unknown" };
   }
   if (paidStateObserved && durableOutcome) {
-    await recordReviewFailure(deps.env.DB, attemptId, Date.now());
+    await releaseLaunch();
   }
   if (sendAttempt !== null) {
     await check?.terminalize(sendAttempt.publicationId, "publication-unknown");

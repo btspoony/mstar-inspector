@@ -6,14 +6,19 @@ import {
   kvClaimKey,
 } from "../contracts/idem";
 import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
-import { markAttemptRevokedStatement, readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
+import { expireInflightStatement } from "../store/inflight-store";
+import { readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
-import { settlementFailureRowStatement } from "../store/failure-store";
+import { settlementFailureRowStatement, type ReviewFailureInput } from "../store/failure-store";
 
 import {
   beginAttemptSettlementStatement,
+  closeUnownedSettlement,
   landFailureEffect,
+  recordLandedEffectStatement,
+  revokeUnsettledLaunchStatement,
+  settlementRecordInsertStatement,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
   clearRefusalPending,
@@ -206,6 +211,36 @@ async function settledHeadSha(env: ReviewRouteEnv, handoff: AttemptHandoff): Pro
 }
 
 /**
+ * The row a settlement records, composed from what is durable NOW: the phase's
+ * observation (which wins over the caller's default code), the head the attempt
+ * actually reviewed, and the author-facing sentence. Shared with the lane that
+ * lands the record inside its own guarded batch.
+ */
+async function settlementFailureInput(
+  env: ReviewRouteEnv,
+  handoff: AttemptHandoff,
+  detail: string,
+  failure: { code?: FailureCode },
+): Promise<ReviewFailureInput> {
+  const observed = await readObservedCause(env, handoff);
+  const code = observed?.code ?? failure.code ?? "review.internal.unclassified";
+  return {
+    id: handoff.attemptId,
+    target_id: handoff.payload.targetId,
+    installation_id: handoff.payload.installation_id,
+    owner: handoff.payload.owner,
+    repo: handoff.payload.repo,
+    pr_number: handoff.payload.pr_number,
+    head_sha: await settledHeadSha(env, handoff),
+    stage: "pipeline",
+    code,
+    trackId: handoff.attemptId,
+    message: authorFacingMessage(code, observed),
+    error: observed?.message ?? detail,
+  };
+}
+
+/**
  * Land the effects a settlement owes that need no dead host's memory — the
  * failure row and the head's abandoned claim — then let the ONE settlement rule
  * decide completeness from durable facts: the Check must actually be terminal
@@ -215,10 +250,11 @@ async function settledHeadSha(env: ReviewRouteEnv, handoff: AttemptHandoff): Pro
  *
  * The failure row and its landed fact are ONE persistence step (`landFailureEffect`
  * commits them in a single D1 batch): no interruption and no second pass can see
- * the row without the fact, and the insert is attempt-keyed so a concurrent pass
- * adds nothing. This pass is the ONLY failure-row writer for a settlement (the
- * phase records an observation instead), so no ownership proof exists beyond
- * the insert's own `meta.changes`.
+ * the row without the fact, and the insert carries the attempt's own existence
+ * predicate (`SETTLEMENT_RECORD_MISSING`), so a concurrent pass, a replay, or a
+ * row an older build wrote under a random id adds nothing. This pass is the ONLY
+ * failure-row writer for a settlement (the phase records an observation instead),
+ * so the insert's own `meta.changes` is the whole ownership proof.
  *
  * `failure.code` defaults to the unclassified crash-window code; a caller that
  * knows why it settled names it. The handoff's own `observation` — what the LIVE
@@ -234,8 +270,9 @@ async function settledHeadSha(env: ReviewRouteEnv, handoff: AttemptHandoff): Pro
  * operator's raw text. An observation recorded after the insert is applied to
  * the same row by the pass's own late-observation sync.
  *
- * One row per attempt, in every interleaving: the insert is attempt-keyed
- * (`ON CONFLICT DO NOTHING`), so a concurrent pass adds nothing.
+ * One row per attempt, in every interleaving: the guarded insert writes only
+ * when the attempt has no record yet, and `ON CONFLICT(id) DO NOTHING` absorbs
+ * two simultaneous writers.
  */
 async function landSettlementEffects(
   env: ReviewRouteEnv,
@@ -244,6 +281,13 @@ async function landSettlementEffects(
   detail: string,
   nowMs: number,
   failure: { code?: FailureCode } = {},
+  /**
+   * Whether THIS pass created the record, when the caller already landed it in
+   * its own guarded batch. `null` means this call lands it (the publication and
+   * incomplete lanes); `false` means the attempt's record already existed, so
+   * nothing here may stamp the head.
+   */
+  created: boolean | null = null,
 ): Promise<void> {
   // The refused round's accounting comes FIRST: its writes are not part of any
   // claim (F6), so a fault here leaves the duty for the next pass without ever
@@ -251,28 +295,14 @@ async function landSettlementEffects(
   await ensureRecheckAccounting(env, handoff, nowMs);
   // The pass that LANDS the record owns the head-wide claim; an overlapping pass
   // that lost the insert race owns nothing and must not touch it.
-  let owned = false;
+  let owned = created === true;
   if (!landed.has("failure-row")) {
-    const observed = await readObservedCause(env, handoff);
-    const code = observed?.code ?? failure.code ?? "review.internal.unclassified";
     const recorded = await landFailureEffect(
       env.DB,
       {
         attemptId: handoff.attemptId,
         landed: [...landed],
-        failure: {
-          target_id: handoff.payload.targetId,
-          installation_id: handoff.payload.installation_id,
-          owner: handoff.payload.owner,
-          repo: handoff.payload.repo,
-          pr_number: handoff.payload.pr_number,
-          head_sha: await settledHeadSha(env, handoff),
-          stage: "pipeline",
-          code,
-          trackId: handoff.attemptId,
-          message: authorFacingMessage(code, observed),
-          error: observed?.message ?? detail,
-        },
+        failure: await settlementFailureInput(env, handoff, detail, failure),
       },
       nowMs,
     );
@@ -295,6 +325,12 @@ async function landSettlementEffects(
     if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }
   await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
+  // A pass that could not land the record itself owns nothing here, and the one
+  // effect it may never write is the head-wide claim stamp. Once every other
+  // obligation has landed, leaving the settlement marker would keep this row in
+  // the incomplete lane for an effect no replay can own — so stop scheduling it
+  // and let the owed stamp stand as the recorded residual.
+  if (!owned) await closeUnownedSettlement(env.DB, { attemptId: handoff.attemptId, landed: [...landed] });
 }
 
 /**
@@ -391,6 +427,17 @@ async function ensureRecheckAccounting(
  * the NEIGHBOURING one (`landSettlementEffects`), so the Check lane and the
  * head-wide claim behave exactly as they do for every other settled failure.
  */
+/**
+ * The release batch's precondition, on the same `?1` (attempt) bind every
+ * statement of that batch carries: the launch row still reads `launched` with no
+ * outcome. The guarded insert and the landed fact AND it into their own guards,
+ * so a race that terminalized the row another way (`persisted`, by a live
+ * settlement writing its result) writes neither — the release would not have won
+ * the row, and nothing may claim it did.
+ */
+const LAUNCH_STILL_LIVE_SQL = `EXISTS (SELECT 1 FROM review_launches l
+  WHERE l.attempt_id = ?1 AND l.state = 'launched' AND l.result_outcome IS NULL)`;
+
 async function settleLostReplies(
   env: ReviewRouteEnv,
   windowMs: number,
@@ -412,30 +459,107 @@ async function settleLostReplies(
     // reconciler wrote from a row any other producer owns.
     const detail =
       handoff.deadlineMs === null ? LOST_REPLY_FALLBACK_ERROR_UNANCHORED : LOST_REPLY_FALLBACK_ERROR;
+    // The RELEASE is all this pass owes unconditionally. The record may already
+    // exist (a settlement that got as far as its row and died before moving the
+    // launch row, or a previous build's row), and whoever wrote it owns its
+    // effects and its claim; what that record authorises here is the terminal
+    // move — and only that. Revoking a row this pass did not settle would retire
+    // the attempt, and a retired row can never be torn down
+    // (`reviewAttemptSandbox` refuses it), so the container's stop proof would be
+    // lost and the PR would stay held after its lease expired. The successor's
+    // own stop evidence takes a released row, exactly as after a live failure.
+    //
+    // Existence is therefore a PREDICATE of the batch, never a read before it.
+    // The guarded insert asks "does this attempt already have a record?" (any
+    // build's row: the attempt-keyed id, or a legacy random id carrying the
+    // attempt in `track_id`) and writes only when the answer is no; its `changes`
+    // is the proof THIS pass created the record, and the only proof a head-wide
+    // claim may rest on. The revoke asks the SAME question and rides in front of
+    // the insert over the same rows, so it fires exactly when the insert wins. A
+    // pass that loses the race — or that finds an older build's row — writes no
+    // second record, revokes nothing and claims nothing.
+    //
+    // The landed fact (`failure-row`) and the settlement start ride in this same
+    // batch: a stop before the effects can then never leave the next pass
+    // believing it may create the record or claim the head. What this pass leaves
+    // unlanded stays with its own lanes — a Check that never concludes keeps the
+    // handoff scheduled (the Check lane owns it), and once only the un-ownable
+    // stamp remains the handoff is closed instead of retried forever.
+    let failure: ReviewFailureInput | null = null;
+    try {
+      failure = await settlementFailureInput(env, handoff, detail, { code: "review.paid.reply_lost" });
+    } catch {
+      failure = null;
+    }
+    const statements = [
+      ...(failure === null
+        ? []
+        : [
+            // The record FIRST — its own row count is what the revoke below is
+            // gated on (SQL cannot read a later statement's result).
+            settlementRecordInsertStatement(env.DB, failure, handoff.attemptId, LAUNCH_STILL_LIVE_SQL),
+            // Immediately after it: only a pass whose insert created the record
+            // retires the row, and the insert's own count is the gate.
+            revokeUnsettledLaunchStatement(env.DB, handoff.attemptId, nowMs),
+          ]),
+      // The landed fact, in the batch that moves the row: it lands when a record
+      // is durable at this point (our insert above counts) and the row is still
+      // live, so a stop right after this batch never loses it.
+      recordLandedEffectStatement(env.DB, handoff.attemptId, "failure-row", LAUNCH_STILL_LIVE_SQL),
+      // The lease ends with the review: the row stops counting against the caps
+      // at once, and it stays so a same-PR successor still owes the stop proof.
+      expireInflightStatement(
+        env.DB,
+        {
+          installation_id: handoff.payload.installation_id,
+          owner: handoff.payload.owner,
+          repo: handoff.payload.repo,
+          pr_number: handoff.payload.pr_number,
+        },
+        handoff.attemptId,
+        nowMs,
+        LAUNCH_STILL_LIVE_SQL,
+      ),
+      // The release — only a `launched` row moves, so one pass wins it — and the
+      // settlement start, which closes the batch and reads the release's count.
+      recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
+      beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
+    ];
     let moved: D1Result[];
     try {
-      moved = await env.DB.batch([
-        markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs),
-        recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
-        beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs),
-      ] as D1PreparedStatement[]);
+      moved = await env.DB.batch(statements as D1PreparedStatement[]);
     } catch {
       // The batch is atomic: nothing moved, the row is untouched and the next pass retries it.
       continue;
     }
-    if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
-    try {
-      await landSettlementEffects(
-        env,
-        handoff,
-        new Set<SettlementEffect>(handoff.settledEffects ?? []),
-        detail,
-        nowMs,
-        { code: "review.paid.reply_lost" },
-      );
+    // The release is the gate (the settlement start closes the batch): a row
+    // another pass terminalized in between gets no settlement effects from this
+    // one.
+    if ((moved[moved.length - 2]?.meta.changes ?? 0) !== 1) continue;
+    // ...composed, but never gating the release: a lost observation read is not
+    // evidence that nothing was observed, so the release above stands, the record
+    // waits for the next pass (the settlement start gave the incomplete lane
+    // ownership of it), and nothing is settled from the selector's older snapshot.
+    if (failure === null) {
       log?.info?.(
         { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
-        `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`,
+        `lost reply released past its attempt's hard-stop bound — its record could not be composed, so the settlement lane owes it`,
+      );
+      continue;
+    }
+    // The ownership proof is the guarded insert's own row count (statement 0):
+    // zero means the attempt's record already existed (any build's), and only the
+    // creating pass may stamp the head.
+    const owned = failure !== null && (moved[0]?.meta.changes ?? 0) === 1;
+    const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
+    landed.add("failure-row");
+    try {
+      await landSettlementEffects(env, handoff, landed, detail, nowMs, { code: "review.paid.reply_lost" }, owned);
+      log?.info?.(
+        { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
+        owned
+          ? `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`
+          : `lost reply released past its attempt's hard-stop bound — its durable record already existed, so this pass wrote no second one, claimed nothing, and left the row to the stop proof`,
       );
     } catch (err) {
       // The guarded batch above already made the row terminal (`failed`, revoked,

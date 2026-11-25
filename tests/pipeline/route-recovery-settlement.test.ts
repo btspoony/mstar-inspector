@@ -10,6 +10,8 @@ import { createFailureStore, type FailureStore } from "../../src/store/failure-s
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import {
   deliveryKeyOf,
+  listIncompleteSettlements,
+  listLostReplyLaunchSettlements,
   listUnpublishedLaunchSettlements,
   markAttemptSettled,
   readAttemptHandoff,
@@ -36,7 +38,7 @@ import type { D1Like, D1StatementLike } from "../../src/store/types";
 import type { TestD1 } from "../store/helpers";
 
 const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
-const { createReviewConsumer } = await import("../../src/pipeline/consumer");
+const { createReviewConsumer, priorAttemptStopEvidence } = await import("../../src/pipeline/consumer");
 const { cleanupAttempt, settleAttemptFailure } = await import(
   "../../src/pipeline/review-attempt-execution"
 );
@@ -138,6 +140,58 @@ function settledMark(db: TestD1): number | null {
     .prepare("SELECT settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
     .get(ATTEMPT_ID) as { settled_ms: number | null } | null;
   return row?.settled_ms ?? null;
+}
+
+/** The launch row's capacity-revocation instant: the arm an expired admission row needs. */
+
+/**
+ * A database whose settlement-record insert refuses when a batch executes it —
+ * only that statement, so the batch stays atomic and the fault is exercised from
+ * inside its transaction.
+ */
+function insertFaults(db: TestD1): D1Like {
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (sql.includes("INSERT INTO review_failures")) throw new Error("insert unavailable");
+      return st.run();
+    },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+    raw: db.raw,
+  } as unknown as D1Like;
+}
+
+/**
+ * A database whose settle-once MARK write refuses when it executes — only that
+ * statement (`SET … settled_ms = CASE`); every other statement, including the
+ * release batch's, runs normally.
+ */
+function markWriteFaults(db: TestD1): D1Like {
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (sql.includes("settled_ms = CASE")) throw new Error("D1 mark write failed");
+      return st.run();
+    },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+    raw: db.raw,
+  } as unknown as D1Like;
+}
+function revokedAt(db: TestD1, attemptId: string): number | null {
+  const row = db.raw
+    .prepare("SELECT revoked_ms FROM review_launches WHERE attempt_id = ?")
+    .get(attemptId) as { revoked_ms: number | null } | null;
+  return row?.revoked_ms ?? null;
 }
 
 function stepHost(options: { failOn?: string; dieOn?: string; inFlight?: boolean } = {}): {
@@ -658,9 +712,12 @@ function withReconcilerRace(
   return {
     prepare: (sql: string) => {
       const statement = db.prepare(sql);
+      // Bound to the lost-reply selector's own shape: the unpublished lane's
+      // selector shares the table, the join and the ORDER BY, and only this one
+      // carries the pre-column launch-instant arm.
       const isLostReplySelector =
-        sql.includes("FROM review_failures f WHERE f.id = h.attempt_id") &&
-        sql.includes("FROM review_attempt_handoffs h");
+        sql.includes("FROM review_attempt_handoffs h") &&
+        sql.includes("l.launched_at_ms <= ?2");
       if (isLostReplySelector) {
         let bound = statement;
         const racing: D1StatementLike = {
@@ -834,6 +891,89 @@ describe("a rejection is not an observation", () => {
     expect(outcome.kind).toBe("budget-exhausted");
     expect(failureRows(db)).toHaveLength(1);
     expect(launchState(db)).toBe("failed");
+  });
+
+  test("a settled failure frees the PR's slot, and a replay lands nothing new", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await launchedAttempt(db);
+    await seedHandoff(db, payload);
+    // The paid attempt activated, and its admission row is live but expired: an
+    // activated attempt holds that row's slot until its launch row carries an
+    // outcome.
+    db.raw.prepare("UPDATE review_launches SET activated_ms = ? WHERE attempt_id = ?").run(Date.now(), ATTEMPT_ID);
+    const holdKey = {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      workspace_id: "default",
+    };
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(
+        holdKey.installation_id,
+        holdKey.owner,
+        holdKey.repo,
+        holdKey.pr_number,
+        ATTEMPT_ID,
+        payload.head_sha ?? "",
+        new Date(Date.now() - 1_200_000).toISOString(),
+        new Date(Date.now() - 1).toISOString(),
+      );
+    const admission = {
+      systemCap: 32,
+      workspaceCap: 16,
+      ttlSeconds: 600,
+      headSha: payload.head_sha ?? null,
+      now: new Date().toISOString(),
+    };
+    // note: Held: the expired lease alone is not enough while the activated
+    // attempt's launch row carries no outcome.
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
+
+    const deps = await makeDeps(db);
+    const phase = {
+      class: "failure",
+      phase: "review",
+      stage: "pipeline",
+      headSha: null,
+      runnerReturned: true,
+      message: "the review step returned a failing status",
+      sendAttemptPublicationId: null,
+    } as const;
+    expect(await settleAttemptFailure(deps, ref, phase, null)).toEqual({ kind: "ok" });
+
+    // note: ONE attempt-keyed record, and the launch row is no longer
+    // `launched` — that move is what stops `PAID_STATE_UNKNOWN` holding the
+    // slot. The row is NOT revoked: a revoked attempt can never be torn down or
+    // retried, so the cleanup below could never release it.
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.id).toBe(ATTEMPT_ID);
+    expect(launchState(db)).toBe("failed");
+    expect(revokedAt(db, ATTEMPT_ID)).toBeNull();
+
+    // note: A replay writes no second record and no second terminal outcome.
+    expect(await settleAttemptFailure(deps, ref, phase, null)).toEqual({ kind: "ok" });
+    expect(failureRows(db)).toEqual(settled);
+    expect(launchState(db)).toBe("failed");
+
+    // note: The cleanup that follows the settlement proves the container gone
+    // and releases the admission row, so the next head's admission succeeds.
+    await cleanupAttempt(deps, ref);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get()).toEqual({ n: 0 });
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-fresh" })).toEqual({
+      ok: true,
+    });
   });
 });
 
@@ -1317,6 +1457,341 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
+  test("the crash window's handoff is released, and stops being scheduled once its Check concludes", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-crash-window";
+    const check = await openCheck(db, payload, LAUNCHED_AT);
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT, check });
+    // The dead live settlement's exact state: it began settling, committed its
+    // attempt-keyed record, and stopped before it could move the launch row.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(SETTLES_AT - 10 * 60_000, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'the phase returned', 'review.internal.unclassified', ?, 'the phase returned', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const incomplete = { settlingBeforeMs: SETTLES_AT, limit: ROUTE_RECOVERY_LIMIT };
+    const scheduled = async (at: number): Promise<string[]> =>
+      (await listIncompleteSettlements(db as never, { ...incomplete, settlingBeforeMs: at })).map(
+        (row) => row.attemptId,
+      );
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The release, and only the release: one record, no revoke, no claim —
+    // a non-owner writes none of the other's effects.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+    // note: The Check is still owed, so the handoff STAYS scheduled for the lane
+    // that can land it — a settlement every remaining obligation can still
+    // satisfy is never dropped.
+    expect(await scheduled(SETTLES_AT)).toEqual([attemptId]);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(await scheduled(SETTLES_AT + 60_000)).toEqual([attemptId]);
+    expect(h.kvPuts).toHaveLength(0);
+
+    // note: The Check concludes. The next pass lands that fact, and the only
+    // effect still owed is the head-wide stamp no non-owner may write — so the
+    // row leaves the lane instead of being retried forever.
+    db.raw
+      .prepare(
+        `UPDATE review_checks SET terminal_ms = ?, recovery_state = 'done', desired = 'failure', observed = 'failure' WHERE id = ?`,
+      )
+      .run(SETTLES_AT - 60_000, check.id);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 120_000);
+
+    expect(await scheduled(SETTLES_AT + 120_000)).toEqual([]);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(h.kvPuts).toHaveLength(0);
+  });
+
+  test("a record a previous build wrote under a random id is reused, never duplicated", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-legacy-record";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    // The pre-change live settlement's row: a random id, the attempt in `track_id`.
+    const legacyId = "9f1c0e6a-0000-4000-8000-000000000001";
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded by the old build', 'review.internal.unclassified', ?, 'recorded by the old build', datetime('now'))`,
+      )
+      .run(
+        legacyId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The old row IS the settlement's record: reused byte-identical, with
+    // the release on top and no second row for the same attempt.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.id).toBe(legacyId);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded by the old build");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(h.kvPuts).toHaveLength(0);
+  });
+
+  test("a crash window over a legacy record releases once: no second record, no revoke, no claim", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-legacy-crash";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    // The dead live settlement's state: it began settling, and the record it left
+    // is a previous build's (random id, the attempt only in `track_id`). The
+    // launch row never moved.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(SETTLES_AT - 10 * 60_000, attemptId);
+    const legacyId = "6c1f0d2e-1111-4222-8333-944455556666";
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded by the old build', 'review.internal.unclassified', ?, 'recorded by the old build', datetime('now'))`,
+      )
+      .run(
+        legacyId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const ledgerOf = (): { settled_ms: number | null; settled_effects: string | null; settling_ms: number | null } =>
+      db.raw
+        .prepare("SELECT settled_ms, settled_effects, settling_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+        .get(attemptId) as { settled_ms: number | null; settled_effects: string | null; settling_ms: number | null };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // ONE record: the legacy row, untouched — the guarded insert proved it exists,
+    // so this pass created nothing.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.id).toBe(legacyId);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded by the old build");
+    // The release landed, and the landed fact rode in the same batch as it.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(JSON.parse(ledgerOf().settled_effects ?? "[]") as string[]).toContain("failure-row");
+    // A pass that created no record revokes nothing and claims nothing.
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+    // The PR is still held: taking the slot is the stop proof's call, not a
+    // silent handover from a non-owner.
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...admissionAt(SETTLES_AT, payload), attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held" });
+
+    // A second pass changes nothing: one record, still no revoke, still no claim.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+  });
+
+  test("an insert fault revokes nothing and leaves the slot held", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-insert-fault";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    const env = await h.makeEnv({ DB: insertFaults(db) as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The insert never ran: the batch rolled back, so the row was neither
+    // retired nor released, and the lane retries it on the next pass.
+    expect(failureRows(db)).toHaveLength(0);
+    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...admissionAt(SETTLES_AT, payload), attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held" });
+
+    // note: The clean retry is the owner: one record, and the revoke that only a
+    // creating pass may write.
+    await reconcileReviewRoute(
+      { ...(await h.makeEnv({ DB: db as never })), REVIEW_QUEUE: queue as never },
+      SETTLES_AT + 60_000,
+    );
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toEqual(expect.any(Number));
+  });
+
+  test("a pre-batch read fault over an existing record revokes nothing and claims nothing", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-read-fault-recorded";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    // note: The composition read (the handoff) fails once. There is no record
+    // content to compose — and the durable record already exists — so the release
+    // must still land while nothing is revoked and nothing is claimed.
+    let faults = 1;
+    const racing = withReconcilerRace(db, {});
+    const faulty: D1Like = {
+      prepare: (sql: string) => {
+        if (faults > 0 && sql.includes("FROM review_attempt_handoffs WHERE attempt_id = ?")) {
+          faults -= 1;
+          throw new Error("handoff read unavailable");
+        }
+        return racing.prepare(sql);
+      },
+      batch: (statements: D1StatementLike[]) => racing.batch(statements),
+    } as unknown as D1Like;
+    const env = await h.makeEnv({ DB: faulty as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+    // note: The landed fact still rode in the batch: the record exists and the
+    // row was live, so a stop right after cannot leave the fact missing.
+    const ledger = db.raw
+      .prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_effects: string | null };
+    expect(JSON.parse(ledger.settled_effects ?? "[]") as string[]).toContain("failure-row");
+  });
+
+  test("the release records its landed fact in the batch, so a mark fault still proves it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fact-before-mark";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(SETTLES_AT - 10 * 60_000, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    // note: The MARK write is what fails: the release batch itself (with the
+    // landed fact) is unaffected, because batch statements execute unwrapped.
+    const env = await h.makeEnv({ DB: markWriteFaults(db) as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    const ledger = db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+    // note: The batch's own fact is the only proof left: the mark never landed,
+    // and the next pass reads this to know the record exists.
+    expect(JSON.parse(ledger.settled_effects ?? "[]") as string[]).toContain("failure-row");
+    expect(ledger.settled_ms).toBeNull();
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+  });
+
+  test("a per-stage recheck row is not the attempt's settlement record", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-recheck-only";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    const subRecords = [
+      { id: `${attemptId}:recheck`, stage: "recheck" },
+      { id: `${attemptId}:usage`, stage: "usage" },
+      { id: "6a2d9c41-3e58-4b06-9d77-2f5c8b0a1e34", stage: "usage" },
+    ];
+    for (const sub of subRecords) {
+      db.raw
+        .prepare(
+          `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'a sub-record', 'review.internal.unclassified', ?, 'a sub-record', datetime('now'))`,
+        )
+        .run(
+          sub.id,
+          payload.targetId,
+          payload.installation_id,
+          payload.owner,
+          payload.repo,
+          payload.pr_number,
+          payload.head_sha,
+          sub.stage,
+          attemptId,
+        );
+    }
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The sub-records share the attempt's `track_id` but are not the
+    // settlement record — the `<attempt>:<stage>` namespace AND the attribution
+    // stage vocabulary both have to be outside the settlement's — so the lane
+    // still writes the attempt's own one row.
+    expect(failureRows(db).map((row) => row.id).sort()).toEqual(
+      [...subRecords.map((sub) => sub.id), attemptId].sort(),
+    );
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+  });
+
   test("a row past its deadline but inside the post-deadline grace is left alone", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
@@ -1476,13 +1951,193 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(failureRows(db)[0]!.error_code).toBe("review.paid.reply_lost");
   });
 
-  test("a row that already produced a failure record is never settled twice", async () => {
+  test("a row whose failure record is already durable is released, and never recorded twice", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-recorded";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    // note: Another producer already recorded this attempt's failure; the selector's
-    // anti-join must treat it as settled and mint nothing.
+    noteContainerId(db, attemptId);
+    // note: The crash window's shape: a settlement recorded this attempt's failure
+    // and died before it could move the launch row — the slot stays held, and
+    // nothing can release it (the revoke is guarded on `launched`).
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.paid.reply_lost', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    // note: The attempt's own admission row, expired, still holding the PR.
+    seedHeldAdmission(db, payload, attemptId);
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const selector = { deadlineBeforeMs: SETTLES_AT, limit: ROUTE_RECOVERY_LIMIT };
+    const admission = admissionAt(SETTLES_AT, payload);
+
+    expect((await listLostReplyLaunchSettlements(db as never, selector)).map((row) => row.attemptId)).toEqual([
+      attemptId,
+    ]);
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: The record stands untouched (ONE row), and the slot is released by
+    // the launch row's terminal move. The row is NOT revoked: a revoked attempt
+    // can never be torn down (`reviewAttemptSandbox` refuses it), which is the
+    // veto this branch must not hand the cleanup or the successor.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toBeNull();
+    // note: The foreign settlement is not adopted into this lane's: no claim
+    // stamp is written for a record this pass never landed.
+    expect(h.kvPuts).toHaveLength(0);
+    // note: The expired lease still holds the PR: the release is the launch row,
+    // and who may take the slot is the stop proof's call, not a silent handover.
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
+
+    // note: The release is the ONE move: the selector has nothing left to reach.
+    expect(await listLostReplyLaunchSettlements(db as never, selector)).toEqual([]);
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+
+    // note: The teardown the release left possible: cleanup proves the container
+    // gone, and the admission row goes with it — a revoked row could never get
+    // here, which is what kept the PR held forever.
+    const deps = await makeDeps(db);
+    const ref = makeRef(payload);
+    await cleanupAttempt(deps, { ...ref, attemptId, inflight: { ...ref.inflight!, attemptId } });
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get()).toEqual({ n: 0 });
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toEqual({
+      ok: true,
+    });
+  });
+
+  /** The container this attempt minted: what the teardown and stop proofs address. */
+  function noteContainerId(db: TestD1, attemptId: string): void {
+    db.raw
+      .prepare("UPDATE review_launches SET sandbox_id = ? WHERE attempt_id = ?")
+      .run(`review-${attemptId}`, attemptId);
+  }
+
+  /** The attempt's own admission row, still recording its holder. */
+  function seedHeldAdmission(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    attemptId: string,
+    expiresAtMs: number = SETTLES_AT - 1,
+  ): void {
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        attemptId,
+        payload.head_sha ?? "",
+        new Date(LAUNCHED_AT - 600_000).toISOString(),
+        new Date(expiresAtMs).toISOString(),
+      );
+  }
+
+  function holdOf(payload: ReviewJobPayload) {
+    return {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      workspace_id: "default",
+    };
+  }
+
+  /** Another pull request in the same workspace: the unrelated review a stuck slot refuses. */
+  function otherPrKey(payload: ReviewJobPayload) {
+    return { ...holdOf(payload), pr_number: payload.pr_number + 1 };
+  }
+
+  function admissionAt(nowMs: number, payload: ReviewJobPayload) {
+    return {
+      systemCap: 32,
+      workspaceCap: 16,
+      ttlSeconds: 600,
+      headSha: payload.head_sha ?? null,
+      now: new Date(nowMs).toISOString(),
+    };
+  }
+
+  test("the release returns the attempt's capacity at once, and the PR still owes a stop proof", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-capacity";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    // A LIVE lease: at the pass's instant this row still occupies the only slot.
+    seedHeldAdmission(db, payload, attemptId, SETTLES_AT + 3_600_000);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const caps = { systemCap: 1, workspaceCap: 1, ttlSeconds: 600, headSha: payload.head_sha ?? null, now: new Date(SETTLES_AT).toISOString() };
+
+    // note: Both limits are saturated by THIS attempt: an unrelated PR is refused.
+    expect(
+      await acquireInflight(db as never, otherPrKey(payload), { ...caps, attemptId: "attempt-unrelated" }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: Same PR: the row still records its holder, so a successor needs the
+    // stop proof — an expired lease alone never reassigns the PR.
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...caps, attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held", heldExpired: true });
+    // note: Unrelated PR: the slot is back the moment the release lands.
+    expect(
+      await acquireInflight(db as never, otherPrKey(payload), { ...caps, attemptId: "attempt-unrelated" }),
+    ).toEqual({ ok: true });
+  });
+
+  test("a released row's slot is handed back by the successor's own stop proof", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-successor";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
     db.raw
       .prepare(
         `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
@@ -1500,11 +2155,32 @@ describe("a launched attempt whose paid reply was lost", () => {
       );
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
+    const holdKey = holdOf(payload);
+    const admission = admissionAt(SETTLES_AT, payload);
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    // note: Still held: the released row was NOT revoked, so the expired lease
+    // keeps counting until someone proves where the container is.
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
 
-    expect(failureRows(db)).toHaveLength(1);
-    expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
+    // note: The production stop-proof path decides it: the container answers
+    // stopped, the attempt is marked revoked, and only then does the takeover
+    // acquire — the same sequence a successor runs for a live failure's attempt.
+    const sandbox = { revoke: async () => ({ revoked: true, running: false }) };
+    expect(
+      await priorAttemptStopEvidence(db as never, async () => sandbox as never, undefined, attemptId),
+    ).toBe("revoked");
+    expect(
+      await acquireInflight(db as never, holdKey, {
+        ...admission,
+        attemptId: "attempt-fresh",
+        priorStopped: { attemptId },
+      }),
+    ).toEqual({ ok: true });
   });
 
   test("the phase's observation is what the row records, and the reconciler is its only writer", async () => {
@@ -1886,11 +2562,12 @@ describe("a launched attempt whose paid reply was lost", () => {
     const observedCause = "Error: socket hang up (after 800ms)";
     const observedMessage = `the attempt container could not be read at the review step (reply-lost) — ${observedCause} — nothing may be concluded`;
     let injected = false;
-    // The settlement-effect batch is the only one with exactly two statements
-    // (the attempt-keyed insert + its landed mark); the lost-reply gate is three.
+    // The pass composes the record BEFORE its release batch, so the window this
+    // test targets is "composition done, batch not yet run": the release batch is
+    // the first one this pass issues.
     const racing = withReconcilerRace(db, {
-      beforeBatch: async (statements) => {
-        if (injected || statements.length !== 2) return;
+      beforeBatch: async () => {
+        if (injected) return;
         injected = true;
         // The phase's own writer. Its stamp deliberately sits BEHIND the row's
         // `created_at` — the sync selects on content, never on time.
@@ -2022,8 +2699,9 @@ describe("a launched attempt whose paid reply was lost", () => {
     // row's own settlement ledger. The re-admission arm that used to exist here
     // (row-OR-fact) would select this attempt, find the insert a no-op, and then
     // stamp the head-wide claim as its own — adopting a failure it never wrote.
-    // With one writer there is no promotion: the anti-join excludes the attempt,
-    // so the launch row is untouched and no claim is written.
+    // With one writer there is no promotion: the row is never landed or marked
+    // again and no claim is written. What this pass owes is only the RELEASE —
+    // the record it inherited authorises the launch row's move.
     const db = await createSeededTestD1();
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-foreign";
@@ -2053,7 +2731,10 @@ describe("a launched attempt whose paid reply was lost", () => {
 
     expect(failureRows(db)).toHaveLength(1);
     expect(String(failureRows(db)[0]!.error)).toBe("recorded elsewhere");
-    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    // The release the inherited record authorises: terminal, and deliberately
+    // NOT revoked — the successor's stop proof is what takes the row.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(revokedAt(db, attemptId)).toBeNull();
     expect(h.kvPuts).toHaveLength(0);
 
     // The sync lane must not adopt it either: the phase's observation arrives
@@ -2072,7 +2753,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     });
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
     expect(failureRows(db)).toEqual([before]);
-    expect(launchRow(db, attemptId)).toEqual({ state: "launched", result_outcome: null });
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
   });
 
   test("an observation stamped behind the row's creation still syncs onto the fallback row", async () => {
