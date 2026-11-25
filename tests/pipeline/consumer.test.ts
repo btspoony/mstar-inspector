@@ -10208,7 +10208,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     seatsTotal: 2,
     seatsCompleted: 1,
     stoppedReason: "cap" as const,
-    unreviewed: [{ seat: "correctness", scope: ["src/a.ts"] }],
+    unreviewed: [{ seat: "correctness", scope: ["src/a.ts"], reason: "cap" }],
   };
   // The ONE sentence both faces share (coverage-wire.ts): the Check summary and
   // the published body must carry it verbatim.
@@ -10297,19 +10297,19 @@ describe("partial seat coverage — a delivered review passes and says what it c
         seatsCompleted: 2,
         stoppedReason: null,
         unreviewed: [
-          { seat: "correctness", scope: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"] },
-          { seat: "perf", scope: [] },
+          { seat: "correctness", scope: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"], reason: "failed" },
+          { seat: "perf", scope: [], reason: "failed" },
         ],
       }),
     ).toBe(
-      "Reviewed 2/4 seats — not reviewed: correctness (src/a.ts, src/b.ts, src/c.ts, +1 more file), perf ()",
+      "Reviewed 2/4 seats — not reviewed: correctness (src/a.ts, src/b.ts, src/c.ts, +1 more file; failed), perf (failed)",
     );
     expect(
       partialSeatCoverageLine({
         seatsTotal: 6,
         seatsCompleted: 2,
         stoppedReason: "cap",
-        unreviewed: Array.from({ length: 5 }, (_, i) => ({ seat: `seat${i}`, scope: [] })),
+        unreviewed: Array.from({ length: 5 }, (_, i) => ({ seat: `seat${i}`, scope: [], reason: "cap" })),
       }),
     ).toBe("Reviewed 2/6 seats; stopped by cap — not reviewed: seat0 (), seat1 (), seat2 (), +2 more seats");
   });

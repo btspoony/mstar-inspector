@@ -10,17 +10,32 @@
  * field: `mstar.review/v1` is closed and its schema does not grow.
  */
 
-/** One seat (and its scope) the round did not review. */
-export type ReviewSeatUnreviewed = { seat: string; scope: readonly string[] };
+/**
+ * One seat (and its scope) the round did not review, with WHY it stopped in
+ * the bounded slug vocabulary: `cap` for the time cap, `failed` for any other
+ * stop, `failed:<slug>` when a cause is known. Per-seat reasons are what make a
+ * MIXED round (one capped, one failed) unambiguous.
+ */
+export type ReviewSeatUnreviewed = { seat: string; scope: readonly string[]; reason: string };
 
 /** The run's seat coverage, as the contract defines it. */
 export type ReviewCoverage = {
   seatsTotal: number;
   seatsCompleted: number;
-  /** `cap` when the round was stopped by the time cap, null when every seat finished. */
-  stoppedReason: "cap" | null;
+  /**
+   * The round's dominant stop class: `cap` when any seat was stopped by the
+   * time cap (the allocation cause outranks the rest), else `failed` when any
+   * seat was lost another way, null when every seat finished.
+   */
+  stoppedReason: "cap" | "failed" | null;
   unreviewed: readonly ReviewSeatUnreviewed[];
 };
+
+/** How long one per-seat reason slug may be, matching the runner's stage bound. */
+const REASON_MAX_CHARS = 40;
+
+/** The closed per-seat reason vocabulary: `cap`, `failed`, `failed:<slug>`. */
+const REASON_RE = /^(?:cap|failed|failed:[\w.:=-]+)$/;
 
 const COVERAGE_KEYS: Record<string, true> = {
   seatsTotal: true,
@@ -41,19 +56,26 @@ const isUnreviewedList = (value: unknown): value is ReviewSeatUnreviewed[] =>
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
     const seat = entry as Record<string, unknown>;
     return (
-      Object.keys(seat).length === 2 &&
+      Object.keys(seat).length === 3 &&
       Object.hasOwn(seat, "seat") &&
       Object.hasOwn(seat, "scope") &&
+      Object.hasOwn(seat, "reason") &&
       isNonEmptyString(seat.seat) &&
-      isScopeList(seat.scope)
+      isScopeList(seat.scope) &&
+      typeof seat.reason === "string" &&
+      seat.reason.length <= REASON_MAX_CHARS &&
+      REASON_RE.test(seat.reason)
     );
   });
 
 /**
  * The whole coverage guard: the exact key set, safe-integer counts with
- * `1 <= seatsCompleted <= seatsTotal`, the closed `stoppedReason` vocabulary
- * and well-formed `unreviewed` entries. A block that breaks the shape is not
- * a runner fact — the caller treats it as no coverage at all.
+ * `1 <= seatsCompleted <= seatsTotal`, the closed `stoppedReason` vocabulary,
+ * well-formed `unreviewed` entries, and the block's INTERNAL truth:
+ * full (every seat finished) → no stop reason and no entries; partial → a stop
+ * reason and exactly one entry per missing seat; a `cap` headline requires at
+ * least one capped entry. A block that types well but contradicts itself is
+ * not a runner fact — the caller treats it as no coverage at all.
  */
 export function isReviewCoverage(value: unknown): value is ReviewCoverage {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -63,17 +85,24 @@ export function isReviewCoverage(value: unknown): value is ReviewCoverage {
     if (!Object.hasOwn(doc, key)) return false;
   }
   const { seatsTotal, seatsCompleted, stoppedReason, unreviewed } = doc;
-  return (
-    typeof seatsTotal === "number" &&
-    typeof seatsCompleted === "number" &&
-    Number.isSafeInteger(seatsTotal) &&
-    Number.isSafeInteger(seatsCompleted) &&
-    seatsTotal >= 1 &&
-    seatsCompleted >= 1 &&
-    seatsCompleted <= seatsTotal &&
-    (stoppedReason === null || stoppedReason === "cap") &&
-    isUnreviewedList(unreviewed)
-  );
+  if (
+    typeof seatsTotal !== "number" ||
+    typeof seatsCompleted !== "number" ||
+    !Number.isSafeInteger(seatsTotal) ||
+    !Number.isSafeInteger(seatsCompleted) ||
+    seatsTotal < 1 ||
+    seatsCompleted < 1 ||
+    seatsCompleted > seatsTotal ||
+    (stoppedReason !== null && stoppedReason !== "cap" && stoppedReason !== "failed") ||
+    !isUnreviewedList(unreviewed)
+  ) {
+    return false;
+  }
+  const missing = seatsTotal - seatsCompleted;
+  if (missing === 0) return stoppedReason === null && unreviewed.length === 0;
+  if (stoppedReason === null || unreviewed.length !== missing) return false;
+  if (stoppedReason === "cap") return unreviewed.some((entry) => entry.reason === "cap");
+  return unreviewed.every((entry) => entry.reason !== "cap");
 }
 
 /** How many scope entries one seat line shows before folding into a count. */
@@ -98,13 +127,28 @@ const scopeText = (scope: readonly string[]): string => {
 export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefined): string {
   if (coverage === null || coverage === undefined) return "";
   if (coverage.seatsCompleted < 1 || coverage.seatsCompleted >= coverage.seatsTotal) return "";
-  const stopped = coverage.stoppedReason === "cap" ? "; stopped by cap" : "";
+  const stopped =
+    coverage.stoppedReason === "cap"
+      ? "; stopped by cap"
+      : coverage.stoppedReason === "failed"
+        ? "; stopped by a seat failure"
+        : "";
   const seats = coverage.unreviewed.slice(0, MAX_SEAT_ENTRIES);
   const seatOverflow = coverage.unreviewed.length - seats.length;
   const unreviewed =
     seats.length === 0
       ? ""
-      : ` — not reviewed: ${seats.map((seat) => `${seat.seat} (${scopeText(seat.scope)})`).join(", ")}` +
+      : ` — not reviewed: ${seats
+          .map((seat) => {
+            const scope = scopeText(seat.scope);
+            // The headline already names the round's dominant class, so a
+            // per-seat suffix is shown only when it ADDS information (a mixed
+            // round's other cause, or a failure detail).
+            const suffix = seat.reason === coverage.stoppedReason ? "" : seat.reason;
+            if (suffix === "") return `${seat.seat} (${scope})`;
+            return `${seat.seat} (${scope === "" ? suffix : `${scope}; ${suffix}`})`;
+          })
+          .join(", ")}` +
         (seatOverflow > 0 ? `, +${seatOverflow} more seat${seatOverflow === 1 ? "" : "s"}` : "");
   return `Reviewed ${coverage.seatsCompleted}/${coverage.seatsTotal} seats${stopped}${unreviewed}`;
 }

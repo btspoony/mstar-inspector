@@ -809,28 +809,6 @@ export const SUMMARY_MD_BUDGET = 8_000;
  */
 export const SEAT_GAP_MAX_CHARS = 400;
 
-function scopeList(paths: readonly string[], budget: number): string {
-  const listed: string[] = [];
-  for (const [index, path] of paths.entries()) {
-    const unlisted = paths.length - index - 1;
-    const candidate = `${[...listed, path].join(", ")}${unlisted > 0 ? `, and ${unlisted} more` : ""}`;
-    if (candidate.length > budget) break;
-    listed.push(path);
-  }
-  if (listed.length === paths.length) return listed.join(", ");
-  return listed.length === 0
-    ? `${paths.length} file(s)`
-    : `${listed.join(", ")}, and ${paths.length - listed.length} more`;
-}
-
-function scopeLine(head: string, separator: string, maxChars: number, scope: readonly string[]): string {
-  const budget = maxChars - head.length - separator.length;
-  const list = scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(scope, budget) : "";
-  const line = list.length === 0 ? head : `${head}${separator}${list}`;
-  if (line.length <= maxChars) return line;
-  return maxChars > 1 ? `${line.slice(0, maxChars - 1)}…` : "";
-}
-
 function fittedSummary(summary: string, budget: number): string {
   if (summary.length <= budget) return summary;
   const marker = "\n… (summary truncated)";
@@ -1420,13 +1398,12 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         [settled?.usage, ...reportSingles],
       );
       return {
+        // why: The deep parent cannot observe its own `task`-dispatched domain
+        // seats, so absence of `incomplete` proves nothing about their
+        // coverage — a seat cap-stopped mid-review still yields a verdict with
+        // the degradation only in `- notes:`. Deep therefore claims NO coverage
+        // rather than fabricating 1/1 reviewed.
         envelope,
-        // why: The deep parent IS the seat. A yielded review is full coverage;
-        // a parent that produced nothing returns an incomplete envelope and
-        // carries NO coverage — that round is a failure, not a partial review.
-        ...(envelope.incomplete === undefined
-          ? { coverage: { seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] } satisfies ReviewCoverage }
-          : {}),
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
@@ -1588,6 +1565,9 @@ export const ompAgentRuntime: AgentRuntime = {
       const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
       const completedSeatIds = new Set<string>();
+      // Why each non-completed seat stopped, keyed by seat id: `cap` for the
+      // time cap, `failed` (plus a bounded slug) for any other loss.
+      const seatStops = new Map<string, { reason: "cap" | "failed"; detail?: string }>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
           // why: The SDK wall-clock timer is disabled (`maxRuntimeMs: 0`): it
@@ -1628,6 +1608,17 @@ export const ompAgentRuntime: AgentRuntime = {
               outcome = { output: null, gap: { plan, reason: capReason }, failure: null };
             }
             if (outcome.gap === null && outcome.output !== null) completedSeatIds.add(id);
+            else if (outcome.gap !== null) seatStops.set(id, { reason: "cap", detail: outcome.gap.reason });
+            else {
+              // why: Name the CAUSE, not the synthesized seat-number prefix —
+              // `structuredOutput.error` carries the schema verdict and the SDK
+              // `error` the provider fault; the status is the last resort.
+              const detail =
+                result.result.error ??
+                result.result.structuredOutput?.error ??
+                `no usable output (status ${result.result.structuredOutput?.status ?? "absent"})`;
+              seatStops.set(id, { reason: "failed", detail });
+            }
             // why: All THREE outcomes pick their own terminal stage — a
             // fulfilled-but-failed result (provider error, schema-rejected
             // payload) must never be reported as a done seat.
@@ -1647,9 +1638,11 @@ export const ompAgentRuntime: AgentRuntime = {
             // review into a failure and drop the completed siblings' findings.
             const capReason = watchdogCapReason(watch);
             if (capReason !== undefined) {
+              seatStops.set(id, { reason: "cap", detail: capReason });
               terminalStage = seatGapStage(traceId, capReason);
               return { output: null, gap: { plan, reason: capReason }, failure: null };
             }
+            seatStops.set(id, { reason: "failed", detail: causeText(error) });
             terminalStage = seatFailedStage(traceId, causeText(error));
             throw error;
           } finally {
@@ -1675,46 +1668,36 @@ export const ompAgentRuntime: AgentRuntime = {
           deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
         })),
       });
+      // why: A seat that lost for ANY reason beside a sibling that produced
+      // output must not sink the round — the product rule is "deliver what the
+      // seats found". The losers are recorded per seat (for `coverage`) and the
+      // run decides below: ≥1 usable output delivers a partial review, zero
+      // usable output is an explicit failure.
       let outcomes: SeatOutcome[];
-      let rejectedSeats = 0;
-      let rejectedReason: unknown = undefined;
       const siblingLosses: { seat: string; detail: string }[] = [];
+      let results: PromiseSettledResult<SeatOutcome>[];
       try {
-        const results = await group;
-        outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-        const rejections = results.filter((result) => result.status === "rejected");
-        rejectedSeats = rejections.length;
-        rejectedReason = rejections[0]?.reason;
-        results.forEach((result, seatIndex) => {
-          if (result.status === "rejected") {
-            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
-          } else if (result.value.failure !== null) {
-            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
-          }
-        });
-        const capStopped = outcomes.some((outcome) => outcome.gap !== null);
-        const rejected = results.find((result) => result.status === "rejected");
-        const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-        if (!capStopped && outcomes.some((outcome) => outcome.output !== null)) {
-          if (rejected?.status === "rejected") throw rejected.reason;
-          if (lostSeat !== null) throw lostSeat;
-        }
-      } catch (error) {
-        recheckController.abort();
-        if (recheckWork) await recheckWork;
-        throw error;
+        results = await group;
       } finally {
-
         await supervision;
       }
+      outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      results.forEach((result, seatIndex) => {
+        if (result.status === "rejected") {
+          siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
+        } else if (result.value.failure !== null) {
+          siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
+        }
+      });
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
       // why: A seat that finished its own scope is COMPLETED; a cap-stopped
       // seat's collected payload still contributes findings, but that seat's
       // scope was never finished, so it is not counted as completed and its
-      // seat lands in `unreviewed`. Only a round with no completed seat is a
-      // failure — everything else is a delivered partial review.
-      if (gaps.length > 0 && completedSeatIds.size === 0) {
+      // seat lands in `unreviewed`. The round then delivers when at least one
+      // seat completed; with none it is an explicit failure, never a silent
+      // incomplete success.
+      if (completedSeatIds.size === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         const served = new Set<string>();
@@ -1722,74 +1705,78 @@ export const ompAgentRuntime: AgentRuntime = {
           const applied = servedBySeat.get(id);
           if (applied !== undefined) served.add(applied);
         }
-        const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
-        exhausted.recheck = settled?.doc ?? null;
-        if (settled !== null) exhausted.recheckStatus = settled.status;
-        // why: The failure must name the seat reason, not just a count — the
-        // capped seat's abort reason is the only evidence of WHY it stopped.
-        for (const gap of gaps) {
-          console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+        if (gaps.length > 0) {
+          const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
+          exhausted.recheck = settled?.doc ?? null;
+          if (settled !== null) exhausted.recheckStatus = settled.status;
+          // why: The failure must name the seat reason, not just a count — the
+          // capped seat's abort reason is the only evidence of WHY it stopped.
+          for (const gap of gaps) {
+            console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+          }
+          for (const { seat, detail } of siblingLosses) {
+            console.error(
+              `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
+            );
+          }
+          if (served.size === 1) exhausted.appliedModel = [...served][0]!;
+          throw exhausted;
         }
-        for (const { seat, detail } of siblingLosses) {
-          console.error(
-            `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
-          );
-        }
-        if (served.size === 1) exhausted.appliedModel = [...served][0]!;
-        throw exhausted;
+        // why: Zero usable output with no cap is the ONLY remaining failure —
+        // and it must be one, not an `incomplete` envelope at exit 0 that reads
+        // as success downstream. The cause is the first recorded stop reason.
+        const firstStop = seats
+          .map(({ id }) => ({ id, stop: seatStops.get(id) }))
+          .find((entry) => entry.stop !== undefined);
+        const cause =
+          firstStop?.stop?.detail === undefined || firstStop.stop.detail === ""
+            ? (firstStop?.stop?.reason ?? "no seat produced a usable payload")
+            : firstStop.stop.detail;
+        console.error(
+          `review failed: no usable seat output${firstStop === undefined ? "" : ` (${firstStop.id}: ${cause})`}`,
+        );
+        throw new Error(`review produced no usable seat output${firstStop === undefined ? "" : `: ${firstStop.id}: ${cause}`}`);
       }
-      if (gaps.length > 0) {
+      if (gaps.length > 0 || siblingLosses.length > 0) {
         // why: A delivered partial review keeps its seat losses visible in the
         // runner log; the product statement about coverage rides the coverage
-        // block (the Check summary and the published body render it), never a
-        // second failure vocabulary.
+        // block (the Check summary and the published body render it).
         for (const gap of gaps) {
           console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
         }
         for (const { seat, detail } of siblingLosses) {
-          console.error(`review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`);
+          console.error(`review seat ${seat} lost beside delivered seats${detail.length === 0 ? "" : `: ${detail}`}`);
         }
       }
-      // why: A round with no completed seat is a FAILURE, not a partial review,
-      // so it carries NO coverage. The contract's guard requires
-      // `seatsCompleted >= 1`; emitting a zero-count block here would be
-      // rejected by the runner's own transport guard and bury the actionable
-      // incomplete/failure outcome behind a shape error.
-      const coverage: ReviewCoverage | undefined =
-        completedSeatIds.size === 0
-          ? undefined
-          : {
-              seatsTotal: seats.length,
-              seatsCompleted: completedSeatIds.size,
-              stoppedReason: gaps.length > 0 ? "cap" : null,
-              unreviewed: seats
-                .filter(({ id }) => !completedSeatIds.has(id))
-                .map(({ plan }) => ({ seat: `${plan.domain}-${plan.seat}`, scope: [...plan.scope] })),
-            };
+      const unreviewedSeats = seats.filter(({ id }) => !completedSeatIds.has(id));
+      const coverage: ReviewCoverage = {
+        seatsTotal: seats.length,
+        seatsCompleted: completedSeatIds.size,
+        // why: The cap outranks other losses as the headline cause; each seat's
+        // own bounded reason keeps a mixed round unambiguous.
+        stoppedReason:
+          unreviewedSeats.length === 0
+            ? null
+            : unreviewedSeats.some(({ id }) => seatStops.get(id)?.reason === "cap")
+              ? "cap"
+              : "failed",
+        unreviewed: unreviewedSeats.map(({ id, plan }) => {
+          const stop = seatStops.get(id) ?? { reason: "failed" as const };
+          const slug = stop.detail === undefined ? "" : stageSlug(stop.detail, 24);
+          return {
+            seat: `${plan.domain}-${plan.seat}`,
+            scope: [...plan.scope],
+            reason: stop.reason === "cap" ? "cap" : slug === "" ? "failed" : `failed:${slug}`,
+          };
+        }),
+      };
 
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const findings = mergeSeatOutputs(outputs);
-      const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const lostSeatText = causeText(lostSeatDetail ?? (rejectedSeats === 0 ? "" : rejectedReason));
-      const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
       const envelope = synthesizeReview({
         findings,
         target: parseTarget(input.reconFacts),
-        // why: `incomplete` is the nothing-usable verdict. A round that
-        // delivered at least one seat's findings is a review — its coverage
-        // gap is stated by the `coverage` block, not by claiming the whole
-        // result was incomplete (which would make the worker fail the Check).
-        ...(outputs.length > 0
-          ? {}
-          : {
-              incomplete: {
-                reason: `no dispatched seat produced a usable payload${lostSeatCause}`,
-                unscanned: seats.map((seat) =>
-                  scopeLine(`${seat.plan.domain}-${seat.plan.seat}:`, " ", SEAT_GAP_MAX_CHARS, seat.plan.scope),
-                ),
-              },
-            }),
       });
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
