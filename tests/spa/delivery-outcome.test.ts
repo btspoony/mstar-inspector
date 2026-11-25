@@ -8,11 +8,13 @@ describe("deliveryOutcomeLabel", () => {
     expect(deliveryOutcomeLabel("ignored", "en")).toBe("Ignored");
     expect(deliveryOutcomeLabel("rejected", "en")).toBe("Rejected");
     expect(deliveryOutcomeLabel("skipped", "en")).toBe("Skipped");
+    expect(deliveryOutcomeLabel("refused", "en")).toBe("Refused");
     expect(deliveryOutcomeLabel("ok", "zh_CN")).toBe("正常");
     expect(deliveryOutcomeLabel("paused", "zh_CN")).toBe("已暂停");
     expect(deliveryOutcomeLabel("ignored", "zh_CN")).toBe("已忽略");
     expect(deliveryOutcomeLabel("rejected", "zh_CN")).toBe("已拒绝");
     expect(deliveryOutcomeLabel("skipped", "zh_CN")).toBe("已跳过");
+    expect(deliveryOutcomeLabel("refused", "zh_CN")).toBe("已拒收");
   });
 
   test("an off-vocabulary outcome falls back to the raw value (fail-visible, never blank)", () => {

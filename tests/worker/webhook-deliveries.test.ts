@@ -296,8 +296,8 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
     expect(count.n).toBe(0);
   });
 
-  test("DELIVERY_OUTCOMES is the frozen single source: exactly ok | paused | ignored | rejected | skipped", () => {
-    expect(DELIVERY_OUTCOMES).toEqual(["ok", "paused", "ignored", "rejected", "skipped"]);
+  test("DELIVERY_OUTCOMES is the frozen single source: exactly ok | paused | ignored | rejected | skipped | refused", () => {
+    expect(DELIVERY_OUTCOMES).toEqual(["ok", "paused", "ignored", "rejected", "skipped", "refused"]);
     expect(Object.isFrozen(DELIVERY_OUTCOMES)).toBe(true);
   });
 
@@ -982,6 +982,116 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     const count = db.raw.query("SELECT COUNT(*) AS n FROM webhook_deliveries").get() as { n: number };
     expect(count.n).toBe(0);
   });
+  test("route gate off: a verified job records outcome='refused' with the gate's reason and still answers 200", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "refused", status_code: null },
+    ]);
+    const reason = db.raw
+      .query("SELECT reason FROM webhook_deliveries WHERE bot_id = ?")
+      .all(appRow.id) as Array<{ reason: string | null }>;
+    expect(reason).toHaveLength(1);
+    expect(reason[0]!.reason).toContain("review.route.workflow");
+  });
+
+  test("route gate off: a ledger write fault still answers 200 and logs delivery_record_failed", async () => {
+    const db = createMigratedD1(false);
+    await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const warn = mock((_msg: unknown) => {});
+    const origWarn = console.warn;
+    console.warn = warn;
+    let res: Response;
+    try {
+      res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    } finally {
+      console.warn = origWarn;
+    }
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    const line = warn.mock.calls.map((call) => String(call[0])).find((s) => s.includes("delivery_record_failed"));
+    expect(line).toBeDefined();
+    const fields = JSON.parse(line!) as { event: string };
+    expect(fields.event).toBe("delivery_record_failed");
+  });
+
+  test("route gate off: a paused App's delivery records 'paused' — the gate does not rewrite the visible reason", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createReviewBotsStore(db).setReviewEnabled(appRow.id, false);
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "paused", status_code: null },
+    ]);
+    const reason = db.raw
+      .query("SELECT reason FROM webhook_deliveries WHERE bot_id = ?")
+      .all(appRow.id) as Array<{ reason: string | null }>;
+    expect(reason).toEqual([{ reason: null }]);
+  });
+
+  test("route gate off after a successful delivery: the refused row wins the dashboard's ordered read", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // Gate on: the first delivery enqueues and records 'ok'.
+    const first = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(await first.text()).toBe("accepted");
+
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const second = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(await second.text()).toBe("ignored");
+
+    const summary = await createReviewBotsStore(db).deliverySummary(appRow.id);
+    expect(summary.latest?.outcome).toBe("refused");
+  });
 
 });
 
@@ -998,6 +1108,10 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, true)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, true)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true, true)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true, false, true)).toBe("refused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, false, true)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, false, true)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1, true, false, true)).toBe("ignored");
   });
 
   test.each([
