@@ -3791,7 +3791,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
     expect(row.error_code).toBe("review.internal.unclassified");
     expect(row.track_id).toBe(ATTEMPT_ID);
     expect(String(row.error)).toBe(
-      `internal error in phase review: TypeError: the runner input write failed: exit 3 (attempt ${ATTEMPT_ID})`,
+      `internal error in phase review (stage pipeline): TypeError: the runner input write failed: exit 3 (attempt ${ATTEMPT_ID})`,
     );
     // The platform's bare sentence would fail this assertion: it names neither
     // the phase nor the class, so removing the plumbing turns the test red.
@@ -4277,7 +4277,7 @@ describe("the runner's last traced stage — settlement text", () => {
       null,
     );
     expect(String(failureRows(db)[0]!.error)).toBe(
-      `internal error in phase review: runner failed: exit 1, stdout 0B, stderr tail: boom (attempt ${ATTEMPT_ID})`,
+      `internal error in phase review (stage runner): runner failed: exit 1, stdout 0B, stderr tail: boom (attempt ${ATTEMPT_ID})`,
     );
     const line = h.logLines.find((entry) => entry.msg.startsWith("review failed:"));
     expect(line?.fields.last_stage).toBeUndefined();
@@ -4354,7 +4354,7 @@ describe("an unclassified internal error reports its stage and cause", () => {
     // The row names where it stopped and what threw — the phase, the error
     // class and the bounded message — plus the attempt it belongs to.
     expect(String(row.error)).toBe(
-      `internal error in phase review: Error: runner failed: exit 1, stdout 0B, stderr tail: boom (attempt ${ATTEMPT_ID})`,
+      `internal error in phase review (stage runner): Error: runner failed: exit 1, stdout 0B, stderr tail: boom (attempt ${ATTEMPT_ID})`,
     );
     // The observed stage is the step's own report, not the pipeline fallthrough.
     expect(row.stage).toBe("runner");
@@ -4394,8 +4394,13 @@ describe("an unclassified internal error reports its stage and cause", () => {
     }
     // The rebuild cannot be asked for its prototype...
     expect(rebuilt).not.toBeInstanceOf(PhaseTransientError);
-    expect(errorClassOf(rebuilt)).toBe("Error");
-    // ...but the facts carry the real class verbatim.
+    // ...its own surviving `name` is the wrapper's, which a specific-name read
+    // reports instead of collapsing to the rebuilt constructor...
+    expect(errorClassOf(rebuilt)).toBe("PhaseTransientError");
+    // ...and a rebuilt plain error carrying a platform name reads THAT.
+    const platformRebuilt = Object.assign(new Error("denied"), { name: "RangeError" });
+    expect(errorClassOf(platformRebuilt)).toBe("RangeError");
+    // ...but the facts carry the real class verbatim either way.
     expect(transientFactsOf(rebuilt)?.errorClass).toBe("RangeError");
     expect(transientFactsOf(rebuilt)?.stage).toBe("runner");
   });
@@ -4455,7 +4460,424 @@ describe("an unclassified internal error reports its stage and cause", () => {
     );
     const row = failureRows(db)[0]!;
     expect(String(row.error).length).toBeLessThan(600);
-    expect(String(row.error)).toContain("internal error in phase collect: Error:");
+    expect(String(row.error)).toContain("internal error in phase collect (stage pipeline): Error:");
     expect(String(row.error)).toContain(`(attempt ${ATTEMPT_ID})`);
+  });
+});
+
+describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
+  /** Seed the launch row and seal a credential set on it, as the paid step would. */
+  async function sealLaunchSecrets(db: TestD1, values: string[]): Promise<void> {
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, values);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+  }
+
+  test("a sealed credential straddling the message bound reaches no durable sink", async () => {
+    // The regression the short shaped token cannot catch: the credential has no
+    // recognizable shape (only exact redaction sees it), and it straddles the
+    // 400-character cut, so a cut-first composition would leave its plaintext
+    // prefix in the row.
+    const secret = `k${"s".repeat(460)}`;
+    const { deps, db } = await makeDeps();
+    await sealLaunchSecrets(db, [secret]);
+    const ref = makeRef(makePayload());
+    const concluded: Array<{ outcome: string; failureDetail?: string }> = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async (input: { outcome: string; failureDetail?: string }) => {
+        concluded.push(input);
+      },
+    };
+    const check = createCheckSettlement({ deps, payload: ref.payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = HANDLE;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    // The secret sits across the bound: padding before it, padding after it.
+    const message = `${"p".repeat(380)}${secret}${"q".repeat(80)}`;
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message,
+        errorClass: "Error",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).not.toContain(secret);
+    // Not even the prefix that survived the cut may leak: thirty characters of
+    // padding-plus-secret is inside the plaintext fragment a cut-first pass
+    // would have redacted nothing of.
+    expect(String(row.error)).not.toContain(`${"p".repeat(380)}k${"s".repeat(29)}`);
+    expect(String(row.error)).toContain(REDACTED);
+    expect(concluded[0]!.failureDetail).not.toContain(secret);
+    expect(concluded[0]!.failureDetail).not.toContain(`${"p".repeat(380)}k${"s".repeat(29)}`);
+  });
+
+  test("an unopenable seal writes the fixed diagnostic, never the raw message", async () => {
+    // The envelope exists but decryption cannot complete — a wrong key, a
+    // tampered row. Nothing derived from the raw message may be written.
+    const { deps, db } = await makeDeps();
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run("not-a-valid-envelope", ATTEMPT_ID);
+    const ref = makeRef(makePayload());
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "the raw detail that must never be persisted",
+        errorClass: "Error",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    // The guarded settle path still completes — decryption rejection must not
+    // escape as a settlement throw.
+    expect(settlement.kind).not.toBe("unknown");
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("the failure detail could not be sanitized");
+    expect(String(row.error)).not.toContain("the raw detail that must never be persisted");
+  });
+
+  test("an empty message says so instead of rendering a bare colon", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "",
+        errorClass: "Error",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("(no message recorded)");
+    expect(String(row.error)).not.toMatch(/Error:  \(attempt/);
+  });
+
+  test("a runaway class token is normalized and bounded", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const hugeClass = `Weird Error ${"C".repeat(500)}`;
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "boom",
+        errorClass: hugeClass,
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).not.toContain("WeirdError" + "C".repeat(100));
+    expect(String(row.error).length).toBeLessThan(600);
+    expect(String(row.error)).toContain("WeirdError");
+  });
+
+  test("errorClassOf never throws on hostile objects and prefers specific names", () => {
+    const hostile = {};
+    Object.defineProperty(hostile, "constructor", {
+      get() {
+        throw new Error("hostile getter");
+      },
+    });
+    expect(errorClassOf(hostile)).toBeUndefined();
+    const proxy = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error("revoked");
+        },
+      },
+    );
+    expect(errorClassOf(proxy)).toBeUndefined();
+    // A node-style code outranks a generic name.
+    expect(errorClassOf(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("ECONNRESET");
+    // A specific constructor still wins over everything.
+    expect(errorClassOf(new TypeError("x"))).toBe("TypeError");
+  });
+
+  test("a nested transient error keeps the class the inner throw captured", () => {
+    const inner = new PhaseTransientError(
+      { stage: "runner", headSha: SHA, runnerReturned: true, sendAttemptPublicationId: null, rateLimited: null },
+      new RangeError("inner detail"),
+    );
+    const outer = new PhaseTransientError(
+      { stage: "pipeline", headSha: SHA, runnerReturned: false, sendAttemptPublicationId: null, rateLimited: null },
+      inner,
+    );
+    expect(outer.facts.errorClass).toBe("RangeError");
+  });
+});
+
+describe("the review step's phase attribution", () => {
+  test("a platform failure of the review step is attributed to review, never to prepare", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    // The step boundary itself fails BEFORE invoking the review callback: the
+    // platform's own fault, with no facts any wrapper could have captured. The
+    // attribution must come from the workflow's own phase tracking.
+    const failingReview: WorkflowStep = {
+      do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+        if (name === "review") {
+          throw Object.assign(new Error("the workflow engine lost the step"), { name: "WorkflowStepError" });
+        }
+        const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+        return callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+      },
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async (): Promise<never> => {
+        throw new Error("the test step store does not wait for events");
+      },
+    } as unknown as WorkflowStep;
+
+    await expect(runReviewAttemptWorkflow(deps, ref, failingReview, async () => {})).rejects.toThrow(
+      /workflow engine lost the step/,
+    );
+    const row = failureRows(db)[0]!;
+    expect(String(row.error)).toContain("internal error in phase review");
+    expect(String(row.error)).not.toContain("internal error in phase prepare");
+    // The platform error's own name is the class the row reports.
+    expect(String(row.error)).toContain("WorkflowStepError");
+  });
+});
+
+describe("the delivered Check summary of an unclassified failure", () => {
+  test("the real lifecycle's completed Check carries the stage, phase and class", async () => {
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    // The Check row the settlement terminalizes, claimed the way the §7.10 lane
+    // claims it — through the real store, and the handle carries the lease the
+    // claim actually minted: the lifecycle's fences compare it against the row.
+    const claimedCheck = await claimAttempt(db as never, {
+      scope: SCOPE,
+      githubAppId: 424242,
+      headSha: SHA,
+      triggeredBy: "pull_request",
+      action: "opened",
+      holder: `consumer:${ATTEMPT_ID}`,
+      nowMs: Date.now(),
+      executionDeadlineMs: Date.now() + 600_000,
+    });
+    if (claimedCheck.kind !== "claimed") throw new Error(`fixture: expected claimed, got ${claimedCheck.kind}`);
+    const checkRowId = claimedCheck.attempt.identity.attemptId;
+    expect(await setCheckCreateState(db as never, checkRowId, claimedCheck.lease, "sending", undefined, Date.now())).toBe(true);
+    expect(await attachCheckRunId(db as never, checkRowId, claimedCheck.lease, 4242, Date.now())).toBe(true);
+    // The claim is NOT released: the settlement terminalizes the run it still
+    // owns, and the lifecycle's ownership fence reads the holder off the row.
+    const handle: CheckHandle = { attemptId: checkRowId, scope: SCOPE, githubAppId: 424242, headSha: SHA, lease: claimedCheck.lease };
+
+    // The REAL lifecycle: the same begin/terminalize production wires, with only
+    // the GitHub transport doubled. The completed Check's summary is what the PR
+    // page shows.
+    let delivered: { conclusion?: string; output?: { title?: string; summary?: string } } | null = null;
+    const octokit: ChecksOctokit = {
+      rest: {
+        checks: {
+          update: async (params: Record<string, unknown>) => {
+            delivered = {
+              conclusion: "conclusion" in params ? (params.conclusion as string) : undefined,
+              output: "output" in params ? (params.output as { title?: string; summary?: string }) : undefined,
+            };
+            return {
+              data: {
+                id: 4242,
+                name: CHECK_NAME,
+                head_sha: handle.headSha,
+                external_id: "",
+                status: "completed",
+                conclusion: "conclusion" in params ? params.conclusion : undefined,
+                output: "output" in params ? params.output : undefined,
+                app: { id: handle.githubAppId },
+              },
+            };
+          },
+          create: async () => {
+            throw new Error("no create expected");
+          },
+          get: async () => {
+            throw new Error("no get expected");
+          },
+          listForRef: async () => {
+            throw new Error("no list expected");
+          },
+        },
+      },
+    } as ChecksOctokit;
+    const adapter = createChecksAdapter({ db: db as never, nowMs: () => Date.now(), getOctokit: async () => octokit });
+    const lifecycle = createCheckLifecycle({
+      db: db as never,
+      nowMs: () => Date.now(),
+      getAdapter: () => adapter,
+      getCheckGate: async () => ({ minScore: 0, passVerdicts: ["ship it"] }),
+    });
+    deps.checks = lifecycle;
+    const check = createCheckSettlement({ deps, payload: ref.payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = handle;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "the runner input write failed: exit 3",
+        errorClass: "TypeError",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+
+    expect(delivered).not.toBeNull();
+    expect(delivered!.conclusion).toBe("failure");
+    const summary = delivered!.output?.summary ?? "";
+    // The approved sentence stands first; the recorded facts follow it — the
+    // phase AND the observed stage AND the class, so a red Check already says
+    // where and what.
+    expect(summary.startsWith(TERMINAL_FAILURE_TEXT["unknown-failure"])).toBe(true);
+    expect(summary).toContain("internal error in phase review");
+    expect(summary).toContain("stage runner");
+    expect(summary).toContain("TypeError");
+    expect(summary).toContain(`attempt ${ATTEMPT_ID}`);
+  });
+});
+
+describe("the observation carries sanitized, then bounded text", () => {
+  test("a sealed credential straddling the cause bound never reaches the handoff observation", async () => {
+    const secret = `k${"s".repeat(460)}`;
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, [secret]);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    // The cause straddles the 500-character observation bound: exact redaction
+    // must see it whole, or the fragment before the cut persists as plaintext.
+    const cause = `Error: read failed ${"p".repeat(400)}${secret}${"q".repeat(120)}`;
+    const settlement = await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "unknown",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        containerStateUnknown: false,
+        code: "review.paid.reply_lost",
+        message: "the attempt container could not be read (reply-lost) — its result is not collected",
+        cause,
+      },
+      null,
+    );
+    expect(settlement).toEqual({ kind: "unknown" });
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
+    expect(handoff?.observation?.cause).not.toContain(secret);
+    expect(handoff?.observation?.cause).not.toContain(`k${"s".repeat(29)}`);
+    expect(handoff?.observation?.cause).toContain(REDACTED);
+    expect(handoff?.observation?.message).not.toContain(secret);
+  });
+
+  test("an abandoned terminalize hands the detail to the fallback freeze", async () => {
+    // The promotion-abandoned lane: the terminalize that never starts must not
+    // freeze the bare sentence when the settlement already knows where and what.
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    const abandonedInputs: Array<{ outcome?: string; failureDetail?: string }> = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async () => {},
+      abandonTerminalize: async (input: { outcome?: string; failureDetail?: string }) => {
+        abandonedInputs.push(input);
+        return true;
+      },
+    };
+    const check = createCheckSettlement({ deps, payload: ref.payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = HANDLE;
+    // The promotion was abandoned: the terminalize hands off instead of sending.
+    check.promotionAbandoned = HANDLE.attemptId;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "the runner input write failed: exit 3",
+        errorClass: "TypeError",
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    expect(abandonedInputs).toHaveLength(1);
+    expect(abandonedInputs[0]!.failureDetail).toContain("internal error in phase review");
+    expect(abandonedInputs[0]!.failureDetail).toContain("stage runner");
+    expect(abandonedInputs[0]!.failureDetail).toContain("TypeError");
   });
 });

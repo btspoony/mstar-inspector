@@ -40,7 +40,7 @@ import {
   recordTerminalizeOutcome,
 } from "../store/review-checks";
 import { claimPublicationLease, releasePublicationLease } from "../store/finding-lifecycle";
-import { redactSecrets } from "./redact";
+import { boundedCheckDetail, redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
 import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
@@ -1123,10 +1123,12 @@ export type CheckTerminalOutcome =
  * the gate was met (clarify C3) and concludes `failure`.
  *
  * Every `failure` reached from an EXECUTION fault carries the approved category
- * of that fault (`TERMINAL_FAILURE_TEXT`), so no branch may interpolate a cause
- * into the public text. Two failures carry none on purpose: a missed gate is a
- * verdict — the review ran and reported — and a superseded attempt is not a
- * fault at all.
+ * of that fault (`TERMINAL_FAILURE_TEXT`); when the settlement hands in its
+ * already-redacted `failureDetail`, the approved sentence is followed by that
+ * bounded recorded-facts clause — the detail can never replace or flip the
+ * approved conclusion, only annotate the one the matrix already reached. Two
+ * failures carry none on purpose: a missed gate is a verdict — the review ran
+ * and reported — and a superseded attempt is not a fault at all.
  */
 export function decideConclusion(input: {
   proof: PublicationProof | null;
@@ -1223,7 +1225,11 @@ export function decideConclusion(input: {
   const base = terminalFailure("unknown-failure");
   const detail = input.failureDetail;
   if (detail === undefined || detail.trim() === "") return base;
-  return { ...base, summary: `${base.summary} Recorded: ${boundedText(detail, "").slice(0, 240)}` };
+  // The shape-redaction and newline flattening happen on the FULL text; the
+  // excerpt's own cut keeps the attempt reference (boundedText's blind slice
+  // would drop it).
+  const flattened = redactSecrets(detail).replace(/[\r\n]+/g, " ");
+  return { ...base, summary: `${base.summary} Recorded: ${boundedCheckDetail(flattened)}` };
 }
 
 function boundedText(text: string, fallback: string): string {
@@ -1358,6 +1364,12 @@ export type CheckLifecycle = {
     outcome?: CheckTerminalOutcome;
     budgetExhaustion?: BudgetExhaustedOutcome;
     inheritedHeadSha?: string;
+    /**
+     * The failure settlement's already-redacted detail, when the abandoned
+     * terminalize knew it. Freezing the fallback without it would pin the bare
+     * sentence even though the settlement could already say where and what.
+     */
+    failureDetail?: string;
     firstRecoveryDelayMs?: number;
   }): Promise<boolean>;
 };
@@ -1945,6 +1957,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
                 : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),
               headSha: handle.headSha,
               ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
+              ...(input.failureDetail === undefined ? {} : { failureDetail: input.failureDetail }),
             });
       const fence = fenceFor(handle.lease);
       await setCheckFallbackDesired(deps.db, handle.attemptId, fence.lease, conclusion, fence.nowMs);

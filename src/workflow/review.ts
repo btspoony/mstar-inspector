@@ -110,6 +110,10 @@ export async function runReviewAttemptWorkflow(
     const handoff = prepared;
     cleanup.headSha = handoff.headSha;
     const remainingMs = Math.max(1, handoff.runnerDeadlineMs - Date.now());
+    // The phase is set BEFORE the boundary, as collect and publish already do:
+    // a platform failure of the step itself — the callback never ran — must
+    // still attribute the throw to the phase the instance was in.
+    inPhase = "review";
     const reviewed = await step.do(
       "review",
       {
@@ -130,7 +134,6 @@ export async function runReviewAttemptWorkflow(
         if ((await readDurablePaid(deps, ref.attemptId)).kind === "payable") {
           await ensureRunnerConfig(ref.payload, deps);
         }
-        inPhase = "review";
         return reviewAttempt(deps, ref, handoff);
       },
     );
@@ -259,8 +262,10 @@ function ordinaryFailure(
     // the bounded message the settlement would otherwise have to re-derive —
     // the observation the reconciler renders carries the facts as data, never
     // a sentence parsed back out of the composed text.
-    cause:
-      errorCauseText(err) ?? (errorClass === undefined ? message.slice(0, 240) : `${errorClass}: ${message.slice(0, 240)}`),
+    // The cause is NOT bounded here: it is sanitized at settlement, and a cut
+    // that ran first would destroy the exact match the redaction needs. The
+    // observation path bounds it after the exact pass.
+    cause: errorCauseText(err) ?? (errorClass === undefined ? message : `${errorClass}: ${message}`),
     ...(transient?.lastStage === undefined ? {} : { lastStage: transient.lastStage }),
     ...(errorClass === undefined ? {} : { errorClass }),
     sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,

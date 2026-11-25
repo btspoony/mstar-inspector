@@ -3915,3 +3915,20 @@ describe("a resumed settlement acts only on the frozen generation", () => {
     expect(rows.n).toBe(1);
   });
 });
+
+describe("the Check excerpt of a recorded detail", () => {
+  test("a long detail keeps the attempt reference and marks truncation", () => {
+    const longMessage = `internal error in phase review (stage runner): Error: ${"x".repeat(600)}`;
+    const detail = `${longMessage} (attempt attempt-4b-0001)`;
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate: { minScore: 80, passVerdicts: ["ship it"] },
+      review: null,
+      failureDetail: detail,
+    });
+    expect(decided.summary).toContain("(attempt attempt-4b-0001)");
+    expect(decided.summary).toContain("…");
+    expect(decided.summary.length).toBeLessThan(500);
+  });
+});
