@@ -97,17 +97,24 @@ const MAX_SEAT_ENTRIES = 3;
 /**
  * Display normalization for repository-controlled text (seat names and file
  * paths — a hostile diff can put anything in either): single-line, no
- * Inspector marker syntax, and no angle brackets. This is done HERE, inside
- * the one shared formatter, so the Check summary and the published body
- * render the EXACT same sentence — the body's later marker strip can never
- * diverge from the summary's unaugmented render.
+ * Inspector marker syntax, no angle brackets, and no live Markdown control
+ * syntax. This is done HERE, inside the one shared formatter, so the Check
+ * summary and the published body render the EXACT same sentence — the
+ * body's later marker strip can never diverge from the summary's unaugmented
+ * render, and a path or seat name can never escape its plain-text position:
+ * both surfaces render the text as Markdown, so the control characters are
+ * backslash-escaped (the backslash first, or the escapes would escape each
+ * other).
  */
 const displayText = (text: string): string =>
   text
     .replace(/<!--\s*mstar-inspector:[a-zA-Z-]+:v1[^>]*-->/g, "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/[<>]/g, (angle) => (angle === "<" ? "‹" : "›"));
+    .replace(/[<>]/g, (angle) => (angle === "<" ? "‹" : "›"))
+    .replace(/\\/g, "\\\\")
+    .replace(/[`[\]()*_|]/g, (meta) => `\\${meta}`)
+    .replace(/^#/, "\\#");
 
 const scopeText = (scope: readonly string[]): string => {
   const shown = scope.slice(0, MAX_SCOPE_ENTRIES);
