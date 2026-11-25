@@ -139,8 +139,6 @@ import {
   GUARD_TIMED_SANDBOX_STEPS,
   POST_RUNNER_READ_TIMEOUT_MS,
   ROUND_BUDGET_MS,
-  RUNNER_BUDGET_FLOOR_MS,
-  SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
   runnerTimeoutMs,
@@ -2195,7 +2193,7 @@ describe("createReviewConsumer", () => {
     expect(row).toContain('"seatsStopped":0');
   });
 
-  test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
+  test("a small diff requests the tier ceiling with its work units recorded — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let roundStart = 0;
@@ -2227,9 +2225,7 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    const requestedMs =
-      RUNNER_BUDGET_FLOOR_MS.default +
-      ((600_000 - RUNNER_BUDGET_FLOOR_MS.default) * 17) / SIZE_SATURATION_WORK_UNITS;
+    const requestedMs = 600_000;
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_work_units).toBe(17);
     expect(line.fields.runner_requested_ms).toBe(requestedMs);
@@ -2277,7 +2273,7 @@ describe("createReviewConsumer", () => {
     });
 
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
-    expect(line.fields.runner_requested_ms).toBe(500_340);
+    expect(line.fields.runner_requested_ms).toBe(600_000);
     expect(line.fields.runner_effective_ms).toBe(66_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
     expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
@@ -4425,7 +4421,6 @@ describe("createReviewConsumer", () => {
   });
 
   const LATE_SATURATED_EFFECTIVE_MS = 546_000;
-  const LATE_FLOOR_EFFECTIVE_MS = 500_020;
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -4455,7 +4450,6 @@ describe("createReviewConsumer", () => {
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
-    expect(line.fields.runner_effective_ms).not.toBe(LATE_FLOOR_EFFECTIVE_MS);
 
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
@@ -4466,7 +4460,7 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
-  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (floor request)", async () => {
+  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (measured small diff — the ceiling request, same as saturated)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     h.sandbox.numstatStdout = "-\t-\tdocs/diagram.png\n";
     const db = await createSeededTestD1();
@@ -4482,19 +4476,20 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        ...clockSpendingSandbox("git init", 100_000, clock),
+        ...clockSpendingSandbox("git init", 400_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    expect(execDeadlineMs).toBeLessThan(roundStart + 646_000);
+    // why: The request is the tier ceiling at every size, so the deadline and
+    // effective window match the saturated case exactly — size never shrinks
+    // the window, setup time is never charged against the seats.
+    expect(execDeadlineMs).toBe(roundStart + 946_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
-    expect(tailMs).toBeLessThanOrEqual(roundStart + ROUND_BUDGET_MS);
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
-    expect(line.fields.runner_effective_ms).toBe(LATE_FLOOR_EFFECTIVE_MS);
-    expect(line.fields.runner_effective_ms).not.toBe(LATE_SATURATED_EFFECTIVE_MS);
+    expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
 
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);

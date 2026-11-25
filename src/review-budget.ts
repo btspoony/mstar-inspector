@@ -179,36 +179,35 @@ export const PUBLICATION_TAIL_MS = 60_000;
 /**
  * Wall clock one review seat costs (ms), from the measured round distribution
  * rather than one round: over 30 days of successful reviews (n = 1361) the
- * duration sat at p50 304 584 ms, p90 508 800 ms and max 647 553 ms. A seat
- * priced at 150 s put the two-seat `default` floor at 360 s — above p50, below
- * p90 — so the floor cut into the slowest tenth of ordinary rounds. The
- * observed failure was sharper than that: one head was stopped at 362 s and
- * then passed inside the same budget. A tier runs `maxSeats` concurrent model
- * calls plus their tool turns, so pricing one call underfunds every round.
+ * duration sat at p50 304 584 ms, p90 508 800 ms and max 647 553 ms. Kept as
+ * the seating measurement the floor below is priced from; it is no longer a
+ * reduction input — the request is the tier ceiling at every size.
  */
 export const PER_SEAT_ALLOCATION_MS = 220_000;
 
-function seatPricedFloorMs(level: ReviewLevel): number {
-  return Math.min(
-    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS,
-    RUNNER_MAX_BUDGET_MS[level],
-  );
-}
-
+/**
+ * The seat-priced floor per tier (ms): the MINIMUM a round of this tier could
+ * need — the publication tail plus one allocation per concurrent seat. Since
+ * `requestRunnerBudget` asks for the tier ceiling at every size, and every
+ * tier ceiling is at or above this floor, the floor never reduces an
+ * allocation; it survives as the documented lower bound on what the ceiling
+ * must fund.
+ */
 export const RUNNER_BUDGET_FLOOR_MS: Record<ReviewLevel, number> = {
-  quick: seatPricedFloorMs("quick"),
-  default: seatPricedFloorMs("default"),
-  deep: seatPricedFloorMs("deep"),
+  quick: Math.min(
+    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.quick.maxSeats * PER_SEAT_ALLOCATION_MS,
+    RUNNER_MAX_BUDGET_MS.quick,
+  ),
+  default: Math.min(
+    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.default.maxSeats * PER_SEAT_ALLOCATION_MS,
+    RUNNER_MAX_BUDGET_MS.default,
+  ),
+  deep: Math.min(
+    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.deep.maxSeats * PER_SEAT_ALLOCATION_MS,
+    RUNNER_MAX_BUDGET_MS.deep,
+  ),
 };
 
-/**
- * Work units at which the request reaches the tier maximum. Real PRs cluster
- * at 100–1,000 changed lines, so 5,000 is reachable; the old 20,000-unit
- * boundary reached them too, but added only about 2.4–24 s at 100–1,000
- * units — too little to change what a round could finish. A sizing anchor,
- * not a throughput measurement.
- */
-export const SIZE_SATURATION_WORK_UNITS = 5_000;
 
 
 
@@ -404,10 +403,10 @@ export function parseNumstatSize(
 }
 
 /**
- * A computed size-aware request: `floor(tier) + (tierMax - floor(tier)) *
- * units/5_000`, units saturated at `SIZE_SATURATION_WORK_UNITS`. The caller
- * feeds `requestedBudgetMs` into `anchorRunnerBudget` as `requestMs` — the
- * ONE tier clamp still lives there.
+ * A computed request: the tier ceiling at every size, carrying the measured
+ * `workUnits` for the round's log fields. The caller feeds `requestedBudgetMs`
+ * into `anchorRunnerBudget` as `requestMs` — the ONE tier clamp still lives
+ * there.
  */
 export type RunnerBudgetRequest = {
   kind: "requested";
@@ -442,21 +441,14 @@ export function deriveReviewBudget(inputs: ReviewBudgetInputs): ReviewBudget {
 }
 
 /**
- * Convert the selected numstat's size into the runner's requested budget —
- * the deterministic request that `anchorRunnerBudget` clamps against the
- * live cutoff; it never overrides the tier ceiling and never decides the
- * outcome. Capped linear interpolation in whole ms:
- *
- *   workUnits         = Σ max(1, linesInFile)   (binary/zero-text files pay 1)
- *   requestedMs(null) = tierMaxMs
- *   requestedMs       = floor(level)
- *                     + floor((tierMaxMs - floor(level)) * min(workUnits, 5_000) / 5_000)
- *
- * Zero work requests the floor; 5,000 units and beyond request exactly the
- * tier maximum — adjacent sizes ramp smoothly, there are no buckets; a tier
- * whose seat-priced floor clamps to its ceiling has no ramp at all. `null`
- * (numstat absent or unavailable) requests the tier maximum: an unmeasurable
- * diff is never short-changed, and the numstat is never fetched twice.
+ * Convert the selected numstat's size into the runner's requested budget.
+ * The request is the tier ceiling at EVERY size: a review delivers what it
+ * finds, so the budget bounds the render cycle, never the allocation — a
+ * 44-line diff and a 5,000-unit diff receive the same window, and setup time
+ * never competes with the seats' thinking time. `workUnits` survives on the
+ * request for the round's log fields (`runner_work_units`); it no longer
+ * shrinks the window. `null` (numstat absent or unavailable) is the same
+ * ceiling with no measurement: an unmeasurable diff is never short-changed.
  *
  * Malformed size input — a non-integer or negative count, or a `changedLines`
  * that disagrees with the file lines — is refused with the existing
@@ -480,12 +472,7 @@ export function requestRunnerBudget(
   if (malformed) {
     return { kind: "invalid", requestedBudgetMs: Number.NaN };
   }
-  const saturatedUnits = Math.min(workUnits, SIZE_SATURATION_WORK_UNITS);
-  const floorMs = RUNNER_BUDGET_FLOOR_MS[level];
-  const requestedBudgetMs =
-    floorMs +
-    Math.floor(((tierMaxMs - floorMs) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS);
-  return { kind: "requested", requestedBudgetMs, workUnits };
+  return { kind: "requested", requestedBudgetMs: tierMaxMs, workUnits };
 }
 
 /**
