@@ -124,6 +124,12 @@ export type AgentRuntimeRunInput = {
   recheck?: RecheckInput;
   outerDeadlineEpochMs?: number;
   recheckAssignmentMaxBytes?: number;
+  /**
+   * The fan-out the partition must produce, the worker's own choice (a small
+   * diff under `review.seats.*` can ask for fewer seats than the tier). Absent
+   * is `REVIEW_SEATS[level]`; a level without an entry does not use this input.
+   */
+  seats?: number;
   prContext?: PrContext;
   signal?: AbortSignal;
 };

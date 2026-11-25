@@ -233,6 +233,7 @@ export type RunnerInputJson = {
   recheck?: RecheckInput;
   recheckAssignmentMaxBytes?: number;
   outerDeadlineEpochMs?: number;
+  seats?: number;
   prContext?: PrContext;
   tokenUsageNonce?: string;
 };
@@ -423,6 +424,13 @@ export function parseRunnerInput(parsed: unknown): RunnerInputJson {
       );
     }
     input.outerDeadlineEpochMs = outerDeadlineEpochMs;
+  }
+  if (record.seats !== undefined) {
+    const seats = record.seats;
+    if (typeof seats !== "number" || !Number.isInteger(seats) || seats < 1) {
+      throw new Error("input JSON field `seats` must be a positive integer when present");
+    }
+    input.seats = seats;
   }
   if (record.prContext !== undefined) {
     const context = record.prContext;
@@ -789,6 +797,7 @@ export async function main(
           ? { outerDeadlineEpochMs: json.outerDeadlineEpochMs }
           : {}),
         ...(json.prContext !== undefined ? { prContext: json.prContext } : {}),
+        ...(json.seats !== undefined ? { seats: json.seats } : {}),
         agentDir: dir,
         authStorage,
       };

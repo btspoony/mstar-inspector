@@ -29,6 +29,7 @@ import {
   setLostReplySettleMs,
   setMaintenance,
   setRecheckAssignmentMaxBytes,
+  setSeatSettings,
   setSystemConcurrency,
   useLoaded,
   type AdmissionDropCounts,
@@ -43,6 +44,7 @@ import {
   type ReviewsRunningAnswer,
   type ReviewsRunningConfig,
   type RouteWorkflowConfig,
+  type SeatSettingsConfig,
 } from "./api";
 import { ConsolePath, Screen } from "./screen";
 
@@ -396,6 +398,8 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const [reconcileDraft, setReconcileDraft] = useState<Partial<Record<ReconcileField, string>>>({});
   const [sweepDraft, setSweepDraft] = useState<Partial<Record<SweepField, string>>>({});
   const [recheckDraft, setRecheckDraft] = useState<string | null>(null);
+  const [seatLinesDraft, setSeatLinesDraft] = useState<string | null>(null);
+  const [seatSeatsDraft, setSeatSeatsDraft] = useState<string | null>(null);
   const [lostReplyDraft, setLostReplyDraft] = useState<string | null>(null);
   const [attemptCapDraft, setAttemptCapDraft] = useState<string | null>(null);
   const [attemptCapConfirming, setAttemptCapConfirming] = useState(false);
@@ -411,6 +415,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
   const reconcileSignal = useSaveSignal();
   const sweepSignal = useSaveSignal();
   const recheckAssignmentSignal = useSaveSignal();
+  const seatSettingsSignal = useSaveSignal();
   const lostReplySignal = useSaveSignal();
   const attemptCapSignal = useSaveSignal();
   const maintenanceSignal = useSaveSignal();
@@ -424,6 +429,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
       | "sweep"
       | "reconcile"
       | "recheckAssignment"
+      | "seatSettings"
       | "lostReplySettle"
       | "attemptCap"
       | "maintenance";
@@ -661,6 +667,47 @@ export function RuntimePage({ locale }: { locale: Locale }) {
     }
   }
 
+  async function onSaveSeats(
+    event: SubmitEvent<HTMLFormElement>,
+    stored: SeatSettingsConfig,
+  ): Promise<void> {
+    event.preventDefault();
+    if (busy) return;
+    if (stored.degraded && seatLinesDraft === null && seatSeatsDraft === null) return;
+    const smallDiffMaxLines = Number(
+      (seatLinesDraft ?? String(stored.smallDiffMaxLines)).trim(),
+    );
+    const smallDiffSeats = Number((seatSeatsDraft ?? String(stored.smallDiffSeats)).trim());
+    setBusy(true);
+    setNotice(null);
+    seatSettingsSignal.start();
+    try {
+      const saved = await setSeatSettings(smallDiffMaxLines, smallDiffSeats, stored);
+      update((data) => ({ ...data, seatSettings: saved }));
+      setSeatLinesDraft(null);
+      setSeatSeatsDraft(null);
+      setNotice({
+        kind: "success",
+        message: t(locale, "admin.runtime.seatSettingsSaved"),
+        source: "seatSettings",
+      });
+      seatSettingsSignal.succeed();
+    } catch (error) {
+      const generic = t(locale, "admin.runtime.seatSettingsFailed");
+      setNotice({
+        kind: "error",
+        message:
+          error instanceof AdminWriteError
+            ? `${generic} ${t(locale, "admin.refusalDetail", { detail: error.message })}`
+            : generic,
+        source: "seatSettings",
+      });
+      seatSettingsSignal.fail();
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function onSaveLostReply(
     event: SubmitEvent<HTMLFormElement>,
     stored: LostReplySettleConfig,
@@ -822,6 +869,7 @@ export function RuntimePage({ locale }: { locale: Locale }) {
           const sweep = data.sweep;
           const reconcile = data.reconcile;
           const recheck = data.recheckAssignment;
+          const seatSettings = data.seatSettings;
           const attemptCap = data.attemptCap;
           const lostReplySettle = data.lostReplySettle;
           const routeWorkflow = data.routeWorkflow;
@@ -1565,6 +1613,88 @@ export function RuntimePage({ locale }: { locale: Locale }) {
                 {recheck.degraded ? null : (
                   <p className="mt-2 text-xs text-muted-foreground">
                     {t(locale, "admin.runtime.recheckCurrent", { value: recheck.maxBytes })}
+                  </p>
+                )}
+              </CardContent>
+            </SectionCard>
+            )}
+            {seatSettings === null ? null : (
+            <SectionCard tier="secondary">
+              <CardHeader>
+                <SectionCardTitle>{t(locale, "admin.runtime.seatSettingsTitle")}</SectionCardTitle>
+              </CardHeader>
+              <CardContent>
+                <p className="text-sm text-muted-foreground">
+                  {t(locale, "admin.runtime.seatSettingsDescription")}
+                </p>
+                {notice?.source === "seatSettings" ? (
+                  <CardOutcome notice={notice} status={seatSettingsSignal.status} />
+                ) : null}
+                {seatSettings.degraded ? (
+                  <div className="mt-4">
+                    <PageNotice kind="warn" message={t(locale, "admin.runtime.seatSettingsUnreadable")} />
+                  </div>
+                ) : null}
+                <form
+                  className="mt-4 flex flex-wrap items-end gap-2"
+                  onSubmit={(event) => void onSaveSeats(event, seatSettings)}
+                >
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="seat-settings-lines">
+                      {t(locale, "admin.runtime.seatSettingsLinesLabel")}
+                    </label>
+                    <Input
+                      id="seat-settings-lines"
+                      type="number"
+                      min={seatSettings.linesMin}
+                      max={seatSettings.linesMax}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      value={
+                        seatLinesDraft ?? (seatSettings.degraded ? "" : String(seatSettings.smallDiffMaxLines))
+                      }
+                      onChange={(event) => setSeatLinesDraft(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-sm font-medium" htmlFor="seat-settings-seats">
+                      {t(locale, "admin.runtime.seatSettingsSeatsLabel")}
+                    </label>
+                    <Input
+                      id="seat-settings-seats"
+                      type="number"
+                      min={seatSettings.seatsMin}
+                      max={seatSettings.seatsMax}
+                      className="w-40"
+                      autoComplete="off"
+                      required
+                      value={
+                        seatSeatsDraft ?? (seatSettings.degraded ? "" : String(seatSettings.smallDiffSeats))
+                      }
+                      onChange={(event) => setSeatSeatsDraft(event.target.value)}
+                    />
+                  </div>
+                  <Button
+                    type="submit"
+                    disabled={busy}
+                    status={seatSettingsSignal.status === "idle" ? undefined : seatSettingsSignal.status}
+                  >
+                    {t(locale, "admin.runtime.seatSettingsSave")}
+                  </Button>
+                  <SaveInFlight show={seatSettingsSignal.status === "loading"} locale={locale} />
+                  {seatSettings.degraded ? (
+                    <Button type="button" variant="secondary" onClick={reload}>
+                      {t(locale, "common.retry")}
+                    </Button>
+                  ) : null}
+                </form>
+                {seatSettings.degraded ? null : (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t(locale, "admin.runtime.seatSettingsCurrent", {
+                      lines: seatSettings.smallDiffMaxLines,
+                      seats: seatSettings.smallDiffSeats,
+                    })}
                   </p>
                 )}
               </CardContent>

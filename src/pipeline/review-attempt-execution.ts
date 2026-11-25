@@ -19,6 +19,7 @@ import {
 import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { REVIEW_SEATS } from "../../packages/shared/src/runtime";
 import {
   carriesSecretForm,
   redactExactSecrets,
@@ -198,7 +199,12 @@ import {
   type UpsertPlan,
 } from "./comment";
 import { createTargetsStore } from "../dashboard/targets-store";
-import { getRecheckAssignmentMaxBytes, getReconcileSettings } from "../dashboard/runtime-config-store";
+import {
+  getRecheckAssignmentMaxBytes,
+  getReconcileSettings,
+  getReviewSeatSettings,
+  type SeatSettingsRead,
+} from "../dashboard/runtime-config-store";
 import { type CustomProviderConsumerConfig } from "../dashboard/app-config-store";
 import {
   CHECK_SUMMARIES,
@@ -285,7 +291,7 @@ type DiffCaptureDecline = {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "issue_comment" | "check_run" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_blocked_deployment_gate" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "check_run" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_seat_settings_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_blocked_deployment_gate" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -324,6 +330,8 @@ export type ConsumerLogFields = {
   runner_cutoff_ms?: number;
   runner_deadline_ms?: number;
   runner_work_units?: number | null;
+  runner_seats?: number;
+  seats_reason?: "small-diff" | "level";
   elapsed_ms?: number;
   orchestration?: "bun-fanout" | "parent";
   provider?: string;
@@ -1932,6 +1940,53 @@ function scopeOf(payload: ReviewJobPayload): Scope | undefined {
   };
 }
 
+/** Why the attempt runs its seat count: the small-diff rule, or the tier's own fan-out. */
+export type AttemptSeatSelection = { seats: number | undefined; reason: "small-diff" | "level" };
+
+/**
+ * The seat count this attempt asks the runner for. A diff at or under
+ * `smallDiffMaxLines` changed lines takes `smallDiffSeats`, clamped to the
+ * level's own fan-out; anything else takes `REVIEW_SEATS[level]`. `deep` has no
+ * seat partition, so it asks for nothing (`seats` undefined) and never reads
+ * the small-diff rows.
+ */
+export function selectAttemptSeats(
+  level: ReviewLevel,
+  observedChangedLines: number | null,
+  settings: SeatSettingsRead,
+): AttemptSeatSelection {
+  const levelSeats = Object.hasOwn(REVIEW_SEATS, level)
+    ? REVIEW_SEATS[level as keyof typeof REVIEW_SEATS]
+    : undefined;
+  if (levelSeats === undefined) return { seats: undefined, reason: "level" };
+  if (observedChangedLines !== null && observedChangedLines <= settings.smallDiffMaxLines) {
+    return { seats: Math.min(settings.smallDiffSeats, levelSeats), reason: "small-diff" };
+  }
+  return { seats: levelSeats, reason: "level" };
+}
+
+/**
+ * The settings read behind {@link selectAttemptSeats}: one statement, plus the
+ * degraded warn on the attempt's own fields when a stored row cannot be
+ * trusted. Callers gate this on the level having a seat-table entry — the read
+ * exists only where its answer is used.
+ */
+async function selectAttemptSeatsFrom(
+  deps: ProcessDeps,
+  fields: ConsumerLogFields,
+  level: ReviewLevel,
+  observedChangedLines: number | null,
+): Promise<AttemptSeatSelection> {
+  const settings = await getReviewSeatSettings(deps.env.DB);
+  if (settings.degraded) {
+    deps.log.warn(
+      { ...fields, event: "review_seat_settings_degraded" },
+      "seat settings read degraded — the documented defaults drive the seat count",
+    );
+  }
+  return selectAttemptSeats(level, observedChangedLines, settings);
+}
+
 /**
  * What `prepare` hands the paid step, as data: the authoritative checkout, the
  * round's captured context and the ONE anchored deadline. No container handle,
@@ -1952,6 +2007,12 @@ export type PreparedAttempt = {
   };
   modelChain: string | undefined;
   observedChangedLines: number | null;
+  /**
+   * The seat count resolved at prepare time plus the rule that chose it.
+   * Optional: a checkpointed prepare from before this field existed replays
+   * without it, and `deep` runs leave `seats` undefined (no seat partition).
+   */
+  seatSelection?: AttemptSeatSelection;
   reconFacts: string[];
   recheckInput: RecheckInput | undefined;
   recheckAssignmentMaxBytes: number | undefined;
@@ -3477,6 +3538,12 @@ async function preparePhase(
     );
   }
   observed.runnerEffectiveBudgetMs = anchor.effectiveBudgetMs;
+  // Seat selection is only a fan-out concept: deep runs one parent turn, so
+  // the settings read and its degraded warn belong to the levels that have a
+  // seat table entry.
+  const seatSelection = Object.hasOwn(REVIEW_SEATS, level)
+    ? await selectAttemptSeatsFrom(deps, fields, level, observedChangedLines)
+    : { seats: undefined, reason: "level" as const };
   fields = {
     ...fields,
     runner_requested_ms: anchor.requestedBudgetMs,
@@ -3484,6 +3551,8 @@ async function preparePhase(
     runner_cutoff_ms: roundBudget.runnerCutoffMs,
     runner_deadline_ms: anchor.execDeadlineMs,
     runner_work_units: sizeRequest.kind === "requested" ? sizeRequest.workUnits : null,
+    runner_seats: seatSelection.seats,
+    seats_reason: seatSelection.reason,
   };
   check.fields = fields;
   return {
@@ -3502,6 +3571,7 @@ async function preparePhase(
       },
       modelChain: effectiveModelChain(requireRunnerConfig(deps, payload).appCfg).chain,
       observedChangedLines,
+      seatSelection,
       reconFacts,
       recheckInput,
       recheckAssignmentMaxBytes,
@@ -3652,6 +3722,7 @@ export async function reviewAttempt(
         execDeadlineMs: prepared.runnerDeadlineMs,
       },
       observedChangedLines: prepared.observedChangedLines,
+      seats: prepared.seatSelection?.seats,
       progress,
       attemptId,
       targetId: payload.targetId,

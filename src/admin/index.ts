@@ -20,6 +20,10 @@ import {
   RECHECK_ASSIGNMENT_MAX,
   RECHECK_ASSIGNMENT_MIN,
   REVIEW_ATTEMPT_CAP_MAX_MS,
+  SEATS_SMALL_DIFF_LINES_MAX,
+  SEATS_SMALL_DIFF_LINES_MIN,
+  SEATS_SMALL_DIFF_SEATS_MAX,
+  SEATS_SMALL_DIFF_SEATS_MIN,
   REVIEW_ATTEMPT_CAP_MIN_MS,
   RuntimeConfigError,
   SWEEP_LIMITS,
@@ -32,6 +36,7 @@ import {
   getRecheckAssignmentMaxBytes,
   getReviewAttemptCapSetting,
   getSweepSettings,
+  getReviewSeatSettings,
   getReconcileSettings,
   setReconcileSettings,
   getSystemConcurrency,
@@ -46,6 +51,7 @@ import {
   setOfficialWorkspace,
   setRecheckAssignmentMaxBytes,
   setReviewAttemptCap,
+  setReviewSeatSettings,
   setSweepSettings,
   setSystemConcurrency,
   reviewRunState,
@@ -242,6 +248,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     level,
     recheck,
     attemptCap,
+    seats,
     reviews,
     lostReplySettle,
     officialWorkspaceId,
@@ -259,6 +266,7 @@ async function readRuntime(c: AdminContext): Promise<Response> {
     readDefaultReviewLevel(db),
     getRecheckAssignmentMaxBytes(db),
     getReviewAttemptCapSetting(db),
+    getReviewSeatSettings(db),
     reviewRunState(db, maintenance),
     getLostReplySettleMs(db),
     readOfficialWorkspaceId(db),
@@ -315,6 +323,16 @@ async function readRuntime(c: AdminContext): Promise<Response> {
       min: REVIEW_ATTEMPT_CAP_MIN_MS,
       max: REVIEW_ATTEMPT_CAP_MAX_MS,
       degraded: attemptCap.degraded,
+    },
+    // Effective values plus their bounds; PATCH `seatSettings` owns the writes.
+    seatSettings: {
+      smallDiffMaxLines: seats.smallDiffMaxLines,
+      smallDiffSeats: seats.smallDiffSeats,
+      linesMin: SEATS_SMALL_DIFF_LINES_MIN,
+      linesMax: SEATS_SMALL_DIFF_LINES_MAX,
+      seatsMin: SEATS_SMALL_DIFF_SEATS_MIN,
+      seatsMax: SEATS_SMALL_DIFF_SEATS_MAX,
+      degraded: seats.degraded,
     },
     routeWorkflow: reviews.gate,
     lostReplySettle: {
@@ -412,6 +430,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
   let rawLostReply: unknown;
   let rawMaintenance: unknown;
   let rawRouteWorkflow: unknown;
+  let rawSeatSettings: unknown;
   try {
     const body = (await c.req.json()) as {
       concurrency?: unknown;
@@ -425,6 +444,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       lostReplySettle?: unknown;
       maintenance?: unknown;
       routeWorkflow?: unknown;
+      seatSettings?: unknown;
     };
     concurrency = body.concurrency;
     rawBudgets = body.checkBudgets;
@@ -437,6 +457,7 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     rawLostReply = body.lostReplySettle;
     rawMaintenance = body.maintenance;
     rawRouteWorkflow = body.routeWorkflow;
+    rawSeatSettings = body.seatSettings;
   } catch {
   }
   // `routeWorkflow` is gone from this surface: name the removed capability
@@ -463,12 +484,13 @@ async function setRuntime(c: AdminContext): Promise<Response> {
       rawAttemptCap,
       rawLostReply,
       rawMaintenance,
+      rawSeatSettings,
     ].filter((value) => value !== undefined).length > 1
   ) {
     return c.json(
       {
         error:
-          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance",
+          "body must carry exactly one of concurrency | checkBudgets | commentClaim | sweep | reconcile | reviewLevel | recheckAssignment | attemptCap | lostReplySettle | maintenance | seatSettings",
       },
       400,
     );
@@ -570,6 +592,30 @@ async function setRuntime(c: AdminContext): Promise<Response> {
     try {
       return c.json({
         reviewLevel: { value: await setDefaultReviewLevel(db, level as ReviewLevel, login) },
+      });
+    } catch (error) {
+      if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+  if (rawSeatSettings !== undefined) {
+    const pair =
+      typeof rawSeatSettings === "object" && rawSeatSettings !== null
+        ? (rawSeatSettings as { smallDiffMaxLines?: unknown; smallDiffSeats?: unknown })
+        : {};
+    if (typeof pair.smallDiffMaxLines !== "number" || typeof pair.smallDiffSeats !== "number") {
+      return c.json(
+        { error: "body must be { seatSettings: { smallDiffMaxLines, smallDiffSeats } }" },
+        400,
+      );
+    }
+    try {
+      return c.json({
+        seatSettings: await setReviewSeatSettings(
+          db,
+          { smallDiffMaxLines: pair.smallDiffMaxLines, smallDiffSeats: pair.smallDiffSeats },
+          login,
+        ),
       });
     } catch (error) {
       if (error instanceof RuntimeConfigError) return c.json({ error: error.message }, 400);

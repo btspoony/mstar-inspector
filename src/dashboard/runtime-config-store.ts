@@ -1,4 +1,4 @@
-import { isReviewLevel, REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
+import { isReviewLevel, REVIEW_LEVELS, REVIEW_SEATS, type ReviewLevel } from "../../packages/shared/src/runtime";
 import {
   DEFAULT_CHECK_MIN_SCORE,
   isCheckMinScoreValue,
@@ -71,6 +71,67 @@ const COMMENT_CLAIM_TARGET = "review.comment_claim.budgets";
 export const REVIEW_LEVEL_KEY = "review.level.default";
 /** Absent row: the tier every App without its own depth inherits. */
 export const REVIEW_LEVEL_DEFAULT: ReviewLevel = "default";
+
+/** PK of the small-diff threshold row: changed lines at or under it get fewer seats. */
+export const SEATS_SMALL_DIFF_LINES_KEY = "review.seats.smallDiffMaxLines";
+/** PK of the seat count a small diff gets. */
+export const SEATS_SMALL_DIFF_SEATS_KEY = "review.seats.smallDiffSeats";
+/** Absent row: diffs of 120 changed lines or fewer take the small-diff seat count. */
+export const SEATS_SMALL_DIFF_LINES_DEFAULT = 120;
+/** Absent row: a small diff is one seat — issue #383's 57-line diff still paid for two. */
+export const SEATS_SMALL_DIFF_SEATS_DEFAULT = 1;
+/** Range of a stored threshold: zero would disable the rule, 20 000 covers any diff the platform admits. */
+export const SEATS_SMALL_DIFF_LINES_MIN = 1;
+export const SEATS_SMALL_DIFF_LINES_MAX = 20_000;
+/** Range of a stored seat count: at least one seat, at most the largest tier fan-out. */
+export const SEATS_SMALL_DIFF_SEATS_MIN = 1;
+export const SEATS_SMALL_DIFF_SEATS_MAX = Math.max(...Object.values(REVIEW_SEATS));
+
+/** Both small-diff seat settings and whether the stored rows could be trusted. */
+export type SeatSettingsRead = {
+  smallDiffMaxLines: number;
+  smallDiffSeats: number;
+  degraded: boolean;
+};
+
+/**
+ * Both `review.seats.*` settings in ONE statement (one read per attempt). Only
+ * absent rows are the documented defaults; an untrusted stored value or a read
+ * failure answers both defaults with `degraded: true` and never throws — the
+ * attempt must still pick a seat count.
+ */
+export async function getReviewSeatSettings(db: DashboardD1): Promise<SeatSettingsRead> {
+  const degraded = (maxLines: number, seats: number): SeatSettingsRead => ({
+    smallDiffMaxLines: maxLines,
+    smallDiffSeats: seats,
+    degraded: true,
+  });
+  try {
+    const { results } = await db
+      .prepare(`SELECT key, value FROM review_runtime_settings WHERE key IN (?1, ?2)`)
+      .bind(SEATS_SMALL_DIFF_LINES_KEY, SEATS_SMALL_DIFF_SEATS_KEY)
+      .all<{ key: string; value: unknown }>();
+    const rows = new Map(results.map(({ key, value }) => [key, value]));
+    const linesStored = rows.has(SEATS_SMALL_DIFF_LINES_KEY)
+      ? parseInRange(rows.get(SEATS_SMALL_DIFF_LINES_KEY), SEATS_SMALL_DIFF_LINES_MIN, SEATS_SMALL_DIFF_LINES_MAX)
+      : SEATS_SMALL_DIFF_LINES_DEFAULT;
+    const seatsStored = rows.has(SEATS_SMALL_DIFF_SEATS_KEY)
+      ? parseInRange(rows.get(SEATS_SMALL_DIFF_SEATS_KEY), SEATS_SMALL_DIFF_SEATS_MIN, SEATS_SMALL_DIFF_SEATS_MAX)
+      : SEATS_SMALL_DIFF_SEATS_DEFAULT;
+    if (linesStored === undefined || seatsStored === undefined || Number.isNaN(linesStored) || Number.isNaN(seatsStored)) {
+      return degraded(SEATS_SMALL_DIFF_LINES_DEFAULT, SEATS_SMALL_DIFF_SEATS_DEFAULT);
+    }
+    return {
+      smallDiffMaxLines: linesStored,
+      smallDiffSeats: seatsStored,
+      degraded: false,
+    };
+  } catch {
+    return degraded(SEATS_SMALL_DIFF_LINES_DEFAULT, SEATS_SMALL_DIFF_SEATS_DEFAULT);
+  }
+}
+
+
 
 function isIntegerIn(value: unknown, min: number, max: number): value is number {
   return typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
@@ -1071,6 +1132,69 @@ export async function setRecheckAssignmentMaxBytes(
       .prepare(RECHECK_ASSIGNMENT_AUDIT_SQL)
       .bind(crypto.randomUUID(), actor, value, RECHECK_ASSIGNMENT_KEY, now),
     db.prepare(SYSTEM_UPSERT_SQL).bind(RECHECK_ASSIGNMENT_KEY, String(value), now, actor),
+  ]);
+  return value;
+}
+
+/** The two small-diff values one write carries. */
+export type SeatSettingsWrite = { smallDiffMaxLines: number; smallDiffSeats: number };
+
+const SEAT_SETTINGS_TARGET = "review.seats";
+
+const SEAT_SETTINGS_AUDIT_SQL = `
+  INSERT INTO platform_audit_events
+    (id, actor_login, action, target_type, target_id, detail_json, created_at)
+  VALUES (?1, ?2, 'runtime.seat_settings.set', 'runtime', '${SEAT_SETTINGS_TARGET}',
+          json_object('before', json_object(
+                      'smallDiffMaxLines', ${storedBudgetSql("?6", "NULL", SEATS_SMALL_DIFF_LINES_MIN, SEATS_SMALL_DIFF_LINES_MAX)},
+                      'smallDiffSeats', ${storedBudgetSql("?7", "NULL", SEATS_SMALL_DIFF_SEATS_MIN, SEATS_SMALL_DIFF_SEATS_MAX)}),
+                      'after', json_object('smallDiffMaxLines', ?3, 'smallDiffSeats', ?4)),
+          ?5)`;
+
+/**
+ * Write both small-diff settings. Either value outside its own range refuses
+ * the whole write (`invalid_value`) with no row and no audit entry; an
+ * accepted pair is audited with the actor in ONE batch and returned. There is
+ * no cross-field relation to enforce: the threshold bounds a diff's line
+ * count, the seat count is bounded by the largest tier fan-out on its own
+ * (the selection still clamps it to the level's count at use time).
+ */
+export async function setReviewSeatSettings(
+  db: DashboardD1,
+  value: SeatSettingsWrite,
+  actor: string,
+): Promise<SeatSettingsWrite> {
+  if (!isIntegerIn(value.smallDiffMaxLines, SEATS_SMALL_DIFF_LINES_MIN, SEATS_SMALL_DIFF_LINES_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `small-diff line threshold must be an integer in ${SEATS_SMALL_DIFF_LINES_MIN}..${SEATS_SMALL_DIFF_LINES_MAX}`,
+    );
+  }
+  if (!isIntegerIn(value.smallDiffSeats, SEATS_SMALL_DIFF_SEATS_MIN, SEATS_SMALL_DIFF_SEATS_MAX)) {
+    throw new RuntimeConfigError(
+      "invalid_value",
+      `small-diff seat count must be an integer in ${SEATS_SMALL_DIFF_SEATS_MIN}..${SEATS_SMALL_DIFF_SEATS_MAX}`,
+    );
+  }
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(SEAT_SETTINGS_AUDIT_SQL)
+      .bind(
+        crypto.randomUUID(),
+        actor,
+        value.smallDiffMaxLines,
+        value.smallDiffSeats,
+        now,
+        SEATS_SMALL_DIFF_LINES_KEY,
+        SEATS_SMALL_DIFF_SEATS_KEY,
+      ),
+    db
+      .prepare(SYSTEM_UPSERT_SQL)
+      .bind(SEATS_SMALL_DIFF_LINES_KEY, String(value.smallDiffMaxLines), now, actor),
+    db
+      .prepare(SYSTEM_UPSERT_SQL)
+      .bind(SEATS_SMALL_DIFF_SEATS_KEY, String(value.smallDiffSeats), now, actor),
   ]);
   return value;
 }

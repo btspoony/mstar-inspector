@@ -488,6 +488,7 @@ describe("createReviewConsumer", () => {
       reconFacts: ["acme/widgets#42", `head ${SHA}`, "10\t2\tsrc/auth.ts", "5\t0\tdocs/readme.md"],
       capabilityHosts: [],
       outerDeadlineEpochMs: expect.any(Number),
+      seats: 1,
       tokenUsageNonce: expect.any(String),
     });
     expect(h.sandbox.calls[0]!.opts).toEqual({

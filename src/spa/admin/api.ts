@@ -154,6 +154,21 @@ export type LostReplySettleConfig = {
 };
 
 /**
+ * The small-diff seat rule as the operator API reports it: a diff at or under
+ * `smallDiffMaxLines` changed lines fans out to `smallDiffSeats` seats instead
+ * of the level's own count.
+ */
+export type SeatSettingsConfig = {
+  smallDiffMaxLines: number;
+  smallDiffSeats: number;
+  linesMin: number;
+  linesMax: number;
+  seatsMin: number;
+  seatsMax: number;
+  degraded: boolean;
+};
+
+/**
  * The review route's operating switch as the operator API reports it: the
  * gate's own answer (`mode`) plus what the stored row holds behind it. A
  * hand-edited row the read path refuses answers `off` with `degraded: true`,
@@ -232,6 +247,7 @@ export type RuntimeConfig = {
   recheckAssignment: RecheckAssignmentConfig | null;
   attemptCap: AttemptCapConfig | null;
   lostReplySettle: LostReplySettleConfig | null;
+  seatSettings: SeatSettingsConfig | null;
   routeWorkflow: RouteWorkflowConfig | null;
   reviewsRunning: ReviewsRunningConfig | null;
   maintenance: MaintenanceConfig | null;
@@ -317,6 +333,21 @@ function parseRecheckAssignment(row: Json): RecheckAssignmentConfig | null {
     min: num(budget, "min"),
     max: num(budget, "max"),
     degraded: bool(budget, "degraded"),
+  };
+}
+
+function parseSeatSettings(row: Json): SeatSettingsConfig | null {
+  const raw = row.seatSettings;
+  if (raw === undefined) return null;
+  const seat = map(raw, "runtime seatSettings");
+  return {
+    smallDiffMaxLines: num(seat, "smallDiffMaxLines"),
+    smallDiffSeats: num(seat, "smallDiffSeats"),
+    linesMin: num(seat, "linesMin"),
+    linesMax: num(seat, "linesMax"),
+    seatsMin: num(seat, "seatsMin"),
+    seatsMax: num(seat, "seatsMax"),
+    degraded: bool(seat, "degraded"),
   };
 }
 
@@ -460,6 +491,7 @@ export async function readRuntime(): Promise<RuntimeConfig> {
     reconcile: parseReconcile(body),
     recheckAssignment: parseRecheckAssignment(body),
     attemptCap: parseAttemptCap(body),
+    seatSettings: parseSeatSettings(body),
     lostReplySettle: parseLostReplySettle(body),
     routeWorkflow: parseRouteWorkflow(body),
     reviewsRunning: parseReviewsRunning(body),
@@ -725,6 +757,41 @@ export async function setLostReplySettleMs(
     }
   }
   return { ...stored, settleMs, degraded: false };
+}
+
+/**
+ * Save the small-diff seat rule, answering the values the server stored. The
+ * echo carries both numbers, so `degraded: false` rides a landed write; a 2xx
+ * with an unreadable body still landed, so the request values stand in — the
+ * same rule as `setAttemptCap`.
+ */
+export async function setSeatSettings(
+  smallDiffMaxLines: number,
+  smallDiffSeats: number,
+  stored: SeatSettingsConfig,
+): Promise<SeatSettingsConfig> {
+  const answer = await write("PATCH", "/runtime", {
+    seatSettings: { smallDiffMaxLines, smallDiffSeats },
+  });
+  if (typeof answer === "object" && answer !== null && "seatSettings" in answer) {
+    const saved = answer.seatSettings;
+    if (
+      typeof saved === "object" &&
+      saved !== null &&
+      "smallDiffMaxLines" in saved &&
+      typeof saved.smallDiffMaxLines === "number" &&
+      "smallDiffSeats" in saved &&
+      typeof saved.smallDiffSeats === "number"
+    ) {
+      return {
+        ...stored,
+        smallDiffMaxLines: saved.smallDiffMaxLines,
+        smallDiffSeats: saved.smallDiffSeats,
+        degraded: false,
+      };
+    }
+  }
+  return { ...stored, smallDiffMaxLines, smallDiffSeats, degraded: false };
 }
 
 /**
