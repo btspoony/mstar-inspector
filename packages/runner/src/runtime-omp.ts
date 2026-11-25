@@ -26,7 +26,7 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { PR_DIFF_PATH, REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
+import { PR_DIFF_PATH, REVIEW_SEATS, RUNNER_MAX_BUDGET_MS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import {
   PUBLICATION_TAIL_MS,
   remainingOuterMs,
@@ -34,7 +34,7 @@ import {
   runRecheckSeat,
   type RecheckSeatResult,
 } from "./recheck";
-import { runReportSeat, revalidatedNotes } from "./report";
+import { REPORT_TAIL_MARGIN_MS, runReportSeat, revalidatedNotes } from "./report";
 import type { PrContext, ReportDoc } from "../../shared/src/report-wire";
 import type { ReviewCoverage } from "../../shared/src/coverage-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
@@ -167,6 +167,9 @@ export function reportSkipStage(reason: string): string {
   return `report_skip:${reason}`;
 }
 
+/** The report seat started and the run was torn down under it (not a failure). */
+export const REPORT_ABORTED_STAGE = "report_aborted";
+
 export function reportFailedStage(cause: string | undefined): string {
   const slug = stageSlug(cause, 12);
   return slug === "" ? "report_failed" : `report_failed:${slug}`;
@@ -202,7 +205,7 @@ async function tracedReportSeatFor(
   // why: `report_start` must mean the seat actually started. Emitting it for
   // an ineligible run (no PR context, no head, no seat definition, or a review
   // that produced nothing) would make the trace claim work nobody did.
-  const eligibility = reportEligibility(input, envelope);
+  const eligibility = reportEligibility(input, envelope, signal);
   if (!eligibility.ok) {
     // why: ONE place logs the skip and names it in the trace — the dispatch
     // log and the stage can never disagree, and no `report_start` claims a
@@ -216,10 +219,19 @@ async function tracedReportSeatFor(
   try {
     report = await runReportSeatFor(input, session, envelope, recheckDoc, signal, usage);
   } catch (error) {
+    // why: A REJECTED report call is a seat failure, not "no document". The
+    // review is never failed by the report (narrative only), so this stops at
+    // the trace and the review's own envelope still publishes.
     traceStage(reportFailedStage(causeText(error)));
-    throw error;
+    return null;
   }
-  traceStage(reportStage(report, usage[0]?.requests));
+  // why: A torn-down run under a started seat is neither a document nor an
+  // empty seat — name the cancellation instead of blaming the seat.
+  traceStage(
+    report === null && (signal.aborted || input.signal?.aborted === true)
+      ? REPORT_ABORTED_STAGE
+      : reportStage(report, usage[0]?.requests),
+  );
   return report;
 }
 
@@ -558,7 +570,11 @@ export function seatCapAbortError(windowMs: number): Error {
  * of cutting the turn mid-yield.
  */
 export function seatDeadlineMs(nowMs: number, firstTurnMs: number, level: ReviewLevel): number {
-  const ceilingMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000 * (level === "deep" ? 2 : 1);
+  // why: The seat ceiling is the RUNNER's tier maximum, not the engine's
+  // wall-clock table — the two disagree for `quick` (480 s vs 300 s), and the
+  // engine figure is SHORTER than what the old from-spawn cap already gave a
+  // large quick diff. Only the deep parent keeps its ×2 headroom.
+  const ceilingMs = RUNNER_MAX_BUDGET_MS[level] * (level === "deep" ? 2 : 1);
   return Math.min(firstTurnMs + ceilingMs, nowMs + remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS);
 }
 
@@ -1417,10 +1433,30 @@ export type ReportEligibility =
   | { ok: true; headSha: string; prContext: PrContext }
   | {
       ok: false;
-      reason: "no-pr-context" | "head-sha-missing" | "seat-definition-missing" | "review-incomplete";
+      reason:
+        | "no-pr-context"
+        | "head-sha-missing"
+        | "seat-definition-missing"
+        | "review-incomplete"
+        | "budget-exhausted"
+        | "aborted";
     };
 
-export function reportEligibility(input: AgentRuntimeRunInput, envelope: MstarReviewV1): ReportEligibility {
+export function reportEligibility(
+  input: AgentRuntimeRunInput,
+  envelope: MstarReviewV1,
+  signal?: AbortSignal,
+): ReportEligibility {
+  // why: The run's own state is checked FIRST — a torn-down or out-of-time run
+  // never starts the seat (its budget guard would refuse it), and naming a
+  // missing seat definition there would blame the input for the run's clock.
+  // why: Both signals mean "the run is over": the composed teardown signal and
+  // the caller's own. `AbortSignal.any` propagation can land a tick late, so
+  // the caller's flag is read directly rather than inferred through the fold.
+  if (signal?.aborted === true || input.signal?.aborted === true) return { ok: false, reason: "aborted" };
+  if (remainingOuterMs(Date.now(), input.level) <= REPORT_TAIL_MARGIN_MS) {
+    return { ok: false, reason: "budget-exhausted" };
+  }
   if (input.prContext === undefined) return { ok: false, reason: "no-pr-context" };
   const headSha = envelope.target?.head_sha;
   if (headSha === undefined) return { ok: false, reason: "head-sha-missing" };
@@ -1439,7 +1475,7 @@ async function runReportSeatFor(
   signal: AbortSignal,
   usage: SubagentUsageSource[] = [],
 ): Promise<ReportDoc | null> {
-  const eligibility = reportEligibility(input, envelope);
+  const eligibility = reportEligibility(input, envelope, signal);
   if (!eligibility.ok) return null;
   return runReportSeat({
     session,

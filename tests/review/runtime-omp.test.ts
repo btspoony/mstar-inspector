@@ -11,12 +11,7 @@ import {
 import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
-import type {
-  AgentRuntime,
-  AgentRuntimeRunInput,
-  ReviewLevel,
-  ReviewRunResult,
-} from "../../packages/shared/src/runtime";
+import { RUNNER_MAX_BUDGET_MS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../packages/shared/src/runtime";
 import { RunnerBudgetExhausted } from "../../packages/shared/src/budget-exhausted-wire";
 import { servedModel, type SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
@@ -358,6 +353,7 @@ const {
   reportStage,
   reportSkipStage,
   reportFailedStage,
+  reportEligibility,
   SUMMARY_MD_BUDGET,
   SEAT_GAP_MAX_CHARS,
 } = (await import(RUNTIME_OMP_SPEC)) as {
@@ -375,6 +371,7 @@ const {
   reportEligibility: (
     input: AgentRuntimeRunInput,
     envelope: { incomplete?: unknown; target?: { head_sha?: string } },
+    signal?: AbortSignal,
   ) => { ok: true; headSha: string } | { ok: false; reason: string };
   seatStopLine: (seat: string, reason: string | undefined) => string;
   seatStartStage: (seat: string) => string;
@@ -818,7 +815,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 
   test("every seat's window is the FULL tier ceiling, bounded only by the absolute deadline", () => {
     const level = "default" as const;
-    const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
+    const ceiling = RUNNER_MAX_BUDGET_MS.default;
     const turn = Date.now();
     anchorRecheckDeadline(turn, level, turn + 3_600_000);
 
@@ -834,7 +831,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
 
   test("two concurrent seats each get the whole ceiling — neither dies at half the window", async () => {
     jest.useFakeTimers();
-    const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
+    const ceiling = RUNNER_MAX_BUDGET_MS.default;
     anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
     const dispatched = [deferred(), deferred()];
     seatDispatchQueue = dispatched.map((entry) => entry.resolve);
@@ -870,7 +867,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   test("a seat's clock starts at its first REAL model turn, not at the running label", async () => {
     jest.useFakeTimers();
     const level = "quick" as const;
-    const ceiling = PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes * 60_000;
+    const ceiling = RUNNER_MAX_BUDGET_MS.quick;
     // Setup longer than the whole ceiling: if the clock started at dispatch —
     // or at the monitor's initial `running` label — the seat would already be
     // dead by the first assertion.
@@ -2853,6 +2850,68 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
     expect(trace).toContain(`seat_done:${id}`);
   });
 
+  test("the seat ceiling is the runner's tier maximum for quick, not the engine's shorter wall clock", () => {
+    const turn = Date.now();
+    anchorRecheckDeadline(turn, "quick", turn + 3_600_000);
+    const window = seatDeadlineMs(turn, turn, "quick") - turn;
+    expect(window).toBe(RUNNER_MAX_BUDGET_MS.quick);
+    // The engine table would give 300 s; that is the regression this pins.
+    expect(window).not.toBe(PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes * 60_000);
+    expect(window).toBeGreaterThan(PR_REVIEW_TIER_BUDGETS.quick.wallClockMinutes * 60_000);
+    // default is unchanged (both sources agree) and deep keeps its ×2 headroom.
+    anchorRecheckDeadline(turn, "default", turn + 3_600_000);
+    expect(seatDeadlineMs(turn, turn, "default") - turn).toBe(RUNNER_MAX_BUDGET_MS.default);
+    anchorRecheckDeadline(turn, "deep", turn + 3_600_000);
+    expect(seatDeadlineMs(turn, turn, "deep") - turn).toBe(RUNNER_MAX_BUDGET_MS.deep * 2);
+  });
+
+  test("a delivered cap stop with no time left skips the report seat and never claims a start", async () => {
+    // The round delivers (one completed seat), but its deadline is already
+    // inside the report seat's publication margin: the seat cannot run.
+    const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=480000)";
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 1_000);
+    const trace = await capturedTrace(async () => {
+      seatResults = [
+        { status: "absent", aborted: true, abortReason: CAP },
+        { data: seatPayload() },
+      ];
+      await ompAgentRuntime.runReview({ ...BASE_INPUT, prContext: PR_CTX });
+    });
+
+    expect(trace).toContain("report_skip:budget-exhausted");
+    expect(trace).not.toContain("report_start");
+  });
+
+  test("a rejected report call is a failure, never a silent absent document", async () => {
+    const trace = await capturedTrace(async () => {
+      seatResults = [
+        { data: seatPayload() },
+        { data: seatPayload({ findings: [] }) },
+        { rejectWith: new Error("report boom") },
+      ];
+      const result = await ompAgentRuntime.runReview({ ...BASE_INPUT, prContext: PR_CTX });
+      // The review is never failed by its report (narrative only).
+      expect(result.report).toBeNull();
+      expect(result.envelope.verdict).toBe("blocked");
+    });
+
+    expect(trace).toContain("report_start");
+    expect(trace).toContain("report_failed:report-boom");
+    expect(trace).not.toContain("report_absent");
+  });
+
+  test("a torn-down run is ineligible for the report seat, with the reason named", () => {
+    const envelope = synthesizeReview({
+      findings: [],
+      target: { owner: "acme", repo: "widgets", pr: 7, head_sha: HEAD_SHA },
+    });
+    const controller = new AbortController();
+    controller.abort();
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
+    const verdict = reportEligibility({ ...BASE_INPUT, prContext: PR_CTX }, envelope, controller.signal);
+    expect(verdict).toEqual({ ok: false, reason: "aborted" });
+  });
+
   test("the first-turn signal is the assistant request count, never the running label", () => {
     expect(startsFirstTurn({ status: "running", requests: 0 })).toBe(false);
     expect(startsFirstTurn({ status: "pending", requests: 5 })).toBe(false);
@@ -2961,7 +3020,7 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
     ["quick/default", { ...BASE_INPUT, level: "quick" as const }],
     ["deep", DEEP_INPUT],
   ] as const) {
-    test(`${name}: a caller abort after the report seat starts resolves null, never throws`, async () => {
+    test(`${name}: a caller abort under the report seat is a cancellation — null, never a throw`, async () => {
       if (input.level === "deep") parentYields = [deepEnvelope()];
       const dispatch = deferred();
       seatDispatchQueue = input.level === "deep" ? [dispatch.resolve] : [() => {}, dispatch.resolve];
@@ -2983,7 +3042,10 @@ describe("ompAgentRuntime.runReview — report seat (mstar.report/v1)", () => {
       }
       expect(result.report).toBeNull();
       expect(result.envelope.schema).toBe("mstar.review/v1");
-      expect(errors.filter((line) => line.includes("report_seat_aborted"))).toHaveLength(1);
+      // Started, then cancelled: neither "absent" nor a failure.
+      expect(errors.filter((line) => line.includes('"stage":"report_start"'))).toHaveLength(1);
+      expect(errors.filter((line) => line.includes('"stage":"report_aborted"'))).toHaveLength(1);
+      expect(errors.filter((line) => line.includes('"stage":"report_absent"'))).toHaveLength(0);
     });
   }
 
