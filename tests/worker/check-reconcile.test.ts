@@ -1787,6 +1787,47 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(three[2]!.identity.attemptId).toBe(staleId);
   });
 
+  test("§7.9a: a valid but foreign-scoped link is never correctable (I-000673)", async () => {
+    const db = seededDb();
+    const DUE_SHA = "0123456789abcdef0123456789abcdef0123456f";
+    const READY_SHA = "fedcba9876543210fedcba9876543210fedcba98";
+    const foreignId = await markedUnconfirmed(db, SHA, "publication-foreign");
+    const readyId = await markedUnconfirmed(db, READY_SHA, "publication-ready");
+    // Both links carry valid, self-referential JSON naming their own row; the
+    // foreign one's embedded scope names another installation than the journal
+    // row — and the Check — it is stored on.
+    const scopedProof = (publicationId: string, headSha: string, installationId: number) =>
+      JSON.stringify({
+        publicationId,
+        scope: { ...SCOPE, installationId },
+        headSha,
+        kind: "review",
+        round: 3,
+        commentId: 77,
+        bodySha256: "a".repeat(64),
+        confirmedMs: CLAIM_AT + 2_000,
+      });
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(scopedProof("publication-foreign", SHA, SCOPE.installationId + 1), "publication-foreign");
+    db.raw
+      .prepare(`UPDATE review_publications SET proof_json = ? WHERE id = ?`)
+      .run(scopedProof("publication-ready", READY_SHA, SCOPE.installationId), "publication-ready");
+    const due = await claim(db, { headSha: DUE_SHA, executionDeadlineMs: CLAIM_AT + 1_000 });
+    const dueId = due.attempt.identity.attemptId;
+
+    // The foreign link is not a proof the reader would accept: the store guard
+    // refuses the reopen, and the batch orders the mark behind ready work.
+    expect(await reopenTerminalCorrection(db, foreignId, "publication-foreign", "success", CLAIM_AT + 5_000)).toBe(false);
+    const one = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, RECONCILE_DEFAULTS.checkMaxAttempts, 1);
+    expect(one.map((row) => row.identity.attemptId)).toEqual([readyId]);
+    const all = await listCheckReconcileBatch(db, CLAIM_AT + 5_000, RECONCILE_DEFAULTS.checkMaxAttempts, 3);
+    expect(all.map((row) => row.identity.attemptId)).toEqual([readyId, dueId, foreignId]);
+    // The genuine mark still reopens exactly once for its own proof.
+    expect(await reopenTerminalCorrection(db, readyId, "publication-ready", "success", CLAIM_AT + 5_000)).toBe(true);
+    expect(await reopenTerminalCorrection(db, readyId, "publication-ready", "success", CLAIM_AT + 5_000)).toBe(false);
+  });
+
   test("§7.9a: the ordering class is exactly the transition's precondition", async () => {
     const db = seededDb();
     const CORRUPT_SHA = "fedcba9876543210fedcba9876543210fedcba99";

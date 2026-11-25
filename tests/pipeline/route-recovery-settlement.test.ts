@@ -22,6 +22,7 @@ import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { idemKey } from "../../src/contracts/idem";
 import {
   HANDOFF_RECOVERY_AFTER_MS,
+  ROUTE_RECOVERY_LIMIT,
   reconcileReviewRoute,
   type ReviewRouteLogFields,
 } from "../../src/pipeline/route-reconcile";
@@ -331,6 +332,137 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     const rowsAfter = failureRows(db).length;
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, 1_000 + 10 * 60_000);
     expect(failureRows(db)).toHaveLength(rowsAfter);
+  });
+
+  // The bounded retry lane (I-000709): a settlement whose observation read
+  // keeps faulting must not consume the pass's whole batch ahead of newer
+  // work. The seeded shape is the defect itself: more permanently faulting
+  // rows than the 25-row limit, plus one healthy row behind them all.
+  const FAULT_READ_MARKER = "FROM review_attempt_handoffs WHERE attempt_id = ?";
+  // Per-pass record of which rows the pass actually attempted: every faulting
+  // observation read appends the attempt id in selection order before it
+  // throws. The tests drain `attempts` between passes, so "read in pass 1" and
+  // "read again in pass 2" are separately provable — a cumulative count could
+  // not tell a pass reading a row twice from a retry.
+  function faultingObservationReads(db: TestD1, faultAttempts: Set<string>, attempts: string[]): TestD1 {
+    return {
+      prepare(sql: string) {
+        const stmt = db.prepare(sql);
+        if (!sql.includes(FAULT_READ_MARKER)) return stmt;
+        return {
+          bind(...values: unknown[]) {
+            const attemptId = String(values[0]);
+            if (faultAttempts.has(attemptId)) {
+              attempts.push(attemptId);
+              throw new Error("injected: the observation read faulted");
+            }
+            return stmt.bind(...values);
+          },
+          first: stmt.first.bind(stmt),
+          all: stmt.all.bind(stmt),
+          run: stmt.run.bind(stmt),
+        } as D1StatementLike;
+      },
+      batch: (statements) => db.batch(statements),
+      raw: db.raw,
+    } as TestD1;
+  }
+  async function seedSettlementRow(db: TestD1, index: number, settlingMs: number): Promise<string> {
+    // 40 distinct hex chars per index — the delivery key needs a distinct head.
+    const headSha = String(index).padStart(4, "0").repeat(10);
+    const payload = makePayload({ head_sha: headSha });
+    const attemptId = `attempt-fair-${index}`;
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId,
+      payload,
+      nowMs: 900,
+      createdMs: 900,
+      enqueuedMs: 0,
+      deadlineMs: Date.now() + 600_000,
+    });
+    db.raw.prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?").run(settlingMs, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, failed_at_ms, result_outcome)
+         VALUES (?, 'failed', 890, 895, 899, 'failed')`,
+      )
+      .run(attemptId);
+    return attemptId;
+  }
+  // Raw bun:sqlite row of the handoffs table — the shape the tests seed themselves.
+  type StampRow = { settle_attempt_ms: number | null; settled_ms: number | null };
+  function stampOf(db: TestD1, attemptId: string): StampRow {
+    const row = db.raw.prepare("SELECT settle_attempt_ms, settled_ms FROM review_attempt_handoffs WHERE attempt_id = ?").get(attemptId) as StampRow | null;
+    if (row === null) throw new Error(`fixture: the seeded settlement row ${attemptId} is missing`);
+    return row;
+  }
+
+  test("a stalled majority cannot starve the healthy settlement (two passes, I-000709)", async () => {
+    const db = await createSeededTestD1();
+    const faultIdsInOrder: string[] = [];
+    const attempts: string[] = [];
+    for (let index = 0; index < ROUTE_RECOVERY_LIMIT + 1; index++) {
+      faultIdsInOrder.push(await seedSettlementRow(db, index, 900 + index));
+    }
+    const healthyId = await seedSettlementRow(db, 99, 950);
+    const env = await h.makeEnv({ DB: faultingObservationReads(db, new Set(faultIdsInOrder), attempts) as never });
+    const queue = { send: async () => {} };
+    const now = 1_000 + 5 * 60_000 + 1;
+
+    // Pass 1: the batch is exactly the 25 oldest unattempted faulting rows,
+    // in selection order — the healthy row is reached only when a later pass
+    // re-orders attempted rows behind unattempted ones.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
+    const pass1 = attempts.splice(0);
+    expect(pass1).toEqual(faultIdsInOrder.slice(0, ROUTE_RECOVERY_LIMIT));
+    expect(stampOf(db, healthyId).settle_attempt_ms).toBeNull();
+    expect(stampOf(db, healthyId).settled_ms).toBeNull();
+
+    // Pass 2 — the documented bound: unattempted rows go first, so the
+    // healthy row settles while every faulting row is still owed.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
+    expect(stampOf(db, healthyId).settled_ms).not.toBeNull();
+    const settled = db.raw.prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?").get(healthyId) as {
+      settled_effects: string;
+    };
+    const effects = JSON.parse(settled.settled_effects) as string[];
+    expect(effects).toEqual(expect.arrayContaining(["failure-row", "claim-stamp"]));
+    for (const faultId of faultIdsInOrder) {
+      expect(stampOf(db, faultId).settle_attempt_ms).not.toBeNull();
+      expect(stampOf(db, faultId).settled_ms).toBeNull();
+    }
+  });
+
+  test("a persistently faulting row is retried after the others, never dropped (I-000709)", async () => {
+    const db = await createSeededTestD1();
+    const faultIds = new Set<string>();
+    const attempts: string[] = [];
+    for (let index = 0; index < ROUTE_RECOVERY_LIMIT + 1; index++) {
+      faultIds.add(await seedSettlementRow(db, index, 900 + index));
+    }
+    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, attempts) as never });
+    const queue = { send: async () => {} };
+    const now = 1_000 + 5 * 60_000 + 1;
+
+    // Pass 1: exactly the 25 oldest rows take their turn; the newest faulting
+    // row is beyond the limit and is not attempted yet.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
+    const newest = `attempt-fair-${ROUTE_RECOVERY_LIMIT}`;
+    const pass1 = attempts.splice(0);
+    expect(pass1).toHaveLength(ROUTE_RECOVERY_LIMIT);
+    expect(pass1).not.toContain(newest);
+
+    // Pass 2: the previously unattempted row takes the first slot — every
+    // stamp-less row leads — and the oldest faulting row is read AGAIN behind
+    // it: retried after the others, never dropped.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
+    const pass2 = attempts.splice(0);
+    expect(pass2.at(0)).toBe(newest);
+    expect(pass2.at(1)).toBe("attempt-fair-0");
+    for (const faultId of faultIds) {
+      expect(stampOf(db, faultId).settled_ms).toBeNull();
+    }
   });
 
   test("two settlement executions accumulate their effects instead of overwriting each other", async () => {

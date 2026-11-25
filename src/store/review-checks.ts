@@ -516,6 +516,68 @@ export async function getCheckOwnership(
  * says nothing about GitHub create idempotency — `external_id` is correlation,
  * not a server-side idempotency key.
  */
+/**
+ * The proof predicate ONE linked publication row must satisfy before its
+ * confirmation proves anything about the `review_checks` row it is linked to
+ * (spec §7.9a): the row must BE the Check's link, carry a proof whose every
+ * PublicationProof field is present with the right JSON type, whose embedded
+ * identity agrees with its own journal row AND with the Check row the link
+ * hangs on, and whose contract values hold (round >= 1, commentId > 0,
+ * positive confirming stamp, 64-hex body digest). `claimAttempt`'s dedup
+ * probe and the correctable-mark transition/ordering share this ONE fragment,
+ * so the dedup answer and the recovery ordering cannot drift apart
+ * (I-000673). References are unqualified `pub.*` for the publication and
+ * `review_checks.*` for the Check row: inside the dedup probe they resolve to
+ * the probe's own joined rows; inside the mark's `EXISTS`/`CASE` they
+ * correlate to the row being tested.
+ */
+const LINKED_PROOF_SQL = `
+       pub.id = review_checks.publication_id
+       AND pub.kind IN ('review','degraded')
+       AND pub.proof_json IS NOT NULL
+       AND json_valid(pub.proof_json)
+       -- Presence AND JSON type for every required PublicationProof field.
+       -- json_type returns NULL for a missing path, so these predicates
+       -- enforce presence and type together: a field that is absent, or
+       -- present with the wrong JSON type, leaves the proof unproven.
+       AND json_type(pub.proof_json, '$.publicationId') = 'text'
+       AND json_type(pub.proof_json, '$.headSha') = 'text'
+       AND json_type(pub.proof_json, '$.kind') = 'text'
+       AND json_type(pub.proof_json, '$.bodySha256') = 'text'
+       AND json_type(pub.proof_json, '$.confirmedMs') = 'integer'
+       AND json_type(pub.proof_json, '$.round') = 'integer'
+       AND json_type(pub.proof_json, '$.commentId') = 'integer'
+       AND json_type(pub.proof_json, '$.scope.appId') = 'text'
+       AND json_type(pub.proof_json, '$.scope.installationId') = 'integer'
+       AND json_type(pub.proof_json, '$.scope.owner') = 'text'
+       AND json_type(pub.proof_json, '$.scope.repo') = 'text'
+       AND json_type(pub.proof_json, '$.scope.prNumber') = 'integer'
+       -- Identity: the embedded proof must agree with the journal row it is
+       -- stored on, so JSON that disagrees with its own row is unproven.
+       AND json_extract(pub.proof_json, '$.publicationId') = pub.id
+       AND json_extract(pub.proof_json, '$.kind') = pub.kind
+       AND json_extract(pub.proof_json, '$.headSha') = pub.head_sha
+       AND json_extract(pub.proof_json, '$.scope.appId') = pub.bot_id
+       AND json_extract(pub.proof_json, '$.scope.installationId') = pub.installation_id
+       AND json_extract(pub.proof_json, '$.scope.owner') = pub.owner
+       AND json_extract(pub.proof_json, '$.scope.repo') = pub.repo
+       AND json_extract(pub.proof_json, '$.scope.prNumber') = pub.pr_number
+       -- ...and with the Check row the link hangs on, so a self-referential
+       -- JSON whose scope or head disagrees with the Check never counts.
+       AND json_extract(pub.proof_json, '$.headSha') = review_checks.head_sha
+       AND json_extract(pub.proof_json, '$.scope.appId') = review_checks.bot_id
+       AND json_extract(pub.proof_json, '$.scope.installationId') = review_checks.installation_id
+       AND json_extract(pub.proof_json, '$.scope.owner') = review_checks.owner
+       AND json_extract(pub.proof_json, '$.scope.repo') = review_checks.repo
+       AND json_extract(pub.proof_json, '$.scope.prNumber') = review_checks.pr_number
+       -- Values (the contract: round >= 1, commentId > 0, confirmedMs is the
+       -- positive Unix-ms stamp of the confirming response, digest 64-hex).
+       AND json_extract(pub.proof_json, '$.round') >= 1
+       AND json_extract(pub.proof_json, '$.commentId') > 0
+       AND json_extract(pub.proof_json, '$.confirmedMs') > 0
+       AND length(json_extract(pub.proof_json, '$.bodySha256')) = 64
+       AND json_extract(pub.proof_json, '$.bodySha256') NOT GLOB '*[^0-9a-f]*'`;
+
 export async function claimAttempt(
   db: D1Like,
   input: {
@@ -560,49 +622,10 @@ export async function claimAttempt(
   const attemptId = crypto.randomUUID();
 
   const provenPublication = `(
-    SELECT COUNT(*) FROM review_checks p
-      JOIN review_publications pub ON pub.id = p.publication_id
-     WHERE p.attempt_key = ?
-       AND pub.bot_id = p.bot_id
-       AND pub.installation_id = p.installation_id
-       AND pub.owner = p.owner AND pub.repo = p.repo
-       AND pub.pr_number = p.pr_number AND pub.head_sha = p.head_sha
-       AND pub.kind IN ('review','degraded')
-       AND pub.proof_json IS NOT NULL
-       AND json_valid(pub.proof_json)
-       -- Presence AND JSON type for every required PublicationProof field.
-       -- json_type returns NULL for a missing path, so these predicates
-       -- enforce presence and type together: a field that is absent, or
-       -- present with the wrong JSON type, leaves the proof unproven.
-       AND json_type(pub.proof_json, '$.publicationId') = 'text'
-       AND json_type(pub.proof_json, '$.headSha') = 'text'
-       AND json_type(pub.proof_json, '$.kind') = 'text'
-       AND json_type(pub.proof_json, '$.bodySha256') = 'text'
-       AND json_type(pub.proof_json, '$.confirmedMs') = 'integer'
-       AND json_type(pub.proof_json, '$.round') = 'integer'
-       AND json_type(pub.proof_json, '$.commentId') = 'integer'
-       AND json_type(pub.proof_json, '$.scope.appId') = 'text'
-       AND json_type(pub.proof_json, '$.scope.installationId') = 'integer'
-       AND json_type(pub.proof_json, '$.scope.owner') = 'text'
-       AND json_type(pub.proof_json, '$.scope.repo') = 'text'
-       AND json_type(pub.proof_json, '$.scope.prNumber') = 'integer'
-       -- Identity: the embedded proof must agree with the journal row it is
-       -- stored on, so JSON that disagrees with its own row is unproven.
-       AND json_extract(pub.proof_json, '$.publicationId') = pub.id
-       AND json_extract(pub.proof_json, '$.kind') = pub.kind
-       AND json_extract(pub.proof_json, '$.headSha') = pub.head_sha
-       AND json_extract(pub.proof_json, '$.scope.appId') = pub.bot_id
-       AND json_extract(pub.proof_json, '$.scope.installationId') = pub.installation_id
-       AND json_extract(pub.proof_json, '$.scope.owner') = pub.owner
-       AND json_extract(pub.proof_json, '$.scope.repo') = pub.repo
-       AND json_extract(pub.proof_json, '$.scope.prNumber') = pub.pr_number
-       -- Values (the contract: round >= 1, commentId > 0, confirmedMs is the
-       -- positive Unix-ms stamp of the confirming response, digest 64-hex).
-       AND json_extract(pub.proof_json, '$.round') >= 1
-       AND json_extract(pub.proof_json, '$.commentId') > 0
-       AND json_extract(pub.proof_json, '$.confirmedMs') > 0
-       AND length(json_extract(pub.proof_json, '$.bodySha256')) = 64
-       AND json_extract(pub.proof_json, '$.bodySha256') NOT GLOB '*[^0-9a-f]*'
+    SELECT COUNT(*) FROM review_checks
+      JOIN review_publications pub ON pub.id = review_checks.publication_id
+     WHERE review_checks.attempt_key = ?
+       AND ${LINKED_PROOF_SQL}
   )`;
   const noProvenPublication = `(
     (SELECT COUNT(*) FROM review_checks p
@@ -1655,12 +1678,17 @@ export async function recordCheckObservation(
   );
 }
 
+/**
+ * A terminal unconfirmed mark is correctable NOW only when its linked
+ * publication carries a proof the reader would accept (`LINKED_PROOF_SQL`),
+ * no newer open generation supersedes the row and the App pair is usable.
+ * The reopen transition's guard and the batch's ordering class read this ONE
+ * predicate, so a link the reader would reject is never ordered as if it
+ * could be corrected (I-000673).
+ */
 const CORRECTABLE_NOW_SQL = `EXISTS (
             SELECT 1 FROM review_publications pub
-             WHERE pub.id = review_checks.publication_id
-               AND pub.proof_json IS NOT NULL
-               AND json_valid(pub.proof_json)
-               AND json_extract(pub.proof_json, '$.publicationId') = review_checks.publication_id
+             WHERE ${LINKED_PROOF_SQL}
           )
           AND NOT EXISTS (
             SELECT 1 FROM review_checks n
