@@ -774,6 +774,17 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
 
 type SeatGap = { plan: SeatPlan; reason?: string };
 
+/**
+ * The cap reason OUR watchdog stamped, when it fired. The abort is the runner's
+ * decision, so whatever the SDK does next — resolve with a salvaged result or
+ * reject with a cleanup timeout — the seat's outcome is a CAP STOP, not the
+ * SDK's failure. Reading the signal (not the error) is what keeps that true.
+ */
+function watchdogCapReason(watch: SeatWatch): string | undefined {
+  const signal = watch.controller.signal;
+  return signal.aborted ? causeText(signal.reason) : undefined;
+}
+
 type SeatOutcome = {
   output: SeatOutput | null;
   gap: SeatGap | null;
@@ -1456,7 +1467,6 @@ export type ReportEligibility =
         | "no-pr-context"
         | "head-sha-missing"
         | "seat-definition-missing"
-        | "review-incomplete"
         | "budget-exhausted"
         | "aborted";
     };
@@ -1482,7 +1492,10 @@ export function reportEligibility(
   if (!existsSync(join(input.worktreePath, ".omp", "agents", SEAT_AGENT_FILE))) {
     return { ok: false, reason: "seat-definition-missing" };
   }
-  if (envelope.incomplete !== undefined) return { ok: false, reason: "review-incomplete" };
+  // why: An INCOMPLETE review is still a review — it yields findings and names
+  // its unscanned scope, so its overview, verification notes and fix plan are
+  // exactly what a reader needs. Only a dead run (aborted / out of time) or
+  // missing inputs make the seat ineligible.
   return { ok: true, headSha, prContext: input.prContext };
 }
 
@@ -1605,7 +1618,15 @@ export const ompAgentRuntime: AgentRuntime = {
               },
             });
             seatSingles.push(result.result);
-            const outcome = seatOutput(result, index, plan);
+            let outcome = seatOutput(result, index, plan);
+            // why: A watchdog abort that the SDK settled as a FAILED/payload-less
+            // result is still our cap stop — the seat was cut off by the
+            // runner's clock, not by its own provider. A collected payload is
+            // never discarded this way.
+            const capReason = outcome.output === null ? watchdogCapReason(watch) : undefined;
+            if (capReason !== undefined && outcome.gap === null) {
+              outcome = { output: null, gap: { plan, reason: capReason }, failure: null };
+            }
             if (outcome.gap === null && outcome.output !== null) completedSeatIds.add(id);
             // why: All THREE outcomes pick their own terminal stage — a
             // fulfilled-but-failed result (provider error, schema-rejected
@@ -1620,6 +1641,15 @@ export const ompAgentRuntime: AgentRuntime = {
           } catch (error) {
             const settled = (error as { result?: unknown } | null | undefined)?.result;
             if (settled !== null && typeof settled === "object") seatSingles.push(settled as SubagentUsageSource);
+            // why: When OUR watchdog fired, a rejection is the SDK's cleanup
+            // failing under an abort we already decided on — the seat's outcome
+            // is the cap stop. Rethrowing here would turn a delivered partial
+            // review into a failure and drop the completed siblings' findings.
+            const capReason = watchdogCapReason(watch);
+            if (capReason !== undefined) {
+              terminalStage = seatGapStage(traceId, capReason);
+              return { output: null, gap: { plan, reason: capReason }, failure: null };
+            }
             terminalStage = seatFailedStage(traceId, causeText(error));
             throw error;
           } finally {
@@ -1684,8 +1714,6 @@ export const ompAgentRuntime: AgentRuntime = {
       // scope was never finished, so it is not counted as completed and its
       // seat lands in `unreviewed`. Only a round with no completed seat is a
       // failure — everything else is a delivered partial review.
-      const stoppedSeats =
-        outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
       if (gaps.length > 0 && completedSeatIds.size === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
