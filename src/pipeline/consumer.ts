@@ -1154,14 +1154,24 @@ export async function settleHaltedBatch(
   );
   // Bounded pool: a worker takes the next unsettled message until the batch is
   // drained. Every worker is awaited even after one rejects, so no settlement
-  // outlives the invocation; the first failure is rethrown after that, leaving
-  // its message unacked for redelivery.
+  // outlives the invocation; every worker's rejection is logged with its
+  // message's identity before the first reason is rethrown — a second,
+  // recurring cause would otherwise leave no trace.
   let next = 0;
   const drain = async (): Promise<void> => {
     while (next < batch.messages.length) {
       const message = batch.messages[next];
       next += 1;
-      if (message !== undefined) await settleHaltedDelivery(deps, message, halt, log);
+      if (message === undefined) continue;
+      try {
+        await settleHaltedDelivery(deps, message, halt, log);
+      } catch (err) {
+        log.warn(
+          { ...payloadIdentityFields(message.body), event: "review_halt_settle_failed" },
+          `halted-batch settlement failed for this delivery (it stays unacked for redelivery): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        throw err;
+      }
     }
   };
   const settled = await Promise.allSettled(

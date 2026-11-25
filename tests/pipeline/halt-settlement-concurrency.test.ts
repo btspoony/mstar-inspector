@@ -6,6 +6,7 @@ import { loadConsumer } from "../helpers/consumer-harness";
 import { createSeededTestD1, SHA, TEST_APP_ID } from "../helpers/consumer-fixtures";
 import { failureRows, makePayload } from "../helpers/consumer-harness";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
+import { createFailureStore } from "../../src/store/failure-store";
 import type { TestD1 } from "../store/helpers";
 
 // The consumer loads through the harness's cached dynamic import: the workerd
@@ -124,5 +125,49 @@ describe("a halted batch settles bounded-concurrent", () => {
     expect(failureRows(db)).toHaveLength(count);
     expect(replay.acks).toHaveLength(count);
     expect(new Set(replay.acks).size).toBe(count);
+  });
+
+  test("two settlement failures are both logged with their causes while the messages stay unacked", async () => {
+    const db = await createSeededTestD1();
+    const count = HALT_SETTLE_CONCURRENCY;
+    const { acks, retries, batch } = batchOf(count);
+    // Two DISTINCT causes: the failure row write declines m1 and m5.
+    const real = createFailureStore(db as never);
+    const faultyStore = {
+      ...real,
+      record: async (input: { id: string }) => {
+        if (input.id.endsWith(":9701")) throw new Error("d1 disk is full");
+        if (input.id.endsWith(":9705")) throw new Error("d1 deadline exceeded");
+        return real.record(input as never);
+      },
+    };
+    const warnLines: Array<{ fields: Record<string, unknown>; msg: string }> = [];
+    const log: ConsumerLog = {
+      info: () => {},
+      warn: (fields, msg) => warnLines.push({ fields: fields as Record<string, unknown>, msg: msg ?? "" }),
+      error: () => {},
+    };
+
+    await expect(
+      settleHaltedBatch(batch, makeEnv(db), "paused-platform", log, { failureStore: faultyStore as never }),
+    ).rejects.toThrow("d1 disk is full");
+
+    // Both causes are in the log, each on a line naming its own delivery.
+    const fails = warnLines.filter((line) => line.fields.event === "review_halt_settle_failed");
+    expect(fails).toHaveLength(2);
+    expect(fails.map((line) => line.msg).join("\n")).toContain("d1 disk is full");
+    expect(fails.map((line) => line.msg).join("\n")).toContain("d1 deadline exceeded");
+    expect(fails.every((line) => line.fields.pr_number === 42)).toBe(true);
+
+    // The two failed messages stay unacked; the rest settled exactly once,
+    // each with the row its own identity names.
+    expect(acks).toHaveLength(count - 2);
+    expect(acks).not.toContain("m1");
+    expect(acks).not.toContain("m5");
+    expect(retries).toHaveLength(0);
+    const rows = failureRows(db);
+    expect(rows).toHaveLength(count - 2);
+    expect(rows.map((row) => row.id)).not.toContain(`platform_paused:comment:target-${TEST_APP_ID}:9701`);
+    expect(rows.map((row) => row.id)).not.toContain(`platform_paused:comment:target-${TEST_APP_ID}:9705`);
   });
 });
