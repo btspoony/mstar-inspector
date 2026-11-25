@@ -1,10 +1,21 @@
 /**
- * The seat-coverage block the runner adds to a successful review output
- * (plan review-partial-delivery): which seats completed, why the round
- * stopped, and what was left unreviewed. Present on every successful run
- * (all seats completed → `stoppedReason: null`, `unreviewed: []`); a round
- * where no seat produced output carries NO coverage — that round is a
- * failure, not a partial review.
+ * The seat-coverage block the runner adds to a successful review output:
+ * which seats completed, why the round stopped, and what was left
+ * unreviewed. A present block always asserts a full or partial coverage —
+ * all seats finished → `stoppedReason: null`, `unreviewed: []`.
+ *
+ * Absence is NOT failure — it means the round does not assert coverage.
+ * Exactly two legal absences exist:
+ *
+ * - the DEEP tier, whose seats are task-dispatched in a way the runner
+ *   cannot observe, so a deep run asserts nothing about coverage at all;
+ * - a round where no seat produced usable output (the runner cannot even
+ *   see what it lost) — that round is a failure THROUGH THE FAILURE PATH,
+ *   never a partial review, and the coverage block simply never claims a
+ *   coverage for it.
+ *
+ * Consumers must treat a missing block as "not asserted": neither success
+ * evidence nor failure evidence.
  *
  * This is transport metadata next to the engine envelope, never an envelope
  * field: `mstar.review/v1` is closed and its schema does not grow.
@@ -70,7 +81,8 @@ const isUnreviewedList = (value: unknown): value is ReviewSeatUnreviewed[] =>
 
 /**
  * The whole coverage guard: the exact key set, safe-integer counts with
- * `1 <= seatsCompleted <= seatsTotal`, the closed `stoppedReason` vocabulary,
+ * `0 <= seatsCompleted <= seatsTotal` (0 is legal: a round whose seats were
+ * all stopped still publishes the payloads they salvaged), the closed `stoppedReason` vocabulary,
  * well-formed `unreviewed` entries, and the block's INTERNAL truth:
  * full (every seat finished) → no stop reason and no entries; partial → a stop
  * reason and exactly one entry per missing seat; a `cap` headline requires at
@@ -91,7 +103,7 @@ export function isReviewCoverage(value: unknown): value is ReviewCoverage {
     !Number.isSafeInteger(seatsTotal) ||
     !Number.isSafeInteger(seatsCompleted) ||
     seatsTotal < 1 ||
-    seatsCompleted < 1 ||
+    seatsCompleted < 0 ||
     seatsCompleted > seatsTotal ||
     (stoppedReason !== null && stoppedReason !== "cap" && stoppedReason !== "failed") ||
     !isUnreviewedList(unreviewed)
@@ -110,11 +122,33 @@ const MAX_SCOPE_ENTRIES = 3;
 /** How many seats the not-reviewed list shows before folding into a count. */
 const MAX_SEAT_ENTRIES = 3;
 
+/**
+ * Display normalization for repository-controlled text (seat names and file
+ * paths — a hostile diff can put anything in either): single-line, no
+ * Inspector marker syntax, no angle brackets, and no live Markdown control
+ * syntax. This is done HERE, inside the one shared formatter, so the Check
+ * summary and the published body render the EXACT same sentence — the
+ * body's later marker strip can never diverge from the summary's unaugmented
+ * render, and a path or seat name can never escape its plain-text position:
+ * both surfaces render the text as Markdown, so the control characters are
+ * backslash-escaped (the backslash first, or the escapes would escape each
+ * other).
+ */
+const displayText = (text: string): string =>
+  text
+    .replace(/<!--\s*mstar-inspector:[a-zA-Z-]+:v1[^>]*-->/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[<>]/g, (angle) => (angle === "<" ? "‹" : "›"))
+    .replace(/\\/g, "\\\\")
+    .replace(/[`[\]()*_|]/g, (meta) => `\\${meta}`)
+    .replace(/^#/, "\\#");
+
 const scopeText = (scope: readonly string[]): string => {
   const shown = scope.slice(0, MAX_SCOPE_ENTRIES);
   const overflow = scope.length - shown.length;
   return (
-    shown.join(", ") + (overflow > 0 ? `, +${overflow} more file${overflow === 1 ? "" : "s"}` : "")
+    shown.map(displayText).join(", ") + (overflow > 0 ? `, +${overflow} more file${overflow === 1 ? "" : "s"}` : "")
   );
 };
 
@@ -126,7 +160,9 @@ const scopeText = (scope: readonly string[]): string => {
  */
 export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefined): string {
   if (coverage === null || coverage === undefined) return "";
-  if (coverage.seatsCompleted < 1 || coverage.seatsCompleted >= coverage.seatsTotal) return "";
+  // `0/N` is a real coverage state (every seat was stopped but salvaged output
+  // published), so only full coverage renders nothing here.
+  if (coverage.seatsCompleted >= coverage.seatsTotal) return "";
   const stopped =
     coverage.stoppedReason === "cap"
       ? "; stopped by cap"
@@ -145,8 +181,8 @@ export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefi
             // per-seat suffix is shown only when it ADDS information (a mixed
             // round's other cause, or a failure detail).
             const suffix = seat.reason === coverage.stoppedReason ? "" : seat.reason;
-            if (suffix === "") return `${seat.seat} (${scope})`;
-            return `${seat.seat} (${scope === "" ? suffix : `${scope}; ${suffix}`})`;
+            if (suffix === "") return `${displayText(seat.seat)} (${scope})`;
+            return `${displayText(seat.seat)} (${scope === "" ? suffix : `${scope}; ${suffix}`})`;
           })
           .join(", ")}` +
         (seatOverflow > 0 ? `, +${seatOverflow} more seat${seatOverflow === 1 ? "" : "s"}` : "");

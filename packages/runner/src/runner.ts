@@ -123,6 +123,7 @@ import {
 } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import {
+  ReviewNoOutputFailure,
   isReviewBudgetExhaustedSignal,
   RunnerBudgetExhausted,
 } from "../../shared/src/budget-exhausted-wire";
@@ -927,6 +928,21 @@ export async function main(
         }
         console.log(JSON.stringify(signal));
         return 0;
+      }
+      // why: A no-output failure is still a FAILURE (exit 1, worker records it),
+      // but the recheck document it managed to settle is real evidence and is
+      // written exactly as the budget-stop path writes it.
+      if (error instanceof ReviewNoOutputFailure) {
+        if (recheckOutPath !== undefined && error.recheck !== null) {
+          try {
+            writeFileSync(recheckOutPath, JSON.stringify(error.recheck));
+          } catch (writeError) {
+            console.error(`review: cannot write recheck output ${recheckOutPath}: ${(writeError as Error).message}`);
+          }
+        }
+        if (recheckOutPath !== undefined && error.recheckStatus !== undefined) {
+          writeRecheckStatus(error.recheckStatus, statusPath);
+        }
       }
       const cause = (error as Error).message;
       if (agentDir !== undefined && authStorage !== undefined) {
