@@ -119,8 +119,9 @@ export function deliveryOutcomeFromWebhook(
  * id must not override it; only `pr_number` stays row-authoritative.
  * The rerun targets the PR's CURRENT head, resolved from the `pull_requests`
  * watermark; the run's own `head_sha` is the fallback when the watermark is
- * absent or its read faults (fail-open, matching the watermark read posture
- * elsewhere). The run id still proves App ownership of the review.
+ * absent, its read faults, or the row predates this attempt (the ledger write
+ * is best-effort, so an older copy must never pull the rerun backwards). The
+ * run id still proves App ownership of the review.
  */
 async function resolveCheckRerunOutcome(
   db: D1Database,
@@ -169,7 +170,22 @@ async function resolveCheckRerunOutcome(
         repo: rerun.repo,
         prNumber: attempt.prNumber,
       });
-      if (watermark !== null && watermark.headSha !== null && watermark.headSha !== "" && watermark.headSha !== attempt.headSha) {
+      // The ledger write is best-effort and can lag the attempt's own head, so
+      // a differing head is adopted ONLY when the PR was updated after this
+      // attempt was created: otherwise the row is an older copy and the run's
+      // own head (the pre-existing behavior) is the safer target.
+      const watermarkAt =
+        watermark?.headAt === null || watermark?.headAt === undefined
+          ? Number.NaN
+          : Date.parse(watermark.headAt);
+      if (
+        watermark !== null &&
+        watermark.headSha !== null &&
+        watermark.headSha !== "" &&
+        watermark.headSha !== attempt.headSha &&
+        Number.isFinite(watermarkAt) &&
+        watermarkAt > attempt.createdMs
+      ) {
         webhookInfo(
           "check_rerun_live_head",
           `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} head=${attempt.headSha.slice(0, 7)}->${watermark.headSha.slice(0, 7)}`,

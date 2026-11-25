@@ -25,7 +25,7 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | Scope | Per review target, which may inherit the workspace default (`follow_workspace_defaults`). No deployment-level override; the target's business pause or the bot's operational pause governs every enqueue path alongside the platform flag |
 | Default | the workspace default is `every_push` (`default_review_trigger_mode`); a new target is created inheriting it |
 | Write path | the repository detail's 评审配置 tab (`POST …/api/targets/:targetId`) and its 所有仓库 twin (`POST …/api/targets/defaults`), one validated body parser each; an off-vocabulary mode is a keyed 400 with nothing stored |
-| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no operator action at all: the manifest declares `check_run` in `default_events`, and an App already holding `checks: write` is auto-subscribed to the event by GitHub, so an existing App needs no settings change; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0109`) — which is the authoritative source for the run's `pr_number` (a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch`); the reviewed `head_sha` is the PR's current head from the `pull_requests` watermark, with the run's own head only as the absent/unreadable fallback (§2.2); the job's `owner`/`repo` follow the delivery's current name so a renamed repository keeps the target and the job in agreement |
+| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no operator action at all: the manifest declares `check_run` in `default_events`, and an App already holding `checks: write` is auto-subscribed to the event by GitHub, so an existing App needs no settings change; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0109`) — which is the authoritative source for the run's `pr_number` (a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch`); the reviewed `head_sha` is the PR's current head from the `pull_requests` watermark when that row is newer than the attempt, with the run's own head as the absent/unreadable/stale fallback (§2.2); the job's `owner`/`repo` follow the delivery's current name so a renamed repository keeps the target and the job in agreement |
 
 ### 2.1 Auto-trigger classification matrix
 
@@ -65,11 +65,13 @@ rerequested is a trigger, never a bypass.
 ### 2.2 Check-run rerequested semantics
 
 - **Rerun means re-run the review on the PR's current head.** The rerun
-  targets the head the `pull_requests` watermark currently records for the PR
-  — re-running an already-superseded commit is pointless. The `review_checks`
-  row the run id names supplies the PR identity and proves App ownership; the
-  run's own recorded head is only the fallback when the watermark row is
-  absent or its read faults. The enqueued job carries
+  targets the head the `pull_requests` watermark records for the PR **when the
+  PR was updated after this attempt was created** — re-running an
+  already-superseded commit is pointless. The `review_checks` row the run id
+  names supplies the PR identity and proves App ownership; the run's own
+  recorded head is the fallback when the watermark row is absent, its read
+  faults, or it predates the attempt (the ledger write is best-effort, so an
+  older copy must never pull the rerun backwards). The enqueued job carries
   `triggered_by: "check_run"`, `action: "rerequested"`, the
   `rerun_check_run_id` it was asked to rerun, `pr_number` from the row, and
   `owner`/`repo` from the delivery's current name (the row may predate a
@@ -96,7 +98,7 @@ rerequested is a trigger, never a bypass.
   is still the PR head.** If the PR advances AGAIN between enqueue and
   consume, the existing consumer supersede/settle path applies — no review
   of yet another head: the consumer settles its attached run with the
-  watermark head's persisted review when one exists, or `neutral` with the
+  enqueued head's persisted review when one exists, or `neutral` with the
   skip reason when it does not, and acks. The workflow's checkout is fenced
   the same way: if it lands on a head other than the rerun's payload head, the
   rerun settles its Check and returns before metering, so a later push is

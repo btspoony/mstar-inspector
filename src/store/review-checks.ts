@@ -741,15 +741,29 @@ export async function findCheckAttemptByRunId(
   db: D1Like,
   githubAppId: number,
   checkRunId: number,
-): Promise<{ owner: string; repo: string; prNumber: number; headSha: string; installationId: number } | null> {
+): Promise<{
+  owner: string;
+  repo: string;
+  prNumber: number;
+  headSha: string;
+  installationId: number;
+  createdMs: number;
+} | null> {
   const row = await db
     .prepare(
-      `SELECT installation_id, owner, repo, pr_number, head_sha FROM review_checks
+      `SELECT installation_id, owner, repo, pr_number, head_sha, created_ms FROM review_checks
         WHERE github_app_id = ? AND check_run_id = ?
         ORDER BY created_ms DESC LIMIT 1`,
     )
     .bind(githubAppId, checkRunId)
-    .first<{ installation_id: number; owner: string; repo: string; pr_number: number; head_sha: string }>();
+    .first<{
+      installation_id: number;
+      owner: string;
+      repo: string;
+      pr_number: number;
+      head_sha: string;
+      created_ms: number;
+    }>();
   if (row === null) return null;
   return {
     installationId: row.installation_id,
@@ -757,6 +771,7 @@ export async function findCheckAttemptByRunId(
     repo: row.repo,
     prNumber: row.pr_number,
     headSha: row.head_sha,
+    createdMs: row.created_ms,
   };
 }
 

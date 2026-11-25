@@ -2892,8 +2892,8 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     const NEWER_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
     db.raw
       .prepare(
-        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha)
-         VALUES ('pr-rerun-42', ?, ?, ?, ?, 42, 'open', ?)`,
+        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
+         VALUES ('pr-rerun-42', ?, ?, ?, ?, 42, 'open', ?, '2099-01-01T00:00:00.000Z')`,
       )
       .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name, NEWER_HEAD);
     const { queue, sent } = makeQueue();
@@ -2923,6 +2923,32 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(attempts[1]).toMatchObject({ triggered_by: "check_run", head_sha: NEWER_HEAD });
   });
 
+  test("a watermark head older than the attempt is not adopted — the run's own head is enqueued", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
+         VALUES ('pr-rerun-stale', ?, ?, ?, ?, 42, 'open', 'ffffffffffffffffffffffffffffffffffffffff', '2020-01-01T00:00:00.000Z')`,
+      )
+      .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload();
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ head_sha: RERUN_HEAD, rerun_check_run_id: RERUN_CHECK_RUN_ID });
+  });
+
   test("a redelivered rerequested event never enqueues twice — even after the PR head moves", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
@@ -2944,8 +2970,8 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     // the resolved head now differs, so only the delivery id can dedup it.
     db.raw
       .prepare(
-        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha)
-         VALUES ('pr-rerun-redelivery', ?, ?, ?, ?, 42, 'open', 'fedcba9876543210fedcba9876543210fedcba98')`,
+        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
+         VALUES ('pr-rerun-redelivery', ?, ?, ?, ?, 42, 'open', 'fedcba9876543210fedcba9876543210fedcba98', '2099-01-01T00:00:00.000Z')`,
       )
       .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name);
 
