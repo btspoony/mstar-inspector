@@ -1,0 +1,13 @@
+-- 0112_settlement_attempt_column.sql — the recovery lane's attempt stamp.
+--
+-- `listIncompleteSettlements` now orders open settlements so a row the pass
+-- already attempted and still could not settle yields to rows not yet
+-- attempted (I-000709) while staying selectable for a later pass. The pass
+-- stamps `settle_attempt_ms` when it takes a row, and the selector orders by
+-- `settle_attempt_ms IS NOT NULL` first, so a stuck row can no longer
+-- consume the whole bounded batch ahead of newer settlements. The selector
+-- keeps its seek through 0097's partial index — the sort runs only over the
+-- open-settlement rows that index already matches, never the delivery
+-- history. Additive only: existing rows keep their columns untouched, and a
+-- pre-column row reads as never attempted (it sorts by its settling_ms).
+ALTER TABLE review_attempt_handoffs ADD COLUMN settle_attempt_ms INTEGER;

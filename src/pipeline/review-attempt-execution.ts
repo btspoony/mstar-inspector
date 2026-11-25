@@ -291,7 +291,7 @@ type DiffCaptureDecline = {
  * elapsed_ms / orchestration — spec d5-budget L5: they ride THIS channel;
  * no new APM, no webhook sink). */
 export type ConsumerLogFields = {
-  event: "pull_request" | "issue_comment" | "check_run" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_seat_settings_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_blocked_deployment_gate" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed";
+  event: "pull_request" | "issue_comment" | "check_run" | "review_paused" | "review_superseded" | "review_concurrency_degraded" | "review_check_budgets_degraded" | "review_attempt_cap_degraded" | "review_level_degraded" | "review_recheck_assignment_degraded" | "review_seat_settings_degraded" | "review_recheck_no_fit" | "review_no_increment" | "review_no_diff" | "review_unresolved" | "sandbox_teardown_unproven" | "review_succession_refused" | "check_terminalize_budget_exceeded" | "check_terminalize_failed" | "check_abandon_released" | "check_abandon_not_owned" | "check_abandon_failed" | "check_settlement_not_adopted" | "check_settlement_owed" | "review_moved_head" | "check_skip_settle_failed" | "check_queued_relabel_failed" | "check_in_progress_failed" | "maintenance_defer" | "review_blocked_deployment_gate" | "review_workflow_create_ambiguous" | "review_moved_head_successor" | "review_moved_head_no_successor" | "review_successor_enqueue_failed" | "review_halt_settle_failed";
   action: string;
   installation_id: number;
   owner: string;
@@ -413,7 +413,6 @@ export type ProcessOutcome =
   | { kind: "paused" }
   | { kind: "degraded" }
   | { kind: "superseded" }
-  | { kind: "rerun-stale" }
   | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
   | { kind: "unknown" };
 

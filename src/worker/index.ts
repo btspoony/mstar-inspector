@@ -7,6 +7,7 @@ import { reconcileReviewChecks } from "./check-reconcile";
 import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { IDEMPOTENCY_SECONDS } from "../contracts/idem";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import type * as ConsumerModule from "../pipeline/consumer";
@@ -122,13 +123,18 @@ export function deliveryOutcomeFromWebhook(
  * name a repository that has since been renamed while `target` was resolved
  * by the payload's current name: the job and the target must agree.
  * `installation_id` likewise comes from the DELIVERY — classification already
- * bound the run to this installation, so the row's recorded (possibly stale)
- * id must not override it; only `pr_number`/`head_sha` stay row-authoritative.
+ * id must not override it; only `pr_number` stays row-authoritative.
+ * The rerun targets the PR's CURRENT head, resolved from the `pull_requests`
+ * watermark; the run's own `head_sha` is the fallback when the watermark row
+ * is absent or its read faults (fail-open, matching the watermark read posture
+ * elsewhere). The run id still proves App ownership of the review.
  */
 async function resolveCheckRerunOutcome(
   db: D1Database,
   row: Pick<GithubAppTenantRow, "id" | "github_app_id">,
   rerun: Extract<WebhookOutcome, { kind: "check_rerun" }>,
+  appsStore: ReturnType<typeof createReviewBotsStore>,
+  target: ReviewTargetRow | null,
   webhookRef: string,
 ): Promise<Exclude<WebhookOutcome, { kind: "check_rerun" }>> {
   // `undefined` = the lookup faulted; `null` = the lookup ran and no row owns
@@ -161,6 +167,42 @@ async function resolveCheckRerunOutcome(
       "rerequested run resolved to a renamed repository — enqueueing under the delivery's current name",
     );
   }
+  let headSha = attempt.headSha;
+  if (target !== null) {
+    try {
+      const watermark = await appsStore.selectPrHead({
+        targetId: target.id,
+        owner: rerun.owner,
+        repo: rerun.repo,
+        prNumber: attempt.prNumber,
+      });
+      // The ledger row is a denormalized copy of the PR head: when it names a
+      // different commit, that is the head the operator's rerun should review.
+      // Comparing timestamps cannot decide which head is newer (the attempt is
+      // created after GitHub saw its own commit), so a lagging row is caught
+      // later by the checkout fence, which settles without paying rather than
+      // reviewing a stale commit.
+      if (
+        watermark !== null &&
+        watermark.headSha !== null &&
+        watermark.headSha !== "" &&
+        watermark.headSha !== attempt.headSha
+      ) {
+        webhookInfo(
+          "check_rerun_live_head",
+          `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} head=${attempt.headSha.slice(0, 7)}->${watermark.headSha.slice(0, 7)}`,
+          "rerequested run resolved to the PR's current head — reviewing the watermark head instead of the run's own",
+        );
+        headSha = watermark.headSha;
+      }
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_head_lookup_failed",
+        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerequested run could not read the pull_requests watermark — falling back to the run's own head (fail-open)",
+      );
+    }
+  }
   return {
     kind: "job",
     payload: {
@@ -168,7 +210,7 @@ async function resolveCheckRerunOutcome(
       owner: rerun.owner,
       repo: rerun.repo,
       pr_number: attempt.prNumber,
-      head_sha: attempt.headSha,
+      head_sha: headSha,
       action: "rerequested",
       triggered_by: "check_run",
       rerun_check_run_id: rerun.checkRunId,
@@ -420,6 +462,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
+  const githubDeliveryId = c.req.header("x-github-delivery") ?? null;
 
   const db = c.env.DB;
   if (db === undefined) {
@@ -532,7 +575,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   const settled: Exclude<WebhookOutcome, { kind: "check_rerun" }> =
-    outcome.kind === "check_rerun" ? await resolveCheckRerunOutcome(db, row, outcome, webhookRef) : outcome;
+    outcome.kind === "check_rerun" ? await resolveCheckRerunOutcome(db, row, outcome, appsStore, delivery.target, webhookRef) : outcome;
 
   const target = delivery.target;
   if (settled.kind === "ignore" && settled.reason === NO_TARGET_REASON) {
@@ -725,7 +768,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
-  await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
+  // GitHub redelivers a webhook with the SAME delivery id, and a redelivery is
+  // the original Re-run request, not a new one. The per-head KV claim cannot
+  // dedup it once the PR has moved (the resolved head changed), so the delivery
+  // id is the guard at this layer: claim only after the enqueue succeeded, so a
+  // failed send stays retriable.
+  const rerunDeliveryKey =
+    outcome.kind === "check_rerun" && githubDeliveryId !== null
+      ? `check-rerun-delivery:${row.github_app_id}:${githubDeliveryId}`
+      : null;
+  if (rerunDeliveryKey !== null) {
+    try {
+      if ((await c.env.IDEMPOTENCY_KV.get(rerunDeliveryKey)) !== null) {
+        webhookInfo(
+          "check_rerun_redelivery",
+          `${webhookRef} delivery=${githubDeliveryId}`,
+          "GitHub redelivered a rerequested check run already accepted — no second enqueue",
+        );
+        return c.text("ignored", 200);
+      }
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_redelivery_read_failed",
+        `${webhookRef} delivery=${githubDeliveryId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerun redelivery guard read failed — proceeding without it (fail-open)",
+      );
+    }
+  }
+  const handleOutcome = await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
     beforeEnqueue: async (payload) => {
@@ -769,6 +839,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       return { ...payload, attachDeliveryId };
     },
   }, refusal);
+  if (handleOutcome.kind === "enqueued" && rerunDeliveryKey !== null) {
+    try {
+      await c.env.IDEMPOTENCY_KV.put(rerunDeliveryKey, "1", { expirationTtl: IDEMPOTENCY_SECONDS });
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_redelivery_write_failed",
+        `${webhookRef} delivery=${githubDeliveryId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerun redelivery guard write failed — a redelivery may enqueue again",
+      );
+    }
+  }
   return c.text("accepted", 200);
 });
 

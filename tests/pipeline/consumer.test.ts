@@ -8578,9 +8578,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(h.messageRetryCalls).toHaveLength(0);
   });
 
-  test("check lifecycle: a rerun whose commit is no longer the head settles the check instead of reviewing the live head", async () => {
+  test("check lifecycle: a rerun whose PR moved after admission reviews the current head", async () => {
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     await createArtifactStore(db).put({
       kind: "review",
       key: idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
@@ -8628,23 +8629,20 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ),
     );
 
-    // The rerun names SHA; the PR has moved on. Reviewing SHA2 would pay for a
-    // commit nobody asked about and hang its result on SHA's run.
-    expect(h.sandbox.calls).toHaveLength(0);
-    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
-    const stale = checkRowFor(db, SHA);
-    expect(stale.terminal_ms).not.toBeNull();
-    expect(stale.desired).not.toBe("in_progress");
-    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    // The rerun follows the PR ref like any trigger: the moved head is the one
+    // reviewed, and the old Check is closed as superseded.
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(2);
+    expect(checkRowFor(db, SHA2).terminal_ms).not.toBeNull();
+    expect(checkRowFor(db, SHA2).desired).not.toBe("in_progress");
+    expect(checkRowFor(db, SHA).terminal_ms).not.toBeNull();
     expect(h.messageRetryCalls).toHaveLength(0);
-    expect(
-      h.logLines.some((line) => line.msg.includes("settling the check instead of reviewing the live head")),
-    ).toBe(true);
   });
 
-  test("check lifecycle: a rerun of an unreviewed old head also settles instead of reviewing the live head", async () => {
+  test("check lifecycle: a rerun of an unreviewed old head reviews the moved head", async () => {
     const db = await createSeededTestD1();
     h.sandbox.resolvedSha = SHA2;
+    h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     await seedPrHead(db, { headSha: SHA2, headAt: new Date().toISOString() });
     const adapter = checksAdapterFor(db);
     const rerunCheckRunId = 4343;
@@ -8684,12 +8682,11 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
       ),
     );
 
-    // No reviews row for SHA — the settled arms below would not fire, so the
-    // gate itself must stop the checkout from following the moved PR ref.
-    expect(h.sandbox.calls).toHaveLength(0);
-    expect(checkRows(db).map((row) => row.head_sha)).toEqual([SHA]);
-    expect(checkRowFor(db, SHA).terminal_ms).not.toBeNull();
-    expect(h.messageAckCalls).toEqual([{ attempts: 1 }]);
+    // No reviews row for SHA: the checkout lands on the moved head and the
+    // review follows it, exactly like an automatic trigger.
+    expect(h.sandbox.calls.length).toBeGreaterThan(0);
+    expect(reviewCount(db)).toBe(1);
+    expect(checkRowFor(db, SHA2).terminal_ms).not.toBeNull();
     expect(h.messageRetryCalls).toHaveLength(0);
   });
 
