@@ -8,8 +8,6 @@ import {
   CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
   PUBLICATION_TAIL_MS,
-  PER_SEAT_ALLOCATION_MS,
-  RUNNER_BUDGET_FLOOR_MS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
@@ -221,16 +219,6 @@ describe("size-aware request: the tier ceiling at every size", () => {
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
     expect(anchor.effectiveBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
-  });
-
-  test("the seat-priced floor stays a documented minimum, never a reduction input", () => {
-    for (const level of LEVELS) {
-      const seatPriced =
-        PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS;
-      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBe(Math.min(seatPriced, RUNNER_MAX_BUDGET_MS[level]));
-      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
-    }
-    expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 280_000, default: 500_000, deep: 646_000 });
   });
 
   test("an unknown size requests the tier maximum — never the floor and never a second numstat", () => {

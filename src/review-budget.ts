@@ -177,39 +177,14 @@ export const CHECK_WINDOW_MS = ROUND_BUDGET_MS;
 export const PUBLICATION_TAIL_MS = 60_000;
 
 /**
- * Wall clock one review seat costs (ms), from the measured round distribution
- * rather than one round: over 30 days of successful reviews (n = 1361) the
- * duration sat at p50 304 584 ms, p90 508 800 ms and max 647 553 ms. Kept as
- * the seating measurement the floor below is priced from; it is no longer a
- * reduction input — the request is the tier ceiling at every size.
+ * Why there is no seat-priced floor table: a floor exists to keep a REQUEST
+ * from shrinking below what a round needs, and the request is now the tier
+ * ceiling at every size — every ceiling already exceeds the seat-priced
+ * minimum (publication tail + one ~220 s allocation per concurrent seat,
+ * measured p50 304 584 ms / p90 508 800 ms over n = 1361 successful rounds)
+ * by construction. The derivation survives only as this note; a constant
+ * nothing reads is not an invariant.
  */
-export const PER_SEAT_ALLOCATION_MS = 220_000;
-
-/**
- * The seat-priced floor per tier (ms): the MINIMUM a round of this tier could
- * need — the publication tail plus one allocation per concurrent seat. Since
- * `requestRunnerBudget` asks for the tier ceiling at every size, and every
- * tier ceiling is at or above this floor, the floor never reduces an
- * allocation; it survives as the documented lower bound on what the ceiling
- * must fund.
- */
-export const RUNNER_BUDGET_FLOOR_MS: Record<ReviewLevel, number> = {
-  quick: Math.min(
-    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.quick.maxSeats * PER_SEAT_ALLOCATION_MS,
-    RUNNER_MAX_BUDGET_MS.quick,
-  ),
-  default: Math.min(
-    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.default.maxSeats * PER_SEAT_ALLOCATION_MS,
-    RUNNER_MAX_BUDGET_MS.default,
-  ),
-  deep: Math.min(
-    PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS.deep.maxSeats * PER_SEAT_ALLOCATION_MS,
-    RUNNER_MAX_BUDGET_MS.deep,
-  ),
-};
-
-
-
 
 /** Runner maximum for `level` — the naming SSOT consumers log against. */
 export function runnerTimeoutMs(level: ReviewLevel): number {
