@@ -1066,12 +1066,13 @@ export function budgetExhaustedSummary(outcome: BudgetExhaustedOutcome): string 
   }
   if (changedLines !== null) counters.push(`${changedLines} changed lines`);
   const counted = counters.length === 0 ? "" : `; ${counters.join("; ")}`;
-  if (outcome.cappedBy === "remaining-window") {
+  if (outcome.budgetWindow === "runner" && outcome.cappedBy === "remaining-window") {
     // The runner was clamped by the round's remaining window, not by the
     // level's own budget: name that clock instead of the tier budget, and give
     // the advice the limit actually answers — the earlier work consumed this
     // attempt's window, so a re-trigger is the lever (a bigger tier or a
-    // smaller diff would not have changed this stop).
+    // smaller diff would not have changed this stop). A preparation-window
+    // stop takes its own copy below: it never had a runner to clamp.
     return (
       `Review cap exhausted: ${outcome.tier} review stopped at ${budget}s — the runner was capped by the round's remaining window, not the ${outcome.tier} level budget` +
       counted +

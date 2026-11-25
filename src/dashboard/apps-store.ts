@@ -159,6 +159,12 @@ export type DeliveryOutcome =
   | "skipped"
   | "refused";
 
+/**
+ * The verdict tier the dashboard's ordered delivery reads rank on; the
+ * expression is migrations/0113_delivery_health_index_refused.sql's index
+ * expression byte-for-byte: change both, never one (a drifted index is a
+ * silent temp-B-tree, not an error).
+ */
 const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected', 'refused') THEN 0 ELSE 1 END`;
 
 /**
