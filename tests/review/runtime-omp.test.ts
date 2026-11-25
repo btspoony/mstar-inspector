@@ -688,33 +688,35 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     expect(promptTexts).toHaveLength(0);
   });
 
-  test("propagates SDK execution failures while the wave still has a review to publish", async () => {
+  test("a non-cap SDK failure beside a usable seat delivers the completed findings with its reason in coverage", async () => {
     seatResults = [{ error: "provider boom" }, { data: seatPayload() }];
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
-      /review seat 0 .*failed: provider boom/,
-    );
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.envelope.incomplete).toBeUndefined();
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed",
+      unreviewed: [
+        { seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "failed:provider-boom" },
+      ],
+    });
     expect(disposeCalls).toBe(1);
   });
 
-  test("a strict schema violation with no usable output reports the wave incomplete, never a clean verdict", async () => {
+  test("a strict schema violation with zero usable output is an explicit failure naming the seat", async () => {
     seatResults = [{ status: "invalid", data: { findings: [{ mergeClass: "critical" }] } }];
-    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.findings).toEqual([]);
-    expect(envelope.incomplete?.reason).toMatch(
-      /^no dispatched seat produced a usable payload: .+/,
+    await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
+      /review produced no usable seat output: full-diff-combined:/,
     );
-    expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
   });
 
-  test("an absent structured output with no usable output reports the wave incomplete", async () => {
+  test("an absent structured output with zero usable output is an explicit failure", async () => {
     seatResults = [{ status: "absent" }];
-    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.findings).toEqual([]);
-    expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
+    await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
+      /review produced no usable seat output/,
+    );
   });
 });
 
@@ -949,7 +951,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
   });
 
@@ -977,7 +979,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
     // The runner's log line names the seat and its abort reason verbatim.
     expect(seatStopLine("changeset-1-part-1", "Subagent runtime limit exceeded (task.maxRuntimeMs=540000)")).toBe(
@@ -1019,32 +1021,50 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
   });
 
-  test("an abort the runtime limit did not cause stays fatal — the flag alone is not coverage", async () => {
+  test("an abort the runtime limit did not cause is a seat failure that still delivers the sibling", async () => {
     seatResults = [
       { status: "absent", aborted: true, abortReason: "Provider stream closed unexpectedly" },
       { data: seatPayload() },
     ];
 
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage?.stoppedReason).toBe("failed");
+    expect(result.coverage?.unreviewed[0]).toEqual({
+      seat: "changeset-1-src",
+      scope: RECON_SRC_SCOPE,
+      reason: "failed:no-usable-output-status-",
+    });
   });
 
-  test("an aborted seat with no reason at all stays fatal — never an inferred cap", async () => {
+  test("an aborted seat with no reason is never an inferred cap — it is a plain failure beside a delivered sibling", async () => {
     seatResults = [{ status: "absent", aborted: true }, { data: seatPayload() }];
 
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+    expect(result.coverage?.stoppedReason).toBe("failed");
+    expect(result.coverage?.unreviewed[0]?.reason).toBe("failed:no-usable-output-status-");
   });
 
-  test("an SDK error without a cap stays fatal while the wave still has usable output", async () => {
+  test("an SDK error without a cap delivers the sibling with the failed seat named in uncovered seats", async () => {
     seatResults = [{ error: "provider exploded" }, { data: seatPayload() }];
 
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/review seat 0 .*failed:/);
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed",
+      unreviewed: [
+        { seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "failed:provider-exploded" },
+      ],
+    });
   });
 
-  test("a payload the strict schema rejected without a cap stays fatal — invalid is not absent", async () => {
+  test("a schema-rejected payload without a cap never rides the review, yet the sibling still delivers", async () => {
     seatResults = [
       {
         status: "invalid",
@@ -1053,7 +1073,20 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
       { data: seatPayload() },
     ];
 
-    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(/no valid structured output/);
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed",
+      unreviewed: [
+        {
+          seat: "changeset-1-src",
+          scope: RECON_SRC_SCOPE,
+          reason: "failed:no-usable-output-status-",
+        },
+      ],
+    });
   });
 
   test("both seats capped before producing anything is still a failure: no envelope, no report, the reason named", async () => {
@@ -1113,7 +1146,7 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
   });
 });
@@ -1144,81 +1177,48 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(stop.seatsStopped).toBe(2);
   });
 
-  test("a nothing-usable round carries no coverage, yet still narrates when time remains", async () => {
-    // A zero-completed coverage block would fail the runner's own transport
-    // guard and replace this failure with a shape error — so no block at all.
-    // The report seat is NOT withheld for this: an incomplete review still has
-    // scope to state, and the ruling is that only a dead run or missing inputs
-    // make it ineligible.
-    seatResults = [{ status: "absent" }, { status: "absent" }, { status: "absent" }];
-    const result = await ompAgentRuntime.runReview({
-      ...BASE_INPUT,
-      prContext: { prBody: "Closes #7", issues: [] },
-    });
-
-    expect(result.envelope.verdict).toBe("incomplete");
-    expect(result.envelope.incomplete?.reason).toMatch(/^no dispatched seat produced a usable payload/);
-    expect(result.coverage).toBeUndefined();
-    // Two review seats + the report seat (which ran and produced no document).
-    expect(subagentRequests).toHaveLength(3);
-    expect(result.report).toBeNull();
+  test("a nothing-usable round fails without a coverage block or a report seat", async () => {
+    // No envelope at all: the failure carries the reason, and nothing claims
+    // coverage or narrates a review that does not exist.
+    seatResults = [{ status: "absent" }, { status: "absent" }];
+    await expect(
+      ompAgentRuntime.runReview({ ...BASE_INPUT, prContext: { prBody: "Closes #7", issues: [] } }),
+    ).rejects.toThrow(/^review produced no usable seat output/);
+    expect(subagentRequests).toHaveLength(2);
   });
 
-  test("a wave that produced nothing usable without any cap is delivered incomplete, every seat listed", async () => {
+  test("a wave that produced nothing usable fails explicitly, naming the first stopped seat", async () => {
     seatResults = [{ status: "absent" }, { status: "absent" }];
 
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.findings).toEqual([]);
-    expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.incomplete?.reason).toMatch(
-      /^no dispatched seat produced a usable payload: .+/,
+    // Zero usable output is a FAILURE, never an `incomplete` envelope at exit 0
+    // that reads as success downstream.
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
+      /^review produced no usable seat output: changeset-1-src: /,
     );
-    expect(envelope.incomplete?.unscanned).toEqual([
-      expect.stringContaining("changeset-1-src"),
-      expect.stringContaining("changeset-2-lib"),
-    ]);
   });
 
-  test("a whole wave of SDK errors with no usable output is delivered incomplete too", async () => {
+  test("a whole wave of SDK errors with no usable output fails explicitly with the provider cause", async () => {
     seatResults = [{ error: "provider boom" }];
 
-    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.findings).toEqual([]);
-    expect(envelope.incomplete?.reason).toMatch(
-      /^no dispatched seat produced a usable payload: .+/,
+    await expect(ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" })).rejects.toThrow(
+      /^review produced no usable seat output: full-diff-combined: provider boom$/,
     );
-    expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
   });
 
-  test("every seat promise rejected: the wave is incomplete and lists every dispatched seat", async () => {
+  test("every seat promise rejected: the failure names the first rejection's cause", async () => {
     seatResults = [{ reject: "provider boom" }, { reject: "provider boom" }];
 
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.findings).toEqual([]);
-    expect(validateMstarReviewV1(envelope).ok).toBe(true);
-    expect(envelope.incomplete?.reason).toMatch(
-      /^no dispatched seat produced a usable payload: provider boom$/,
+    await expect(ompAgentRuntime.runReview(BASE_INPUT)).rejects.toThrow(
+      /^review produced no usable seat output: .*provider boom$/,
     );
-    expect(envelope.incomplete?.unscanned).toEqual([
-      expect.stringContaining("changeset-1-src"),
-      expect.stringContaining("changeset-2-lib"),
-    ]);
   });
 
-  test("a seat promise rejected with null keeps its cause as a fact, not an empty string", async () => {
+  test("a seat promise rejected with null keeps its cause a fact, never an empty string", async () => {
     seatResults = [{ rejectWith: null }, { reject: "provider boom" }];
 
-    const { envelope } = await ompAgentRuntime.runReview(BASE_INPUT);
-
-    expect(envelope.verdict).toBe("incomplete");
-    expect(envelope.incomplete?.reason).toBe("no dispatched seat produced a usable payload: null");
-    expect(validateMstarReviewV1(envelope).ok).toBe(true);
+    const failure = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as Error;
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toMatch(/^review produced no usable seat output: changeset-1-src: null$/);
   });
 
   test("a cap over an SDK error in one seat no longer sinks the sibling's review", async () => {
@@ -1262,7 +1262,7 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
   });
 
@@ -1277,8 +1277,48 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
+  });
+
+  test("one seat completes and one REJECTS with a provider error: findings publish, the failed seat is named", async () => {
+    seatResults = [{ reject: "provider boom" }, { data: seatPayload() }];
+
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.envelope.incomplete).toBeUndefined();
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed",
+      unreviewed: [
+        { seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "failed:provider-boom" },
+      ],
+    });
+  });
+
+  test("zero usable output with a rejection is an explicit failure carrying the rejection reason", async () => {
+    seatResults = [{ reject: "provider boom" }, { reject: "provider down" }];
+
+    const failure = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as Error;
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure.message).toMatch(/^review produced no usable seat output: changeset-1-src: provider boom$/);
+  });
+
+  test("the deep tier claims no coverage — it cannot observe its own task seats", async () => {
+    parentYields = [deepEnvelope()];
+    seatResults = [{ status: "absent" }];
+    const result = await ompAgentRuntime.runReview({
+      ...DEEP_INPUT,
+      prContext: { prBody: "Closes #7", issues: [] },
+    });
+
+    // A yielded review proves findings, never `1/1 reviewed`: a domain seat
+    // cap-stopped mid-review still yields a verdict, so full coverage would be
+    // a fabricated claim.
+    expect(result.envelope.findings).toHaveLength(1);
+    expect(result.coverage).toBeUndefined();
   });
 
   test("no stopped seat: the envelope is the engine's own synthesis, fact and notes absent", async () => {
@@ -2658,14 +2698,19 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
     expect("recheckStatus" in result).toBe(false);
   });
 
-  test("a review failure aborts the recheck child and still rejects (never lose the review)", async () => {
+  test("a delivered partial review still settles the recheck child and never mixes their signals", async () => {
     seatResults = [{ data: validRecheckDoc() }, { data: seatPayload() }, { error: "provider boom" }];
-    await expect(
-      ompAgentRuntime.runReview({ ...BASE_INPUT, level: "default", recheck: recheckInput() }),
-    ).rejects.toThrow(/provider boom/);
+    const result = await ompAgentRuntime.runReview({
+      ...BASE_INPUT,
+      level: "default",
+      recheck: recheckInput(),
+    });
 
+    // The sibling's findings publish and the recheck document rides along.
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.recheck).toEqual(validRecheckDoc());
+    expect(result.coverage?.stoppedReason).toBe("failed");
     expect(subagentRequests).toHaveLength(3);
-    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
     // The review seats carry their own watchdog signals — never the recheck's.
     expect((subagentRequests[1]!.signal as AbortSignal).aborted).toBe(false);
     expect((subagentRequests[2]!.signal as AbortSignal).aborted).toBe(false);
@@ -2968,7 +3013,7 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap",
-      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" }],
     });
   });
 
@@ -3365,10 +3410,6 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     seatResults = [{ error: "provider boom" }, { data: seatPayload({ findings: [] }) }];
 
     const run = ompAgentRuntime.runReview(BASE_INPUT);
-    const outcome = run.then(
-      () => null,
-      (error: unknown) => error,
-    );
     await dispatched[1]!.promise;
 
     seatReleases.shift()!();
@@ -3380,7 +3421,10 @@ describe("ompAgentRuntime.runReview — seat supervision (progress nudges)", () 
     expect(existsSync(join(TEST_WORKTREE, ".omp", "agents", "mstar-review-seat.md"))).toBe(true);
 
     seatReleases.shift()!();
-    expect(String(await outcome)).toMatch(/review seat 0 .*failed: provider boom/);
+    // The failed seat is recorded, not fatal: the sibling's review delivers.
+    const result = await run;
+    expect(result.coverage?.stoppedReason).toBe("failed");
+    expect(result.coverage?.unreviewed[0]?.seat).toBe("changeset-1-src");
     expect(disposeCalls).toBe(1);
     jest.advanceTimersByTime(normalTickMs * 3);
     await flush();

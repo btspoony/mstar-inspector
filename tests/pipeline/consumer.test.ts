@@ -10209,7 +10209,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
     seatsTotal: 2,
     seatsCompleted: 1,
     stoppedReason: "cap" as const,
-    unreviewed: [{ seat: "correctness", scope: ["src/a.ts"] }],
+    unreviewed: [{ seat: "correctness", scope: ["src/a.ts"], reason: "cap" }],
   };
   // The ONE sentence both faces share (coverage-wire.ts): the Check summary and
   // the published body must carry it verbatim.
@@ -10365,7 +10365,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap" as const,
-      unreviewed: [{ seat: "correctness", scope: [markerScope] }],
+      unreviewed: [{ seat: "correctness", scope: [markerScope], reason: "cap" }],
     };
     h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: markedCoverage });
     const db = await createSeededTestD1();
@@ -10482,7 +10482,7 @@ describe("partial seat coverage — a delivered review passes and says what it c
       seatsTotal: 2,
       seatsCompleted: 1,
       stoppedReason: "cap" as const,
-      unreviewed: [{ seat: "#correctness", scope: [hostileScope] }],
+      unreviewed: [{ seat: "#correctness", scope: [hostileScope], reason: "cap" }],
     };
     h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: hostileCoverage });
     const db = await createSeededTestD1();
@@ -10503,6 +10503,50 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(summaryTail).toBe(expectedLine);
   });
 
+  test("a mixed round renders the dominant headline plus only the reasons that add information", async () => {
+    // cap outranks: the headline says cap, the capped seat carries no suffix,
+    // the failed seat names its cause inside the same shared sentence.
+    const mixedCoverage = {
+      seatsTotal: 3,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [
+        { seat: "correctness", scope: ["src/a.ts"], reason: "cap" },
+        { seat: "perf", scope: ["src/p.ts"], reason: "failed:watchdog" },
+      ],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: mixedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const line =
+      "Reviewed 1/3 seats; stopped by cap — not reviewed: correctness (src/a.ts), perf (src/p.ts; failed:watchdog)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(line);
+    expect(terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "))).toBe(line);
+    expect(body).toContain(line);
+  });
+
+  test("a failure-only round renders the seat-failure headline", async () => {
+    const failedCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed" as const,
+      unreviewed: [{ seat: "correctness", scope: ["src/a.ts"], reason: "failed" }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: failedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const line = "Reviewed 1/2 seats; stopped by a seat failure — not reviewed: correctness (src/a.ts)";
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "))).toBe(line);
+    expect(publishedBody()).toContain(line);
+  });
+
   test("the shared sentence renderer: full or absent coverage renders nothing, unknown stops are omitted", () => {
     expect(partialSeatCoverageLine(null)).toBe("");
     expect(partialSeatCoverageLine({ seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] })).toBe("");
@@ -10512,19 +10556,19 @@ describe("partial seat coverage — a delivered review passes and says what it c
         seatsCompleted: 2,
         stoppedReason: null,
         unreviewed: [
-          { seat: "correctness", scope: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"] },
-          { seat: "perf", scope: [] },
+          { seat: "correctness", scope: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"], reason: "failed" },
+          { seat: "perf", scope: [], reason: "failed" },
         ],
       }),
     ).toBe(
-      "Reviewed 2/4 seats — not reviewed: correctness (src/a.ts, src/b.ts, src/c.ts, +1 more file), perf ()",
+      "Reviewed 2/4 seats — not reviewed: correctness (src/a.ts, src/b.ts, src/c.ts, +1 more file; failed), perf (failed)",
     );
     expect(
       partialSeatCoverageLine({
         seatsTotal: 6,
         seatsCompleted: 2,
         stoppedReason: "cap",
-        unreviewed: Array.from({ length: 5 }, (_, i) => ({ seat: `seat${i}`, scope: [] })),
+        unreviewed: Array.from({ length: 5 }, (_, i) => ({ seat: `seat${i}`, scope: [], reason: "cap" })),
       }),
     ).toBe("Reviewed 2/6 seats; stopped by cap — not reviewed: seat0 (), seat1 (), seat2 (), +2 more seats");
   });
