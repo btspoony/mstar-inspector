@@ -1,10 +1,21 @@
 /**
  * The seat-coverage block the runner adds to a successful review output:
  * which seats completed, why the round stopped, and what was left
- * unreviewed. Present on every successful run (all seats completed →
- * `stoppedReason: null`, `unreviewed: []`); a round where no seat produced
- * output carries NO coverage — that round is a failure, not a partial
- * review.
+ * unreviewed. A present block always asserts a full or partial coverage —
+ * all seats finished → `stoppedReason: null`, `unreviewed: []`.
+ *
+ * Absence is NOT failure — it means the round does not assert coverage.
+ * Exactly two legal absences exist:
+ *
+ * - the DEEP tier, whose seats are task-dispatched in a way the runner
+ *   cannot observe, so a deep run asserts nothing about coverage at all;
+ * - a round where no seat produced usable output (the runner cannot even
+ *   see what it lost) — that round is a failure THROUGH THE FAILURE PATH,
+ *   never a partial review, and the coverage block simply never claims a
+ *   coverage for it.
+ *
+ * Consumers must treat a missing block as "not asserted": neither success
+ * evidence nor failure evidence.
  *
  * This is transport metadata next to the engine envelope, never an envelope
  * field: `mstar.review/v1` is closed and its schema does not grow.
@@ -70,7 +81,8 @@ const isUnreviewedList = (value: unknown): value is ReviewSeatUnreviewed[] =>
 
 /**
  * The whole coverage guard: the exact key set, safe-integer counts with
- * `1 <= seatsCompleted <= seatsTotal`, the closed `stoppedReason` vocabulary,
+ * `0 <= seatsCompleted <= seatsTotal` (0 is legal: a round whose seats were
+ * all stopped still publishes the payloads they salvaged), the closed `stoppedReason` vocabulary,
  * well-formed `unreviewed` entries, and the block's INTERNAL truth:
  * full (every seat finished) → no stop reason and no entries; partial → a stop
  * reason and exactly one entry per missing seat; a `cap` headline requires at
@@ -91,7 +103,7 @@ export function isReviewCoverage(value: unknown): value is ReviewCoverage {
     !Number.isSafeInteger(seatsTotal) ||
     !Number.isSafeInteger(seatsCompleted) ||
     seatsTotal < 1 ||
-    seatsCompleted < 1 ||
+    seatsCompleted < 0 ||
     seatsCompleted > seatsTotal ||
     (stoppedReason !== null && stoppedReason !== "cap" && stoppedReason !== "failed") ||
     !isUnreviewedList(unreviewed)
@@ -148,7 +160,9 @@ const scopeText = (scope: readonly string[]): string => {
  */
 export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefined): string {
   if (coverage === null || coverage === undefined) return "";
-  if (coverage.seatsCompleted < 1 || coverage.seatsCompleted >= coverage.seatsTotal) return "";
+  // `0/N` is a real coverage state (every seat was stopped but salvaged output
+  // published), so only full coverage renders nothing here.
+  if (coverage.seatsCompleted >= coverage.seatsTotal) return "";
   const stopped =
     coverage.stoppedReason === "cap"
       ? "; stopped by cap"

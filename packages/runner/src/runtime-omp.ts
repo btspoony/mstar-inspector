@@ -43,7 +43,7 @@ import {
 import type { PrContext, ReportDoc } from "../../shared/src/report-wire";
 import type { ReviewCoverage } from "../../shared/src/coverage-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
-import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
+import { ReviewNoOutputFailure, RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 import {
   bucketsFromSession,
   bucketsFromSubagents,
@@ -1697,7 +1697,11 @@ export const ompAgentRuntime: AgentRuntime = {
       // seat lands in `unreviewed`. The round then delivers when at least one
       // seat completed; with none it is an explicit failure, never a silent
       // incomplete success.
-      if (completedSeatIds.size === 0) {
+      // why: Delivery is keyed on USABLE OUTPUT, not on a completed seat: a
+      // cap-stopped seat still returns the payload it salvaged, and dropping
+      // that beside no completion is exactly the loss this plan removes. The
+      // coverage block discloses the scope gap (0/2 completed is legal).
+      if (outputs.length === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         const served = new Set<string>();
@@ -1735,7 +1739,15 @@ export const ompAgentRuntime: AgentRuntime = {
         console.error(
           `review failed: no usable seat output${firstStop === undefined ? "" : ` (${firstStop.id}: ${cause})`}`,
         );
-        throw new Error(`review produced no usable seat output${firstStop === undefined ? "" : `: ${firstStop.id}: ${cause}`}`);
+        // why: The failure carries the recheck facts it already paid for — a
+        // settled recheck validated older findings, and the worker must still
+        // be able to record that even though the main review is not delivered.
+        const failure = new ReviewNoOutputFailure(
+          `${firstStop?.id ?? "seat"}: ${cause}`,
+        );
+        failure.recheck = settled?.doc ?? null;
+        if (settled !== null) failure.recheckStatus = settled.status;
+        throw failure;
       }
       if (gaps.length > 0 || siblingLosses.length > 0) {
         // why: A delivered partial review keeps its seat losses visible in the

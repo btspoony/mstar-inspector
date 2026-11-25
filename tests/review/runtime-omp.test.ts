@@ -12,7 +12,7 @@ import * as realStructuredSubagent from "@oh-my-pi/pi-coding-agent/task/structur
 import { PR_REVIEW_NUDGE_CADENCE, PR_REVIEW_TIER_BUDGETS, synthesizeReview, validateMstarReviewV1 } from "@mstar-harness/engine";
 
 import { RUNNER_MAX_BUDGET_MS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../packages/shared/src/runtime";
-import { RunnerBudgetExhausted } from "../../packages/shared/src/budget-exhausted-wire";
+import { ReviewNoOutputFailure, RunnerBudgetExhausted } from "../../packages/shared/src/budget-exhausted-wire";
 import { servedModel, type SupervisedSeat } from "../../packages/runner/src/runtime-omp";
 import { anchorRecheckDeadline, RECHECK_OUTPUT_SCHEMA, remainingOuterMs, remainingSoftMinutes, resetRecheckAnchor } from "../../packages/runner/src/recheck";
 import { REPORT_OUTPUT_SCHEMA } from "../../packages/runner/src/report";
@@ -1187,6 +1187,72 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(subagentRequests).toHaveLength(2);
   });
 
+  test("two cap-stopped seats that both salvaged a payload deliver those findings with 0/2 coverage", async () => {
+    const CAP = "Subagent runtime limit exceeded (task.maxRuntimeMs=600000)";
+    seatResults = [
+      {
+        aborted: true,
+        abortReason: CAP,
+        data: {
+          findings: [
+            {
+              mergeClass: "must-fix",
+              title: "Missing null check",
+              body: "The handler assumes the payload is always present.",
+              file_path: "lib/c.ts",
+              line_start: 4,
+            },
+          ],
+        },
+      },
+      {
+        aborted: true,
+        abortReason: CAP,
+        data: {
+          findings: [
+            {
+              mergeClass: "should-fix",
+              title: "Unbounded loop",
+              body: "The loop never terminates on empty input.",
+              file_path: "src/a.ts",
+              line_start: 10,
+            },
+          ],
+        },
+      },
+    ];
+
+    const result = await ompAgentRuntime.runReview(BASE_INPUT);
+
+    // Neither seat completed, yet both salvaged findings — they publish.
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual([
+      "Missing null check",
+      "Unbounded loop",
+    ]);
+    expect(result.envelope.incomplete).toBeUndefined();
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 0,
+      stoppedReason: "cap",
+      unreviewed: [
+        { seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" },
+        { seat: "changeset-2-lib", scope: ["lib/c.ts"], reason: "cap" },
+      ],
+    });
+  });
+
+  test("a zero-output failure keeps the settled recheck document and status", async () => {
+    seatResults = [{ data: validRecheckDoc() }, { status: "absent" }, { status: "absent" }];
+    const failure = (await ompAgentRuntime
+      .runReview({ ...BASE_INPUT, level: "default", recheck: recheckInput() })
+      .catch((error: unknown) => error)) as ReviewNoOutputFailure;
+
+    expect(failure).toBeInstanceOf(ReviewNoOutputFailure);
+    expect(failure.message).toMatch(/^review produced no usable seat output: /);
+    expect(failure.recheck).toEqual(validRecheckDoc());
+    expect(failure.recheckStatus).toBeDefined();
+  });
+
   test("a wave that produced nothing usable fails explicitly, naming the first stopped seat", async () => {
     seatResults = [{ status: "absent" }, { status: "absent" }];
 
@@ -1391,7 +1457,7 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     expect(lost[0]).toContain("changeset-2-lib");
   });
 
-  test("a cap stop outranks a sibling's non-cap error even while the wave holds usable output", async () => {
+  test("a salvaged cap payload beside a sibling's non-cap error is delivered, both stops named", async () => {
     seatResults = [
       { aborted: true, abortReason: CAP_REASON, data: seatPayload() },
       { error: "provider exploded" },
@@ -1400,17 +1466,24 @@ describe("ompAgentRuntime.runReview — the budget stop's facts and bounds", () 
     const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
       errorCalls.push(args);
     });
-    let stop: RunnerBudgetExhausted;
+    let result: ReviewRunResult;
     try {
-      stop = (await ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error)) as RunnerBudgetExhausted;
+      result = await ompAgentRuntime.runReview(BASE_INPUT);
     } finally {
       spy.mockRestore();
     }
 
-    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
-    expect(stop.seatsDispatched).toBe(2);
-    expect(stop.seatsStopped).toBe(1);
-    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside a cap stop"));
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 0,
+      stoppedReason: "cap",
+      unreviewed: [
+        { seat: "changeset-1-src", scope: RECON_SRC_SCOPE, reason: "cap" },
+        { seat: "changeset-2-lib", scope: ["lib/c.ts"], reason: "failed:provider-exploded" },
+      ],
+    });
+    const lost = errorCalls.map((call) => String(call[0])).filter((line) => line.includes("lost beside delivered seats"));
     expect(lost).toHaveLength(1);
     expect(lost[0]).toContain("changeset-2-lib");
     expect(lost[0]).toContain("provider exploded");

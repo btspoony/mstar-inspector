@@ -110,3 +110,21 @@ export class RunnerBudgetExhausted extends Error {
     };
   }
 }
+
+/**
+ * A review that produced NO usable seat output, and was not stopped by the cap.
+ * It is a genuine failure (the CLI exits non-zero, the worker records
+ * `review.budget.runner_spent`), but the side facts gathered before the seats
+ * settled are still real: a settled recheck round validated older findings and
+ * its document must not disappear with the main review. Same transport shape as
+ * `RunnerBudgetExhausted` — the error carries the facts, the CLI writes them.
+ */
+export class ReviewNoOutputFailure extends Error {
+  recheck: RecheckDoc | null = null;
+  recheckStatus?: RecheckStatus;
+
+  constructor(readonly cause: string) {
+    super(`review produced no usable seat output: ${cause}`);
+    this.name = "ReviewNoOutputFailure";
+  }
+}
