@@ -34,7 +34,12 @@ import {
   runRecheckSeat,
   type RecheckSeatResult,
 } from "./recheck";
-import { REPORT_TAIL_MARGIN_MS, runReportSeat, revalidatedNotes } from "./report";
+import {
+  REPORT_TAIL_MARGIN_MS,
+  runReportSeat,
+  revalidatedNotes,
+  type ReportSeatEmptyReason,
+} from "./report";
 import type { PrContext, ReportDoc } from "../../shared/src/report-wire";
 import type { ReviewCoverage } from "../../shared/src/coverage-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
@@ -194,17 +199,28 @@ function tracedRecheck(work: Promise<RecheckSeatResult>): Promise<RecheckSeatRes
   );
 }
 
+/**
+ * Run the report seat through ONE decision path for every level. The session is
+ * created only AFTER eligibility says the seat will run, so an ineligible run
+ * never opens a session nor emits `report_start`.
+ *
+ * Terminal stages, by what actually happened:
+ * - a document                             -> `report_done:turns=N`
+ * - call made, no usable document          -> `report_absent`
+ * - NO call made (`budget` / `aborted`)    -> `report_aborted`
+ * - the call (or the session) failed       -> `report_failed:<slug>`
+ *
+ * A clock crossing after `report_start` is therefore a cancellation, never an
+ * empty seat: `report_absent` requires that a call actually happened.
+ */
 async function tracedReportSeatFor(
   input: AgentRuntimeRunInput,
-  session: ToolSession,
+  getSession: () => Promise<ToolSession>,
   envelope: MstarReviewV1,
   recheckDoc: RecheckDoc | null,
   signal: AbortSignal,
   usage: SubagentUsageSource[] = [],
 ): Promise<ReportDoc | null> {
-  // why: `report_start` must mean the seat actually started. Emitting it for
-  // an ineligible run (no PR context, no head, no seat definition, or a review
-  // that produced nothing) would make the trace claim work nobody did.
   const eligibility = reportEligibility(input, envelope, signal);
   if (!eligibility.ok) {
     // why: ONE place logs the skip and names it in the trace — the dispatch
@@ -215,22 +231,26 @@ async function tracedReportSeatFor(
     return null;
   }
   traceStage("report_start");
+  let empty: ReportSeatEmptyReason | undefined;
   let report: ReportDoc | null = null;
   try {
-    report = await runReportSeatFor(input, session, envelope, recheckDoc, signal, usage);
+    const session = await getSession();
+    report = await runReportSeatFor(input, session, envelope, recheckDoc, signal, usage, (reason) => {
+      empty = reason;
+    });
   } catch (error) {
-    // why: A REJECTED report call is a seat failure, not "no document". The
-    // review is never failed by the report (narrative only), so this stops at
-    // the trace and the review's own envelope still publishes.
+    // why: A REJECTED report call (or a session that could not be created) is a
+    // seat failure, not "no document". The review is never failed by the report
+    // (narrative only), so this stops at the trace.
     traceStage(reportFailedStage(causeText(error)));
     return null;
   }
-  // why: A torn-down run under a started seat is neither a document nor an
-  // empty seat — name the cancellation instead of blaming the seat.
   traceStage(
-    report === null && (signal.aborted || input.signal?.aborted === true)
-      ? REPORT_ABORTED_STAGE
-      : reportStage(report, usage[0]?.requests),
+    report !== null
+      ? reportStage(report, usage[0]?.requests)
+      : empty === "no-document"
+        ? reportStage(null, undefined)
+        : REPORT_ABORTED_STAGE,
   );
   return report;
 }
@@ -1360,22 +1380,21 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const reportSingles: SubagentUsageSource[] = [];
-      let report: ReportDoc | null = null;
-      if (input.prContext !== undefined) {
-        try {
+      // why: The deep path goes through the SAME eligibility/skip decision as the
+      // fan-out — a `prContext` gate here skipped the seat silently and left the
+      // trace and the dispatch log disagreeing. The session opens lazily, only
+      // once the seat is actually eligible.
+      const report = await tracedReportSeatFor(
+        input,
+        async () => {
           reportSession = await createSeatSession();
-          report = await tracedReportSeatFor(
-            input,
-            asToolSession(reportSession, cwd),
-            envelope,
-            settled?.doc ?? null,
-            runTeardownSignal(teardown, input),
-            reportSingles,
-          );
-        } catch (error) {
-          console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
-        }
-      }
+          return asToolSession(reportSession, cwd);
+        },
+        envelope,
+        settled?.doc ?? null,
+        runTeardownSignal(teardown, input),
+        reportSingles,
+      );
       const appliedModel = servedModel(session);
       // why: The parent's `task`-dispatched review seats spend inside
       // `getUsageStatistics()` without journaling entries or reporting a
@@ -1474,6 +1493,7 @@ async function runReportSeatFor(
   recheckDoc: RecheckDoc | null,
   signal: AbortSignal,
   usage: SubagentUsageSource[] = [],
+  onEmpty?: (reason: ReportSeatEmptyReason) => void,
 ): Promise<ReportDoc | null> {
   const eligibility = reportEligibility(input, envelope, signal);
   if (!eligibility.ok) return null;
@@ -1487,6 +1507,7 @@ async function runReportSeatFor(
     level: input.level,
     signal,
     usage,
+    ...(onEmpty === undefined ? {} : { onEmpty }),
   });
 }
 
@@ -1750,7 +1771,7 @@ export const ompAgentRuntime: AgentRuntime = {
       const reportSingles: SubagentUsageSource[] = [];
       const report = await tracedReportSeatFor(
         input,
-        toolSession,
+        async () => toolSession,
         envelope,
         settled?.doc ?? null,
         runTeardownSignal(teardown, input),

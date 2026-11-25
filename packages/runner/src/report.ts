@@ -35,6 +35,13 @@ export const REPORT_OUTPUT_SCHEMA = {
 } as const;
 
 /**
+ * Why `runReportSeat` produced no document when it did not throw. The caller
+ * maps these to distinct terminal stages: `budget`/`aborted` are cancellations
+ * (no call happened), `no-document` is a call that completed empty.
+ */
+export type ReportSeatEmptyReason = "budget" | "aborted" | "no-document";
+
+/**
  * Tail the report seat must leave for publication (ms). Exported because the
  * caller's eligibility check and this seat's own budget guard are the SAME
  * threshold — two copies would let the trace claim a start the seat then
@@ -171,15 +178,27 @@ export async function runReportSeat(input: {
   signal?: AbortSignal;
   /** Collects the settled subagent `SingleResult` for the token-usage fold; the caller may ignore it. */
   usage?: SubagentUsageSource[];
+  /**
+   * Why the seat produced no document, for the caller's terminal trace. Omitted
+   * on a document; a rejected call is a throw, never a reason. `budget` and
+   * `aborted` mean NO SDK call was made — the caller records a cancellation,
+   * not an empty narrative.
+   */
+  onEmpty?: (reason: ReportSeatEmptyReason) => void;
 }): Promise<ReportDoc | null> {
   const external = input.signal ?? new AbortController().signal;
   if (external.aborted) {
     console.error(JSON.stringify({ event: "report_seat_aborted" }));
+    input.onEmpty?.("aborted");
     return null;
   }
   const maxRuntimeMs = remainingOuterMs(Date.now(), input.level) - REPORT_TAIL_MARGIN_MS;
   if (maxRuntimeMs <= 0) {
+    // why: The window vanished between the caller's eligibility check and this
+    // call. No SDK call is made, so the caller must record a CANCELLATION, not
+    // an empty seat — the reason is reported rather than guessed.
     console.error(JSON.stringify({ event: "report_skipped", reason: "budget" }));
+    input.onEmpty?.("budget");
     return null;
   }
   const controller = new AbortController();
@@ -215,6 +234,7 @@ export async function runReportSeat(input: {
     if (settled !== null && typeof settled === "object") input.usage?.push(settled as SubagentUsageSource);
     if (external.aborted) {
       console.error(JSON.stringify({ event: "report_seat_aborted" }));
+      input.onEmpty?.("aborted");
       return null;
     }
     const reason = timedOut ? "timeout" : "seat-failed";
@@ -233,12 +253,20 @@ export async function runReportSeat(input: {
     // Completed call, no usable document: the seat ran and produced nothing.
     const settled = (error as { result?: unknown } | null | undefined)?.result;
     if (settled !== null && typeof settled === "object") input.usage?.push(settled as SubagentUsageSource);
+    // why: The child settles an aborted call as a result with no payload — that
+    // is the run ending under the seat, not an empty narrative.
+    if (external.aborted) {
+      console.error(JSON.stringify({ event: "report_seat_aborted" }));
+      input.onEmpty?.("aborted");
+      return null;
+    }
     console.error(
       JSON.stringify({
         event: "report_seat_failed",
         error: redactedError(error instanceof Error ? error.message : String(error)),
       }),
     );
+    input.onEmpty?.("no-document");
     return null;
   }
   const bound =
@@ -250,6 +278,7 @@ export async function runReportSeat(input: {
     console.error(
       JSON.stringify({ event: "report_seat_failed", error: redactedError(`report document failed validation: ${gate.error}`) }),
     );
+    input.onEmpty?.("no-document");
     return null;
   }
   return gate.doc;
