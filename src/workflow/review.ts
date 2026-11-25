@@ -14,6 +14,7 @@ import {
   readDurablePaid,
   settleAttemptFailure,
   phaseFailureRecord,
+  errorClassOf,
   PhaseTransientError,
   transientFactsOf,
   settleSkippedRow,
@@ -235,6 +236,12 @@ function ordinaryFailure(
   transient?: PhaseTransientError["facts"],
 ): PhaseFailure {
   const raw = err instanceof Error ? err.message : String(err);
+  // The class the throw site captured rides the transient facts as plain data;
+  // only a throw with no wrapper — this file's own host probes — is asked for
+  // its constructor directly, and a rebuild without a prototype still answers
+  // through its surviving `name`.
+  const errorClass = transient?.errorClass ?? errorClassOf(err);
+  const message = raw.replace(/^[A-Za-z][\w.]*Error: /, "");
   return {
     class: "failure",
     phase,
@@ -247,11 +254,25 @@ function ordinaryFailure(
     // must not claim the runner returned: the settlement's `paid-unknown` guard
     // reads this field to decide whether an unconfirmed row may be concluded.
     runnerReturned: transient?.runnerReturned ?? false,
-    message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
+    message,
+    // The throw site's own cause when one was chained, otherwise the class and
+    // the bounded message the settlement would otherwise have to re-derive —
+    // the observation the reconciler renders carries the facts as data, never
+    // a sentence parsed back out of the composed text.
+    cause:
+      errorCauseText(err) ?? (errorClass === undefined ? message.slice(0, 240) : `${errorClass}: ${message.slice(0, 240)}`),
     ...(transient?.lastStage === undefined ? {} : { lastStage: transient.lastStage }),
+    ...(errorClass === undefined ? {} : { errorClass }),
     sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
     rateLimited: transient?.rateLimited ?? null,
   };
+}
+
+/** A chained string cause, read with a real narrow — never an inline cast shape. */
+function errorCauseText(err: unknown): string | undefined {
+  if (err === null || typeof err !== "object" || !("cause" in err)) return undefined;
+  const cause = (err as Error).cause;
+  return typeof cause === "string" && cause !== "" ? cause : undefined;
 }
 
 /**

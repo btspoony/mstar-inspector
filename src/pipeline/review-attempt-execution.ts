@@ -560,6 +560,12 @@ export type CheckLifecycleHooks = {
     outcome: CheckTerminalOutcome;
     inheritedHeadSha?: string;
     budgetExhaustion?: BudgetExhaustedOutcome;
+    /**
+     * The failure settlement's redacted, bounded stage+class detail. The hook
+     * threads it into the Check's summary so a red Check already says where
+     * and what instead of the fixed text alone.
+     */
+    failureDetail?: string;
     updateBudgetMs: number }): Promise<void>;
   abandonTerminalize?(input: {
     handle: CheckHandle;
@@ -1825,6 +1831,12 @@ type PhaseFailureBase = {
    * author-facing `message`, which keeps no internal mechanism wording.
    */
   lastStage?: string;
+  /**
+   * The thrown error's own class as serializable data, captured at the throw
+   * site. Settlement composes it into the operator-facing detail so an
+   * unclassified row names WHAT failed, not only that something did.
+   */
+  errorClass?: string;
 };
 
 export type PhaseFailure =
@@ -1866,8 +1878,10 @@ export type PhaseFailureStep = { kind: "failed"; failure: PhaseFailure };
  * the error object's prototype.
  */
 export class PhaseTransientError extends Error {
+  readonly facts: TransientFacts;
+
   constructor(
-    readonly facts: {
+    facts: {
       stage: FailureStage;
       headSha: string | null;
       runnerReturned: boolean;
@@ -1881,6 +1895,11 @@ export class PhaseTransientError extends Error {
   ) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "PhaseTransientError";
+    // The error's class is captured HERE, while the prototype still exists: a
+    // rebuild across the retry boundary keeps `facts` as plain data but cannot
+    // be asked for the constructor again.
+    this.facts =
+      errorClassOf(cause) === undefined ? facts : { ...facts, errorClass: errorClassOf(cause) };
   }
 }
 
@@ -1914,6 +1933,7 @@ export type CheckSettlement = {
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
     budgetExhaustion?: BudgetExhaustedOutcome,
+    failureDetail?: string,
   ): Promise<void>;
 };
 
@@ -2122,6 +2142,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
     budgetExhaustion?: BudgetExhaustedOutcome,
+    failureDetail?: string,
   ): Promise<void> => {
     const budgets = checkBudgets ?? {
       terminalizeMs: CHECK_TERMINALIZE_DEFAULT,
@@ -2159,6 +2180,7 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
         outcome,
         ...(budgetExhaustion === undefined ? {} : { budgetExhaustion }),
         ...(inheritedHeadSha === undefined ? {} : { inheritedHeadSha }),
+        ...(failureDetail === undefined ? {} : { failureDetail }),
         updateBudgetMs: budgets.updateMs,
       });
       deps.background?.waitUntil(
@@ -2224,10 +2246,11 @@ export function createCheckSettlement(input: CheckSettlementInput): CheckSettlem
     outcome: CheckTerminalOutcome,
     inheritedHeadSha?: string,
     budgetExhaustion?: BudgetExhaustedOutcome,
+    failureDetail?: string,
   ): Promise<void> => {
     if (deps.checks === undefined || settlement.handle === null || settlement.terminalized) return;
     settlement.terminalized = true;
-    await runTerminalize(settlement.handle, publicationId, outcome, inheritedHeadSha, budgetExhaustion);
+    await runTerminalize(settlement.handle, publicationId, outcome, inheritedHeadSha, budgetExhaustion, failureDetail);
   };
 
   const promoteCheckInProgress = async (handle: CheckHandle): Promise<CheckPromotion["kind"]> => {
@@ -2565,6 +2588,53 @@ function strippedMessage(err: unknown): string {
   return text.replace(/^[A-Za-z][\w.]*Error: /, "");
 }
 
+/**
+ * The throw's identity as one serializable token: its constructor name, or the
+ * platform error's own `name`/`code` when a retry rebuilt the object without
+ * its prototype. Never re-derived from the message — a generic platform
+ * sentence is still an answer about WHERE it failed, and this answers WHAT.
+ */
+export function errorClassOf(err: unknown): string | undefined {
+  if (err === null || (typeof err !== "object" && typeof err !== "function")) return undefined;
+  const value = err as { constructor?: { name?: unknown }; name?: unknown; code?: unknown };
+  const constructorName = typeof value.constructor?.name === "string" ? value.constructor.name : undefined;
+  if (constructorName !== undefined && constructorName !== "" && constructorName !== "Object") return constructorName;
+  if (typeof value.name === "string" && value.name !== "") return value.name;
+  if (typeof value.code === "string" && value.code !== "") return value.code;
+  return undefined;
+}
+
+/**
+ * One clause of a thrown message, bounded for the row's composed text. Newlines
+ * collapse so the text stays a single line; a long tail is cut rather than
+ * dropped so the opening of the message — the part that names the operation —
+ * survives.
+ */
+function boundFailureMessage(text: string, maxChars = 400): string {
+  const single = text.replace(/[\r\n]+/g, " ").trim();
+  return single.length <= maxChars ? single : `${single.slice(0, maxChars - 1)}…`;
+}
+
+/**
+ * The operator-facing detail of an unclassified internal failure: the phase the
+ * throw was observed at, its class, a bounded message and the attempt it
+ * belongs to — never the platform's sentence alone. The class clause is absent
+ * only when the platform replaced the error wholesale and no facts survived.
+ */
+export function internalFailureDetail(input: {
+  phase: AttemptPhase;
+  errorClass: string | undefined;
+  message: string;
+  attemptId: string;
+}): string {
+  const phaseClause = `internal error in phase ${input.phase}`;
+  const what =
+    input.errorClass === undefined
+      ? `${phaseClause}: ${boundFailureMessage(input.message)}`
+      : `${phaseClause}: ${input.errorClass}: ${boundFailureMessage(input.message)}`;
+  return `${what} (attempt ${input.attemptId})`;
+}
+
 /** What one phase wrapper knows when it classifies its own failure. */
 export type PhaseFailureContext = {
   phase: AttemptPhase;
@@ -2594,6 +2664,12 @@ export type TransientFacts = {
   rateLimited: "primary" | "secondary" | null;
   /** The runner's last traced stage, when the throw site had its stderr. */
   lastStage?: string;
+  /**
+   * The thrown error's own class, captured at the throw site as plain data.
+   * It survives the rebuild the platform performs across a retry, where the
+   * prototype — and with it the constructor — is lost.
+   */
+  errorClass?: string;
 };
 
 /**
@@ -4988,9 +5064,20 @@ export async function settleAttemptFailure(
   prepared: PreparedAttempt | null,
 ): Promise<ProcessOutcome> {
   const { payload, level, attemptId, githubAppId } = ref;
-  const detail = failure.message;
   const code = failureCodeOf(failure);
   const summary = FAILURE_SUMMARIES[code];
+  // An unclassified internal failure reports what the record knows — the phase
+  // it was observed at, the throw's class and a bounded message — never the
+  // platform's sentence alone. Every other class carries its own wording.
+  const detail =
+    code === "review.internal.unclassified"
+      ? internalFailureDetail({
+          phase: failure.phase,
+          errorClass: failure.errorClass,
+          message: failure.message,
+          attemptId,
+        })
+      : failure.message;
   const markSettled = async (landed: readonly SettlementEffect[]): Promise<void> => {
     try {
       await settleAttemptIfDischarged(deps.env.DB, { attemptId, landed }, Date.now());
@@ -5241,6 +5328,9 @@ export async function settleAttemptFailure(
   // the verdict is record data now (the wrapper saw the response headers).
   const persistedDetail =
     failure.rateLimited === "secondary" ? `${GITHUB_RATE_LIMIT_PREFIX}${detail}` : detail;
+  // Redaction lands once on the SAME text the row and the Check share: a
+  // credential in the thrown message must reach neither surface.
+  const redactedDetail = redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId));
   try {
     await deps.failureStore.record({
       target_id: payload.targetId,
@@ -5254,7 +5344,7 @@ export async function settleAttemptFailure(
       id: attemptId,
       trackId: attemptId,
       message: summary,
-      error: redactExactSecrets(redactSecrets(persistedDetail), await sealedSecretValues(deps, attemptId)),
+      error: redactedDetail,
     });
     durableOutcome = true;
   } catch (recordErr) {
@@ -5287,10 +5377,13 @@ export async function settleAttemptFailure(
   if (paidStateObserved && durableOutcome) {
     await releaseLaunch();
   }
+  // The Check carries the same redacted stage+class text the row does, so a
+  // red Check already says where and what instead of the fixed sentence alone.
+  const failureDetail = code === "review.internal.unclassified" ? redactedDetail : undefined;
   if (sendAttempt !== null) {
-    await check?.terminalize(sendAttempt.publicationId, "publication-unknown");
+    await check?.terminalize(sendAttempt.publicationId, "publication-unknown", undefined, undefined, failureDetail);
   } else {
-    await check?.terminalize(null, "pre-publication-failure");
+    await check?.terminalize(null, "pre-publication-failure", undefined, undefined, failureDetail);
   }
 
   let claimStampLanded = payload.head_sha === null || payload.head_sha === undefined || payload.head_sha === "";

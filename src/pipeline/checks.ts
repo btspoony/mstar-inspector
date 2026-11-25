@@ -1136,6 +1136,12 @@ export function decideConclusion(input: {
   inherited?: { headSha: string; reviewedHeadSha: string };
   headSha?: string;
   budgetExhaustion?: BudgetExhaustedOutcome;
+  /**
+   * The settlement's already-redacted, bounded stage+class text for an
+   * execution fault. It never rewrites the approved sentence — it appends the
+   * operator-facing clause so the Check answers where and what.
+   */
+  failureDetail?: string;
 }): CheckConclusion {
   const { proof, outcome, gate, review, inherited } = input;
   if (outcome === "budget-exhausted") {
@@ -1214,7 +1220,10 @@ export function decideConclusion(input: {
     const sha7 = input.headSha === undefined || input.headSha === "" ? "unknown" : input.headSha.slice(0, 7);
     return { desired: "failure", title: CHECK_NAME, summary: CHECK_SUMMARIES.superseded(sha7) };
   }
-  return terminalFailure("unknown-failure");
+  const base = terminalFailure("unknown-failure");
+  const detail = input.failureDetail;
+  if (detail === undefined || detail.trim() === "") return base;
+  return { ...base, summary: `${base.summary} Recorded: ${boundedText(detail, "").slice(0, 240)}` };
 }
 
 function boundedText(text: string, fallback: string): string {
@@ -1306,6 +1315,12 @@ export type CheckLifecycle = {
     outcome: CheckTerminalOutcome;
     inheritedHeadSha?: string;
     budgetExhaustion?: BudgetExhaustedOutcome;
+    /**
+     * The failure settlement's already-redacted stage+class text. It joins the
+     * approved unknown-failure sentence as an operator-facing clause, so a red
+     * Check names where and what instead of the fixed wording alone.
+     */
+    failureDetail?: string;
     updateBudgetMs?: number;
   }): Promise<void>;
   markInProgress(input: {
@@ -1869,6 +1884,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
         inherited,
         headSha: handle.headSha,
         ...(input.budgetExhaustion === undefined ? {} : { budgetExhaustion: input.budgetExhaustion }),
+        ...(input.failureDetail === undefined ? {} : { failureDetail: input.failureDetail }),
       });
       const intentFence = fenceFor(handle.lease);
       const frozen = await setCheckDesired(

@@ -1440,6 +1440,38 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
   });
 
+  test("an execution fault carries the settlement's stage+class text after the approved sentence", () => {
+    const detail = "internal error in phase review: TypeError: the input write failed (attempt attempt-1)";
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate,
+      review: null,
+      failureDetail: detail,
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    // The approved sentence stands FIRST; the recorded facts follow it, bounded,
+    // so a red Check already says where and what.
+    expect(decided.summary.startsWith(TERMINAL_FAILURE_TEXT["unknown-failure"])).toBe(true);
+    expect(decided.summary).toContain("phase review");
+    expect(decided.summary).toContain("TypeError");
+    // Without the detail nothing changes: the approved wording alone.
+    const bare = decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null });
+    expect(bare.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+  });
+
+  test("a credential shape inside the detail never reaches the summary", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate,
+      review: null,
+      failureDetail: "internal error in phase review: Error: the token ghp_abcdefghijklmnop was refused (attempt a)",
+    });
+    expect(decided.summary).not.toContain("ghp_abcdefghijklmnop");
+  });
+
   test("no proof + degraded-not-posted carries the approved wording", () => {
     const decided = decideConclusion({ proof: null, outcome: "degraded-not-posted", gate, review: null });
     expect(decided.desired).toBe("failure");
