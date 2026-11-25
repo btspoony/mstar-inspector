@@ -421,6 +421,7 @@ export const en = {
         ignored: "Ignored",
         rejected: "Rejected",
         skipped: "Skipped",
+        refused: "Refused",
       },
     },
     tableName: "App",
