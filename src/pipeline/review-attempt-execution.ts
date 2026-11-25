@@ -413,7 +413,6 @@ export type ProcessOutcome =
   | { kind: "paused" }
   | { kind: "degraded" }
   | { kind: "superseded" }
-  | { kind: "rerun-stale" }
   | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
   | { kind: "unknown" };
 
@@ -2932,29 +2931,6 @@ async function preparePhase(
         `check supersede handoff failed — continuing the review for ${headSha.slice(0, 7)} with no Check`,
       );
     }
-  }
-  // A rerun reviews the head its Check names. A checkout that landed on a newer
-  // commit means the PR advanced after admission; continuing would pay for a
-  // review nobody requested, so the rerun settles here instead. The automatic
-  // path keeps its moving-head behavior.
-  if (
-    payload.triggered_by === "check_run" &&
-    typeof payload.head_sha === "string" &&
-    payload.head_sha !== "" &&
-    payload.head_sha !== headSha
-  ) {
-    deps.log.info(
-      fields,
-      `rerun checkout landed on ${headSha.slice(0, 7)}, not the rerun head ${payload.head_sha.slice(0, 7)} — settling without a paid review`,
-    );
-    await check?.terminalize(null, "skipped", headSha);
-    await settleSkippedRow(
-      deps,
-      payload,
-      payload.head_sha,
-      "rerun checkout landed on a head other than the rerun's own",
-    );
-    return { kind: "settled", outcome: { kind: "ok" } };
   }
   const done = await kvDoneHit(deps.env.IDEMPOTENCY_KV, kvClaimKey(payload, headSha), fields, deps.log);
   if (done) {

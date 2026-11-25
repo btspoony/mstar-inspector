@@ -64,13 +64,14 @@ rerequested is a trigger, never a bypass.
 
 ### 2.2 Check-run rerequested semantics
 
-- **Rerun means re-run the review on the PR's current head.** The rerun
-  targets the head the `pull_requests` watermark records for the PR —
-  re-running an already-superseded commit is pointless. The `review_checks`
+- **Re-run is an ordinary review of the PR's current head.** The `review_checks`
   row the run id names supplies the PR identity and proves App ownership; the
-  run's own recorded head is the fallback when the watermark row is absent or
-  its read faults. A lagging watermark row is never paid for: the checkout
-  fence below settles the attempt before metering. The enqueued job carries
+  enqueued `head_sha` is the `pull_requests` watermark head (the run's own
+  recorded head when that row or its read is unavailable — fail-open). From
+  there the job behaves exactly like an automatic trigger: the checkout follows
+  the PR ref, and if the PR moved after admission the supersede path closes the
+  old Check and reviews the current head. Re-running an already-superseded
+  commit is pointless, so there is no separate stale-rerun gate. The job carries
   `triggered_by: "check_run"`, `action: "rerequested"`, the
   `rerun_check_run_id` it was asked to rerun, `pr_number` from the row, and
   `owner`/`repo` from the delivery's current name (the row may predate a
@@ -90,18 +91,9 @@ rerequested is a trigger, never a bypass.
   successful enqueue so a failed send stays retriable), because the resolved
   head can move between the original delivery and the redelivery. The
   pipeline's existing `reviews` lookup then settles its attached run with the
-  head's persisted review against the App's current gate (`success`/`failure`),
-  or `neutral` with the skip reason when there is nothing to inherit, instead
-  of running the model again (RL-10).
-- **A head that was never successfully reviewed really re-reviews — while it
-  is still the PR head.** If the PR advances AGAIN between enqueue and
-  consume, the existing consumer supersede/settle path applies — no review
-  of yet another head: the consumer settles its attached run with the
-  enqueued head's persisted review when one exists, or `neutral` with the
-  skip reason when it does not, and acks. The workflow's checkout is fenced
-  the same way: if it lands on a head other than the rerun's payload head, the
-  rerun settles that attempt's Check as `skipped` with the skip reason and
-  returns before metering, so a later push is never paid for. On either leg, a persisted
+  current head's persisted review against the App's current gate
+  (`success`/`failure`), or `neutral` with the skip reason when there is
+  nothing to inherit, instead of running the model again (RL-10). A persisted
   review/publication row that EXISTS but cannot be READ settles
   `unknown-failure` → `failure` (fail-closed), never `neutral`.
 

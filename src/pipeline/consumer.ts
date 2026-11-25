@@ -1359,10 +1359,6 @@ export function createReviewConsumer(
         message.ack();
       } else if (outcome.kind === "superseded") {
         message.ack();
-      } else if (outcome.kind === "rerun-stale") {
-        // Already settled above: the stale run was closed, so a redelivery
-        // would only re-settle it.
-        message.ack();
       } else if (outcome.kind === "routed") {
         message.ack();
       } else if (outcome.kind === "unknown") {
@@ -1564,23 +1560,6 @@ async function processMessage(
     };
     const payloadHeadSha = payload.head_sha;
     const payloadHeadAt = payload.head_at;
-    // A rerun must review the commit its check names, never a newer one: the
-    // checkout follows the PR ref, so without this gate a rerun of an old
-    // check would pay for the live head and hang the result on the old run.
-    // This runs before any sandbox work and regardless of whether the named
-    // head was ever reviewed (the settled arms below only cover a reviewed
-    // or journaled head).
-    if (payload.triggered_by === "check_run" && payloadHeadSha) {
-      const live = await readWatermark("fail-open: reviewing the rerun's own head");
-      if (live?.headSha && live.headSha !== payloadHeadSha) {
-        deps.log.info(
-          { ...baseFields, event: "review_superseded", reason: "superseded" },
-          `rerun-stale: rerun targets ${payloadHeadSha.slice(0, 7)} but the PR head is ${live.headSha.slice(0, 7)} — settling the check instead of reviewing the live head`,
-        );
-        await settleSkippedRow(deps, payload, payloadHeadSha, "rerun targets a commit that is no longer the PR head");
-        return { kind: "rerun-stale" };
-      }
-    }
     if (payloadHeadSha && payloadHeadAt) {
       const ledgerHead = await readWatermark("fail-open: reviewing normally");
       if (
@@ -1815,16 +1794,6 @@ async function processMessage(
             `delivery keyed on ${earlyHeadSha.slice(0, 7)} but the PR head is ${movedHeadSha.slice(0, 7)} — reviewing the live head`,
           );
           await settleSkippedRow(deps, payload, earlyHeadSha, "superseded by a newer commit", { announceNoOp: true });
-          // A rerun names the commit its run was created for. Reviewing the live
-          // head would attach that result to a check the operator never asked
-          // about (and pay twice), so the run is settled as skipped instead.
-          if (payload.triggered_by === "check_run") {
-            deps.log.info(
-              earlyFields,
-              "rerun targets a commit that is no longer the PR head — settling the check instead of reviewing the live head",
-            );
-            return { kind: "rerun-stale" };
-          }
         }
         checkClaimSha = movedHeadSha ?? earlyHeadSha;
       }
