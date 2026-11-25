@@ -406,13 +406,14 @@ describe("claim 11 — one origin for the round clock", () => {
   test("the spent-window refusal names the step without a remainder", () => {
     let thrown: unknown;
     try {
-      boundedStepTimeout(Date.now() - 60_000, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
+      boundedStepTimeout(Date.now() - 60_000, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation", "remaining-window");
     } catch (err) {
       thrown = err;
     }
     expect(thrown).toBeInstanceOf(RoundBudgetSpent);
     const spent = thrown as InstanceType<typeof RoundBudgetSpent>;
     expect(spent.window).toBe("preparation");
+    expect(spent.cappedBy).toBe("remaining-window");
     expect(spent.message).toContain("diff capture");
     expect(spent.message).not.toMatch(/-\d+ms/);
   });
