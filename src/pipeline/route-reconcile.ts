@@ -34,6 +34,7 @@ import {
   listOwedSuccessors,
   listUnpublishedLaunchSettlements,
   markSuccessorDelivered,
+  recordSettlementAttempt,
   restoreCommentClaimForRecovery,
   settleAttemptIfDischarged,
   stampOwedSettlementClaim,
@@ -483,6 +484,11 @@ export async function reconcileReviewRoute(env: ReviewRouteEnv, nowMs = Date.now
     limit: ROUTE_RECOVERY_LIMIT,
   })) {
     try {
+      // The attempt stamp is the bounded-retry mark (I-000709): this row's
+      // turn is spent even when the settlement below faults or skips, so on
+      // the next pass it yields to rows not yet attempted — and is retried
+      // after them, never dropped.
+      await recordSettlementAttempt(env.DB, handoff.deliveryKey, nowMs);
       const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
       if (landed.has("skip")) continue;
       const launch = await readReviewLaunch(env.DB, handoff.attemptId);
