@@ -157,9 +157,9 @@ describe("attemptFailureStoryExists", () => {
   });
 
   test("a row keyed by anything but the attempt is not the attempt's story", async () => {
-    // The live phase's own row (random id, same track id) and the per-stage
-    // recheck row are never composed by a recovery lane for this attempt, so they
-    // do not refuse the observation — and the lookup stays a primary-key hit.
+    // The per-stage recheck row shares the attempt's `track_id` but is not the
+    // attempt's own settlement record, so it refuses nothing — and the lookup
+    // stays a primary-key hit.
     const db = createMigratedTestD1();
     seedTargetOnce(db);
     await seedHandoff(db, ATTEMPT);

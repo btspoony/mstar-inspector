@@ -593,11 +593,12 @@ SELECT 1 AS present FROM review_failures
  * row is a lane-authored story ("publication never started …") and the phase's
  * later observation must not replace it.
  *
- * Keyed on `id`, which the recovery writers set to the ATTEMPT id
- * (`landFailureEffect` inserts with it), so the guard is a primary-key lookup.
- * `track_id` carries the same value but has no index, and this predicate runs
- * precisely while no row matches yet — a scan of every workspace's failure
- * history per lost reply.
+ * Keyed on `id`, which every settlement writer sets to the ATTEMPT id (the
+ * live settlement and `landFailureEffect` alike), so the guard is one
+ * primary-key lookup. The `track_id` arm exists for the cross-build lookup
+ * (`settlementRowExists`, indexed by 0114) and is not needed here: a row this
+ * guard must judge was written by a build whose id IS the attempt, and the
+ * per-stage `<attempt>:recheck` row is deliberately not this attempt's story.
  *
  * A fallback-shaped row is deliberately NOT a story: it exists precisely because
  * no observation had arrived, and the late-observation sync rewrites it in place
@@ -615,16 +616,16 @@ SELECT 1 AS present FROM review_failures
 
 /**
  * Whether the attempt's own failure row already tells its story in words the
- * phase cannot improve on. The live settlement records only an OBSERVATION —
- * never a row — so a row that exists here came from a recovery lane that saw
- * materially more (a durable paid result with nothing staged), and its sentence
- * must stand. A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
+ * phase cannot improve on. That row is attempt-keyed whoever wrote it — the live
+ * settlement, or a recovery lane that saw materially more — and its sentence
+ * must stand, so a phase arriving after it records no observation (its own
+ * attempt-keyed insert would be a no-op anyway; this read keeps it from being
+ * attempted). A fallback-shaped row is excluded: see `ATTEMPT_FAILURE_STORY_SQL`.
  *
- * Only the ATTEMPT-KEYED row is consulted, which is the row those lanes compose
- * and the only indexed key. A row the live phase wrote under a random id (or the
- * per-stage `<attempt>:recheck` row) is not a story: a lane's later insert is
- * attempt-keyed with ON CONFLICT DO NOTHING and the sync lane only rewrites
- * fallback shapes, so recording the observation over such a row changes nothing.
+ * A row a PRE-CHANGE build wrote under a random id is not consulted: it is not
+ * this attempt's key, and recording the observation beside it changes nothing —
+ * the settlement lookup reuses that row and the sync lane only rewrites fallback
+ * shapes.
  */
 export async function attemptFailureStoryExists(db: D1Like, attemptId: string): Promise<boolean> {
   const row = await db

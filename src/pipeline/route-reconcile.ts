@@ -429,6 +429,16 @@ async function settleLostReplies(
     // refuses it), so the container's stop proof would be lost and the same PR
     // would stay held after its lease expired. The successor's own stop evidence
     // is what takes a released row, exactly as it does after a live failure.
+    //
+    // Two limits are deliberate. The `recorded` read is one step BEFORE the
+    // batch: a record that lands in between makes this pass's own insert a
+    // no-op (`owned: false`), which lands in exactly the same disposition below,
+    // so the branch does not depend on the read and the batch being one
+    // transaction. And the effects this pass leaves unlanded stay with their own
+    // lanes: a Check that never concludes keeps the handoff scheduled (its
+    // owner is the Check lane, not this pass), and the head-wide claim stamp is
+    // never written — once only that stamp remains the handoff is closed rather
+    // than retried forever, so the owed stamp stands as the recorded residual.
     let recorded: boolean;
     let moved: D1Result[];
     try {

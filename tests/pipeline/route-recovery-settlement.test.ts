@@ -668,9 +668,12 @@ function withReconcilerRace(
   return {
     prepare: (sql: string) => {
       const statement = db.prepare(sql);
+      // Bound to the lost-reply selector's own shape: the unpublished lane's
+      // selector shares the table, the join and the ORDER BY, and only this one
+      // carries the pre-column launch-instant arm.
       const isLostReplySelector =
         sql.includes("FROM review_attempt_handoffs h") &&
-        sql.includes("ORDER BY h.deadline_ms, h.delivery_key");
+        sql.includes("l.launched_at_ms <= ?2");
       if (isLostReplySelector) {
         let bound = statement;
         const racing: D1StatementLike = {
@@ -1707,6 +1710,7 @@ describe("a launched attempt whose paid reply was lost", () => {
     const payload = makePayload();
     const attemptId = "attempt-lost-reply-recorded";
     await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
     // note: The crash window's shape: a settlement recorded this attempt's failure
     // and died before it could move the launch row — the slot stays held, and
     // nothing can release it (the revoke is guarded on `launched`).
@@ -1725,13 +1729,20 @@ describe("a launched attempt whose paid reply was lost", () => {
         payload.head_sha,
         attemptId,
       );
+    // note: The attempt's own admission row, expired, still holding the PR.
+    seedHeldAdmission(db, payload, attemptId);
     const env = await h.makeEnv({ DB: db as never });
     const queue = { send: async () => {} };
     const selector = { deadlineBeforeMs: SETTLES_AT, limit: ROUTE_RECOVERY_LIMIT };
+    const admission = admissionAt(SETTLES_AT, payload);
 
     expect((await listLostReplyLaunchSettlements(db as never, selector)).map((row) => row.attemptId)).toEqual([
       attemptId,
     ]);
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
 
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
 
@@ -1746,12 +1757,30 @@ describe("a launched attempt whose paid reply was lost", () => {
     // note: The foreign settlement is not adopted into this lane's: no claim
     // stamp is written for a record this pass never landed.
     expect(h.kvPuts).toHaveLength(0);
+    // note: The expired lease still holds the PR: the release is the launch row,
+    // and who may take the slot is the stop proof's call, not a silent handover.
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
 
     // note: The release is the ONE move: the selector has nothing left to reach.
     expect(await listLostReplyLaunchSettlements(db as never, selector)).toEqual([]);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
     expect(failureRows(db)).toHaveLength(1);
     expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+
+    // note: The teardown the release left possible: cleanup proves the container
+    // gone, and the admission row goes with it — a revoked row could never get
+    // here, which is what kept the PR held forever.
+    const deps = await makeDeps(db);
+    const ref = makeRef(payload);
+    await cleanupAttempt(deps, { ...ref, attemptId, inflight: { ...ref.inflight!, attemptId } });
+    expect(h.sandbox.destroyCalls).toBe(1);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get()).toEqual({ n: 0 });
+    expect(await acquireInflight(db as never, holdOf(payload), { ...admission, attemptId: "attempt-fresh" })).toEqual({
+      ok: true,
+    });
   });
 
   /** The container this attempt minted: what the teardown and stop proofs address. */
@@ -1851,43 +1880,6 @@ describe("a launched attempt whose paid reply was lost", () => {
         priorStopped: { attemptId },
       }),
     ).toEqual({ ok: true });
-  });
-
-  test("a released row can still be torn down, and the cleanup hands the PR back", async () => {
-    const db = await createSeededTestD1();
-    const payload = makePayload();
-    const attemptId = "attempt-lost-reply-teardown";
-    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
-    noteContainerId(db, attemptId);
-    seedHeldAdmission(db, payload, attemptId);
-    db.raw
-      .prepare(
-        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.paid.reply_lost', ?, 'recorded elsewhere', datetime('now'))`,
-      )
-      .run(
-        attemptId,
-        payload.targetId,
-        payload.installation_id,
-        payload.owner,
-        payload.repo,
-        payload.pr_number,
-        payload.head_sha,
-        attemptId,
-      );
-    const env = await h.makeEnv({ DB: db as never });
-    const queue = { send: async () => {} };
-
-    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
-
-    // note: The teardown a revoked row would make impossible: the container is
-    // reachable, so cleanup destroys it and releases the admission row.
-    const deps = await makeDeps(db);
-    const ref = makeRef(payload);
-    await cleanupAttempt(deps, { ...ref, attemptId, inflight: { ...ref.inflight!, attemptId } });
-    expect(h.sandbox.destroyCalls).toBe(1);
-    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get()).toEqual({ n: 0 });
-    expect(await acquireInflight(db as never, holdOf(payload), { ...admissionAt(SETTLES_AT, payload), attemptId: "attempt-fresh" })).toEqual({ ok: true });
   });
 
   test("the phase's observation is what the row records, and the reconciler is its only writer", async () => {

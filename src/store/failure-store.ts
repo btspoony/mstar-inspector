@@ -219,7 +219,7 @@ function assertFailureStage(stage: string): void {
 /**
  * The route recovery pass's terminal settlement failure: ONE row per ATTEMPT,
  * keyed by the attempt itself, so a re-pass or two concurrent passes can never
- * mint a second randomly identified row. The caller commits this in the SAME
+ * mint a second row for one attempt. The caller commits this in the SAME
  * D1 batch as the attempt's settle-once mark, which is what makes "the row
  * exists" and "the fact is recorded" a single step.
  */
