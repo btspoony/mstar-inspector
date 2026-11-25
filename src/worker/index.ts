@@ -88,17 +88,24 @@ app.use("*", spaDispatch());
  * shared-bot capability then refused reads `skipped`. `ok` would claim a job
  * was enqueued, and `paused` would tell an operator a switch is off while it
  * is on.
+ *
+ * `routeRefused` is the fourth gate: a job the review.route.workflow gate
+ * refused at acceptance reads `refused`. It sits after the pauses on purpose:
+ * a closed platform gate must not rewrite the visible reason a paused App's
+ * delivery stopped at — the operator reads `paused` and sees the switch.
  */
 export function deliveryOutcomeFromWebhook(
   outcome: { kind: Exclude<WebhookOutcome["kind"], "check_rerun"> },
   reviewEnabled: number,
   reviewGlobal: boolean,
   sharedBotRefused = false,
+  routeRefused = false,
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
   if (reviewEnabled === 0 || !reviewGlobal) return "paused";
+  if (routeRefused) return "refused";
   return sharedBotRefused ? "skipped" : "ok";
 }
 
@@ -575,7 +582,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         await appsStore.recordDelivery({
           appId: row.id,
           eventName,
-          outcome: "refused",
+          outcome: deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, false, true),
           statusCode: null,
           repositoryFullName: webhookRepositoryFullName(classified),
           reason: `review.route.workflow gate off (degraded=${routeGate.degraded})`,

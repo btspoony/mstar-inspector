@@ -1042,6 +1042,53 @@ describe("per-App webhook face — best-effort delivery recording", () => {
     expect(fields.event).toBe("delivery_record_failed");
   });
 
+  test("route gate off: a paused App's delivery records 'paused' — the gate does not rewrite the visible reason", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    await createReviewBotsStore(db).setReviewEnabled(appRow.id, false);
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("ignored");
+    expect(sent).toHaveLength(0);
+    expect(deliveriesFor(db, appRow.id)).toEqual([
+      { event_name: "pull_request", outcome: "paused", status_code: null },
+    ]);
+  });
+
+  test("route gate off after a successful delivery: the refused row wins the dashboard's ordered read", async () => {
+    const db = createMigratedD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    // Gate on: the first delivery enqueues and records 'ok'.
+    const first = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(await first.text()).toBe("accepted");
+
+    db.raw
+      .prepare(
+        `INSERT OR REPLACE INTO review_runtime_settings (key, value, updated_at)
+         VALUES ('review.route.workflow', 'off', datetime('now'))`,
+      )
+      .run();
+    const second = await postWebhook("/webhook/default/app-x", body, await sigHeaders("secret-x", body), env);
+    expect(await second.text()).toBe("ignored");
+
+    const summary = await createReviewBotsStore(db).deliverySummary(appRow.id);
+    expect(summary.latest?.outcome).toBe("refused");
+  });
+
 });
 
 describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, QC S-2)", () => {
@@ -1057,6 +1104,10 @@ describe("deliveryOutcomeFromWebhook (classifier outcome → delivery outcome, Q
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, true)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, true)).toBe("paused");
     expect(deliveryOutcomeFromWebhook({ kind: "reject" }, 1, true, true)).toBe("rejected");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, true, false, true)).toBe("refused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 0, true, false, true)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "job" }, 1, false, false, true)).toBe("paused");
+    expect(deliveryOutcomeFromWebhook({ kind: "ignore" }, 1, true, false, true)).toBe("ignored");
   });
 
   test.each([
