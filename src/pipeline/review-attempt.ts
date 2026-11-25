@@ -446,23 +446,6 @@ export function recordReviewFailureStatement(db: D1Like, attemptId: string, nowM
   return db.prepare(RECORD_LAUNCH_FAILURE_SQL).bind(nowMs, attemptId);
 }
 
-/**
- * The REVOCATION as a statement (see `markAttemptRevoked`), for a settlement
- * that must clear the attempt's capacity hold in the same batch: an expired
- * admission row keeps holding its slot while its attempt is activated and never
- * revoked, and a window that proved no live child is exactly the evidence
- * `revoke()` would have given. Idempotent: an already-revoked row matches zero.
- */
-export function markAttemptRevokedStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
-  return db
-    .prepare(
-      `UPDATE review_launches SET revoked_ms = ?
-        WHERE attempt_id = ? AND state = 'launched' AND result_outcome IS NULL AND revoked_ms IS NULL`,
-    )
-    .bind(nowMs, attemptId);
-}
-
-
 const ABANDON_LAUNCH_SQL = `
 INSERT INTO review_launches (attempt_id, state, claimed_at_ms, abandoned_at_ms, sandbox_id)
 VALUES (?, 'abandoned', ?, ?, ?)

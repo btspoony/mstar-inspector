@@ -143,6 +143,28 @@ function settledMark(db: TestD1): number | null {
 }
 
 /** The launch row's capacity-revocation instant: the arm an expired admission row needs. */
+
+/**
+ * A database whose settle-once MARK write refuses at execution — and only that
+ * write. Batch members run unwrapped, so a release batch that already landed the
+ * landed fact survives the fault.
+ */
+function markWriteFaults(db: TestD1): D1Like {
+  const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
+    bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
+    first: () => st.first(),
+    all: () => st.all(),
+    run: async () => {
+      if (sql.includes("settled_ms = CASE")) throw new Error("D1 mark write failed");
+      return st.run();
+    },
+  });
+  return {
+    prepare: (sql: string) => wrap(sql, db.prepare(sql)),
+    batch: (statements: D1StatementLike[]) => db.batch(statements),
+    raw: db.raw,
+  } as unknown as D1Like;
+}
 function revokedAt(db: TestD1, attemptId: string): number | null {
   const row = db.raw
     .prepare("SELECT revoked_ms FROM review_launches WHERE attempt_id = ?")
@@ -1515,6 +1537,109 @@ describe("a launched attempt whose paid reply was lost", () => {
     expect(h.kvPuts).toHaveLength(0);
   });
 
+  test("a crash window over a legacy record releases once: no second record, no revoke, no claim", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-legacy-crash";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    seedHeldAdmission(db, payload, attemptId);
+    // The dead live settlement's state: it began settling, and the record it left
+    // is a previous build's (random id, the attempt only in `track_id`). The
+    // launch row never moved.
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(SETTLES_AT - 10 * 60_000, attemptId);
+    const legacyId = "6c1f0d2e-1111-4222-8333-944455556666";
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded by the old build', 'review.internal.unclassified', ?, 'recorded by the old build', datetime('now'))`,
+      )
+      .run(
+        legacyId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const ledgerOf = (): { settled_ms: number | null; settled_effects: string | null; settling_ms: number | null } =>
+      db.raw
+        .prepare("SELECT settled_ms, settled_effects, settling_ms FROM review_attempt_handoffs WHERE attempt_id = ?")
+        .get(attemptId) as { settled_ms: number | null; settled_effects: string | null; settling_ms: number | null };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // ONE record: the legacy row, untouched — the guarded insert proved it exists,
+    // so this pass created nothing.
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.id).toBe(legacyId);
+    expect(String(failureRows(db)[0]!.error)).toBe("recorded by the old build");
+    // The release landed, and the landed fact rode in the same batch as it.
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+    expect(JSON.parse(ledgerOf().settled_effects ?? "[]") as string[]).toContain("failure-row");
+    // A pass that created no record revokes nothing and claims nothing.
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+    // The PR is still held: taking the slot is the stop proof's call, not a
+    // silent handover from a non-owner.
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...admissionAt(SETTLES_AT, payload), attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held" });
+
+    // A second pass changes nothing: one record, still no revoke, still no claim.
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT + 60_000);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(revokedAt(db, attemptId)).toBeNull();
+    expect(h.kvPuts).toHaveLength(0);
+  });
+
+  test("the release records its landed fact in the batch, so a mark fault still proves it", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-fact-before-mark";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    db.raw
+      .prepare("UPDATE review_attempt_handoffs SET settling_ms = ? WHERE attempt_id = ?")
+      .run(SETTLES_AT - 10 * 60_000, attemptId);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    // note: The MARK write is what fails: the release batch itself (with the
+    // landed fact) is unaffected, because batch statements execute unwrapped.
+    const env = await h.makeEnv({ DB: markWriteFaults(db) as never });
+    const queue = { send: async () => {} };
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    const ledger = db.raw
+      .prepare("SELECT settled_ms, settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?")
+      .get(attemptId) as { settled_ms: number | null; settled_effects: string | null };
+    // note: The batch's own fact is the only proof left: the mark never landed,
+    // and the next pass reads this to know the record exists.
+    expect(JSON.parse(ledger.settled_effects ?? "[]") as string[]).toContain("failure-row");
+    expect(ledger.settled_ms).toBeNull();
+    expect(failureRows(db)).toHaveLength(1);
+    expect(launchRow(db, attemptId)).toEqual({ state: "failed", result_outcome: "failed" });
+  });
+
   test("a per-stage recheck row is not the attempt's settlement record", async () => {
     const db = await createSeededTestD1();
     const payload = makePayload();
@@ -2261,11 +2386,12 @@ describe("a launched attempt whose paid reply was lost", () => {
     const observedCause = "Error: socket hang up (after 800ms)";
     const observedMessage = `the attempt container could not be read at the review step (reply-lost) — ${observedCause} — nothing may be concluded`;
     let injected = false;
-    // The settlement-effect batch is the only one with exactly two statements
-    // (the attempt-keyed insert + its landed mark); the lost-reply gate is three.
+    // The pass composes the record BEFORE its release batch, so the window this
+    // test targets is "composition done, batch not yet run": the release batch is
+    // the first one this pass issues.
     const racing = withReconcilerRace(db, {
-      beforeBatch: async (statements) => {
-        if (injected || statements.length !== 2) return;
+      beforeBatch: async () => {
+        if (injected) return;
         injected = true;
         // The phase's own writer. Its stamp deliberately sits BEHIND the row's
         // `created_at` — the sync selects on content, never on time.

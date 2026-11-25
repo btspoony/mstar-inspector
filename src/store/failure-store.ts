@@ -208,7 +208,7 @@ WHERE created_at > datetime('now', '-24 hours')
   AND error LIKE ?`;
 
 /** `review_failures.stage` is a producer vocabulary — reject anything off it before writing. */
-function assertFailureStage(stage: string): void {
+export function assertFailureStage(stage: string): void {
   if (!FAILURE_STAGES.includes(stage)) {
     throw new Error(
       `failure-store: stage ${JSON.stringify(stage)} is not on the producer vocabulary (${FAILURE_STAGES.join(" | ")}) — zero rows written`,

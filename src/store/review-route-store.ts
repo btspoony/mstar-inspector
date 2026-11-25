@@ -22,7 +22,7 @@ import { REVIEW_ATTEMPT_CAP_MAX_MS } from "../dashboard/runtime-config-store";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEM_FAILED, putAbandonClaim, type AbandonClaimWrite } from "../contracts/idem";
 import { FAILURE_SUMMARIES, isFailureCode, type FailureCode } from "../contracts/failure-codes";
-import { settlementFailureRowStatement, type ReviewFailureInput } from "./failure-store";
+import { assertFailureStage, type ReviewFailureInput } from "./failure-store";
 import type { D1Like, D1StatementLike } from "./types";
 
 export type AttemptHandoffState = "owed" | "ambiguous" | "created" | "failed";
@@ -578,15 +578,109 @@ ON CONFLICT(attempt_id) DO NOTHING
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
 /**
- * The settlement record's lookup. `?1` is the attempt, `?2` its per-stage
- * `<attempt>:recheck` row: the attempt's `track_id` covers rows a build before
- * the attempt-keyed id wrote, and the exclude keeps that per-stage row from
- * standing in for the attempt's own record.
+ * "This attempt has no settlement record yet" as a PREDICATE, bound as `?1` =
+ * attempt, `?2` = that attempt's `<attempt>:recheck` per-stage row. Two builds
+ * wrote the record: the attempt-keyed id, and — before that key — a random id
+ * carrying the attempt in `track_id` (indexed by 0114). Evaluating this inside
+ * the write, rather than reading it first, is what makes existence a fact of the
+ * batch: a concurrent settlement cannot slip a record in between the decision
+ * and the statement, and both statements that use it see the same rows.
  */
-const SETTLEMENT_ROW_EXISTS_SQL = `
-SELECT 1 AS present FROM review_failures
- WHERE (id = ?1 OR track_id = ?1) AND id <> ?2
- LIMIT 1`;
+const SETTLEMENT_RECORD_MISSING = `NOT EXISTS (
+  SELECT 1 FROM review_failures f
+   WHERE f.id = ?1 OR (f.track_id = ?1 AND f.id <> ?2)
+)`;
+
+/**
+ * The settlement record's insert, guarded by its OWN existence predicate. One
+ * row per attempt for any build's row, and the statement's `changes` is the
+ * proof that THIS pass created it — the only proof the head-wide claim may rest
+ * on. `ON CONFLICT(id)` keeps two simultaneous replays harmless.
+ */
+export function settlementRecordInsertStatement(
+  db: D1Like,
+  input: ReviewFailureInput,
+  attemptId: string,
+  /**
+   * A caller's own precondition, ANDed into the guard. It may only use the same
+   * `?1` (attempt) / `?2` (per-stage row) binds — the release batch passes its
+   * launch precondition, so a race that terminalized the row another way writes
+   * no record at all.
+   */
+  extraGuard = "",
+): D1StatementLike {
+  assertFailureStage(input.stage);
+  return db
+    .prepare(
+      `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
+       SELECT ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
+        WHERE ${SETTLEMENT_RECORD_MISSING}${extraGuard === "" ? "" : ` AND ${extraGuard}`}
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .bind(
+      attemptId,
+      `${attemptId}:recheck`,
+      attemptId,
+      input.target_id,
+      input.installation_id,
+      input.owner,
+      input.repo,
+      input.pr_number,
+      input.head_sha,
+      input.stage,
+      input.error,
+      input.code ?? null,
+      input.trackId ?? attemptId,
+      input.message ?? null,
+    );
+}
+
+/**
+ * The revocation, for a lane that must not retire a row whose record somebody
+ * else already created: the same guarded move as `markAttemptRevokedStatement`
+ * plus "no settlement record exists yet". It is evaluated in the settlement
+ * batch BEFORE that batch's guarded insert, over the same rows, so it fires
+ * exactly when the insert wins — a pass that finds an existing record (any
+ * build's, including a legacy random-id one) never revokes, and the row stays
+ * tearable down and open to the successor's stop proof.
+ */
+export function revokeUnsettledLaunchStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
+  return db
+    .prepare(
+      `UPDATE review_launches SET revoked_ms = ?3
+        WHERE attempt_id = ?1 AND state = 'launched' AND result_outcome IS NULL AND revoked_ms IS NULL
+          AND ${SETTLEMENT_RECORD_MISSING}`,
+    )
+    .bind(attemptId, `${attemptId}:recheck`, nowMs);
+}
+
+/**
+ * Record one landed settlement effect as a durable fact, for a batch that
+ * terminalizes a record it did not write: a stop between the two writes would
+ * otherwise leave the next pass with no proof that the record exists, and the
+ * claim gate has to read that fact.
+ */
+export function recordLandedEffectStatement(
+  db: D1Like,
+  attemptId: string,
+  effect: SettlementEffect,
+  /** A caller's precondition on the same `?1` (attempt) bind — see the insert above. */
+  extraGuard = "",
+): D1StatementLike {
+  return db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET settled_effects = (
+                SELECT json_group_array(value) FROM (
+                  SELECT value FROM json_each(COALESCE(settled_effects, '[]'))
+                  UNION
+                  SELECT ?2
+                )
+              )
+        WHERE attempt_id = ?1${extraGuard === "" ? "" : ` AND ${extraGuard}`}`,
+    )
+    .bind(attemptId, effect);
+}
 /**
  * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
  * outside the fallback sentences, or another code, or another summary. Any such
@@ -595,9 +689,9 @@ SELECT 1 AS present FROM review_failures
  *
  * Keyed on `id`, which every settlement writer sets to the ATTEMPT id (the
  * live settlement and `landFailureEffect` alike), so the guard is one
- * primary-key lookup. The `track_id` arm exists for the cross-build lookup
- * (`settlementRowExists`, indexed by 0114) and is not needed here: a row this
- * guard must judge was written by a build whose id IS the attempt, and the
+ * primary-key lookup. The `track_id` arm belongs to the settlement's own
+ * existence predicate (`SETTLEMENT_RECORD_MISSING`) and is not needed here: a row
+ * this guard must judge was written by a build whose id IS the attempt, and the
  * per-stage `<attempt>:recheck` row is deliberately not this attempt's story.
  *
  * A fallback-shaped row is deliberately NOT a story: it exists precisely because
@@ -721,24 +815,6 @@ export async function recheckRowExists(db: D1Like, attemptId: string): Promise<b
 }
 
 /**
- * Whether this attempt's settlement record is already durable. Two keys, because
- * two builds wrote it: the attempt-keyed id (every settlement writer, the live
- * settlement included) and, for rows a build before that key wrote,
- * `track_id` — the attempt the failure belongs to (0106), indexed by 0114 so
- * this arm is a range read rather than a scan of every workspace's history.
- * The per-stage `<attempt>:recheck` row also carries the attempt's `track_id`
- * and is NOT this attempt's settlement record, so it is excluded by key; a row
- * a previous build wrote under a random id is.
- */
-export async function settlementRowExists(db: D1Like, attemptId: string): Promise<boolean> {
-  const row = await db
-    .prepare(SETTLEMENT_ROW_EXISTS_SQL)
-    .bind(attemptId, `${attemptId}:recheck`)
-    .first<{ present: number }>();
-  return row !== null;
-}
-
-/**
  * Complete the settle-once mark. It is written by the settlement itself, and it
  * records **which effects landed**: `settled_ms` is set only when the required
  * set is complete, so the mark can never certify an effect that is missing,
@@ -848,11 +924,11 @@ export async function landFailureEffect(
     : [...input.landed, "failure-row"];
   const mark = await settlementStatementForEffects(db, { attemptId: input.attemptId, landed }, nowMs);
   if (mark === null) return { landed: false, owned: false };
-  const results = await db.batch([
-    settlementFailureRowStatement(db, input.failure, input.attemptId),
-    mark,
-  ]);
-  // The row insert is second-to-last; the mark always closes the batch.
+  const results = await db.batch([settlementRecordInsertStatement(db, input.failure, input.attemptId), mark]);
+  // The row insert is second-to-last; the mark always closes the batch. Its own
+  // `changes` is the ownership proof: the insert carries the existence predicate,
+  // so zero means the attempt's record already existed — this pass created
+  // nothing and may not stamp the head.
   const insert = results[results.length - 2];
   return { landed: true, owned: (insert?.meta.changes ?? 0) === 1 };
 }
