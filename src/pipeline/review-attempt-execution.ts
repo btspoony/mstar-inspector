@@ -414,7 +414,6 @@ export type ProcessOutcome =
   | { kind: "paused" }
   | { kind: "degraded" }
   | { kind: "superseded" }
-  | { kind: "rerun-stale" }
   | { kind: "budget-exhausted"; outcome: BudgetExhaustedOutcome }
   | { kind: "unknown" };
 

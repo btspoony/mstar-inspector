@@ -36,7 +36,7 @@ export type SandboxImagePins = {
  * commit — a tag cannot yield the deref sha. The Dockerfile's `ref`/`tag`
  * comment pair, the engine manifest and the lock rows are hand-synced to it.
  */
-export const HARNESS_VERSION = "4.8.5";
+export const HARNESS_VERSION = "4.9.0";
 
 /** The `omp` image's build pins — the single declaration of its versioned inputs. */
 export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
@@ -46,7 +46,7 @@ export const OMP_SANDBOX_IMAGE_PINS: SandboxImagePins = Object.freeze({
   bunVersion: "1.4.0",
   bunImageDigest: "sha256:5bb0f9be3a1a36a03e27c9a9dd894a3b1ad26657155c7df4dda771e17bf872ef",
   harnessVersion: HARNESS_VERSION,
-  harnessRef: "bb5a2cc2a33158a9002203fbc9854c04d77e49a8",
+  harnessRef: "49577e8a32a26018327123d132d60e366b88c0df",
   harnessCliVersion: HARNESS_VERSION,
 });
 
