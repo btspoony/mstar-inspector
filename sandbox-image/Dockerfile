@@ -1,4 +1,4 @@
-# image-inputs: 47f6dc900d94bb522b0a20377ee3c6b5
+# image-inputs: 9e084366699611250c6cb5a77cb5d782
 # mstar-inspector review sandbox image (review-runner containerization).
 #
 # IMAGE INPUTS: this Dockerfile COPYs packages/{runner,shared}/src, but the

@@ -4261,8 +4261,9 @@ async function collectPhase(
   // The runner's seat coverage rode the stdout NEXT TO the envelope and was
   // captured by the SAME parse that validated the envelope (stripped before
   // the engine gates): a round whose envelope arrived carries whatever the
-  // runner reported, full or partial, and null means the round had none (an
-  // old runner, or no usable seat output).
+  // runner reported, full or partial. `null` means NOT ASSERTED, never a
+  // failure — the deep tier cannot observe its own seats, an old runner
+  // knows nothing of the block, and a no-output round never reaches here.
   const seatCoverage = parsed.coverage;
   const suggestionsDropped: ReviewOutput = {
     ...redacted,

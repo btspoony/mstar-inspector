@@ -1,10 +1,21 @@
 /**
  * The seat-coverage block the runner adds to a successful review output:
  * which seats completed, why the round stopped, and what was left
- * unreviewed. Present on every successful run (all seats completed →
- * `stoppedReason: null`, `unreviewed: []`); a round where no seat produced
- * output carries NO coverage — that round is a failure, not a partial
- * review.
+ * unreviewed. A present block always asserts a full or partial coverage —
+ * all seats finished → `stoppedReason: null`, `unreviewed: []`.
+ *
+ * Absence is NOT failure — it means the round does not assert coverage.
+ * Exactly two legal absences exist:
+ *
+ * - the DEEP tier, whose seats are task-dispatched in a way the runner
+ *   cannot observe, so a deep run asserts nothing about coverage at all;
+ * - a round where no seat produced usable output (the runner cannot even
+ *   see what it lost) — that round is a failure THROUGH THE FAILURE PATH,
+ *   never a partial review, and the coverage block simply never claims a
+ *   coverage for it.
+ *
+ * Consumers must treat a missing block as "not asserted": neither success
+ * evidence nor failure evidence.
  *
  * This is transport metadata next to the engine envelope, never an envelope
  * field: `mstar.review/v1` is closed and its schema does not grow.
