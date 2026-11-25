@@ -400,27 +400,27 @@ describe("claim 2 — the mark proves completion, not entry", () => {
 
   test("a stalled majority cannot starve the healthy settlement (two passes, I-000709)", async () => {
     const db = await createSeededTestD1();
-    const faultIds = new Set<string>();
+    const faultIdsInOrder: string[] = [];
     const attempts: string[] = [];
     for (let index = 0; index < ROUTE_RECOVERY_LIMIT + 1; index++) {
-      faultIds.add(await seedSettlementRow(db, index, 900 + index));
+      faultIdsInOrder.push(await seedSettlementRow(db, index, 900 + index));
     }
     const healthyId = await seedSettlementRow(db, 99, 950);
-    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, attempts) as never });
+    const env = await h.makeEnv({ DB: faultingObservationReads(db, new Set(faultIdsInOrder), attempts) as never });
     const queue = { send: async () => {} };
     const now = 1_000 + 5 * 60_000 + 1;
 
-    // Pass 1: the limit is spent on unattempted faulting rows; the healthy
-    // row is behind all of them and is not reached.
+    // Pass 1: the batch is exactly the 25 oldest unattempted faulting rows,
+    // in selection order — the healthy row is reached only when a later pass
+    // re-orders attempted rows behind unattempted ones.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
-    expect(attempts).toHaveLength(ROUTE_RECOVERY_LIMIT);
-    expect(attempts).not.toContain(healthyId);
+    const pass1 = attempts.splice(0);
+    expect(pass1).toEqual(faultIdsInOrder.slice(0, ROUTE_RECOVERY_LIMIT));
     expect(stampOf(db, healthyId).settle_attempt_ms).toBeNull();
     expect(stampOf(db, healthyId).settled_ms).toBeNull();
 
     // Pass 2 — the documented bound: unattempted rows go first, so the
     // healthy row settles while every faulting row is still owed.
-    attempts.splice(0);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
     expect(stampOf(db, healthyId).settled_ms).not.toBeNull();
     const settled = db.raw.prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?").get(healthyId) as {
@@ -428,7 +428,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     };
     const effects = JSON.parse(settled.settled_effects) as string[];
     expect(effects).toEqual(expect.arrayContaining(["failure-row", "claim-stamp"]));
-    for (const faultId of faultIds) {
+    for (const faultId of faultIdsInOrder) {
       expect(stampOf(db, faultId).settle_attempt_ms).not.toBeNull();
       expect(stampOf(db, faultId).settled_ms).toBeNull();
     }
