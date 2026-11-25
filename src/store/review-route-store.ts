@@ -227,6 +227,8 @@ type HandoffRow = {
   settled_ms: number | null;
   settled_effects: string | null;
   settling_ms: number | null;
+  /** The last pass that TOOK the row for a settlement attempt, or `null`. */
+  settle_attempt_ms: number | null;
 };
 
 function toHandoff(row: HandoffRow): AttemptHandoff {
@@ -359,7 +361,7 @@ export async function listLateObservedFailures(
   const rows = await db
     .prepare(
       `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
-              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms, h.settle_attempt_ms
          FROM review_attempt_handoffs h
          JOIN review_failures f ON f.id = h.attempt_id
         WHERE json_extract(h.payload_json, '$.${OBSERVATION_KEY}.message') IS NOT NULL
@@ -398,7 +400,7 @@ export async function syncSettledFailureRow(
 export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms, settle_attempt_ms
          FROM review_attempt_handoffs WHERE delivery_key = ?`,
     )
     .bind(deliveryKey)
@@ -414,7 +416,7 @@ export async function readAttemptHandoff(db: D1Like, deliveryKey: string): Promi
 export async function readAttemptHandoffByAttempt(db: D1Like, attemptId: string): Promise<AttemptHandoff | null> {
   const row = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms, settle_attempt_ms
          FROM review_attempt_handoffs WHERE attempt_id = ?`,
     )
     .bind(attemptId)
@@ -993,7 +995,14 @@ export async function readAttemptCheckKey(
 
 /**
  * Settlements that STARTED and never completed, quiet long enough that a live
- * step is not racing this pass.
+ * step is not racing this pass. Bounded retry discipline (I-000709): rows the
+ * pass already attempted and could not settle sort BEHIND rows not yet
+ * attempted (then by their last attempt stamp, oldest first), so a handful of
+ * permanently faulting settlements cannot consume the whole batch before
+ * newer work is reached — and none of them is ever skipped: once every open
+ * row has been attempted, they take their turns again oldest-stamp first.
+ * `delivery_key` breaks ties deterministically (every stamp of one pass
+ * shares one clock value).
  */
 export async function listIncompleteSettlements(
   db: D1Like,
@@ -1001,15 +1010,34 @@ export async function listIncompleteSettlements(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms, settle_attempt_ms
          FROM review_attempt_handoffs
         WHERE settled_ms IS NULL AND settling_ms IS NOT NULL AND settling_ms <= ?
-        ORDER BY settling_ms
+        ORDER BY (settle_attempt_ms IS NOT NULL), COALESCE(settle_attempt_ms, settling_ms), delivery_key
         LIMIT ?`,
     )
     .bind(input.settlingBeforeMs, input.limit)
     .all<HandoffRow>();
   return rows.results.map(toHandoff);
+}
+
+/**
+ * Stamp that this pass TOOK the row for a settlement attempt — the fairness
+ * mark behind `listIncompleteSettlements`' bounded retry order (I-000709).
+ * Written BEFORE the settlement work, so a row that faults (or is skipped)
+ * still yields to unattempted rows on the next pass and takes its own next
+ * turn after them. Rows settled in between are not re-stamped: the mark
+ * describes an attempt the lane owes, and a settled row owes nothing.
+ */
+export async function recordSettlementAttempt(db: D1Like, deliveryKey: string, nowMs: number): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE review_attempt_handoffs
+          SET settle_attempt_ms = ?
+        WHERE delivery_key = ? AND settled_ms IS NULL AND settling_ms IS NOT NULL`,
+    )
+    .bind(nowMs, deliveryKey)
+    .run();
 }
 
 /**
@@ -1053,7 +1081,7 @@ export async function listUnpublishedLaunchSettlements(
   const rows = await db
     .prepare(
       `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
-              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms, h.settle_attempt_ms
          FROM review_attempt_handoffs h
          JOIN review_launches l ON l.attempt_id = h.attempt_id
         WHERE h.settled_ms IS NULL AND h.settling_ms IS NULL AND h.state = 'created'
@@ -1160,7 +1188,7 @@ export async function listLostReplyLaunchSettlements(
   const rows = await db
     .prepare(
       `SELECT h.delivery_key, h.attempt_id, h.payload_json, h.state, h.deadline_ms,
-              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms
+              h.enqueued_ms, h.created_ms, h.settled_ms, h.settled_effects, h.settling_ms, h.settle_attempt_ms
          FROM review_attempt_handoffs h
          JOIN review_launches l ON l.attempt_id = h.attempt_id
         WHERE l.state = 'launched' AND l.result_outcome IS NULL
@@ -1194,7 +1222,7 @@ export async function listHandoffsForRecovery(
 ): Promise<AttemptHandoff[]> {
   const rows = await db
     .prepare(
-      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms
+      `SELECT delivery_key, attempt_id, payload_json, state, deadline_ms, enqueued_ms, created_ms, settled_ms, settled_effects, settling_ms, settle_attempt_ms
          FROM review_attempt_handoffs
         WHERE state IN ('owed', 'ambiguous') AND updated_ms <= ?
         ORDER BY updated_ms
