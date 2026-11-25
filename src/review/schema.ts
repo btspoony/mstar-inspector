@@ -45,6 +45,7 @@ import {
   type PrIncomplete,
 } from "@mstar-harness/engine";
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
+import { isReviewCoverage, type ReviewCoverage } from "../../packages/shared/src/coverage-wire";
 import { REDACTED } from "../../packages/shared/src/secret-shapes";
 import { z } from "zod";
 
@@ -462,6 +463,16 @@ export function parseReviewOutput(
             `harness merge classes are ${JSON.stringify(MERGE_CLASSES)}; use verdict + findings[].mergeClass`,
         };
       }
+      // The seat-coverage block is TRANSPORT metadata next to the envelope
+      // (coverage-wire.ts), never an envelope field: the closed engine gate
+      // must not see it, and its validity is the EXTRACTOR's question
+      // (`extractReviewCoverage`), never this parser's. Stripped before every
+      // check below, so a bad coverage block degrades nothing — the envelope
+      // alone decides the parse.
+      if (Object.hasOwn(parsed, "coverage")) {
+        const { coverage, ...envelopeOnly } = parsed as Record<string, unknown>;
+        parsed = envelopeOnly;
+      }
     }
     const gate = validateMstarReviewV1(parsed);
     if (!gate.ok) {
@@ -485,6 +496,37 @@ export function parseReviewOutput(
       : { ok: false, error: result.error.message };
   }
   return { ok: false, error: lastError };
+}
+
+/**
+ * Read the runner's seat-coverage block off raw stdout — the transport
+ * metadata that rides NEXT TO the envelope, never inside it (`mstar.review/v1`
+ * is closed; the runner prints one document that is the envelope plus this
+ * key). Same candidate order as `parseReviewOutput` (whole text, then first
+ * `{` … last `}`); a candidate whose `coverage` key passes the shared guard
+ * wins. `null` means no coverage — an older runner, or a round where no seat
+ * produced output. The envelope keys themselves are NOT read here: the
+ * envelope's own validation stays in `parseReviewOutput`.
+ */
+export function extractReviewCoverage(raw: string): ReviewCoverage | null {
+  const text = raw.trim();
+  if (text === "") return null;
+  const candidates: string[] = [text];
+  const braces = extractBraces(text);
+  if (braces !== null) candidates.push(braces);
+  for (const candidate of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const coverage = (parsed as Record<string, unknown>).coverage;
+      if (isReviewCoverage(coverage)) return coverage;
+    }
+  }
+  return null;
 }
 
 /**
