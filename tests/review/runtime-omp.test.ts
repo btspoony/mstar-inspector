@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as realSdkRoot from "@oh-my-pi/pi-coding-agent";
@@ -42,6 +42,7 @@ let seatResults: Array<{
   reject?: string;
   rejectWith?: unknown;
   awaitAbort?: boolean;
+  readDiff?: boolean;
 }> = [];
 let installedSeatAgent: string | null = null;
 let installedAgentFiles: string[] | null = null;
@@ -286,6 +287,10 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
     if (plan.reject !== undefined) throw new Error(plan.reject);
     if ("rejectWith" in plan) throw plan.rejectWith;
     const status = plan.status ?? "valid";
+    // A seat test double whose only tool surface is a file read: readDiff
+    // mirrors the real seat — parse the pinned snapshot path out of its own
+    // assignment, read that file, and conclude from what it sees there.
+    const data = plan.readDiff === true ? diffDrivenFindings(request.assignment as string) : plan.data;
     return {
       result: {
         index: 0,
@@ -300,7 +305,7 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         structuredOutput:
           status === "absent"
             ? undefined
-            : { source: "caller", mode: "strict", status, data: plan.data },
+            : { source: "caller", mode: "strict", status, data },
       },
       policy: {},
       mergeSummary: "",
@@ -632,6 +637,91 @@ describe("ompAgentRuntime.runReview — seat fan-out", () => {
     expect(envelope.verdict).toBe("incomplete");
     expect(envelope.findings).toEqual([]);
     expect(envelope.incomplete?.unscanned).toEqual([expect.stringContaining("full-diff-combined")]);
+  });
+});
+
+/**
+ * The seat test double's whole tool surface: parse the pinned snapshot path
+ * out of the seat's own assignment, read that file, and report the guard a
+ * REMOVED line carried — a finding that cannot exist without the diff text,
+ * since the checkout only holds the file's head state.
+ */
+function diffDrivenFindings(assignment: string): unknown {
+  const path = assignment.match(/Read the pinned diff snapshot FIRST: `([^`]+)`/)?.[1];
+  if (path === undefined) throw new Error("assignment carries no pinned diff snapshot");
+  const diffText = readFileSync(path, "utf8");
+  const removedGuard = diffText
+    .split("\n")
+    .filter((line) => line.startsWith("-") && !line.startsWith("---") && line.includes("throw"))
+    .map((line) => line.slice(1).trim());
+  return {
+    findings: removedGuard.map((guard) => ({
+      mergeClass: "must-fix",
+      title: "Removed guard",
+      body: `The diff deletes a guard: ${guard}`,
+      file_path: "src/a.ts",
+      line_start: 1,
+    })),
+  };
+}
+
+const GUARD_DIFF = [
+  "diff --git a/src/a.ts b/src/a.ts",
+  "--- a/src/a.ts",
+  "+++ b/src/a.ts",
+  "@@ -10,5 +10,4 @@",
+  " export function handle(user) {",
+  "-  if (!user) throw new Error(\"unauthenticated\");",
+  "   return user.name;",
+  " }",
+  "",
+].join("\n");
+
+describe("ompAgentRuntime.runReview — the seat receives the pinned diff", () => {
+  function pinDiff(): string {
+    const path = join(tmpdir(), `omp-test-diff-${crypto.randomUUID()}.diff`);
+    writeFileSync(path, GUARD_DIFF);
+    process.env.MSTAR_REVIEW_DIFF_PATH = path;
+    return path;
+  }
+
+  afterEach(() => {
+    delete process.env.MSTAR_REVIEW_DIFF_PATH;
+  });
+
+  test("the seat assignment carries the snapshot path and the prompt's read-first line names it", async () => {
+    const pinned = pinDiff();
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    for (const request of subagentRequests) {
+      const assignment = request.assignment as string;
+      expect(assignment).toContain(`Read the pinned diff snapshot FIRST: \`${pinned}\``);
+      expect(assignment).toContain("read it before opening files");
+    }
+  });
+
+  test("no pinned file: the assignment omits the diff ingredient entirely", async () => {
+    delete process.env.MSTAR_REVIEW_DIFF_PATH;
+    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
+    await ompAgentRuntime.runReview(BASE_INPUT);
+
+    for (const request of subagentRequests) {
+      // why: The engine's file-open-cap prose mentions the snapshot
+      // unconditionally; only the read-first ingredient is diffFile-driven.
+      expect(request.assignment as string).not.toContain("Read the pinned diff snapshot FIRST");
+    }
+  });
+
+  test("a seat whose only tools are reads produces a finding that requires a removed line", async () => {
+    pinDiff();
+    seatResults = [{ readDiff: true }];
+    const { envelope } = await ompAgentRuntime.runReview({ ...BASE_INPUT, level: "quick" });
+
+    expect(envelope.verdict).not.toBe("incomplete");
+    expect(envelope.findings).toHaveLength(1);
+    expect(envelope.findings[0]!.title).toBe("Removed guard");
+    expect(envelope.findings[0]!.body).toContain("unauthenticated");
   });
 });
 
