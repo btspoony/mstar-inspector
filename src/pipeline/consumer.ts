@@ -1047,6 +1047,64 @@ function haltRowIdentity(payload: ReviewJobPayload): string {
 }
 
 /**
+ * How many halted deliveries settle at once. One settlement costs about five
+ * subrequests (claim KV write, failure row, Check completion, comment claim),
+ * so eight in flight stays far under the 1000-subrequest invocation cap at the
+ * platform's 100-message batch ceiling and keeps the Check burst modest.
+ */
+export const HALT_SETTLE_CONCURRENCY = 8;
+
+/** Settle ONE halted delivery: paused claim, failure row, Check, comment claim, ack. */
+async function settleHaltedDelivery(
+  deps: ProcessDeps,
+  message: Message<ReviewJobPayload>,
+  halt: (typeof HALT_SETTLEMENT)[ReviewHaltState],
+  log: ConsumerLog,
+): Promise<void> {
+  const payload = message.body;
+  const fields = { ...payloadIdentityFields(payload), event: halt.event };
+  if (payload.head_sha) {
+    try {
+      await putAbandonClaim(
+        deps.env.IDEMPOTENCY_KV,
+        idemKey({
+          installation_id: payload.installation_id,
+          owner: payload.owner,
+          repo: payload.repo,
+          pr_number: payload.pr_number,
+          head_sha: payload.head_sha,
+        }),
+        IDEM_PAUSED,
+        IDEMPOTENCY_SECONDS,
+      );
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log.warn(fields, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
+    }
+  }
+  const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
+  await deps.failureStore.record({
+    id: `${halt.cause}:${haltRowIdentity(payload)}`,
+    target_id: payload.targetId,
+    installation_id: payload.installation_id,
+    owner: payload.owner,
+    repo: payload.repo,
+    pr_number: payload.pr_number,
+    head_sha: payload.head_sha ?? "",
+    stage: "pipeline",
+    code: halt.code,
+    trackId: `${identity}@${payload.head_sha ?? ""}`,
+    message: FAILURE_SUMMARIES[halt.code],
+    error: `${halt.cause}: ${halt.why}, so this queued delivery ended without a review — PR ${identity}, head_sha ${
+      payload.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : payload.head_sha
+    }`,
+  });
+  await settleSkippedRow(deps, payload, payload.head_sha, halt.checkReason, { paused: true });
+  await closeCommentClaim(deps.env.DB, payload);
+  message.ack();
+}
+
+/**
  * End a whole queue batch VISIBLY while reviews provably cannot run — the
  * platform switch is off, or the deployment's routing gate is not open.
  *
@@ -1069,6 +1127,10 @@ function haltRowIdentity(payload: ReviewJobPayload): string {
  * deliver to a platform that cannot run it (or replay once it resumes), so
  * the claim is closed with the settlement (`closeCommentClaim`) and that
  * failure is uncaught for the same reason.
+ *
+ * Deliveries settle `HALT_SETTLE_CONCURRENCY` at a time: the per-message work
+ * is independent (own KV key, own failure row id, own Check, own claim), so
+ * the width changes only latency.
  */
 export async function settleHaltedBatch(
   batch: MessageBatch<ReviewJobPayload>,
@@ -1090,49 +1152,23 @@ export async function settleHaltedBatch(
     },
     halt.line,
   );
-  for (const message of batch.messages) {
-    const payload = message.body;
-    const fields = { ...payloadIdentityFields(payload), event: halt.event };
-    if (payload.head_sha) {
-      try {
-        await putAbandonClaim(
-          deps.env.IDEMPOTENCY_KV,
-          idemKey({
-            installation_id: payload.installation_id,
-            owner: payload.owner,
-            repo: payload.repo,
-            pr_number: payload.pr_number,
-            head_sha: payload.head_sha,
-          }),
-          IDEM_PAUSED,
-          IDEMPOTENCY_SECONDS,
-        );
-      } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
-        log.warn(fields, `paused-claim KV write failed (the skip may still treat this commit as queued): ${detail}`);
-      }
+  // Bounded pool: a worker takes the next unsettled message until the batch is
+  // drained. Every worker is awaited even after one rejects, so no settlement
+  // outlives the invocation; the first failure is rethrown after that, leaving
+  // its message unacked for redelivery.
+  let next = 0;
+  const drain = async (): Promise<void> => {
+    while (next < batch.messages.length) {
+      const message = batch.messages[next];
+      next += 1;
+      if (message !== undefined) await settleHaltedDelivery(deps, message, halt, log);
     }
-    const identity = `${payload.owner}/${payload.repo}#${payload.pr_number}`;
-    await deps.failureStore.record({
-      id: `${halt.cause}:${haltRowIdentity(payload)}`,
-      target_id: payload.targetId,
-      installation_id: payload.installation_id,
-      owner: payload.owner,
-      repo: payload.repo,
-      pr_number: payload.pr_number,
-      head_sha: payload.head_sha ?? "",
-      stage: "pipeline",
-      code: halt.code,
-      trackId: `${identity}@${payload.head_sha ?? ""}`,
-      message: FAILURE_SUMMARIES[halt.code],
-      error: `${halt.cause}: ${halt.why}, so this queued delivery ended without a review — PR ${identity}, head_sha ${
-        payload.head_sha === null ? "unresolved (comment trigger, no sha in payload)" : payload.head_sha
-      }`,
-    });
-    await settleSkippedRow(deps, payload, payload.head_sha, halt.checkReason, { paused: true });
-    await closeCommentClaim(deps.env.DB, payload);
-    message.ack();
-  }
+  };
+  const settled = await Promise.allSettled(
+    Array.from({ length: Math.min(HALT_SETTLE_CONCURRENCY, batch.messages.length) }, drain),
+  );
+  const failed = settled.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed !== undefined) throw failed.reason;
 }
 
 /**
