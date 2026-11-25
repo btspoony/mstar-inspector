@@ -16,7 +16,7 @@ import {
   putAbandonClaim,
   type IdempotencyKey,
 } from "../contracts/idem";
-import { dropAllSuggestionFences, dropRedactedSuggestions, extractReviewCoverage, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
+import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import { REVIEW_SEATS } from "../../packages/shared/src/runtime";
@@ -4257,11 +4257,12 @@ async function collectPhase(
   }
 
   const redacted = redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues);
-  // The runner's seat coverage rides the stdout NEXT TO the envelope (the
-  // parser stripped it before the envelope gates): a round whose envelope
-  // arrived carries whatever the runner reported, full or partial, and null
-  // means the round had none (an old runner, or no usable seat output).
-  const seatCoverage = extractReviewCoverage(run.stdout);
+  // The runner's seat coverage rode the stdout NEXT TO the envelope and was
+  // captured by the SAME parse that validated the envelope (stripped before
+  // the engine gates): a round whose envelope arrived carries whatever the
+  // runner reported, full or partial, and null means the round had none (an
+  // old runner, or no usable seat output).
+  const seatCoverage = parsed.coverage;
   const suggestionsDropped: ReviewOutput = {
     ...redacted,
     findings: redacted.findings.map((finding) => ({

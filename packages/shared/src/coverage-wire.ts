@@ -1,10 +1,10 @@
 /**
- * The seat-coverage block the runner adds to a successful review output
- * (plan review-partial-delivery): which seats completed, why the round
- * stopped, and what was left unreviewed. Present on every successful run
- * (all seats completed → `stoppedReason: null`, `unreviewed: []`); a round
- * where no seat produced output carries NO coverage — that round is a
- * failure, not a partial review.
+ * The seat-coverage block the runner adds to a successful review output:
+ * which seats completed, why the round stopped, and what was left
+ * unreviewed. Present on every successful run (all seats completed →
+ * `stoppedReason: null`, `unreviewed: []`); a round where no seat produced
+ * output carries NO coverage — that round is a failure, not a partial
+ * review.
  *
  * This is transport metadata next to the engine envelope, never an envelope
  * field: `mstar.review/v1` is closed and its schema does not grow.
@@ -52,8 +52,16 @@ const isUnreviewedList = (value: unknown): value is ReviewSeatUnreviewed[] =>
 /**
  * The whole coverage guard: the exact key set, safe-integer counts with
  * `1 <= seatsCompleted <= seatsTotal`, the closed `stoppedReason` vocabulary
- * and well-formed `unreviewed` entries. A block that breaks the shape is not
- * a runner fact — the caller treats it as no coverage at all.
+ * and well-formed `unreviewed` entries — plus the block's INTERNAL truth:
+ *
+ * - FULL (every seat finished): `stoppedReason` null, `unreviewed` empty;
+ * - PARTIAL (some seats missing): `stoppedReason` "cap", and exactly one
+ *   `unreviewed` entry per missing seat.
+ *
+ * A block that types well but contradicts itself (a full round claiming a
+ * stop, a partial one claiming none, or a missing-seat count its list does
+ * not cover) is not a runner fact — the caller treats it as no coverage at
+ * all, never as a verdict input.
  */
 export function isReviewCoverage(value: unknown): value is ReviewCoverage {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -63,17 +71,22 @@ export function isReviewCoverage(value: unknown): value is ReviewCoverage {
     if (!Object.hasOwn(doc, key)) return false;
   }
   const { seatsTotal, seatsCompleted, stoppedReason, unreviewed } = doc;
-  return (
-    typeof seatsTotal === "number" &&
-    typeof seatsCompleted === "number" &&
-    Number.isSafeInteger(seatsTotal) &&
-    Number.isSafeInteger(seatsCompleted) &&
-    seatsTotal >= 1 &&
-    seatsCompleted >= 1 &&
-    seatsCompleted <= seatsTotal &&
-    (stoppedReason === null || stoppedReason === "cap") &&
-    isUnreviewedList(unreviewed)
-  );
+  if (
+    typeof seatsTotal !== "number" ||
+    typeof seatsCompleted !== "number" ||
+    !Number.isSafeInteger(seatsTotal) ||
+    !Number.isSafeInteger(seatsCompleted) ||
+    seatsTotal < 1 ||
+    seatsCompleted < 1 ||
+    seatsCompleted > seatsTotal ||
+    !isUnreviewedList(unreviewed)
+  ) {
+    return false;
+  }
+  if (seatsCompleted === seatsTotal) {
+    return stoppedReason === null && unreviewed.length === 0;
+  }
+  return stoppedReason === "cap" && unreviewed.length === seatsTotal - seatsCompleted;
 }
 
 /** How many scope entries one seat line shows before folding into a count. */
@@ -81,11 +94,26 @@ const MAX_SCOPE_ENTRIES = 3;
 /** How many seats the not-reviewed list shows before folding into a count. */
 const MAX_SEAT_ENTRIES = 3;
 
+/**
+ * Display normalization for repository-controlled text (seat names and file
+ * paths — a hostile diff can put anything in either): single-line, no
+ * Inspector marker syntax, and no angle brackets. This is done HERE, inside
+ * the one shared formatter, so the Check summary and the published body
+ * render the EXACT same sentence — the body's later marker strip can never
+ * diverge from the summary's unaugmented render.
+ */
+const displayText = (text: string): string =>
+  text
+    .replace(/<!--\s*mstar-inspector:[a-zA-Z-]+:v1[^>]*-->/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[<>]/g, (angle) => (angle === "<" ? "‹" : "›"));
+
 const scopeText = (scope: readonly string[]): string => {
   const shown = scope.slice(0, MAX_SCOPE_ENTRIES);
   const overflow = scope.length - shown.length;
   return (
-    shown.join(", ") + (overflow > 0 ? `, +${overflow} more file${overflow === 1 ? "" : "s"}` : "")
+    shown.map(displayText).join(", ") + (overflow > 0 ? `, +${overflow} more file${overflow === 1 ? "" : "s"}` : "")
   );
 };
 
@@ -104,7 +132,7 @@ export function partialSeatCoverageLine(coverage: ReviewCoverage | null | undefi
   const unreviewed =
     seats.length === 0
       ? ""
-      : ` — not reviewed: ${seats.map((seat) => `${seat.seat} (${scopeText(seat.scope)})`).join(", ")}` +
+      : ` — not reviewed: ${seats.map((seat) => `${displayText(seat.seat)} (${scopeText(seat.scope)})`).join(", ")}` +
         (seatOverflow > 0 ? `, +${seatOverflow} more seat${seatOverflow === 1 ? "" : "s"}` : "");
   return `Reviewed ${coverage.seatsCompleted}/${coverage.seatsTotal} seats${stopped}${unreviewed}`;
 }
