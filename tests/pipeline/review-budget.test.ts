@@ -7,8 +7,6 @@ import {
   deriveReviewBudget,
   CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
-  RUNNER_BUDGET_FLOOR_MS,
-  SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
 } from "../../src/review-budget";
@@ -195,24 +193,30 @@ describe("allocation: one min(), one absolute deadline", () => {
   });
 });
 
-describe("size-aware request: floor → tier maximum at 5,000 work units", () => {
+describe("size-aware request: the tier ceiling at every size", () => {
   const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
-  test("a zero-line diff requests the tier floor, not a refusal and not zero", () => {
+  test("a zero-line diff requests the tier ceiling, not a refusal and not the floor", () => {
     for (const level of LEVELS) {
       const request = requestRunnerBudget(level, size(0, 0));
       expect(request.kind).toBe("requested");
       if (request.kind !== "requested") return;
-      expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS[level]);
+      expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
       expect(request.workUnits).toBe(0);
     }
   });
 
-  test("each tier floor prices its seat count between the tail and the tier maximum", () => {
-    for (const level of LEVELS) {
-      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
-    }
-    expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 280_000, default: 500_000, deep: 646_000 });
+  test("a 44-line diff allocates the whole default ceiling — size never shrinks the window", () => {
+    const request = requestRunnerBudget("default", size(44, 44));
+    expect(request.kind).toBe("requested");
+    if (request.kind !== "requested") return;
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+    expect(request.workUnits).toBe(44);
+    const budget = budgetFor("default", CHECK_TERMINALIZE_MAX);
+    const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
+    expect(anchor.kind).toBe("allocated");
+    if (anchor.kind !== "allocated") return;
+    expect(anchor.effectiveBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
   });
 
   test("an unknown size requests the tier maximum — never the floor and never a second numstat", () => {
@@ -230,7 +234,7 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
     expect(request.workUnits).toBe(3);
-    expect(request.requestedBudgetMs).toBe(500_060);
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
   });
 
   test("a zero-text row beside real lines pays its own unit (the per-file minimum is per file)", () => {
@@ -252,38 +256,15 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
     }
   });
 
-  test("units at exactly the saturation point land on the tier maximum; one below stays inside", () => {
-    const at = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS, SIZE_SATURATION_WORK_UNITS));
-    expect(at.kind).toBe("requested");
-    if (at.kind !== "requested") return;
-    expect(at.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
-
-    const below = requestRunnerBudget("default", size(SIZE_SATURATION_WORK_UNITS - 1, SIZE_SATURATION_WORK_UNITS - 1));
-    expect(below.kind).toBe("requested");
-    if (below.kind !== "requested") return;
-    expect(below.requestedBudgetMs).toBeLessThan(RUNNER_MAX_BUDGET_MS.default);
-    expect(below.requestedBudgetMs).toBeGreaterThan(RUNNER_BUDGET_FLOOR_MS.default);
-  });
-
-  test("the ramp honours floor and ceiling on every interior size and every tier", () => {
+  test("every interior size requests the tier ceiling on every tier — no ramp, no buckets", () => {
     for (const level of LEVELS) {
-      for (const units of [1, 100, 1_000, 10_000, SIZE_SATURATION_WORK_UNITS + 500]) {
+      for (const units of [1, 100, 1_000, 5_000, 10_000]) {
         const request = requestRunnerBudget(level, size(units, units));
         expect(request.kind).toBe("requested");
         if (request.kind !== "requested") return;
-        expect(Number.isInteger(request.requestedBudgetMs)).toBe(true);
-        expect(request.requestedBudgetMs).toBeGreaterThanOrEqual(RUNNER_BUDGET_FLOOR_MS[level]);
-        expect(request.requestedBudgetMs).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
+        expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS[level]);
       }
     }
-  });
-
-  test("a tier whose seat-priced floor clamps to its ceiling has no ramp — deep, 2 work units → 646_000 ms", () => {
-    const request = requestRunnerBudget("deep", size(2, 2));
-    expect(request.kind).toBe("requested");
-    if (request.kind !== "requested") return;
-    expect(request.requestedBudgetMs).toBe(646_000);
-    expect(request.requestedBudgetMs).toBe(RUNNER_BUDGET_FLOOR_MS.deep);
   });
 
   test("malformed size input is invalid — never treated as an empty diff", () => {
@@ -310,12 +291,12 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
     const request = requestRunnerBudget("default", size(2_000, 2_000));
     expect(request.kind).toBe("requested");
     if (request.kind !== "requested") return;
-    expect(request.requestedBudgetMs).toBe(540_000);
+    expect(request.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
     const anchor = anchorRunnerBudget(budget, ROUND_START, request.requestedBudgetMs);
     expect(anchor.kind).toBe("allocated");
     if (anchor.kind !== "allocated") return;
-    expect(anchor.requestedBudgetMs).toBe(540_000);
-    expect(anchor.effectiveBudgetMs).toBe(540_000);
+    expect(anchor.requestedBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
+    expect(anchor.effectiveBudgetMs).toBe(RUNNER_MAX_BUDGET_MS.default);
   });
 
 });
@@ -323,7 +304,7 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
 describe("admission windows cover the whole allocation range", () => {
   const size = (changedLines: number, workUnits: number) => ({ changedLines, workUnits });
 
-  test("floor request: the smallest allocation still ends inside the earliest-acquired windows", () => {
+  test("a measured small diff ends inside the earliest-acquired windows", () => {
     for (const level of LEVELS) {
       const budget = budgetFor(level, CHECK_TERMINALIZE_MAX);
       const request = requestRunnerBudget(level, size(0, 1));
@@ -388,11 +369,7 @@ describe("admission windows cover the whole allocation range", () => {
       };
       const floor = anchoredWindows(size(0, 1));
       const ceiling = anchoredWindows(null);
-      if (RUNNER_BUDGET_FLOOR_MS[level] < RUNNER_MAX_BUDGET_MS[level]) {
-        expect(floor.effectiveBudgetMs).not.toBe(ceiling.effectiveBudgetMs);
-      } else {
-        expect(floor.effectiveBudgetMs).toBe(ceiling.effectiveBudgetMs);
-      }
+      expect(floor.effectiveBudgetMs).toBe(ceiling.effectiveBudgetMs);
       expect(floor.guardTtlSeconds).toBe(ceiling.guardTtlSeconds);
       expect(floor.checkWindowMs).toBe(ceiling.checkWindowMs);
       expect(floor.checkLeaseMs).toBe(ceiling.checkLeaseMs);
