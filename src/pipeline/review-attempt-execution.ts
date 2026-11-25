@@ -1344,6 +1344,7 @@ function refusePublicationPastDeadline(deadlineMs: number): void {
   throw new RoundBudgetSpent(
     `round budget spent: no first publication ${lateMs}ms past the attempt's frozen deadline`,
     "runner",
+    "remaining-window",
   );
 }
 
@@ -1437,7 +1438,7 @@ async function publishDegradedPublication(input: {
       });
     } catch (err) {
       if (err instanceof PublicationDeadlineSpent) {
-        throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
+        throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner", "remaining-window");
       }
       if (err instanceof PublicationAuthorityUnavailable) {
         try {
@@ -2680,6 +2681,7 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
         cause: "consumer-deadline",
         tier: ctx.tier,
         budgetWindow: err.window,
+        cappedBy: err.cappedBy,
         budgetMs: ctx.budgetMs,
         seatsDispatched: 0,
         seatsStopped: 0,
@@ -2835,7 +2837,7 @@ async function preparePhase(
     terminalizeMs: ref.checkBudgets?.terminalizeMs ?? CHECK_TERMINALIZE_DEFAULT,
     level,
   });
-  boundedStepTimeout(roundBudget.runnerCutoffMs, EXEC_TIMEOUT_GIT_MS, "attempt preparation", "preparation");
+  boundedStepTimeout(roundBudget.runnerCutoffMs, EXEC_TIMEOUT_GIT_MS, "attempt preparation", "preparation", "remaining-window");
   const sandboxId = attemptSandboxId(attemptId);
   const commenter = requireCommenter(deps, payload);
   const check = createCheckSettlement({
@@ -3147,7 +3149,7 @@ async function preparePhase(
   // restate the same instant.
   const runnerDeadlineMs = roundBudget.runnerCutoffMs;
   const diffStageNow = Date.now();
-  const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation");
+  const diffWindowMs = boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "diff capture", "preparation", "remaining-window");
   const diffCaptureDeadlineMs = diffStageNow + diffWindowMs;
   const diff = await sandbox.runCommand(cmds.diff, {
     env: { GH_TOKEN: token },
@@ -3183,6 +3185,7 @@ async function preparePhase(
         throw new RoundBudgetSpent(
           `${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`,
           "preparation",
+          "remaining-window",
         );
       }
       throw new Error(`${gitStageFailureDetail("diff", diff, progress.secretValues)}; oversized fallback: ${captured.reason} at ${captured.step}`);
@@ -3203,7 +3206,7 @@ async function preparePhase(
       incrementDiffCommand(payload.owner, payload.repo, sinceSha, headSha, DIFF_PATH),
       {
         env: { GH_TOKEN: token },
-        timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff", "preparation"),
+        timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "increment diff", "preparation", "remaining-window"),
       },
     );
     if (increment.exitCode !== 0) {
@@ -3456,7 +3459,7 @@ async function preparePhase(
   }
 
   const numstat = await sandbox.runCommand(cmds.numstat, {
-    timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation"),
+    timeout: boundedStepTimeout(runnerDeadlineMs, EXEC_TIMEOUT_GIT_MS, "numstat", "preparation", "remaining-window"),
   });
   if (numstat.exitCode !== 0 && diffFileState !== "empty") {
     throw new Error(`${gitStageFailureDetail("numstat", numstat, progress.secretValues)}; diff file: ${diffFileState}`);
@@ -3535,6 +3538,7 @@ async function preparePhase(
     throw new RoundBudgetSpent(
       `round budget spent: runner declined — the pre-runner cutoff is spent (${anchor.remainingMs}ms left for it)`,
       "preparation",
+      "remaining-window",
     );
   }
   observed.runnerEffectiveBudgetMs = anchor.effectiveBudgetMs;
@@ -4573,7 +4577,7 @@ async function publishPhase(
     });
   } catch (err) {
     if (err instanceof PublicationDeadlineSpent) {
-      throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner");
+      throw new RoundBudgetSpent(`round budget spent: ${err.message}`, "runner", "remaining-window");
     }
     if (err instanceof PublicationAuthorityUnavailable) {
       try {

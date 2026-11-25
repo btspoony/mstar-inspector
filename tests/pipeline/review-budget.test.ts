@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  allocationCappedBy,
   anchorRunnerBudget,
   requestRunnerBudget,
   parseNumstatSize,
@@ -113,6 +114,17 @@ describe("allocation: one min(), one absolute deadline", () => {
     if (anchor.kind !== "allocated") return;
     expect(anchor.effectiveBudgetMs).toBe(10_000);
     expect(anchor.execDeadlineMs).toBe(cutoff);
+  });
+
+  test("the allocation names which limit it came from — the request, or the remaining window", () => {
+    const budget = budgetFor("deep", 10_000);
+    const whole = anchorRunnerBudget(budget, ROUND_START);
+    const delayed = anchorRunnerBudget(budget, ROUND_START + 350_000);
+    expect(whole.kind).toBe("allocated");
+    expect(delayed.kind).toBe("allocated");
+    if (whole.kind !== "allocated" || delayed.kind !== "allocated") return;
+    expect(allocationCappedBy(whole)).toBe("level-budget");
+    expect(allocationCappedBy(delayed)).toBe("remaining-window");
   });
 
   test("a smaller request (a future size-based caller) is honoured, never widened", () => {

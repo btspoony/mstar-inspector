@@ -18,7 +18,12 @@ import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
 import { redactDocument, redactExactSecrets, redactSecrets } from "./redact";
-import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
+import {
+  allocationCappedBy,
+  EXEC_TIMEOUT_GIT_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  type RunnerBudgetAnchor,
+} from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like, D1StatementLike } from "../store/types";
 import {
@@ -1093,12 +1098,17 @@ export type ReviewAttemptExecution = {
  * The derived-deadline refusal: an attempt's own clock declined a step or a
  * paid exec. `window` names which derived window was spent — the runner
  * window frozen at the anchor (`runner`), or the preparation window before
- * the runner received an allocation (`preparation`).
+ * the runner received an allocation (`preparation`). `cappedBy` names which
+ * limit filled that window — the level's own budget or the round's remaining
+ * window — and is REQUIRED because the Check's recorded category and its
+ * copy cannot be derived from the window alone: an unclamped runner deadline
+ * IS the level's budget.
  */
 export class RoundBudgetSpent extends Error {
   constructor(
     message: string,
     readonly window: BudgetExhaustedOutcome["budgetWindow"],
+    readonly cappedBy: BudgetExhaustedOutcome["cappedBy"],
   ) {
     super(message);
     this.name = "RoundBudgetSpent";
@@ -1137,13 +1147,15 @@ export class BudgetExhaustedError extends Error {
  * never re-clamped here. `nowMs` fixes the clock when the caller must reuse
  * its own sample — a step whose timeout AND whose kill attribution read one
  * instant (the runner input write) passes it; everyone else takes the fresh
- * read.
+ * read. `cappedBy` is the throw site's own provenance: only the anchor knows
+ * whether the spent deadline was the level's budget or the remaining window.
  */
 export function boundedStepTimeout(
   runnerDeadlineMs: number,
   capMs: number,
   step: string,
   window: BudgetExhaustedOutcome["budgetWindow"],
+  cappedBy: BudgetExhaustedOutcome["cappedBy"],
   nowMs = Date.now(),
 ): number {
   const left = Math.min(capMs, runnerDeadlineMs - nowMs);
@@ -1151,6 +1163,7 @@ export function boundedStepTimeout(
     throw new RoundBudgetSpent(
       `round budget spent: ${step} declined — the derived runner deadline was already spent before this step`,
       window,
+      cappedBy,
     );
   }
   return left;
@@ -2093,6 +2106,7 @@ export async function prepareReviewAttempt(input: {
     EXEC_TIMEOUT_GIT_MS,
     "container provisioning",
     "preparation",
+    "remaining-window",
   );
   progress.failureStage = "sandbox";
   const provisioned = await sandbox.provision(marker, { deadlineEpochMs: Date.now() + provisionMs });
@@ -2294,6 +2308,7 @@ export async function runReviewAttempt(input: {
         EXEC_TIMEOUT_GIT_MS,
         "runner input write",
         "runner",
+        allocationCappedBy(runnerAnchor),
         deadlineMs - inputWriteWindowMs,
       ),
     },
@@ -2306,6 +2321,7 @@ export async function runReviewAttempt(input: {
           cause: "sandbox-kill",
           tier: level,
           budgetWindow: "runner",
+          cappedBy: allocationCappedBy(runnerAnchor),
           budgetMs: runnerAnchor.effectiveBudgetMs,
           seatsDispatched: 0,
           seatsStopped: 0,
@@ -2348,6 +2364,7 @@ export async function runReviewAttempt(input: {
     throw new RoundBudgetSpent(
       `round budget spent: runner declined — the exec deadline is spent (${beforeClaimMs}ms left for it)`,
       "runner",
+      allocationCappedBy(runnerAnchor),
     );
   }
   let launch: LaunchClaim;
@@ -2388,6 +2405,7 @@ export async function runReviewAttempt(input: {
         cause: "consumer-deadline",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: 0,
         seatsStopped: 0,
@@ -2453,6 +2471,7 @@ export async function runReviewAttempt(input: {
         cause: "sandbox-kill",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: null,
         seatsStopped: null,
@@ -2488,6 +2507,7 @@ export async function runReviewAttempt(input: {
         cause: "runner-deadline",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: budgetSignal.signal.seatsDispatched,
         seatsStopped: budgetSignal.signal.seatsStopped,
