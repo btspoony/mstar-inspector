@@ -1,6 +1,7 @@
 
 import type { Assessment, Coverage, OriginalFinding, RecheckTarget, ThreadSnapshot } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
+import type { ReviewCoverage } from "../../packages/shared/src/coverage-wire";
 import { createArtifactStore, type ReviewArtifactDoc } from "./artifact-store";
 import type {
   D1BatchResult,
@@ -63,6 +64,8 @@ export type PublicationPayload = {
   lineIntents: LineIntent[];
   attemptId?: string;
   admittedAttemptId?: string;
+  /** The runner's seat coverage for this round (null: none — old runner or no usable seat output). */
+  seatCoverage?: ReviewCoverage | null;
 };
 
 /** The phases a claimer may resume for: terminal rows are never claimable. */

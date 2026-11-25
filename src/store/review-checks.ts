@@ -1,6 +1,7 @@
 
 import { CHECK_WINDOW_MS } from "../review-budget";
 import type { Scope } from "../../packages/shared/src/recheck-wire";
+import { isReviewCoverage, type ReviewCoverage } from "../../packages/shared/src/coverage-wire";
 import { suspensionCredentialOf, type Lease, type SuspensionKind } from "./finding-lifecycle";
 import type { D1Like, ReviewCheckRow } from "./types";
 
@@ -134,7 +135,7 @@ export type CheckConclusion = {
  * when the row carries no readable tally — the caller treats that as an
  * unreadable gate input, never as a pass.
  */
-export type PublishedReview = { verdict: string; scorePct: number | null };
+export type PublishedReview = { verdict: string; scorePct: number | null; seatCoverage?: ReviewCoverage | null };
 
 /** The §7.9 claim outcome union. */
 export type ClaimAttemptResult =
@@ -2311,7 +2312,15 @@ async function readPublicationReview(
   const artifact = recordOf(recordOf(parseJson(row.payload_json))?.artifact);
   const envelope = recordOf(artifact?.payload);
   if (envelope === null || typeof envelope.verdict !== "string") return null;
-  return { verdict: envelope.verdict, scorePct: tallyScore(envelope) };
+  // The seat coverage rides the PUBLICATION payload (not the envelope): a
+  // stored value must pass the shared guard to be believed — anything else is
+  // no coverage, never a summary source.
+  const coverage = recordOf(parseJson(row.payload_json))?.seatCoverage;
+  return {
+    verdict: envelope.verdict,
+    scorePct: tallyScore(envelope),
+    ...(isReviewCoverage(coverage) ? { seatCoverage: coverage } : {}),
+  };
 }
 
 function parseJson(text: string | null): unknown {

@@ -43,6 +43,7 @@ import { claimPublicationLease, releasePublicationLease } from "../store/finding
 import { redactSecrets } from "./redact";
 import { CHECK_UPDATE_DEFAULT } from "./check-budgets-reader";
 import type { BudgetExhaustedOutcome } from "../../packages/shared/src/budget-exhausted-wire";
+import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
 
 
 /** A check-run payload as the installed octokit types deliver it. */
@@ -1151,17 +1152,24 @@ export function decideConclusion(input: {
     if (gate === null || review === null || review.scorePct === null) {
       return terminalFailure("unknown-failure");
     }
+    // A partial round is DELIVERED work, not a free pass: the verdict the
+    // round's own findings produced decides the gate exactly as it does for a
+    // full review — branch protection must never be satisfied over a verdict
+    // the review itself blocked. What the coverage adds is honesty: BOTH
+    // faces (this summary and the published body) name which seats never
+    // ran, whatever the conclusion.
+    const seatLine = partialSeatCoverageLine(review.seatCoverage);
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMet(sha7, proof.round, review.verdict, review.scorePct, gate), seatLine),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(CHECK_SUMMARIES.gateMissed(sha7, review.verdict, review.scorePct, gate), seatLine),
         };
   }
   if (inherited !== undefined) {
@@ -1171,21 +1179,32 @@ export function decideConclusion(input: {
     if (review === null || gate === null || review.scorePct === null) {
       return terminalFailure("unknown-failure");
     }
+    // The SAME decision as the publication branch, on the SAME inputs: an
+    // inherited gate position is never re-judged by a different rule, and the
+    // coverage sentence rides along whenever the read carried it — a
+    // re-requested Check can never flip or lose what the first pass concluded.
+    const seatLine = partialSeatCoverageLine(review.seatCoverage);
     const met = review.scorePct >= gate.minScore && gate.passVerdicts.includes(review.verdict);
     return met
       ? {
           desired: "success",
           title: CHECK_NAME,
-          summary: sameHead
-            ? CHECK_SUMMARIES.sameHeadInheritedGateMet(head7, review.verdict, review.scorePct, gate)
-            : CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(
+            sameHead
+              ? CHECK_SUMMARIES.sameHeadInheritedGateMet(head7, review.verdict, review.scorePct, gate)
+              : CHECK_SUMMARIES.inheritedGateMet(head7, base7, review.verdict, review.scorePct, gate),
+            seatLine,
+          ),
         }
       : {
           desired: "failure",
           title: CHECK_NAME,
-          summary: sameHead
-            ? CHECK_SUMMARIES.sameHeadInheritedGateMissed(head7, review.verdict, review.scorePct, gate)
-            : CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
+          summary: withSeatCoverage(
+            sameHead
+              ? CHECK_SUMMARIES.sameHeadInheritedGateMissed(head7, review.verdict, review.scorePct, gate)
+              : CHECK_SUMMARIES.inheritedGateMissed(head7, base7, review.verdict, review.scorePct, gate),
+            seatLine,
+          ),
         };
   }
   if (outcome === "skipped") {
@@ -1201,6 +1220,11 @@ export function decideConclusion(input: {
 function boundedText(text: string, fallback: string): string {
   const value = text.trim().length === 0 ? fallback : text;
   return redactSecrets(value).replace(/[\r\n]+/g, " ").slice(0, 240);
+}
+
+/** The gate summary and the partial-coverage sentence, one space apart; no sentence, no change. */
+function withSeatCoverage(summary: string, seatLine: string): string {
+  return seatLine === "" ? summary : `${summary} ${seatLine}`;
 }
 
 
@@ -1486,6 +1510,31 @@ function retryableOverlap(attempt: CheckAttempt): boolean {
  */
 export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
   const fenceFor = (lease: Lease): { lease: Lease; nowMs: number } => ({ lease, nowMs: deps.nowMs() });
+
+  /**
+   * The inherited head's review, read with the SAME inputs the publication
+   * branch decides on: when a proof exists for that head its publication is
+   * the source (coverage and all), exactly as in `settleSkipped`; the
+   * scope/SHA projection is the fallback a proofless row relies on. Without
+   * this a re-requested Check would decide from a leaner record than the
+   * first pass did — a partial round's coverage exists only on the
+   * publication payload.
+   */
+  const readInheritedHeadReview = async (
+    scope: Scope,
+    headSha: string,
+  ): Promise<PublishedReview | null> => {
+    const proof = await readPublicationProof(deps.db, { scope, headSha });
+    if (proof !== null) {
+      const published = await readPublishedReview(deps.db, {
+        scope,
+        headSha,
+        publicationId: proof.publicationId,
+      });
+      if (published !== null) return published;
+    }
+    return readInheritedReview(deps.db, { scope, headSha });
+  };
 
   const abandonUnterminalized = async (
     attemptId: string,
@@ -1805,10 +1854,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
             ? [null, null]
             : await Promise.all([
                 deps.getCheckGate(handle.scope),
-                readInheritedReview(deps.db, {
-                  scope: handle.scope,
-                  headSha: input.inheritedHeadSha,
-                }),
+                readInheritedHeadReview(handle.scope, input.inheritedHeadSha),
               ]);
       const [gate, review] = gateAndReview;
       const inherited =
@@ -1877,7 +1923,7 @@ export function createCheckLifecycle(deps: CheckLifecycleDeps): CheckLifecycle {
               review:
                 input.inheritedHeadSha === undefined
                   ? null
-                  : await readInheritedReview(deps.db, { scope: handle.scope, headSha: input.inheritedHeadSha }),
+                  : await readInheritedHeadReview(handle.scope, input.inheritedHeadSha),
               ...(input.inheritedHeadSha === undefined
                 ? {}
                 : { inherited: { headSha: handle.headSha, reviewedHeadSha: input.inheritedHeadSha } }),

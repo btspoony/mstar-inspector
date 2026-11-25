@@ -123,12 +123,14 @@ import {
 } from "./seat-failover-probe";
 import { writePerReviewModelsYaml } from "./models-synthesis";
 import {
+  ReviewNoOutputFailure,
   isReviewBudgetExhaustedSignal,
   RunnerBudgetExhausted,
 } from "../../shared/src/budget-exhausted-wire";
 import { decodeCredentialPayload } from "../../shared/src/credential-payload";
 import { APPLIED_MODEL_PATH, type AppliedModelDoc } from "../../shared/src/runtime";
 import { RECHECK_STATUS_PATH, type RecheckInput, type RecheckStatus } from "../../shared/src/recheck-wire";
+import { isReviewCoverage } from "../../shared/src/coverage-wire";
 import { type PrContext } from "../../shared/src/report-wire";
 import { TOKEN_USAGE_PATH, type TokenUsageDoc } from "../../shared/src/token-usage-wire";
 
@@ -807,7 +809,7 @@ export async function main(
     }
 
     try {
-      const { envelope, recheck, recheckStatus, report, appliedModel, tokenUsage } = await runtime.runReview(input);
+      const { envelope, coverage, recheck, recheckStatus, report, appliedModel, tokenUsage } = await runtime.runReview(input);
       if (appliedModel === undefined) {
         try {
           rmSync(appliedModelPath, { force: true });
@@ -882,7 +884,17 @@ export async function main(
       if (recheckOutPath !== undefined && recheckStatus !== undefined) {
         writeRecheckStatus(recheckStatus, statusPath);
       }
-      console.log(JSON.stringify(envelope));
+      // why: `coverage` rides BESIDE the engine envelope, never inside it —
+      // `mstar.review/v1` is closed and the consumer keys off its shape. The
+      // block is runner-owned, so a malformed one is refused here instead of
+      // being published as a claim the round cannot support.
+      if (coverage !== undefined && !isReviewCoverage(coverage)) {
+        console.error(
+          `review: coverage block failed its own shape: ${JSON.stringify(coverage).slice(0, 300)}`,
+        );
+        return 1;
+      }
+      console.log(JSON.stringify(coverage === undefined ? envelope : { ...envelope, coverage }));
       return 0;
     } catch (error) {
       if (error instanceof RunnerBudgetExhausted) {
@@ -916,6 +928,21 @@ export async function main(
         }
         console.log(JSON.stringify(signal));
         return 0;
+      }
+      // why: A no-output failure is still a FAILURE (exit 1, worker records it),
+      // but the recheck document it managed to settle is real evidence and is
+      // written exactly as the budget-stop path writes it.
+      if (error instanceof ReviewNoOutputFailure) {
+        if (recheckOutPath !== undefined && error.recheck !== null) {
+          try {
+            writeFileSync(recheckOutPath, JSON.stringify(error.recheck));
+          } catch (writeError) {
+            console.error(`review: cannot write recheck output ${recheckOutPath}: ${(writeError as Error).message}`);
+          }
+        }
+        if (recheckOutPath !== undefined && error.recheckStatus !== undefined) {
+          writeRecheckStatus(error.recheckStatus, statusPath);
+        }
       }
       const cause = (error as Error).message;
       if (agentDir !== undefined && authStorage !== undefined) {

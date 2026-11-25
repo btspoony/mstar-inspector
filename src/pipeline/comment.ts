@@ -13,6 +13,7 @@ import { isBudgetRefusal } from "../contracts/recovery-budget";
 import type { Assessment, Coverage, Scope, Discussion } from "../../packages/shared/src/recheck-wire";
 import { ASSESSMENT_TARGET_CAP } from "../../packages/shared/src/recheck-wire";
 import type { ReportDoc } from "../../packages/shared/src/report-wire";
+import { partialSeatCoverageLine, type ReviewCoverage } from "../../packages/shared/src/coverage-wire";
 import { claimDegradedTarget, hasUnprovenDegradedPublication, releaseDegradedTarget, type Lease, type LineIntent, type VerifiedResolution } from "../store/finding-lifecycle";
 import type { D1Like } from "../store/types";
 import { listDiscussionWithOctokit, type ListDiscussionInput } from "./discussion-context";
@@ -174,6 +175,7 @@ export function buildReviewBody(
   omittedFindings = 0,
   reportParts?: { report: ReportDoc | null; revalidated: string },
   limit = REVIEW_BODY_LIMIT,
+  seatCoverage?: ReviewCoverage | null,
 ): string {
   let rendered = output;
   if (output.incomplete !== undefined) {
@@ -196,18 +198,22 @@ export function buildReviewBody(
   }
   let core = renderReviewMarkdown(rendered);
   const closure = reportParts === undefined ? "" : reportParts.revalidated;
+  // The seat-coverage statement sits directly under the review core: a partial
+  // round says what it did NOT cover before anything else in the tail.
+  const seatLine = partialSeatCoverageLine(seatCoverage);
   const footer = omittedFindings > 0 ? `*(+${omittedFindings} more findings omitted)*` : "";
   const closureReserve = closure === "" ? 0 : closure.length + 2;
+  const seatReserve = seatLine === "" ? 0 : seatLine.length + 2;
   const footerReserve = footer === "" ? 0 : footer.length + 2;
   const tail =
     reportParts === undefined
       ? ""
-      : buildReportTail(reportParts.report, limit - closureReserve - footerReserve);
+      : buildReportTail(reportParts.report, limit - closureReserve - seatReserve - footerReserve);
   if (reportParts !== undefined) {
     core = insertReportFields(core, reportParts.report);
   }
-  const reserved = closureReserve + footerReserve + (tail === "" ? 0 : tail.length + 2);
-  return [clampKeepingHead(core, limit - reserved), closure, footer, tail]
+  const reserved = closureReserve + seatReserve + footerReserve + (tail === "" ? 0 : tail.length + 2);
+  return [clampKeepingHead(core, limit - reserved), seatLine, closure, footer, tail]
     .filter((part) => part !== "")
     .join("\n\n");
 }
@@ -456,6 +462,7 @@ export function buildPreparedReviewBody(input: {
   publicationMarker: string;
   sinceSha?: string;
   reportParts?: { report: ReportDoc | null; revalidated: string };
+  seatCoverage?: ReviewCoverage | null;
 }): string {
   const roundMarker = `<!-- mstar-inspector:review:v1 round=${input.round} -->`;
   const header =
@@ -464,7 +471,7 @@ export function buildPreparedReviewBody(input: {
   const reserve = roundMarker.length + header.length + input.publicationMarker.length + 8;
   const budget = REVIEW_BODY_LIMIT - reserve;
   const core = stripInspectorMarkerSyntax(
-    buildReviewBody(input.output, input.omittedFindings, input.reportParts, budget),
+    buildReviewBody(input.output, input.omittedFindings, input.reportParts, budget, input.seatCoverage),
   );
   return `${roundMarker}\n\n${clampKeepingHead(core, budget)}\n\n${header}\n${input.publicationMarker}`;
 }

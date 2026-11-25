@@ -45,6 +45,7 @@ import {
   type PrIncomplete,
 } from "@mstar-harness/engine";
 import { isReviewBudgetExhaustedSignal, type ReviewBudgetExhaustedSignal } from "../../packages/shared/src/budget-exhausted-wire";
+import { isReviewCoverage, type ReviewCoverage } from "../../packages/shared/src/coverage-wire";
 import { REDACTED } from "../../packages/shared/src/secret-shapes";
 import { z } from "zod";
 
@@ -432,10 +433,16 @@ function extractBraces(text: string): string | null {
  * Any failure returns `{ ok: false, error }` and never throws. An
  * M1-shaped document (no `schema` literal, M1 verdict/severity vocab) fails
  * here — it is never posted or persisted.
+ * `output` carries the validated envelope and `coverage` the seat-coverage
+ * block read off the SAME candidate that produced it (capture-before-strip,
+ * below): the two never come from different scans of the text, so a coverage
+ * block can never be claimed for — or lost from — a document the envelope
+ * was not validated against.
+ *
  */
 export function parseReviewOutput(
   raw: string,
-): { ok: true; output: ReviewOutput } | { ok: false; error: string } {
+): { ok: true; output: ReviewOutput; coverage: ReviewCoverage | null } | { ok: false; error: string } {
   const text = raw.trim();
   if (text === "") return { ok: false, error: "empty input" };
 
@@ -444,7 +451,6 @@ export function parseReviewOutput(
   if (fenced !== null) candidates.push(fenced);
   const braces = extractBraces(text);
   if (braces !== null) candidates.push(braces);
-
   let lastError = "not valid ReviewOutput JSON";
   for (const candidate of candidates) {
     let parsed: unknown;
@@ -453,6 +459,10 @@ export function parseReviewOutput(
     } catch {
       continue;
     }
+    // The seat-coverage block is read off THIS candidate — the one object the
+    // envelope is validated from — so the two can never disagree about which
+    // document the round produced.
+    let candidateCoverage: ReviewCoverage | null = null;
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
       if ((parsed as Record<string, unknown>).severity !== undefined) {
         return {
@@ -461,6 +471,17 @@ export function parseReviewOutput(
             'review.inspector-vocab: review document carries inspector M1 field "severity" - ' +
             `harness merge classes are ${JSON.stringify(MERGE_CLASSES)}; use verdict + findings[].mergeClass`,
         };
+      }
+      // The seat-coverage block is TRANSPORT metadata next to the envelope
+      // (coverage-wire.ts), never an envelope field: the closed engine gate
+      // must not see it. It is captured by the shared guard BEFORE stripping
+      // (a malformed block is no coverage at all, never a parse failure) and
+      // stripped before every check below, so the envelope alone decides the
+      // parse.
+      if (Object.hasOwn(parsed, "coverage")) {
+        const { coverage, ...envelopeOnly } = parsed as Record<string, unknown>;
+        candidateCoverage = isReviewCoverage(coverage) ? coverage : null;
+        parsed = envelopeOnly;
       }
     }
     const gate = validateMstarReviewV1(parsed);
@@ -481,11 +502,12 @@ export function parseReviewOutput(
     }
     const result = outputSchema.safeParse(parsed);
     return result.success
-      ? { ok: true, output: result.data }
+      ? { ok: true, output: result.data, coverage: candidateCoverage }
       : { ok: false, error: result.error.message };
   }
   return { ok: false, error: lastError };
 }
+
 
 /**
  * Parse raw runner stdout into the `mstar.review-budget-exhausted/v1`

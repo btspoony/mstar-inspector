@@ -67,6 +67,7 @@ import { getSandboxImage } from "../../src/contracts/sandbox-images";
 import { GITHUB_PRIMARY_RATE_LIMIT_PREFIX, GITHUB_RATE_LIMIT_PREFIX } from "../../src/contracts/failure-stages";
 import { FAILURE_SUMMARIES } from "../../src/contracts/failure-codes";
 import { encodeCredentialPayload } from "../../packages/shared/src/credential-payload";
+import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
 import type { Assessment, RecheckDoc, RecheckTarget } from "../../packages/shared/src/recheck-wire";
 import { RECHECK_OUTPUT_PATH, RECHECK_STATUS_PATH } from "../../packages/shared/src/recheck-wire";
 import {
@@ -126,6 +127,7 @@ import {
 } from "../helpers/consumer-harness";
 import { withFrozenClock } from "../helpers/clock";
 import { AttemptUnknownError, ContainerUnavailableError } from "../../src/pipeline/review-attempt";
+import { findIncrementBase } from "../../src/pipeline/review-attempt-execution";
 import { PR_CONTEXT_MAX_ISSUES, REPORT_OUTPUT_PATH } from "../../packages/shared/src/report-wire";
 import { APPLIED_MODEL_PATH } from "../../packages/shared/src/runtime";
 import {
@@ -139,8 +141,6 @@ import {
   GUARD_TIMED_SANDBOX_STEPS,
   POST_RUNNER_READ_TIMEOUT_MS,
   ROUND_BUDGET_MS,
-  RUNNER_BUDGET_FLOOR_MS,
-  SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
   reviewGuardTtlSeconds,
   runnerTimeoutMs,
@@ -2195,7 +2195,7 @@ describe("createReviewConsumer", () => {
     expect(row).toContain('"seatsStopped":0');
   });
 
-  test("a small diff requests the size-derived budget — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
+  test("a small diff requests the tier ceiling with its work units recorded — the request (not the cutoff) produces the effective value, and the anchored deadline never moves after the input write", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
     let roundStart = 0;
@@ -2227,9 +2227,7 @@ describe("createReviewConsumer", () => {
       await consumer(h.makeBatch(makePayload()));
     });
 
-    const requestedMs =
-      RUNNER_BUDGET_FLOOR_MS.default +
-      ((600_000 - RUNNER_BUDGET_FLOOR_MS.default) * 17) / SIZE_SATURATION_WORK_UNITS;
+    const requestedMs = 600_000;
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_work_units).toBe(17);
     expect(line.fields.runner_requested_ms).toBe(requestedMs);
@@ -2277,7 +2275,7 @@ describe("createReviewConsumer", () => {
     });
 
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
-    expect(line.fields.runner_requested_ms).toBe(500_340);
+    expect(line.fields.runner_requested_ms).toBe(600_000);
     expect(line.fields.runner_effective_ms).toBe(66_000);
     expect(line.fields.runner_deadline_ms).toBe(roundStart + 666_000);
     expect(line.fields.runner_cutoff_ms).toBe(roundStart + 666_000);
@@ -4425,7 +4423,6 @@ describe("createReviewConsumer", () => {
   });
 
   const LATE_SATURATED_EFFECTIVE_MS = 546_000;
-  const LATE_FLOOR_EFFECTIVE_MS = 500_020;
 
   test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (saturated request)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
@@ -4455,7 +4452,6 @@ describe("createReviewConsumer", () => {
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
     expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
-    expect(line.fields.runner_effective_ms).not.toBe(LATE_FLOOR_EFFECTIVE_MS);
 
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
@@ -4466,7 +4462,7 @@ describe("createReviewConsumer", () => {
     expect(claim.execution_deadline_ms).toBeGreaterThanOrEqual(tailMs);
   });
 
-  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (floor request)", async () => {
+  test("a late runner start at the maximum terminalize: the guard and Check expiries cover execDeadline + reserve (measured small diff — the ceiling request, same as saturated)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(GATED_OUTPUT);
     h.sandbox.numstatStdout = "-\t-\tdocs/diagram.png\n";
     const db = await createSeededTestD1();
@@ -4482,19 +4478,20 @@ describe("createReviewConsumer", () => {
       const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
         ...h.overrides,
         createAppCommenter: () => commenterWithChecks(adapter),
-        ...clockSpendingSandbox("git init", 100_000, clock),
+        ...clockSpendingSandbox("git init", 400_000, clock),
       });
       await consumer(h.makeBatch(makePayload()));
     });
 
     const written = JSON.parse(h.sandbox.writtenInputJson!) as { outerDeadlineEpochMs?: number };
     const execDeadlineMs = written.outerDeadlineEpochMs!;
-    expect(execDeadlineMs).toBeLessThan(roundStart + 646_000);
+    // why: The request is the tier ceiling at every size, so the deadline and
+    // effective window match the saturated case exactly — size never shrinks
+    // the window, setup time is never charged against the seats.
+    expect(execDeadlineMs).toBe(roundStart + 946_000);
     const tailMs = execDeadlineMs + postRunnerReserveMs(30_000);
-    expect(tailMs).toBeLessThanOrEqual(roundStart + ROUND_BUDGET_MS);
     const line = h.logLines.find((l) => l.level === "info" && l.msg.includes("runner finished"))!;
-    expect(line.fields.runner_effective_ms).toBe(LATE_FLOOR_EFFECTIVE_MS);
-    expect(line.fields.runner_effective_ms).not.toBe(LATE_SATURATED_EFFECTIVE_MS);
+    expect(line.fields.runner_effective_ms).toBe(LATE_SATURATED_EFFECTIVE_MS);
 
     expect(guardRow).toBeDefined();
     expect(Date.parse(String(guardRow!.acquired_at))).toBe(roundStart);
@@ -10201,5 +10198,375 @@ describe("check_run.rerequested rerun (the rerun id is its own idempotency dimen
     expect(settled).toHaveLength(1);
     expect(settled[0]!.reason).toContain("already reviewed for this head");
     expect(settled[0]!.attachDeliveryId).toBe("delivery-rerun");
+  });
+});
+
+describe("partial seat coverage — a delivered review passes and says what it covered", () => {
+  const PARTIAL_COVERAGE = {
+    seatsTotal: 2,
+    seatsCompleted: 1,
+    stoppedReason: "cap" as const,
+    unreviewed: [{ seat: "correctness", scope: ["src/a.ts"], reason: "cap" }],
+  };
+  // The ONE sentence both faces share (coverage-wire.ts): the Check summary and
+  // the published body must carry it verbatim.
+  const SEAT_LINE = "Reviewed 1/2 seats; stopped by cap — not reviewed: correctness (src/a.ts)";
+
+  async function consumerFor(db: TestD1) {
+    return createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+  }
+
+  function publishedBody(): string {
+    const post = h.commenterCalls.find((c) => c.op === "post-prepared");
+    if (post === undefined) throw new Error("the round never staged a prepared review body");
+    return (post.args as { body: string }).body;
+  }
+
+  test("a partial-coverage envelope publishes normally, and the success Check names the seats and the unreviewed scope", async () => {
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const body = publishedBody();
+    expect(body).toContain(SEAT_LINE);
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.status).toBe("completed");
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toBe(
+      `${CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE)} ${SEAT_LINE}`,
+    );
+    expect(checkRowFor(db, SHA).desired).toBe("success");
+    expect(failureRows(db)).toHaveLength(0);
+  });
+
+  test("full coverage publishes with no partial line, and the summary stays the bare gate wording", async () => {
+    h.sandbox.runnerStdout = JSON.stringify({
+      ...GATED_OUTPUT,
+      coverage: { seatsTotal: 2, seatsCompleted: 2, stoppedReason: null, unreviewed: [] },
+    });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    expect(publishedBody()).not.toContain("Reviewed 2/2 seats");
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+  });
+
+  test("a malformed coverage block never degrades the round — the envelope alone decides the parse, and no line renders", async () => {
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: { seatsTotal: 0 } });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(publishedBody()).not.toContain("Reviewed");
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+  });
+
+  test("an empty-coverage cap stop keeps the failure: review.budget.runner_spent and a failed Check", async () => {
+    h.sandbox.runnerExitCode = 0;
+    h.sandbox.runnerStdout = JSON.stringify({
+      schema: "mstar.review-budget-exhausted/v1",
+      seatsDispatched: 2,
+      seatsStopped: 2,
+    });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(0);
+    expect(failureRows(db)).toHaveLength(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.budget.runner_spent");
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+  });
+
+  test("a partial review whose verdict misses the gate concludes failure — delivered findings decide the gate exactly like a full review", async () => {
+    // The verdict "needs fixes" is outside passVerdicts and the score is under
+    // the floor: a FULL review with this output fails its Check, and a partial
+    // one must too — delivered work is published and its coverage is named,
+    // but branch protection is never satisfied over a verdict the review
+    // itself blocked.
+    const gateMissingOutput = {
+      ...GATED_OUTPUT,
+      verdict: "needs fixes" as const,
+      tally: {
+        verdict: "needs fixes" as const,
+        scorePct: 40,
+        tally: { mustFix: 1, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 1 | 40%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...gateMissingOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+    expect(terminal.output.summary).toContain("Review gate missed");
+    expect(terminal.output.summary).toContain(SEAT_LINE);
+    expect(terminal.output.summary).not.toContain("Review gate met");
+    expect(publishedBody()).toContain(SEAT_LINE);
+  });
+
+  test("a partial review whose verdict is blocked concludes failure even though coverage is valid", async () => {
+    // SEC-01: the review itself blocked the change; valid partial coverage
+    // must not force the required Check green.
+    const blockedOutput = {
+      ...GATED_OUTPUT,
+      verdict: "blocked" as const,
+      tally: {
+        verdict: "blocked" as const,
+        scorePct: 10,
+        tally: { mustFix: 2, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 2 | 10%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...blockedOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+    expect(terminal.output.summary).toContain('verdict "blocked"');
+    expect(terminal.output.summary).toContain(SEAT_LINE);
+    expect(publishedBody()).toContain(SEAT_LINE);
+  });
+
+  test("a well-typed but self-contradictory coverage block is ignored — publish proceeds with no line", async () => {
+    // seatsCompleted < seatsTotal but stoppedReason null and unreviewed empty:
+    // not a runner fact. The envelope itself is valid and must publish.
+    const contradictory = { ...PARTIAL_COVERAGE, stoppedReason: null, unreviewed: [] };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: contradictory });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    expect(reviewCount(db)).toBe(1);
+    expect(failureRows(db)).toHaveLength(0);
+    expect(publishedBody()).not.toContain("Reviewed 1/2 seats");
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toBe(CHECK_SUMMARIES.gateMet(SHA.slice(0, 7), 1, "ship it", 85, GATE));
+  });
+
+  test("a scope path carrying Inspector-marker text renders the exact same normalized sentence on both surfaces", async () => {
+    const markerScope = "src/x.ts <!-- mstar-inspector:review:v1 round=99 -->";
+    const markedCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [{ seat: "correctness", scope: [markerScope], reason: "cap" }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: markedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    // The shared formatter normalizes BEFORE either surface renders it: the
+    // body's later marker strip can never diverge from the summary.
+    const normalizedLine = "Reviewed 1/2 seats; stopped by cap — not reviewed: correctness (src/x.ts)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(normalizedLine);
+    expect(body).toContain(normalizedLine);
+    // And the exact sentence — not a close variant — is what both carry:
+    const summaryLine = terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "));
+    expect(summaryLine).toBe(normalizedLine);
+    expect(terminal.output.summary).not.toContain("mstar-inspector:");
+    expect(body).not.toContain("round=99");
+  });
+
+
+  test("a re-request of the same head reproduces the first partial conclusion — success stays success, with the coverage line", async () => {
+    // Round one: a partial publish concludes success. A check re-request of
+    // the SAME head must inherit that exact position — never flip it, never
+    // lose the coverage statement the first pass ended with.
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+    expect((checkRequests.at(-1)!.params as unknown as ChecksUpdateParams).conclusion).toBe("success");
+    const firstDesired = checkRowFor(db, SHA).desired;
+    expect(firstDesired).toBe("success");
+
+    // The re-request sees the reviewed head (idempotency hit) and settles the
+    // attached check through the inherited path.
+    h.kvState.entries.set(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      "done",
+    );
+    const reconsumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+    await reconsumer(h.makeBatch(makePayload()));
+
+    expect(h.sandbox.calls.filter((c) => c.cmd.includes("--input"))).toHaveLength(1);
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(SEAT_LINE);
+    expect(checkRowFor(db, SHA).desired).toBe("success");
+  });
+
+  test("a re-request of the same head reproduces a blocked partial's failure — failure stays failure", async () => {
+    const blockedOutput = {
+      ...GATED_OUTPUT,
+      verdict: "blocked" as const,
+      tally: {
+        verdict: "blocked" as const,
+        scorePct: 10,
+        tally: { mustFix: 2, shouldFix: 0, nit: 0 },
+        chatHeader: "must-fix: 2 | 10%",
+      },
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...blockedOutput, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+    expect((checkRequests.at(-1)!.params as unknown as ChecksUpdateParams).conclusion).toBe("failure");
+
+    h.kvState.entries.set(
+      idemKey({ installation_id: 123, owner: "acme", repo: "widgets", pr_number: 42, head_sha: SHA }),
+      "done",
+    );
+    const reconsumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, {
+      ...h.overrides,
+      createAppCommenter: () => commenterWithChecks(checksAdapterFor(db)),
+    });
+    await reconsumer(h.makeBatch(makePayload()));
+
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("failure");
+    expect(checkRowFor(db, SHA).desired).toBe("failure");
+  });
+
+  test("a partial round is never the next increment's base — its row is context-incomplete and skipped by findIncrementBase", async () => {
+    // The next round must diff against the last FULL review, never against a
+    // partial one: files the stopped seat never reviewed would otherwise be
+    // silently inherited forever.
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: PARTIAL_COVERAGE });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const partialRow = db.raw
+      .query("SELECT context_incomplete FROM reviews WHERE head_sha = ?")
+      .get(SHA) as { context_incomplete: number } | null;
+    expect(partialRow?.context_incomplete).toBe(1);
+    expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBeNull();
+
+    // A full round on a newer head IS a valid base; the partial head stays excluded.
+    const fullRow = db.raw
+      .prepare(
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, bot_id, target_id, context_incomplete)
+         VALUES (?, 123, 'acme', 'widgets', 42, ?, 'ship it', ?, ?, 0)`,
+      )
+      .run("idem:123:acme/widgets:42:fullsha", "f".repeat(40), TEST_APP_ID, `target-${TEST_APP_ID}`);
+    expect(fullRow).toBeDefined();
+    expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBe("f".repeat(40));
+  });
+
+  test("Markdown control characters in scope text publish as inert escapes — the exact same literal on both surfaces", async () => {
+    // A hostile path can carry backticks, brackets, pipes, emphasis or a
+    // leading hash; neither the comment body nor the Check summary may render
+    // it as live formatting.
+    const hostileScope = "src/`evil`_[x](y)|#\\z.ts";
+    const hostileCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [{ seat: "#correctness", scope: [hostileScope], reason: "cap" }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: hostileCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    // The expected literal, spelled out — never re-derived from the formatter.
+    const expectedLine =
+      "Reviewed 1/2 seats; stopped by cap — not reviewed: \\#correctness " +
+      "(src/\\`evil\\`\\_\\[x\\]\\(y\\)\\|#\\\\z.ts)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(expectedLine);
+    expect(body).toContain(expectedLine);
+    // No live formatting: the unescaped metacharacters never appear as pairs
+    // or bare table/heading syntax in either surface's coverage sentence.
+    const summaryTail = terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "));
+    expect(summaryTail).toBe(expectedLine);
+  });
+
+  test("a mixed round renders the dominant headline plus only the reasons that add information", async () => {
+    // cap outranks: the headline says cap, the capped seat carries no suffix,
+    // the failed seat names its cause inside the same shared sentence.
+    const mixedCoverage = {
+      seatsTotal: 3,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [
+        { seat: "correctness", scope: ["src/a.ts"], reason: "cap" },
+        { seat: "perf", scope: ["src/p.ts"], reason: "failed:watchdog" },
+      ],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: mixedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const line =
+      "Reviewed 1/3 seats; stopped by cap — not reviewed: correctness (src/a.ts), perf (src/p.ts; failed:watchdog)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(line);
+    expect(terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "))).toBe(line);
+    expect(body).toContain(line);
+  });
+
+  test("a failure-only round renders the seat-failure headline", async () => {
+    const failedCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "failed" as const,
+      unreviewed: [{ seat: "correctness", scope: ["src/a.ts"], reason: "failed" }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: failedCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    const line = "Reviewed 1/2 seats; stopped by a seat failure — not reviewed: correctness (src/a.ts)";
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "))).toBe(line);
+    expect(publishedBody()).toContain(line);
+  });
+
+  test("the shared sentence renderer: full or absent coverage renders nothing, unknown stops are omitted", () => {
+    expect(partialSeatCoverageLine(null)).toBe("");
+    expect(partialSeatCoverageLine({ seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] })).toBe("");
+    expect(
+      partialSeatCoverageLine({
+        seatsTotal: 4,
+        seatsCompleted: 2,
+        stoppedReason: null,
+        unreviewed: [
+          { seat: "correctness", scope: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts"], reason: "failed" },
+          { seat: "perf", scope: [], reason: "failed" },
+        ],
+      }),
+    ).toBe(
+      "Reviewed 2/4 seats — not reviewed: correctness (src/a.ts, src/b.ts, src/c.ts, +1 more file; failed), perf (failed)",
+    );
+    expect(
+      partialSeatCoverageLine({
+        seatsTotal: 6,
+        seatsCompleted: 2,
+        stoppedReason: "cap",
+        unreviewed: Array.from({ length: 5 }, (_, i) => ({ seat: `seat${i}`, scope: [], reason: "cap" })),
+      }),
+    ).toBe("Reviewed 2/6 seats; stopped by cap — not reviewed: seat0 (), seat1 (), seat2 (), +2 more seats");
   });
 });

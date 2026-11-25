@@ -19,6 +19,7 @@ import {
 import { dropAllSuggestionFences, dropRedactedSuggestions, parseReviewOutput, capFindings, clampFindingSizes } from "../review/schema";
 import type { BudgetExhaustedOutcome, ReviewFinding, ReviewOutput } from "../review/schema";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
+import { partialSeatCoverageLine } from "../../packages/shared/src/coverage-wire";
 import { REVIEW_SEATS } from "../../packages/shared/src/runtime";
 import {
   carriesSecretForm,
@@ -4256,6 +4257,13 @@ async function collectPhase(
   }
 
   const redacted = redactReviewOutputExact(redactReviewOutput(parsed.output), progress.secretValues);
+  // The runner's seat coverage rode the stdout NEXT TO the envelope and was
+  // captured by the SAME parse that validated the envelope (stripped before
+  // the engine gates): a round whose envelope arrived carries whatever the
+  // runner reported, full or partial. `null` means NOT ASSERTED, never a
+  // failure — the deep tier cannot observe its own seats, an old runner
+  // knows nothing of the block, and a no-output round never reaches here.
+  const seatCoverage = parsed.coverage;
   const suggestionsDropped: ReviewOutput = {
     ...redacted,
     findings: redacted.findings.map((finding) => ({
@@ -4330,6 +4338,7 @@ async function collectPhase(
     publicationMarker,
     ...(sinceSha !== null ? { sinceSha } : {}),
     reportParts: { report, revalidated: buildRevalidatedSection(coverage, closureRows) },
+    seatCoverage,
   });
   const bodySha256 = await sha256Hex(preparedBody);
 
@@ -4422,12 +4431,18 @@ async function collectPhase(
       targetId: payload.targetId,
       model: chainHeadSelector(prepared.modelChain),
       provider: appliedProvider,
-      contextIncomplete: staleContext,
+      // A round that never scanned its whole scope is never the next
+      // increment's baseline: `findIncrementBase` excludes context-incomplete
+      // rows by exactly this column, so a partial round (seats missing) marks
+      // itself out the same way a stale-capture round does — its unreviewed
+      // files are diffed into the next round instead of silently inherited.
+      contextIncomplete: staleContext || partialSeatCoverageLine(seatCoverage) !== "",
       durationMs: Date.now() - roundStartedAt,
     },
     lifecycle: lifecycleRound,
     lineIntents,
     admittedAttemptId: ref.attemptId,
+    seatCoverage,
   };
   const staged = await stagePublication(deps.env.DB, { id: publicationId, payload: payloadDoc, nowMs: Date.now() });
   if (staged.id !== publicationId) {

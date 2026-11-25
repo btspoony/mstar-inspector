@@ -1,6 +1,7 @@
 
 import type { MstarReviewV1 } from "@mstar-harness/engine";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent";
+import type { ReviewCoverage } from "./coverage-wire";
 import type { RecheckDoc, RecheckInput, RecheckStatus } from "./recheck-wire";
 import type { PrContext, ReportDoc } from "./report-wire";
 import type { TokenUsageBucket } from "./token-usage-wire";
@@ -137,6 +138,12 @@ export type AgentRuntimeRunInput = {
 /** One completed review run: the validated envelope plus its optional side documents. */
 export type ReviewRunResult = {
   envelope: MstarReviewV1;
+  /**
+   * The run's seat coverage, present on every delivered run and absent only
+   * when no seat produced usable output (that round is a failure, never a
+   * partial review). Transport metadata beside the closed envelope.
+   */
+  coverage?: ReviewCoverage;
   recheck: RecheckDoc | null;
   recheckStatus?: RecheckStatus;
   report: ReportDoc | null;
@@ -144,6 +151,15 @@ export type ReviewRunResult = {
   /** The run's per-(provider, model) token spend; absent/empty means nothing attributable. */
   tokenUsage?: TokenUsageBucket[];
 };
+
+/**
+ * The pinned unified-diff snapshot the consumer captures into the image
+ * (`src/pipeline/gitops.ts` DIFF_PATH mirrors this value — the consumer's
+ * command builders keep their own interpolation constant because the workerd
+ * graph may not depend on the in-image layout module). Every review seat reads
+ * the change from this file: removed lines exist nowhere else in the checkout.
+ */
+export const PR_DIFF_PATH = "/workspace/pr.diff";
 
 /**
  * The applied model's side document (fixed in-image path). The published

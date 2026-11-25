@@ -26,7 +26,7 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
+import { PR_DIFF_PATH, REVIEW_SEATS, RUNNER_MAX_BUDGET_MS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import {
   PUBLICATION_TAIL_MS,
   remainingOuterMs,
@@ -34,10 +34,16 @@ import {
   runRecheckSeat,
   type RecheckSeatResult,
 } from "./recheck";
-import { runReportSeat, revalidatedNotes } from "./report";
-import type { ReportDoc } from "../../shared/src/report-wire";
+import {
+  REPORT_TAIL_MARGIN_MS,
+  runReportSeat,
+  revalidatedNotes,
+  type ReportSeatEmptyReason,
+} from "./report";
+import type { PrContext, ReportDoc } from "../../shared/src/report-wire";
+import type { ReviewCoverage } from "../../shared/src/coverage-wire";
 import { RECHECK_MIN_REMAINING_MS, type RecheckDoc } from "../../shared/src/recheck-wire";
-import { RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
+import { ReviewNoOutputFailure, RunnerBudgetExhausted } from "../../shared/src/budget-exhausted-wire";
 import {
   bucketsFromSession,
   bucketsFromSubagents,
@@ -96,6 +102,157 @@ export function parseModelSelectors(raw: string | undefined): string[] {
 
 function traceStage(stage: string): void {
   console.error(JSON.stringify({ event: "review_stage", stage }));
+}
+
+/** Bound on a free-text slug inside a stage token (the reader caps at 60 chars). */
+const STAGE_SLUG_MAX_CHARS = 20;
+
+/** One token-safe word from a free-text cause: no whitespace, bounded. */
+function stageSlug(text: string | undefined, maxChars = STAGE_SLUG_MAX_CHARS): string {
+  if (text === undefined) return "";
+  return text.replace(/\s+/g, "-").replace(/[^\w.:=-]/g, "").slice(0, maxChars);
+}
+
+/**
+ * Compact per-seat trace id. Seat labels can reach 48 characters and the
+ * worker's stage field is 60, so a full `<domain>-<seat>` id would push the cap
+ * reason or turn count out of the field and lose the one fact the stage exists
+ * for. The ordinal keeps ids distinct within a run; the truncated id keeps them
+ * recognisable.
+ */
+export function seatTraceId(index: number, id: string): string {
+  return `${index + 1}-${id.slice(0, 22)}`;
+}
+
+/**
+ * Per-seat trace tokens. `traceStage` marks ENTRY, and the worker prints the
+ * LAST line — so a seat's terminal token is emitted when it settles, not when
+ * it starts, and it must say which of the three outcomes happened: a payload
+ * (with its turn count), a cap gap (window + window's turn count when known),
+ * or a failure.
+ */
+export function seatStartStage(seat: string): string {
+  return `seat_start:${seat}`;
+}
+
+export function seatDoneStage(seat: string, turns: number | undefined): string {
+  return turns === undefined ? `seat_done:${seat}` : `seat_done:${seat}:turns=${turns}`;
+}
+
+export function seatGapStage(seat: string, reason: string | undefined, turns?: number): string {
+  const suffix = turns === undefined ? "" : `:turns=${turns}`;
+  const capMs = reason?.match(/task\.maxRuntimeMs=(\d+)/)?.[1];
+  if (capMs !== undefined) return `seat_gap:${seat}:cap:${capMs}ms${suffix}`;
+  const slug = stageSlug(reason, 12);
+  return slug === "" ? `seat_gap:${seat}${suffix}` : `seat_gap:${seat}:${slug}${suffix}`;
+}
+
+export function seatFailedStage(seat: string, cause: string | undefined): string {
+  const slug = stageSlug(cause, 12);
+  return slug === "" ? `seat_failed:${seat}` : `seat_failed:${seat}:${slug}`;
+}
+
+/** The recheck seat's terminal token: its turn count, or why it ended empty. */
+export function recheckStage(result: RecheckSeatResult): string {
+  if (result.doc !== null) return `recheck_done:turns=${result.usage?.requests ?? 0}`;
+  return `recheck_gap:${result.status.outcome}${result.status.reason === undefined ? "" : `-${result.status.reason}`}`;
+}
+
+/**
+ * The report seat's terminal token. Three distinct outcomes, never collapsed:
+ * a document (with its turn count) or a seat that RAN and produced nothing.
+ * A run that never attempted the seat emits `report_skip:<reason>` instead and
+ * no `report_start` — see `reportEligibility`.
+ */
+export function reportStage(report: unknown, turns: number | undefined): string {
+  return report === null ? "report_absent" : turns === undefined ? "report_done" : `report_done:turns=${turns}`;
+}
+
+export function reportSkipStage(reason: string): string {
+  return `report_skip:${reason}`;
+}
+
+/** The report seat started and the run was torn down under it (not a failure). */
+export const REPORT_ABORTED_STAGE = "report_aborted";
+
+export function reportFailedStage(cause: string | undefined): string {
+  const slug = stageSlug(cause, 12);
+  return slug === "" ? "report_failed" : `report_failed:${slug}`;
+}
+
+/**
+ * Trace the recheck seat's boundary exactly ONCE per run: `recheck_start` on
+ * entry, then the terminal token when the work settles. Every throw path ends
+ * on a stage that names a seat that actually ran last.
+ */
+function tracedRecheck(work: Promise<RecheckSeatResult>): Promise<RecheckSeatResult> {
+  traceStage("recheck_start");
+  return work.then(
+    (result) => {
+      traceStage(recheckStage(result));
+      return result;
+    },
+    (error: unknown) => {
+      traceStage(seatFailedStage("recheck", causeText(error)));
+      throw error;
+    },
+  );
+}
+
+/**
+ * Run the report seat through ONE decision path for every level. The session is
+ * created only AFTER eligibility says the seat will run, so an ineligible run
+ * never opens a session nor emits `report_start`.
+ *
+ * Terminal stages, by what actually happened:
+ * - a document                             -> `report_done:turns=N`
+ * - call made, no usable document          -> `report_absent`
+ * - NO call made (`budget` / `aborted`)    -> `report_aborted`
+ * - the call (or the session) failed       -> `report_failed:<slug>`
+ *
+ * A clock crossing after `report_start` is therefore a cancellation, never an
+ * empty seat: `report_absent` requires that a call actually happened.
+ */
+async function tracedReportSeatFor(
+  input: AgentRuntimeRunInput,
+  getSession: () => Promise<ToolSession>,
+  envelope: MstarReviewV1,
+  recheckDoc: RecheckDoc | null,
+  signal: AbortSignal,
+  usage: SubagentUsageSource[] = [],
+): Promise<ReportDoc | null> {
+  const eligibility = reportEligibility(input, envelope, signal);
+  if (!eligibility.ok) {
+    // why: ONE place logs the skip and names it in the trace — the dispatch
+    // log and the stage can never disagree, and no `report_start` claims a
+    // seat that never ran.
+    console.error(JSON.stringify({ event: "report_skipped", reason: eligibility.reason }));
+    traceStage(reportSkipStage(eligibility.reason));
+    return null;
+  }
+  traceStage("report_start");
+  let empty: ReportSeatEmptyReason | undefined;
+  let report: ReportDoc | null = null;
+  try {
+    const session = await getSession();
+    report = await runReportSeatFor(input, session, envelope, recheckDoc, signal, usage, (reason) => {
+      empty = reason;
+    });
+  } catch (error) {
+    // why: A REJECTED report call (or a session that could not be created) is a
+    // seat failure, not "no document". The review is never failed by the report
+    // (narrative only), so this stops at the trace.
+    traceStage(reportFailedStage(causeText(error)));
+    return null;
+  }
+  traceStage(
+    report !== null
+      ? reportStage(report, usage[0]?.requests)
+      : empty === "no-document"
+        ? reportStage(null, undefined)
+        : REPORT_ABORTED_STAGE,
+  );
+  return report;
 }
 
 export async function loadHarnessSkills(pluginRoot: string): Promise<Skill[]> {
@@ -402,9 +559,101 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
   return budgetMinutes(remainingSoftMinutes(Date.now(), level));
 }
 
-function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
-  const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
-  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS));
+/** Watchdog cadence for one seat's cap check. */
+const SEAT_WATCH_TICK_MS = 250;
+
+/**
+ * Why the message keeps the `task.maxRuntimeMs` token: `seatOutput` reads a
+ * cap stop from that exact vocabulary — the executor's own wall-clock timer
+ * is DISABLED for review seats (the seat's clock starts at its FIRST model
+ * turn, which the SDK timer, ticking from spawn, cannot see), so the runner's
+ * own watchdog stamps the same sentence the cap regex proves.
+ */
+export function seatCapAbortError(windowMs: number): Error {
+  return new Error(`Subagent runtime limit exceeded (task.maxRuntimeMs=${windowMs})`);
+}
+
+/**
+ * Why every seat owns the FULL tier ceiling, never a divided share: dividing
+ * one ceiling across the wave makes two slow seats die at half a window each —
+ * exactly the failure this pipeline exists to remove. A seat's window is
+ * therefore independent of its siblings, so a seat finishing early changes
+ * nothing about a sibling's deadline (there is no share to release), and the
+ * only bound above the ceiling is the attempt's absolute deadline less the
+ * publication tail.
+ *
+ * The seat's own clock starts at its FIRST REAL model turn (`firstTurnMs`),
+ * never at dispatch: session setup and the skill load are paid by the run, not
+ * out of the seat's thinking time. The deep parent keeps the legacy ×2 headroom
+ * because its soft cap is a convergence target its own supervision nudges
+ * enforce — the hard window must let the steer past the soft cap land instead
+ * of cutting the turn mid-yield.
+ */
+export function seatDeadlineMs(nowMs: number, firstTurnMs: number, level: ReviewLevel): number {
+  // why: The seat ceiling is the RUNNER's tier maximum, not the engine's
+  // wall-clock table — the two disagree for `quick` (480 s vs 300 s), and the
+  // engine figure is SHORTER than what the old from-spawn cap already gave a
+  // large quick diff. Only the deep parent keeps its ×2 headroom.
+  const ceilingMs = RUNNER_MAX_BUDGET_MS[level] * (level === "deep" ? 2 : 1);
+  return Math.min(firstTurnMs + ceilingMs, nowMs + remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS);
+}
+
+/**
+ * Before its first real model turn a seat has no thinking clock yet, so its
+ * only bound is the attempt's absolute deadline less the publication tail. A
+ * seat that never emits a turn (a wedged child, a monitor that never reports)
+ * must still be stoppable — disabling the SDK timer may never leave the signal
+ * unbounded.
+ */
+export function preTurnDeadlineMs(nowMs: number, level: ReviewLevel): number {
+  return nowMs + remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS;
+}
+
+/**
+ * One seat's cap owner: a ticking watchdog plus the controller whose signal
+ * the seat consumes. `markFirstTurn` anchors the clock at the seat's first REAL
+ * model turn; `stop` clears the tick once the seat settles.
+ */
+export type SeatWatch = {
+  controller: AbortController;
+  markFirstTurn: () => void;
+  stop: () => void;
+};
+
+/**
+ * How the first real model turn is recognised: `progress.status === "running"`
+ * is the monitor's INITIAL state (set before any model call, e.g. on a task
+ * label or a bare session event), so it can never start the clock. The SDK
+ * counts assistant message_end events in `progress.requests`; the first turn is
+ * the first snapshot with `requests >= 1`, which no label or session event
+ * produces.
+ */
+export function startsFirstTurn(progress: { status: string; requests?: number }): boolean {
+  return progress.status === "running" && (progress.requests ?? 0) >= 1;
+}
+
+export function startSeatWatch(level: ReviewLevel, startedMs = Date.now()): SeatWatch {
+  const controller = new AbortController();
+  let firstTurnMs: number | undefined;
+  const timer = setInterval(() => {
+    if (controller.signal.aborted) return;
+    const now = Date.now();
+    const deadline =
+      firstTurnMs === undefined ? preTurnDeadlineMs(now, level) : seatDeadlineMs(now, firstTurnMs, level);
+    if (now >= deadline) {
+      const windowMs = deadline - (firstTurnMs ?? startedMs);
+      controller.abort(seatCapAbortError(Math.max(1, Math.round(windowMs))));
+    }
+  }, SEAT_WATCH_TICK_MS);
+  return {
+    controller,
+    markFirstTurn: () => {
+      if (firstTurnMs === undefined) firstTurnMs = Date.now();
+    },
+    stop: () => {
+      clearInterval(timer);
+    },
+  };
 }
 
 /**
@@ -495,7 +744,21 @@ export async function superviseSeats(opts: {
   }
 }
 
+/**
+ * The pinned unified-diff snapshot the consumer captured beside the clone, or
+ * `undefined` when no file is present (a capture failure round or a hand-run
+ * checkout). The diff is never inlined: the consumer's 2 MiB prefetch cap is
+ * far above a seat's read budget, and the file path — not its text — is the
+ * read-first ingredient. `MSTAR_REVIEW_DIFF_PATH` redirects the lookup for
+ * host-side tests only; the image always writes the fixed path.
+ */
+export function seatDiffFile(): string | undefined {
+  const candidate = Bun.env.MSTAR_REVIEW_DIFF_PATH ?? PR_DIFF_PATH;
+  return existsSync(candidate) ? candidate : undefined;
+}
+
 function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: SeatPlan): string {
+  const diffFile = seatDiffFile();
   return prReviewSeatPrompt({
     stage: 2,
     domain: plan.domain,
@@ -504,11 +767,23 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
+    ...(diffFile === undefined ? {} : { diffFile }),
     budgetRemainingMinutes: dispatchBudgetMinutes(input.level),
   });
 }
 
-type SeatGap = { plan: SeatPlan };
+type SeatGap = { plan: SeatPlan; reason?: string };
+
+/**
+ * The cap reason OUR watchdog stamped, when it fired. The abort is the runner's
+ * decision, so whatever the SDK does next — resolve with a salvaged result or
+ * reject with a cleanup timeout — the seat's outcome is a CAP STOP, not the
+ * SDK's failure. Reading the signal (not the error) is what keeps that true.
+ */
+function watchdogCapReason(watch: SeatWatch): string | undefined {
+  const signal = watch.controller.signal;
+  return signal.aborted ? causeText(signal.reason) : undefined;
+}
 
 type SeatOutcome = {
   output: SeatOutput | null;
@@ -534,28 +809,6 @@ export const SUMMARY_MD_BUDGET = 8_000;
  */
 export const SEAT_GAP_MAX_CHARS = 400;
 
-function scopeList(paths: readonly string[], budget: number): string {
-  const listed: string[] = [];
-  for (const [index, path] of paths.entries()) {
-    const unlisted = paths.length - index - 1;
-    const candidate = `${[...listed, path].join(", ")}${unlisted > 0 ? `, and ${unlisted} more` : ""}`;
-    if (candidate.length > budget) break;
-    listed.push(path);
-  }
-  if (listed.length === paths.length) return listed.join(", ");
-  return listed.length === 0
-    ? `${paths.length} file(s)`
-    : `${listed.join(", ")}, and ${paths.length - listed.length} more`;
-}
-
-function scopeLine(head: string, separator: string, maxChars: number, scope: readonly string[]): string {
-  const budget = maxChars - head.length - separator.length;
-  const list = scope.length === 0 ? "the whole diff" : budget > 0 ? scopeList(scope, budget) : "";
-  const line = list.length === 0 ? head : `${head}${separator}${list}`;
-  if (line.length <= maxChars) return line;
-  return maxChars > 1 ? `${line.slice(0, maxChars - 1)}…` : "";
-}
-
 function fittedSummary(summary: string, budget: number): string {
   if (summary.length <= budget) return summary;
   const marker = "\n… (summary truncated)";
@@ -572,6 +825,15 @@ function causeText(reason: unknown): string {
 
 const RUNTIME_LIMIT_ABORT_RE = /Subagent runtime limit exceeded \(task\.maxRuntimeMs=[^)]+\)/;
 
+/**
+ * The runner-log line naming a capped seat and WHY it stopped. Exported so the
+ * test suite can pin the exact failure text without intercepting a module-bound
+ * console: the reason is the only evidence a zero-output round has.
+ */
+export function seatStopLine(seat: string, reason: string | undefined): string {
+  return `review seat ${seat} stopped by cap${reason === undefined ? "" : `: ${reason}`}`;
+}
+
 function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatPlan): SeatOutcome {
   const single = result.result;
   const structured = single.structuredOutput;
@@ -582,7 +844,7 @@ function seatOutput(result: StructuredSubagentResult, index: number, plan: SeatP
     (structured !== undefined && (structured.status !== "valid" || structured.data === undefined));
   const stoppedByCap = single.abortReason?.match(RUNTIME_LIMIT_ABORT_RE)?.[0];
   if (stoppedByCap !== undefined) {
-    return { output: rejectedPayload ? null : collected, gap: { plan }, failure: null };
+    return { output: rejectedPayload ? null : collected, gap: { plan, reason: stoppedByCap }, failure: null };
   }
   if (single.error) {
     return {
@@ -905,15 +1167,17 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (input.recheck !== undefined) {
         const liveRecheckSession = await createSeatSession();
         recheckSession = liveRecheckSession;
-        recheckWork = runRecheckSeat({
-          session: asToolSession(liveRecheckSession, cwd),
-          input: input.recheck,
-          model: seatModelChain(input),
-          signal: recheckController.signal,
-          ...(input.recheckAssignmentMaxBytes === undefined
-            ? {}
-            : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
-        });
+        recheckWork = tracedRecheck(
+          runRecheckSeat({
+            session: asToolSession(liveRecheckSession, cwd),
+            input: input.recheck,
+            model: seatModelChain(input),
+            signal: recheckController.signal,
+            ...(input.recheckAssignmentMaxBytes === undefined
+              ? {}
+              : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
+          }),
+        );
       }
 
       const runParentTurn = async (): Promise<MstarReviewV1> => {
@@ -977,7 +1241,15 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           if (remainingOuterMs(Date.now(), input.level) <= 0) {
             throw new RunnerBudgetExhausted(0, 0);
           }
-          deadlineTimer = setTimeout(deadlineAbort, seatMaxRuntimeMs(Date.now(), input.level));
+          // why: The deep parent IS the wave's only seat: its clock starts
+          // when its turn is dispatched (its first model turn — the prompt
+          // await IS the first inference), and its window is the whole tier
+          // ceiling, bounded only by the attempt's absolute deadline.
+          const firstTurnMs = Date.now();
+          deadlineTimer = setTimeout(
+            deadlineAbort,
+            Math.max(1, seatDeadlineMs(firstTurnMs, firstTurnMs, input.level) - firstTurnMs),
+          );
           await parentSession.prompt(assignment);
         } catch (error) {
           turnError = error;
@@ -1041,9 +1313,30 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       };
 
       let parentRunning = true;
-      const parentTurn = runParentTurn().finally(() => {
-        parentRunning = false;
-      });
+      const deepSeatId = seatTraceId(0, parentSession.getAgentId() ?? "deep-parent");
+      traceStage(seatStartStage(deepSeatId));
+      const parentTurn = runParentTurn()
+        .then(
+          (ready) => {
+            // why: The deep parent IS the wave's seat. Its terminal token says
+            // whether the turn produced a usable review or stopped empty; the
+            // engine's parent session exposes no per-run turn count, so the
+            // token omits `turns` rather than inventing one.
+            traceStage(
+              ready.incomplete === undefined
+                ? seatDoneStage(deepSeatId, undefined)
+                : seatGapStage(deepSeatId, ready.incomplete.reason),
+            );
+            return ready;
+          },
+          (error: unknown) => {
+            traceStage(seatFailedStage(deepSeatId, causeText(error)));
+            throw error;
+          },
+        )
+        .finally(() => {
+          parentRunning = false;
+        });
       const supervision = superviseSeats({
         level: input.level,
         done: parentTurn.then(
@@ -1076,22 +1369,21 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const reportSingles: SubagentUsageSource[] = [];
-      let report: ReportDoc | null = null;
-      if (input.prContext !== undefined) {
-        try {
+      // why: The deep path goes through the SAME eligibility/skip decision as the
+      // fan-out — a `prContext` gate here skipped the seat silently and left the
+      // trace and the dispatch log disagreeing. The session opens lazily, only
+      // once the seat is actually eligible.
+      const report = await tracedReportSeatFor(
+        input,
+        async () => {
           reportSession = await createSeatSession();
-          report = await runReportSeatFor(
-            input,
-            asToolSession(reportSession, cwd),
-            envelope,
-            settled?.doc ?? null,
-            runTeardownSignal(teardown, input),
-            reportSingles,
-          );
-        } catch (error) {
-          console.error(JSON.stringify({ event: "report_skipped", reason: "session-failed" }), error);
-        }
-      }
+          return asToolSession(reportSession, cwd);
+        },
+        envelope,
+        settled?.doc ?? null,
+        runTeardownSignal(teardown, input),
+        reportSingles,
+      );
       const appliedModel = servedModel(session);
       // why: The parent's `task`-dispatched review seats spend inside
       // `getUsageStatistics()` without journaling entries or reporting a
@@ -1106,6 +1398,11 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
         [settled?.usage, ...reportSingles],
       );
       return {
+        // why: The deep parent cannot observe its own `task`-dispatched domain
+        // seats, so absence of `incomplete` proves nothing about their
+        // coverage — a seat cap-stopped mid-review still yields a verdict with
+        // the degradation only in `- notes:`. Deep therefore claims NO coverage
+        // rather than fabricating 1/1 reviewed.
         envelope,
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
@@ -1133,6 +1430,52 @@ function runTeardownSignal(controller: AbortController, input: AgentRuntimeRunIn
   return input.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, input.signal]);
 }
 
+/**
+ * Whether the report seat can run for this round. ONE authority: the dispatch
+ * path logs the reason and the trace names it, so the two can never disagree.
+ * `review-incomplete` is a nothing-usable round — there is no review to
+ * narrate, so no seat is invented for it.
+ */
+export type ReportEligibility =
+  | { ok: true; headSha: string; prContext: PrContext }
+  | {
+      ok: false;
+      reason:
+        | "no-pr-context"
+        | "head-sha-missing"
+        | "seat-definition-missing"
+        | "budget-exhausted"
+        | "aborted";
+    };
+
+export function reportEligibility(
+  input: AgentRuntimeRunInput,
+  envelope: MstarReviewV1,
+  signal?: AbortSignal,
+): ReportEligibility {
+  // why: The run's own state is checked FIRST — a torn-down or out-of-time run
+  // never starts the seat (its budget guard would refuse it), and naming a
+  // missing seat definition there would blame the input for the run's clock.
+  // why: Both signals mean "the run is over": the composed teardown signal and
+  // the caller's own. `AbortSignal.any` propagation can land a tick late, so
+  // the caller's flag is read directly rather than inferred through the fold.
+  if (signal?.aborted === true || input.signal?.aborted === true) return { ok: false, reason: "aborted" };
+  if (remainingOuterMs(Date.now(), input.level) <= REPORT_TAIL_MARGIN_MS) {
+    return { ok: false, reason: "budget-exhausted" };
+  }
+  if (input.prContext === undefined) return { ok: false, reason: "no-pr-context" };
+  const headSha = envelope.target?.head_sha;
+  if (headSha === undefined) return { ok: false, reason: "head-sha-missing" };
+  if (!existsSync(join(input.worktreePath, ".omp", "agents", SEAT_AGENT_FILE))) {
+    return { ok: false, reason: "seat-definition-missing" };
+  }
+  // why: An INCOMPLETE review is still a review — it yields findings and names
+  // its unscanned scope, so its overview, verification notes and fix plan are
+  // exactly what a reader needs. Only a dead run (aborted / out of time) or
+  // missing inputs make the seat ineligible.
+  return { ok: true, headSha, prContext: input.prContext };
+}
+
 async function runReportSeatFor(
   input: AgentRuntimeRunInput,
   session: ToolSession,
@@ -1140,30 +1483,21 @@ async function runReportSeatFor(
   recheckDoc: RecheckDoc | null,
   signal: AbortSignal,
   usage: SubagentUsageSource[] = [],
+  onEmpty?: (reason: ReportSeatEmptyReason) => void,
 ): Promise<ReportDoc | null> {
-  if (input.prContext === undefined) return null;
-  const headSha = envelope.target?.head_sha;
-  if (headSha === undefined) {
-    console.error(JSON.stringify({ event: "report_skipped", reason: "head-sha-missing" }));
-    return null;
-  }
-  const agentsDir = join(input.worktreePath, ".omp", "agents");
-  if (!existsSync(join(agentsDir, SEAT_AGENT_FILE))) {
-    console.error(
-      JSON.stringify({ event: "report_skipped", reason: "seat-definition-missing", agents_dir: agentsDir }),
-    );
-    return null;
-  }
+  const eligibility = reportEligibility(input, envelope, signal);
+  if (!eligibility.ok) return null;
   return runReportSeat({
     session,
     envelopeJson: JSON.stringify(envelope),
-    headSha,
+    headSha: eligibility.headSha,
     revalidated: revalidatedNotes(input.recheck, recheckDoc),
-    prContext: input.prContext,
+    prContext: eligibility.prContext,
     model: seatModelChain(input),
     level: input.level,
     signal,
     usage,
+    ...(onEmpty === undefined ? {} : { onEmpty }),
   });
 }
 
@@ -1214,23 +1548,37 @@ export const ompAgentRuntime: AgentRuntime = {
       const recheckDoc = input.recheck;
       const recheckWork =
         recheckDoc !== undefined
-          ? runRecheckSeat({
-              session: toolSession,
-              input: recheckDoc,
-              model: seatModels,
-              signal: recheckController.signal,
-              ...(input.recheckAssignmentMaxBytes === undefined
-                ? {}
-                : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
-            })
+          ? tracedRecheck(
+              runRecheckSeat({
+                session: toolSession,
+                input: recheckDoc,
+                model: seatModels,
+                signal: recheckController.signal,
+                ...(input.recheckAssignmentMaxBytes === undefined
+                  ? {}
+                  : { assignmentMaxBytes: input.recheckAssignmentMaxBytes }),
+              }),
+            )
           : null;
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
       const servedBySeat = new Map<string, string | undefined>();
-      const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
       const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
+      const completedSeatIds = new Set<string>();
+      // Why each non-completed seat stopped, keyed by seat id: `cap` for the
+      // time cap, `failed` (plus a bounded slug) for any other loss.
+      const seatStops = new Map<string, { reason: "cap" | "failed"; detail?: string }>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
+          // why: The SDK wall-clock timer is disabled (`maxRuntimeMs: 0`): it
+          // ticks from spawn, but the seat's budget starts at its first REAL
+          // model turn and its window is its OWN tier ceiling — neither fact
+          // the executor's static cap can express. The watchdog aborts through
+          // the signal the seat consumes.
+          const watch = startSeatWatch(input.level);
+          const traceId = seatTraceId(index, id);
+          let terminalStage = seatFailedStage(traceId, "seat did not settle");
+          traceStage(seatStartStage(traceId));
           try {
             const result = await runStructuredSubagent({
               session: toolSession,
@@ -1243,13 +1591,59 @@ export const ompAgentRuntime: AgentRuntime = {
               schemaMode: "strict",
               enableLsp: false,
               enableIrc: false,
-              maxRuntimeMs: seatCapMs,
+              maxRuntimeMs: 0,
+              signal: watch.controller.signal,
+              onProgress: (progress) => {
+                if (startsFirstTurn(progress)) watch.markFirstTurn();
+              },
             });
             seatSingles.push(result.result);
-            return seatOutput(result, index, plan);
+            let outcome = seatOutput(result, index, plan);
+            // why: A watchdog abort that the SDK settled as a FAILED/payload-less
+            // result is still our cap stop — the seat was cut off by the
+            // runner's clock, not by its own provider. A collected payload is
+            // never discarded this way.
+            const capReason = outcome.output === null ? watchdogCapReason(watch) : undefined;
+            if (capReason !== undefined && outcome.gap === null) {
+              outcome = { output: null, gap: { plan, reason: capReason }, failure: null };
+            }
+            if (outcome.gap === null && outcome.output !== null) completedSeatIds.add(id);
+            else if (outcome.gap !== null) seatStops.set(id, { reason: "cap", detail: outcome.gap.reason });
+            else {
+              // why: Name the CAUSE, not the synthesized seat-number prefix —
+              // `structuredOutput.error` carries the schema verdict and the SDK
+              // `error` the provider fault; the status is the last resort.
+              const detail =
+                result.result.error ??
+                result.result.structuredOutput?.error ??
+                `no usable output (status ${result.result.structuredOutput?.status ?? "absent"})`;
+              seatStops.set(id, { reason: "failed", detail });
+            }
+            // why: All THREE outcomes pick their own terminal stage — a
+            // fulfilled-but-failed result (provider error, schema-rejected
+            // payload) must never be reported as a done seat.
+            terminalStage =
+              outcome.gap !== null
+                ? seatGapStage(traceId, outcome.gap.reason, result.result.requests)
+                : outcome.failure !== null
+                  ? seatFailedStage(traceId, result.result.error ?? outcome.failure.message)
+                  : seatDoneStage(traceId, result.result.requests);
+            return outcome;
           } catch (error) {
             const settled = (error as { result?: unknown } | null | undefined)?.result;
             if (settled !== null && typeof settled === "object") seatSingles.push(settled as SubagentUsageSource);
+            // why: When OUR watchdog fired, a rejection is the SDK's cleanup
+            // failing under an abort we already decided on — the seat's outcome
+            // is the cap stop. Rethrowing here would turn a delivered partial
+            // review into a failure and drop the completed siblings' findings.
+            const capReason = watchdogCapReason(watch);
+            if (capReason !== undefined) {
+              seatStops.set(id, { reason: "cap", detail: capReason });
+              terminalStage = seatGapStage(traceId, capReason);
+              return { output: null, gap: { plan, reason: capReason }, failure: null };
+            }
+            seatStops.set(id, { reason: "failed", detail: causeText(error) });
+            terminalStage = seatFailedStage(traceId, causeText(error));
             throw error;
           } finally {
             // why: Capture the served model HERE, at the seat's own settlement: the
@@ -1260,6 +1654,8 @@ export const ompAgentRuntime: AgentRuntime = {
             // would race that.
             servedBySeat.set(id, servedModel(AgentRegistry.global().get(id)?.session));
             settledSeats.add(id);
+            watch.stop();
+            traceStage(terminalStage);
           }
         }),
       );
@@ -1272,43 +1668,40 @@ export const ompAgentRuntime: AgentRuntime = {
           deliver: (nudge) => nudgeSession(AgentRegistry.global().get(id)?.session, nudge),
         })),
       });
+      // why: A seat that lost for ANY reason beside a sibling that produced
+      // output must not sink the round — the product rule is "deliver what the
+      // seats found". The losers are recorded per seat (for `coverage`) and the
+      // run decides below: ≥1 usable output delivers a partial review, zero
+      // usable output is an explicit failure.
       let outcomes: SeatOutcome[];
-      let rejectedSeats = 0;
-      let rejectedReason: unknown = undefined;
       const siblingLosses: { seat: string; detail: string }[] = [];
+      let results: PromiseSettledResult<SeatOutcome>[];
       try {
-        const results = await group;
-        outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
-        const rejections = results.filter((result) => result.status === "rejected");
-        rejectedSeats = rejections.length;
-        rejectedReason = rejections[0]?.reason;
-        results.forEach((result, seatIndex) => {
-          if (result.status === "rejected") {
-            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
-          } else if (result.value.failure !== null) {
-            siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
-          }
-        });
-        const capStopped = outcomes.some((outcome) => outcome.gap !== null);
-        const rejected = results.find((result) => result.status === "rejected");
-        const lostSeat = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-        if (!capStopped && outcomes.some((outcome) => outcome.output !== null)) {
-          if (rejected?.status === "rejected") throw rejected.reason;
-          if (lostSeat !== null) throw lostSeat;
-        }
-      } catch (error) {
-        recheckController.abort();
-        if (recheckWork) await recheckWork;
-        throw error;
+        results = await group;
       } finally {
-
         await supervision;
       }
+      outcomes = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      results.forEach((result, seatIndex) => {
+        if (result.status === "rejected") {
+          siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.reason) });
+        } else if (result.value.failure !== null) {
+          siblingLosses.push({ seat: seats[seatIndex]!.id, detail: causeText(result.value.failure) });
+        }
+      });
       const outputs = outcomes.flatMap((outcome) => (outcome.output === null ? [] : [outcome.output]));
       const gaps = outcomes.flatMap((outcome) => (outcome.gap === null ? [] : [outcome.gap]));
-      const stoppedSeats =
-        outcomes.filter((outcome) => outcome.gap !== null || outcome.output === null).length + rejectedSeats;
-      if (gaps.length > 0) {
+      // why: A seat that finished its own scope is COMPLETED; a cap-stopped
+      // seat's collected payload still contributes findings, but that seat's
+      // scope was never finished, so it is not counted as completed and its
+      // seat lands in `unreviewed`. The round then delivers when at least one
+      // seat completed; with none it is an explicit failure, never a silent
+      // incomplete success.
+      // why: Delivery is keyed on USABLE OUTPUT, not on a completed seat: a
+      // cap-stopped seat still returns the payload it salvaged, and dropping
+      // that beside no completion is exactly the loss this plan removes. The
+      // coverage block discloses the scope gap (0/2 completed is legal).
+      if (outputs.length === 0) {
         recheckController.abort();
         const settled = recheckWork ? await recheckWork : null;
         const served = new Set<string>();
@@ -1316,37 +1709,86 @@ export const ompAgentRuntime: AgentRuntime = {
           const applied = servedBySeat.get(id);
           if (applied !== undefined) served.add(applied);
         }
-        const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
-        exhausted.recheck = settled?.doc ?? null;
-        if (settled !== null) exhausted.recheckStatus = settled.status;
-        for (const { seat, detail } of siblingLosses) {
-          console.error(
-            `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
-          );
+        if (gaps.length > 0) {
+          const exhausted = new RunnerBudgetExhausted(seats.length, gaps.length);
+          exhausted.recheck = settled?.doc ?? null;
+          if (settled !== null) exhausted.recheckStatus = settled.status;
+          // why: The failure must name the seat reason, not just a count — the
+          // capped seat's abort reason is the only evidence of WHY it stopped.
+          for (const gap of gaps) {
+            console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+          }
+          for (const { seat, detail } of siblingLosses) {
+            console.error(
+              `review seat ${seat} lost beside a cap stop${detail.length === 0 ? "" : `: ${detail}`}`,
+            );
+          }
+          if (served.size === 1) exhausted.appliedModel = [...served][0]!;
+          throw exhausted;
         }
-        if (served.size === 1) exhausted.appliedModel = [...served][0]!;
-        throw exhausted;
+        // why: Zero usable output with no cap is the ONLY remaining failure —
+        // and it must be one, not an `incomplete` envelope at exit 0 that reads
+        // as success downstream. The cause is the first recorded stop reason.
+        const firstStop = seats
+          .map(({ id }) => ({ id, stop: seatStops.get(id) }))
+          .find((entry) => entry.stop !== undefined);
+        const cause =
+          firstStop?.stop?.detail === undefined || firstStop.stop.detail === ""
+            ? (firstStop?.stop?.reason ?? "no seat produced a usable payload")
+            : firstStop.stop.detail;
+        console.error(
+          `review failed: no usable seat output${firstStop === undefined ? "" : ` (${firstStop.id}: ${cause})`}`,
+        );
+        // why: The failure carries the recheck facts it already paid for — a
+        // settled recheck validated older findings, and the worker must still
+        // be able to record that even though the main review is not delivered.
+        const failure = new ReviewNoOutputFailure(
+          `${firstStop?.id ?? "seat"}: ${cause}`,
+        );
+        failure.recheck = settled?.doc ?? null;
+        if (settled !== null) failure.recheckStatus = settled.status;
+        throw failure;
       }
+      if (gaps.length > 0 || siblingLosses.length > 0) {
+        // why: A delivered partial review keeps its seat losses visible in the
+        // runner log; the product statement about coverage rides the coverage
+        // block (the Check summary and the published body render it).
+        for (const gap of gaps) {
+          console.error(seatStopLine(`${gap.plan.domain}-${gap.plan.seat}`, gap.reason));
+        }
+        for (const { seat, detail } of siblingLosses) {
+          console.error(`review seat ${seat} lost beside delivered seats${detail.length === 0 ? "" : `: ${detail}`}`);
+        }
+      }
+      const unreviewedSeats = seats.filter(({ id }) => !completedSeatIds.has(id));
+      const coverage: ReviewCoverage = {
+        seatsTotal: seats.length,
+        seatsCompleted: completedSeatIds.size,
+        // why: The cap outranks other losses as the headline cause; each seat's
+        // own bounded reason keeps a mixed round unambiguous.
+        stoppedReason:
+          unreviewedSeats.length === 0
+            ? null
+            : unreviewedSeats.some(({ id }) => seatStops.get(id)?.reason === "cap")
+              ? "cap"
+              : "failed",
+        unreviewed: unreviewedSeats.map(({ id, plan }) => {
+          const stop = seatStops.get(id) ?? { reason: "failed" as const };
+          const slug = stop.detail === undefined ? "" : stageSlug(stop.detail, 24);
+          return {
+            seat: `${plan.domain}-${plan.seat}`,
+            scope: [...plan.scope],
+            reason: stop.reason === "cap" ? "cap" : slug === "" ? "failed" : `failed:${slug}`,
+          };
+        }),
+      };
 
       if (remainingOuterMs(Date.now(), input.level) <= RECHECK_MIN_REMAINING_MS) recheckController.abort();
       const settled = recheckWork ? await recheckWork : null;
       const findings = mergeSeatOutputs(outputs);
-      const lostSeatDetail = outcomes.find((outcome) => outcome.failure !== null)?.failure ?? null;
-      const lostSeatText = causeText(lostSeatDetail ?? (rejectedSeats === 0 ? "" : rejectedReason));
-      const lostSeatCause = lostSeatText === "" ? "" : `: ${lostSeatText}`;
       const envelope = synthesizeReview({
         findings,
         target: parseTarget(input.reconFacts),
-        ...(stoppedSeats === 0
-          ? {}
-          : {
-              incomplete: {
-                reason: `no dispatched seat produced a usable payload${lostSeatCause}`,
-                unscanned: seats.map((seat) =>
-                  scopeLine(`${seat.plan.domain}-${seat.plan.seat}:`, " ", SEAT_GAP_MAX_CHARS, seat.plan.scope),
-                ),
-              },
-            }),
       });
       const gate = validateMstarReviewV1(envelope);
       if (!gate.ok) {
@@ -1354,9 +1796,9 @@ export const ompAgentRuntime: AgentRuntime = {
         throw new Error(`synthesized review failed mstar.review/v1 validation: ${detail}`);
       }
       const reportSingles: SubagentUsageSource[] = [];
-      const report = await runReportSeatFor(
+      const report = await tracedReportSeatFor(
         input,
-        toolSession,
+        async () => toolSession,
         envelope,
         settled?.doc ?? null,
         runTeardownSignal(teardown, input),
@@ -1370,6 +1812,7 @@ export const ompAgentRuntime: AgentRuntime = {
       const appliedModel = served.size === 1 ? [...served][0]! : undefined;
       return {
         envelope,
+        ...(coverage === undefined ? {} : { coverage }),
         recheck: settled?.doc ?? null,
         ...(settled !== null ? { recheckStatus: settled.status } : {}),
         report,
