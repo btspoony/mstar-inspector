@@ -119,7 +119,7 @@ P1 cannot be split because the configuration tables follow the new bot row while
 - **Three kinds of writer (R5).** The App owner, the bot owner and the installing workspace each write different things. A bot's write permission is judged on `review_bots.workspace_id`, not on the App row as `canWriteBotScope` does today (`src/dashboard/index.ts:2007`).
 - **Re-runs may land on another bot (R1).** The publishing identity is stable; only the executing configuration can differ between two runs of one head.
 - **Blast radius (R4, R13).** Non-test sources touching the renamed identifiers, counted at commit `1981816d` with `grep -rlE <identifier> src` over `*.ts` and `*.tsx`: `review_bots` in 19 files, `bot_workspaces` in 3, `bot_installations` in 11, `bot_id` in 23. Twelve index names still contain `bot` after the rename; renaming them is optional.
-- **Documentation drift (R14).** The records [separate the execution identity from the review configuration unit](../../implemented/architecture/2026-11-15-review-bot-and-target-entities.md) and [shared bot scope and claiming](../../implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md) state parts of the model this proposal changes; whether that is a supersession is decided at promotion, and the [README](../../README.md) then requires both header lines in the same change. The entitlement spec's shared-bot gate on target creation has no counterpart in code (`SHARED_BOT_REFUSAL` has no caller in `src/`, `src/dashboard/entitlement.ts:410`), so the spec needs the correction independently.
+- **Documentation drift (R14).** Every record and spec this proposal changes is named in [ADR impact at promotion](#adr-impact-at-promotion); promotion settles each row there. The entitlement spec's shared-bot gate on target creation has no counterpart in code (`SHARED_BOT_REFUSAL` has no caller in `src/`, `src/dashboard/entitlement.ts:410`), so that correction is owed independently of the split.
 
 **Open decisions.**
 
@@ -132,3 +132,15 @@ P1 cannot be split because the configuration tables follow the new bot row while
 - **The 286 test files are not inventoried** (`find tests -name "*.test.ts" -o -name "*.test.tsx"` at commit `1981816d`). The P1 figure is a per-identifier count, not a per-test plan.
 - **Spec rule D7 must be superseded.** See R8 above; it needs its own record before P3a ships.
 - **Sharing from any workspace is a future item.** Today only the official workspace may share (`src/dashboard/apps-store.ts:1537-1543`); the guard is switchable, not switched.
+
+### ADR impact at promotion
+
+Promotion to `implemented/` is one change that settles every row below. A `Supersedes` / `Superseded-by` pair is written in that same change, on both records, on relative paths ([README](../../README.md) § Header); a row whose answer is "not a supersession" says so in the promoted body instead of leaving the question open.
+
+| Record or spec | What this proposal changes | Promotion must |
+| --- | --- | --- |
+| [`implemented/architecture/2026-11-15-review-bot-and-target-entities.md`](../../implemented/architecture/2026-11-15-review-bot-and-target-entities.md) | Separates what that record calls one bot entity into a GitHub App (identity, installations, publishing) and a Review Bot (configuration, quota), hosted by that App | Decide supersession. If superseded, add both header lines and name the paragraphs it replaces. |
+| [`implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md`](../../implemented/feature/2026-11-15-shared-bot-scope-and-claiming.md) | Splits one `scope` into two independent switches — sharing a GitHub App (bindable installations) and sharing a Review Bot (funded capacity and quota) — and adds a publisher guard that is switchable but not switched | Decide supersession. If superseded, add both header lines; until then the bind route's refusal stays that record's authority (`src/dashboard/index.ts:4142`). |
+| `docs/specs/architecture/entitlement-and-deployment-modes.md` § RP metering and the monthly ceiling | Rule D7 says BYOK is metered, never exempt; this proposal exempts a workspace's own bot from the plan ceiling | Write the superseding record before P3a ships, and correct that section. |
+| `docs/specs/feature/bot-scope-and-claiming.md` § Current state | One `scope` answers two questions today (bindability and plan funding) | Restate as two switches after P3b; until the cutover, that section remains the description of shipped behaviour. |
+| `docs/specs/architecture/operator-admin-surface.md` | Adds a bot-level sharing route and a quota surface next to the existing App route | Add both surfaces, the audit actions they write, and the guard that keeps only the official workspace publishing. |
