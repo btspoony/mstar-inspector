@@ -17,6 +17,7 @@ import { createArtifactStore } from "../../src/store/artifact-store";
 import { createFailureStore } from "../../src/store/failure-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { readReviewLaunch } from "../../src/pipeline/review-attempt";
+import { decideConclusion } from "../../src/pipeline/checks";
 import { deliveryKeyOf, readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import {
   CHECK_TERMINALIZE_DEFAULT,
@@ -485,9 +486,21 @@ describe("the launch claim is part of the attempt's clock", () => {
         kind: "budget-exhausted",
         cause: "consumer-deadline",
         budgetWindow: "runner",
+        cappedBy: "level-budget",
         seatsDispatched: 0,
         seatsStopped: 0,
       });
+      // The anchor was honoured at its full request, so this IS the level's own
+      // budget and the recorded Check category must say so.
+      expect(
+        decideConclusion({
+          proof: null,
+          outcome: "budget-exhausted",
+          gate: null,
+          review: null,
+          budgetExhaustion: reviewed.failure.outcome,
+        }).failureStatus,
+      ).toBe("budget-stop");
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 
@@ -497,6 +510,48 @@ describe("the launch claim is part of the attempt's clock", () => {
       expect(failureRows(db)).toHaveLength(1);
       expect(await cleanupAttempt(deps, ref, { headSha: SHA })).toEqual({ retention: "retained" });
       expect(h.sandbox.destroyCalls).toBe(1);
+    });
+  });
+
+  test("a claim that spends a window clamped below the request records the remaining-window stop", async () => {
+    const { deps, db } = await makeDeps();
+    await withFrozenClock(async (clock) => {
+      // A 700s attempt cap leaves the pre-runner cutoff at 400s, below the
+      // level's own request, so the window the claim spends came from the
+      // round's remaining clock — not from the level's budget.
+      const ref = makeRef(makePayload(), clock.now + 700_000);
+      const step = await prepareFor(deps, ref);
+      if (step.kind !== "prepared") throw new Error(`prepare did not hand off: ${step.kind}`);
+      expect(step.prepared.runnerEffectiveMs).toBeLessThan(step.prepared.runnerRequestedMs);
+
+      deps.env = {
+        ...deps.env,
+        DB: claimSpendingDb(deps.env.DB, step.prepared.runnerDeadlineMs - clock.now, clock) as never,
+      };
+      const reviewed = await reviewAttempt(deps, ref, step.prepared);
+      if (!("failure" in reviewed)) throw new Error("the cap stop was not classified");
+      if (reviewed.failure.class !== "budget") throw new Error("the stop was not a budget stop");
+      expect(reviewed.failure.outcome).toMatchObject({
+        kind: "budget-exhausted",
+        cause: "consumer-deadline",
+        budgetWindow: "runner",
+        cappedBy: "remaining-window",
+      });
+      const conclusion = decideConclusion({
+        proof: null,
+        outcome: "budget-exhausted",
+        gate: null,
+        review: null,
+        budgetExhaustion: reviewed.failure.outcome,
+      });
+      expect(conclusion.failureStatus).toBe("cap-stop");
+      expect(conclusion.summary).toContain("round's remaining window");
+      expect(conclusion.summary).not.toContain("Review budget exhausted");
+      expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
+      expect(await settleAttemptFailure(deps, ref, reviewed.failure, step.prepared)).toMatchObject({
+        kind: "budget-exhausted",
+      });
+      expect(failureRows(db)).toHaveLength(1);
     });
   });
 });
@@ -595,9 +650,21 @@ describe("a container-side deadline refusal is a confirmed stop", () => {
         kind: "budget-exhausted",
         cause: "consumer-deadline",
         budgetWindow: "runner",
+        cappedBy: "level-budget",
         seatsDispatched: 0,
         seatsStopped: 0,
       });
+      // The anchor was honoured at its full request, so this IS the level's own
+      // budget and the recorded Check category must say so.
+      expect(
+        decideConclusion({
+          proof: null,
+          outcome: "budget-exhausted",
+          gate: null,
+          review: null,
+          budgetExhaustion: reviewed.failure.outcome,
+        }).failureStatus,
+      ).toBe("budget-stop");
       expect(h.sandbox.calls.some((call) => call.cmd.includes("--input"))).toBe(false);
       expect((await readReviewLaunch(db as never, ATTEMPT_ID))?.state).toBe("failed");
 
