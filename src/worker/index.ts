@@ -571,6 +571,19 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       });
       if (routeGate.degraded) console.warn(line);
       else console.log(line);
+      try {
+        await appsStore.recordDelivery({
+          appId: row.id,
+          eventName,
+          outcome: "refused",
+          statusCode: null,
+          repositoryFullName: webhookRepositoryFullName(classified),
+          reason: `review.route.workflow gate off (degraded=${routeGate.degraded})`,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        webhookWarn("delivery_record_failed", detail, "webhook delivery record failed — webhook response unaffected");
+      }
       return c.text("ignored", 200);
     }
   }

@@ -393,6 +393,7 @@ export const zhCN: Dictionary = {
         ignored: "已忽略",
         rejected: "已拒绝",
         skipped: "已跳过",
+        refused: "已拒收",
       },
     },
     tableName: "应用",
