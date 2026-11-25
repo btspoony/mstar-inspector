@@ -10205,4 +10205,21 @@ describe("check_run.rerequested rerun (the rerun id is its own idempotency dimen
     expect(settled[0]!.reason).toContain("already reviewed for this head");
     expect(settled[0]!.attachDeliveryId).toBe("delivery-rerun");
   });
+
+  test("a rerun whose checkout landed on a newer head settles without a paid review", async () => {
+    const db = await createSeededTestD1();
+    h.sandbox.resolvedSha = SHA2;
+    const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
+
+    await consumer(h.makeBatch(rerunPayload()));
+
+    expect(h.sandbox.calls.map((c) => c.cmd)).toEqual([
+      expect.stringContaining("git init '/workspace/repo'"),
+      expect.stringContaining("git -C '/workspace/repo' rev-parse HEAD"),
+    ]);
+    expect(reviewCount(db)).toBe(0);
+    expect(
+      h.logLines.some((line) => line.level === "info" && line.msg.includes("settling without a paid review")),
+    ).toBe(true);
+  });
 });

@@ -2923,6 +2923,38 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(attempts[1]).toMatchObject({ triggered_by: "check_run", head_sha: NEWER_HEAD });
   });
 
+  test("a redelivered rerequested event never enqueues twice — even after the PR head moves", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload();
+    const headers = {
+      "x-hub-signature-256": await signatureFor("secret-x", body),
+      "x-github-event": "check_run",
+      "x-github-delivery": "delivery-rerun-1",
+    };
+
+    const first = await postWebhook("/webhook/default/app-x", body, headers, env);
+    expect(await first.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+
+    // The PR head advances, then GitHub redelivers the ORIGINAL Re-run delivery:
+    // the resolved head now differs, so only the delivery id can dedup it.
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha)
+         VALUES ('pr-rerun-redelivery', ?, ?, ?, ?, 42, 'open', 'fedcba9876543210fedcba9876543210fedcba98')`,
+      )
+      .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name);
+
+    const second = await postWebhook("/webhook/default/app-x", body, headers, env);
+    expect(second.status).toBe(200);
+    expect(await second.text()).toBe("ignored");
+    expect(sent).toHaveLength(1);
+  });
+
   test("a rerun of a renamed repository enqueues under the delivery's current owner/repo", async () => {
     const db = createMigratedTestD1();
     const current = { owner: "new-owner", name: "new-name" };

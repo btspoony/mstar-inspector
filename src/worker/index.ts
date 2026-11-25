@@ -7,6 +7,7 @@ import { reconcileReviewChecks } from "./check-reconcile";
 import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
+import { IDEMPOTENCY_SECONDS } from "../contracts/idem";
 import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import type * as ConsumerModule from "../pipeline/consumer";
@@ -443,6 +444,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
   const signature = c.req.header("x-hub-signature-256") ?? null;
   const eventName = c.req.header("x-github-event") ?? null;
+  const githubDeliveryId = c.req.header("x-github-delivery") ?? null;
 
   const db = c.env.DB;
   if (db === undefined) {
@@ -731,7 +733,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
     return c.text("ignored", 200);
   }
   const skipSettlement = refusalSkipSettlement({ db, target: target! });
-  await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
+  // GitHub redelivers a webhook with the SAME delivery id, and a redelivery is
+  // the original Re-run request, not a new one. The per-head KV claim cannot
+  // dedup it once the PR has moved (the resolved head changed), so the delivery
+  // id is the guard at this layer: claim only after the enqueue succeeded, so a
+  // failed send stays retriable.
+  const rerunDeliveryKey =
+    outcome.kind === "check_rerun" && githubDeliveryId !== null
+      ? `check-rerun-delivery:${row.github_app_id}:${githubDeliveryId}`
+      : null;
+  if (rerunDeliveryKey !== null) {
+    try {
+      if ((await c.env.IDEMPOTENCY_KV.get(rerunDeliveryKey)) !== null) {
+        webhookInfo(
+          "check_rerun_redelivery",
+          `${webhookRef} delivery=${githubDeliveryId}`,
+          "GitHub redelivered a rerequested check run already accepted — no second enqueue",
+        );
+        return c.text("ignored", 200);
+      }
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_redelivery_read_failed",
+        `${webhookRef} delivery=${githubDeliveryId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerun redelivery guard read failed — proceeding without it (fail-open)",
+      );
+    }
+  }
+  const handleOutcome = await handleReviewJob({ ...settled.payload, botRef: { appId: row.id }, targetId: target!.id }, {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
     beforeEnqueue: async (payload) => {
@@ -775,6 +804,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       return { ...payload, attachDeliveryId };
     },
   }, refusal);
+  if (handleOutcome.kind === "enqueued" && rerunDeliveryKey !== null) {
+    try {
+      await c.env.IDEMPOTENCY_KV.put(rerunDeliveryKey, "1", { expirationTtl: IDEMPOTENCY_SECONDS });
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_redelivery_write_failed",
+        `${webhookRef} delivery=${githubDeliveryId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerun redelivery guard write failed — a redelivery may enqueue again",
+      );
+    }
+  }
   return c.text("accepted", 200);
 });
 

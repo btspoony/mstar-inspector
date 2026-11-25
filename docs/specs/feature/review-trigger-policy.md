@@ -82,19 +82,25 @@ rerequested is a trigger, never a bypass.
   distinguishes it from the run being rerun.
 - **An already-reviewed head is never paid twice.** The rerun's KV claims
   key under `{idemKey}:rerun:{check_run_id}`, so the plain key's `done`
-  never swallows it and the redelivery of the same rerequested event still
-  dedups; the head is part of the idemKey, so the same run id rerun at a
-  newer head is a DIFFERENT claim, not a duplicate. The pipeline's existing
-  `reviews` lookup then settles its attached run with the head's persisted
-  review against the App's current gate (`success`/`failure`), or `neutral`
-  with the skip reason when there is nothing to inherit, instead of running
-  the model again (RL-10).
+  never swallows it; the head is part of the idemKey, so the same run id
+  rerun at a newer head is a DIFFERENT claim, not a duplicate. GitHub's
+  redelivery of the same event is deduped one layer up by the delivery id
+  (`check-rerun-delivery:{github_app_id}:{delivery_id}`, written only after a
+  successful enqueue so a failed send stays retriable), because the resolved
+  head can move between the original delivery and the redelivery. The
+  pipeline's existing `reviews` lookup then settles its attached run with the
+  head's persisted review against the App's current gate (`success`/`failure`),
+  or `neutral` with the skip reason when there is nothing to inherit, instead
+  of running the model again (RL-10).
 - **A head that was never successfully reviewed really re-reviews — while it
   is still the PR head.** If the PR advances AGAIN between enqueue and
   consume, the existing consumer supersede/settle path applies — no review
   of yet another head: the consumer settles its attached run with the
   watermark head's persisted review when one exists, or `neutral` with the
-  skip reason when it does not, and acks. On either leg, a persisted
+  skip reason when it does not, and acks. The workflow's checkout is fenced
+  the same way: if it lands on a head other than the rerun's payload head, the
+  rerun settles its Check and returns before metering, so a later push is
+  never paid for. On either leg, a persisted
   review/publication row that EXISTS but cannot be READ settles
   `unknown-failure` → `failure` (fail-closed), never `neutral`.
 
