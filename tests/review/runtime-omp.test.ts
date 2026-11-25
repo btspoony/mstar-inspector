@@ -40,6 +40,7 @@ let seatResults: Array<{
   readDiff?: boolean;
   firstTurnAfterMs?: number;
   requests?: number;
+  rejectOnAbort?: string;
 }> = [];
 let installedSeatAgent: string | null = null;
 let installedAgentFiles: string[] | null = null;
@@ -292,6 +293,10 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
         // same settled shape instead of rejecting with a bare AbortError.
         const settleAborted = (): void => {
           const reason = signal.reason instanceof Error ? signal.reason.message : "aborted";
+          if (plan.rejectOnAbort !== undefined) {
+            reject(new Error(plan.rejectOnAbort));
+            return;
+          }
           resolve();
           plan.aborted = true;
           plan.abortReason = reason;
@@ -1139,10 +1144,13 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(stop.seatsStopped).toBe(2);
   });
 
-  test("a nothing-usable round is an actionable incomplete envelope: no coverage, and no report seat invented", async () => {
-    // QC F-001: a zero-completed coverage block would fail the runner's own
-    // transport guard and replace this failure with a shape error.
-    seatResults = [{ status: "absent" }, { status: "absent" }];
+  test("a nothing-usable round carries no coverage, yet still narrates when time remains", async () => {
+    // A zero-completed coverage block would fail the runner's own transport
+    // guard and replace this failure with a shape error — so no block at all.
+    // The report seat is NOT withheld for this: an incomplete review still has
+    // scope to state, and the ruling is that only a dead run or missing inputs
+    // make it ineligible.
+    seatResults = [{ status: "absent" }, { status: "absent" }, { status: "absent" }];
     const result = await ompAgentRuntime.runReview({
       ...BASE_INPUT,
       prContext: { prBody: "Closes #7", issues: [] },
@@ -1151,8 +1159,8 @@ describe("ompAgentRuntime.runReview — a stopped wave: budget stops signal, oth
     expect(result.envelope.verdict).toBe("incomplete");
     expect(result.envelope.incomplete?.reason).toMatch(/^no dispatched seat produced a usable payload/);
     expect(result.coverage).toBeUndefined();
-    // No report seat was dispatched: there is nothing to narrate.
-    expect(subagentRequests).toHaveLength(2);
+    // Two review seats + the report seat (which ran and produced no document).
+    expect(subagentRequests).toHaveLength(3);
     expect(result.report).toBeNull();
   });
 
@@ -2932,6 +2940,71 @@ describe("ompAgentRuntime.runReview — every seat is visible in the trace", () 
     expect(subagentRequests).toHaveLength(1);
     expect(result.report).toBeNull();
     expect(result.envelope.schema).toBe("mstar.review/v1");
+  });
+
+  test("a watchdog stop whose SDK cleanup then rejects is still a cap stop — the sibling's findings publish", async () => {
+    jest.useFakeTimers();
+    // A short outer window makes the watchdog fire deterministically; the
+    // seat's SDK call then rejects with a cleanup timeout instead of settling.
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 2_000);
+    const dispatched = [deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [
+      { awaitAbort: true, rejectOnAbort: "cleanup timed out" },
+      { data: seatPayload() },
+    ];
+
+    let result: ReviewRunResult;
+    const run = ompAgentRuntime.runReview(BASE_INPUT);
+    await Promise.all([dispatched[0]!.promise, dispatched[1]!.promise]);
+    await flushMicrotasks();
+    jest.advanceTimersByTime(3_000);
+    await flushMicrotasks();
+    result = await run;
+
+    // The completed sibling's finding is delivered, not dropped with the abort.
+    expect(result.envelope.findings.map((finding) => finding.title)).toEqual(["Unbounded loop"]);
+    expect(result.coverage).toEqual({
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap",
+      unreviewed: [{ seat: "changeset-1-src", scope: RECON_SRC_SCOPE }],
+    });
+  });
+
+  test("an incomplete deep review with time left still narrates its findings", async () => {
+    const incomplete = synthesizeReview({
+      findings: [
+        {
+          mergeClass: "should-fix",
+          title: "Missing null check",
+          body: "The handler assumes the payload is always present.",
+          file_path: "lib/c.ts",
+          line_start: 4,
+        },
+      ],
+      target: { owner: "acme", repo: "widgets", pr: 7, head_sha: HEAD_SHA },
+      incomplete: { reason: "deep parent reviewed part of the diff", unscanned: ["docs/"] },
+    });
+    const trace: string[] = [];
+    const spy = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      for (const arg of args) if (typeof arg === "string") trace.push(arg);
+    });
+    let result: ReviewRunResult;
+    try {
+      parentYields = [incomplete];
+      seatResults = [{ status: "absent" }];
+      result = await ompAgentRuntime.runReview({ ...DEEP_INPUT, prContext: { prBody: "Closes #7", issues: [] } });
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The seat ran: start, then the honest "ran, no document" terminal stage.
+    expect(trace.some((line) => line.includes('"stage":"report_start"'))).toBe(true);
+    expect(trace.some((line) => line.includes('"stage":"report_absent"'))).toBe(true);
+    expect(subagentRequests).toHaveLength(1);
+    expect(result.envelope.findings).toHaveLength(1);
+    expect(result.report).toBeNull();
   });
 
   test("the deep path skips an ineligible report seat with the SAME reason vocabulary", async () => {
