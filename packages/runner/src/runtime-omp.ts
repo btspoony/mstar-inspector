@@ -26,7 +26,7 @@ import {
   type MstarReviewFinding,
   type MstarReviewV1,
 } from "@mstar-harness/engine";
-import { REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
+import { PR_DIFF_PATH, REVIEW_SEATS, type AgentRuntime, type AgentRuntimeRunInput, type ReviewLevel, type ReviewRunResult } from "../../shared/src/runtime";
 import {
   PUBLICATION_TAIL_MS,
   remainingOuterMs,
@@ -495,7 +495,21 @@ export async function superviseSeats(opts: {
   }
 }
 
+/**
+ * The pinned unified-diff snapshot the consumer captured beside the clone, or
+ * `undefined` when no file is present (a capture failure round or a hand-run
+ * checkout). The diff is never inlined: the consumer's 2 MiB prefetch cap is
+ * far above a seat's read budget, and the file path — not its text — is the
+ * read-first ingredient. `MSTAR_REVIEW_DIFF_PATH` redirects the lookup for
+ * host-side tests only; the image always writes the fixed path.
+ */
+export function seatDiffFile(): string | undefined {
+  const candidate = Bun.env.MSTAR_REVIEW_DIFF_PATH ?? PR_DIFF_PATH;
+  return existsSync(candidate) ? candidate : undefined;
+}
+
 function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: SeatPlan): string {
+  const diffFile = seatDiffFile();
   return prReviewSeatPrompt({
     stage: 2,
     domain: plan.domain,
@@ -504,6 +518,7 @@ function seatAssignment(input: AgentRuntimeRunInput, pluginRoot: string, plan: S
     worktreePath: input.worktreePath,
     reconFacts: seatReconFacts(input.reconFacts, plan),
     tier: input.level,
+    ...(diffFile === undefined ? {} : { diffFile }),
     budgetRemainingMinutes: dispatchBudgetMinutes(input.level),
   });
 }

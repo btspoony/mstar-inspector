@@ -146,6 +146,15 @@ export type ReviewRunResult = {
 };
 
 /**
+ * The pinned unified-diff snapshot the consumer captures into the image
+ * (`src/pipeline/gitops.ts` DIFF_PATH mirrors this value — the consumer's
+ * command builders keep their own interpolation constant because the workerd
+ * graph may not depend on the in-image layout module). Every review seat reads
+ * the change from this file: removed lines exist nowhere else in the checkout.
+ */
+export const PR_DIFF_PATH = "/workspace/pr.diff";
+
+/**
  * The applied model's side document (fixed in-image path). The published
  * envelope is the engine's schema and must not grow fields, so this crosses the
  * container boundary as its OWN document — `{"appliedModel":"provider/model"}`.
