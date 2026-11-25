@@ -130,6 +130,17 @@ describe("the approved wording set (compass D9)", () => {
 });
 
 describe("every terminal path persists a category (or deliberately none)", () => {
+  // Independent literals: the loop below never derives its expectation from
+  // the formatter under test.
+  const UNKNOWN_FAILURE_SUMMARY =
+    "Something went wrong while running this review. Nothing is wrong with your change. Re-trigger the review by mentioning the review bot in a PR comment.";
+  const CAP_STOP_SUMMARY =
+    "This review was stopped because it ran longer than the platform's maximum review duration. Nothing is wrong with your change. Re-trigger the review by mentioning the review bot in a PR comment.";
+  const LEVEL_BUDGET_SUMMARY =
+    "Review budget exhausted: default review stopped at 600s with 2/3 seats stopped before finishing (420 changed lines) — a time-budget failure, not a verdict on the PR; shrink the diff or use a tier whose ceiling covers it.";
+  const REMAINING_WINDOW_SUMMARY =
+    "Review cap exhausted: default review stopped at 600s — the runner was capped by the round's remaining window, not the default level budget; 2/3 seats stopped before finishing; 420 changed lines — a time-window failure, not a verdict on the PR; re-trigger the review for a fresh attempt window.";
+
   const verdictMissed = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("needs fixes", 40) });
   const verdictMet = decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("ship it", 90) });
 
@@ -142,16 +153,16 @@ describe("every terminal path persists a category (or deliberately none)", () =>
     path: string;
     decided: CheckConclusion;
     status: CheckFailureStatus | null;
-    exhaustion?: BudgetExhaustedOutcome;
+    expected: string | null;
   }> = [
-    { path: "pre-publication-failure", decided: decideConclusion({ proof: null, outcome: "pre-publication-failure", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "degraded-not-posted", decided: decideConclusion({ proof: null, outcome: "degraded-not-posted", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "publication-unknown", decided: decideConclusion({ proof: null, outcome: "publication-unknown", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "expired-without-proof", decided: decideConclusion({ proof: null, outcome: "expired", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "local-error", decided: decideConclusion({ proof: null, outcome: "local-error", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "degraded-publication", decided: decideConclusion({ proof: publication({ kind: "degraded" }), outcome: "expired", gate: GATE, review: null }), status: "unknown-failure" },
-    { path: "unreadable-gate", decided: decideConclusion({ proof: publication(), outcome: "expired", gate: null, review: review("ship it", 90) }), status: "unknown-failure" },
-    { path: "unreadable-tally", decided: decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("ship it", null) }), status: "unknown-failure" },
+    { path: "pre-publication-failure", decided: decideConclusion({ proof: null, outcome: "pre-publication-failure", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "degraded-not-posted", decided: decideConclusion({ proof: null, outcome: "degraded-not-posted", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "publication-unknown", decided: decideConclusion({ proof: null, outcome: "publication-unknown", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "expired-without-proof", decided: decideConclusion({ proof: null, outcome: "expired", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "local-error", decided: decideConclusion({ proof: null, outcome: "local-error", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "degraded-publication", decided: decideConclusion({ proof: publication({ kind: "degraded" }), outcome: "expired", gate: GATE, review: null }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "unreadable-gate", decided: decideConclusion({ proof: publication(), outcome: "expired", gate: null, review: review("ship it", 90) }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
+    { path: "unreadable-tally", decided: decideConclusion({ proof: publication(), outcome: "expired", gate: GATE, review: review("ship it", null) }), status: "unknown-failure", expected: UNKNOWN_FAILURE_SUMMARY },
     {
       path: "inherited-unreadable-baseline",
       decided: decideConclusion({
@@ -162,21 +173,25 @@ describe("every terminal path persists a category (or deliberately none)", () =>
         inherited: { headSha: SHA, reviewedHeadSha: "fedcba9876543210fedcba9876543210fedcba98" },
       }),
       status: "unknown-failure",
+      expected: UNKNOWN_FAILURE_SUMMARY,
     },
     {
       path: "budget-stop: runner window, runner-deadline",
       decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "runner-deadline" } }),
       status: "budget-stop",
+      expected: LEVEL_BUDGET_SUMMARY,
     },
     {
       path: "budget-stop: runner window, sandbox-kill",
       decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "sandbox-kill" } }),
       status: "budget-stop",
+      expected: LEVEL_BUDGET_SUMMARY,
     },
     {
       path: "budget-stop: runner window, consumer-deadline",
       decided: decideConclusion({ proof: null, outcome: "budget-exhausted", gate: null, review: null, budgetExhaustion: { ...BUDGET_RECORD, cause: "consumer-deadline" } }),
       status: "budget-stop",
+      expected: LEVEL_BUDGET_SUMMARY,
     },
     {
       path: "cap-stop: preparation window",
@@ -188,22 +203,31 @@ describe("every terminal path persists a category (or deliberately none)", () =>
         budgetExhaustion: PREPARATION_RECORD,
       }),
       status: "cap-stop",
-      exhaustion: PREPARATION_RECORD,
+      expected: CAP_STOP_SUMMARY,
     },
-    { path: "gate-missed verdict", decided: verdictMissed, status: null },
-    { path: "gate-met", decided: verdictMet, status: null },
-    { path: "superseded", decided: decideConclusion({ proof: null, outcome: "superseded", gate: GATE, review: null, headSha: SHA }), status: null },
-    { path: "skipped-neutral", decided: decideConclusion({ proof: null, outcome: "skipped", gate: GATE, review: null }), status: null },
+    {
+      path: "cap-stop: runner window clamped by the remaining window",
+      decided: decideConclusion({
+        proof: null,
+        outcome: "budget-exhausted",
+        gate: null,
+        review: null,
+        budgetExhaustion: { ...BUDGET_RECORD, cappedBy: "remaining-window" },
+      }),
+      status: "cap-stop",
+      expected: REMAINING_WINDOW_SUMMARY,
+    },
+    { path: "gate-missed verdict", decided: verdictMissed, status: null, expected: null },
+    { path: "gate-met", decided: verdictMet, status: null, expected: null },
+    { path: "superseded", decided: decideConclusion({ proof: null, outcome: "superseded", gate: GATE, review: null, headSha: SHA }), status: null, expected: null },
+    { path: "skipped-neutral", decided: decideConclusion({ proof: null, outcome: "skipped", gate: GATE, review: null }), status: null, expected: null },
   ];
 
   test("each terminal path carries the approved category, or none by design", () => {
-    for (const { path, decided, status, exhaustion } of paths) {
+    for (const { path, decided, status, expected } of paths) {
       expect({ path, status: decided.failureStatus ?? null }).toEqual({ path, status });
       if (status !== null) {
-        expect({ path, summary: decided.summary }).toEqual({
-          path,
-          summary: terminalFailureSummary(status, exhaustion ?? BUDGET_RECORD),
-        });
+        expect({ path, summary: decided.summary }).toEqual({ path, summary: expected! });
         expect(decided.desired).toBe("failure");
       }
     }
@@ -234,7 +258,7 @@ describe("every terminal path persists a category (or deliberately none)", () =>
     );
     for (const decided of sameInstant) {
       expect(decided.failureStatus).toBe("budget-stop");
-      expect(decided.summary).toBe(terminalFailureSummary("budget-stop", BUDGET_RECORD));
+      expect(decided.summary).toBe(LEVEL_BUDGET_SUMMARY);
     }
     for (const cause of ["consumer-deadline", "sandbox-kill"] as const) {
       const decided = decideConclusion({
@@ -245,7 +269,7 @@ describe("every terminal path persists a category (or deliberately none)", () =>
         budgetExhaustion: { ...BUDGET_RECORD, cause, budgetWindow: "preparation" },
       });
       expect(decided.failureStatus).toBe("cap-stop");
-      expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["cap-stop"]);
+      expect(decided.summary).toBe(CAP_STOP_SUMMARY);
     }
   });
 });

@@ -3696,7 +3696,7 @@ describe("budget-exhausted Check vocabulary", () => {
     expect(conclusion.desired).toBe("failure");
     expect(conclusion.failureStatus).toBe("cap-stop");
     expect(conclusion.summary).toBe(
-      `Review cap exhausted: default review stopped at 42s — the runner was capped by the round's remaining window, not the default level budget; 120 changed lines${TAIL}`,
+      `Review cap exhausted: default review stopped at 42s — the runner was capped by the round's remaining window, not the default level budget; 120 changed lines — a time-window failure, not a verdict on the PR; re-trigger the review for a fresh attempt window.`,
     );
   });
 
