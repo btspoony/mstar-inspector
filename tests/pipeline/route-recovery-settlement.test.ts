@@ -140,6 +140,14 @@ function settledMark(db: TestD1): number | null {
   return row?.settled_ms ?? null;
 }
 
+/** The launch row's capacity-revocation instant: the arm an expired admission row needs. */
+function revokedAt(db: TestD1, attemptId: string): number | null {
+  const row = db.raw
+    .prepare("SELECT revoked_ms FROM review_launches WHERE attempt_id = ?")
+    .get(attemptId) as { revoked_ms: number | null } | null;
+  return row?.revoked_ms ?? null;
+}
+
 function stepHost(options: { failOn?: string; dieOn?: string; inFlight?: boolean } = {}): {
   step: WorkflowStep;
   runs: string[];
@@ -834,6 +842,89 @@ describe("a rejection is not an observation", () => {
     expect(outcome.kind).toBe("budget-exhausted");
     expect(failureRows(db)).toHaveLength(1);
     expect(launchState(db)).toBe("failed");
+  });
+
+  test("a settled failure frees the PR's slot, and a replay lands nothing new", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const ref = makeRef(payload);
+    await launchedAttempt(db);
+    await seedHandoff(db, payload);
+    // The paid attempt activated, and its admission row is live but expired: an
+    // activated attempt holds that row's slot until its launch row carries an
+    // outcome.
+    db.raw.prepare("UPDATE review_launches SET activated_ms = ? WHERE attempt_id = ?").run(Date.now(), ATTEMPT_ID);
+    const holdKey = {
+      installation_id: payload.installation_id,
+      owner: payload.owner,
+      repo: payload.repo,
+      pr_number: payload.pr_number,
+      workspace_id: "default",
+    };
+    db.raw
+      .prepare(
+        `INSERT INTO review_inflight
+           (installation_id, owner, repo, pr_number, workspace_id, attempt_id, head_sha, acquired_at, expires_at)
+         VALUES (?, ?, ?, ?, 'default', ?, ?, ?, ?)`,
+      )
+      .run(
+        holdKey.installation_id,
+        holdKey.owner,
+        holdKey.repo,
+        holdKey.pr_number,
+        ATTEMPT_ID,
+        payload.head_sha ?? "",
+        new Date(Date.now() - 1_200_000).toISOString(),
+        new Date(Date.now() - 1).toISOString(),
+      );
+    const admission = {
+      systemCap: 32,
+      workspaceCap: 16,
+      ttlSeconds: 600,
+      headSha: payload.head_sha ?? null,
+      now: new Date().toISOString(),
+    };
+    // note: Held: the expired lease alone is not enough while the activated
+    // attempt's launch row carries no outcome.
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-fresh" })).toMatchObject({
+      ok: false,
+      reason: "pr-held",
+    });
+
+    const deps = await makeDeps(db);
+    const phase = {
+      class: "failure",
+      phase: "review",
+      stage: "pipeline",
+      headSha: null,
+      runnerReturned: true,
+      message: "the review step returned a failing status",
+      sendAttemptPublicationId: null,
+    } as const;
+    expect(await settleAttemptFailure(deps, ref, phase, null)).toEqual({ kind: "ok" });
+
+    // note: ONE attempt-keyed record, and the launch row is no longer
+    // `launched` — that move is what stops `PAID_STATE_UNKNOWN` holding the
+    // slot. The row is NOT revoked: a revoked attempt can never be torn down or
+    // retried, so the cleanup below could never release it.
+    const settled = failureRows(db);
+    expect(settled).toHaveLength(1);
+    expect(settled[0]!.id).toBe(ATTEMPT_ID);
+    expect(launchState(db)).toBe("failed");
+    expect(revokedAt(db, ATTEMPT_ID)).toBeNull();
+
+    // note: A replay writes no second record and no second terminal outcome.
+    expect(await settleAttemptFailure(deps, ref, phase, null)).toEqual({ kind: "ok" });
+    expect(failureRows(db)).toEqual(settled);
+    expect(launchState(db)).toBe("failed");
+
+    // note: The cleanup that follows the settlement proves the container gone
+    // and releases the admission row, so the next head's admission succeeds.
+    await cleanupAttempt(deps, ref);
+    expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_inflight").get()).toEqual({ n: 0 });
+    expect(await acquireInflight(db as never, holdKey, { ...admission, attemptId: "attempt-fresh" })).toEqual({
+      ok: true,
+    });
   });
 });
 
