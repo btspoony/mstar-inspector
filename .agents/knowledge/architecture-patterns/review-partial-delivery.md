@@ -11,6 +11,8 @@ Two consequences follow, and both are easy to get wrong:
 
 **The Check still follows the review's verdict.** "Do not fail a task because it ran out of time" does not mean "pass a review that found blocking problems". A partial round whose verdict is blocked, or whose score is under the floor, concludes **failure** while still publishing its findings and its coverage statement. Otherwise a PR the review itself blocked could satisfy a required branch-protection Check.
 
+**Delivery keys on usable output, not on a completed seat.** A seat cut by the cap still returns whatever payload it had collected, so a round whose every seat was cap-stopped can still have findings worth publishing — coverage then honestly says `0/2`, and every stopped seat is named in `unreviewed`. A round with literally nothing usable is the failure case.
+
 ## What a seat must be given
 
 A seat that never receives the diff cannot review it: it must infer the change by opening whole files, which makes cost independent of diff size and leaves the actual change unexamined. Pass the pinned diff snapshot and instruct the seat to read it first. Everything else in the prompt (reference documents, skill corpus) is a fixed cost that the diff never amortizes.
