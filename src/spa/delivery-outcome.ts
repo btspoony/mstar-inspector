@@ -6,6 +6,7 @@ const OUTCOME_KEYS = {
   ignored: "apps.health.outcome.ignored",
   rejected: "apps.health.outcome.rejected",
   skipped: "apps.health.outcome.skipped",
+  refused: "apps.health.outcome.refused",
 } as const;
 
 type OutcomeKey = (typeof OUTCOME_KEYS)[keyof typeof OUTCOME_KEYS];

@@ -18,7 +18,12 @@ import { resolveModelSize } from "../contracts/provider-models";
 import { encodeCredentialPayload, type CredentialPools } from "../../packages/shared/src/credential-payload";
 import { providerEnvName } from "./provider-catalog";
 import { redactDocument, redactExactSecrets, redactSecrets } from "./redact";
-import { EXEC_TIMEOUT_GIT_MS, POST_RUNNER_READ_TIMEOUT_MS, type RunnerBudgetAnchor } from "../review-budget";
+import {
+  allocationCappedBy,
+  EXEC_TIMEOUT_GIT_MS,
+  POST_RUNNER_READ_TIMEOUT_MS,
+  type RunnerBudgetAnchor,
+} from "../review-budget";
 import type { FailureStage } from "../store/failure-store";
 import type { D1Like, D1StatementLike } from "../store/types";
 import {
@@ -2306,6 +2311,7 @@ export async function runReviewAttempt(input: {
           cause: "sandbox-kill",
           tier: level,
           budgetWindow: "runner",
+          cappedBy: allocationCappedBy(runnerAnchor),
           budgetMs: runnerAnchor.effectiveBudgetMs,
           seatsDispatched: 0,
           seatsStopped: 0,
@@ -2388,6 +2394,7 @@ export async function runReviewAttempt(input: {
         cause: "consumer-deadline",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: 0,
         seatsStopped: 0,
@@ -2453,6 +2460,7 @@ export async function runReviewAttempt(input: {
         cause: "sandbox-kill",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: null,
         seatsStopped: null,
@@ -2488,6 +2496,7 @@ export async function runReviewAttempt(input: {
         cause: "runner-deadline",
         tier: level,
         budgetWindow: "runner",
+        cappedBy: allocationCappedBy(runnerAnchor),
         budgetMs: runnerAnchor.effectiveBudgetMs,
         seatsDispatched: budgetSignal.signal.seatsDispatched,
         seatsStopped: budgetSignal.signal.seatsStopped,

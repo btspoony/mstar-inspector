@@ -31,6 +31,11 @@ export type ReviewBudgetExhaustedSignal = {
  *     window frozen before the input write (`runner`), or the already derived
  *     preparation window that expired before the runner ever received an
  *     allocation (`preparation`);
+ *   - `cappedBy` — which limit filled that window: the level's own budget
+ *     (`level-budget`, the tier ceiling or a size-aware request inside it), or
+ *     the round's remaining window, which the derivation clamps to so the
+ *     post-runner tail still fits (`remaining-window`). A capped runner did
+ *     not exhaust the tier's budget and the Check must not say it did;
  *   - `tier` / `budgetMs` — this attempt's derived tier and effective budget,
  *     always present (required facts, never unobserved);
  *   - `seatsDispatched` / `seatsStopped` / `changedLines` — observed facts,
@@ -42,6 +47,7 @@ export type BudgetExhaustedOutcome = {
   kind: "budget-exhausted";
   cause: "runner-deadline" | "consumer-deadline" | "sandbox-kill";
   budgetWindow: "runner" | "preparation";
+  cappedBy: "level-budget" | "remaining-window";
   tier: ReviewLevel;
   budgetMs: number;
   seatsDispatched: number | null;

@@ -135,7 +135,10 @@ export type AppInstallationState = {
  * the delivery (400|401|500 — "sent but refused" is the R2 visibility
  * core), `skipped` = verified and admitted by every switch, then refused by
  * the shared-bot capability (200, zero enqueue — neither `ok`, which would
- * claim a job, nor `paused`, which would blame a switch that is on).
+ * claim a job, nor `paused`, which would blame a switch that is on),
+ * `refused` = verified and classified as a job, then refused at acceptance
+ * by a platform gate (200, zero enqueue — `rejected` would claim an HTTP
+ * refusal the sender saw as 200).
  * Enforced producer-side: an off-vocabulary outcome throws BEFORE
  * any row is written; the schema has no CHECK (0010 precedent).
  */
@@ -145,9 +148,16 @@ export const DELIVERY_OUTCOMES: readonly string[] = Object.freeze([
   "ignored",
   "rejected",
   "skipped",
+  "refused",
 ]);
 
-export type DeliveryOutcome = "ok" | "paused" | "ignored" | "rejected" | "skipped";
+export type DeliveryOutcome =
+  | "ok"
+  | "paused"
+  | "ignored"
+  | "rejected"
+  | "skipped"
+  | "refused";
 
 const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
 

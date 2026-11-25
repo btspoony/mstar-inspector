@@ -56,6 +56,7 @@ import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { getReviewAttemptCap, type DegradedReason } from "./dashboard/runtime-config-store";
 import type { DashboardD1 } from "./dashboard/users";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../packages/shared/src/runtime";
+import type { BudgetExhaustedOutcome } from "../packages/shared/src/budget-exhausted-wire";
 
 /**
  * The one warn a degraded cap read owes. Its fields are this module's payload,
@@ -486,6 +487,20 @@ export function requestRunnerBudget(
     floorMs +
     Math.floor(((tierMaxMs - floorMs) * saturatedUnits) / SIZE_SATURATION_WORK_UNITS);
   return { kind: "requested", requestedBudgetMs, workUnits };
+}
+
+/**
+ * Which limit an allocation's effective window actually came from: the
+ * request — the level's own budget, whether the tier ceiling or a size-aware
+ * request inside it — or the round's remaining window, which the single
+ * `min()` above clamped it to. This is the ONLY place that distinction is
+ * read, so the Check category and its operator copy cannot disagree.
+ */
+export function allocationCappedBy(anchor: {
+  requestedBudgetMs: number;
+  effectiveBudgetMs: number;
+}): BudgetExhaustedOutcome["cappedBy"] {
+  return anchor.effectiveBudgetMs < anchor.requestedBudgetMs ? "remaining-window" : "level-budget";
 }
 
 /**

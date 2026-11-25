@@ -2680,6 +2680,9 @@ export function phaseFailureRecord(ctx: PhaseFailureContext, err: unknown): Phas
         cause: "consumer-deadline",
         tier: ctx.tier,
         budgetWindow: err.window,
+        // A spent round window IS the derived remaining-window clock: the guard
+        // declined the step because the cutoff the derivation set had arrived.
+        cappedBy: "remaining-window",
         budgetMs: ctx.budgetMs,
         seatsDispatched: 0,
         seatsStopped: 0,
