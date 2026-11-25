@@ -402,9 +402,74 @@ function dispatchBudgetMinutes(level: ReviewLevel): number {
   return budgetMinutes(remainingSoftMinutes(Date.now(), level));
 }
 
-function seatMaxRuntimeMs(nowMs: number, level: ReviewLevel): number {
-  const softCapMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000;
-  return Math.max(1, Math.min(softCapMs * 2, remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS));
+/** Watchdog cadence for one seat's cap check. */
+const SEAT_WATCH_TICK_MS = 250;
+
+/**
+ * Why the message keeps the `task.maxRuntimeMs` token: `seatOutput` reads a
+ * cap stop from that exact vocabulary — the executor's own wall-clock timer
+ * is DISABLED for review seats (the seat's clock starts at its FIRST model
+ * turn, which the SDK timer, ticking from spawn, cannot see), so the runner's
+ * own watchdog stamps the same sentence the cap regex proves.
+ */
+export function seatCapAbortError(windowMs: number): Error {
+  return new Error(`Subagent runtime limit exceeded (task.maxRuntimeMs=${windowMs})`);
+}
+
+/**
+ * Why the window is SHARED, never divided once at dispatch: one tier ceiling
+ * for the wave, split evenly across the seats still running at `nowMs`. A
+ * seat that finishes early drops out of the active count, so a sibling's
+ * deadline moves forward — released time is never stranded beside a still-
+ * thinking seat. The only bound above the share is the attempt's absolute
+ * deadline less the publication tail.
+ *
+ * The seat's own clock starts at its FIRST model turn (`firstTurnMs`), never
+ * at dispatch: session setup and the skill load are paid by the run, not out
+ * of the seat's thinking time.
+ */
+export function seatDeadlineMs(nowMs: number, firstTurnMs: number, level: ReviewLevel, activeSeats: number): number {
+  // why: quick/default seats think only inside the tier ceiling — the budget
+  // bounds the render cycle, so their share is the plain division. The deep
+  // parent's soft cap is a convergence target its own supervision nudges
+  // enforce; its hard window keeps the legacy ×2 headroom so the steer past
+  // the soft cap can land instead of cutting the turn mid-yield.
+  const ceilingMs = PR_REVIEW_TIER_BUDGETS[level].wallClockMinutes * 60_000 * (level === "deep" ? 2 : 1);
+  const running = Math.max(1, activeSeats);
+  return Math.min(firstTurnMs + Math.ceil(ceilingMs / running), nowMs + remainingOuterMs(nowMs, level) - PUBLICATION_TAIL_MS);
+}
+
+/**
+ * One seat's cap owner: a ticking watchdog plus the controller whose signal
+ * the seat consumes. `markFirstTurn` anchors the clock at the seat's first
+ * running progress event; `stop` clears the tick once the seat settles.
+ */
+export type SeatWatch = {
+  controller: AbortController;
+  markFirstTurn: () => void;
+  stop: () => void;
+};
+
+export function startSeatWatch(level: ReviewLevel, activeSeats: () => number): SeatWatch {
+  const controller = new AbortController();
+  let firstTurnMs: number | undefined;
+  const timer = setInterval(() => {
+    if (firstTurnMs === undefined || controller.signal.aborted) return;
+    const now = Date.now();
+    const deadline = seatDeadlineMs(now, firstTurnMs, level, activeSeats());
+    if (now >= deadline) {
+      controller.abort(seatCapAbortError(Math.max(1, deadline - firstTurnMs)));
+    }
+  }, SEAT_WATCH_TICK_MS);
+  return {
+    controller,
+    markFirstTurn: () => {
+      if (firstTurnMs === undefined) firstTurnMs = Date.now();
+    },
+    stop: () => {
+      clearInterval(timer);
+    },
+  };
 }
 
 /**
@@ -992,7 +1057,15 @@ async function runDeepReview(input: AgentRuntimeRunInput): Promise<ReviewRunResu
           if (remainingOuterMs(Date.now(), input.level) <= 0) {
             throw new RunnerBudgetExhausted(0, 0);
           }
-          deadlineTimer = setTimeout(deadlineAbort, seatMaxRuntimeMs(Date.now(), input.level));
+          // why: The deep parent IS the wave's only seat: its clock starts
+          // when its turn is dispatched (its first model turn — the prompt
+          // await IS the first inference), and its window is the whole tier
+          // ceiling, bounded only by the attempt's absolute deadline.
+          const firstTurnMs = Date.now();
+          deadlineTimer = setTimeout(
+            deadlineAbort,
+            Math.max(1, seatDeadlineMs(firstTurnMs, firstTurnMs, input.level, 1) - firstTurnMs),
+          );
           await parentSession.prompt(assignment);
         } catch (error) {
           turnError = error;
@@ -1241,11 +1314,18 @@ export const ompAgentRuntime: AgentRuntime = {
           : null;
       const seats = plans.map((plan, index) => ({ plan, index, id: `${plan.domain}-${plan.seat}` }));
       const servedBySeat = new Map<string, string | undefined>();
-      const seatCapMs = seatMaxRuntimeMs(Date.now(), input.level);
       const seatSingles: SubagentUsageSource[] = [];
       const settledSeats = new Set<string>();
+      const runningSeats = new Set<string>();
       const group = Promise.allSettled(
         seats.map(async ({ plan, index, id }) => {
+          // why: The SDK wall-clock timer is disabled (`maxRuntimeMs: 0`): it
+          // ticks from spawn, but the seat's budget starts at its first model
+          // turn and its window is the shared, re-dividable tier ceiling —
+          // neither fact the executor's static cap can express. The watchdog
+          // aborts through the signal the seat consumes.
+          const watch = startSeatWatch(input.level, () => runningSeats.size);
+          runningSeats.add(id);
           try {
             const result = await runStructuredSubagent({
               session: toolSession,
@@ -1258,7 +1338,11 @@ export const ompAgentRuntime: AgentRuntime = {
               schemaMode: "strict",
               enableLsp: false,
               enableIrc: false,
-              maxRuntimeMs: seatCapMs,
+              maxRuntimeMs: 0,
+              signal: watch.controller.signal,
+              onProgress: (progress) => {
+                if (progress.status === "running") watch.markFirstTurn();
+              },
             });
             seatSingles.push(result.result);
             return seatOutput(result, index, plan);
@@ -1275,6 +1359,8 @@ export const ompAgentRuntime: AgentRuntime = {
             // would race that.
             servedBySeat.set(id, servedModel(AgentRegistry.global().get(id)?.session));
             settledSeats.add(id);
+            runningSeats.delete(id);
+            watch.stop();
           }
         }),
       );

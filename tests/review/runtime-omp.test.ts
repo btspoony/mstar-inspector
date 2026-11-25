@@ -43,6 +43,7 @@ let seatResults: Array<{
   rejectWith?: unknown;
   awaitAbort?: boolean;
   readDiff?: boolean;
+  firstTurnAfterMs?: number;
 }> = [];
 let installedSeatAgent: string | null = null;
 let installedAgentFiles: string[] | null = null;
@@ -269,19 +270,39 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
     reservedSeatIds.push(identity?.id);
     seatDispatchQueue.shift()?.();
     const plan = seatResults.shift() ?? {};
+    // A seat that models its first model turn: the runner starts the seat's
+    // budget clock from this event, never from dispatch. The hook fires BEFORE
+    // the hold/abort waits — the first turn precedes the work, not the other
+    // way around; the delay simulates setup cost (session creation, skill
+    // load) — it must never be charged.
+    const progressHook = request.onProgress as ((progress: { status: string }) => void) | undefined;
+    if (plan.firstTurnAfterMs !== undefined) {
+      const delay = plan.firstTurnAfterMs;
+      if (delay > 0) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      progressHook?.({ status: "running" });
+    }
     if (holdSeats) {
       await new Promise<void>((resolve) => seatReleases.push(resolve));
     }
     if (plan.awaitAbort) {
       const signal = request.signal as AbortSignal;
-      await new Promise<void>((_resolve, reject) => {
+      await new Promise<void>((resolve, reject) => {
+        // why: The real executor converts a cap abort into a settled result
+        // whose abortReason carries the cap vocabulary; the runner's watchdog
+        // stamps that reason onto the signal, so the test double resolves the
+        // same settled shape instead of rejecting with a bare AbortError.
+        const settleAborted = (): void => {
+          const reason = signal.reason instanceof Error ? signal.reason.message : "aborted";
+          resolve();
+          plan.aborted = true;
+          plan.abortReason = reason;
+          plan.status = "absent";
+        };
         if (signal.aborted) {
-          reject(new DOMException("The operation was aborted.", "AbortError"));
+          settleAborted();
           return;
         }
-        signal.addEventListener("abort", () =>
-          reject(new DOMException("The operation was aborted.", "AbortError")),
-        );
+        signal.addEventListener("abort", settleAborted, { once: true });
       });
     }
     if (plan.reject !== undefined) throw new Error(plan.reject);
@@ -317,13 +338,14 @@ mock.module("@oh-my-pi/pi-coding-agent/task/structured-subagent", () => ({
 }));
 
 const RUNTIME_OMP_SPEC = "../../packages/runner/src/runtime-omp.ts?test=runtime-omp";
-const { ompAgentRuntime, superviseSeats, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS } = (await import(RUNTIME_OMP_SPEC)) as {
+const { ompAgentRuntime, superviseSeats, seatDeadlineMs, SUMMARY_MD_BUDGET, SEAT_GAP_MAX_CHARS } = (await import(RUNTIME_OMP_SPEC)) as {
   ompAgentRuntime: AgentRuntime;
   superviseSeats: (opts: {
     seats: readonly SupervisedSeat[];
     level: ReviewLevel;
     done: Promise<void>;
   }) => Promise<void>;
+  seatDeadlineMs: (nowMs: number, firstTurnMs: number, level: ReviewLevel, activeSeats: number) => number;
   SUMMARY_MD_BUDGET: number;
   SEAT_GAP_MAX_CHARS: number;
 };
@@ -381,6 +403,16 @@ function toolOnlyTurn(errorMessage?: string): unknown {
 }
 
 const HEAD_SHA = "abc1234567890abcdef1234567890abcdef12";
+
+async function flushMicrotasks(rounds = 50): Promise<void> {
+  // why: microtask-only flushes cannot reach real fs/timer completions the
+  // runtime awaits before dispatch (readFile/writeFile macrotasks); the
+  // setImmediate turns let the event loop deliver them between rounds.
+  for (let i = 0; i < rounds; i += 1) {
+    await Promise.resolve();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
 
 const TWO_CLUSTER_FACTS = [
   "acme/widgets#7",
@@ -729,34 +761,115 @@ describe("ompAgentRuntime.runReview — hard seat cap (collected vs uncollected)
   const softCapMs = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
   const TAIL_MS = 60_000;
 
-  test("the seat call is capped by min(soft cap × 2, outer budget − 60s) — never the soft remainder", async () => {
-    jest.useFakeTimers();
+  test("the SDK wall-clock timer is disabled: the watchdog owns the cap, anchored at the first model turn", async () => {
     seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-
     anchorRecheckDeadline(Date.now() + 3_600_000, "default");
     await ompAgentRuntime.runReview(BASE_INPUT);
 
-    const cap = subagentRequests[0]!.maxRuntimeMs as number;
-    expect(cap).toBe(softCapMs * 2);
-    expect(cap).toBe(subagentRequests[1]!.maxRuntimeMs as number);
-
-    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-    anchorRecheckDeadline(Date.now(), "default");
-    const before = subagentRequests.length;
-    await ompAgentRuntime.runReview(BASE_INPUT);
-
-    const outerCapped = subagentRequests[before]!.maxRuntimeMs as number;
-    expect(outerCapped).toBe(remainingOuterMs(Date.now(), "default") - TAIL_MS);
-    expect(outerCapped).toBeLessThan(softCapMs * 2);
-    expect(outerCapped).not.toBe(remainingSoftMinutes(Date.now(), "default") * 60_000);
+    expect(subagentRequests[0]!.maxRuntimeMs).toBe(0);
+    expect(subagentRequests[1]!.maxRuntimeMs).toBe(0);
+    expect(subagentRequests[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
   });
 
-  test("a spent outer budget still bounds the seat — never the SDK's 0 = no cap", async () => {
-    anchorRecheckDeadline(Date.now() - 700_000, "default");
-    seatResults = [{ data: seatPayload() }, { data: seatPayload({ findings: [] }) }];
-    await ompAgentRuntime.runReview(BASE_INPUT);
+  test("the shared window is the tier ceiling split across the running seats, bounded by the absolute deadline", async () => {
+    const level = "default" as const;
+    const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
+    const turn = Date.now();
+    anchorRecheckDeadline(turn, level, turn + 3_600_000);
 
-    expect(subagentRequests[0]!.maxRuntimeMs as number).toBe(1);
+    const twoSeats = seatDeadlineMs(turn, turn, level, 2);
+    expect(twoSeats - turn).toBe(Math.ceil(ceiling / 2));
+
+    const oneSeat = seatDeadlineMs(turn, turn, level, 1);
+    expect(oneSeat - turn).toBe(ceiling);
+    expect(oneSeat).toBeGreaterThan(twoSeats);
+
+    // A deadline inside the two-seat share clamps the window; one beyond the
+    // full ceiling never widens it — the tier ceiling bounds both directions.
+    anchorRecheckDeadline(turn, level, turn + 250_000 + TAIL_MS);
+    expect(seatDeadlineMs(turn + 1, turn, level, 2)).toBe(turn + 250_000);
+    anchorRecheckDeadline(turn, level, turn + ceiling * 3);
+    expect(seatDeadlineMs(turn + 1, turn, level, 2)).toBe(twoSeats);
+  });
+
+  test("a seat's cap starts at its first model turn — slow setup is never charged to its window", async () => {
+    // Real timers: the watchdog ticks on wall time. The seat's setup costs
+    // 150 ms before its first turn; if the clock had started at dispatch the
+    // window would already be spent by the assertion point far past the
+    // tick cadence — an un-aborted signal after several ticks proves the cap
+    // re-anchored at the first turn instead.
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
+    seatResults = [
+      { firstTurnAfterMs: 150, data: seatPayload() },
+      { firstTurnAfterMs: 150, data: seatPayload({ findings: [] }) },
+    ];
+
+    await ompAgentRuntime.runReview(BASE_INPUT);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+
+    for (const request of subagentRequests) {
+      expect((request.signal as AbortSignal).aborted).toBe(false);
+    }
+  });
+
+  test("a seat that finishes early releases its share: the sibling's deadline is the full ceiling", async () => {
+    jest.useFakeTimers();
+    const ceiling = PR_REVIEW_TIER_BUDGETS.default.wallClockMinutes * 60_000;
+    anchorRecheckDeadline(Date.now(), "default", Date.now() + 3_600_000);
+    holdSeats = true;
+    const dispatched = [deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [{ firstTurnAfterMs: 0, data: seatPayload() }, { firstTurnAfterMs: 0, data: seatPayload() }];
+
+    const run = ompAgentRuntime.runReview(BASE_INPUT);
+    await dispatched[1]!.promise;
+    await flushMicrotasks();
+
+    // Seat 1 finishes early — far inside the shared window — releasing its
+    // half while the sibling still thinks.
+    jest.advanceTimersByTime(Math.ceil(ceiling / 4) - 250);
+    await flushMicrotasks();
+    seatReleases[0]!();
+    await flushMicrotasks();
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(false);
+
+    // The sibling's window moved forward with the release: it survives past
+    // the two-seat deadline, but not past the full ceiling.
+    jest.advanceTimersByTime(Math.ceil(ceiling / 4));
+    await flushMicrotasks();
+    const siblingSignal = subagentRequests[1]!.signal as AbortSignal;
+    expect(siblingSignal.aborted).toBe(false);
+    jest.advanceTimersByTime(Math.ceil(ceiling / 2) + 2_000);
+    await flushMicrotasks();
+    expect(siblingSignal.aborted).toBe(true);
+    expect(String((siblingSignal.reason as Error).message)).toMatch(/Subagent runtime limit exceeded/);
+
+    seatReleases[1]!();
+    await run;
+  });
+
+  test("a spent outer budget still bounds the seat — the watchdog aborts at the first tick after its first turn", async () => {
+    jest.useFakeTimers();
+    anchorRecheckDeadline(Date.now() - 700_000, "default");
+    const dispatched = [deferred(), deferred()];
+    seatDispatchQueue = dispatched.map((entry) => entry.resolve);
+    seatResults = [
+      { firstTurnAfterMs: 0, awaitAbort: true },
+      { firstTurnAfterMs: 0, data: seatPayload({ findings: [] }) },
+    ];
+
+    const run = ompAgentRuntime.runReview(BASE_INPUT).catch((error: unknown) => error);
+    // Await the seats' own dispatch — the fan-out's fs setup is real I/O a
+    // fixed flush count cannot guarantee under fake timers.
+    await Promise.all([dispatched[0]!.promise, dispatched[1]!.promise]);
+
+    jest.advanceTimersByTime(1_000);
+    await flushMicrotasks();
+
+    expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
+    const stop = (await run) as RunnerBudgetExhausted;
+    expect(stop).toBeInstanceOf(RunnerBudgetExhausted);
   });
 
   test("a seat that returns inside its cap is collected: findings land, no coverage note", async () => {
@@ -2370,8 +2483,9 @@ describe("ompAgentRuntime.runReview — recheck seat (spec §7.8)", () => {
 
     expect(subagentRequests).toHaveLength(3);
     expect((subagentRequests[0]!.signal as AbortSignal).aborted).toBe(true);
-    expect(subagentRequests[1]!.signal).toBeUndefined();
-    expect(subagentRequests[2]!.signal).toBeUndefined();
+    // The review seats carry their own watchdog signals — never the recheck's.
+    expect((subagentRequests[1]!.signal as AbortSignal).aborted).toBe(false);
+    expect((subagentRequests[2]!.signal as AbortSignal).aborted).toBe(false);
   });
 
   test("deep: the recheck seat runs on a DEDICATED read-only session, not the parent's yield stream", async () => {
