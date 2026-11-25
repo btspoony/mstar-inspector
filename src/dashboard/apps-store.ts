@@ -159,7 +159,7 @@ export type DeliveryOutcome =
   | "skipped"
   | "refused";
 
-const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected') THEN 0 ELSE 1 END`;
+const DELIVERY_VERDICT_TIER_SQL = `CASE WHEN outcome IN ('ok', 'paused', 'rejected', 'refused') THEN 0 ELSE 1 END`;
 
 /**
  * Restricts `webhook_deliveries` rows to repositories the bound workspace has a
