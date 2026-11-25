@@ -88,17 +88,24 @@ app.use("*", spaDispatch());
  * shared-bot capability then refused reads `skipped`. `ok` would claim a job
  * was enqueued, and `paused` would tell an operator a switch is off while it
  * is on.
+ *
+ * `routeRefused` is the fourth gate: a job the review.route.workflow gate
+ * refused at acceptance reads `refused`. It sits after the pauses on purpose:
+ * a closed platform gate must not rewrite the visible reason a paused App's
+ * delivery stopped at — the operator reads `paused` and sees the switch.
  */
 export function deliveryOutcomeFromWebhook(
   outcome: { kind: Exclude<WebhookOutcome["kind"], "check_rerun"> },
   reviewEnabled: number,
   reviewGlobal: boolean,
   sharedBotRefused = false,
+  routeRefused = false,
 ): DeliveryOutcome {
   if (outcome.kind === "reject") return "rejected";
   if (outcome.kind === "ignore") return "ignored";
   if (outcome.kind === "installation" || outcome.kind === "installation_removed") return "ignored";
   if (reviewEnabled === 0 || !reviewGlobal) return "paused";
+  if (routeRefused) return "refused";
   return sharedBotRefused ? "skipped" : "ok";
 }
 
@@ -571,6 +578,23 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       });
       if (routeGate.degraded) console.warn(line);
       else console.log(line);
+        // The outcome decides the reason: a paused App or a global kill switch
+        // still reads `paused` (and so records the same null reason the
+        // gate-on path would), never a gate it was never refused by.
+        const outcome = deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, false, true);
+      try {
+        await appsStore.recordDelivery({
+          appId: row.id,
+          eventName,
+          outcome: outcome,
+          statusCode: null,
+          repositoryFullName: webhookRepositoryFullName(classified),
+          reason: outcome === "refused" ? `review.route.workflow gate off (degraded=${routeGate.degraded})` : null,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        webhookWarn("delivery_record_failed", detail, "webhook delivery record failed — webhook response unaffected");
+      }
       return c.text("ignored", 200);
     }
   }
