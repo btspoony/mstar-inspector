@@ -10478,6 +10478,36 @@ describe("partial seat coverage — a delivered review passes and says what it c
     expect(await findIncrementBase(db as never, { appId: TEST_APP_ID, installationId: 123, owner: "acme", repo: "widgets", prNumber: 42 })).toBe("f".repeat(40));
   });
 
+  test("Markdown control characters in scope text publish as inert escapes — the exact same literal on both surfaces", async () => {
+    // A hostile path can carry backticks, brackets, pipes, emphasis or a
+    // leading hash; neither the comment body nor the Check summary may render
+    // it as live formatting.
+    const hostileScope = "src/`evil`_[x](y)|#\\z.ts";
+    const hostileCoverage = {
+      seatsTotal: 2,
+      seatsCompleted: 1,
+      stoppedReason: "cap" as const,
+      unreviewed: [{ seat: "#correctness", scope: [hostileScope] }],
+    };
+    h.sandbox.runnerStdout = JSON.stringify({ ...GATED_OUTPUT, coverage: hostileCoverage });
+    const db = await createSeededTestD1();
+    await (await consumerFor(db))(h.makeBatch(makePayload()));
+
+    // The expected literal, spelled out — never re-derived from the formatter.
+    const expectedLine =
+      "Reviewed 1/2 seats; stopped by cap — not reviewed: \\#correctness " +
+      "(src/\\`evil\\`\\_\\[x\\]\\(y\\)\\|#\\\\z.ts)";
+    const body = publishedBody();
+    const terminal = checkRequests.at(-1)!.params as unknown as ChecksUpdateParams;
+    expect(terminal.conclusion).toBe("success");
+    expect(terminal.output.summary).toContain(expectedLine);
+    expect(body).toContain(expectedLine);
+    // No live formatting: the unescaped metacharacters never appear as pairs
+    // or bare table/heading syntax in either surface's coverage sentence.
+    const summaryTail = terminal.output.summary.slice(terminal.output.summary.indexOf("Reviewed "));
+    expect(summaryTail).toBe(expectedLine);
+  });
+
   test("the shared sentence renderer: full or absent coverage renders nothing, unknown stops are omitted", () => {
     expect(partialSeatCoverageLine(null)).toBe("");
     expect(partialSeatCoverageLine({ seatsTotal: 1, seatsCompleted: 1, stoppedReason: null, unreviewed: [] })).toBe("");

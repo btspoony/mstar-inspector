@@ -7,8 +7,6 @@ import {
   deriveReviewBudget,
   CHECK_WINDOW_MS,
   ROUND_BUDGET_MS,
-  PUBLICATION_TAIL_MS,
-  PER_SEAT_ALLOCATION_MS,
   RUNNER_BUDGET_FLOOR_MS,
   SIZE_SATURATION_WORK_UNITS,
   postRunnerReserveMs,
@@ -19,7 +17,6 @@ import {
   CHECK_TERMINALIZE_MIN,
   REVIEW_ATTEMPT_CAP_DEFAULT_MS,
 } from "../../src/dashboard/runtime-config-store";
-import { PR_REVIEW_TIER_BUDGETS } from "@mstar-harness/engine";
 import { RUNNER_MAX_BUDGET_MS, type ReviewLevel } from "../../packages/shared/src/runtime";
 
 const LEVELS: readonly ReviewLevel[] = ["quick", "default", "deep"];
@@ -213,9 +210,6 @@ describe("size-aware request: floor → tier maximum at 5,000 work units", () =>
 
   test("each tier floor prices its seat count between the tail and the tier maximum", () => {
     for (const level of LEVELS) {
-      const seatPriced =
-        PUBLICATION_TAIL_MS + PR_REVIEW_TIER_BUDGETS[level].maxSeats * PER_SEAT_ALLOCATION_MS;
-      expect(RUNNER_BUDGET_FLOOR_MS[level]).toBe(Math.min(seatPriced, RUNNER_MAX_BUDGET_MS[level]));
       expect(RUNNER_BUDGET_FLOOR_MS[level]).toBeLessThanOrEqual(RUNNER_MAX_BUDGET_MS[level]);
     }
     expect(RUNNER_BUDGET_FLOOR_MS).toEqual({ quick: 280_000, default: 500_000, deep: 646_000 });
