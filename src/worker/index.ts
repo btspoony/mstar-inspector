@@ -115,13 +115,18 @@ export function deliveryOutcomeFromWebhook(
  * name a repository that has since been renamed while `target` was resolved
  * by the payload's current name: the job and the target must agree.
  * `installation_id` likewise comes from the DELIVERY — classification already
- * bound the run to this installation, so the row's recorded (possibly stale)
- * id must not override it; only `pr_number`/`head_sha` stay row-authoritative.
+ * id must not override it; only `pr_number` stays row-authoritative.
+ * The rerun targets the PR's CURRENT head, resolved from the `pull_requests`
+ * watermark; the run's own `head_sha` is the fallback when the watermark is
+ * absent or its read faults (fail-open, matching the watermark read posture
+ * elsewhere). The run id still proves App ownership of the review.
  */
 async function resolveCheckRerunOutcome(
   db: D1Database,
   row: Pick<GithubAppTenantRow, "id" | "github_app_id">,
   rerun: Extract<WebhookOutcome, { kind: "check_rerun" }>,
+  appsStore: ReturnType<typeof createReviewBotsStore>,
+  target: ReviewTargetRow | null,
   webhookRef: string,
 ): Promise<Exclude<WebhookOutcome, { kind: "check_rerun" }>> {
   // `undefined` = the lookup faulted; `null` = the lookup ran and no row owns
@@ -154,6 +159,31 @@ async function resolveCheckRerunOutcome(
       "rerequested run resolved to a renamed repository — enqueueing under the delivery's current name",
     );
   }
+  let headSha = attempt.headSha;
+  if (target !== null) {
+    try {
+      const watermark = await appsStore.selectPrHead({
+        targetId: target.id,
+        owner: rerun.owner,
+        repo: rerun.repo,
+        prNumber: attempt.prNumber,
+      });
+      if (watermark !== null && watermark.headSha !== null && watermark.headSha !== "" && watermark.headSha !== attempt.headSha) {
+        webhookInfo(
+          "check_rerun_live_head",
+          `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} head=${attempt.headSha.slice(0, 7)}->${watermark.headSha.slice(0, 7)}`,
+          "rerequested run resolved to the PR's current head — reviewing the watermark head instead of the run's own",
+        );
+        headSha = watermark.headSha;
+      }
+    } catch (err) {
+      webhookWarn(
+        "check_rerun_head_lookup_failed",
+        `${webhookRef} row_id=${row.id} check_run_id=${rerun.checkRunId} detail=${err instanceof Error ? err.message : String(err)}`,
+        "rerequested run could not read the pull_requests watermark — falling back to the run's own head (fail-open)",
+      );
+    }
+  }
   return {
     kind: "job",
     payload: {
@@ -161,7 +191,7 @@ async function resolveCheckRerunOutcome(
       owner: rerun.owner,
       repo: rerun.repo,
       pr_number: attempt.prNumber,
-      head_sha: attempt.headSha,
+      head_sha: headSha,
       action: "rerequested",
       triggered_by: "check_run",
       rerun_check_run_id: rerun.checkRunId,
@@ -525,7 +555,7 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
 
   const settled: Exclude<WebhookOutcome, { kind: "check_rerun" }> =
-    outcome.kind === "check_rerun" ? await resolveCheckRerunOutcome(db, row, outcome, webhookRef) : outcome;
+    outcome.kind === "check_rerun" ? await resolveCheckRerunOutcome(db, row, outcome, appsStore, delivery.target, webhookRef) : outcome;
 
   const target = delivery.target;
   if (settled.kind === "ignore" && settled.reason === NO_TARGET_REASON) {

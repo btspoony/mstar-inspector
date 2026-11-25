@@ -25,7 +25,7 @@ The comment trigger is a **bare mention**: no slash command, no magic wording. `
 | Scope | Per review target, which may inherit the workspace default (`follow_workspace_defaults`). No deployment-level override; the target's business pause or the bot's operational pause governs every enqueue path alongside the platform flag |
 | Default | the workspace default is `every_push` (`default_review_trigger_mode`); a new target is created inheriting it |
 | Write path | the repository detail's 评审配置 tab (`POST …/api/targets/:targetId`) and its 所有仓库 twin (`POST …/api/targets/defaults`), one validated body parser each; an off-vocabulary mode is a keyed 400 with nothing stored |
-| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no operator action at all: the manifest declares `check_run` in `default_events`, and an App already holding `checks: write` is auto-subscribed to the event by GitHub, so an existing App needs no settings change; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0109`) — which is the authoritative source for the run's `pr_number` and `head_sha` because a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch`; the job's `owner`/`repo` follow the delivery's current name so a renamed repository keeps the target and the job in agreement |
+| Read path | The webhook resolves the delivery's target by repository identity and passes that target's effective trigger mode (plus the bot row's cached `github_slug` and its numeric `github_app_id`) into classification — one defaults read per delivery, no second lookup. A `check_run` delivery's write path needs no operator action at all: the manifest declares `check_run` in `default_events`, and an App already holding `checks: write` is auto-subscribed to the event by GitHub, so an existing App needs no settings change; the read path resolves the rerequested run back through `review_checks (github_app_id, check_run_id)` — indexed by `idx_review_checks_app_run` (migration `0109`) — which is the authoritative source for the run's `pr_number` (a fork PR's delivery carries an empty `pull_requests` list and a null `head_branch`); the reviewed `head_sha` is the PR's current head from the `pull_requests` watermark, with the run's own head only as the absent/unreadable fallback (§2.2); the job's `owner`/`repo` follow the delivery's current name so a renamed repository keeps the target and the job in agreement |
 
 ### 2.1 Auto-trigger classification matrix
 
@@ -64,12 +64,17 @@ rerequested is a trigger, never a bypass.
 
 ### 2.2 Check-run rerequested semantics
 
-- **Rerun means re-run the review on the run's own head.** The enqueued job
-  carries `triggered_by: "check_run"`, `action: "rerequested"`, the
-  `rerun_check_run_id` it was asked to rerun, `pr_number`/`head_sha` read
-  from the `review_checks` row, and `owner`/`repo` from the delivery's current
-  name (the row may predate a rename) — the delivery's own `pull_requests` is
-  advisory only (empty on fork PRs).
+- **Rerun means re-run the review on the PR's current head.** The rerun
+  targets the head the `pull_requests` watermark currently records for the PR
+  — re-running an already-superseded commit is pointless. The `review_checks`
+  row the run id names supplies the PR identity and proves App ownership; the
+  run's own recorded head is only the fallback when the watermark row is
+  absent or its read faults. The enqueued job carries
+  `triggered_by: "check_run"`, `action: "rerequested"`, the
+  `rerun_check_run_id` it was asked to rerun, `pr_number` from the row, and
+  `owner`/`repo` from the delivery's current name (the row may predate a
+  rename) — the delivery's own `pull_requests` is advisory only (empty on
+  fork PRs).
 - **GitHub requires a new run.** A concluded run cannot be re-queued, so
   acceptance attaches a fresh `review_checks` attempt under
   `(triggered_by=check_run, action=rerequested)` — the same
@@ -78,18 +83,20 @@ rerequested is a trigger, never a bypass.
 - **An already-reviewed head is never paid twice.** The rerun's KV claims
   key under `{idemKey}:rerun:{check_run_id}`, so the plain key's `done`
   never swallows it and the redelivery of the same rerequested event still
-  dedups; the pipeline's existing `reviews` lookup then settles its attached
-  run with the head's persisted review against the App's current gate
-  (`success`/`failure`), or `neutral` with the skip reason when there is
-  nothing to inherit, instead of running the model again (RL-10). There is no
+  dedups; the head is part of the idemKey, so the same run id rerun at a
+  newer head is a DIFFERENT claim, not a duplicate. The pipeline's existing
+  `reviews` lookup then settles its attached run with the head's persisted
+  review against the App's current gate (`success`/`failure`), or `neutral`
+  with the skip reason when there is nothing to inherit, instead of running
+  the model again (RL-10).
 - **A head that was never successfully reviewed really re-reviews — while it
-  is still the PR head.** When the run's head has been overtaken, the rerun
-  never reviews new code: the consumer settles its attached run with the old
-  head's persisted review against the App's current gate (`success`/`failure`)
-  when that head was reviewed, or `neutral` with the skip reason ("rerun
-  targets a commit that is no longer the PR head") when it was not, and acks.
-  On either leg, a persisted review/publication row that EXISTS but cannot be
-  READ settles `unknown-failure` → `failure` (fail-closed), never `neutral`.
+  is still the PR head.** If the PR advances AGAIN between enqueue and
+  consume, the existing consumer supersede/settle path applies — no review
+  of yet another head: the consumer settles its attached run with the
+  watermark head's persisted review when one exists, or `neutral` with the
+  skip reason when it does not, and acks. On either leg, a persisted
+  review/publication row that EXISTS but cannot be READ settles
+  `unknown-failure` → `failure` (fail-closed), never `neutral`.
 
 
 ### 3. Bot-mention comment trigger (normative)

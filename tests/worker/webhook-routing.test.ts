@@ -2885,6 +2885,44 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(attempts[1]).toMatchObject({ triggered_by: "check_run", action: "rerequested" });
   });
 
+  test("a rerequested run with a newer watermark head enqueues the watermark head, not the run's own", async () => {
+    const db = createMigratedTestD1();
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", githubAppId: 1000 });
+    await seedAttachedCheck(db, appRow);
+    const NEWER_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
+    db.raw
+      .prepare(
+        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha)
+         VALUES ('pr-rerun-42', ?, ?, ?, ?, 42, 'open', ?)`,
+      )
+      .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name, NEWER_HEAD);
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never });
+    const body = checkRunPayload();
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "check_run" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("accepted");
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      pr_number: 42,
+      head_sha: NEWER_HEAD,
+      rerun_check_run_id: RERUN_CHECK_RUN_ID,
+      triggered_by: "check_run",
+    });
+    const attempts = db.raw
+      .query("SELECT triggered_by, head_sha FROM review_checks ORDER BY created_ms")
+      .all() as Array<{ triggered_by: string; head_sha: string }>;
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]).toMatchObject({ triggered_by: "check_run", head_sha: NEWER_HEAD });
+  });
+
   test("a rerun of a renamed repository enqueues under the delivery's current owner/repo", async () => {
     const db = createMigratedTestD1();
     const current = { owner: "new-owner", name: "new-name" };
