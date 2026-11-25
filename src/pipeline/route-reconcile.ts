@@ -6,6 +6,7 @@ import {
   kvClaimKey,
 } from "../contracts/idem";
 import { getLostReplySettleMs } from "../dashboard/runtime-config-store";
+import { expireInflightStatement } from "../store/inflight-store";
 import { readReviewLaunch, recordReviewFailureStatement } from "./review-attempt";
 import { payloadIdentityFields } from "./review-attempt-execution";
 import type { ConsumerLogFields } from "./review-attempt-execution";
@@ -505,6 +506,20 @@ async function settleLostReplies(
       // is durable at this point (our insert above counts) and the row is still
       // live, so a stop right after this batch never loses it.
       recordLandedEffectStatement(env.DB, handoff.attemptId, "failure-row", LAUNCH_STILL_LIVE_SQL),
+      // The lease ends with the review: the row stops counting against the caps
+      // at once, and it stays so a same-PR successor still owes the stop proof.
+      expireInflightStatement(
+        env.DB,
+        {
+          installation_id: handoff.payload.installation_id,
+          owner: handoff.payload.owner,
+          repo: handoff.payload.repo,
+          pr_number: handoff.payload.pr_number,
+        },
+        handoff.attemptId,
+        nowMs,
+        LAUNCH_STILL_LIVE_SQL,
+      ),
       // The release — only a `launched` row moves, so one pass wins it — and the
       // settlement start, which closes the batch and reads the release's count.
       recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),

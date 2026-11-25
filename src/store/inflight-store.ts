@@ -1,4 +1,4 @@
-import type { D1Like } from "./types";
+import type { D1Like, D1StatementLike } from "./types";
 
 /**
  * The per-PR identity plus the tenant the caps are counted against. `owner` /
@@ -53,12 +53,26 @@ const PAID_STATE_UNKNOWN = `EXISTS (SELECT 1 FROM review_launches l
            WHERE l.attempt_id = r.attempt_id
              AND l.state = 'launched' AND l.result_outcome IS NULL)`;
 
+/**
+ * Whether this row still counts against the caps. A live lease does; so does a
+ * paid state nobody can read; and so does an EXPIRED lease whose attempt is
+ * activated, not revoked, and could still be doing paid work — a `persisted`
+ * result may still be publishing, and an unreadable outcome is fail-closed.
+ *
+ * A FAILED attempt is the exception, and it is the settlement's side of the
+ * bargain: its outcome is terminal (the paid step returned), the release that
+ * wrote it also shortened the lease (`expireInflightStatement`), and keeping the
+ * row counted would leave unrelated reviews queued behind a slot nobody will
+ * release. The row itself STAYS, so a same-PR successor still has to prove the
+ * container's stop before it takes the PR.
+ */
 const HOLDS_CAP_SQL = `(r.expires_at > ? OR ${PAID_STATE_UNKNOWN}
           OR (r.expires_at <= ? AND EXISTS (
                 SELECT 1 FROM review_launches l
                  WHERE l.attempt_id = r.attempt_id
                    AND l.activated_ms IS NOT NULL
-                   AND l.revoked_ms IS NULL)))`;
+                   AND l.revoked_ms IS NULL
+                   AND (l.result_outcome IS NULL OR l.result_outcome = 'persisted'))))`;
 
 const ACQUIRE_SQL = `
 INSERT INTO review_inflight
@@ -241,6 +255,36 @@ export async function extendInflightTtl(
     )
     .bind(expiresAt, key.installation_id, key.owner, key.repo, key.pr_number, attemptId, expiresAt)
     .run();
+}
+
+/**
+ * End this attempt's lease as part of the settlement that recorded its outcome:
+ * the release shortens `expires_at` to now, so the row stops counting against
+ * the caps at once instead of holding a slot until a TTL nobody will shorten.
+ *
+ * The row is NOT deleted. It still records who held the PR, so a successor on
+ * the same pull request reaches the ordinary `pr-held` refusal and must provide
+ * the container's stop proof before it takes over — the same guard the cleanup's
+ * own `releaseInflight` removes along with the row.
+ *
+ * `extraGuard` is the caller's own precondition on `?1` (the attempt); the
+ * release batch passes its launch condition, so a row whose launch was
+ * terminalized another way keeps its full lease.
+ */
+export function expireInflightStatement(
+  db: D1Like,
+  key: Pick<InflightKey, "installation_id" | "owner" | "repo" | "pr_number">,
+  attemptId: string,
+  nowMs: number,
+  extraGuard = "",
+): D1StatementLike {
+  return db
+    .prepare(
+      `UPDATE review_inflight SET expires_at = ?2
+        WHERE attempt_id = ?1 AND installation_id = ?3 AND owner = ?4 AND repo = ?5 AND pr_number = ?6
+          ${extraGuard === "" ? "" : `AND ${extraGuard}`}`,
+    )
+    .bind(attemptId, isoInstant(nowMs), key.installation_id, key.owner.toLowerCase(), key.repo.toLowerCase(), key.pr_number);
 }
 
 /**

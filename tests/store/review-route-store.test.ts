@@ -149,6 +149,52 @@ describe("the settlement record's insert", () => {
     expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 2 });
   });
 
+  test("ids that differ only in a wildcard character each keep exactly one record", async () => {
+    const db = createMigratedTestD1();
+    seedTargetOnce(db);
+    // `_` is ANY character in an unescaped LIKE pattern, so `attempt_a:%` would
+    // also cover `attemptXa:<stage>`. The pattern is escaped and carries
+    // `ESCAPE '\'`, so each attempt's namespace is literally its own id.
+    const underscored = "attempt_a";
+    const lookalike = "attemptXa";
+    const base = recordInput();
+    const subRecord = (id: string, attemptId: string) =>
+      createFailureStore(db as never).record({
+        id,
+        target_id: TARGET_ID,
+        installation_id: 123,
+        owner: "acme",
+        repo: "widgets",
+        pr_number: 7,
+        head_sha: "a".repeat(40),
+        stage: "recheck",
+        code: "review.internal.unclassified" as never,
+        trackId: attemptId,
+        message: "a sub-record",
+        error: "a sub-record",
+      });
+    await subRecord(`${lookalike}:recheck`, lookalike);
+
+    const first = await settlementRecordInsertStatement(
+      db as never,
+      { ...base, trackId: underscored },
+      underscored,
+    ).run();
+    const second = await settlementRecordInsertStatement(db as never, { ...base, trackId: lookalike }, lookalike).run();
+    const retry = await settlementRecordInsertStatement(
+      db as never,
+      { ...base, trackId: underscored },
+      underscored,
+    ).run();
+
+    // Each attempt gets its own record exactly once; the foreign sub-record never
+    // stands in for the other's.
+    expect([first.meta.changes, second.meta.changes, retry.meta.changes]).toEqual([1, 1, 0]);
+    for (const id of [underscored, lookalike]) {
+      expect(db.raw.prepare("SELECT COUNT(*) AS n FROM review_failures WHERE id = ?").get(id)).toEqual({ n: 1 });
+    }
+  });
+
   test("a diagnostic sub-stage row never stands in for the attempt's record", async () => {
     const db = createMigratedTestD1();
     seedTargetOnce(db);

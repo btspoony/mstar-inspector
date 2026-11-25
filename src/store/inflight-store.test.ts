@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   acquireInflight,
+  expireInflightStatement,
   releaseInflight,
   type AcquireInflightOptions,
   type InflightKey,
@@ -142,6 +143,107 @@ describe("inflight-store", () => {
     rows = db.raw.query("SELECT * FROM review_inflight").all() as Array<Record<string, unknown>>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.attempt_id).toBe("attempt-1");
+  });
+
+  test("an expired lease stops counting once its attempt records an outcome", async () => {
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
+    // The attempt is over: its launch row carries the outcome the settlement wrote.
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, failed_at_ms, activated_ms, result_outcome)
+         VALUES (?, 'failed', 1, 2, 3, 2, 'failed')`,
+      )
+      .run(OPTS.attemptId);
+
+    expect(
+      await acquireInflight(db, otherPr(8), {
+        ...OPTS,
+        attemptId: "attempt-8",
+        systemCap: 1,
+        workspaceCap: 1,
+        now: "2026-11-03T00:02:00Z",
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  test("an expired lease of an activated attempt with no outcome still holds capacity", async () => {
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
+    // Activated, and no outcome recorded: a container may still exist, so the
+    // slot stays reserved until a stop proof or the cleanup moves it.
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, activated_ms, sandbox_id)
+         VALUES (?, 'provisioned', 1, 2, ?)`,
+      )
+      .run(OPTS.attemptId, `review-${OPTS.attemptId}`);
+
+    expect(
+      await acquireInflight(db, otherPr(8), {
+        ...OPTS,
+        attemptId: "attempt-8",
+        systemCap: 1,
+        workspaceCap: 1,
+        now: "2026-11-03T00:02:00Z",
+      }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+  });
+
+  test("an expired lease of a persisted attempt keeps holding its slot", async () => {
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 60 })).toEqual({ ok: true });
+    // A durable result may still be publishing: the paid work is not over, so the
+    // expired lease keeps counting until a stop proof or the cleanup.
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, persisted_at_ms, result_json, result_outcome, activated_ms)
+         VALUES (?, 'persisted', 1, 2, 3, '{}', 'persisted', 2)`,
+      )
+      .run(OPTS.attemptId);
+
+    expect(
+      await acquireInflight(db, otherPr(8), {
+        ...OPTS,
+        attemptId: "attempt-8",
+        systemCap: 1,
+        workspaceCap: 1,
+        now: "2026-11-03T00:02:00Z",
+      }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+  });
+
+  test("shortening the lease returns capacity at once and keeps the PR guarded", async () => {
+    const db = freshDb();
+    expect(await acquireInflight(db, KEY, { ...OPTS, ttlSeconds: 600 })).toEqual({ ok: true });
+    db.raw
+      .prepare(
+        `INSERT INTO review_launches (attempt_id, state, claimed_at_ms, launched_at_ms, failed_at_ms, activated_ms, result_outcome)
+         VALUES (?, 'failed', 1, 2, 3, 2, 'failed')`,
+      )
+      .run(OPTS.attemptId);
+    const now = "2026-11-03T00:01:00Z";
+
+    // The lease still reads live: the row counts.
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-8", systemCap: 1, workspaceCap: 1, now }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+
+    await expireInflightStatement(db, KEY, OPTS.attemptId, Date.parse(now)).run();
+
+    // Capacity is back for an unrelated PR...
+    expect(
+      await acquireInflight(db, otherPr(8), { ...OPTS, attemptId: "attempt-8", systemCap: 1, workspaceCap: 1, now }),
+    ).toEqual({ ok: true });
+    // ...while this PR's row still records its holder: a successor needs the stop
+    // proof, not just an expired lease.
+    expect(await acquireInflight(db, KEY, { ...OPTS, attemptId: "attempt-2", now })).toEqual({
+      ok: false,
+      reason: "pr-held",
+      heldHeadSha: SHA,
+      heldAttemptId: OPTS.attemptId,
+      heldExpired: true,
+    });
   });
 
   test("an expired row does not count toward the caps", async () => {

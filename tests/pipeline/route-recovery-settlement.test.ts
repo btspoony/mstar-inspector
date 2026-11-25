@@ -145,13 +145,9 @@ function settledMark(db: TestD1): number | null {
 /** The launch row's capacity-revocation instant: the arm an expired admission row needs. */
 
 /**
- * A database whose settle-once MARK write refuses at execution — and only that
- * write. Batch members run unwrapped, so a release batch that already landed the
- * landed fact survives the fault.
- */
-/**
- * A database whose settlement-record insert refuses at execution — and only that
- * statement, so the batch stays atomic and the fault lands inside it.
+ * A database whose settlement-record insert refuses when a batch executes it —
+ * only that statement, so the batch stays atomic and the fault is exercised from
+ * inside its transaction.
  */
 function insertFaults(db: TestD1): D1Like {
   const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
@@ -170,6 +166,11 @@ function insertFaults(db: TestD1): D1Like {
   } as unknown as D1Like;
 }
 
+/**
+ * A database whose settle-once MARK write refuses when it executes — only that
+ * statement (`SET … settled_ms = CASE`); every other statement, including the
+ * release batch's, runs normally.
+ */
 function markWriteFaults(db: TestD1): D1Like {
   const wrap = (sql: string, st: D1StatementLike): D1StatementLike => ({
     bind: (...values: unknown[]) => wrap(sql, st.bind(...values)),
@@ -2035,8 +2036,13 @@ describe("a launched attempt whose paid reply was lost", () => {
       .run(`review-${attemptId}`, attemptId);
   }
 
-  /** The attempt's own admission row, expired but still holding its PR. */
-  function seedHeldAdmission(db: TestD1, payload: ReviewJobPayload, attemptId: string): void {
+  /** The attempt's own admission row, still recording its holder. */
+  function seedHeldAdmission(
+    db: TestD1,
+    payload: ReviewJobPayload,
+    attemptId: string,
+    expiresAtMs: number = SETTLES_AT - 1,
+  ): void {
     db.raw
       .prepare(
         `INSERT INTO review_inflight
@@ -2051,7 +2057,7 @@ describe("a launched attempt whose paid reply was lost", () => {
         attemptId,
         payload.head_sha ?? "",
         new Date(LAUNCHED_AT - 600_000).toISOString(),
-        new Date(SETTLES_AT - 1).toISOString(),
+        new Date(expiresAtMs).toISOString(),
       );
   }
 
@@ -2065,6 +2071,11 @@ describe("a launched attempt whose paid reply was lost", () => {
     };
   }
 
+  /** Another pull request in the same workspace: the unrelated review a stuck slot refuses. */
+  function otherPrKey(payload: ReviewJobPayload) {
+    return { ...holdOf(payload), pr_number: payload.pr_number + 1 };
+  }
+
   function admissionAt(nowMs: number, payload: ReviewJobPayload) {
     return {
       systemCap: 32,
@@ -2074,6 +2085,51 @@ describe("a launched attempt whose paid reply was lost", () => {
       now: new Date(nowMs).toISOString(),
     };
   }
+
+  test("the release returns the attempt's capacity at once, and the PR still owes a stop proof", async () => {
+    const db = await createSeededTestD1();
+    const payload = makePayload();
+    const attemptId = "attempt-lost-reply-capacity";
+    await seedLaunched(db, payload, { attemptId, launchedAtMs: LAUNCHED_AT });
+    noteContainerId(db, attemptId);
+    // A LIVE lease: at the pass's instant this row still occupies the only slot.
+    seedHeldAdmission(db, payload, attemptId, SETTLES_AT + 3_600_000);
+    db.raw
+      .prepare(
+        `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pipeline', 'recorded elsewhere', 'review.internal.unclassified', ?, 'recorded elsewhere', datetime('now'))`,
+      )
+      .run(
+        attemptId,
+        payload.targetId,
+        payload.installation_id,
+        payload.owner,
+        payload.repo,
+        payload.pr_number,
+        payload.head_sha,
+        attemptId,
+      );
+    const env = await h.makeEnv({ DB: db as never });
+    const queue = { send: async () => {} };
+    const caps = { systemCap: 1, workspaceCap: 1, ttlSeconds: 600, headSha: payload.head_sha ?? null, now: new Date(SETTLES_AT).toISOString() };
+
+    // note: Both limits are saturated by THIS attempt: an unrelated PR is refused.
+    expect(
+      await acquireInflight(db as never, otherPrKey(payload), { ...caps, attemptId: "attempt-unrelated" }),
+    ).toEqual({ ok: false, reason: "system-cap" });
+
+    await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, SETTLES_AT);
+
+    // note: Same PR: the row still records its holder, so a successor needs the
+    // stop proof — an expired lease alone never reassigns the PR.
+    expect(
+      await acquireInflight(db as never, holdOf(payload), { ...caps, attemptId: "attempt-fresh" }),
+    ).toMatchObject({ ok: false, reason: "pr-held", heldExpired: true });
+    // note: Unrelated PR: the slot is back the moment the release lands.
+    expect(
+      await acquireInflight(db as never, otherPrKey(payload), { ...caps, attemptId: "attempt-unrelated" }),
+    ).toEqual({ ok: true });
+  });
 
   test("a released row's slot is handed back by the successor's own stop proof", async () => {
     const db = await createSeededTestD1();

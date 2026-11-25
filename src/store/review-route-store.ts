@@ -578,15 +578,21 @@ ON CONFLICT(attempt_id) DO NOTHING
 `;
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
+
 /**
- * "This attempt has no settlement record yet" as a PREDICATE, bound as `?1` =
- * attempt, `?2` = that attempt's `<attempt>:recheck` per-stage row. Two builds
- * wrote the record: the attempt-keyed id, and — before that key — a random id
- * carrying the attempt in `track_id` (indexed by 0114). Evaluating this inside
- * the write, rather than reading it first, is what makes existence a fact of the
- * batch: a concurrent settlement cannot slip a record in between the decision
- * and the statement, and both statements that use it see the same rows.
+ * The escape for a LIKE pattern built from an id: `\`, `%` and `_` are literal
+ * characters in an attempt id, not wildcards, and the predicate below carries
+ * `ESCAPE '\'` so an id that contains one matches only itself.
  */
+function likeLiteral(value: string): string {
+  return value.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+/** The LIKE pattern of one attempt's sub-record namespace (`<attempt>:<stage>`). */
+function subRecordPattern(attemptId: string): string {
+  return `${likeLiteral(attemptId)}:%`;
+}
+
 /**
  * What a settlement record IS, positively: the row keyed by the ATTEMPT itself,
  * or — for a build before that key — a row carrying the attempt in `track_id`,
@@ -596,9 +602,15 @@ const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE i
  * diagnostic row (`usage`, `recheck`, `rate-limit`) is attributed to the attempt
  * but never settles it, so it cannot stand in for the settlement record — even
  * when its id is a random uuid and only its `track_id` names the attempt.
+ *
+ * Binds: `?1` is the attempt id, `?2` its escaped `<attempt>:%` pattern; nothing
+ * else. Evaluating this inside the write, rather than reading it first, is what
+ * makes existence a fact of the batch: a concurrent settlement cannot slip a
+ * record in between the decision and the statement, and every statement of the
+ * batch sees the same rows.
  */
 const SETTLEMENT_RECORD_EXISTS = `(f.id = ?1 OR (f.track_id = ?1
-   AND f.id NOT LIKE ?1 || ':%'
+   AND f.id NOT LIKE ?2 ESCAPE '\\'
    AND f.stage NOT IN (${sqlStageList(ATTRIBUTION_EXCLUDED_STAGES)})))`;
 const SETTLEMENT_RECORD_MISSING = `NOT EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
 const SETTLEMENT_RECORD_PRESENT = `EXISTS (SELECT 1 FROM review_failures f WHERE ${SETTLEMENT_RECORD_EXISTS})`;
@@ -629,12 +641,13 @@ export function settlementRecordInsertStatement(
   return db
     .prepare(
       `INSERT INTO review_failures (id, target_id, installation_id, owner, repo, pr_number, head_sha, stage, error, error_code, track_id, message)
-       SELECT ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+       SELECT ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14
         WHERE ${SETTLEMENT_RECORD_MISSING}${extraGuard === "" ? "" : ` AND ${extraGuard}`}
        ON CONFLICT(id) DO NOTHING`,
     )
     .bind(
       attemptId,
+      subRecordPattern(attemptId),
       attemptId,
       input.target_id,
       input.installation_id,
@@ -663,11 +676,11 @@ export function settlementRecordInsertStatement(
 export function revokeUnsettledLaunchStatement(db: D1Like, attemptId: string, nowMs: number): D1StatementLike {
   return db
     .prepare(
-      `UPDATE review_launches SET revoked_ms = ?2
+      `UPDATE review_launches SET revoked_ms = ?3
         WHERE attempt_id = ?1 AND state = 'launched' AND result_outcome IS NULL AND revoked_ms IS NULL
           AND changes() > 0`,
     )
-    .bind(attemptId, nowMs);
+    .bind(attemptId, subRecordPattern(attemptId), nowMs);
 }
 
 /**
@@ -692,12 +705,12 @@ export function recordLandedEffectStatement(
                 SELECT json_group_array(value) FROM (
                   SELECT value FROM json_each(COALESCE(settled_effects, '[]'))
                   UNION
-                  SELECT ?2
+                  SELECT ?3
                 )
               )
         WHERE attempt_id = ?1 AND ${SETTLEMENT_RECORD_PRESENT}${extraGuard === "" ? "" : ` AND ${extraGuard}`}`,
     )
-    .bind(attemptId, effect);
+    .bind(attemptId, subRecordPattern(attemptId), effect);
 }
 /**
  * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
