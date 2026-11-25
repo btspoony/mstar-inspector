@@ -13,6 +13,7 @@ import { settlementFailureRowStatement } from "../store/failure-store";
 
 import {
   beginAttemptSettlementStatement,
+  closeUnownedSettlement,
   landFailureEffect,
   listCommentClaimsForRecovery,
   listHandoffsForRecovery,
@@ -296,6 +297,12 @@ async function landSettlementEffects(
     if (stamped === "written" || stamped === "done") landed.add("claim-stamp");
   }
   await settleAttemptIfDischarged(env.DB, { attemptId: handoff.attemptId, landed: [...landed] }, nowMs);
+  // A pass that could not land the record itself owns nothing here, and the one
+  // effect it may never write is the head-wide claim stamp. Once every other
+  // obligation has landed, leaving the settlement marker would keep this row in
+  // the incomplete lane for an effect no replay can own — so stop scheduling it
+  // and let the owed stamp stand as the recorded residual.
+  if (!owned) await closeUnownedSettlement(env.DB, { attemptId: handoff.attemptId, landed: [...landed] });
 }
 
 /**
@@ -415,43 +422,44 @@ async function settleLostReplies(
       handoff.deadlineMs === null ? LOST_REPLY_FALLBACK_ERROR_UNANCHORED : LOST_REPLY_FALLBACK_ERROR;
     // A record for this attempt is already durable (a settlement that got as far
     // as its failure row and died before moving the launch row, or a producer
-    // that finished): the effects and the mark are that writer's, so this pass
-    // owes ONE thing — the release. Starting a settlement over it would mark a
-    // row whose effects can never land (the attempt-keyed insert is a no-op),
-    // parking it in the incomplete lane for good.
+    // that finished): the record and its ownership are that writer's, so this
+    // pass never inserts a second one and never claims the head. What the record
+    // does authorise is the RELEASE — and only that: revoking here would retire
+    // the attempt, and a retired row can never be torn down (`reviewAttemptSandbox`
+    // refuses it), so the container's stop proof would be lost and the same PR
+    // would stay held after its lease expired. The successor's own stop evidence
+    // is what takes a released row, exactly as it does after a live failure.
     let recorded: boolean;
     let moved: D1Result[];
     try {
       recorded = await settlementRowExists(env.DB, handoff.attemptId);
-      moved = await env.DB.batch([
-        markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs),
-        recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs),
-        ...(recorded ? [] : [beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs)]),
-      ] as D1PreparedStatement[]);
+      const terminalize = recordReviewFailureStatement(env.DB, handoff.attemptId, nowMs);
+      const begin = beginAttemptSettlementStatement(env.DB, handoff.deliveryKey, nowMs);
+      moved = await env.DB.batch(
+        (recorded
+          ? [terminalize, begin]
+          : [markAttemptRevokedStatement(env.DB, handoff.attemptId, nowMs), terminalize, begin]) as D1PreparedStatement[],
+      );
     } catch {
       // The batch is atomic: nothing moved, the row is untouched and the next pass retries it.
       continue;
     }
-    if ((moved[1]?.meta.changes ?? 0) !== 1) continue;
-    if (recorded) {
-      log?.info?.(
-        { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
-        `lost reply settled past its attempt's hard-stop bound — the durable failure record stands, and the launch row is terminal: capacity released, the attempt is terminal`,
-      );
-      continue;
-    }
+    // The terminal move's result: second in the owner batch, first in the
+    // release-only one. It is the gate — a row another pass terminalized in
+    // between gets no settlement effects.
+    if ((moved[recorded ? 0 : 1]?.meta.changes ?? 0) !== 1) continue;
+    const landed = new Set<SettlementEffect>(handoff.settledEffects ?? []);
+    // The durable record IS the settlement's `failure-row` effect: this pass
+    // landed none of it, so `landSettlementEffects` must not insert one, and the
+    // pass owns nothing to stamp.
+    if (recorded) landed.add("failure-row");
     try {
-      await landSettlementEffects(
-        env,
-        handoff,
-        new Set<SettlementEffect>(handoff.settledEffects ?? []),
-        detail,
-        nowMs,
-        { code: "review.paid.reply_lost" },
-      );
+      await landSettlementEffects(env, handoff, landed, detail, nowMs, { code: "review.paid.reply_lost" });
       log?.info?.(
         { ...payloadIdentityFields(handoff.payload), attempt_id: handoff.attemptId, error_code: "review.paid.reply_lost" },
-        `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`,
+        recorded
+          ? `lost reply released past its attempt's hard-stop bound — the durable failure record stands, its Check and round work land here, and the successor's stop proof takes the slot`
+          : `lost reply settled past its attempt's hard-stop bound — capacity released, the attempt is terminal`,
       );
     } catch (err) {
       // The guarded batch above already made the row terminal (`failed`, revoked,

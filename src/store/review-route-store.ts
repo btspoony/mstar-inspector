@@ -578,6 +578,16 @@ ON CONFLICT(attempt_id) DO NOTHING
 const READ_RECHECK_ATTRIBUTION_SQL = `SELECT 1 AS present FROM review_recheck_attributions WHERE attempt_id = ?`;
 const FAILURE_ROW_EXISTS_SQL = `SELECT 1 AS present FROM review_failures WHERE id = ?`;
 /**
+ * The settlement record's lookup. `?1` is the attempt, `?2` its per-stage
+ * `<attempt>:recheck` row: the attempt's `track_id` covers rows a build before
+ * the attempt-keyed id wrote, and the exclude keeps that per-stage row from
+ * standing in for the attempt's own record.
+ */
+const SETTLEMENT_ROW_EXISTS_SQL = `
+SELECT 1 AS present FROM review_failures
+ WHERE (id = ?1 OR track_id = ?1) AND id <> ?2
+ LIMIT 1`;
+/**
  * A row for this attempt that is NOT the lost-reply lane's placeholder: `error`
  * outside the fallback sentences, or another code, or another summary. Any such
  * row is a lane-authored story ("publication never started …") and the phase's
@@ -710,14 +720,20 @@ export async function recheckRowExists(db: D1Like, attemptId: string): Promise<b
 }
 
 /**
- * Whether this attempt's settlement record — its one attempt-keyed failure row —
- * is already durable. The primary key IS that fact: every settlement writer
- * keys its row by the attempt (the live settlement included), so the lookup is
- * one indexed read and an existing row means the settlement's effects are
- * somebody else's to finish.
+ * Whether this attempt's settlement record is already durable. Two keys, because
+ * two builds wrote it: the attempt-keyed id (every settlement writer, the live
+ * settlement included) and, for rows a build before that key wrote,
+ * `track_id` — the attempt the failure belongs to (0106), indexed by 0114 so
+ * this arm is a range read rather than a scan of every workspace's history.
+ * The per-stage `<attempt>:recheck` row also carries the attempt's `track_id`
+ * and is NOT this attempt's settlement record, so it is excluded by key; a row
+ * a previous build wrote under a random id is.
  */
 export async function settlementRowExists(db: D1Like, attemptId: string): Promise<boolean> {
-  const row = await db.prepare(FAILURE_ROW_EXISTS_SQL).bind(attemptId).first<{ present: number }>();
+  const row = await db
+    .prepare(SETTLEMENT_ROW_EXISTS_SQL)
+    .bind(attemptId, `${attemptId}:recheck`)
+    .first<{ present: number }>();
   return row !== null;
 }
 
@@ -907,6 +923,40 @@ export async function settlementStatementIfDischarged(
     plan.required,
     nowMs,
   );
+}
+
+const CLOSE_SETTLEMENT_SQL = `
+UPDATE review_attempt_handoffs SET settling_ms = NULL
+ WHERE attempt_id = ? AND settled_ms IS NULL AND settling_ms IS NOT NULL`;
+
+/**
+ * Stop scheduling a settlement only an owner could finish. Called by a pass that
+ * could NOT land the record itself (`owned === false`), once every other effect
+ * has landed: the only thing still owed is the head-wide claim stamp, which no
+ * non-owner may write (KV has no compare-and-set, so a repair could overwrite a
+ * fresh delivery's claim — see `stampOwedSettlementClaim`'s residual).
+ *
+ * The disposition is the settlement-start marker: clearing it takes the row out
+ * of `listIncompleteSettlements`, which would otherwise select it on every pass
+ * for an effect it can never land and starve the bounded oldest-first batch.
+ * `settled_ms` stays NULL on purpose — this pass did NOT settle the attempt and
+ * must not certify the missing effect (I-000688 leaves the same residue for the
+ * unpublished lane).
+ *
+ * `false` keeps the row scheduled: recoverable work is still owed (a Check that
+ * has not concluded, the refused round's accounting), or the marker is already
+ * gone.
+ */
+export async function closeUnownedSettlement(
+  db: D1Like,
+  input: AttemptSettlementInput,
+): Promise<boolean> {
+  const plan = await settlementPlan(db, input);
+  if (plan === null) return false;
+  const missing = plan.required.filter((effect) => !plan.landed.includes(effect));
+  if (missing.length !== 1 || missing[0] !== "claim-stamp") return false;
+  await db.prepare(CLOSE_SETTLEMENT_SQL).bind(input.attemptId).run();
+  return true;
 }
 
 function settlementStatement(
