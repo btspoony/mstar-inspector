@@ -339,7 +339,12 @@ describe("claim 2 — the mark proves completion, not entry", () => {
   // work. The seeded shape is the defect itself: more permanently faulting
   // rows than the 25-row limit, plus one healthy row behind them all.
   const FAULT_READ_MARKER = "FROM review_attempt_handoffs WHERE attempt_id = ?";
-  function faultingObservationReads(db: TestD1, faultAttempts: Set<string>, hits: Map<string, number>): TestD1 {
+  // Per-pass record of which rows the pass actually attempted: every faulting
+  // observation read appends the attempt id in selection order before it
+  // throws. The tests drain `attempts` between passes, so "read in pass 1" and
+  // "read again in pass 2" are separately provable — a cumulative count could
+  // not tell a pass reading a row twice from a retry.
+  function faultingObservationReads(db: TestD1, faultAttempts: Set<string>, attempts: string[]): TestD1 {
     return {
       prepare(sql: string) {
         const stmt = db.prepare(sql);
@@ -348,7 +353,7 @@ describe("claim 2 — the mark proves completion, not entry", () => {
           bind(...values: unknown[]) {
             const attemptId = String(values[0]);
             if (faultAttempts.has(attemptId)) {
-              hits.set(attemptId, (hits.get(attemptId) ?? 0) + 1);
+              attempts.push(attemptId);
               throw new Error("injected: the observation read faulted");
             }
             return stmt.bind(...values);
@@ -396,23 +401,26 @@ describe("claim 2 — the mark proves completion, not entry", () => {
   test("a stalled majority cannot starve the healthy settlement (two passes, I-000709)", async () => {
     const db = await createSeededTestD1();
     const faultIds = new Set<string>();
-    const hits = new Map<string, number>();
+    const attempts: string[] = [];
     for (let index = 0; index < ROUTE_RECOVERY_LIMIT + 1; index++) {
       faultIds.add(await seedSettlementRow(db, index, 900 + index));
     }
     const healthyId = await seedSettlementRow(db, 99, 950);
-    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, hits) as never });
+    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, attempts) as never });
     const queue = { send: async () => {} };
     const now = 1_000 + 5 * 60_000 + 1;
 
     // Pass 1: the limit is spent on unattempted faulting rows; the healthy
     // row is behind all of them and is not reached.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
+    expect(attempts).toHaveLength(ROUTE_RECOVERY_LIMIT);
+    expect(attempts).not.toContain(healthyId);
     expect(stampOf(db, healthyId).settle_attempt_ms).toBeNull();
     expect(stampOf(db, healthyId).settled_ms).toBeNull();
 
     // Pass 2 — the documented bound: unattempted rows go first, so the
     // healthy row settles while every faulting row is still owed.
+    attempts.splice(0);
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
     expect(stampOf(db, healthyId).settled_ms).not.toBeNull();
     const settled = db.raw.prepare("SELECT settled_effects FROM review_attempt_handoffs WHERE attempt_id = ?").get(healthyId) as {
@@ -429,11 +437,11 @@ describe("claim 2 — the mark proves completion, not entry", () => {
   test("a persistently faulting row is retried after the others, never dropped (I-000709)", async () => {
     const db = await createSeededTestD1();
     const faultIds = new Set<string>();
-    const hits = new Map<string, number>();
+    const attempts: string[] = [];
     for (let index = 0; index < ROUTE_RECOVERY_LIMIT + 1; index++) {
       faultIds.add(await seedSettlementRow(db, index, 900 + index));
     }
-    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, hits) as never });
+    const env = await h.makeEnv({ DB: faultingObservationReads(db, faultIds, attempts) as never });
     const queue = { send: async () => {} };
     const now = 1_000 + 5 * 60_000 + 1;
 
@@ -441,15 +449,17 @@ describe("claim 2 — the mark proves completion, not entry", () => {
     // row is beyond the limit and is not attempted yet.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
     const newest = `attempt-fair-${ROUTE_RECOVERY_LIMIT}`;
-    expect(hits.size).toBe(ROUTE_RECOVERY_LIMIT);
-    expect(hits.has(newest)).toBe(false);
+    const pass1 = attempts.splice(0);
+    expect(pass1).toHaveLength(ROUTE_RECOVERY_LIMIT);
+    expect(pass1).not.toContain(newest);
 
-    // Pass 2: the previously unattempted row goes first (its turn was never
-    // spent), and the oldest faulting row is attempted AGAIN behind the
-    // unattempted ones — retried, not dropped.
+    // Pass 2: the previously unattempted row takes the first slot — every
+    // stamp-less row leads — and the oldest faulting row is read AGAIN behind
+    // it: retried after the others, never dropped.
     await reconcileReviewRoute({ ...env, REVIEW_QUEUE: queue as never }, now);
-    expect(hits.get(newest)).toBe(1);
-    expect(hits.get("attempt-fair-0")).toBe(2);
+    const pass2 = attempts.splice(0);
+    expect(pass2.at(0)).toBe(newest);
+    expect(pass2.at(1)).toBe("attempt-fair-0");
     for (const faultId of faultIds) {
       expect(stampOf(db, faultId).settled_ms).toBeNull();
     }
