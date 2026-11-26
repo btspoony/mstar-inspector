@@ -480,75 +480,11 @@ function installStateInsert(
 const BIND_WROTE_GUARD = " AND changes() > 0";
 
 /**
- * The invariant the revival path restores: a live, bound installation of an App
- * implies its workspace's install state. Selected from the installation row
- * ITSELF, inside the batch — never from a pre-batch read, so a removal that
- * lands between the two can no longer clear `removed_at` and leave no state
- * behind. `scope` narrows to one installation (the upsert path) or to the whole
- * App (the reconcile path); the `NOT EXISTS` keeps it a fixed point.
- */
-function installStateFromInstallations(
-  db: AppsStoreD1,
-  appId: string,
-  scope: string,
-  scopeValues: readonly unknown[] = [],
-): AppsStoreStatement {
-  return db
-    .prepare(
-      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
-       SELECT g.id, i.bound_workspace_id, datetime('now')
-         FROM github_app_installations i
-         JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-         JOIN workspaces ws ON ws.id = i.bound_workspace_id AND ws.deleted_at IS NULL
-        WHERE i.app_id = ?1 AND i.removed_at IS NULL AND i.bound_workspace_id IS NOT NULL${scope}
-          AND NOT EXISTS (SELECT 1 FROM app_installations a
-                           WHERE a.github_app_id = g.id AND a.workspace_id = i.bound_workspace_id)`,
-    )
-    .bind(appId, ...scopeValues);
-}
-
-/**
- * The chain for the states the PREVIOUS statement created, read off those
- * states themselves: the App owner's chain on that App, keeping only rows whose
- * bot the installing workspace may mount, positions preserved (D35).
- * `changes()` is the state insert's own count, so this fires only when a state
- * was just restored — an existing chain is never rewritten.
- */
-function installChainFromInstallations(
-  db: AppsStoreD1,
-  appId: string,
-  scope: string,
-  scopeValues: readonly unknown[] = [],
-): AppsStoreStatement {
-  return db
-    .prepare(
-      `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-       SELECT oc.github_app_id, s.workspace_id, oc.position, oc.bot_id
-         FROM github_app_installations i
-         JOIN app_installations s
-           ON s.github_app_id = i.app_id AND s.workspace_id = i.bound_workspace_id
-         JOIN app_install_bots oc ON oc.github_app_id = s.github_app_id
-         JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
-         JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
-        WHERE i.app_id = ?1 AND i.removed_at IS NULL AND i.bound_workspace_id IS NOT NULL${scope}
-          AND changes() > 0
-          AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
-          AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
-                           WHERE ib.github_app_id = oc.github_app_id
-                             AND ib.workspace_id = s.workspace_id)`,
-    )
-    .bind(appId, ...scopeValues);
-}
-
-/** One installation's scope for the revival pair. */
-const ONE_INSTALLATION_SCOPE = " AND i.installation_id = ?2";
-
-/**
- * The initial chain of the state the PREVIOUS statement created: a copy of the
- * App owner's chain on that App, keeping only rows whose bot this workspace may
- * mount (shared, or its own), positions preserved (D35). `changes()` is that
- * statement's own count, so the copy happens exactly once — on creation — and a
- * chain that already exists is never rewritten.
+ * The chain for the state the PREVIOUS statement created, on the BIND path —
+ * one workspace per call, so `changes() > 0` is unambiguous there (the revival
+ * path restores several workspaces at once and uses the batch stamp instead).
+ * Keeps the owner's positions and only the bots this workspace may mount (D35),
+ * and never rewrites a chain that exists.
  */
 function installChainCopy(
   db: AppsStoreD1,
@@ -565,9 +501,107 @@ function installChainCopy(
         WHERE oc.github_app_id = ?1
           AND oc.workspace_id = aw.workspace_id
           AND changes() > 0
-          AND (rb.scope = 'shared' OR rb.workspace_id = ?2)`,
+          AND (rb.scope = 'shared' OR rb.workspace_id = ?2)
+          AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                           WHERE ib.github_app_id = oc.github_app_id
+                             AND ib.workspace_id = ?2)`,
     )
     .bind(appId, workspaceId);
+}
+
+/**
+ * One D1 clock reading, used as a batch stamp. Two statements in one batch may
+ * each get their own `strftime('now')`, so the value has to be read once and
+ * passed to both: it is what lets the chain copy identify the states the batch
+ * itself created.
+ */
+async function readClock(db: AppsStoreD1): Promise<string> {
+  const row = await db.prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`).first<{ now: string }>();
+  if (!row) throw new Error("D1 returned no clock row");
+  return row.now;
+}
+
+/**
+ * The invariant the revival path restores: a live, bound installation of an App
+ * implies its workspace's install state. Read from the installation rows THEM-
+ * SELVES inside the batch — never from a pre-batch read, so a removal that lands
+ * between the two cannot clear `removed_at` and leave no state behind.
+ *
+ * Three details carry the correctness:
+ *   • `SELECT DISTINCT` — several installations of one App may bind to ONE
+ *     workspace (the bind path allows it), so the source set is deduplicated to
+ *     one state per `(app, workspace)`; without it the composite primary key
+ *     aborts the batch.
+ *   • `?3` is the batch's own clock reading, so the state row carries a stamp
+ *     unique to this call. The chain copy below reads that stamp to identify
+ *     exactly the states THIS batch created.
+ *   • `NOT EXISTS` keeps a repeat a fixed point and never rewrites a state that
+ *     already exists.
+ *
+ * `installationId` narrows to one physical installation (the upsert path);
+ * `null` means every live installation of the App (the reconcile path).
+ */
+function installStateFromInstallations(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number | null,
+  stamp: string,
+): AppsStoreStatement {
+  const scope = installationId === null ? "" : " AND i.installation_id = ?3";
+  return db
+    .prepare(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+       SELECT DISTINCT g.id, i.bound_workspace_id, ?2
+         FROM github_app_installations i
+         JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+         JOIN workspaces ws ON ws.id = i.bound_workspace_id AND ws.deleted_at IS NULL
+        WHERE i.app_id = ?1 AND i.removed_at IS NULL AND i.bound_workspace_id IS NOT NULL${scope}
+          AND NOT EXISTS (SELECT 1 FROM app_installations a
+                           WHERE a.github_app_id = g.id AND a.workspace_id = i.bound_workspace_id)`,
+    )
+    .bind(appId, stamp, ...(installationId === null ? [] : [installationId]));
+}
+
+/**
+ * The initial chain of the states the PREVIOUS statement created — identified by
+ * the batch stamp it wrote into `created_at`, never by `changes() > 0`: a
+ * statement-wide count cannot say WHICH rows were added, so a second workspace
+ * restored in the same batch would borrow it and land a copy in a workspace
+ * whose state already existed.
+ *
+ * A state that already existed therefore never reaches this statement, and its
+ * chain is left exactly as it was — including the legal EMPTY chain (D35) and a
+ * chain that was already configured. The `NOT EXISTS` is the second belt: even a
+ * stamp collision cannot rewrite a chain that exists.
+ */
+function installChainForCreatedStates(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number | null,
+  stamp: string,
+): AppsStoreStatement {
+  // The workspace scope rides on the state row here, so the copy is bounded by
+  // the installation this call restored rather than by any live row of the App.
+  const scope =
+    installationId === null
+      ? ""
+      : ` AND s.workspace_id = (SELECT i.bound_workspace_id FROM github_app_installations i
+                                 WHERE i.app_id = ?1 AND i.installation_id = ?3)`;
+  return db
+    .prepare(
+      `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       SELECT DISTINCT oc.github_app_id, s.workspace_id, oc.position, oc.bot_id
+         FROM app_installations s
+         JOIN app_install_bots oc ON oc.github_app_id = s.github_app_id
+         JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
+         JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
+        WHERE s.github_app_id = ?1 AND s.created_at = ?2${scope}
+          AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
+          AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                           WHERE ib.github_app_id = oc.github_app_id
+                             AND ib.workspace_id = s.workspace_id)`,
+    )
+    .bind(appId, stamp, ...(installationId === null ? [] : [installationId]));
 }
 
 /**
@@ -1234,10 +1268,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // earlier read is then already visible here, so the state is restored for
       // exactly the rows the batch made live. An unbound row names no workspace
       // and gives none a state (0104).
+      const stamp = await readClock(db);
       await db.batch([
         upsert,
-        installStateFromInstallations(db, input.appId, ONE_INSTALLATION_SCOPE, [input.installationId]),
-        installChainFromInstallations(db, input.appId, ONE_INSTALLATION_SCOPE, [input.installationId]),
+        installStateFromInstallations(db, input.appId, input.installationId, stamp),
+        installChainForCreatedStates(db, input.appId, input.installationId, stamp),
       ]);
     },
 
@@ -1582,11 +1617,7 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     async currentTimestamp(): Promise<string> {
-      const row = await db
-        .prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`)
-        .first<{ now: string }>();
-      if (!row) throw new Error("D1 returned no clock row");
-      return row.now;
+      return readClock(db);
     },
 
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
@@ -1613,9 +1644,11 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       // the transaction, so a row stamped with an older timestamp between the read
       // and the batch is still covered, and a concurrent removal cannot clear
       // `removed_at` without its state coming back.
-      const liveNow = `AND i.app_id = ?2 AND i.removed_at IS NULL
-          AND i.bound_workspace_id IS NOT NULL
-          AND i.installation_id IN (SELECT value FROM json_each(?1, '$.ids'))`;
+      // A stamp of this call's own, shared by the state insert and the chain copy:
+      // it is how the copy recognises the states this batch created. Read ONCE —
+      // two statements would each get a different `now`, and `changes()` cannot
+      // say which rows were added.
+      const stamp = await readClock(db);
       await db.batch([
         db
           .prepare(
@@ -1641,37 +1674,8 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                )`,
           )
           .bind(snapshot, appId),
-        db
-          .prepare(
-            `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
-             SELECT g.id, i.bound_workspace_id, datetime('now')
-               FROM github_app_installations i
-               JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-               JOIN workspaces ws ON ws.id = i.bound_workspace_id AND ws.deleted_at IS NULL
-              WHERE 1 = 1 ${liveNow}
-                AND NOT EXISTS (SELECT 1 FROM app_installations a
-                                 WHERE a.github_app_id = g.id AND a.workspace_id = i.bound_workspace_id)`,
-          )
-          .bind(snapshot, appId),
-        db
-          .prepare(
-            `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-             SELECT oc.github_app_id, s.workspace_id, oc.position, oc.bot_id
-               FROM github_app_installations i
-               JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-               JOIN app_installations s
-                 ON s.github_app_id = i.app_id AND s.workspace_id = i.bound_workspace_id
-               JOIN app_install_bots oc ON oc.github_app_id = s.github_app_id
-               JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
-               JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
-              WHERE 1 = 1 ${liveNow}
-                AND changes() > 0
-                AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
-                AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
-                                 WHERE ib.github_app_id = oc.github_app_id
-                                   AND ib.workspace_id = s.workspace_id)`,
-          )
-          .bind(snapshot, appId),
+        installStateFromInstallations(db, appId, null, stamp),
+        installChainForCreatedStates(db, appId, null, stamp),
         ...installStateSweep(db, appId),
       ]);
     },

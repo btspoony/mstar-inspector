@@ -732,3 +732,116 @@ describe("F2 R2 — the revival decision lives inside the batch", () => {
     db.raw.close();
   });
 });
+
+describe("F2 round 3 — several installations, one state, and only the chains this batch created", () => {
+  /** A shared App owned elsewhere, with `count` installations bound to CONSUMER. */
+  function multiInstallWorld(installations: readonly number[]): TestD1 {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, CONSUMER);
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-shared", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-shared', '${OTHER}', '${TS}'),
+                ('app-shared', '${CONSUMER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-shared', '${OTHER}', 1, 'app-shared'),
+                ('app-shared', '${CONSUMER}', 1, 'app-shared');`,
+    );
+    for (const installationId of installations) {
+      seedInstallation(db, { appId: "app-shared", installationId, bound: CONSUMER });
+    }
+    return db;
+  }
+
+  test("two revived installations of one App/workspace yield ONE state and one length-1 chain", async () => {
+    const db = multiInstallWorld([1801, 1802]);
+    const store = createReviewBotsStore(db);
+    // Both removed in one pass: the sweep retires the aggregate, and the source
+    // set for the revival then holds TWO rows for the same (App, workspace).
+    await store.markInstallationRemoved("app-shared", 1801);
+    await store.markInstallationRemoved("app-shared", 1802);
+    expect(count(db, "app_installations", `WHERE workspace_id = '${CONSUMER}'`)).toBe(0);
+    db.raw.run(
+      `UPDATE github_app_installations SET removed_at = NULL
+        WHERE app_id = 'app-shared' AND bound_workspace_id = '${CONSUMER}'`,
+    );
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    // The batch must COMMIT: an undeduplicated insert would emit the same key
+    // twice and abort on the composite primary key.
+    await store.reconcileInstallations("app-shared", [1801, 1802], observedAt);
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER },
+    ]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toHaveLength(1);
+    db.raw.close();
+  });
+
+  test("a workspace whose chain is intentionally EMPTY keeps it empty in the same batch", async () => {
+    const db = multiInstallWorld([1901]);
+    const store = createReviewBotsStore(db);
+    await store.markInstallationRemoved("app-shared", 1901);
+    // A third workspace holds a state with NO chain at all — a legal state (D35),
+    // not a missing one — plus a live installation, so its row is in this pass
+    // alongside CONSUMER's revival. It must receive no copy.
+    db.raw.run(
+      `INSERT INTO workspaces (id, slug, name, created_at) VALUES ('ws-empty', 'ws-empty', 'E', '${TS}');
+       INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-shared', 'ws-empty', '${TS}');`,
+    );
+    seedInstallation(db, { appId: "app-shared", installationId: 1902, bound: "ws-empty" });
+    expect(chain(db).filter((row) => row.workspace_id === "ws-empty")).toEqual([]);
+    db.raw.run(
+      `UPDATE github_app_installations SET removed_at = NULL
+        WHERE app_id = 'app-shared' AND bound_workspace_id = '${CONSUMER}'`,
+    );
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    await store.reconcileInstallations("app-shared", [1901, 1902], observedAt);
+
+    // CONSUMER revived and got its copy; `ws-empty`'s chain stayed empty because
+    // its state already existed. A borrowed `changes() > 0` count wrote into it.
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toHaveLength(1);
+    expect(chain(db).filter((row) => row.workspace_id === "ws-empty")).toEqual([]);
+    expect(states(db).filter((row) => row.workspace_id === "ws-empty")).toEqual([
+      { github_app_id: "app-shared", workspace_id: "ws-empty" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a pre-existing non-empty chain is left exactly as it was", async () => {
+    const db = multiInstallWorld([2001]);
+    const store = createReviewBotsStore(db);
+    await store.markInstallationRemoved("app-shared", 2001);
+    // A third workspace with a state and a CONFIGURED chain, plus its own live
+    // installation so the sweep keeps it.
+    db.raw.run(
+      `INSERT INTO workspaces (id, slug, name, created_at) VALUES ('ws-configured', 'ws-configured', 'C', '${TS}');
+       INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-shared', 'ws-configured', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-shared', 'ws-configured', 1, 'app-shared');`,
+    );
+    seedInstallation(db, { appId: "app-shared", installationId: 2002, bound: "ws-configured" });
+    const before = chain(db).filter((row) => row.workspace_id === "ws-configured");
+    expect(before).toHaveLength(1);
+    db.raw.run(
+      `UPDATE github_app_installations SET removed_at = NULL
+        WHERE app_id = 'app-shared' AND bound_workspace_id = '${CONSUMER}'`,
+    );
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    await store.reconcileInstallations("app-shared", [2001, 2002], observedAt);
+
+    // The configured chain is unchanged: a chain its workspace owns is never
+    // rewritten by a revival elsewhere in the same batch.
+    expect(chain(db).filter((row) => row.workspace_id === "ws-configured")).toEqual(before);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toHaveLength(1);
+    db.raw.close();
+  });
+});
