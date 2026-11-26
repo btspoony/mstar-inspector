@@ -333,20 +333,20 @@ export function BotQuotaOverridesEditor({
       )}
       <div className="flex flex-wrap items-end gap-2">
         <input
-          className="w-56 rounded border px-2 py-1 text-sm"
+          className="w-56 rounded-md border border-(--border-default) px-2 py-1 text-sm"
           aria-label={t(locale, "bots.overrideWorkspace")}
           placeholder={t(locale, "bots.overrideWorkspace")}
           value={workspaceId}
           onChange={(event) => setWorkspaceId(event.target.value)}
         />
         <input
-          className="w-32 rounded border px-2 py-1 text-sm tabular-nums"
+          className="w-32 rounded-md border border-(--border-default) px-2 py-1 text-sm tabular-nums"
           aria-label={t(locale, "bots.overrideCeiling")}
           placeholder={t(locale, "bots.overrideCeiling")}
           value={ceiling}
           onChange={(event) => setCeiling(event.target.value)}
         />
-        <button type="button" className="rounded border px-3 py-1 text-sm" disabled={busy} onClick={submit}>
+        <button type="button" className="rounded-md border border-(--border-default) px-3 py-1 text-sm" disabled={busy} onClick={submit}>
           {t(locale, "bots.overrideSave")}
         </button>
       </div>

@@ -34,7 +34,7 @@ async function mount(initial: Array<{ workspaceId: string; monthlyRp: number }>)
   const setValue = (node: HTMLInputElement | null, value: string) => {
     const setter = Object.getOwnPropertyDescriptor(win.HTMLInputElement.prototype, "value")?.set;
     setter?.call(node, value);
-    node?.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Event);
+    node?.dispatchEvent(new win.Event("input", { bubbles: true }) as unknown as Parameters<HTMLInputElement["dispatchEvent"]>[0]);
   };
   const button = (label: string) =>
     [...(container.querySelectorAll("button") as unknown as HTMLButtonElement[])].find(
