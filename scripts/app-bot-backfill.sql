@@ -23,11 +23,11 @@
 -- with `wrangler d1 execute --file`, after `d1 migrations apply`, any number
 -- of times.
 
--- One bot per App, keyed by the same id. `multiplier` follows the split rule:
--- an owned bot pays its owner's own keys at 1; a shared bot keeps the shared
--- multiplier of the profile in force at run time (the latest `effective_from`
--- at or before now, else the earliest — the `resolveQuotaProfile` rule), so no
--- stored price changes.
+-- One bot per App, keyed by the same id. `multiplier` is a literal 1: it is the
+-- bot's own price factor, and a bot this file creates has no prior price, so 1
+-- prices it exactly at its base weight. The 0115 file keeps the older
+-- derivation because it is apply-once and ran before the columns dropped;
+-- changing it would rewrite history.
 INSERT INTO review_bots (
   id, workspace_id, name, description, scope, shared_at,
   sandbox_image_id, multiplier, monthly_rp, deleted_at, created_at, updated_at
@@ -40,14 +40,12 @@ SELECT
   g.scope,
   g.shared_at,
   'omp',
-  CASE WHEN g.scope = 'shared' THEN
-    COALESCE(
-      (SELECT source_shared FROM quota_profiles
-        WHERE effective_from <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        ORDER BY effective_from DESC LIMIT 1),
-      (SELECT source_shared FROM quota_profiles ORDER BY effective_from ASC LIMIT 1)
-    )
-  ELSE 1 END,
+  -- The multiplier is the bot's own price factor from quota-relay-repair Task 3
+  -- (D11/D37). This file must not read `quota_profiles.source_*`: that column is
+  -- dropped in the same release, and a replay after the drop would fail.
+  -- A bot this backfill creates is one the split never made, so it has no prior
+  -- price to preserve; 1 keeps it priced exactly at its base weight.
+  1,
   NULL,
   g.deleted_at,
   g.created_at,

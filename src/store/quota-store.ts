@@ -2,16 +2,12 @@
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { D1Like } from "./types";
 
-/** The two key sources a review can be started from; the profile scales each. */
-export type QuotaSource = "byok" | "shared";
-
 /** One resolved profile, in the vocabulary the faces and the form use. */
 export type QuotaProfile = {
   id: string;
   version: number;
   effectiveFrom: string;
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
@@ -22,8 +18,6 @@ type QuotaProfileRow = {
   base_quick: number;
   base_standard: number;
   base_deep: number;
-  source_byok: number;
-  source_shared: number;
   rp_per_credit: number;
 };
 
@@ -43,7 +37,6 @@ function quotaProfile(row: QuotaProfileRow): QuotaProfile {
     version: row.version,
     effectiveFrom: row.effective_from,
     base: { quick: row.base_quick, default: row.base_standard, deep: row.base_deep },
-    source: { byok: row.source_byok, shared: row.source_shared },
     rpPerCredit: row.rp_per_credit,
   };
 }
@@ -54,8 +47,6 @@ const PROFILE_COLUMNS = `id            AS id,
             base_quick    AS base_quick,
             base_standard AS base_standard,
             base_deep     AS base_deep,
-            source_byok   AS source_byok,
-            source_shared AS source_shared,
             rp_per_credit AS rp_per_credit`;
 
 /** The one error an empty `quota_profiles` table produces, on every read path. */
@@ -182,12 +173,17 @@ export async function resolveWorkspaceMonthlyQuota(
 }
 
 /**
- * Integer RP one started review costs. Pure. Every factor is > 0 by DDL CHECK,
- * so the result is always >= 1 — which is what lets 0 mark a pre-metering
- * `usage_events.rp` row unambiguously.
+ * Integer RP one started review costs: `ceil(base(level) × multiplier)` (D11).
+ * Pure. Both factors are > 0 by DDL CHECK, so the result is always >= 1 — which
+ * is what lets 0 mark a pre-metering `usage_events.rp` row unambiguously, even
+ * when the fractional product is below 1 RP.
+ *
+ * The multiplier belongs to the executing bot, not the profile (D37): a bot's
+ * own key source no longer scales its price, and the profile keeps only the
+ * level weights and the credit denominator.
  */
-export function rpFor(level: ReviewLevel, source: QuotaSource, profile: QuotaProfile): number {
-  return profile.base[level] * profile.source[source];
+export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number {
+  return Math.max(1, Math.ceil(profile.base[level] * multiplier));
 }
 
 /**
@@ -258,8 +254,6 @@ export const QUOTA_PROFILES_SQL = `SELECT p.id            AS id,
               p.base_quick    AS base_quick,
               p.base_standard AS base_standard,
               p.base_deep     AS base_deep,
-              p.source_byok   AS source_byok,
-              p.source_shared AS source_shared,
               p.rp_per_credit AS rp_per_credit,
               p.notes         AS notes,
               q.plan_id       AS plan_id,

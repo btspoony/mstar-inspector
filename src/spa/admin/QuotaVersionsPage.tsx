@@ -36,8 +36,6 @@ type Drafts = {
   quick: string;
   standard: string;
   deep: string;
-  byok: string;
-  shared: string;
   rpPerCredit: string;
   notes: string;
   ceilings: Record<string, string>;
@@ -55,8 +53,6 @@ function seedDrafts(data: QuotaVersionsData): Drafts {
     quick: String(current?.base.quick ?? ""),
     standard: String(current?.base.default ?? ""),
     deep: String(current?.base.deep ?? ""),
-    byok: String(current?.source.byok ?? ""),
-    shared: String(current?.source.shared ?? ""),
     rpPerCredit: String(current?.rpPerCredit ?? ""),
     notes: "",
     ceilings,
@@ -67,11 +63,9 @@ function candidateOf(drafts: Drafts, data: QuotaVersionsData): QuotaCandidate | 
   const quick = wholeNumber(drafts.quick);
   const standard = wholeNumber(drafts.standard);
   const deep = wholeNumber(drafts.deep);
-  const byok = wholeNumber(drafts.byok);
-  const shared = wholeNumber(drafts.shared);
   const rpPerCredit = wholeNumber(drafts.rpPerCredit);
   if (quick === null || standard === null || deep === null) return null;
-  if (byok === null || shared === null || rpPerCredit === null) return null;
+  if (rpPerCredit === null) return null;
   if (!/^\d{4}-\d{2}-\d{2}$/.test(drafts.effectiveFrom)) return null;
   const monthlyRp: Record<string, number | null> = {};
   for (const plan of data.plans) {
@@ -87,7 +81,6 @@ function candidateOf(drafts: Drafts, data: QuotaVersionsData): QuotaCandidate | 
   return {
     effectiveFrom: drafts.effectiveFrom,
     base: { quick, default: standard, deep },
-    source: { byok, shared },
     rpPerCredit,
     monthlyRp,
   };
@@ -316,8 +309,6 @@ function CreateQuotaVersionForm({
             {field("quota-base-quick", t(locale, "admin.quotaVersions.fieldBaseQuick"), drafts.quick, (next) => patch({ quick: next }), { inputMode: "numeric" })}
             {field("quota-base-standard", t(locale, "admin.quotaVersions.fieldBaseStandard"), drafts.standard, (next) => patch({ standard: next }), { inputMode: "numeric" })}
             {field("quota-base-deep", t(locale, "admin.quotaVersions.fieldBaseDeep"), drafts.deep, (next) => patch({ deep: next }), { inputMode: "numeric" })}
-            {field("quota-source-byok", t(locale, "admin.quotaVersions.fieldSourceByok"), drafts.byok, (next) => patch({ byok: next }), { inputMode: "numeric" })}
-            {field("quota-source-shared", t(locale, "admin.quotaVersions.fieldSourceShared"), drafts.shared, (next) => patch({ shared: next }), { inputMode: "numeric" })}
             {field("quota-rp-per-credit", t(locale, "admin.quotaVersions.fieldRpPerCredit"), drafts.rpPerCredit, (next) => patch({ rpPerCredit: next }), { inputMode: "numeric" })}
           </div>
           <div className="flex flex-wrap items-end gap-3">

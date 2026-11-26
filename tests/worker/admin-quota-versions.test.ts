@@ -33,6 +33,9 @@ function seed(db: TestD1, sql: string, ...params: Array<string | number | null>)
   db.raw.prepare(sql).run(...params);
 }
 
+/** The profiles every migrated database ships before a test seeds anything. */
+const SEEDED_PROFILES = 2;
+
 function fixture(): TestD1 {
   const db = createMigratedTestD1();
   seed(
@@ -88,16 +91,12 @@ function seedUsage(db: TestD1, workspaceId: string, rp: number, source: "byok" |
 }
 
 function seedJudgingProfile(db: TestD1, ceilings: Record<string, number | null>): void {
-  const month = quotaMonth(new Date());
-  seed(
-    db,
-    `INSERT INTO quota_profiles
-       (id, version, effective_from, base_quick, base_standard, base_deep,
-        source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-     VALUES ('quota-candidate', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'fixture')`,
-    month.startIso,
-    month.startIso,
-  );
+  // Rewrite the judged version in place: the profile that judges THIS month is
+  // v1, so the candidate numbers must land on its instant, and the shipped
+  // large-base row must not outrank it.
+  seed(db, "DELETE FROM quota_profile_plans");
+  seed(db, "DELETE FROM quota_profiles WHERE id <> 'quota-v1'");
+  seed(db, "UPDATE quota_profiles SET id = 'quota-candidate' WHERE id = 'quota-v1'");
   for (const [planId, monthlyRp] of Object.entries(ceilings)) {
     seed(
       db,
@@ -129,8 +128,10 @@ async function adminFetch(
   );
 }
 
+/** The first 1st after the shipped large-base profile, which already holds the next one. */
 function nextFirst(): string {
-  return quotaMonth(new Date()).endIso.slice(0, 10);
+  const end = new Date(quotaMonth(new Date()).endIso);
+  return new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() + 1, 1)).toISOString().slice(0, 10);
 }
 
 function candidate(effectiveFrom = nextFirst()): Record<string, unknown> {
@@ -148,23 +149,6 @@ describe("GET /_internal_admin/api/quota-versions", () => {
   test("lists every version with its derived interval and marks the judging one", async () => {
     const db = fixture();
     const month = quotaMonth(new Date());
-    seed(
-      db,
-      `INSERT INTO quota_profiles
-         (id, version, effective_from, base_quick, base_standard, base_deep,
-          source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-v2', 2, ?, 1, 2, 6, 1, 10, 20, 'next', ?, 'fixture')`,
-      month.endIso,
-      month.endIso,
-    );
-    for (const planId of ["free", "pro", "unlimited"]) {
-      seed(
-        db,
-        "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-v2', ?, NULL)",
-        planId,
-      );
-    }
-
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
@@ -179,6 +163,8 @@ describe("GET /_internal_admin/api/quota-versions", () => {
     expect(body.nextVersion).toBe(3);
     expect(body.plans.map((plan) => plan.id)).toEqual(["free", "pro", "unlimited"]);
     expect(body.uncoveredPlanIds).toEqual([]);
+    // The two shipped versions: v1 judges this month, v2 (large base) is
+    // scheduled for the next 1st, and each interval ends where the next begins.
     expect(body.versions).toEqual([
       {
         id: "quota-v1",
@@ -187,22 +173,20 @@ describe("GET /_internal_admin/api/quota-versions", () => {
         effectiveTo: month.endIso,
         state: "current",
         base: { quick: 1, default: 2, deep: 6 },
-        source: { byok: 1, shared: 10 },
         rpPerCredit: 20,
         notes: "v1 baseline: free 2000 RP, pro 20000 RP, unlimited uncapped.",
         monthlyRp: { free: 2000, pro: 20000, unlimited: null },
       },
       {
-        id: "quota-v2",
+        id: "quota-v2-large-base",
         version: 2,
         effectiveFrom: month.endIso,
         effectiveTo: null,
         state: "scheduled",
-        base: { quick: 1, default: 2, deep: 6 },
-        source: { byok: 1, shared: 10 },
-        rpPerCredit: 20,
-        notes: "next",
-        monthlyRp: { free: null, pro: null, unlimited: null },
+        base: { quick: 50, default: 100, deep: 300 },
+        rpPerCredit: 1000,
+        notes: "v2: large base 50/100/300, 1 credit = 1000 RP; ceilings scaled with the price.",
+        monthlyRp: { free: 100_000, pro: 1_000_000, unlimited: null },
       },
     ]);
   });
@@ -215,18 +199,24 @@ describe("GET /_internal_admin/api/quota-versions", () => {
       db,
       `INSERT INTO quota_profiles
          (id, version, effective_from, base_quick, base_standard, base_deep,
-          source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-mid', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'fixture')`,
+          rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-mid', (SELECT COALESCE(MAX(version), 0) + 1 FROM quota_profiles),
+               ?, 50, 100, 300, 1000, NULL, ?, 'fixture')`,
       midMonth,
       midMonth,
     );
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     const body = (await res.json()) as {
       judgingVersion: number;
-      versions: Array<{ version: number; state: string }>;
+      versions: Array<{ id: string; version: number; state: string }>;
     };
-    expect(body.judgingVersion).toBe(1);
-    expect(body.versions.find((row) => row.version === 2)?.state).toBe("scheduled");
+    // D13: the marker names the profile in force NOW, so a mid-month instant
+    // that has already passed is the current one — and next month's shipped
+    // row stays scheduled behind it.
+    const mid = body.versions.find((row) => row.id === "quota-mid");
+    expect(mid?.state).toBe("current");
+    expect(mid?.version).toBe(body.judgingVersion);
+    expect(body.versions.find((row) => row.id === "quota-v2-large-base")?.state).toBe("scheduled");
   });
 });
 
@@ -321,7 +311,7 @@ describe("POST /_internal_admin/api/quota-versions/preview", () => {
     });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("is not a calendar date (YYYY-MM-DD)");
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES });
   });
 });
 
@@ -331,7 +321,7 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const res = await adminFetch(db, "POST", "/api/quota-versions", candidate());
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("/preview");
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES });
   });
 
   test("refuses a preview whose count no longer matches", async () => {
@@ -343,7 +333,7 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const res = await adminFetch(db, "POST", "/api/quota-versions", stale);
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toContain("preview");
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES });
   });
 
   test("publishes one profile with its plan rows and one audit row, mutating nothing else", async () => {
@@ -358,14 +348,15 @@ describe("POST /_internal_admin/api/quota-versions", () => {
 
     const res = await adminFetch(db, "POST", "/api/quota-versions", { ...body, impact });
     expect(res.status).toBe(201);
-    expect(await res.json()).toEqual({ version: 2, startsOn: nextFirst() });
+    expect(await res.json()).toEqual({ version: 3, startsOn: nextFirst() });
 
     const versions = db.raw.query("SELECT id, version FROM quota_profiles ORDER BY version").all();
     expect(versions).toEqual([
       { id: "quota-v1", version: 1 },
-      { id: expect.any(String), version: 2 },
+      { id: "quota-v2-large-base", version: 2 },
+      { id: expect.any(String), version: 3 },
     ]);
-    const created = db.raw.query("SELECT id FROM quota_profiles WHERE version = 2").get() as { id: string };
+    const created = db.raw.query("SELECT id FROM quota_profiles WHERE version = 3").get() as { id: string };
     expect(
       db.raw
         .query("SELECT plan_id, monthly_rp FROM quota_profile_plans WHERE profile_id = ? ORDER BY plan_id")
@@ -397,7 +388,7 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const res = await adminFetch(db, "POST", "/api/quota-versions", { ...body, impact });
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toContain("month in progress");
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES });
   });
 
   test("accepts a mid-month instant and says which 1st it judges", async () => {
@@ -415,7 +406,7 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const following = new Date(
       Date.UTC(new Date(first).getUTCFullYear(), new Date(first).getUTCMonth() + 1, 1),
     );
-    expect(await res.json()).toEqual({ version: 2, startsOn: following.toISOString().slice(0, 10) });
+    expect(await res.json()).toEqual({ version: 3, startsOn: following.toISOString().slice(0, 10) });
   });
 
   test("refuses a second version at an instant another already holds", async () => {
@@ -430,7 +421,7 @@ describe("POST /_internal_admin/api/quota-versions", () => {
     const again = await adminFetch(db, "POST", "/api/quota-versions", { ...body, impact });
     expect(again.status).toBe(409);
     expect(((await again.json()) as { error: string }).error).toContain("already starts at");
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: 2 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get()).toEqual({ n: SEEDED_PROFILES + 1 });
   });
 
   test("publishes version 1 end to end when no profile exists yet", async () => {
@@ -573,6 +564,16 @@ async function seedDelivery(
     webhookSecretEnc,
   );
   seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", appId, workspaceId);
+  // The executing bot: pricing reads its own multiplier, so the delivery needs
+  // the row the entity split would have created.
+  seed(
+    db,
+    `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+     VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+    appId,
+    workspaceId,
+    appId,
+  );
   const targetId = `target-${appId}`;
   seed(
     db,
@@ -608,16 +609,11 @@ async function postWebhook(path: string, body: string, secret: string, env: Env)
 describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
   function fixtureMissing(missing: string[]): TestD1 {
     const db = fixture();
-    const month = quotaMonth(new Date());
-    seed(
-      db,
-      `INSERT INTO quota_profiles (
-         id, version, effective_from, base_quick, base_standard, base_deep,
-         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-gap', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
-      month.startIso,
-      month.startIso,
-    );
+    // The gap must be in the profile JUDGING this month, so it replaces v1 at
+    // v1's own instant. The shipped large-base v2 lands on the next 1st and is
+    // irrelevant here.
+    seed(db, "DELETE FROM quota_profile_plans WHERE profile_id = 'quota-v1'");
+    seed(db, "UPDATE quota_profiles SET id = 'quota-gap' WHERE id = 'quota-v1'");
     for (const planId of ["free", "pro", "unlimited"].filter((id) => !missing.includes(id))) {
       seed(
         db,
@@ -633,7 +629,7 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
-    expect(body.judgingVersion).toBe(2);
+    expect(body.judgingVersion).toBe(1);
     expect(body.uncoveredPlanIds).toEqual(["pro"]);
   });
 
@@ -644,10 +640,10 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
       db,
       `INSERT INTO quota_profiles (
          id, version, effective_from, base_quick, base_standard, base_deep,
-         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-later', 2, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
-      month.endIso,
-      month.endIso,
+         rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-later', 50, ?, 50, 100, 300, 1000, NULL, ?, 'test')`,
+      new Date(Date.UTC(new Date(month.endIso).getUTCFullYear(), new Date(month.endIso).getUTCMonth() + 1, 1)).toISOString(),
+      month.startIso,
     );
     seed(db, "INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES ('quota-later', 'free', 1000)");
     const res = await adminFetch(db, "GET", "/api/quota-versions");
@@ -695,7 +691,7 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
 
     expect(reads.batches).toEqual([2]);
     expect(reads.readsOutsideBatch).toBe(0);
-    expect(payload.judgingVersion).toBe(2);
+    expect(payload.judgingVersion).toBe(1);
     expect(payload.uncoveredPlanIds).toEqual(["pro"]);
   });
 
@@ -704,7 +700,7 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
     seed(db, "UPDATE quota_profile_plans SET monthly_rp = NULL WHERE profile_id = 'quota-gap' AND plan_id = 'unlimited'");
     const res = await adminFetch(db, "GET", "/api/quota-versions");
     const body = (await res.json()) as { judgingVersion: number; uncoveredPlanIds: string[] };
-    expect(body.judgingVersion).toBe(2);
+    expect(body.judgingVersion).toBe(1);
     expect(body.uncoveredPlanIds).toEqual([]);
   });
 
@@ -720,8 +716,8 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
       db,
       `INSERT INTO quota_profiles (
          id, version, effective_from, base_quick, base_standard, base_deep,
-         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-near', 9, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+         rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-near', 9, ?, 1, 2, 6, 20, NULL, ?, 'test')`,
       nearIso,
       nearIso,
     );
@@ -729,8 +725,8 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
       db,
       `INSERT INTO quota_profiles (
          id, version, effective_from, base_quick, base_standard, base_deep,
-         source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-       VALUES ('quota-far', 10, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'test')`,
+         rp_per_credit, notes, created_at, created_by)
+       VALUES ('quota-far', 10, ?, 1, 2, 6, 20, NULL, ?, 'test')`,
       farIso,
       farIso,
     );

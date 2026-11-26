@@ -40,6 +40,7 @@ describe("recordUsageEvent", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-a",
@@ -49,6 +50,7 @@ describe("recordUsageEvent", () => {
       rp: 2,
       source: "byok",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-b",
@@ -58,6 +60,7 @@ describe("recordUsageEvent", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const rows = db.raw
@@ -107,6 +110,7 @@ describe("recordUsageEvent", () => {
       rp: 60,
       source: "shared" as const,
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     };
     await recordUsageEvent(db, input);
     await recordUsageEvent(db, input);
@@ -133,10 +137,81 @@ describe("recordUsageEvent", () => {
         rp: 1,
         source: "byok",
         botId: "bot-usage",
+        quota: { month: "2026-10", profileId: "quota-v1" },
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get() as { n: number };
     expect(count.n).toBe(0);
+  });
+});
+
+describe("recordUsageEvent pins the month's version (D36)", () => {
+  test("the first metering of a month writes the binding in the SAME batch as the row", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    await recordUsageEvent(db, {
+      reviewId: "review-bind",
+      executionToken: "token-bind-1",
+      workspaceId: "default",
+      occurredAt: AT,
+      rp: 50,
+      source: "shared",
+      botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
+    });
+    expect(db.raw.query("SELECT workspace_id, month, profile_id FROM workspace_quota_binding").all()).toEqual([
+      { workspace_id: "default", month: "2026-10", profile_id: "quota-v1" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a later metering of the same month never moves the pinned version", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const base = {
+      reviewId: "review-bind",
+      workspaceId: "default",
+      occurredAt: AT,
+      rp: 50,
+      source: "shared" as const,
+      botId: "bot-usage",
+    };
+    await recordUsageEvent(db, { ...base, executionToken: "t1", quota: { month: "2026-10", profileId: "quota-v1" } });
+    // A second metering names a different profile; INSERT OR IGNORE keeps the first.
+    await recordUsageEvent(db, { ...base, executionToken: "t2", quota: { month: "2026-10", profileId: "quota-v2" } });
+    expect(db.raw.query("SELECT profile_id FROM workspace_quota_binding WHERE month = '2026-10'").all()).toEqual([
+      { profile_id: "quota-v1" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a new month binds its own row, leaving the previous month pinned", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const base = {
+      reviewId: "review-roll",
+      workspaceId: "default",
+      rp: 50,
+      source: "shared" as const,
+      botId: "bot-usage",
+    };
+    await recordUsageEvent(db, {
+      ...base,
+      executionToken: "r1",
+      occurredAt: "2026-11-30T23:00:00.000Z",
+      quota: { month: "2026-11", profileId: "quota-v1" },
+    });
+    await recordUsageEvent(db, {
+      ...base,
+      executionToken: "r2",
+      occurredAt: "2026-12-01T00:00:01.000Z",
+      quota: { month: "2026-12", profileId: "quota-v1" },
+    });
+    expect(db.raw.query("SELECT month, profile_id FROM workspace_quota_binding ORDER BY month").all()).toEqual([
+      { month: "2026-11", profile_id: "quota-v1" },
+      { month: "2026-12", profile_id: "quota-v1" },
+    ]);
+    db.raw.close();
   });
 });
 
@@ -162,6 +237,7 @@ describe("usage_events.rp (migration 0064)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-a",
@@ -171,6 +247,7 @@ describe("usage_events.rp (migration 0064)", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     expect(db.raw.query("SELECT seq, rp FROM usage_events ORDER BY seq").all()).toEqual([
@@ -231,6 +308,7 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "byok-standard",
@@ -240,6 +318,7 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 2,
       source: "byok",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
@@ -264,6 +343,7 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
@@ -395,6 +475,7 @@ describe("usage_events.bot_id (migration 0117)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-metering",
+      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     const row = db.raw
       .query("SELECT bot_id, rp, source FROM usage_events WHERE review_id = 'review-metered'")
@@ -414,6 +495,7 @@ describe("usage_events.bot_id (migration 0117)", () => {
         rp: 1,
         source: "byok",
         botId: "no-such-bot",
+        quota: { month: "2026-10", profileId: "quota-v1" },
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });

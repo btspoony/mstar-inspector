@@ -87,7 +87,6 @@ const DATA = {
       effectiveTo: null,
       state: "current",
       base: { quick: 1, default: 2, deep: 6 },
-      source: { byok: 1, shared: 10 },
       rpPerCredit: 20,
       notes: "v1 baseline",
       monthlyRp: { free: 2000, pro: 20000, unlimited: null },
@@ -152,7 +151,6 @@ describe("console quota versions page", () => {
     expect(preview?.body).toMatchObject({
       effectiveFrom: new Date().toISOString().slice(0, 10),
       base: { quick: 1, default: 2, deep: 6 },
-      source: { byok: 1, shared: 10 },
       rpPerCredit: 20,
       monthlyRp: { free: 2000, pro: 20000, unlimited: null },
     });

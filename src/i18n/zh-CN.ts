@@ -1444,8 +1444,6 @@ export const zhCN: Dictionary = {
       fieldBaseQuick: "快速权重（RP）",
       fieldBaseStandard: "标准权重（RP）",
       fieldBaseDeep: "深度权重（RP）",
-      fieldSourceByok: "BYOK 倍率",
-      fieldSourceShared: "共享机器人倍率",
       fieldRpPerCredit: "每额度 RP",
       fieldMonthlyRp: "每月 RP · {plan}",
       monthlyRpHint: "留空表示不设月度上限。",

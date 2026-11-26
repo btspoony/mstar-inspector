@@ -9,7 +9,6 @@ import {
   quotaStartsOn,
   type QuotaProfileListRow,
   type QuotaProfileVersion,
-  type QuotaSource,
 } from "../store/quota-store";
 import { readMonthlyRpByWorkspace } from "../store/usage-store";
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
@@ -25,7 +24,6 @@ export type QuotaVersionRow = {
   effectiveTo: string | null;
   state: "past" | "current" | "scheduled";
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
   notes: string | null;
   monthlyRp: Record<string, number | null>;
@@ -82,7 +80,6 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
           ? ("scheduled" as const)
           : ("past" as const),
     base: profile.base,
-    source: profile.source,
     rpPerCredit: profile.rpPerCredit,
     notes: profile.notes,
     monthlyRp: profile.monthlyRp,
@@ -167,7 +164,6 @@ export async function previewQuotaImpact(
 export type CreateQuotaVersionInput = QuotaCandidate & {
   notes: string | null;
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
@@ -178,8 +174,8 @@ export type CreateQuotaVersionOutcome =
 const PROFILE_INSERT_SQL = `
   INSERT INTO quota_profiles
     (id, version, effective_from, base_quick, base_standard, base_deep,
-     source_byok, source_shared, rp_per_credit, notes, created_at, created_by)
-  SELECT ?1, COALESCE(MAX(version), 0) + 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+     rp_per_credit, notes, created_at, created_by)
+  SELECT ?1, COALESCE(MAX(version), 0) + 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
     FROM quota_profiles`;
 
 const PLAN_INSERT_SQL = `
@@ -220,8 +216,6 @@ export async function createQuotaVersion(
           input.base.quick,
           input.base.default,
           input.base.deep,
-          input.source.byok,
-          input.source.shared,
           input.rpPerCredit,
           input.notes,
           now,
@@ -239,7 +233,6 @@ export async function createQuotaVersion(
           JSON.stringify({
             effectiveFrom: input.effectiveFrom,
             base: input.base,
-            source: input.source,
             rpPerCredit: input.rpPerCredit,
             monthlyRp: input.monthlyRp,
             notes: input.notes,
@@ -326,27 +319,27 @@ export function parseQuotaCandidate(body: unknown, planIds: readonly string[]): 
 
 /**
  * The pricing half of the create body. Every factor is a positive integer
- * because the DDL CHECKs are: a zero or fractional weight would price a review
- * at 0 RP and make the ledger's pre-metering sentinel ambiguous.
+ * because the DDL CHECKs are: a zero weight would price a review at 0 RP and
+ * make the ledger's pre-metering sentinel ambiguous.
+ *
+ * The two key-source rates are GONE (D37): a review's price is
+ * `ceil(base × the executing bot's multiplier)`, so the profile carries only
+ * the level weights and the credit denominator.
  */
-export function parseQuotaNumbers(body: unknown): Parsed<Pick<CreateQuotaVersionInput, "base" | "source" | "rpPerCredit" | "notes">> {
+export function parseQuotaNumbers(
+  body: unknown,
+): Parsed<Pick<CreateQuotaVersionInput, "base" | "rpPerCredit" | "notes">> {
   const fields = record(body);
   if (fields === null) return { ok: false, error: "body must be a JSON object" };
   const base = record(fields.base);
-  const source = record(fields.source);
-  if (base === null || source === null) {
-    return { ok: false, error: "base and source must be objects of positive whole numbers" };
+  if (base === null) {
+    return { ok: false, error: "base must be an object of positive whole numbers" };
   }
   const quick = positiveInt(base.quick);
   const standard = positiveInt(base.default);
   const deep = positiveInt(base.deep);
   if (quick === null || standard === null || deep === null) {
     return { ok: false, error: "base.quick, base.default and base.deep must each be a positive whole number of RP" };
-  }
-  const byok = positiveInt(source.byok);
-  const shared = positiveInt(source.shared);
-  if (byok === null || shared === null) {
-    return { ok: false, error: "source.byok and source.shared must each be a positive whole-number multiplier" };
   }
   const rpPerCredit = positiveInt(fields.rpPerCredit);
   if (rpPerCredit === null) {
@@ -356,7 +349,7 @@ export function parseQuotaNumbers(body: unknown): Parsed<Pick<CreateQuotaVersion
     return { ok: false, error: "notes must be a string, or null to record none" };
   }
   const notes = typeof fields.notes === "string" && fields.notes.trim().length > 0 ? fields.notes.trim() : null;
-  return { ok: true, value: { base: { quick, default: standard, deep }, source: { byok, shared }, rpPerCredit, notes } };
+  return { ok: true, value: { base: { quick, default: standard, deep }, rpPerCredit, notes } };
 }
 
 /**

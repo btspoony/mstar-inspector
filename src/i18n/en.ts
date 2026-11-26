@@ -1540,8 +1540,6 @@ export const en = {
       fieldBaseQuick: "Quick weight (RP)",
       fieldBaseStandard: "Standard weight (RP)",
       fieldBaseDeep: "Deep weight (RP)",
-      fieldSourceByok: "BYOK multiplier",
-      fieldSourceShared: "Shared bot multiplier",
       fieldRpPerCredit: "RP per credit",
       fieldMonthlyRp: "Monthly RP · {plan}",
       monthlyRpHint: "Leave blank for no monthly limit.",

@@ -9607,7 +9607,9 @@ describe("usage ledger (migration 0031)", () => {
       .prepare(`INSERT INTO workspaces (id, slug, name, created_at) VALUES ('tenant', 'tenant', 'Tenant', datetime('now'))`)
       .run();
     await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "deep");
-    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    // The split backfilled a shared bot's multiplier from the old source rate
+    // (10); D11/D37 keep that price by reading it from the bot instead.
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared', multiplier = 10 WHERE id = ?").run(TEST_SECOND_APP_ID);
     db.raw
       .prepare(`INSERT INTO review_targets
                   (id, workspace_id, app_id, name, review_level, check_min_score, created_by, created_at, updated_at)
@@ -9637,7 +9639,7 @@ describe("usage ledger (migration 0031)", () => {
     db.raw.prepare(`UPDATE app_workspaces SET workspace_id = 'tenant' WHERE app_id = ?`).run(TEST_APP_ID);
     db.raw.prepare(`UPDATE review_targets SET workspace_id = 'tenant' WHERE app_id = ?`).run(TEST_APP_ID);
     await seedReviewingApp(db, TEST_SECOND_APP_ID, 434344, "quick");
-    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_SECOND_APP_ID);
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared', multiplier = 10 WHERE id = ?").run(TEST_SECOND_APP_ID);
     db.raw
       .prepare(`INSERT INTO review_targets
                   (id, workspace_id, app_id, name, review_level, check_min_score, created_by, created_at, updated_at)
@@ -9686,10 +9688,11 @@ describe("usage ledger (migration 0031)", () => {
     expect(await sumMonthlyRp(db, "default", month.startIso, month.endIso)).toBe(2);
   });
 
-  test("a shared bot meters the source multiplier: deep × shared records 60 RP", async () => {
+  test("a shared bot meters its own multiplier: ceil(deep × 10) records 60 RP", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE review_bots SET scope = 'shared' WHERE id = ?").run(TEST_APP_ID);
+    // The multiplier the split backfilled from the old source_shared rate.
+    db.raw.prepare("UPDATE review_bots SET scope = 'shared', multiplier = 10 WHERE id = ?").run(TEST_APP_ID);
     setAppReviewLevel(db, TEST_APP_ID, "deep");
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
@@ -9754,17 +9757,12 @@ describe("usage ledger (migration 0031)", () => {
     const db = await createSeededTestD1();
     const appliedThenThrew: TestD1 = {
       ...db,
-      prepare(query: string) {
-        const real = db.prepare(query);
-        if (!query.includes("INSERT INTO usage_events")) return real;
-        return {
-          bind: (...values: unknown[]) => ({
-            run: async () => {
-              await real.bind(...values).run();
-              throw new Error("usage boom after commit");
-            },
-          }),
-        } as never;
+      async batch(statements) {
+        const results = await db.batch(statements);
+        // The metering batch is the one that landed: the row (and its binding)
+        // exist, then the driver throws — the ambiguous case.
+        if (results.length === 2) throw new Error("usage boom after commit");
+        return results;
       },
     };
     const consumer = createReviewConsumer(

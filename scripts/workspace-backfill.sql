@@ -13,9 +13,12 @@
 --
 -- Must stay idempotent: every deploy runs it. Soft-deleted Apps (deleted_at
 -- NOT NULL) are included — the mapping is ownership, not liveness, so a
--- restored App must not fall outside the workspace — and the multiplier follows
--- the split rule: an owned bot pays its owner's keys at 1, a shared bot keeps
--- the shared multiplier of the profile in force.
+-- restored App must not fall outside the workspace.
+--
+-- It reads no column 0120 drops: since quota-relay-repair Task 3 the multiplier
+-- is the bot's own price factor and the profile's `source_byok` /
+-- `source_shared` are gone, so a bot created here starts at 1× and is priced
+-- exactly at its base weight until an operator sets something else.
 --
 -- It writes no per-person row: replaying a `workspace_members` write is what
 -- made every routine deploy re-add removed members to 'default'.
@@ -37,14 +40,12 @@ SELECT
   g.scope,
   g.shared_at,
   'omp',
-  CASE WHEN g.scope = 'shared' THEN
-    COALESCE(
-      (SELECT source_shared FROM quota_profiles
-        WHERE effective_from <= strftime('%Y-%m-%dT%H:%M:%fZ','now')
-        ORDER BY effective_from DESC LIMIT 1),
-      (SELECT source_shared FROM quota_profiles ORDER BY effective_from ASC LIMIT 1)
-    )
-  ELSE 1 END,
+  -- The multiplier is the bot's own price factor from quota-relay-repair Task 3
+  -- (D11/D37). This file must not read `quota_profiles.source_*`: that column is
+  -- dropped in the same release, and a replay after the drop would fail.
+  -- A bot this backfill creates is one the split never made, so it has no prior
+  -- price to preserve; 1 keeps it priced exactly at its base weight.
+  1,
   NULL,
   g.deleted_at,
   g.created_at,
