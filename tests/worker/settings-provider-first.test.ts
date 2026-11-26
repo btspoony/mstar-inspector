@@ -8,7 +8,8 @@ import {
   createAppConfigStore,
   MODEL_ROLE_IDS,
 } from "../../src/dashboard/app-config-store";
-import { composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
+import { THINKING_LEVELS, composeModelOptions, findFailingSelector, selectorBase } from "../../src/dashboard/model-membership";
+import { THINKING_LEVELS as RUNNER_THINKING_LEVELS } from "../../packages/runner/src/token-usage";
 import { PROVIDER_IDS } from "../../src/dashboard/app-config-store";
 import {
   LEGACY_PROVIDER_IDS,
@@ -163,13 +164,46 @@ function mockStatus(status: number, body: unknown = {}): ReturnType<typeof spyOn
 }
 
 describe("selector membership helpers (spec §6.3)", () => {
-  test("selectorBase strips a :variant suffix and requires a provider prefix", () => {
-    expect(selectorBase("anthropic/claude-sonnet-4-6:thinking")).toEqual({
+  test("selectorBase strips a known thinking level and requires a provider prefix", () => {
+    expect(selectorBase("anthropic/claude-sonnet-4-6:high")).toEqual({
       provider: "anthropic",
+      literal: "claude-sonnet-4-6:high",
       model: "claude-sonnet-4-6",
       base: "anthropic/claude-sonnet-4-6",
     });
     expect(selectorBase("bare-model")).toBeNull();
+  });
+
+  test("selectorBase keeps a colon-embedded model id literal", () => {
+    expect(selectorBase("ollama-cloud/deepseek-v4.1-flash:1017")).toEqual({
+      provider: "ollama-cloud",
+      literal: "deepseek-v4.1-flash:1017",
+      model: "deepseek-v4.1-flash:1017",
+      base: "ollama-cloud/deepseek-v4.1-flash:1017",
+    });
+    expect(selectorBase("my-custom/qwen3:32b")?.model).toBe("qwen3:32b");
+    expect(selectorBase("ollama-cloud/deepseek-v4.1-flash:1017:high")).toEqual({
+      provider: "ollama-cloud",
+      literal: "deepseek-v4.1-flash:1017:high",
+      model: "deepseek-v4.1-flash:1017",
+      base: "ollama-cloud/deepseek-v4.1-flash:1017",
+    });
+  });
+
+  test("selectorBase keeps an abbreviation literal and strips only the legacy thinking alias", () => {
+    expect(selectorBase("anthropic/claude-sonnet-4-6:med")).toEqual({
+      provider: "anthropic",
+      literal: "claude-sonnet-4-6:med",
+      model: "claude-sonnet-4-6:med",
+      base: "anthropic/claude-sonnet-4-6:med",
+    });
+    expect(selectorBase("anthropic/claude-sonnet-4-6:xhi")?.model).toBe("claude-sonnet-4-6:xhi");
+    expect(selectorBase("anthropic/claude-sonnet-4-6:thinking")?.model).toBe("claude-sonnet-4-6");
+    expect(selectorBase("anthropic/claude-sonnet-4-6:h")?.model).toBe("claude-sonnet-4-6:h");
+  });
+
+  test("dashboard THINKING_LEVELS cannot drift from the runner vocabulary", () => {
+    expect(Object.keys(THINKING_LEVELS).sort()).toEqual(Object.keys(RUNNER_THINKING_LEVELS).sort());
   });
 
   test("composeModelOptions groups verified cache then custom declarations; probe rows have no selectors", () => {
@@ -195,12 +229,36 @@ describe("selector membership helpers (spec §6.3)", () => {
       { provider: "copilot", models: [], fetched_at: "now" },
     ];
     const custom = [{ provider_id: "my-custom", model_ids: ["local-7b"], has_keys: true }];
-    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:thinking"], verified, custom)).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:high"], verified, custom)).toBeNull();
     expect(findFailingSelector(["anthropic/claude-opus-4-7"], verified, custom)).toBe("anthropic/claude-opus-4-7");
     expect(findFailingSelector(["copilot/anything"], verified, custom)).toBeNull();
     expect(findFailingSelector(["openai/gpt-5"], verified, custom)).toBeNull();
     expect(findFailingSelector(["my-custom/local-7b"], verified, custom)).toBeNull();
     expect(findFailingSelector(["my-custom/nope"], verified, custom)).toBe("my-custom/nope");
+  });
+
+  test("a model id that embeds a colon passes membership literally against cache and custom declarations", () => {
+    const verified = [{ provider: "ollama-cloud", models: ["deepseek-v4.1-flash:1017"], fetched_at: "now" }];
+    expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash:1017"], verified, [])).toBeNull();
+    expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash"], verified, [])).toBe("ollama-cloud/deepseek-v4.1-flash");
+    expect(findFailingSelector(["ollama-cloud/deepseek-v4.1-flash:1017:high"], verified, [])).toBeNull();
+    const custom = [{ provider_id: "my-custom", model_ids: ["qwen3:32b"], has_keys: true }];
+    expect(findFailingSelector(["my-custom/qwen3:32b"], [], custom)).toBeNull();
+  });
+
+  test("a literal id ending in a thinking level wins over the stripped base", () => {
+    const verified = [{ provider: "openrouter", models: ["glm-4.7:max"], fetched_at: "now" }];
+    expect(findFailingSelector(["openrouter/glm-4.7:max"], verified, [])).toBeNull();
+    const custom = [{ provider_id: "my-custom", model_ids: ["glm-4.7:max"], has_keys: true }];
+    expect(findFailingSelector(["my-custom/glm-4.7:max"], [], custom)).toBeNull();
+  });
+
+  test("only the legacy thinking tail resolves to the cached base model; abbreviations stay literal", () => {
+    const verified = [{ provider: "anthropic", models: ["claude-sonnet-4-6"], fetched_at: "now" }];
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:thinking"], verified, [])).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:med"], verified, [])).toBe("anthropic/claude-sonnet-4-6:med");
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:xhi"], verified, [])).toBe("anthropic/claude-sonnet-4-6:xhi");
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:h"], verified, [])).toBe("anthropic/claude-sonnet-4-6:h");
   });
 
   test("a KEYLESS custom declaration is offered nothing and rejected everywhere — an unknown provider still stays syntax-only", () => {
@@ -432,10 +490,10 @@ describe("POST save-chain / save-roles membership", () => {
     const env = makeEnv(db);
     const ok = await postForm(SETTINGS, "mallory", env, {
       op: "save-chain",
-      model_chain: "anthropic/claude-sonnet-4-6:thinking",
+      model_chain: "anthropic/claude-sonnet-4-6:high",
     });
     expect(ok.status).toBe(200);
-    expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:thinking");
+    expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:high");
     const fail = await postForm(SETTINGS, "mallory", env, {
       op: "save-chain",
       model_chain: "anthropic/claude-opus-4-7",
@@ -447,7 +505,19 @@ describe("POST save-chain / save-roles membership", () => {
       message: "Selector anthropic/claude-opus-4-7 is not in this App's verified models.",
       selector: "anthropic/claude-opus-4-7",
     });
-    expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:thinking");
+    expect(await store.getModelChain(app.id)).toBe("anthropic/claude-sonnet-4-6:high");
+  });
+
+  test("a stored legacy :thinking selector re-saves verbatim against a cache holding only the base", async () => {
+    const { db, app } = await seededWorld();
+    const store = createAppConfigStore(db, TEST_KEY);
+    await store.saveVerifiedKey(app.id, "anthropic", PLAIN_KEY, ["claude-sonnet-4-6"]);
+    const stored = "anthropic/claude-sonnet-4-6:thinking";
+    await store.setModelChain(app.id, stored);
+    const env = makeEnv(db);
+    const res = await postForm(SETTINGS, "mallory", env, { op: "save-chain", model_chain: stored });
+    expect(res.status).toBe(200);
+    expect(await store.getModelChain(app.id)).toBe(stored);
   });
 
   test("no cache row (or probe-only empty cache) stays syntax-only — existing chains still save", async () => {
@@ -491,7 +561,7 @@ describe("POST save-chain / save-roles membership", () => {
   test("save-roles references chains: unknown chain 400s, blank still clears", async () => {
     const { db, app } = await seededWorld();
     const store = createAppConfigStore(db, TEST_KEY);
-    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:thinking");
+    await store.upsertModelChain(app.id, "seat-mstar-review-seat", "anthropic/claude-sonnet-4-6:high");
     const env = makeEnv(db);
     const roles = Object.fromEntries(MODEL_ROLE_IDS.map((role) => [`role_${role}`, ""]));
     const fail = await postForm(SETTINGS, "mallory", env, {
