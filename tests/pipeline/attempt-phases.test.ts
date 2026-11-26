@@ -5084,8 +5084,11 @@ describe("the log sink carries only sanitized free text (T1/T2)", () => {
       null,
     );
     for (const line of h.logLines) {
-      expect(JSON.stringify(line.fields)).not.toContain(secret);
-      expect(JSON.stringify(line.fields)).not.toMatch(/ks{5,}/);
+      // The WHOLE captured line — fields AND the message text: a credential
+      // that leaked into either half of the sink must fail this test.
+      const captured = `${JSON.stringify(line.fields)} ${line.msg}`;
+      expect(captured).not.toContain(secret);
+      expect(captured).not.toMatch(/ks{5,}/);
     }
     const errorLine = h.logLines.find((line) => line.level === "error");
     expect(errorLine?.fields?.last_stage).toContain(REDACTED);
