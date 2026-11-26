@@ -1,7 +1,27 @@
 import type { VerifiedModels } from "./app-config-store";
 
 /**
- * Split one selector into provider + model, stripping a `:variant` suffix.
+ * The thinking levels a selector may carry as a trailing `:<level>`. Mirror of
+ * packages/runner/src/token-usage.ts `THINKING_LEVELS`, which stays authoritative
+ * because dashboard modules must not import review code; tests/worker/
+ * settings-provider-first.test.ts locks the two key sets together.
+ */
+export const THINKING_LEVELS: Record<string, true> = {
+  auto: true,
+  off: true,
+  minimal: true,
+  low: true,
+  medium: true,
+  high: true,
+  xhigh: true,
+  max: true,
+};
+
+/**
+ * Split one selector into provider + model. The tail after the LAST `:` is
+ * dropped only when it is a known thinking level (THINKING_LEVELS); any other
+ * tail stays part of the model id, so provider ids that embed a colon
+ * (`ollama-cloud/deepseek-v4.1-flash:1017`, `qwen3:32b`) compare literally.
  * A selector without `/` has no provider prefix — membership cannot apply.
  */
 export function selectorBase(selector: string): { provider: string; model: string; base: string } | null {
@@ -9,8 +29,8 @@ export function selectorBase(selector: string): { provider: string; model: strin
   if (slash <= 0) return null;
   const provider = selector.slice(0, slash);
   const rest = selector.slice(slash + 1);
-  const colon = rest.indexOf(":");
-  const model = colon === -1 ? rest : rest.slice(0, colon);
+  const colon = rest.lastIndexOf(":");
+  const model = colon !== -1 && THINKING_LEVELS[rest.slice(colon + 1)] === true ? rest.slice(0, colon) : rest;
   return { provider, model, base: `${provider}/${model}` };
 }
 

@@ -19,7 +19,7 @@ import type { TokenUsageBucket } from "../../shared/src/token-usage-wire";
 export type SubagentUsageSource = Partial<Pick<SingleResult, "usage" | "requests" | "resolvedModel" | "resolvedModelIdentity">>;
 
 /** SDK thinking levels a `resolvedModel` may suffix as `:<level>` — anything else is part of the model id. */
-const THINKING_LEVELS: Record<string, true> = {
+export const THINKING_LEVELS: Record<string, true> = {
   auto: true,
   off: true,
   minimal: true,
