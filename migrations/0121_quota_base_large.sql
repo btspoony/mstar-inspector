@@ -9,16 +9,31 @@
 -- its next month's first metering (D13), and no historical `rp` row is
 -- recomputed.
 --
--- `effective_from` is the NEXT month's 1st, deliberately not this month's. The
--- base moves 25–50× while historical `rp` stays as recorded, so a mid-month
--- switch would price two reviews in the same month on two scales and make the
--- month's ceiling meaningless. Landing on a boundary means every workspace
--- crosses over at the same instant, at the moment its month rolls.
+-- THE CUTOVER INSTANT is the first FREE instant at or after next month's first
+-- day. "Free" means no profile already holds it: `UNIQUE (effective_from)` is
+-- the authority, and an operator may already have scheduled a version there.
+-- This file therefore probes forward one second at a time and takes the first
+-- gap, so it can neither abort the deploy on the unique index nor overwrite
+-- what an operator scheduled. When next month's midnight is already taken the
+-- chosen instant lands within that month's first minute; the binding is
+-- per-workspace and per-month, so nothing changes for a workspace that metered
+-- before the probe found the gap.
 --
--- `monthly_rp` scales with the price so no allowance changes: the previous
--- ceilings are multiplied by the ratio between the old and new base for their
--- plan. The scaling factor is `rp_per_credit` of the new profile over the old
--- (1000 / 20 = 50), which is exactly the factor the base grew by.
+-- THE RATIO comes from the profiles themselves, never from a constant. The
+-- ceilings are copied from the profile IN FORCE at the cutover instant — the
+-- version whose prices this one supersedes — and scaled by that profile's own
+-- base total:
+--
+--     factor = (50 + 100 + 300) / (base_quick + base_standard + base_deep)
+--
+-- computed in integer arithmetic (multiply first, then divide) so a factor that
+-- does not divide evenly still produces a ceiling rounded DOWN to whole RP: the
+-- allowance never grows beyond the price rise. If ANY of that profile's three
+-- base weights is NULL the whole conversion is undefined — a NULL weight means
+-- the profile cannot price a level at all — so every `monthly_rp` for this
+-- version is left NULL (unlimited) rather than guessed, and the operator sets
+-- the real ceilings. A future-scheduled profile is never the source and its
+-- ceilings are never touched.
 --
 -- `review_bots.multiplier` needs no DDL change: 0115 already created it as
 -- `REAL NOT NULL CHECK (multiplier > 0)`, which admits 1.5. What changes is its
@@ -27,13 +42,15 @@
 -- multiplier 10 therefore prices a deep review at `ceil(300 × 10) = 3000 RP`,
 -- keeping its old ratio to the base weights.
 --
--- The source of the ceilings is the profile in force when this file applies —
--- the newest one that is not this file's own row — so an operator who already
--- published a version is copied from what they published, not from a constant.
---
 -- Must apply AFTER 0120 (the source-column drop): this file names no dropped
 -- column, but the release order is the contract.
 
+-- The cutover instant: next month's first day, probed forward to the first
+-- second no profile already holds. Expressed as a scalar subquery so the three
+-- data statements below all read the same value.
+--
+-- `probe` is a recursive walk from next month's midnight, one second at a time,
+-- stopping at the first instant absent from `quota_profiles.effective_from`.
 INSERT INTO quota_profiles (
   id, version, effective_from, base_quick, base_standard, base_deep,
   rp_per_credit, notes, created_at, created_by
@@ -41,27 +58,52 @@ INSERT INTO quota_profiles (
 SELECT
   'quota-v2-large-base',
   COALESCE(MAX(version), 0) + 1,
-  strftime('%Y-%m-01T00:00:00.000Z', 'now', 'start of month', '+1 month'),
+  (
+    WITH RECURSIVE probe(instant) AS (
+      SELECT strftime('%Y-%m-01T00:00:00.000Z', 'now', 'start of month', '+1 month')
+      UNION ALL
+      SELECT strftime('%Y-%m-%dT%H:%M:%fZ', instant, '+1 second')
+        FROM probe
+       WHERE EXISTS (SELECT 1 FROM quota_profiles p WHERE p.effective_from = instant)
+         AND instant < strftime('%Y-%m-01T00:00:00.000Z', 'now', 'start of month', '+2 month')
+    )
+    SELECT instant FROM probe
+     WHERE NOT EXISTS (SELECT 1 FROM quota_profiles p WHERE p.effective_from = instant)
+     LIMIT 1
+  ),
   50,
   100,
   300,
   1000,
-  'v2: large base 50/100/300, 1 credit = 1000 RP; ceilings scaled with the price.',
+  'v2: large base 50/100/300, 1 credit = 1000 RP; ceilings scaled by the superseded profile''s own base total.',
   strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
   'migration'
 FROM quota_profiles
 WHERE NOT EXISTS (SELECT 1 FROM quota_profiles WHERE id = 'quota-v2-large-base');
 
+-- One ceiling row per plan of the superseded profile. The superseded profile is
+-- the one in force at this file's own `effective_from` — i.e. the latest profile
+-- strictly older than the row just inserted, which excludes itself and every
+-- future-scheduled operator version.
+--
+-- The factor is applied only when all three of that profile's base weights are
+-- non-NULL; otherwise the ceiling stays NULL and the comment above explains it.
 INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp)
 SELECT
   'quota-v2-large-base',
   q.plan_id,
-  CASE WHEN q.monthly_rp IS NULL THEN NULL ELSE q.monthly_rp * 50 END
+  CASE
+    WHEN q.monthly_rp IS NULL THEN NULL
+    WHEN src.base_quick IS NULL OR src.base_standard IS NULL OR src.base_deep IS NULL THEN NULL
+    ELSE (q.monthly_rp * 450) / (src.base_quick + src.base_standard + src.base_deep)
+  END
 FROM quota_profile_plans q
-WHERE q.profile_id = (
-        SELECT id FROM quota_profiles
-         WHERE id <> 'quota-v2-large-base'
-         ORDER BY effective_from DESC, version DESC
+JOIN quota_profiles src ON src.id = q.profile_id
+WHERE src.id = (
+        SELECT p.id FROM quota_profiles p
+         WHERE p.id <> 'quota-v2-large-base'
+           AND p.effective_from <= (SELECT effective_from FROM quota_profiles WHERE id = 'quota-v2-large-base')
+         ORDER BY p.effective_from DESC
          LIMIT 1
       )
   AND NOT EXISTS (
