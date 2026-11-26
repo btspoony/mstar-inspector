@@ -21,6 +21,7 @@ import {
   parseMembers,
   parseReviewUsage,
   parseSettings,
+  parseUsableBots,
   parseProviderCatalog,
   parseSharedBots,
   PR_VERDICTS as SPA_PR_VERDICTS,
@@ -1176,5 +1177,56 @@ describe("invite grammar + page copy", () => {
 describe("review gate verdict mirror", () => {
   test("the SPA PR_VERDICTS mirror equals the engine tuple, in order", () => {
     expect([...SPA_PR_VERDICTS]).toEqual([...ENGINE_PR_VERDICTS]);
+  });
+});
+
+describe("R2 — the usable-bot parser accepts the producer's own payload", () => {
+  /**
+   * The EXACT shape `usableBotsRead` (`src/dashboard/index.ts:2277-2288`) has
+   * always sent — no `monthly_rp` on a usable bot, because that row's ceiling
+   * comes from the plan, not from the bot. A nonempty list must parse.
+   */
+  const PRODUCER_PAYLOAD = {
+    workspace_id: "ws_0123456789abcdefghijkl",
+    plan_monthly_rp: 20000,
+    bots: [
+      {
+        id: "app-a",
+        name: "Acme Reviewer",
+        description: null,
+        workspace_id: "ws_0123456789abcdefghijkl",
+        workspace_name: "Acme",
+        owned: true,
+        can_manage: true,
+        scope: "owned",
+        multiplier: 1,
+        month_used_rp: 40,
+      },
+      {
+        id: "app-b",
+        name: "Mstar Standard",
+        description: "shared depth",
+        workspace_id: "ws_other",
+        workspace_name: "Platform",
+        owned: false,
+        can_manage: false,
+        scope: "shared",
+        multiplier: 1.5,
+        month_used_rp: 1240,
+      },
+    ],
+  };
+
+  test("a nonempty usable-bot list with no per-bot monthly_rp parses", () => {
+    const parsed = parseUsableBots(PRODUCER_PAYLOAD);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.bots).toHaveLength(2);
+    expect(parsed!.bots.map((bot) => bot.id)).toEqual(["app-a", "app-b"]);
+  });
+
+  test("a quota error payload parses and carries the flag, not a fabricated ceiling", () => {
+    const parsed = parseUsableBots({ ...PRODUCER_PAYLOAD, plan_monthly_rp: null, quota_error: true });
+    expect(parsed?.quota_error).toBe(true);
+    expect(parsed?.plan_monthly_rp).toBeNull();
   });
 });

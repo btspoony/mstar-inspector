@@ -2,11 +2,10 @@
  * The Apps page (D6/D8/D22/D25): ONE list surface split into three
  * URL-addressable tabs.
  *
- * - `installed` — Apps this workspace holds an INSTALLATION RELATION to, plus
- *   one "Waiting to be bound" row per pending physical installation. Under D43
- *   the membership is derived from relations that exist today (a live
- *   `review_targets.app_id` row, or a bound `github_app_installations` row) —
- *   never from `app_installations`, which install-state-chain fills.
+ * - `installed` — Apps this workspace holds an INSTALL STATE for (D43), plus one
+ *   "Waiting to be bound" row per pending physical installation. Membership is
+ *   the state, never a target or a physical installation: those are what the
+ *   state is an aggregate over.
  * - `created` — the Apps the workspace owns, installed or not.
  * - `bots` — "Bots I can use": one server-ordered read, client-side filters, no
  *   App column.

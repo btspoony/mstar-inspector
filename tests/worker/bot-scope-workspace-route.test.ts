@@ -65,6 +65,27 @@ function seedOwnedBot(target: TestD1, botId: string, githubAppId: number, worksp
   target.raw.prepare("UPDATE review_bots SET workspace_id = ? WHERE id = ?").run(workspaceId, botId);
 }
 
+/**
+ * D43: the list's membership is `app_installations`. A fixture that models a
+ * consumer holding a shared App's repository must write the install state a
+ * real bind writes; a target alone is a repository under that install, never the
+ * install itself.
+ */
+function seedInstallState(target: TestD1, botId: string, workspaceId: string): void {
+  target.raw
+    .prepare(
+      `INSERT OR IGNORE INTO app_installations (github_app_id, workspace_id, created_at)
+       VALUES (?, ?, datetime('now'))`,
+    )
+    .run(botId, workspaceId);
+  target.raw
+    .prepare(
+      `INSERT OR IGNORE INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       VALUES (?, ?, 1, ?)`,
+    )
+    .run(botId, workspaceId, botId);
+}
+
 function setScope(target: TestD1, botId: string, scope: "owned" | "shared"): void {
   target.raw
     .prepare("UPDATE review_bots SET scope = ?, shared_at = ? WHERE id = ?")
@@ -83,6 +104,7 @@ function world(): TestD1 {
   seedOfficialWorkspace(target, OFFICIAL);
   seedOwnedBot(target, "bot-home", HOME_BOT, OFFICIAL);
   seedOwnedBot(target, "bot-other", OTHER_BOT, OTHER);
+  seedInstallState(target, "bot-home", OTHER);
   seedTarget(target, "bot-home", { workspaceId: OTHER, repoOwner: "acme", repoName: "widgets" });
   return target;
 }
@@ -379,6 +401,7 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
 
     seedOwnedBot(db, "bot-third", 8199, OFFICIAL);
     setScope(db, "bot-third", "shared");
+    seedInstallState(db, "bot-third", OTHER);
     seedTarget(db, "bot-third", { workspaceId: OTHER, repoOwner: "acme", repoName: "gadgets" });
     const delivery = db.raw.prepare(
       `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, repository_full_name, reason)
@@ -387,10 +410,10 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     delivery.run("d-third-gadgets", "check_run", "rejected", 401, "acme/gadgets");
     delivery.run("d-third-globex", "pull_request", "ok", null, "globex/secret-repo");
 
-    // F1: the Apps list's membership is the INSTALLATION RELATION. A consumer
-    // that holds a live target on a shared bot therefore DOES list it (the
-    // `installed` tab) — but its health column is scoped to the consumer's own
-    // repositories, so the owner's delivery records never reach it.
+    // D43: the Apps list's membership is the INSTALL STATE. A consumer that
+    // holds a shared bot's install state therefore lists it (the `installed`
+    // tab) — but its health column is scoped to the consumer's own repositories,
+    // so the owner's delivery records never reach it.
     const consumerIds = await listAppIds(OTHER, "erin");
     expect(consumerIds).toContain("bot-home");
     expect(consumerIds).toContain("bot-third");

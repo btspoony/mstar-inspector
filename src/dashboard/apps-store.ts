@@ -447,6 +447,194 @@ function countOf(result: AppsStoreBatchResult): number {
   return row?.n ?? 0;
 }
 
+/**
+ * The install state for `(appId, workspaceId)`, written only when the App and
+ * the workspace are live and no state exists yet. `guard` is the writer's own
+ * precondition on the batch: the bind passes `changes() > 0` (only a bind that
+ * actually wrote may install), and the revival path passes the live-installation
+ * existence check. `createApp` passes none — a cap refusal leaves no App row,
+ * so this statement finds nothing to select. `NOT EXISTS` makes a repeat a
+ * fixed point rather than a second row.
+ */
+function installStateInsert(
+  db: AppsStoreD1,
+  appId: string,
+  workspaceId: string,
+  guard: string,
+): AppsStoreStatement {
+  return db
+    .prepare(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+       SELECT g.id, ?2, datetime('now')
+         FROM github_apps g
+        WHERE g.id = ?1 AND g.deleted_at IS NULL${guard}
+          AND EXISTS (SELECT 1 FROM workspaces ws
+                       WHERE ws.id = ?2 AND ws.deleted_at IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM app_installations a
+                           WHERE a.github_app_id = g.id AND a.workspace_id = ?2)`,
+    )
+    .bind(appId, workspaceId);
+}
+
+/** The bind precondition: the batch's own UPDATE wrote the binding. */
+const BIND_WROTE_GUARD = " AND changes() > 0";
+
+/**
+ * The chain for the state the PREVIOUS statement created, on the BIND path —
+ * one workspace per call, so `changes() > 0` is unambiguous there (the revival
+ * path restores several workspaces at once and uses the batch stamp instead).
+ * Keeps the owner's positions and only the bots this workspace may mount (D35),
+ * and never rewrites a chain that exists.
+ */
+function installChainCopy(
+  db: AppsStoreD1,
+  appId: string,
+  workspaceId: string,
+): AppsStoreStatement {
+  return db
+    .prepare(
+      `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       SELECT oc.github_app_id, ?2, oc.position, oc.bot_id
+         FROM app_install_bots oc
+         JOIN app_workspaces aw ON aw.app_id = oc.github_app_id
+         JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
+        WHERE oc.github_app_id = ?1
+          AND oc.workspace_id = aw.workspace_id
+          AND changes() > 0
+          AND (rb.scope = 'shared' OR rb.workspace_id = ?2)
+          AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                           WHERE ib.github_app_id = oc.github_app_id
+                             AND ib.workspace_id = ?2)`,
+    )
+    .bind(appId, workspaceId);
+}
+
+/**
+ * One D1 clock reading, used as a batch stamp. Two statements in one batch may
+ * each get their own `strftime('now')`, so the value has to be read once and
+ * passed to both: it is what lets the chain copy identify the states the batch
+ * itself created.
+ */
+async function readClock(db: AppsStoreD1): Promise<string> {
+  const row = await db.prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`).first<{ now: string }>();
+  if (!row) throw new Error("D1 returned no clock row");
+  return row.now;
+}
+
+/**
+ * The invariant the revival path restores: a live, bound installation of an App
+ * implies its workspace's install state. Read from the installation rows THEM-
+ * SELVES inside the batch — never from a pre-batch read, so a removal that lands
+ * between the two cannot clear `removed_at` and leave no state behind.
+ *
+ * Three details carry the correctness:
+ *   • `SELECT DISTINCT` — several installations of one App may bind to ONE
+ *     workspace (the bind path allows it), so the source set is deduplicated to
+ *     one state per `(app, workspace)`; without it the composite primary key
+ *     aborts the batch.
+ *   • `?3` is the batch's own clock reading, so the state row carries a stamp
+ *     unique to this call. The chain copy below reads that stamp to identify
+ *     exactly the states THIS batch created.
+ *   • `NOT EXISTS` keeps a repeat a fixed point and never rewrites a state that
+ *     already exists.
+ *
+ * `installationId` narrows to one physical installation (the upsert path);
+ * `null` means every live installation of the App (the reconcile path).
+ */
+function installStateFromInstallations(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number | null,
+  stamp: string,
+): AppsStoreStatement {
+  const scope = installationId === null ? "" : " AND i.installation_id = ?3";
+  return db
+    .prepare(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+       SELECT DISTINCT g.id, i.bound_workspace_id, ?2
+         FROM github_app_installations i
+         JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+         JOIN workspaces ws ON ws.id = i.bound_workspace_id AND ws.deleted_at IS NULL
+        WHERE i.app_id = ?1 AND i.removed_at IS NULL AND i.bound_workspace_id IS NOT NULL${scope}
+          AND NOT EXISTS (SELECT 1 FROM app_installations a
+                           WHERE a.github_app_id = g.id AND a.workspace_id = i.bound_workspace_id)`,
+    )
+    .bind(appId, stamp, ...(installationId === null ? [] : [installationId]));
+}
+
+/**
+ * The initial chain of the states the PREVIOUS statement created — identified by
+ * the batch stamp it wrote into `created_at`, never by `changes() > 0`: a
+ * statement-wide count cannot say WHICH rows were added, so a second workspace
+ * restored in the same batch would borrow it and land a copy in a workspace
+ * whose state already existed.
+ *
+ * A state that already existed therefore never reaches this statement, and its
+ * chain is left exactly as it was — including the legal EMPTY chain (D35) and a
+ * chain that was already configured. The `NOT EXISTS` is the second belt: even a
+ * stamp collision cannot rewrite a chain that exists.
+ */
+function installChainForCreatedStates(
+  db: AppsStoreD1,
+  appId: string,
+  installationId: number | null,
+  stamp: string,
+): AppsStoreStatement {
+  // The workspace scope rides on the state row here, so the copy is bounded by
+  // the installation this call restored rather than by any live row of the App.
+  const scope =
+    installationId === null
+      ? ""
+      : ` AND s.workspace_id = (SELECT i.bound_workspace_id FROM github_app_installations i
+                                 WHERE i.app_id = ?1 AND i.installation_id = ?3)`;
+  return db
+    .prepare(
+      `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+       SELECT DISTINCT oc.github_app_id, s.workspace_id, oc.position, oc.bot_id
+         FROM app_installations s
+         JOIN app_install_bots oc ON oc.github_app_id = s.github_app_id
+         JOIN app_workspaces aw ON aw.app_id = oc.github_app_id AND aw.workspace_id = oc.workspace_id
+         JOIN review_bots rb ON rb.id = oc.bot_id AND rb.deleted_at IS NULL
+        WHERE s.github_app_id = ?1 AND s.created_at = ?2${scope}
+          AND (rb.scope = 'shared' OR rb.workspace_id = s.workspace_id)
+          AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                           WHERE ib.github_app_id = oc.github_app_id
+                             AND ib.workspace_id = s.workspace_id)`,
+    )
+    .bind(appId, stamp, ...(installationId === null ? [] : [installationId]));
+}
+
+/**
+ * The install state and its chain, removed when the workspace no longer holds
+ * ANY installation of the App and does not own it (D35, ADR § install state):
+ * removing one of several installations keeps both, and a reinstall takes a
+ * fresh copy of the App owner's chain. A bot row and an installation row are
+ * never deleted here — the state is an aggregate over relations that outlive
+ * it. Chain rows go first: their composite foreign key names the state.
+ */
+function installStateSweep(db: AppsStoreD1, appId: string): AppsStoreStatement[] {
+  // One predicate, two targets: the row's own key columns name the state it
+  // belongs to, and both `app_installations` rows and their chain rows carry
+  // that pair.
+  const orphaned = (row: string): string => `EXISTS (
+      SELECT 1 FROM app_installations s
+       WHERE s.github_app_id = ?1
+         AND s.github_app_id = ${row}.github_app_id
+         AND s.workspace_id = ${row}.workspace_id
+         AND NOT EXISTS (SELECT 1 FROM app_workspaces w
+                          WHERE w.app_id = s.github_app_id AND w.workspace_id = s.workspace_id)
+         AND NOT EXISTS (SELECT 1 FROM github_app_installations i
+                          WHERE i.app_id = s.github_app_id
+                            AND i.bound_workspace_id = s.workspace_id
+                            AND i.removed_at IS NULL))`;
+  return [
+    db.prepare(`DELETE FROM app_install_bots WHERE ${orphaned("app_install_bots")}`).bind(appId),
+    db
+      .prepare(`DELETE FROM app_installations WHERE ${orphaned("app_installations")}`)
+      .bind(appId),
+  ];
+}
+
 
 /**
  * The two execution-facing App resolutions plus the operator list. FROZEN —
@@ -790,6 +978,31 @@ export function createReviewBotsStore(db: AppsStoreD1) {
              WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM review_bots b WHERE b.id = ?1)`,
           )
           .bind(id, input.workspaceId),
+        // The owner's install state: an App this workspace created is an App it
+        // installs, with zero physical installations (D35, ADR § install
+        // state). A cap refusal leaves the ownership row absent, and this insert
+        // selects through it, so nothing is written for a refused creation.
+        installStateInsert(
+          db,
+          id,
+          input.workspaceId,
+          " AND EXISTS (SELECT 1 FROM app_workspaces w WHERE w.app_id = g.id AND w.workspace_id = ?2)",
+        ),
+        // …and its first chain row, naming the bot this batch created — the
+        // same id. The App's chain is never empty at creation, so a delivery
+        // resolves a bot from the first moment (D35).
+        db
+          .prepare(
+            `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+             SELECT a.github_app_id, a.workspace_id, 1, a.github_app_id
+               FROM app_installations a
+              WHERE a.github_app_id = ?1 AND a.workspace_id = ?2
+                AND changes() > 0
+                AND NOT EXISTS (SELECT 1 FROM app_install_bots ib
+                                 WHERE ib.github_app_id = a.github_app_id
+                                   AND ib.workspace_id = a.workspace_id)`,
+          )
+          .bind(id, input.workspaceId),
       ]);
       if (results[0]!.meta.changes === 0) {
         const stillLive = await db
@@ -1042,10 +1255,25 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     async upsertInstallation(input: UpsertInstallationInput): Promise<void> {
       const sql = input.authoritative ? UPSERT_INSTALLATION_SQL.authoritative : UPSERT_INSTALLATION_SQL.inferred;
-      await db
+      const upsert = db
         .prepare(sql)
-        .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null)
-        .run();
+        .bind(crypto.randomUUID(), input.appId, input.installationId, input.accountLogin ?? null);
+      if (!input.authoritative) {
+        await upsert.run();
+        return;
+      }
+      // Only the AUTHORITATIVE upsert clears `removed_at`, so only it can revive
+      // a swept install state. WHICH row it revived is read from the row's own
+      // post-UPDATE columns inside this batch: a removal that landed since any
+      // earlier read is then already visible here, so the state is restored for
+      // exactly the rows the batch made live. An unbound row names no workspace
+      // and gives none a state (0104).
+      const stamp = await readClock(db);
+      await db.batch([
+        upsert,
+        installStateFromInstallations(db, input.appId, input.installationId, stamp),
+        installChainForCreatedStates(db, input.appId, input.installationId, stamp),
+      ]);
     },
 
     async listInstallations(appId: string): Promise<AppInstallationRow[]> {
@@ -1101,17 +1329,26 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       installationId: number,
       workspaceId: string,
     ): Promise<BindInstallationOutcome> {
-      const res = await db
-        .prepare(
-          `UPDATE github_app_installations SET bound_workspace_id = ?3
+      const [res] = await db.batch([
+        db
+          .prepare(
+            `UPDATE github_app_installations SET bound_workspace_id = ?3
            WHERE app_id = ?1 AND installation_id = ?2 AND removed_at IS NULL
              AND (bound_workspace_id IS NULL OR bound_workspace_id = ?3
                   OR NOT EXISTS (SELECT 1 FROM workspaces w
                                   WHERE w.id = github_app_installations.bound_workspace_id AND w.deleted_at IS NULL))`,
-        )
-        .bind(appId, installationId, workspaceId)
-        .run();
-      if (res.meta.changes > 0) return "bound";
+          )
+          .bind(appId, installationId, workspaceId),
+        // The workspace's install state, written in the same batch as the
+        // ownership proof: this bind is its first installation of the App. A
+        // refused bind (an UPDATE that matched nothing) writes none, and a later
+        // bind by a workspace that already holds the state writes none either.
+        installStateInsert(db, appId, workspaceId, BIND_WROTE_GUARD),
+        // …and its chain: the App owner's chain on this App, keeping only rows
+        // whose bot this workspace may mount, positions preserved (D35).
+        installChainCopy(db, appId, workspaceId),
+      ]);
+      if (res!.meta.changes > 0) return "bound";
       const row = await db
         .prepare(`SELECT removed_at FROM github_app_installations WHERE app_id = ? AND installation_id = ?`)
         .bind(appId, installationId)
@@ -1163,27 +1400,22 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * F1/D43 (install-state-chain owns the `app_installations` cutover): the
-     * installed set derived from relations that EXIST today — a live
-     * `review_targets.app_id` row for this workspace, or (for the workspace's
-     * own App) a `github_app_installations` row bound to it. An owned App with
-     * neither relation is NOT installed; it belongs to `created`.
+     * D43 (cutover DONE here): the installed set IS `app_installations` — one
+     * row per workspace's install of one App, written by `createApp`, the first
+     * bind, the revival path and the backfill. Targets and physical
+     * installations no longer decide membership: a target belongs to an
+     * installation, never the other way round. Joined to the live App, so a
+     * retired App contributes nothing.
      */
     async listInstalledBotIds(workspaceId: string): Promise<string[]> {
       const res = await db
         .prepare(
-          `SELECT DISTINCT t.app_id AS bot_id
-             FROM review_targets t
-             JOIN github_apps g ON g.id = t.app_id AND g.deleted_at IS NULL
-            WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL
-            UNION
-           SELECT DISTINCT i.app_id AS bot_id
-             FROM github_app_installations i
-             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-            WHERE i.removed_at IS NULL AND i.bound_workspace_id = ?1
-              AND (g.scope = 'shared'
-                   OR EXISTS (SELECT 1 FROM app_workspaces w
-                               WHERE w.app_id = g.id AND w.workspace_id = ?1))`,
+          `SELECT s.github_app_id AS bot_id
+             FROM app_installations s
+             JOIN github_apps g ON g.id = s.github_app_id AND g.deleted_at IS NULL
+             JOIN workspaces ws ON ws.id = s.workspace_id AND ws.deleted_at IS NULL
+            WHERE s.workspace_id = ?1
+            ORDER BY s.github_app_id`,
         )
         .bind(workspaceId)
         .all<{ bot_id: string }>();
@@ -1191,46 +1423,114 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
-     * F1: each of this workspace's Apps and the bots its CHAIN mounts there.
-     * Empty means "no chain": the month cell must read a dash, not a number.
-     * One statement, batched, in chain position order.
+     * F1: each of this workspace's Apps and the bots its CHAIN mounts there, in
+     * position order — one statement, no per-row read. Empty means "no chain":
+     * the month cell must read a dash, not a number.
      */
     async listInstallChainBots(
       workspaceId: string,
     ): Promise<
       Map<
         string,
-        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+        Array<{
+          position: number;
+          botId: string;
+          name: string;
+          description: string | null;
+          providerWorkspace: string;
+          owned: boolean;
+          available: boolean;
+          multiplier: number;
+          monthlyRp: number | null;
+        }>
       >
     > {
       const res = await db
         .prepare(
-          `SELECT ib.github_app_id AS app_id, ib.bot_id, r.workspace_id AS bot_workspace_id,
+          `SELECT ib.github_app_id AS app_id, ib.position, ib.bot_id, r.name, r.description,
+                  r.workspace_id AS bot_workspace_id, r.scope, ws.name AS provider_workspace,
                   r.multiplier, r.monthly_rp
              FROM app_install_bots ib
              JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+             JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
             WHERE ib.workspace_id = ?1
             ORDER BY ib.github_app_id, ib.position`,
         )
         .bind(workspaceId)
         .all<{
           app_id: string;
+          position: number;
           bot_id: string;
+          name: string;
+          description: string | null;
           bot_workspace_id: string;
+          scope: BotScope;
+          provider_workspace: string;
           multiplier: number;
           monthly_rp: number | null;
         }>();
       const byApp = new Map<
         string,
-        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+        Array<{
+          position: number;
+          botId: string;
+          name: string;
+          description: string | null;
+          providerWorkspace: string;
+          owned: boolean;
+          available: boolean;
+          multiplier: number;
+          monthlyRp: number | null;
+        }>
       >();
       for (const row of res.results) {
         const list = byApp.get(row.app_id) ?? [];
         list.push({
+          position: row.position,
           botId: row.bot_id,
+          name: row.name,
+          description: row.description,
+          providerWorkspace: row.provider_workspace,
           owned: row.bot_workspace_id === workspaceId,
+          // A chain row whose bot the owner stopped sharing stays mounted but
+          // is skipped, so the panel can say so instead of offering a bot that
+          // will never run (D29).
+          available: row.scope === "shared" || row.bot_workspace_id === workspaceId,
           multiplier: row.multiplier,
           monthlyRp: row.monthly_rp,
+        });
+        byApp.set(row.app_id, list);
+      }
+      return byApp;
+    },
+
+    /**
+     * Every live installation this workspace has bound, per App — the detail
+     * band's "installations" list and one batch for the whole Apps page. A
+     * removed row is not listed: its binding survives, the installation does
+     * not.
+     */
+    async listBoundInstallationsByWorkspace(
+      workspaceId: string,
+    ): Promise<Map<string, AppInstallationRow[]>> {
+      const res = await db
+        .prepare(
+          `SELECT i.app_id, i.installation_id, i.account_login, i.seen_at
+             FROM github_app_installations i
+             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+             JOIN workspaces ws ON ws.id = i.bound_workspace_id AND ws.deleted_at IS NULL
+            WHERE i.bound_workspace_id = ?1 AND i.removed_at IS NULL
+            ORDER BY i.app_id, i.seen_at DESC, i.installation_id`,
+        )
+        .bind(workspaceId)
+        .all<AppInstallationRow & { app_id: string }>();
+      const byApp = new Map<string, AppInstallationRow[]>();
+      for (const row of res.results) {
+        const list = byApp.get(row.app_id) ?? [];
+        list.push({
+          installation_id: row.installation_id,
+          account_login: row.account_login,
+          seen_at: row.seen_at,
         });
         byApp.set(row.app_id, list);
       }
@@ -1317,21 +1617,19 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     async currentTimestamp(): Promise<string> {
-      const row = await db
-        .prepare(`SELECT strftime('%Y-%m-%d %H:%M:%f','now') AS now`)
-        .first<{ now: string }>();
-      if (!row) throw new Error("D1 returned no clock row");
-      return row.now;
+      return readClock(db);
     },
 
     async markInstallationRemoved(appId: string, installationId: number): Promise<void> {
-      await db
-        .prepare(
-          `UPDATE github_app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
+      await db.batch([
+        db
+          .prepare(
+            `UPDATE github_app_installations SET removed_at = strftime('%Y-%m-%d %H:%M:%f','now')
            WHERE app_id = ? AND installation_id = ?`,
-        )
-        .bind(appId, installationId)
-        .run();
+          )
+          .bind(appId, installationId),
+        ...installStateSweep(db, appId),
+      ]);
     },
 
     async reconcileInstallations(
@@ -1340,6 +1638,17 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       observedAt: string,
     ): Promise<void> {
       const snapshot = JSON.stringify({ ids: liveInstallationIds, observedAt });
+      // The second UPDATE's POST-state, re-read INSIDE the batch: every
+      // installation GitHub reports live for this App now has `removed_at` NULL,
+      // whichever of them this pass revived. No candidate list is computed before
+      // the transaction, so a row stamped with an older timestamp between the read
+      // and the batch is still covered, and a concurrent removal cannot clear
+      // `removed_at` without its state coming back.
+      // A stamp of this call's own, shared by the state insert and the chain copy:
+      // it is how the copy recognises the states this batch created. Read ONCE —
+      // two statements would each get a different `now`, and `changes()` cannot
+      // say which rows were added.
+      const stamp = await readClock(db);
       await db.batch([
         db
           .prepare(
@@ -1365,6 +1674,9 @@ export function createReviewBotsStore(db: AppsStoreD1) {
                )`,
           )
           .bind(snapshot, appId),
+        installStateFromInstallations(db, appId, null, stamp),
+        installChainForCreatedStates(db, appId, null, stamp),
+        ...installStateSweep(db, appId),
       ]);
     },
 

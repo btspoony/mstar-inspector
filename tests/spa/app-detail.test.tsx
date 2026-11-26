@@ -13,6 +13,7 @@ import {
   parseSettings,
   pullRequestRefOf,
   scopedInsightsSummaryUrl,
+  type AppChainEntry,
   type AppDetailSearch,
   type AppDetailTab,
   type SettingsBlockedPayload,
@@ -51,7 +52,52 @@ const identityPayload = {
   app: IDENTITY_APP,
 };
 
+/** The blocked manager face: this workspace's target on another workspace's bot. */
+function blockedPayload(): SettingsBlockedPayload {
+  return {
+    can_manage: true,
+    blocked: true,
+    blocked_reason: "bot_not_shared",
+    workspace_id: managePayload.workspace_id,
+    target_id: managePayload.target_id,
+    app: {
+      github_app_id: managePayload.app.github_app_id,
+      id: managePayload.app.id,
+      status: managePayload.app.status,
+      created_by: managePayload.app.created_by,
+      review_enabled: managePayload.app.review_enabled,
+      review_trigger_mode: managePayload.app.review_trigger_mode,
+      review_level: managePayload.app.review_level,
+      default_review_level: managePayload.app.default_review_level,
+      scope: "owned",
+      github_name: managePayload.app.github_name,
+      github_slug: managePayload.app.github_slug,
+      github_description: managePayload.app.github_description,
+      github_html_url: managePayload.app.github_html_url,
+      github_avatar_url: managePayload.app.github_avatar_url,
+      github_visibility: managePayload.app.github_visibility,
+    },
+    installation: null,
+    check_gate: managePayload.check_gate,
+  };
+}
+
 const BOOT = { locale: "en" as const, login: "mallory", name: null };
+
+/** One chain row with the fields the panel renders; callers override the ones under test. */
+function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id: string }): AppChainEntry {
+  return {
+    name: overrides.bot_id,
+    description: null,
+    provider_workspace: "ws_0123456789abcdefghijkl",
+    owned: true,
+    available: true,
+    multiplier: 1,
+    month_used_rp: 0,
+    monthly_rp: null,
+    ...overrides,
+  };
+}
 
 const managePayload = {
   can_manage: true as const,
@@ -254,10 +300,11 @@ describe("tab shell rendering (static SSR)", () => {
       (tab) => tab.textContent ?? "",
     );
 
-  test("the manager's tab bar is the App's own three faces, settings first", async () => {
+  test("the manager's tab bar is the App's own four faces, settings first", async () => {
     const manage = renderDetail(managePayload);
     expect(await withMarkup(manage, pageTabs)).toEqual([
       t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabBots"),
       t("en", "appDetail.tabDelivery"),
       t("en", "appDetail.tabInstallations"),
     ]);
@@ -339,7 +386,10 @@ describe("tab shell rendering (static SSR)", () => {
     expect(chainless).not.toContain(`href="${apiBase()}/apps/1/bot"`);
 
     // F7: a mounted chain links each mounted BOT id, never the App id.
-    const mounted = renderDetail({ ...managePayload, mounted_bot_ids: ["bot-a", "bot-b"] });
+    const mounted = renderDetail({
+      ...managePayload,
+      chain: [chainRow({ position: 1, bot_id: "bot-a" }), chainRow({ position: 2, bot_id: "bot-b" })],
+    });
     expect(mounted).toContain(`href="${apiBase()}/bots/bot-a"`);
     expect(mounted).toContain(`href="${apiBase()}/bots/bot-b"`);
     expect(mounted).not.toContain(`href="${apiBase()}/apps/1/bot"`);
@@ -775,7 +825,9 @@ describe("header metric band on the manage face (static SSR)", () => {
   }): SettingsManagePayload => ({
     ...managePayload,
     installations: Array.from({ length: counts.installations }, () => installation),
-    mounted_bot_ids: Array.from({ length: counts.mounted }, (_, index) => `bot-${index}`),
+    chain: Array.from({ length: counts.mounted }, (_, index) =>
+      chainRow({ position: index + 1, bot_id: `bot-${index}` }),
+    ),
     delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
   });
 
@@ -865,32 +917,6 @@ describe("install entry (static SSR)", () => {
 });
 
 describe("Blocked and pending installations (static SSR)", () => {
-  const blockedPayload = (): SettingsBlockedPayload => ({
-    can_manage: true,
-    blocked: true,
-    blocked_reason: "bot_not_shared",
-    workspace_id: managePayload.workspace_id,
-    target_id: managePayload.target_id,
-    app: {
-      github_app_id: managePayload.app.github_app_id,
-      id: managePayload.app.id,
-      status: managePayload.app.status,
-      created_by: managePayload.app.created_by,
-      review_enabled: managePayload.app.review_enabled,
-      review_trigger_mode: managePayload.app.review_trigger_mode,
-      review_level: managePayload.app.review_level,
-      default_review_level: managePayload.app.default_review_level,
-      scope: "owned",
-      github_name: managePayload.app.github_name,
-      github_slug: managePayload.app.github_slug,
-      github_description: managePayload.app.github_description,
-      github_html_url: managePayload.app.github_html_url,
-      github_avatar_url: managePayload.app.github_avatar_url,
-      github_visibility: managePayload.app.github_visibility,
-    },
-    installation: null,
-    check_gate: managePayload.check_gate,
-  });
 
   const sharedPayload = (): SettingsManagePayload => ({
     ...managePayload,
@@ -1167,5 +1193,167 @@ describe("投递状态 tab", () => {
         ].map((node) => node.getAttribute("href"))),
       ).not.toContain(`${apiBase()}/targets`);
     }
+  });
+});
+
+describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
+  const chainRows = async (markup: string): Promise<string[][]> =>
+    withMarkup(markup, (container) => {
+      const table = [...container.querySelectorAll("table")].find((node) =>
+        (node.querySelector("thead")?.textContent ?? "").includes(t("en", "apps.chain.columnPosition")),
+      );
+      if (table === undefined) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+      );
+    });
+
+  test("?tab=bots opens the tab and its inverse round-trips; unknown values still fall back", () => {
+    expect(parseAppDetailSearch("?tab=bots").tab).toBe("bots");
+    expect(appDetailSearchQuery({ tab: "bots", window: "30", repo: "", pr: "" })).toBe("?tab=bots");
+    expect(parseAppDetailSearch("?tab=chain").tab).toBe("settings");
+  });
+
+  test("position, bot name, provider, multiplier and the month cell render in chain order", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [
+          chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5, month_used_rp: 1240 }),
+          chainRow({ position: 2, bot_id: "bot-b", name: "acme-own", month_used_rp: 0 }),
+        ],
+      },
+      "bots",
+    );
+    const rows = await chainRows(markup);
+
+    expect(rows.map((cells) => cells[0])).toEqual(["1", "2"]);
+    expect(rows[0]![1]).toContain("Mstar Standard");
+    expect(rows[0]![1]).toContain(t("en", "apps.chain.tagShared"));
+    expect(rows[1]![1]).toContain(t("en", "apps.chain.tagMine"));
+    expect(rows.map((cells) => cells[3])).toEqual(["×1.5", "×1"]);
+    expect(rows[0]![4]).toContain("1240");
+  });
+
+  test("the chain offers no reorder, remove or add control — read-only until the relay ships", async () => {
+    const markup = renderDetail({ ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] }, "bots");
+    const controls = await withMarkup(markup, (container) =>
+      [...container.querySelectorAll("[data-slot='app-chain'] button, [data-slot='app-chain'] input")].map(
+        (node) => node.textContent ?? "",
+      ),
+    );
+    // No control of any kind inside the chain region: the editable order ships
+    // with the relay that reads it (D29), so this release renders none.
+    expect(controls).toEqual([]);
+  });
+
+  test("an empty chain names the next step instead of rendering a blank table", async () => {
+    // F4: with no PENDING bind, an empty chain is the honest "nothing mounted"
+    // answer — not the pending-bind copy, which says no chain can exist yet.
+    const markup = renderDetail({ ...managePayload, chain: [], pending_installations: [] }, "bots");
+    expect(markup).toContain(t("en", "apps.chain.empty"));
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
+    expect(await chainRows(markup)).toEqual([]);
+  });
+
+  test("an unbound shared installation yields the pending-bind copy, not the generic empty answer", async () => {
+    // F4: pending is a REAL bind state (an unbound installation of a shared App),
+    // never `blocked` and never the raw installation array — an owned App's
+    // unbound rows are not binds at all.
+    const pending = renderDetail(
+      {
+        ...managePayload,
+        chain: [],
+        pending_installations: [{ installation_id: 77, account_login: "acme", seen_at: new Date().toISOString() }],
+      },
+      "bots",
+    );
+    expect(pending).toContain(t("en", "apps.chain.pendingBind"));
+    expect(pending).not.toContain(t("en", "apps.chain.empty"));
+  });
+
+  test("a bot its owner stopped sharing renders as a skipped row", async () => {
+    const markup = renderDetail(
+      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })] },
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
+  });
+
+  test("the App band and the bot link read the chain, not a same-id bot", async () => {
+    const markup = renderDetail(
+      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] },
+    );
+    expect(markup).toContain(`href="${apiBase()}/bots/bot-a"`);
+    expect(markup).toContain(t("en", "appDetail.metricMountedBots"));
+  });
+});
+
+describe("F3/F5 — the chain reaches members, blocked managers, and states its ceiling", () => {
+  const chainRows = async (markup: string): Promise<string[][]> =>
+    withMarkup(markup, (container) => {
+      const table = [...container.querySelectorAll("table")].find((node) =>
+        (node.querySelector("thead")?.textContent ?? "").includes(t("en", "apps.chain.columnPosition")),
+      );
+      if (table === undefined) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+      );
+    });
+
+  test("a member's identity-only face renders the read-only chain", async () => {
+    const markup = renderDetail(
+      {
+        ...identityPayload,
+        chain: [chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5 })],
+      },
+    );
+    expect(markup).toContain(t("en", "apps.chain.title"));
+    expect((await chainRows(markup)).map((cells) => cells[0])).toEqual(["1"]);
+  });
+
+  test("a blocked manager keeps the chain and its unavailable row", async () => {
+    const markup = renderDetail(
+      {
+        ...blockedPayload(),
+        chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })],
+      } as SettingsBlockedPayload,
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
+    // The blocked face renders the skipped row, never the pending-bind sentence.
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
+  });
+
+  test("a blocked manager with no chain at all gets the empty-chain answer", async () => {
+    const markup = renderDetail(
+      {
+        ...blockedPayload(),
+        chain: [],
+        installations: [{ installation_id: 1, account_login: "acme", seen_at: new Date().toISOString() }],
+      } as SettingsBlockedPayload,
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.empty"));
+    expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
+  });
+
+  test("each row states its real ceiling: owned unlimited, shared cap, shared uncapped", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [
+          chainRow({ position: 1, bot_id: "bot-own", owned: true, month_used_rp: 40, monthly_rp: 500 }),
+          chainRow({ position: 2, bot_id: "bot-capped", owned: false, month_used_rp: 1240, monthly_rp: 2000 }),
+          chainRow({ position: 3, bot_id: "bot-free", owned: false, month_used_rp: 10, monthly_rp: null }),
+        ],
+      },
+      "bots",
+    );
+    const rows = await chainRows(markup);
+
+    expect(rows[0]![4]).toContain(t("en", "bots.monthOwn", { used: 40 }));
+    expect(rows[1]![4]).toContain(t("en", "bots.monthLimit", { used: 1240, limit: 2000 }));
+    expect(rows[2]![4]).toContain(t("en", "bots.monthNoCeiling", { used: 10 }));
   });
 });

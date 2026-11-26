@@ -12,6 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
   Button,
+  FlowSection,
   StatusBadge,
   Tabs,
   TabsContent,
@@ -28,6 +29,7 @@ import {
   postPinnedOutcome,
 } from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
+import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
@@ -44,6 +46,7 @@ import {
   parseModels,
   parseSettings,
   type AppDetailSearch,
+  type AppChainEntry,
   type BlockedReason,
   type ModelOptionGroup,
   type SettingsPayload,
@@ -314,8 +317,79 @@ export async function refreshAppMetadata(base: string, githubAppId: number): Pro
 }
 
 /** F11: the chain is the only App→bot relation; its row count is an App fact. */
-function mountedBotCount(mountedBotIds: readonly string[]): number {
-  return new Set(mountedBotIds).size;
+function mountedBotCount(chain: readonly AppChainEntry[]): number {
+  return chain.length;
+}
+
+/**
+ * F7 (D29/D35): the App's ordered chain, read-only. Position, bot name, the
+ * shared/mine tag, the multiplier and this month's spend through that bot —
+ * no add, remove or reorder control: the editable order ships with the relay
+ * that reads it. An empty chain names the next step instead of rendering a
+ * blank table.
+ */
+export function AppChainSection({
+  locale,
+  chain,
+}: {
+  locale: SpaBoot["locale"];
+  chain: readonly AppChainEntry[];
+}) {
+  if (chain.length === 0) {
+    return <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>;
+  }
+  const columns: DataTableColumn<AppChainEntry>[] = [
+    {
+      header: t(locale, "apps.chain.columnPosition"),
+      cell: (row) => <span className="tabular-nums text-muted-foreground">{row.position}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnBot"),
+      cell: (row) => (
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-foreground">{row.name}</span>
+          <span className="text-muted-foreground">
+            {t(locale, row.owned ? "apps.chain.tagMine" : "apps.chain.tagShared")}
+          </span>
+          {/* A bot its owner stopped sharing stays mounted as a skipped row. */}
+          {row.available ? null : (
+            <span className="text-(--tone-warn-fg)">{t(locale, "apps.chain.rowUnavailable")}</span>
+          )}
+        </span>
+      ),
+      meta: (row) => (row.description === null || row.description === "" ? null : <span>{row.description}</span>),
+    },
+    {
+      header: t(locale, "apps.chain.columnProvider"),
+      cell: (row) => <span className="text-muted-foreground">{row.provider_workspace}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnMultiplier"),
+      cell: (row) => <span className="tabular-nums">×{row.multiplier}</span>,
+    },
+    {
+      header: t(locale, "apps.chain.columnMonth"),
+      align: "right",
+      cell: (row) => (
+        <span className="tabular-nums text-muted-foreground" title={t(locale, "bots.monthHint")}>
+          {/* F5: an owned bot pays this workspace's own keys, so it has no
+              ceiling; a shared bot with a cap states it; without one, none. */}
+          {row.owned
+            ? t(locale, "bots.monthOwn", { used: row.month_used_rp })
+            : row.monthly_rp === null
+              ? t(locale, "bots.monthNoCeiling", { used: row.month_used_rp })
+              : t(locale, "bots.monthLimit", { used: row.month_used_rp, limit: row.monthly_rp })}
+        </span>
+      ),
+    },
+  ];
+  return (
+    <div data-slot="app-chain">
+      <FlowSection title={t(locale, "apps.chain.title")} subtitle={t(locale, "apps.chain.copy")}>
+        <DataTable columns={columns} rows={chain} rowKey={(row) => `${row.position}:${row.bot_id}`} />
+      </FlowSection>
+    </div>
+  );
 }
 
 const BLOCKED_REASON_KEYS = {
@@ -347,11 +421,11 @@ export function TargetHeader({
   // BOT configuration reached through an equal id — a different entity after
   // the split — so the band carries installations, Apps mounted through the
   // chain, the delivery refusal count and the App's scope, nothing else.
-  const mountedBotNames = payload.can_manage ? (payload.mounted_bot_ids ?? []) : [];
+  const chain = payload.chain ?? [];
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
-        { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(mountedBotNames) },
+        { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(chain) },
         {
           key: t(locale, "apps.metricRejected24h"),
           value: payload.delivery_summary?.rejected24h ?? 0,
@@ -368,10 +442,7 @@ export function TargetHeader({
         actions={
           <>
             {blockedMessage ? null : (
-              <BotSettingsLink
-                locale={locale}
-                mountedBotIds={payload.can_manage ? (payload.mounted_bot_ids ?? []) : []}
-              />
+              <BotSettingsLink locale={locale} mountedBotIds={(payload.chain ?? []).map((row) => row.bot_id)} />
             )}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
@@ -546,6 +617,8 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
+        {/* F3: the chain is what the App mounts, readable by every member. */}
+        <AppChainSection locale={locale} chain={payload.chain ?? []} />
       </div>
     );
   }
@@ -554,7 +627,7 @@ export function AppDetailView({
   const bot = payload.blocked ? null : payload;
 
   function onTabChange(next: string): void {
-    if (next !== "settings" && next !== "delivery" && next !== "installations") return;
+    if (next !== "settings" && next !== "bots" && next !== "delivery" && next !== "installations") return;
     onSearch({ ...search, tab: next });
   }
 
@@ -568,6 +641,9 @@ export function AppDetailView({
           className="group-data-[orientation=horizontal]/tabs:h-10 w-full justify-start gap-4 border-b border-border p-0"
         >
           <TabsTrigger value="settings">{t(locale, "appDetail.tabSettings")}</TabsTrigger>
+          {/* D40: this plan registers the `bots` tab — the chain is the plan's
+              own subject, and no other plan edits this tab set. */}
+          <TabsTrigger value="bots">{t(locale, "appDetail.tabBots")}</TabsTrigger>
           <TabsTrigger value="delivery">{t(locale, "appDetail.tabDelivery")}</TabsTrigger>
           <TabsTrigger value="installations">{t(locale, "appDetail.tabInstallations")}</TabsTrigger>
         </TabsList>
@@ -601,6 +677,21 @@ export function AppDetailView({
             )}
             {bot === null || payload.can_manage !== true ? null : (
               <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
+            )}
+          </div>
+        </TabsContent>
+        <TabsContent value="bots">
+          <div className="flex flex-col">
+            {/* F4/D47: the copy follows the REAL bind state. A pending row is an
+                UNBOUND installation of a SHARED App (the server sends none for an
+                owned App, which never binds) — that, and only that, is "the chain
+                appears once the installation is bound". Everything else with an
+                empty chain is the honest "nothing mounted" answer, and rows whose
+                bot is no longer shared render skipped. */}
+            {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
+              <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
+            ) : (
+              <AppChainSection locale={locale} chain={payload.chain ?? []} />
             )}
           </div>
         </TabsContent>

@@ -101,6 +101,10 @@ export type AppsPayload = {
     /** F1: the App's month state from its MOUNTED CHAIN; `null` = no chain,
      * which renders the dash rather than a fabricated number. */
     month?: { used_rp: number; owned: boolean; multiplier: number } | null;
+    /** The workspace's own live installations of this App (D43). */
+    installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+    /** The App's ordered chain in this workspace — read-only in this release. */
+    chain?: AppChainEntry[];
     bot_id?: string;
     github_name: string | null;
     github_slug: string | null;
@@ -540,9 +544,56 @@ export function isReviewLevel(value: unknown): value is ReviewLevel {
  * log, sandbox_image_id, review-trigger runtime config) stays behind the
  * manager face (the server keys the split on `can_manage`).
  */
-/** F11/F7: the bot ids an App's chain mounts here — the App's only App→bot
- * relation, and the App band's "mounted bots" count. Absent means no chain. */
-export type MountedBotIds = { mounted_bot_ids?: string[] };
+/**
+ * One row of an App's ordered chain in this workspace (F7): the App's only
+ * App→bot relation. `position` is the stored order, `month_used_rp` this
+ * workspace's spend through that bot this month, and `owned` says whether this
+ * workspace provides it (a shared bot reads false).
+ */
+export type AppChainEntry = {
+  position: number;
+  bot_id: string;
+  name: string;
+  description: string | null;
+  provider_workspace: string;
+  owned: boolean;
+  /** False when the bot's owner stopped sharing it: mounted, but skipped. */
+  available: boolean;
+  multiplier: number;
+  month_used_rp: number;
+  /** The bot's own monthly cap; `null` = no cap of its own. */
+  monthly_rp: number | null;
+};
+
+/**
+ * The install-state slice every App face carries: the workspace's own live
+ * installations of this App and its ordered chain. `pending_installations` is
+ * what tells "the chain appears once an installation is bound" from "nothing is
+ * mounted": it holds only UNBOUND installations of a SHARED App — an owned App
+ * never binds (D47), so it carries none.
+ */
+export type AppChain = {
+  chain?: AppChainEntry[];
+  installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+  pending_installations?: PendingInstallation[];
+};
+
+function isAppChainEntry(value: unknown): value is AppChainEntry {
+  return (
+    isRecord(value) &&
+    typeof value.position === "number" &&
+    Number.isSafeInteger(value.position) &&
+    typeof value.bot_id === "string" &&
+    typeof value.name === "string" &&
+    (value.description === null || typeof value.description === "string") &&
+    typeof value.provider_workspace === "string" &&
+    typeof value.owned === "boolean" &&
+    typeof value.available === "boolean" &&
+    typeof value.multiplier === "number" &&
+    typeof value.month_used_rp === "number" &&
+    (value.monthly_rp === null || typeof value.monthly_rp === "number")
+  );
+}
 
 export type SettingsIdentityAppMeta = {
   github_app_id: number | null;
@@ -904,7 +955,7 @@ export type SettingsReadOnlyPayload = {
   target_id?: string;
   targets_many?: boolean;
   app: SettingsIdentityAppMeta;
-} & MountedBotIds;
+} & AppChain;
 
 /**
  * The App's operator-facing display name (D0): GitHub's current name, then
@@ -937,10 +988,7 @@ type SettingsManageBase = {
   targets_many?: boolean;
   official_workspace?: boolean;
   can_configure_bot?: boolean;
-  /** F7: the bot ids this App's chain mounts in this workspace (empty until
-   * install-state-chain writes the chain). */
-  mounted_bot_ids?: string[];
-} & BotConfigSections;
+} & AppChain & BotConfigSections;
 
 /**
  * The manager face of an App whose workspace holds a repository under it: the
@@ -988,7 +1036,7 @@ export type SettingsBlockedPayload = {
   app: BlockedAppIdentity;
   targets_many?: false;
   installation: BoundInstallation | null;
-} & TargetOwnedSections & MountedBotIds;
+} & TargetOwnedSections & AppChain;
 
 /**
  * The Blocked manager face of a bot this workspace holds SEVERAL repositories
@@ -996,7 +1044,7 @@ export type SettingsBlockedPayload = {
  * target-owned slice is absent and `target_id` is an explicit `null` — the
  * shape the SPA's `targets_many` notice reads.
  */
-export type SettingsBlockedManyPayload = MountedBotIds & {
+export type SettingsBlockedManyPayload = AppChain & {
   can_manage: true;
   blocked: true;
   blocked_reason: BlockedReason;
@@ -1813,11 +1861,12 @@ export function pullRequestStatePill(
 
 /**
  * The App detail page's faces: 应用设置 (the App's own configuration, the
- * default), 投递状态 (the bot's webhook deliveries, filtered and paged) and
- * 已安装. The data faces — 洞察 and Pull requests — belong to the repository
- * detail, so they are not values a URL can open here.
+ * default), 机器人 (the App's ordered chain, read-only), 投递状态 (the bot's
+ * webhook deliveries, filtered and paged) and 已安装. The data faces — 洞察 and
+ * Pull requests — belong to the repository detail, so they are not values a
+ * URL can open here.
  */
-export type AppDetailTab = "settings" | "delivery" | "installations";
+export type AppDetailTab = "settings" | "bots" | "delivery" | "installations";
 
 /**
  * URL-derived detail state: the App detail's active tab. `window`/`repo`/`pr`
@@ -1849,9 +1898,9 @@ export function pullRequestRefOf(pr: string): PullRequestRef | null {
 /**
  * The search string as the App detail states it — the ONE derivation shared by
  * the mount initializer and the popstate re-sync (the spa-url-state-resync
- * contract). The bare path IS the 应用设置 tab; `?tab=installations` is the only
- * other address this page opens, and any other value (including the retired
- * data-tab spellings) resolves to the default. `pr` rides verbatim only when
+ * contract). The bare path IS the 应用设置 tab; `?tab=bots`, `?tab=delivery` and
+ * `?tab=installations` are the other addresses this page opens, and any other
+ * value (including the retired data-tab spellings) resolves to the default. `pr` rides verbatim only when
  * `pullRequestRefOf` resolves it — the same predicate the detail face reads —
  * so the address bar never advertises an open detail that can never open.
  */
@@ -1860,7 +1909,7 @@ export function parseAppDetailSearch(search: string): AppDetailSearch {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawTab = params.get("tab");
   const tab: AppDetailTab =
-    rawTab === "installations" || rawTab === "delivery" ? rawTab : "settings";
+    rawTab === "installations" || rawTab === "delivery" || rawTab === "bots" ? rawTab : "settings";
   const window = (INSIGHTS_WINDOWS as readonly string[]).includes(insights.window)
     ? (insights.window as InsightsWindow)
     : "30";
@@ -2586,6 +2635,12 @@ export function parseSettings(data: unknown): SettingsPayload | null {
   if (!parseCatalogReference(data)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (!isNullableGithubVisibility(data.app.github_visibility)) return null;
+  if (
+    data.chain !== undefined &&
+    (!Array.isArray(data.chain) || !data.chain.every(isAppChainEntry))
+  ) {
+    return null;
+  }
   if (!hasTarget) return data as SettingsPayload;
   if (!isReviewTriggerMode(data.app.review_trigger_mode)) return null;
   if (data.app.review_level !== null && !isReviewLevel(data.app.review_level)) return null;

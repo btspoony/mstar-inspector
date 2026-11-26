@@ -2095,35 +2095,28 @@ function blockedReasonFor(
  * into chunks of up to 90 bots to stay under D1's bound-parameter cap, so the
  * cost is two statements per chunk: four for any workspace under 90 Apps of
  * each kind.
- * A request lists the workspace's own bots plus every `shared` bot it holds a
- * live target on (`targetedBotIds`) — the target is the entitlement, so a
- * target created on an official bot does not vanish from this list.
+ * A request lists the Apps this workspace owns plus every App its install state
+ * names (D43), so the health column's cost follows the list the caller sees.
  * shortcut: the workspace filter runs over the joined list in memory
  * (single-tenant scale today); upgrade: to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
  */
 /**
- * F1: the App list's MEMBERSHIP is the union the installation relation
- * defines — an App this workspace owns, an App it holds a bound installation
- * on, or a shared App it has a live target on. The relation is NOT filtered
- * back through a visibility list: a shared App with a bound installation and
- * no target must still appear (and select the `installed` default).
- *
- * DEFERRED by recorded PM decision D43 (delivery-compass): `app_installations`
- * belongs to install-state-chain Task 2; membership reads `app_workspaces`,
- * `github_apps` and the bound `github_app_installations` row instead.
+ * D43, final disposition: the App list's MEMBERSHIP IS the install state. A row
+ * appears because `app_installations` has a row for `(App, this workspace)` —
+ * written by `createApp`, the first bind, the revival path and the backfill —
+ * and because this workspace owns the App. Targets and physical installations
+ * decide nothing here: they cannot resurrect an App the workspace has no state
+ * for, and cannot hide one it does (a bound App whose owner stopped sharing
+ * keeps its state and stays listed).
  */
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
   installedIds: ReadonlySet<string>,
-  targetedBotIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
   const rows = (await apps.listApps()).filter(
-    (app) =>
-      app.workspace_id === scope.workspaceId ||
-      installedIds.has(app.id) ||
-      (app.scope === "shared" && targetedBotIds.has(app.id)),
+    (app) => app.workspace_id === scope.workspaceId || installedIds.has(app.id),
   );
   const owned = rows.filter((app) => canWriteBotScope(app, scope));
   const consumed = rows.filter((app) => !canWriteBotScope(app, scope));
@@ -2146,16 +2139,10 @@ const appListRoute = async (c: DashboardContext) => {
     ]),
   );
   const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
-  // F1/D43: installation membership comes from relations that exist today —
-  // never from `app_installations` (install-state-chain owns that cutover) —
-  // and it is what the LIST is built from, not a post-filter.
+  // D43: the installed set IS the install state, and it is what the LIST is
+  // built from, not a post-filter.
   const installedIds = new Set(await apps.listInstalledBotIds(gate.scope.workspaceId));
-  const rows = await appsListWithHealth(
-    apps,
-    gate.scope,
-    installedIds,
-    new Set(targetByBot.keys()),
-  );
+  const rows = await appsListWithHealth(apps, gate.scope, installedIds);
   const month = quotaMonth(new Date());
   const spendRows = (
     await gate.db
@@ -2171,6 +2158,9 @@ const appListRoute = async (c: DashboardContext) => {
   // F1: an App's month state comes from the bots its CHAIN mounts — never from
   // a same-id bot. No chain means `null`, which the SPA renders as the dash.
   const chains = await apps.listInstallChainBots(gate.scope.workspaceId);
+  // Every live installation this workspace bound, per App — one statement for
+  // the whole page, never a read per row.
+  const boundInstallations = await apps.listBoundInstallationsByWorkspace(gate.scope.workspaceId);
   const quota = await readPlanMonthlyRp(
     gate.db,
     gate.scope.workspaceId,
@@ -2185,21 +2175,37 @@ const appListRoute = async (c: DashboardContext) => {
     ...(quota.kind === "unknown" ? {} : { month_plan_rp: quota.kind === "unlimited" ? null : quota.rp }),
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
+      const chain = chains.get(app.id) ?? [];
       return {
         github_app_id: app.github_app_id,
         owned: app.workspace_id === gate.scope.workspaceId,
         installed: installedIds.has(app.id),
+        // The workspace's own installations of this App, live only.
+        installations: boundInstallations.get(app.id) ?? [],
+        // The ordered chain: position is the array order, and each bot carries
+        // its own name, provider workspace, multiplier and this month's spend.
+        chain: chain.map((bot) => ({
+          position: bot.position,
+          bot_id: bot.botId,
+          name: bot.name,
+          description: bot.description,
+          provider_workspace: bot.providerWorkspace,
+          owned: bot.owned,
+          available: bot.available,
+          multiplier: bot.multiplier,
+          month_used_rp: spend.get(bot.botId) ?? 0,
+          monthly_rp: bot.monthlyRp,
+        })),
         // `null` = no chain mounted, so nothing is metered. A number is the
         // sum of this workspace's spend through the mounted bots.
-        month: (() => {
-          const chain = chains.get(app.id) ?? [];
-          if (chain.length === 0) return null;
-          return {
-            used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
-            owned: chain.every((bot) => bot.owned),
-            multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
-          };
-        })(),
+        month:
+          chain.length === 0
+            ? null
+            : {
+                used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
+                owned: chain.every((bot) => bot.owned),
+                multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
+              },
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2226,8 +2232,9 @@ const appListRoute = async (c: DashboardContext) => {
     shared_apps: await apps.listSharedApps(gate.scope.workspaceId),
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
     // The installed tab's pending-bind rows: every unbound physical
-    // installation of an App this workspace may install through — its own,
-    // or a shared one (D8/D43 — install states are install-state-chain Task 2's).
+    // installation of an App this workspace may install through — its own, or a
+    // shared one. Pending is the ABSENCE of a bind, which is a different fact
+    // from install-state membership (D43).
     pending_installations: await apps.listWorkspacePendingInstallationsNamed(gate.scope.workspaceId),
   });
 };
@@ -2465,6 +2472,9 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         blocked: blockedReason !== null,
         blocked_reason: blockedReason,
         installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
+        // F3: the chain is a READ of the workspace's install state, visible to
+        // every member — it is what the App mounts, not a credential.
+        chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
         app: {
           github_app_id: appRow.github_app_id,
           status: appRow.status,
@@ -2530,6 +2540,11 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
           github_visibility: appRow.github_visibility ?? null,
         },
         installation: binding,
+        // F3: a blocked manager still sees the chain it holds — rows whose bot
+        // is no longer shared render as skipped, not as an absent chain. The
+        // installations are what tells "nothing bound yet" from that.
+        installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
+        chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
       });
     }
     const effective = target === null ? null : effectiveTargetSettings(target, defaults);
@@ -2616,19 +2631,18 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         ...targetOwned.app,
       },
       installation: binding,
-      pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
+      // F4/D47: the pending-bind hint is a SHARED-App fact. The bind route and
+      // its OAuth callback both refuse an owned App, so a hint for one would
+      // offer an action that always 404s.
+      pending_installations:
+        appRow.scope === "shared"
+          ? await store.listPendingInstallations(appRow.id, member.scope.workspaceId)
+          : [],
       // F7: the bots this App's chain actually mounts in THIS workspace — the
-      // only App-to-bot relation that exists. Empty until install-state-chain
-      // writes the chain, and never inferred from an id coincidence.
-      mounted_bot_ids: (
-        await member.db
-          .prepare(
-            `SELECT bot_id FROM app_install_bots
-              WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position`,
-          )
-          .bind(appRow.id, member.scope.workspaceId)
-          .all<{ bot_id: string }>()
-      ).results.map((row) => row.bot_id),
+      // only App-to-bot relation that exists — in position order, each with its
+      // own facts and this month's spend. One statement, no fan-out; the spend
+      // aggregate is the same single query the Apps page reads.
+      chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
       blocked: false,
       blocked_reason: null,
       official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
@@ -3017,9 +3031,9 @@ async function botScopedSections(
   const apps = createReviewBotsStore(db);
   const store = createAppConfigStore(db, encryptionKey);
   const owner = canWriteBotScope(app, scope);
-  // The mount list is EMPTY until install-state-chain populates
-  // app_install_bots (D43-adjacent F2): physical github_app_installations are
-  // App-side state a bot payload never sources through a same-id join.
+  // The mount list is EMPTY on the bot face: physical
+  // github_app_installations are App-side state a bot payload never sources
+  // through a same-id join (D44).
   const emptyInstallations: Awaited<ReturnType<typeof apps.listInstallations>> = [];
   const [installations, deliverySummary, maskedKeys, modelChain, modelChainSeats, modelChains, customProviders, customKeys] =
     owner
@@ -4648,6 +4662,62 @@ function installationsVisibleTo(
     : apps.listInstallations(app.id);
 }
 
+/** One chain row of the App detail's `bots` tab. */
+export type AppChainEntry = {
+  position: number;
+  bot_id: string;
+  name: string;
+  description: string | null;
+  provider_workspace: string;
+  owned: boolean;
+  available: boolean;
+  multiplier: number;
+  month_used_rp: number;
+  /** The bot's own monthly cap (F5); `null` = no cap of its own. */
+  monthly_rp: number | null;
+};
+
+/**
+ * This workspace's ordered chain on one App, each bot with its own facts and
+ * this month's spend. Two statements for the whole chain — the rows and the
+ * spend aggregate — never a query per bot. Positions are the stored ones, so a
+ * gap (a bot the owner stopped sharing, until the editor removes it) stays
+ * visible rather than closing up.
+ */
+async function appChainRead(
+  db: DashboardDb,
+  appId: string,
+  workspaceId: string,
+): Promise<AppChainEntry[]> {
+  const chains = await createReviewBotsStore(db).listInstallChainBots(workspaceId);
+  const chain = chains.get(appId) ?? [];
+  if (chain.length === 0) return [];
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  return chain.map((bot) => ({
+    position: bot.position,
+    bot_id: bot.botId,
+    name: bot.name,
+    description: bot.description,
+    provider_workspace: bot.providerWorkspace,
+    owned: bot.owned,
+    available: bot.available,
+    multiplier: bot.multiplier,
+    month_used_rp: spend.get(bot.botId) ?? 0,
+    monthly_rp: bot.monthlyRp,
+  }));
+}
+
 const BIND_STATE_COOKIE = "__Host-mstar-bind-state";
 const BIND_STATE_MAX_AGE_SEC = 600;
 const BIND_STATE_KIND = "installation-bind";
@@ -4732,7 +4802,8 @@ const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> 
     workspaceId: member.scope.workspaceId,
     botId: app.id,
     installationId,
-    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=settings`,
+    // F4: a successful bind lands where its new chain is shown.
+    returnTo: `/dashboard/${encodeURIComponent(workspaceRef)}/apps/${app.github_app_id}?tab=bots`,
     exp: Math.floor(Date.now() / 1000) + BIND_STATE_MAX_AGE_SEC,
   };
   const state = await signValue(JSON.stringify(payload), secrets.sessionSecret);
