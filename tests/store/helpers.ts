@@ -332,6 +332,24 @@ export function syncSplitPair(db: TestD1): void {
       "UPDATE review_bots SET workspace_id = (SELECT workspace_id FROM app_workspaces WHERE app_id = review_bots.id) WHERE EXISTS (SELECT 1 FROM app_workspaces WHERE app_id = review_bots.id)",
     );
   }
+  if (names.has("app_install_bots")) {
+    // The owner's chain, which `createApp` writes at creation and a raw fixture
+    // INSERT bypasses. The relay walks THIS table, so without it every fixture
+    // App would have an empty chain and every delivery would refuse
+    // `no-review-bot`. One row at position 1 naming the App's own bot — the same
+    // shape `createApp` writes.
+    // `app_install_bots` carries a composite FK to `app_installations`, so the
+    // state row comes first — exactly the order `createApp` and `bindInstallation`
+    // write in production.
+    db.raw.run(`INSERT OR IGNORE INTO app_installations (github_app_id, workspace_id, created_at)
+  SELECT aw.app_id, aw.workspace_id, datetime('now')
+    FROM app_workspaces aw
+   WHERE EXISTS (SELECT 1 FROM review_bots b WHERE b.id = aw.app_id)`);
+    db.raw.run(`INSERT OR IGNORE INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+  SELECT aw.app_id, aw.workspace_id, 1, aw.app_id
+    FROM app_workspaces aw
+   WHERE EXISTS (SELECT 1 FROM review_bots b WHERE b.id = aw.app_id)`);
+  }
 }
 
 export function seedBot(db: TestD1, id: string, githubAppId: number, opts: { workspaceId?: string } = {}): void {

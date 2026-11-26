@@ -2,7 +2,9 @@ import type { D1Database, KVNamespace } from "@cloudflare/workers-types";
 import { idemCommentKey, kvClaimKey, IDEMPOTENCY_SECONDS, IDEM_ENQUEUED, isEnqueuedClaim } from "../contracts/idem";
 import {
   ENTITLEMENT_UNREADABLE_SKIP_REASON,
-  QUOTA_SKIP_REASON,
+  QUOTA_BOT_SKIP_REASON,
+  QUOTA_PLAN_SKIP_REASON,
+  NO_REVIEW_BOT_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
@@ -149,11 +151,24 @@ async function runBeforeEnqueue(
 export type DeliveryRefusal =
   | SharedBotRefusal
   | { kind: "quota-exhausted"; limit: number; used: number; cost: number }
+  | { kind: "quota-plan" }
+  | { kind: "quota-bot"; botId: string }
+  | { kind: "no-review-bot" }
   | { kind: "entitlement-unreadable" };
 
 /** The `review_failures.stage` a refusal is attributed to. */
 export function deliveryRefusalStage(refusal: DeliveryRefusal): FailureStage {
-  return refusal.kind === "quota-exhausted" ? QUOTA_STAGE : SHARED_BOT_ENTITLEMENT_STAGE;
+  switch (refusal.kind) {
+    case "quota-exhausted":
+    case "quota-plan":
+    case "quota-bot":
+      return QUOTA_STAGE;
+    case "no-review-bot":
+      // Not a quota fact: nothing is mounted, so no allowance is involved.
+      return SHARED_BOT_ENTITLEMENT_STAGE;
+    default:
+      return SHARED_BOT_ENTITLEMENT_STAGE;
+  }
 }
 
 /**
@@ -166,11 +181,16 @@ export function deliveryRefusalStage(refusal: DeliveryRefusal): FailureStage {
 export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
   switch (refusal.kind) {
     case "quota-exhausted":
-      return QUOTA_SKIP_REASON;
+    case "quota-plan":
+      return QUOTA_PLAN_SKIP_REASON;
+    case "quota-bot":
+      return QUOTA_BOT_SKIP_REASON;
     case "entitlement-unreadable":
       return ENTITLEMENT_UNREADABLE_SKIP_REASON;
     case "shared-bot-not-included":
       return SHARED_BOT_ENTITLEMENT_SKIP_REASON;
+    case "no-review-bot":
+      return NO_REVIEW_BOT_SKIP_REASON;
   }
 }
 
@@ -182,10 +202,13 @@ export function deliveryRefusalReason(refusal: DeliveryRefusal): string {
 export function deliveryRefusalCode(refusal: DeliveryRefusal): FailureCode {
   switch (refusal.kind) {
     case "quota-exhausted":
+    case "quota-plan":
+    case "quota-bot":
       return "review.delivery.quota_exhausted";
     case "entitlement-unreadable":
       return "review.delivery.entitlement_unreadable";
     case "shared-bot-not-included":
+    case "no-review-bot":
       return "review.delivery.deferred";
   }
 }

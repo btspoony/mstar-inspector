@@ -7,7 +7,7 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { quotaMonth, quotaStartsOn } from "../../src/store/quota-store";
 import { listQuotaVersions } from "../../src/admin/quota-versions";
 import type { DashboardD1, DashboardD1Statement } from "../../src/dashboard/users";
-import { QUOTA_SKIP_REASON, QUOTA_STAGE } from "../../src/contracts/failure-stages";
+import { QUOTA_PLAN_SKIP_REASON, QUOTA_STAGE } from "../../src/contracts/failure-stages";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
@@ -523,7 +523,7 @@ describe("the impact preview agrees with the enqueue", () => {
       { stage: QUOTA_STAGE },
     ]);
     const failure = db.raw.query("SELECT error FROM review_failures").get() as { error: string };
-    expect(failure.error).toContain(QUOTA_SKIP_REASON);
+    expect(failure.error).toContain(QUOTA_PLAN_SKIP_REASON);
 
     const admitted = await postWebhook("/webhook/ws-under/app-under", body, "secret-under", env);
     expect(admitted.status).toBe(200);

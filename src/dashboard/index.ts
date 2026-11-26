@@ -4770,6 +4770,44 @@ async function readBindState(
  * OAuth step-up (`read:org`), and the callback binds only after the user's own
  * token proves they administer the installation's account.
  */
+/**
+ * Replace one install's chain. The editor and the code that reads the order ship
+ * together: `selectReviewBot` walks `position`, and this route is the only thing
+ * that writes it. Positions come out contiguous from 1 because the store clears
+ * and re-inserts in ONE batch — a reorder never leaves a hole a reader could
+ * mistake for an available slot.
+ *
+ * Gated on `can_manage` AND on the store's own installer check: the chain belongs
+ * to the workspace whose `app_installations` row it is.
+ */
+const appChainRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const body = (await c.req.json().catch(() => null)) as { botIds?: unknown } | null;
+  const botIds = body?.botIds;
+  if (!Array.isArray(botIds) || !botIds.every((id): id is string => typeof id === "string")) {
+    return c.json({ error: "botIds must be a list of bot ids" }, 400);
+  }
+  if (new Set(botIds).size !== botIds.length) {
+    return c.json({ error: "botIds names a bot twice" }, 400);
+  }
+  const apps = createReviewBotsStore(member.db);
+  const appId = c.req.param("appId") ?? "";
+  const outcome = await apps.replaceInstallChain({
+    appId,
+    workspaceId: member.scope.workspaceId,
+    botIds,
+  });
+  if (outcome === "not_installer") return c.json({ error: "unknown app" }, 404);
+  if (outcome === "bot_unavailable") {
+    return c.json({ error: "a bot in the chain is neither shared nor owned by this workspace" }, 400);
+  }
+  // Re-read the chain, not the whole page: the editor renders what the relay
+  // will actually walk.
+  return c.json({ chain: await appChainRead(member.db, appId, member.scope.workspaceId) });
+};
+
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -5657,6 +5695,7 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
+  { method: "patch", path: "/api/apps/:appId/chain", handler: appChainRoute, access: "write" },
   { method: "post", path: "/api/review-bots/:botId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/review-bots/:botId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/review-bots/:botId/settings", handler: appSettingsSaveRoute, access: "write" },

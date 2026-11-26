@@ -8,7 +8,6 @@ import { reconcileReviewRoute } from "../pipeline/route-reconcile";
 import { redactSecrets } from "../pipeline/redact";
 import type { ReviewJobPayload } from "../contracts/review-job";
 import { IDEMPOTENCY_SECONDS } from "../contracts/idem";
-import { QUOTA_SKIP_REASON } from "../contracts/failure-stages";
 import type { PipelineEnv } from "../pipeline/consumer";
 import type * as ConsumerModule from "../pipeline/consumer";
 import type { AttemptRef } from "../pipeline/review-attempt-execution";
@@ -23,6 +22,7 @@ import {
   type WebhookOutcome,
 } from "./webhooks";
 import { defaultLog, deliveryRefusalReason, handleReviewJob, type DeliveryRefusal } from "./handlers";
+import { selectReviewBot } from "./select-review-bot";
 import { findCheckAttemptByRunId } from "../store/review-checks";
 import {
   createReviewBotsStore,
@@ -46,9 +46,6 @@ import {
   REVIEW_ROUTE_WORKFLOW_KEY,
   reviewRunState,
 } from "../dashboard/runtime-config-store";
-import { checkEntitlement } from "../dashboard/entitlement";
-import { quotaMonth, readBotMultiplier, resolveWorkspaceQuotaProfile, rpFor } from "../store/quota-store";
-import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
 import { createSecretbox } from "../dashboard/secretbox";
@@ -412,34 +409,6 @@ export async function settleRefusedAfterAttach(input: {
   }
 }
 
-async function quotaRefusal(
-  db: D1Database,
-  target: ReviewTargetRow,
-  multiplier: number,
-  mode: DeploymentMode,
-): Promise<DeliveryRefusal | null> {
-  const now = new Date();
-  const month = quotaMonth(now);
-  const profile = await resolveWorkspaceQuotaProfile(db, target.workspace_id, month.month, now.toISOString());
-  let level = parseTargetReviewLevel(target.review_level);
-  if (level === null) level = (await readDefaultReviewLevel(db)).value;
-  const cost = rpFor(level, multiplier, profile);
-  const used = await sumMonthlyRp(db, target.workspace_id, month.startIso, month.endIso);
-
-  const verdict = await checkEntitlement({
-    db,
-    mode,
-    workspaceId: target.workspace_id,
-    kind: "review-quota",
-    now,
-    usedRp: used,
-    costRp: cost,
-  });
-  return !verdict.ok && verdict.refusal.kind === "review-quota"
-    ? { kind: "quota-exhausted", limit: verdict.refusal.limit, used: verdict.refusal.used, cost: verdict.refusal.cost }
-    : null;
-}
-
 app.get("/healthz", (c) => c.json({ ok: true, version: `v${APP_VERSION}` }));
 app.route("/dashboard", dashboardApp);
 app.post("/webhook/:workspaceId/:appId", async (c) => {
@@ -644,24 +613,34 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
   }
   const mode = deploymentModeOf(c.env.DEPLOYMENT_MODE);
   let refusal: DeliveryRefusal | null = null;
+  let selectedBotId: string | null = null;
   if (settled.kind === "job" && target !== null && !paused && reviewGlobal) {
     try {
-      if (row.scope === "shared") {
-        const verdict = await checkEntitlement({
-          db,
-          mode,
-          workspaceId: target.workspace_id,
-          kind: "shared-bot",
-          botScope: "shared",
-        });
-        if (!verdict.ok && verdict.refusal.kind === "shared-bot") {
-          refusal = { kind: "shared-bot-not-included", planId: verdict.refusal.planId };
-        }
-      }
-      if (refusal === null && mode !== "self-hosted") {
-        const multiplier = await readBotMultiplier(db, row.id);
-        if (multiplier === null) refusal = { kind: "entitlement-unreadable" };
-        else refusal = await quotaRefusal(db, target, multiplier, mode);
+      let level = parseTargetReviewLevel(target.review_level);
+      if (level === null) level = (await readDefaultReviewLevel(db)).value;
+      const relay = await selectReviewBot({
+        db,
+        mode: mode === "saas" ? "saas" : "self-hosted",
+        target,
+        now: new Date(),
+        level,
+      });
+      if (relay.kind === "selected") {
+        selectedBotId = relay.botId;
+      } else {
+        // The relay's refusal becomes the delivery's one refusal. `quota-bot`
+        // names the bot on the failure row and the log, never on the public Check.
+        const r = relay.refusal;
+        refusal =
+          r.kind === "quota-plan"
+            ? { kind: "quota-plan" }
+            : r.kind === "quota-bot"
+              ? { kind: "quota-bot", botId: r.botId }
+              : r.kind === "no-review-bot"
+                ? { kind: "no-review-bot" }
+                : r.kind === "shared-bot-not-included"
+                  ? { kind: "shared-bot-not-included", planId: row.id }
+                  : { kind: "entitlement-unreadable" };
       }
     } catch (err) {
       refusal = { kind: "entitlement-unreadable" };
@@ -798,9 +777,11 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // In this release one App executes through exactly one bot — the one the
-  // entity split created under the same id — so botId is the App's own id.
-  const handleOutcome = await handleReviewJob({ ...settled.payload, botRef: { appId: row.id, botId: row.id }, targetId: target!.id }, {
+  // The relay froze its choice above; an own bot and the App never share an id
+  // once a chain mounts more than one bot, so the payload carries the BOT's id.
+  const handleOutcome = await handleReviewJob(
+    { ...settled.payload, botRef: { appId: row.id, botId: selectedBotId ?? row.id }, targetId: target!.id },
+    {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,
     beforeEnqueue: async (payload) => {

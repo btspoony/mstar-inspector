@@ -6,7 +6,7 @@ import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
   ENTITLEMENT_UNREADABLE_SKIP_REASON,
-  QUOTA_SKIP_REASON,
+  QUOTA_PLAN_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
@@ -79,6 +79,11 @@ async function seedApp(
   db.raw
     .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .run(id);
+  // The two scope switches are independent (D31): the App's decides whether its
+  // installations bind, the BOT's decides whether its capability and quota are
+  // usable by another workspace. The relay reads the bot's, so a fixture that
+  // sets only the App's leaves an own bot in a "shared App".
+  db.raw.prepare("UPDATE review_bots SET scope = ? WHERE id = ?").run(opts.scope ?? "owned", id);
   const targetIds = (opts.targets ?? [{}]).map((target, index) => {
     const targetId = `target-${id}-${index}`;
     db.raw
@@ -108,6 +113,41 @@ async function seedApp(
     )
     .run();
   return { id, slug: opts.slug, targetId: targetIds[0]!, targetIds };
+}
+
+/**
+ * Mount an EXTERNAL shared bot on `appId`'s chain for `workspaceId`, replacing
+ * whatever the fixture put there. The relay reads the BOT's scope and owner, so
+ * a shared bot must belong to another workspace and carry `scope = 'shared'` —
+ * a fixture that sets only the App's scope leaves an own bot that the D15
+ * shortcut admits with no quota read.
+ */
+async function mountExternalSharedBot(
+  db: TestD1,
+  appId: string,
+  workspaceId: string,
+  monthlyRp: number | null = null,
+): Promise<string> {
+  const botId = `bot-shared-${appId}`;
+  db.raw
+    .prepare("INSERT INTO workspaces (id, slug, name, created_at) VALUES ('provider', 'provider', 'Provider', datetime('now'))")
+    .run();
+  db.raw
+    .prepare(
+      `INSERT OR REPLACE INTO review_bots
+         (id, workspace_id, name, description, scope, shared_at, sandbox_image_id,
+          multiplier, monthly_rp, deleted_at, created_at, updated_at)
+       VALUES (?, 'provider', ?, NULL, 'shared', datetime('now'), 'omp', 10, ?, NULL, datetime('now'), datetime('now'))`,
+    )
+    .run(botId, botId, monthlyRp);
+  db.raw
+    .prepare("INSERT OR REPLACE INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, datetime('now'))")
+    .run(appId, workspaceId);
+  db.raw.prepare("DELETE FROM app_install_bots WHERE github_app_id = ? AND workspace_id = ?").run(appId, workspaceId);
+  db.raw
+    .prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, 1, ?)")
+    .run(appId, workspaceId, botId);
+  return botId;
 }
 
 function makeQueue() {
@@ -244,6 +284,9 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("saas: a plan without the shared bot skips the delivery — 200, outcome skipped, no send, one entitlement failure", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
+    // An external shared bot: the plan gates apply to a bot the workspace does
+    // not own, never to its own (D15).
+    await mountExternalSharedBot(db, appRow.id, "default");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -276,7 +319,18 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("saas: an UNREADABLE gate is a recorded skip, not a 500 — the failure names the cause", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
-    db.raw.prepare(`DELETE FROM quota_profile_plans WHERE plan_id = 'free'`).run();
+    // Own-bot deliveries never reach the quota gate (D15), so a gate-fault test
+    // must mount an external shared bot AND hold a plan that INCLUDES shared
+    // bots — otherwise the capability check refuses first and the unreadable
+    // ceiling is never reached.
+    await mountExternalSharedBot(db, appRow.id, "default");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run();
+    db.raw.prepare(`DELETE FROM quota_profile_plans WHERE plan_id = 'pro'`).run();
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -308,6 +362,15 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
   test("saas: an empty quota profile table is the same recorded skip, not a 500", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+    // Same shape: an external shared bot under a plan that includes one, so the
+    // missing profile row is what the gate trips on.
+    await mountExternalSharedBot(db, appRow.id, "default");
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run();
     db.raw.prepare("DELETE FROM quota_profile_plans").run();
     db.raw.prepare("DELETE FROM quota_profiles").run();
     const { queue, sent } = makeQueue();
@@ -2589,10 +2652,12 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
   }
 
   function seedUsage(db: TestD1, reviewId: string, rp: number, occurredAt = new Date().toISOString()): void {
+    // `source = 'shared'`: the plan month now sums SHARED RP only, so a BYOK row
+    // would not count against the shared bot's allowance.
     db.raw
       .prepare(
-        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp)
-         VALUES (?, 1, ?, 'default', ?, ?)`,
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
+         VALUES (?, 1, ?, 'default', ?, ?, 'shared')`,
       )
       .run(reviewId, `token-${reviewId}`, occurredAt, rp);
   }
@@ -2602,14 +2667,21 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
   }
 
   test("a review that exactly fills the month's remaining headroom is admitted; one RP over refuses it", async () => {
+    // The shared bot's deep review costs ceil(6 × 10) = 60 RP under the v1
+    // profile and a ceiling of 120. The enqueue's own comparison is
+    // `used + cost > limit`, so 59 RP used admits (59 + 60 = 119) and 60 used
+    // refuses (60 + 60 = 120 > 120 is false — the exact boundary is 61).
     for (const [usedRp, expected] of [
-      [14, "enqueued"],
-      [15, "refused"],
+      [60, "enqueued"],
+      [61, "refused"],
     ] as const) {
       const db = createMigratedTestD1();
       seedPro(db);
-      setCeiling(db, 20);
+      setCeiling(db, 120);
       const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
+      // A shared bot the workspace does not own: the plan month only applies to
+      // one of those (D15 bypasses an own bot).
+      await mountExternalSharedBot(db, appRow.id, "default");
       db.raw.prepare("UPDATE review_targets SET review_level = 'deep' WHERE id = ?").run(appRow.targetId);
       seedUsage(db, "prior", usedRp);
       const { queue, sent } = makeQueue();
@@ -2637,7 +2709,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
         expect(failures).toHaveLength(1);
         expect(failures[0]!.stage).toBe(QUOTA_STAGE);
         expect(failures[0]!.target_id).toBe(appRow.targetId);
-        expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
+        expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_PLAN_SKIP_REASON));
         const delivery = db.raw
           .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
           .get(appRow.id) as { outcome: string };
@@ -2718,12 +2790,23 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     expect(sent).toHaveLength(1);
   });
 
-  test("a delivery that would fail both gates records exactly one failure, of the entitlement stage", async () => {
+  test("a delivery that would fail both gates records exactly ONE failure, of the plan-quota stage", async () => {
     const db = createMigratedTestD1();
     setCeiling(db, null);
-    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
+    // Both gates would refuse: the plan does not include a shared bot AND the
+    // month is spent. The relay walks one decision path, so ONE refusal is
+    // recorded — and the plan-month ceiling (which the walk reaches only after
+    // the capability check admits) is the one D30 orders first.
+    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run();
+    db.raw
+      .prepare(
+        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
+         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
+      )
+      .run();
     seedUsage(db, "prior", 1000);
-    await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
+    await mountExternalSharedBot(db, appRow.id, "default");
     const { queue, sent } = makeQueue();
     const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
     const body = JSON.stringify(PR_PAYLOAD);
@@ -2741,7 +2824,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
       .query("SELECT stage FROM review_failures ORDER BY rowid")
       .all() as Array<{ stage: string }>;
     expect(failures).toHaveLength(1);
-    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    expect(failures[0]!.stage).toBe(QUOTA_STAGE);
   });
 
   test("self-hosted never meters and never refuses, even with a spent month", async () => {

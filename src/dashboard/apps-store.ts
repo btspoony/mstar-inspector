@@ -1423,6 +1423,56 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * Rewrite one install's chain to exactly `botIds`, in the order given,
+     * positions contiguous from 1, in ONE batch — the whole reorder commits or
+     * none of it does, so a reader can never see a hole or a duplicate position.
+     *
+     * The store refuses a workspace that is not the install's own: the chain
+     * belongs to the workspace whose `app_installations` row it is, and a shared
+     * App's chain is its owner's to write (D34, D35). A bot must be shared or
+     * owned by that same workspace, checked in the same batch as the write.
+     */
+    async replaceInstallChain(
+      input: { appId: string; workspaceId: string; botIds: readonly string[] },
+    ): Promise<"ok" | "not_installer" | "bot_unavailable"> {
+      const own = await db
+        .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
+        .bind(input.appId, input.workspaceId)
+        .first<{ present: number }>();
+      if (own === null) return "not_installer";
+
+      for (const botId of input.botIds) {
+        const usable = await db
+          .prepare(
+            `SELECT 1 AS present FROM review_bots
+              WHERE id = ?1 AND deleted_at IS NULL
+                AND (scope = 'shared' OR workspace_id = ?2)`,
+          )
+          .bind(botId, input.workspaceId)
+          .first<{ present: number }>();
+        if (usable === null) return "bot_unavailable";
+      }
+
+      // ONE batch: clear then re-insert, so the final table state is the whole
+      // new chain with contiguous positions. `DELETE` first also frees the
+      // composite primary key for a bot moving to a lower position.
+      const statements = [
+        db
+          .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
+          .bind(input.appId, input.workspaceId),
+        ...input.botIds.map((botId, index) =>
+          db
+            .prepare(
+              "INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?1, ?2, ?3, ?4)",
+            )
+            .bind(input.appId, input.workspaceId, index + 1, botId),
+        ),
+      ];
+      await db.batch(statements);
+      return "ok";
+    },
+
+    /**
      * F1: each of this workspace's Apps and the bots its CHAIN mounts there, in
      * position order — one statement, no per-row read. Empty means "no chain":
      * the month cell must read a dash, not a number.

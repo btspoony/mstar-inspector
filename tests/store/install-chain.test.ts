@@ -1,0 +1,160 @@
+import { describe, expect, test } from "bun:test";
+import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createReviewBotsStore } from "../../src/dashboard/apps-store";
+
+const TS = "2026-10-24T00:00:00.000Z";
+
+function seedWorkspace(db: TestD1, id: string): void {
+  db.raw
+    .prepare("INSERT INTO workspaces (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+    .run(id, id, id, TS);
+}
+
+function seedApp(db: TestD1, appId: string): void {
+  db.raw
+    .prepare(
+      `INSERT INTO github_apps
+         (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+          created_by, status, scope, deleted_at, created_at, updated_at)
+       VALUES (?, ?, 1, ?, 'k', 'w', 'tester', 'active', 'owned', NULL, ?, ?)`,
+    )
+    .run(appId, appId, appId, TS, TS);
+}
+
+function seedBot(db: TestD1, id: string, workspaceId: string, scope: "owned" | "shared"): void {
+  db.raw
+    .prepare(
+      `INSERT INTO review_bots (id, workspace_id, name, scope, multiplier, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?)`,
+    )
+    .run(id, workspaceId, id, scope, TS, TS);
+}
+
+function seedInstall(db: TestD1, appId: string, workspaceId: string): void {
+  db.raw
+    .prepare("INSERT OR REPLACE INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, ?)")
+    .run(appId, workspaceId, TS);
+}
+
+function chainOf(db: TestD1, appId: string, workspaceId: string): Array<{ position: number; bot_id: string }> {
+  return db.raw
+    .query(
+      "SELECT position, bot_id FROM app_install_bots WHERE github_app_id = ? AND workspace_id = ? ORDER BY position",
+    )
+    .all(appId, workspaceId) as Array<{ position: number; bot_id: string }>;
+}
+
+/** Count the batch() calls a store handle makes — the reorder's atomicity proof. */
+function countingBatches(db: TestD1): { store: ReturnType<typeof createReviewBotsStore>; batches: () => number } {
+  let count = 0;
+  const wrapped = {
+    ...db,
+    async batch(statements: Parameters<TestD1["batch"]>[0]) {
+      count += 1;
+      return db.batch(statements);
+    },
+  } as TestD1;
+  return { store: createReviewBotsStore(wrapped), batches: () => count };
+}
+
+describe("replaceInstallChain — the reorder's batch shape", () => {
+  test("a reorder rewrites positions contiguously from 1 in ONE batch", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-b", "provider", "shared");
+    seedBot(db, "bot-own", "default", "owned");
+    seedInstall(db, "app-1", "default");
+    const { store, batches } = countingBatches(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-b", "bot-own", "bot-a"] }),
+    ).toBe("ok");
+
+    expect(chainOf(db, "app-1", "default")).toEqual([
+      { position: 1, bot_id: "bot-b" },
+      { position: 2, bot_id: "bot-own" },
+      { position: 3, bot_id: "bot-a" },
+    ]);
+    // ONE batch for the whole rewrite: DELETE plus one INSERT per bot.
+    expect(batches()).toBe(1);
+    db.raw.close();
+  });
+
+  test("a removal leaves the remaining positions contiguous — no hole", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-b", "provider", "shared");
+    seedBot(db, "bot-c", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a", "bot-b", "bot-c"] });
+
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a", "bot-c"] });
+
+    expect(chainOf(db, "app-1", "default")).toEqual([
+      { position: 1, bot_id: "bot-a" },
+      { position: 2, bot_id: "bot-c" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a workspace that is not the installer is refused and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedWorkspace(db, "stranger");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedInstall(db, "app-1", "provider");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({ appId: "app-1", workspaceId: "stranger", botIds: ["bot-a"] }),
+    ).toBe("not_installer");
+    expect(chainOf(db, "app-1", "provider")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("a bot neither shared nor owned by the installer is refused and writes nothing", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedWorkspace(db, "other");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-mine", "default", "owned");
+    // Owned by a third workspace and NOT shared: unusable here.
+    seedBot(db, "bot-foreign", "other", "owned");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-mine", "bot-foreign"],
+      }),
+    ).toBe("bot_unavailable");
+    expect(chainOf(db, "app-1", "default")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("the chain the relay reads is the chain the editor wrote", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-own", "default", "owned");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-own", "bot-a"] });
+
+    // `listInstallChainBots` is what `readChain`/`selectReviewBot` build on, so
+    // this asserts the read side sees the write side's order.
+    const chains = await store.listInstallChainBots("default");
+    expect(chains.get("app-1")?.map((bot) => bot.botId)).toEqual(["bot-own", "bot-a"]);
+    db.raw.close();
+  });
+});

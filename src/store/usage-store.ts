@@ -113,7 +113,20 @@ export async function sumMonthlyRp(
   workspaceId: string,
   startIso: string,
   endIso: string,
+  botId?: string,
 ): Promise<number> {
+  // A bot's own month is the same sum with one more predicate on the index
+  // `usage_events` already carries for the window.
+  if (botId !== undefined) {
+    const row = await db
+      .prepare(
+        `SELECT COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id = ?4`,
+      )
+      .bind(workspaceId, startIso, endIso, botId)
+      .first<{ total: number }>();
+    return Number(row?.total ?? 0);
+  }
   const rows = await readMonthlyRp(db, workspaceId, startIso, endIso);
   return rows[0]?.total ?? 0;
 }
