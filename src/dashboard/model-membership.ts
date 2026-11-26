@@ -88,7 +88,8 @@ export function composeModelOptions(
  * Membership layer for save-chain / save-roles (spec §6.3). Syntax
  * (`parseModelChain`) is the caller's job. Per selector:
  *   (a) built-in provider with a non-empty verified cache → must hit a
- *       cached model id (variant suffix tolerated via selectorBase)
+ *       cached model id (a trailing `:<thinking-level>` is tolerated via
+ *       selectorBase; any other colon tail is part of the id)
  *   (b) probe-only (cache row, empty models) OR no cache row → syntax only
  *   (c) custom provider → must hit the declaration's model_ids, and the
  *       declaration must still hold a key (a drained pool makes its whole
