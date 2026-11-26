@@ -17,8 +17,12 @@ export const THINKING_LEVELS: Record<string, true> = {
   xhigh: true,
   max: true,
 };
-/** Levels the SDK accepts abbreviated, provided the prefix matches exactly one of them. */
-const ABBREVIABLE_LEVELS = ["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/**
+ * Levels the SDK accepts abbreviated, provided the prefix matches exactly one
+ * of them. Derived from THINKING_LEVELS so the pool cannot drift from the
+ * parity-locked table; `auto` is excluded because the SDK matches it exactly.
+ */
+const ABBREVIABLE_LEVELS = Object.keys(THINKING_LEVELS).filter((level) => level !== "auto");
 
 /**
  * Why: a selector tail is a thinking level when it is the legacy `thinking`
