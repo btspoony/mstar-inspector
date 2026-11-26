@@ -25,6 +25,7 @@ import {
   type Scope,
 } from "../../src/store/review-checks";
 import { readCheckIdentity } from "../../src/store/review-checks";
+import { boundedCheckDetail } from "../../src/pipeline/redact";
 import {
   CHECK_SUMMARIES,
   TERMINAL_FAILURE_TEXT,
@@ -3930,5 +3931,22 @@ describe("the Check excerpt of a recorded detail", () => {
     expect(decided.summary).toContain("(attempt attempt-4b-0001)");
     expect(decided.summary).toContain("…");
     expect(decided.summary.length).toBeLessThan(500);
+  });
+});
+
+describe("boundedCheckDetail honours its cap", () => {
+  test("a parenthesised token mid-text cannot inflate the tail past the cap", () => {
+    // QC's repro: `[^)]+` used to cross the second `(`, so the tail swallowed
+    // 262 characters and the output exceeded the cap.
+    const input = `phase (attempt ${"x".repeat(241)} (attempt a)`;
+    const out = boundedCheckDetail(input);
+    expect(out.length).toBeLessThanOrEqual(240);
+    expect(out).toContain("…");
+    // A legitimate composed detail keeps its attempt reference under truncation.
+    const legit = `internal error in phase review (stage runner): Error: ${"x".repeat(500)} (attempt attempt-4b-0001)`;
+    const legitOut = boundedCheckDetail(legit);
+    expect(legitOut.length).toBeLessThanOrEqual(240);
+    expect(legitOut).toContain("(attempt attempt-4b-0001)");
+    expect(legitOut).toContain("…");
   });
 });

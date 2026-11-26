@@ -72,7 +72,7 @@ const {
   settleAttemptFailure,
   transientFactsOf,
 } = await import("../../src/pipeline/review-attempt-execution");
-const { runReviewAttemptWorkflow } = await import("../../src/workflow/review");
+const { ordinaryFailure, runReviewAttemptWorkflow } = await import("../../src/workflow/review");
 const { hydrateAttemptHost, ensureRunnerConfig } = await import("../../src/pipeline/consumer");
 const { PublicationDeadlineSpent, postLineCommentsWithOctokit, postPreparedReviewWithOctokit, publicationSendGuard, PreparedSendRejected } = await import(
   "../../src/pipeline/comment"
@@ -4514,18 +4514,20 @@ describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
     );
     const row = failureRows(db)[0]!;
     expect(String(row.error)).not.toContain(secret);
-    // Not even the prefix that survived the cut may leak: thirty characters of
-    // padding-plus-secret is inside the plaintext fragment a cut-first pass
-    // would have redacted nothing of.
-    expect(String(row.error)).not.toContain(`${"p".repeat(380)}k${"s".repeat(29)}`);
+    // The biting assertion: ANY run of the credential's own character after
+    // the padding is a leak — with a cut-first composition the fragment before
+    // the cut (the credential's opening characters) survives redaction verbatim.
+    expect(String(row.error)).not.toMatch(/ks{5,}/);
     expect(String(row.error)).toContain(REDACTED);
     expect(concluded[0]!.failureDetail).not.toContain(secret);
-    expect(concluded[0]!.failureDetail).not.toContain(`${"p".repeat(380)}k${"s".repeat(29)}`);
+    expect(concluded[0]!.failureDetail).not.toMatch(/ks{5,}/);
   });
 
-  test("an unopenable seal writes the fixed diagnostic, never the raw message", async () => {
+  test("an unopenable seal settles as unknown: no row, no observation, no raw byte anywhere", async () => {
     // The envelope exists but decryption cannot complete — a wrong key, a
-    // tampered row. Nothing derived from the raw message may be written.
+    // tampered row. The paid-state question must stay OPEN: nothing is written,
+    // because nothing derived from the raw message can be proven clean, and a
+    // conclusive "it failed" would be a worse answer than the original defect.
     const { deps, db } = await makeDeps();
     expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
     expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
@@ -4533,6 +4535,15 @@ describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
       .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
       .run("not-a-valid-envelope", ATTEMPT_ID);
     const ref = makeRef(makePayload());
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
     const settlement = await settleAttemptFailure(
       deps,
       ref,
@@ -4548,12 +4559,13 @@ describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
       },
       null,
     );
-    // The guarded settle path still completes — decryption rejection must not
-    // escape as a settlement throw.
-    expect(settlement.kind).not.toBe("unknown");
-    const row = failureRows(db)[0]!;
-    expect(String(row.error)).toContain("the failure detail could not be sanitized");
-    expect(String(row.error)).not.toContain("the raw detail that must never be persisted");
+    // The outcome is unknown — the reconciler, not a fabricated failure row,
+    // owns what happens next.
+    expect(settlement).toEqual({ kind: "unknown" });
+    expect(failureRows(db)).toHaveLength(0);
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(ref.payload));
+    expect(handoff?.observation ?? null).toBeNull();
+    expect(JSON.stringify(handoff)).not.toContain("the raw detail that must never be persisted");
   });
 
   test("an empty message says so instead of rendering a bare colon", async () => {
@@ -4621,6 +4633,16 @@ describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
       },
     );
     expect(errorClassOf(proxy)).toBeUndefined();
+    // A constructor whose OWN `name` getter throws: the second read must be as
+    // guarded as the first.
+    const hostileCtor = {};
+    Object.defineProperty(hostileCtor, "name", {
+      get() {
+        throw new Error("hostile constructor name");
+      },
+    });
+    // Degrades to the surviving generic name — never throws.
+    expect(errorClassOf(Object.assign(new Error("x"), { constructor: hostileCtor }))).toBe("Error");
     // A node-style code outranks a generic name.
     expect(errorClassOf(Object.assign(new Error("x"), { code: "ECONNRESET" }))).toBe("ECONNRESET");
     // A specific constructor still wins over everything.
@@ -4836,7 +4858,7 @@ describe("the observation carries sanitized, then bounded text", () => {
     expect(settlement).toEqual({ kind: "unknown" });
     const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(payload));
     expect(handoff?.observation?.cause).not.toContain(secret);
-    expect(handoff?.observation?.cause).not.toContain(`k${"s".repeat(29)}`);
+    expect(handoff?.observation?.cause).not.toMatch(/ks{5,}/);
     expect(handoff?.observation?.cause).toContain(REDACTED);
     expect(handoff?.observation?.message).not.toContain(secret);
   });
@@ -4879,5 +4901,157 @@ describe("the observation carries sanitized, then bounded text", () => {
     expect(abandonedInputs[0]!.failureDetail).toContain("internal error in phase review");
     expect(abandonedInputs[0]!.failureDetail).toContain("stage runner");
     expect(abandonedInputs[0]!.failureDetail).toContain("TypeError");
+  });
+});
+
+describe("exact redaction precedes the shape pass (R1/R4 hardening)", () => {
+  test("a sealed credential the shape pass would clip leaves no suffix fragment anywhere", async () => {
+    // QC's repro: the shape pass matches only the `ghp_…` PREFIX, so exact-first
+    // ordering is the only way `-and-more` — still part of the credential — can
+    // be removed.
+    const secret = `ghp_${"a".repeat(32)}-and-more`;
+    const { deps, db } = await makeDeps();
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, [secret]);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+    const ref = makeRef(makePayload());
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    const concluded: Array<{ outcome: string; failureDetail?: string }> = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async (input: { outcome: string; failureDetail?: string }) => {
+        concluded.push(input);
+      },
+    };
+    const check = createCheckSettlement({ deps, payload: ref.payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = HANDLE;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "unknown",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        containerStateUnknown: false,
+        code: "review.paid.reply_lost",
+        message: `boom ${secret} end`,
+        cause: `Error: read failed ${secret} trailing`,
+      },
+      null,
+    );
+    for (const surface of [String(concluded[0]?.failureDetail ?? "")]) {
+      expect(surface).not.toContain(secret);
+      expect(surface).not.toContain("-and-more");
+    }
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(ref.payload));
+    expect(handoff?.observation?.cause).not.toContain(secret);
+    expect(handoff?.observation?.cause).not.toContain("-and-more");
+    expect(handoff?.observation?.message).not.toContain(secret);
+    expect(handoff?.observation?.message).not.toContain("-and-more");
+  });
+
+  test("a hostile error object cannot abort settlement — a row is still written", async () => {
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    // The review step's boundary hands back an object whose every interesting
+    // property throws when read: settlement must degrade, never die.
+    const hostile: Record<string, unknown> = {};
+    for (const key of ["message", "cause", "facts", "lastStage", "name", "constructor"]) {
+      Object.defineProperty(hostile, key, {
+        get() {
+          throw new Error(`hostile ${key}`);
+        },
+        enumerable: true,
+      });
+    }
+    const hostileSteps: WorkflowStep = {
+      do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+        if (name === "review") throw hostile;
+        const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+        return callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+      },
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async (): Promise<never> => {
+        throw new Error("the test step store does not wait for events");
+      },
+    } as unknown as WorkflowStep;
+
+    await runReviewAttemptWorkflow(deps, ref, hostileSteps, async () => {}).catch(() => {});
+    const rows = failureRows(db);
+    expect(rows.length).toBe(1);
+    expect(rows[0]!.error_code).toBe("review.internal.unclassified");
+    expect(String(rows[0]!.error)).toContain("internal error in phase review");
+  });
+});
+
+describe("the observation cause resists a pre-cut regression (R7)", () => {
+  test("a credential straddling the 240 boundary in an ordinaryFailure cause leaves no fragment", async () => {
+    const secret = `k${"s".repeat(59)}`;
+    const { deps, db } = await makeDeps();
+    const ref = makeRef(makePayload());
+    // The launched row the unobservable verdict needs, plus the envelope the
+    // exact pass reads — the same rows the paid step would have left.
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, [secret]);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(ref.payload),
+      attemptId: ATTEMPT_ID,
+      payload: ref.payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+
+    // The record is built by ordinaryFailure itself — the same composer the
+    // workflow's catch uses — so a pre-cut inside it is exactly what this test
+    // inverts against. The padding places the secret so it straddles offset
+    // 240 of the composed `TypeError: <message>` cause: a `slice(0, 240)` there
+    // would leave the credential's opening fragment beyond redaction's reach.
+    const padding = "p".repeat(218);
+    const longMessage = `${padding}${secret}${"q".repeat(60)}`;
+    const failure = ordinaryFailure(new TypeError(longMessage), "review", null, undefined);
+    expect(failure.cause?.length).toBeGreaterThan(240);
+
+    const settlement = await settleAttemptFailure(deps, ref, failure, null);
+    expect(settlement).toEqual({ kind: "unknown" });
+    const handoff = await readAttemptHandoff(db as never, deliveryKeyOf(ref.payload));
+    expect(handoff?.observation?.cause).not.toContain(secret);
+    expect(handoff?.observation?.cause ?? "").not.toMatch(/ks{5,}/);
+    expect(handoff?.observation?.cause).toContain(REDACTED);
   });
 });

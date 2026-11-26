@@ -22,14 +22,20 @@ export function redactSecrets(text: string): string {
  * reference is re-appended intact.
  */
 export function boundedCheckDetail(detail: string, maxChars = 240): string {
-  const attemptMatch = /(\(attempt [^)]+\))$/.exec(detail);
-  const tail = attemptMatch?.[1];
-  const body = tail === undefined ? detail : detail.slice(0, detail.length - tail.length - 1);
-  const budget = maxChars - (tail === undefined ? 0 : tail.length + 1);
   if (detail.length <= maxChars) return detail;
+  // `[^()]` — not `[^)]`: a parenthesised token earlier in the text must not be
+  // swallowed into the tail. The tail is capped too: a long tail joined to an
+  // already-long body is truncated like everything else, never re-appended whole.
+  const attemptMatch = /(\(attempt [^()]+\))$/.exec(detail);
+  const tail = attemptMatch?.[1];
   const marker = "…";
+  if (tail === undefined || tail.length + 1 > maxChars - marker.length) {
+    return `${detail.slice(0, maxChars - marker.length)}${marker}`;
+  }
+  const body = detail.slice(0, detail.length - tail.length - 1);
+  const budget = maxChars - tail.length - 1;
   const cut = body.slice(0, Math.max(0, budget - marker.length));
-  return tail === undefined ? `${cut}${marker}` : `${cut}${marker} ${tail}`;
+  return `${cut}${marker} ${tail}`;
 }
 
 /**

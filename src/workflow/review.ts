@@ -15,6 +15,7 @@ import {
   settleAttemptFailure,
   phaseFailureRecord,
   errorClassOf,
+  safeStringify,
   PhaseTransientError,
   transientFactsOf,
   settleSkippedRow,
@@ -232,13 +233,21 @@ export async function runReviewAttemptWorkflow(
  * MESSAGE only — extracted without `instanceof`, with a leading `"<name>: "`
  * stripped — and settled as the ordinary branch those errors take.
  */
-function ordinaryFailure(
+export function ordinaryFailure(
   err: unknown,
   phase: AttemptPhase,
   prepared: PreparedAttempt | null,
   transient?: PhaseTransientError["facts"],
 ): PhaseFailure {
-  const raw = err instanceof Error ? err.message : String(err);
+  // Every read of the thrown value is guarded: a hostile getter or a
+  // null-prototype throw must degrade the record's text, never abort the
+  // settlement the record feeds.
+  let raw: string;
+  try {
+    raw = err instanceof Error ? String(err.message) : safeStringify(err);
+  } catch {
+    raw = "(unprintable throw value)";
+  }
   // The class the throw site captured rides the transient facts as plain data;
   // only a throw with no wrapper — this file's own host probes — is asked for
   // its constructor directly, and a rebuild without a prototype still answers
@@ -273,11 +282,16 @@ function ordinaryFailure(
   };
 }
 
-/** A chained string cause, read with a real narrow — never an inline cast shape. */
+/** A chained string cause, narrowed first, read once, guarded against hostile getters. */
 function errorCauseText(err: unknown): string | undefined {
-  if (err === null || typeof err !== "object" || !("cause" in err)) return undefined;
-  const cause = (err as Error).cause;
-  return typeof cause === "string" && cause !== "" ? cause : undefined;
+  if (err === null || typeof err !== "object") return undefined;
+  try {
+    if (!("cause" in err)) return undefined;
+    const cause = (err as Error).cause;
+    return typeof cause === "string" && cause !== "" ? cause : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
