@@ -2708,15 +2708,25 @@ export function internalFailureDetail(input: {
   stage: FailureStage;
   errorClass: string | undefined;
   message: string;
+  lastStage: string | undefined;
   attemptId: string;
 }): string {
   const phaseClause = `internal error in phase ${input.phase} (stage ${input.stage})`;
   const message = input.message.trim() === "" ? "(no message recorded)" : input.message;
+  // The traced stage is structural, ours, and must survive a flood of runner
+  // diagnostics: the clause's room is reserved BEFORE the free-text message is
+  // shortened, so no length of stderr can push it out of the row again.
+  const stageToken =
+    input.lastStage === undefined || input.lastStage.trim() === ""
+      ? undefined
+      : input.lastStage.replace(/\s+/g, " ").trim().slice(0, 60);
+  const stageClause = stageToken === undefined ? "" : ` (last stage: ${stageToken})`;
+  const bounded = boundFailureMessage(message, Math.max(40, 400 - stageClause.length - 20));
   const what =
     input.errorClass === undefined
-      ? `${phaseClause}: ${boundFailureMessage(message)}`
-      : `${phaseClause}: ${normalizedErrorClass(input.errorClass)}: ${boundFailureMessage(message)}`;
-  return `${what} (attempt ${input.attemptId})`;
+      ? `${phaseClause}: ${bounded}`
+      : `${phaseClause}: ${normalizedErrorClass(input.errorClass)}: ${bounded}`;
+  return `${what}${stageClause} (attempt ${input.attemptId})`;
 }
 
 /**
@@ -5259,6 +5269,7 @@ export async function settleAttemptFailure(
           stage: failure.stage,
           errorClass: sanitizedErrorClass,
           message: sanitizedMessage,
+          lastStage: sanitizedLastStage ?? undefined,
           attemptId,
         })
       : sanitizedMessage;

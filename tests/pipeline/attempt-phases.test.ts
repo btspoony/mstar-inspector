@@ -4378,6 +4378,56 @@ describe("an unclassified internal error reports its stage and cause", () => {
     expect(row.message).not.toContain("has not been classified");
   });
 
+  test("a flood of stderr cannot push the runner's traced stage out of the row", async () => {
+    // The P7 regression: the free-text message is bounded, and without a
+    // reservation for it, the `(last stage: …)` clause is always the part the
+    // bound cuts first — the operator regresses from `synthesize` to `runner`.
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    const concluded: Array<{ outcome: string; failureDetail?: string }> = [];
+    deps.checks = {
+      begin: async () => HANDLE,
+      terminalize: async (input: { outcome: string; failureDetail?: string }) => {
+        concluded.push(input);
+      },
+    };
+    const check = createCheckSettlement({ deps, payload, attemptId: ATTEMPT_ID, checkBudgets: null, deadlineMs: Date.now() + 900_000 });
+    check.handle = HANDLE;
+    deps.checkSettlements.set(ATTEMPT_ID, check);
+    const flood = "runner diagnostics flood ".repeat(30); // ~750 characters
+    h.sandbox.runnerExitCode = 1;
+    h.sandbox.runnerStderr = `${flood}\n${JSON.stringify({ event: "review_stage", stage: "synthesize" })}\n${flood}`;
+
+    await expect(runReviewAttemptWorkflow(deps, ref, stepStore(new Map()), async () => {})).rejects.toThrow(
+      /runner failed/,
+    );
+
+    const row = failureRows(db)[0]!;
+    // Structural facts survive the flood: the traced stage is in the row…
+    expect(String(row.error)).toContain("(last stage: synthesize)");
+    expect(String(row.error)).toContain("internal error in phase review (stage runner)");
+    expect(String(row.error)).toContain("Error:");
+    expect(String(row.error)).toContain(`(attempt ${ATTEMPT_ID})`);
+    // …the flood itself is cut, and the Check never publishes any of it.
+    expect(String(row.error).length).toBeLessThan(600);
+    expect(concluded).toHaveLength(1);
+    expect(concluded[0]!.failureDetail).not.toContain("last stage");
+    expect(concluded[0]!.failureDetail).not.toContain("diagnostics flood");
+    expect(concluded[0]!.failureDetail).toContain("(stage runner)");
+  });
+
   test("the thrown error's class crosses a prototype-less rebuild as data", async () => {
     // The platform rebuilds a thrown error across a step retry WITHOUT its
     // prototype: own serializable properties survive, `instanceof` and the
@@ -4504,7 +4554,10 @@ describe("sanitization precedes the bound (C1/W4/W6 hardening)", () => {
     check.handle = HANDLE;
     deps.checkSettlements.set(ATTEMPT_ID, check);
     // The secret sits across the bound: padding before it, padding after it.
-    const message = `${"p".repeat(380)}${secret}${"q".repeat(80)}`;
+    // The message half is cut where the stage clause's reservation ends — the
+    // exact length is not the test's concern, only that the credential straddles
+    // it — so the padding is sized to the bounded cap (380) in effect here.
+    const message = `${"p".repeat(340)}${secret}${"q".repeat(80)}`;
     await settleAttemptFailure(
       deps,
       ref,
