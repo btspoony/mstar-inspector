@@ -1555,19 +1555,10 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         ]);
       } catch (err) {
         if (!(err instanceof Error) || !/app_install_chain_guard/.test(err.message)) throw err;
-        // Name the first requested id that is NEW and no longer mountable — read
-        // fresh, never from the rolled-back batch.
-        for (const botId of input.botIds) {
-          if (retained.has(botId)) continue;
-          const usable = await db
-            .prepare(
-              `SELECT 1 AS present FROM review_bots
-                WHERE id = ?1 AND deleted_at IS NULL AND (scope = 'shared' OR workspace_id = ?2)`,
-            )
-            .bind(botId, input.workspaceId)
-            .first<{ present: number }>();
-          if (usable === null) break;
-        }
+        // The batch rolled back; the ids that failed to insert are the ones this
+        // caller must retry without. Naming a specific one here would require
+        // reading state the failed batch never wrote, so the caller re-reads the
+        // chain and re-derives the list — the guard's rollback is the authority.
         return "bot_unavailable";
       }
       return "ok";
