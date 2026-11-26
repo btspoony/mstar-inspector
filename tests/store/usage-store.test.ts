@@ -2,8 +2,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript } from "./helpers";
+import { bindWorkspaceQuotaProfile, rpFor } from "../../src/store/quota-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import {
+  hasUsageEventForExecutionToken,
   readMonthlyRp,
   readMonthlyRpByWorkspace,
   recordUsageEvent,
@@ -41,7 +43,6 @@ describe("recordUsageEvent", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-a",
@@ -51,7 +52,6 @@ describe("recordUsageEvent", () => {
       rp: 2,
       source: "byok",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-b",
@@ -61,7 +61,6 @@ describe("recordUsageEvent", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const rows = db.raw
@@ -111,7 +110,6 @@ describe("recordUsageEvent", () => {
       rp: 60,
       source: "shared" as const,
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     };
     await recordUsageEvent(db, input);
     await recordUsageEvent(db, input);
@@ -138,7 +136,6 @@ describe("recordUsageEvent", () => {
         rp: 1,
         source: "byok",
         botId: "bot-usage",
-        quota: { month: "2026-10", profileId: "quota-v1" },
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
     const count = db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get() as { n: number };
@@ -146,41 +143,40 @@ describe("recordUsageEvent", () => {
   });
 });
 
-describe("recordUsageEvent pins the month's version (D36)", () => {
-  test("the first metering of a month writes the binding in the SAME batch as the row", async () => {
+describe("bindWorkspaceQuotaProfile (D36: bind first, then price)", () => {
+  test("the first metering of a month pins the profile in force at that instant", async () => {
     const db = createMigratedTestD1();
-    seedUsageBot(db);
-    await recordUsageEvent(db, {
-      reviewId: "review-bind",
-      executionToken: "token-bind-1",
+    const bound = await bindWorkspaceQuotaProfile(db, {
       workspaceId: "default",
-      occurredAt: AT,
-      rp: 50,
-      source: "shared",
-      botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
+      month: "2026-10",
+      at: "2026-10-24T00:00:00.000Z",
     });
+    expect(bound.id).toBe("quota-v1");
     expect(db.raw.query("SELECT workspace_id, month, profile_id FROM workspace_quota_binding").all()).toEqual([
       { workspace_id: "default", month: "2026-10", profile_id: "quota-v1" },
     ]);
     db.raw.close();
   });
 
-  test("a later metering of the same month never moves the pinned version", async () => {
+  test("a later call of the same month answers the WINNER, never its own resolve", async () => {
     const db = createMigratedTestD1();
-    seedUsageBot(db);
-    const base = {
-      reviewId: "review-bind",
+    // Bound first, while v1 was in force.
+    const first = await bindWorkspaceQuotaProfile(db, {
       workspaceId: "default",
-      occurredAt: AT,
-      rp: 50,
-      source: "shared" as const,
-      botId: "bot-usage",
-    };
-    await recordUsageEvent(db, { ...base, executionToken: "t1", quota: { month: "2026-10", profileId: "quota-v1" } });
-    // A second metering names a different profile; INSERT OR IGNORE keeps the first.
-    await recordUsageEvent(db, { ...base, executionToken: "t2", quota: { month: "2026-10", profileId: "quota-v2" } });
-    expect(db.raw.query("SELECT profile_id FROM workspace_quota_binding WHERE month = '2026-10'").all()).toEqual([
+      month: "2026-11",
+      at: "2026-11-01T00:00:00.000Z",
+    });
+    expect(first.id).toBe("quota-v1");
+    // A concurrent call resolving on the far side of the boundary: `at` now
+    // selects the shipped large-base profile, but the binding already exists, so
+    // it must answer v1 — the version the month is actually priced under.
+    const second = await bindWorkspaceQuotaProfile(db, {
+      workspaceId: "default",
+      month: "2026-11",
+      at: "2027-06-01T00:00:00.000Z",
+    });
+    expect(second.id).toBe(first.id);
+    expect(db.raw.query("SELECT profile_id FROM workspace_quota_binding WHERE month = '2026-11'").all()).toEqual([
       { profile_id: "quota-v1" },
     ]);
     db.raw.close();
@@ -188,31 +184,181 @@ describe("recordUsageEvent pins the month's version (D36)", () => {
 
   test("a new month binds its own row, leaving the previous month pinned", async () => {
     const db = createMigratedTestD1();
-    seedUsageBot(db);
-    const base = {
-      reviewId: "review-roll",
+    await bindWorkspaceQuotaProfile(db, {
       workspaceId: "default",
+      month: "2026-11",
+      at: "2026-11-30T23:00:00.000Z",
+    });
+    await bindWorkspaceQuotaProfile(db, {
+      workspaceId: "default",
+      month: "2026-12",
+      at: "2026-12-01T00:00:01.000Z",
+    });
+    expect(db.raw.query("SELECT month, profile_id FROM workspace_quota_binding ORDER BY month").all()).toEqual([
+      { month: "2026-11", profile_id: "quota-v1" },
+      { month: "2026-12", profile_id: "quota-v2-large-base" },
+    ]);
+    db.raw.close();
+  });
+
+  test("a replayed execution token creates no binding — the caller returns early", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const input = {
+      reviewId: "review-replay",
+      executionToken: "token-replay",
+      workspaceId: "default",
+      occurredAt: "2026-10-24T00:00:00.000Z",
       rp: 50,
       source: "shared" as const,
       botId: "bot-usage",
     };
-    await recordUsageEvent(db, {
-      ...base,
-      executionToken: "r1",
-      occurredAt: "2026-11-30T23:00:00.000Z",
-      quota: { month: "2026-11", profileId: "quota-v1" },
-    });
-    await recordUsageEvent(db, {
-      ...base,
-      executionToken: "r2",
-      occurredAt: "2026-12-01T00:00:01.000Z",
-      quota: { month: "2026-12", profileId: "quota-v1" },
-    });
-    expect(db.raw.query("SELECT month, profile_id FROM workspace_quota_binding ORDER BY month").all()).toEqual([
-      { month: "2026-11", profile_id: "quota-v1" },
-      { month: "2026-12", profile_id: "quota-v1" },
-    ]);
+    await recordUsageEvent(db, input);
+    expect(await hasUsageEventForExecutionToken(db, "token-replay")).toBe(true);
+    // The metering path's first step: a replay stops here, so the NEW month is
+    // never bound for a workspace that did not meter in it (I1).
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 0 });
     db.raw.close();
+  });
+});
+
+describe("C1 — two first-metering calls racing an effective_from boundary", () => {
+  /**
+   * The interleaving, simulated exactly: call A resolves while v1 is in force
+   * and binds v1; call B resolves on the far side of the boundary (its `at`
+   * selects the shipped large-base profile) but runs AFTER A's insert has landed.
+   * Without the read-back, B would price `ceil(base × m)` from v2 and append a
+   * differently priced row for the same month. With bind-then-read-back, B reads
+   * A's binding and charges A's version.
+   */
+  test("the loser of the race charges the winner's version, not its own resolve", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+
+    // A: first metering of November, inside v1's interval.
+    const a = await bindWorkspaceQuotaProfile(db, {
+      workspaceId: "default",
+      month: "2026-11",
+      at: "2026-11-02T00:00:00.000Z",
+    });
+    expect(a.id).toBe("quota-v1");
+
+    // B: same month, but its `at` is past v2's effective_from. It must still
+    // price v1, because that is what the month is bound to.
+    const b = await bindWorkspaceQuotaProfile(db, {
+      workspaceId: "default",
+      month: "2026-11",
+      at: "2027-06-01T00:00:00.000Z",
+    });
+    expect(b.id).toBe(a.id);
+
+    // Both price the same version, so both charge the same RP.
+    expect(rpFor("deep", 1, a)).toBe(rpFor("deep", 1, b));
+    // And the table still holds exactly one binding for the month.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 1 });
+    db.raw.close();
+  });
+
+  test("no row is appended twice for one execution token across a race", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    const input = {
+      reviewId: "review-race",
+      executionToken: "token-race",
+      workspaceId: "default",
+      occurredAt: "2026-11-02T00:00:00.000Z",
+      rp: 300,
+      source: "shared" as const,
+      botId: "bot-usage",
+    };
+    // The second call is the loser of a duplicate delivery: it sees the token,
+    // returns early, and writes nothing — the guard `recordUsageEvent` keeps.
+    await recordUsageEvent(db, input);
+    expect(await hasUsageEventForExecutionToken(db, input.executionToken)).toBe(true);
+    await recordUsageEvent(db, input);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events WHERE execution_token = 'token-race'").get()).toEqual({
+      n: 1,
+    });
+    db.raw.close();
+  });
+});
+
+describe("Q10 — the large base preserves every existing price", () => {
+  const OLD_TOTAL = 1 + 2 + 6;
+  const NEW_TOTAL = 50 + 100 + 300;
+  const oldBase: Record<string, number> = { quick: 1, default: 2, deep: 6 };
+  const newBase: Record<string, number> = { quick: 50, default: 100, deep: 300 };
+  const RATIO = NEW_TOTAL / OLD_TOTAL;
+
+  test("the ratio is integral, so an integral product scales exactly", () => {
+    expect(NEW_TOTAL % OLD_TOTAL).toBe(0);
+    expect(RATIO).toBe(50);
+
+    for (const level of REVIEW_LEVELS) {
+      for (const multiplier of [1, 2, 3, 5, 10, 25, 0.5, 1.5, 2.5]) {
+        const oldExact = oldBase[level]! * multiplier;
+        if (!Number.isInteger(oldExact)) continue;
+        expect({ level, multiplier, new: Math.ceil(newBase[level]! * multiplier) }).toEqual({
+          level,
+          multiplier,
+          new: oldExact * RATIO,
+        });
+      }
+    }
+  });
+
+  test("a fractional product differs by less than one old-RP unit, never more", () => {
+    // STATE THE RULE: `ceil` does not commute with scaling, so a fractional
+    // product's new price is not exactly 50× the old rounded price. The error is
+    // bounded by the CEILING itself: the new price never exceeds 50× the old
+    // rounded price, and never falls more than one old-RP unit (50 new RP) below
+    // it. That is the whole point of D12 — a large base bounds the loss.
+    for (const level of REVIEW_LEVELS) {
+      for (const multiplier of [1.1, 1.25, 1.5, 2.25, 2.5, 3.75, 7.5, 0.5 * 3]) {
+        const oldExact = oldBase[level]! * multiplier;
+        if (Number.isInteger(oldExact)) continue;
+        const oldRounded = Math.ceil(oldExact);
+        const newPrice = Math.ceil(newBase[level]! * multiplier);
+        const scaledOld = oldRounded * RATIO;
+        expect({ level, multiplier, ok: newPrice <= scaledOld }).toEqual({
+          level,
+          multiplier,
+          ok: true,
+        });
+        expect({ level, multiplier, ok: newPrice > scaledOld - RATIO }).toEqual({
+          level,
+          multiplier,
+          ok: true,
+        });
+      }
+    }
+  });
+
+  test("a product below 1 RP stays at the 1-RP floor on both scales, not 50×", () => {
+    // The ledger's pre-metering sentinel is 0, so no charge may be 0. The floor
+    // is a price rule, not a scaling rule, so it applies to each scale on its own.
+    // On the small base the floor bites: 6 × 0.001 = 0.006 → 1 RP.
+    expect(Math.ceil(oldBase.deep! * 0.001)).toBe(1);
+    // On the large base the same multiplier is a real price, so the floor is not
+    // reached — the price scales instead of being clamped.
+    expect(Math.ceil(newBase.deep! * 0.001)).toBe(1);
+    expect(Math.ceil(newBase.deep! * 0.01)).toBe(3);
+    expect(Math.ceil(newBase.deep! * 0.1)).toBe(30);
+  });
+
+  test("rpFor itself keeps the floor and the ceiling", () => {
+    const oldProfile = { id: "o", version: 1, effectiveFrom: AT, base: { quick: 1, default: 2, deep: 6 }, rpPerCredit: 20 };
+    const newProfile = { id: "n", version: 2, effectiveFrom: AT, base: { quick: 50, default: 100, deep: 300 }, rpPerCredit: 1000 };
+    for (const level of REVIEW_LEVELS) {
+      for (const multiplier of [0.001, 0.5, 1, 1.5, 2.25, 10]) {
+        expect(rpFor(level, multiplier, newProfile)).toBe(
+          Math.max(1, Math.ceil(newProfile.base[level] * multiplier)),
+        );
+        if (Number.isInteger(oldProfile.base[level] * multiplier)) {
+          expect(rpFor(level, multiplier, newProfile)).toBe(rpFor(level, multiplier, oldProfile) * RATIO);
+        }
+      }
+    }
   });
 });
 
@@ -238,7 +384,6 @@ describe("usage_events.rp (migration 0064)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "review-a",
@@ -248,7 +393,6 @@ describe("usage_events.rp (migration 0064)", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     expect(db.raw.query("SELECT seq, rp FROM usage_events ORDER BY seq").all()).toEqual([
@@ -309,7 +453,6 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     await recordUsageEvent(db, {
       reviewId: "byok-standard",
@@ -319,7 +462,6 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 2,
       source: "byok",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
@@ -344,7 +486,6 @@ describe("usage_events.source (migration 0065)", () => {
       rp: 1,
       source: "byok",
       botId: "bot-usage",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
 
     const [usage] = await readMonthlyRp(db, "default", MONTH.startIso, MONTH.endIso);
@@ -476,7 +617,6 @@ describe("usage_events.bot_id (migration 0117)", () => {
       rp: 60,
       source: "shared",
       botId: "bot-metering",
-      quota: { month: "2026-10", profileId: "quota-v1" },
     });
     const row = db.raw
       .query("SELECT bot_id, rp, source FROM usage_events WHERE review_id = 'review-metered'")
@@ -496,7 +636,6 @@ describe("usage_events.bot_id (migration 0117)", () => {
         rp: 1,
         source: "byok",
         botId: "no-such-bot",
-        quota: { month: "2026-10", profileId: "quota-v1" },
       }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
