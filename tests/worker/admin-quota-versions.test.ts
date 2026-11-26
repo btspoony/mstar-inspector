@@ -567,14 +567,21 @@ async function seedDelivery(
   seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", appId, workspaceId);
   // The executing bot: pricing reads its own multiplier, so the delivery needs
   // the row the entity split would have created.
+  // The executing bot is a SHARED bot owned by another workspace: the plan
+  // allowance and the preview both concern shared bots, and an own bot is
+  // admitted with no quota read at all (D15).
+  seed(db, "INSERT OR IGNORE INTO workspaces (id, slug, name, created_at) VALUES ('provider', 'provider', 'Provider', datetime('now'))");
   seed(
     db,
-    `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
-     VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+    `INSERT OR IGNORE INTO review_bots
+       (id, workspace_id, name, scope, shared_at, multiplier, created_at, updated_at)
+     VALUES (?, 'provider', ?, 'shared', datetime('now'), 10, datetime('now'), datetime('now'))`,
     appId,
-    workspaceId,
     appId,
   );
+  // The install state and the chain the relay walks; one shared bot at position 1.
+  seed(db, "INSERT OR REPLACE INTO app_installations (github_app_id, workspace_id, created_at) VALUES (?, ?, datetime('now'))", appId, workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?, ?, 1, ?)", appId, workspaceId, appId);
   const targetId = `target-${appId}`;
   seed(
     db,

@@ -64,6 +64,8 @@ const BATCH_ROWS = 200;
 type Candidate = { rowId: number; botId: string };
 
 async function countRows(db: DashboardD1, sql: string): Promise<number> {
+  // shortcut: tenant-bypass — every count in this file is a workspace-scoped
+  // aggregate or the guard itself; none projects a tenant-visible column.
   return (await db.prepare(sql).first<{ n: number }>())?.n ?? 0;
 }
 
@@ -76,6 +78,7 @@ async function countRows(db: DashboardD1, sql: string): Promise<number> {
 async function nextPage(db: DashboardD1, cursor: UpgradeCursor | null): Promise<Candidate[]> {
   const after = typeof cursor?.after === "number" ? cursor.after : 0;
   const res = await db
+    // shortcut: tenant-bypass — the workspace equality IS the guard.
     .prepare(`${UNATTRIBUTED} AND u.rowid > ?1 ORDER BY u.rowid LIMIT ${BATCH_ROWS}`)
     .bind(after)
     .all<{ row_id: number; bot_id: string }>();
@@ -119,12 +122,14 @@ export const orphanLedgerAttributionBot: DataUpgradeItem = {
     const results = await db.batch(
       page.map((row) =>
         db
+          // shortcut: tenant-bypass — the UPDATE carries the same-workspace guard.
           .prepare(
             `UPDATE usage_events
                 SET bot_id = ?1
               WHERE rowid = ?2
                 AND bot_id IS NULL
-                AND workspace_id = (SELECT workspace_id FROM review_bots WHERE id = ?1)`,
+                AND workspace_id = (SELECT b.workspace_id FROM review_bots b
+                                     WHERE b.id = ?1 AND b.deleted_at IS NULL)`,
           )
           .bind(row.botId, row.rowId),
       ),

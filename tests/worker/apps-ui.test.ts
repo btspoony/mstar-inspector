@@ -721,7 +721,10 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
           github_description: null,
           owner_workspace_id: "ws-other",
           owner_workspace_name: "ws-other",
-          capability: null,
+          // The owner's chain exists (createApp writes it), so the card names
+          // what a bind would mount: the App's own bot, whose model chain the
+          // fixture left empty — hence the em dash, never a placeholder.
+          capability: "Platform App: —",
           target_count: 0,
         },
       ]);

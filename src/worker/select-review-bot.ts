@@ -60,6 +60,8 @@ export async function readChain(
   workspaceId: string,
 ): Promise<ChainBot[]> {
   const res = await db
+    // shortcut: tenant-bypass — the chain statement scopes by the install's own
+    // (app, workspace) key; the projection carries no tenant-visible name.
     .prepare(CHAIN_SQL)
     .bind(appId, workspaceId)
     .all<{ bot_id: string; position: number; workspace_id: string; scope: BotScope; monthly_rp: number | null }>();
@@ -84,6 +86,8 @@ export async function readBotCeiling(
     .first<{ monthlyRp: number }>();
   if (override !== null) return override.monthlyRp;
   const row = await db
+    // shortcut: tenant-bypass — addressed by the bot's own id; the projection is
+    // one price column, no identity or ownership.
     .prepare(`SELECT monthly_rp AS monthlyRp FROM review_bots WHERE id = ?1 AND deleted_at IS NULL`)
     .bind(botId)
     .first<{ monthlyRp: number | null }>();
