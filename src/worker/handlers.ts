@@ -213,6 +213,19 @@ export function deliveryRefusalCode(refusal: DeliveryRefusal): FailureCode {
   }
 }
 
+/**
+ * Which ceiling a quota refusal names, in the two columns that persist it. The
+ * public sentence still says nothing about an allowance, but the failure row and
+ * the log now do — an operator reading "why was this PR refused" gets the bot.
+ */
+function quotaScopeOf(refusal: DeliveryRefusal): { quotaScope: "plan" | "bot" | null; quotaBotId: string | null } {
+  if (refusal.kind === "quota-bot") return { quotaScope: "bot", quotaBotId: refusal.botId };
+  if (refusal.kind === "quota-plan" || refusal.kind === "quota-exhausted") {
+    return { quotaScope: "plan", quotaBotId: null };
+  }
+  return { quotaScope: null, quotaBotId: null };
+}
+
 async function refuseDelivery(
   payload: ReviewJobPayload,
   deps: HandlerDeps,
@@ -240,13 +253,23 @@ async function refuseDelivery(
       trackId: `${payload.owner}/${payload.repo}#${payload.pr_number}@${payload.head_sha ?? ""}`,
       message: FAILURE_SUMMARIES[code],
       error: CHECK_SUMMARIES.skippedByDelivery(deliveryRefusalReason(refusal)),
+      ...quotaScopeOf(refusal),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     deps.log.warn(fields, `delivery refusal not recorded — delivery still skipped: ${detail}`);
   }
 
-  deps.log.info(fields, `delivery refused (${refusal.kind}) — skipping enqueue`);
+  // The kind, the scope and the bot: enough to trace one refusal without the
+  // public sentence, which names no allowance by design. They ride the message
+  // rather than the seven-field event, whose shape is frozen.
+  const { quotaScope, quotaBotId } = quotaScopeOf(refusal);
+  const scopePart = quotaScope === null ? "" : ` scope=${quotaScope}`;
+  const botPart = quotaBotId === null ? "" : ` bot=${quotaBotId}`;
+  deps.log.info(
+    fields,
+    `delivery refused (${refusal.kind})${scopePart}${botPart} — skipping enqueue`,
+  );
   return { kind: "skipped", reason: deliveryRefusalReason(refusal) };
 }
 

@@ -129,6 +129,8 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     seedInstall(db, "app-1", "default");
     const store = createReviewBotsStore(db);
 
+    // The availability check runs INSIDE the batch: the foreign bot inserts
+    // nothing, the short count restores the previous chain, and the call refuses.
     expect(
       await store.replaceInstallChain({
         appId: "app-1",
@@ -136,7 +138,42 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
         botIds: ["bot-mine", "bot-foreign"],
       }),
     ).toBe("bot_unavailable");
+    // The previous chain (empty here) is what the install still has — never the
+    // half-written one this call would otherwise have left.
     expect(chainOf(db, "app-1", "default")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("a bot that stops being shared BETWEEN the request and the batch is refused", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-b", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    // A chain the install already has: the restore path must bring THIS back.
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    // The race: the caller has read the chain and chosen bot-b, but the owner
+    // unshares it before the batch runs. A pre-batch availability read would have
+    // admitted it; the guarded INSERT must not.
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-b'").run();
+        return db.batch(statements);
+      },
+    } as TestD1;
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-b", "bot-a"],
+      }),
+    ).toBe("bot_unavailable");
+    // The previous chain survived intact — never the half-written one.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-a" }]);
     db.raw.close();
   });
 
@@ -155,6 +192,104 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     // this asserts the read side sees the write side's order.
     const chains = await store.listInstallChainBots("default");
     expect(chains.get("app-1")?.map((bot) => bot.botId)).toEqual(["bot-own", "bot-a"]);
+    db.raw.close();
+  });
+});
+
+describe("setBotQuotaOverride — the writer bot_quota_overrides was missing", () => {
+  function world() {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedWorkspace(db, "tenant");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-shared", "provider", "shared");
+    seedInstall(db, "app-1", "provider");
+    return db;
+  }
+
+  function overrides(db: TestD1, botId: string): Array<{ workspaceId: string; monthlyRp: number }> {
+    return db.raw
+      .query("SELECT workspace_id AS workspaceId, monthly_rp AS monthlyRp FROM bot_quota_overrides WHERE bot_id = ? ORDER BY workspace_id")
+      .all(botId) as Array<{ workspaceId: string; monthlyRp: number }>;
+  }
+
+  test("the owner sets a per-workspace ceiling and the relay read sees it", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    expect(
+      await store.setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("ok");
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 500 }]);
+    db.raw.close();
+  });
+
+  test("setting again replaces the value rather than duplicating the row", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    for (const rp of [500, 750]) {
+      await store.setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "provider",
+        monthlyRp: rp,
+        now: TS,
+      });
+    }
+    expect(overrides(db, "bot-shared")).toEqual([{ workspaceId: "tenant", monthlyRp: 750 }]);
+    db.raw.close();
+  });
+
+  test("null clears the override, returning the workspace to the bot's default", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    await store.setBotQuotaOverride({
+      botId: "bot-shared",
+      workspaceId: "tenant",
+      ownerWorkspaceId: "provider",
+      monthlyRp: 500,
+      now: TS,
+    });
+    await store.setBotQuotaOverride({
+      botId: "bot-shared",
+      workspaceId: "tenant",
+      ownerWorkspaceId: "provider",
+      monthlyRp: null,
+      now: TS,
+    });
+    expect(overrides(db, "bot-shared")).toEqual([]);
+    db.raw.close();
+  });
+
+  test("a non-owner cannot write, and zero or a fraction is refused", async () => {
+    const db = world();
+    const store = createReviewBotsStore(db);
+    expect(
+      await store.setBotQuotaOverride({
+        botId: "bot-shared",
+        workspaceId: "tenant",
+        ownerWorkspaceId: "tenant",
+        monthlyRp: 500,
+        now: TS,
+      }),
+    ).toBe("not_owner");
+    for (const bad of [0, -5, 1.5]) {
+      expect(
+        await store.setBotQuotaOverride({
+          botId: "bot-shared",
+          workspaceId: "tenant",
+          ownerWorkspaceId: "provider",
+          monthlyRp: bad,
+          now: TS,
+        }),
+      ).toBe("invalid");
+    }
+    expect(overrides(db, "bot-shared")).toEqual([]);
     db.raw.close();
   });
 });

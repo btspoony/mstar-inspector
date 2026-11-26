@@ -62,9 +62,93 @@ describe("usage-bot-attribution — preflight", () => {
     // are permanently out of scope.
     expect(await orphanLedgerAttributionBot.preflight(db)).toEqual({
       attributed_rows: 0,
-      unattributed_rows: 1,
-      cross_workspace_rows: 1,
-      no_evidence_rows: 1,
+      attributable_rows: 1,
+      permanently_unattributable_rows: 2,
+      cross_workspace: 1,
+      no_evidence: 1,
+      bot_gone: 0,
+      bot_deleted: 0,
+      unmatched_review: 0,
+    });
+    db.raw.close();
+  });
+});
+
+describe("usage-bot-attribution — verify never hides charged history", () => {
+  test("a zero work queue with unattributable rows is REPORTED, not reported as zero", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-a");
+    seedWorkspace(db, "ws-b");
+    seedBot(db, "bot-b", "ws-b");
+    // The only charged row is cross-workspace: the work queue is empty, but the
+    // month holds spend nobody can attribute.
+    seedPair(db, { review: "r-cross", token: "t-cross", workspaceId: "ws-a", botId: "bot-b", rp: 10 });
+    await orphanLedgerAttributionBot.runBatch(db, null);
+
+    const counts = await orphanLedgerAttributionBot.verify(db, { runStartedAt: null });
+    expect(counts.attributable_rows).toBe(0);
+    expect(counts.permanently_unattributable_rows).toBe(1);
+    expect(counts.cross_workspace).toBe(1);
+    db.raw.close();
+  });
+
+  test("a usage row whose review does not exist is counted, never silently dropped", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-a");
+    // No `reviews` row for this id: every other bucket's join would skip it.
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
+         VALUES ('review-deleted', 1, 'token-orphan', 'ws-a', ?, 10, 'shared')`,
+      )
+      .run(TS);
+
+    const counts = await orphanLedgerAttributionBot.verify(db, { runStartedAt: null });
+    expect(counts.unmatched_review).toBe(1);
+    expect(counts.permanently_unattributable_rows).toBe(1);
+    expect(counts.attributable_rows).toBe(0);
+    db.raw.close();
+  });
+
+  test("a soft-deleted bot is its own named bucket", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-a");
+    seedBot(db, "bot-gone", "ws-a");
+    db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-gone'").run();
+    seedPair(db, { review: "r-gone", token: "t-gone", workspaceId: "ws-a", botId: "bot-gone", rp: 10 });
+
+    const counts = await orphanLedgerAttributionBot.verify(db, { runStartedAt: null });
+    expect(counts.bot_deleted).toBe(1);
+    expect(counts.attributable_rows).toBe(0);
+    db.raw.close();
+  });
+
+  test("the four buckets are disjoint and sum to the permanent total", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-a");
+    seedWorkspace(db, "ws-b");
+    seedBot(db, "bot-b", "ws-b");
+    seedBot(db, "bot-gone", "ws-a");
+    db.raw.prepare("UPDATE review_bots SET deleted_at = datetime('now') WHERE id = 'bot-gone'").run();
+    seedPair(db, { review: "r-cross", token: "t-cross", workspaceId: "ws-a", botId: "bot-b", rp: 10 });
+    seedPair(db, { review: "r-none", token: "t-none", workspaceId: "ws-a", botId: null, rp: 10 });
+    seedPair(db, { review: "r-gone", token: "t-gone", workspaceId: "ws-a", botId: "bot-gone", rp: 10 });
+    db.raw
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source)
+         VALUES ('review-orphan', 1, 't-orphan', 'ws-a', ?, 10, 'shared')`,
+      )
+      .run(TS);
+
+    const counts = await orphanLedgerAttributionBot.verify(db, { runStartedAt: null });
+    expect(counts).toMatchObject({
+      cross_workspace: 1,
+      no_evidence: 1,
+      bot_gone: 0,
+      bot_deleted: 1,
+      unmatched_review: 1,
+      permanently_unattributable_rows: 4,
+      attributable_rows: 0,
     });
     db.raw.close();
   });
@@ -136,11 +220,23 @@ describe("usage-bot-attribution — runBatch", () => {
     seedBot(db, "bot-a", "ws-a");
     seedPair(db, { review: "r-mine", token: "t-mine", workspaceId: "ws-a", botId: "bot-a", rp: 10 });
     expect(await orphanLedgerAttributionBot.verify(db, { runStartedAt: null })).toEqual({
-      unattributed_rows: 1,
+      attributable_rows: 1,
+      permanently_unattributable_rows: 0,
+      cross_workspace: 0,
+      no_evidence: 0,
+      bot_gone: 0,
+      bot_deleted: 0,
+      unmatched_review: 0,
     });
     await orphanLedgerAttributionBot.runBatch(db, null);
     expect(await orphanLedgerAttributionBot.verify(db, { runStartedAt: null })).toEqual({
-      unattributed_rows: 0,
+      attributable_rows: 0,
+      permanently_unattributable_rows: 0,
+      cross_workspace: 0,
+      no_evidence: 0,
+      bot_gone: 0,
+      bot_deleted: 0,
+      unmatched_review: 0,
     });
     db.raw.close();
   });

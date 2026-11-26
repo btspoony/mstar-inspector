@@ -36,11 +36,10 @@ const ATTRIBUTED_COUNT = `
    WHERE u.bot_id IS NOT NULL AND u.rp > 0`;
 
 /**
- * Unattributed charged rows that CAN be attributed: the report's work queue and
- * the number `verify` must drive to zero. A cross-workspace or evidenceless row
- * is reported separately and is permanently out of scope.
+ * The work queue: charged rows this item can still attribute. This one must
+ * reach zero.
  */
-const UNATTRIBUTED_COUNT = `
+const ATTRIBUTABLE_COUNT = `
   SELECT COUNT(*) AS n FROM usage_events u
     JOIN reviews r ON r.id = u.review_id
     JOIN review_bots b ON b.id = r.bot_id AND b.deleted_at IS NULL
@@ -58,6 +57,85 @@ const NO_EVIDENCE_COUNT = `
   SELECT COUNT(*) AS n FROM usage_events u
     JOIN reviews r ON r.id = u.review_id
    WHERE u.bot_id IS NULL AND u.rp > 0 AND r.bot_id IS NULL`;
+
+/** Unattributed rows whose review's bot was soft-deleted: the bot is gone. */
+const BOT_GONE_COUNT = `
+  SELECT COUNT(*) AS n FROM usage_events u
+    JOIN reviews r ON r.id = u.review_id
+    JOIN review_bots b ON b.id = r.bot_id AND b.deleted_at IS NOT NULL
+   WHERE u.bot_id IS NULL AND u.rp > 0`;
+
+/**
+ * Unattributed rows whose review is NOT IN `reviews` at all — a ledger row
+ * orphaned from its review. Easy to forget, and forgetting it is how a charged
+ * row escapes every count: it joins no review, so every other predicate above
+ * skips it.
+ */
+const UNMATCHED_REVIEW_COUNT = `
+  SELECT COUNT(*) AS n FROM usage_events u
+   WHERE u.bot_id IS NULL AND u.rp > 0
+     AND NOT EXISTS (SELECT 1 FROM reviews r WHERE r.id = u.review_id)`;
+
+/**
+ * Every charged row that can NEVER be attributed, counted by reason in ONE
+ * statement. `verify` reports the total beside the work queue so an operator
+ * sees the ceiling risk instead of reading a zero.
+ */
+const PERMANENTLY_UNATTRIBUTABLE_SQL = `
+  SELECT
+    -- DISJOINT buckets, tested in this order: no review, then no bot evidence,
+    -- then a bot gone or foreign, then a bot of this workspace that the write
+    -- guard still refused (it can only be a race, and it re-enters the queue).
+    COALESCE(SUM(CASE WHEN r.id IS NULL THEN 1 ELSE 0 END), 0) AS unmatched_review,
+    COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND r.bot_id IS NULL THEN 1 ELSE 0 END), 0) AS no_evidence,
+    COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND r.bot_id IS NOT NULL AND b.id IS NULL
+                      THEN 1 ELSE 0 END), 0) AS bot_gone,
+    COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND b.id IS NOT NULL
+                       AND b.deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS bot_deleted,
+    COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND b.id IS NOT NULL
+                       AND b.deleted_at IS NULL AND b.workspace_id <> u.workspace_id
+                      THEN 1 ELSE 0 END), 0) AS cross_workspace
+  FROM usage_events u
+  LEFT JOIN reviews r ON r.id = u.review_id
+  LEFT JOIN review_bots b ON b.id = r.bot_id
+  WHERE u.bot_id IS NULL AND u.rp > 0`;
+
+type UnattributableCounts = {
+  cross_workspace: number;
+  no_evidence: number;
+  bot_gone: number;
+  bot_deleted: number;
+  unmatched_review: number;
+};
+
+/**
+ * The named reasons, one row each. The four DISJOINT buckets sum to the number
+ * of charged rows that no run of this item can ever attribute.
+ *
+ * `unmatched_review` exists because a row whose review is missing joins no
+ * other bucket: forgetting it is exactly how a charged row escapes every count.
+ */
+async function unattributable(db: DashboardD1): Promise<UnattributableCounts> {
+  const row = await db.prepare(PERMANENTLY_UNATTRIBUTABLE_SQL).first<UnattributableCounts>();
+  return {
+    cross_workspace: Number(row?.cross_workspace ?? 0),
+    no_evidence: Number(row?.no_evidence ?? 0),
+    bot_gone: Number(row?.bot_gone ?? 0),
+    bot_deleted: Number(row?.bot_deleted ?? 0),
+    unmatched_review: Number(row?.unmatched_review ?? 0),
+  };
+}
+
+/** The four buckets are disjoint, so the total is their sum. */
+function unattributableTotal(counts: UnattributableCounts): number {
+  return (
+    counts.cross_workspace +
+    counts.no_evidence +
+    counts.bot_gone +
+    counts.bot_deleted +
+    counts.unmatched_review
+  );
+}
 
 const BATCH_ROWS = 200;
 
@@ -103,11 +181,12 @@ export const orphanLedgerAttributionBot: DataUpgradeItem = {
   order: 30,
 
   async preflight(db: DashboardD1): Promise<UpgradeCounts> {
+    const blockers = await unattributable(db);
     return {
       attributed_rows: await countRows(db, ATTRIBUTED_COUNT),
-      unattributed_rows: await countRows(db, UNATTRIBUTED_COUNT),
-      cross_workspace_rows: await countRows(db, CROSS_WORKSPACE_COUNT),
-      no_evidence_rows: await countRows(db, NO_EVIDENCE_COUNT),
+      attributable_rows: await countRows(db, ATTRIBUTABLE_COUNT),
+      permanently_unattributable_rows: unattributableTotal(blockers),
+      ...blockers,
     };
   },
 
@@ -135,7 +214,7 @@ export const orphanLedgerAttributionBot: DataUpgradeItem = {
       ),
     );
     const attributed = results.reduce((sum, result) => sum + (result?.meta.changes ?? 0), 0);
-    const remaining = await countRows(db, UNATTRIBUTED_COUNT);
+    const remaining = await countRows(db, ATTRIBUTABLE_COUNT);
     return {
       // The cursor advances even when a row did not change: those rows are
       // permanently unattributable (the guard refused them), and re-reading them
@@ -149,9 +228,17 @@ export const orphanLedgerAttributionBot: DataUpgradeItem = {
 
   advisoryChecks: ["cross_workspace_rows", "no_evidence_rows"],
 
+  /**
+   * BOTH numbers, always. A zero work queue with a non-zero permanent total means
+   * charged history is unattributable — the operator must see that before setting
+   * any per-bot ceiling, because a cap enforced against it would cap the wrong bot.
+   */
   async verify(db: DashboardD1): Promise<UpgradeCounts> {
+    const blockers = await unattributable(db);
     return {
-      unattributed_rows: await countRows(db, UNATTRIBUTED_COUNT),
+      attributable_rows: await countRows(db, ATTRIBUTABLE_COUNT),
+      permanently_unattributable_rows: unattributableTotal(blockers),
+      ...blockers,
     };
   },
 };

@@ -6,6 +6,7 @@ import type { Env } from "../../src/worker/env";
 import { WEBHOOK_BODY_LIMIT } from "../../src/worker/webhooks";
 import {
   ENTITLEMENT_UNREADABLE_SKIP_REASON,
+  QUOTA_BOT_SKIP_REASON,
   QUOTA_PLAN_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
@@ -2790,20 +2791,12 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     expect(sent).toHaveLength(1);
   });
 
-  test("a delivery that would fail both gates records exactly ONE failure, of the plan-quota stage", async () => {
+  test("a delivery that would fail BOTH gates records exactly ONE failure, of the CAPABILITY stage", async () => {
     const db = createMigratedTestD1();
-    setCeiling(db, null);
-    // Both gates would refuse: the plan does not include a shared bot AND the
-    // month is spent. The relay walks one decision path, so ONE refusal is
-    // recorded — and the plan-month ceiling (which the walk reaches only after
-    // the capability check admits) is the one D30 orders first.
-    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run();
-    db.raw
-      .prepare(
-        `INSERT INTO workspace_subscriptions (workspace_id, plan_id, status, created_at, updated_at)
-         VALUES ('default', 'pro', 'active', datetime('now'), datetime('now'))`,
-      )
-      .run();
+    // Both gates fail for a shared bot: the plan does NOT include one (free tier),
+    // and the month is spent. The relay checks capability first, so the refusal is
+    // the capability one — and there is exactly one, never two rows.
+    db.raw.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
     seedUsage(db, "prior", 1000);
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
     await mountExternalSharedBot(db, appRow.id, "default");
@@ -2821,8 +2814,44 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
     expect(res.status).toBe(200);
     expect(sent).toHaveLength(0);
     const failures = db.raw
-      .query("SELECT stage FROM review_failures ORDER BY rowid")
-      .all() as Array<{ stage: string }>;
+      .query("SELECT stage, error FROM review_failures ORDER BY rowid")
+      .all() as Array<{ stage: string; error: string }>;
+    expect(failures).toHaveLength(1);
+    expect(failures[0]!.stage).toBe(SHARED_BOT_ENTITLEMENT_STAGE);
+    expect(failures[0]!.error).toBe(
+      CHECK_SUMMARIES.skippedByDelivery(SHARED_BOT_ENTITLEMENT_SKIP_REASON),
+    );
+    // And the delivery row carries the same cause, not null.
+    const delivery = db.raw
+      .query("SELECT outcome, reason FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
+      .get(appRow.id) as { outcome: string; reason: string | null };
+    expect(delivery).toEqual({ outcome: "skipped", reason: SHARED_BOT_ENTITLEMENT_SKIP_REASON });
+  });
+
+  test("a plan month that is BOTH spent and capability-allowed records the quota stage", async () => {
+    // The quota-only case, kept separate from the capability-first one above.
+    const db = createMigratedTestD1();
+    seedPro(db);
+    setCeiling(db, 1);
+    seedUsage(db, "prior", 1000);
+    const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x", scope: "shared" });
+    await mountExternalSharedBot(db, appRow.id, "default");
+    const { queue, sent } = makeQueue();
+    const env = makeEnv(db, { REVIEW_QUEUE: queue as never, DEPLOYMENT_MODE: "saas" });
+    const body = JSON.stringify(PR_PAYLOAD);
+
+    const res = await postWebhook(
+      "/webhook/default/app-x",
+      body,
+      { "x-hub-signature-256": await signatureFor("secret-x", body), "x-github-event": "pull_request" },
+      env,
+    );
+
+    expect(res.status).toBe(200);
+    expect(sent).toHaveLength(0);
+    const failures = db.raw.query("SELECT stage FROM review_failures ORDER BY rowid").all() as Array<{
+      stage: string;
+    }>;
     expect(failures).toHaveLength(1);
     expect(failures[0]!.stage).toBe(QUOTA_STAGE);
   });

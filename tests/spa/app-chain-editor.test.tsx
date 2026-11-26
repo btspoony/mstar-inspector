@@ -37,7 +37,7 @@ const CHAIN: AppChainEntry[] = [
 
 type Sent = { url: string; method: string; body: unknown };
 
-async function mount(input: { canManage: boolean; chain?: AppChainEntry[] }) {
+async function mount(input: { canManage: boolean; chain?: AppChainEntry[]; mountableBots?: Array<{ id: string; name: string }> }) {
   const { win, cleanup } = installDom("http://localhost/dashboard/ws/apps/app-1");
   const sent: Sent[] = [];
   globalThis.fetch = (async (target: RequestInfo | URL, init?: RequestInit) => {
@@ -62,6 +62,7 @@ async function mount(input: { canManage: boolean; chain?: AppChainEntry[] }) {
         locale: "en" as const,
         appId: "app-1",
         chain: input.chain ?? CHAIN,
+        mountableBots: input.mountableBots ?? [],
         canManage: input.canManage,
         onReordered: async () => {
           reloads += 1;
@@ -132,6 +133,40 @@ describe("the bot chain editor", () => {
     await surface.close();
   });
 
+  test("adding a bot appends it to the full order and re-reads the chain", async () => {
+    const surface = await mount({
+      canManage: true,
+      mountableBots: [
+        { id: "bot-c", name: "Gamma" },
+        { id: "bot-a", name: "Alpha" }, // already mounted: filtered out by the view
+      ],
+    });
+    // The view subtracts what the chain already carries, so only Gamma is offered.
+    const offered = surface.labelled(t("en", "apps.chain.addNamed", { bot: "Gamma" }));
+    expect(offered).toHaveLength(1);
+    expect(surface.labelled(t("en", "apps.chain.addNamed", { bot: "Alpha" }))).toHaveLength(0);
+
+    await surface.click(offered[0]!);
+    const patch = surface.sent.find((request) => request.method === "PATCH");
+    expect(patch?.body).toEqual({ botIds: ["bot-a", "bot-b", "bot-c"] });
+    expect(surface.reloads()).toBe(1);
+    await surface.close();
+  });
+
+  test("removing a bot rewrites the order without it; the LAST row cannot be removed", async () => {
+    const surface = await mount({ canManage: true });
+    await surface.click(surface.labelled(t("en", "apps.chain.removeBot", { bot: "Alpha" }))[0]!);
+    const patch = surface.sent.find((request) => request.method === "PATCH");
+    expect(patch?.body).toEqual({ botIds: ["bot-b"] });
+    await surface.close();
+
+    // D27: one row left — its remove control is present but disabled.
+    const single = await mount({ canManage: true, chain: [CHAIN[0]!] });
+    const remove = single.labelled(t("en", "apps.chain.removeBot", { bot: "Alpha" }))[0]!;
+    expect(remove.hasAttribute("disabled")).toBe(true);
+    await single.close();
+  });
+
   test("a refused reorder says so and re-reads nothing", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws/apps/app-1");
     globalThis.fetch = (async () =>
@@ -150,6 +185,7 @@ describe("the bot chain editor", () => {
           appId: "app-1",
           chain: CHAIN,
           canManage: true,
+          mountableBots: [],
           onReordered: async () => {
             reloads += 1;
           },

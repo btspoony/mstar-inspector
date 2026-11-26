@@ -658,7 +658,15 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       outcome: deliveryOutcomeFromWebhook(settled, paused ? 0 : 1, reviewGlobal, refusal !== null),
       statusCode: settled.kind === "reject" ? settled.status : null,
       repositoryFullName: webhookRepositoryFullName(classified),
-      reason: settled.kind === "reject" ? settled.reason : null,
+      // A refusal is the delivery's reason; a rejected body keeps its own. The
+      // public sentence names no allowance, but the row is the operator's record
+      // of WHY this delivery produced nothing.
+      reason:
+        settled.kind === "reject"
+          ? settled.reason
+          : refusal === null
+            ? null
+            : deliveryRefusalReason(refusal),
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -777,10 +785,17 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
       );
     }
   }
-  // The relay froze its choice above; an own bot and the App never share an id
-  // once a chain mounts more than one bot, so the payload carries the BOT's id.
+  // The relay froze its choice above, or refused. A refused delivery never
+  // reaches the queue — `handleReviewJob` takes the skip tail before the send —
+  // so the id on this payload is unused in that case. An own-bot-only install
+  // still resolves to the App's own id, which IS its bot's id there.
+  const selectedBotIdOrRefused = selectedBotId;
   const handleOutcome = await handleReviewJob(
-    { ...settled.payload, botRef: { appId: row.id, botId: selectedBotId ?? row.id }, targetId: target!.id },
+    {
+      ...settled.payload,
+      botRef: { appId: row.id, botId: selectedBotIdOrRefused ?? row.id },
+      targetId: target!.id,
+    },
     {
     env: { IDEMPOTENCY_KV: c.env.IDEMPOTENCY_KV, REVIEW_QUEUE: c.env.REVIEW_QUEUE, DB: db },
     log: defaultLog,

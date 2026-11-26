@@ -265,6 +265,41 @@ describe("selectReviewBot — the own-bot shortcut issues ZERO quota queries", (
   });
 });
 
+describe("selectReviewBot — self-hosted resolves no quota", () => {
+  test("a shared bot is selected with NO profile row and NO quota query", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, { id: "bot-shared", workspaceId: "provider", scope: "shared" });
+    mountChain(db, "app-1", "default", ["bot-shared"]);
+    // No quota profile at all: a deployment that never needed quota.
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+
+    const { d1, statements } = countingDb(db);
+    const outcome = await selectReviewBot({ ...relayInput(db, "app-1"), db: d1, mode: "self-hosted" });
+
+    expect(outcome).toEqual({ kind: "selected", botId: "bot-shared" });
+    // The chain read, and nothing that touches a quota table.
+    expect(statements().filter((sql) => QUOTA_TABLE.test(sql))).toEqual([]);
+    db.raw.close();
+  });
+
+  test("an exhausted bot ceiling does NOT refuse in self-hosted", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, { id: "bot-shared", workspaceId: "provider", scope: "shared", multiplier: 10, monthlyRp: 1 });
+    mountChain(db, "app-1", "default", ["bot-shared"]);
+
+    expect(await selectReviewBot({ ...relayInput(db, "app-1"), mode: "self-hosted" })).toEqual({
+      kind: "selected",
+      botId: "bot-shared",
+    });
+    db.raw.close();
+  });
+});
+
 describe("readChain", () => {
   test("answers the chain in position order", async () => {
     const db = createMigratedTestD1();

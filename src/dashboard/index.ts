@@ -3442,6 +3442,54 @@ function scopeSwitchRoute(kind: ScopeSwitchKind) {
   };
 }
 
+/**
+ * The per-workspace ceiling writer (F8). Owner-only, one workspace at a time,
+ * `monthlyRp: null` clears the override back to the bot's default.
+ *
+ * This is the writer `bot_quota_overrides` was missing: `selectReviewBot` reads
+ * the table, and until now nothing in the product could populate it.
+ */
+const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
+  const bot = await createReviewBotsStore(gate.db).getScopedBotById(
+    c.req.param("botId") ?? "",
+    gate.scope.workspaceId,
+  );
+  if (!bot) return c.json({ error: "unknown bot" }, 404);
+  let body: { workspaceId?: unknown; monthlyRp?: unknown } | null = null;
+  try {
+    body = (await c.req.json()) as { workspaceId?: unknown; monthlyRp?: unknown };
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  if (body === null || typeof body.workspaceId !== "string" || body.workspaceId.length === 0) {
+    return c.json({ error: "workspaceId must be a non-empty workspace id" }, 400);
+  }
+  const monthlyRp =
+    body.monthlyRp === null
+      ? null
+      : typeof body.monthlyRp === "number"
+        ? body.monthlyRp
+        : Number.NaN;
+  if (monthlyRp !== null && !Number.isInteger(monthlyRp)) {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
+  }
+  const outcome = await createReviewBotsStore(gate.db).setBotQuotaOverride({
+    botId: bot.id,
+    workspaceId: body.workspaceId,
+    ownerWorkspaceId: gate.scope.workspaceId,
+    monthlyRp,
+    now: new Date().toISOString(),
+  });
+  if (outcome === "not_owner") return c.json({ error: "only the bot's owner writes its ceilings" }, 403);
+  if (outcome === "invalid") {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
+  }
+  return c.json({ overrides: await createReviewBotsStore(gate.db).listBotQuotaOverrides(bot.id) });
+};
+
 const appScopeRoute = scopeSwitchRoute("app");
 const botScopeRoute = scopeSwitchRoute("bot");
 
@@ -4793,9 +4841,14 @@ const appChainRoute = async (c: DashboardContext): Promise<Response> => {
     return c.json({ error: "botIds names a bot twice" }, 400);
   }
   const apps = createReviewBotsStore(member.db);
-  const appId = c.req.param("appId") ?? "";
+  // The URL segment is the NUMERIC GitHub App id, exactly as the detail GET and
+  // the SPA address it. `app_installations.github_app_id` holds the internal
+  // `github_apps.id`, so the segment must be resolved here — passing it straight
+  // through made every legitimate reorder answer 404.
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
   const outcome = await apps.replaceInstallChain({
-    appId,
+    appId: app.id,
     workspaceId: member.scope.workspaceId,
     botIds,
   });
@@ -4805,7 +4858,7 @@ const appChainRoute = async (c: DashboardContext): Promise<Response> => {
   }
   // Re-read the chain, not the whole page: the editor renders what the relay
   // will actually walk.
-  return c.json({ chain: await appChainRead(member.db, appId, member.scope.workspaceId) });
+  return c.json({ chain: await appChainRead(member.db, app.id, member.scope.workspaceId) });
 };
 
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
@@ -5685,6 +5738,12 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
   { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },
   { method: "patch", path: "/api/review-bots/:botId/scope", handler: botScopeRoute, access: "write" },
+  {
+    method: "patch",
+    path: "/api/review-bots/:botId/quota-overrides",
+    handler: botQuotaOverrideRoute,
+    access: "write",
+  },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/models", handler: appModelsRoute, access: "write" },
   {

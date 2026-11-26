@@ -132,6 +132,13 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
       // ownership alone (D15).
       return { kind: "selected", botId: bot.botId };
     }
+    if (mode === "self-hosted") {
+      // Self-hosted has no plan and no quota: the plan is unlimited by
+      // definition, so a shared bot is selected without touching a profile or a
+      // ceiling. Resolving one there would refuse on an absent profile row for a
+      // deployment that never needed quota at all.
+      return { kind: "selected", botId: bot.botId };
+    }
     sawShared = true;
 
     const capability = await checkEntitlement({

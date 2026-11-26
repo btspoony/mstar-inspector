@@ -1423,6 +1423,60 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * Set, or clear, one bot's ceiling for ONE workspace. The bot's owner is the
+     * only writer — a per-workspace override is the owner's commercial decision,
+     * not the consumer's — and `monthly_rp > 0` is the DDL's own contract (D32:
+     * there is no "0 = disable").
+     *
+     * `null` deletes the row, which returns that workspace to the bot's DEFAULT
+     * ceiling. Both paths are one statement, so an override never lingers half
+     * written.
+     */
+    async setBotQuotaOverride(input: {
+      botId: string;
+      workspaceId: string;
+      ownerWorkspaceId: string;
+      monthlyRp: number | null;
+      now: string;
+    }): Promise<"ok" | "not_owner" | "invalid"> {
+      const owner = await db
+        .prepare("SELECT workspace_id FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
+        .bind(input.botId)
+        .first<{ workspace_id: string }>();
+      // The caller passes the OWNER it resolved; the store re-checks it against
+      // the row, so a caller that bypasses the route cannot write.
+      if (owner === null || owner.workspace_id !== input.ownerWorkspaceId) return "not_owner";
+      if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+        return "invalid";
+      }
+      if (input.monthlyRp === null) {
+        await db
+          .prepare("DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2")
+          .bind(input.botId, input.workspaceId)
+          .run();
+        return "ok";
+      }
+      await db
+        .prepare(
+          `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (bot_id, workspace_id) DO UPDATE SET monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
+        )
+        .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
+        .run();
+      return "ok";
+    },
+
+    /** Every override one bot carries, for the owner's editor. */
+    async listBotQuotaOverrides(botId: string): Promise<Array<{ workspaceId: string; monthlyRp: number }>> {
+      const res = await db
+        .prepare("SELECT workspace_id AS workspaceId, monthly_rp AS monthlyRp FROM bot_quota_overrides WHERE bot_id = ?1 ORDER BY workspace_id")
+        .bind(botId)
+        .all<{ workspaceId: string; monthlyRp: number }>();
+      return res.results;
+    },
+
+    /**
      * Rewrite one install's chain to exactly `botIds`, in the order given,
      * positions contiguous from 1, in ONE batch — the whole reorder commits or
      * none of it does, so a reader can never see a hole or a duplicate position.
@@ -1441,34 +1495,60 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<{ present: number }>();
       if (own === null) return "not_installer";
 
-      for (const botId of input.botIds) {
-        const usable = await db
-          .prepare(
-            `SELECT 1 AS present FROM review_bots
-              WHERE id = ?1 AND deleted_at IS NULL
-                AND (scope = 'shared' OR workspace_id = ?2)`,
-          )
-          .bind(botId, input.workspaceId)
-          .first<{ present: number }>();
-        if (usable === null) return "bot_unavailable";
-      }
-
       // ONE batch: clear then re-insert, so the final table state is the whole
       // new chain with contiguous positions. `DELETE` first also frees the
       // composite primary key for a bot moving to a lower position.
-      const statements = [
+      //
+      // AVAILABILITY IS CHECKED INSIDE THE SAME BATCH, one guarded statement per
+      // bot: a separate read before the batch would let an owner unshare a bot
+      // between the check and the write, admitting a bot this workspace may no
+      // longer mount.
+      //
+      // D1 cannot abort a batch conditionally (no `RAISE` outside a trigger, and
+      // `changes()` inside one statement reads 0), so the inserts are counted
+      // from the batch's own results and a short count RESTORES the previous
+      // chain in a second batch. The chain is therefore never observed empty.
+      const previous = (await db
+        .prepare(
+          "SELECT position, bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position",
+        )
+        .bind(input.appId, input.workspaceId)
+        .all<{ position: number; bot_id: string }>()).results;
+
+      const results = await db.batch([
         db
           .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
           .bind(input.appId, input.workspaceId),
         ...input.botIds.map((botId, index) =>
           db
             .prepare(
-              "INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?1, ?2, ?3, ?4)",
+              `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+               SELECT ?1, ?2, ?3, ?4
+                WHERE EXISTS (SELECT 1 FROM review_bots
+                               WHERE id = ?4 AND deleted_at IS NULL
+                                 AND (scope = 'shared' OR workspace_id = ?2))`,
             )
             .bind(input.appId, input.workspaceId, index + 1, botId),
         ),
-      ];
-      await db.batch(statements);
+      ]);
+      const inserted = results.slice(1).reduce((sum, result) => sum + (result?.meta.changes ?? 0), 0);
+      if (inserted !== input.botIds.length) {
+        // A bot went unavailable mid-flight. Restore what the install had, in one
+        // batch, so the reader never sees the chain this call emptied.
+        await db.batch([
+          db
+            .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          ...previous.map((row) =>
+            db
+              .prepare(
+                "INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?1, ?2, ?3, ?4)",
+              )
+              .bind(input.appId, input.workspaceId, row.position, row.bot_id),
+          ),
+        ]);
+        return "bot_unavailable";
+      }
       return "ok";
     },
 

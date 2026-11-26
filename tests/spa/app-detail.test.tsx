@@ -1241,8 +1241,10 @@ describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
       [...container.querySelectorAll("[data-slot='app-chain-reorder'] button")].map((node) => node.textContent ?? ""),
     );
     // The order is editable now that `selectReviewBot` reads it (D29): the
-    // editor and the code that reads the order ship in the same release.
-    expect(managed).toEqual(["↑", "↓"]);
+    // editor and the code that reads the order ship in the same release. One
+    // row, so both arrows are disabled and the remove control is present (D27
+    // keeps the LAST row visible).
+    expect(managed).toEqual(["↑", "↓", "✕"]);
 
     const readOnly = await withMarkup(
       renderDetail({ ...managePayload, can_manage: false, chain: [row] }, "bots"),
