@@ -8,6 +8,7 @@ These specifications describe current contracts; decision history lives in the A
 | Architecture | [Operator admin surface](architecture/operator-admin-surface.md) |
 | Architecture | [GitHub review comment mapping](architecture/github-review-comment-mapping.md) |
 | Architecture | [Insights window bucketing](architecture/insights-window-bucketing.md) |
+| Architecture | [Review budget](architecture/review-budget.md) |
 | Feature | [Review lifecycle](feature/review-lifecycle.md) |
 | Feature | [Review trigger policy](feature/review-trigger-policy.md) |
 | Feature | [App detail visibility](feature/app-detail-visibility.md) |
