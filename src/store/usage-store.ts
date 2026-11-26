@@ -1,4 +1,5 @@
 
+import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { D1Like } from "./types";
 
 /**
@@ -8,13 +9,17 @@ import type { D1Like } from "./types";
  */
 export type UsageSource = "byok" | "shared";
 
-/** The usage row input. `occurredAt` is an ISO-8601 string supplied by the caller. */
-export type UsageEventInput = {
+/** The inputs of one metering call. `occurredAt` is an ISO-8601 instant. */
+export type ChargeUsageInput = {
   reviewId: string;
   executionToken: string;
   workspaceId: string;
   occurredAt: string;
-  rp: number;
+  /** The UTC `YYYY-MM` label `quotaMonth` produces — the binding's key. */
+  month: string;
+  level: ReviewLevel;
+  /** The executing bot's price factor (D11). */
+  multiplier: number;
   source: UsageSource;
   // The executing bot (`botRef.botId`). REQUIRED on every write: the column
   // stays nullable for pre-split history, but no production row may be written
@@ -113,34 +118,102 @@ export async function sumMonthlyRp(
   return rows[0]?.total ?? 0;
 }
 
+/** The price column a review level reads. A FIXED allow-list, never input. */
+const LEVEL_BASE_COLUMN: Record<ReviewLevel, string> = {
+  quick: "base_quick",
+  default: "base_standard",
+  deep: "base_deep",
+};
+
 /**
- * Append one started-execution row, minting the attempt `seq`.
+ * One metering call: bind the month's version, price the review and append the
+ * usage row — ALL in one batch, so the three can never disagree.
  *
- * The row carries a price the caller has already computed from the month's
- * BINDING (see `bindWorkspaceQuotaProfile`), so this statement writes no
- * binding: pricing from a pre-insert resolve would let two racing first
- * meterings charge two different versions inside one month.
+ * The two statements are ONE write, and that is the whole design:
  *
- * Idempotent on `execution_token` — a replay writes nothing. Callers check the
- * token first and return early, so a replay also creates no binding.
+ *  - **Statement 1** binds `(workspace, month)` to the profile in force at
+ *    `occurredAt`, `INSERT OR IGNORE` so a concurrent first metering keeps one
+ *    row, and only `WHERE NOT EXISTS` a usage row for this token. A replayed
+ *    token therefore binds NOTHING — including a replay in a new month, which is
+ *    what closes I1.
+ *  - **Statement 2** appends the usage row, priced by JOINing the binding
+ *    statement 1 (or a concurrent statement 1) actually left in the table — so
+ *    the price follows the BINDING, never a resolve the caller did beforehand —
+ *    and again only when this token has not been charged.
+ *
+ * Because they are one batch: a failed bot lookup or an insert error rolls the
+ * binding back with the row (no premature binding), and a concurrent first
+ * metering cannot leave a binding without its matching usage row.
+ *
+ * Pricing happens in SQL because the two statements must be atomic. `rp` is
+ * `max(1, ceil(base * multiplier))` — the same rule `rpFor` states for callers
+ * that price outside a batch. The ceiling is spelled portably as
+ * `CAST(x AS INTEGER) + CASE WHEN x > CAST(x AS INTEGER) THEN 1 ELSE 0 END`:
+ * `ceil()` is available in this engine, but the spelled-out form is the one
+ * this repo can rely on if a driver or target lacks it, and it is exact for
+ * positive products (all factors are > 0 by DDL CHECK).
+ *
+ * `seq` is minted inside the same statement, so the attempt ordinal is a
+ * property of the write, not of a prior read.
  */
-export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source, bot_id)
-       SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7
-       WHERE NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
-    )
-    .bind(
-      input.reviewId,
-      input.executionToken,
-      input.workspaceId,
-      input.occurredAt,
-      input.rp,
-      input.source,
-      input.botId,
-    )
-    .run();
+export async function chargeUsage(
+  db: D1Like,
+  input: ChargeUsageInput,
+): Promise<{ charged: boolean }> {
+  const baseColumn = LEVEL_BASE_COLUMN[input.level];
+  if (baseColumn === undefined) {
+    throw new Error(`chargeUsage: unknown review level '${input.level}'`);
+  }
+  const results = await db.batch([
+    db
+      .prepare(
+        // The SAME rule as `resolveQuotaProfile`: the latest profile at or
+        // before the instant, else the EARLIEST (a month that precedes every
+        // profile is still resolvable). Expressed as one statement so the bind
+        // and the price below it read one table state.
+        `INSERT OR IGNORE INTO workspace_quota_binding (workspace_id, month, profile_id)
+         SELECT ?1, ?2, p.id
+           FROM quota_profiles p
+          WHERE NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)
+          ORDER BY CASE WHEN p.effective_from <= ?3 THEN 0 ELSE 1 END,
+                   CASE WHEN p.effective_from <= ?3 THEN p.effective_from END DESC,
+                   p.effective_from ASC
+          LIMIT 1`,
+      )
+      .bind(input.workspaceId, input.month, input.occurredAt, input.executionToken),
+    db
+      .prepare(
+        `INSERT INTO usage_events
+           (review_id, seq, execution_token, workspace_id, occurred_at, rp, source, bot_id)
+         SELECT ?5,
+                (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?5),
+                ?4, ?1, ?6,
+                max(1, CAST(p.${baseColumn} * ?7 AS INTEGER)
+                       + CASE WHEN p.${baseColumn} * ?7 > CAST(p.${baseColumn} * ?7 AS INTEGER)
+                              THEN 1 ELSE 0 END),
+                ?8, ?9
+           FROM workspace_quota_binding b
+           JOIN quota_profiles p ON p.id = b.profile_id
+          WHERE b.workspace_id = ?1
+            AND b.month = ?2
+            AND NOT EXISTS (SELECT 1 FROM usage_events u WHERE u.execution_token = ?4)`,
+      )
+      .bind(
+        input.workspaceId,
+        input.month,
+        input.occurredAt,
+        input.executionToken,
+        input.reviewId,
+        input.occurredAt,
+        input.multiplier,
+        input.source,
+        input.botId,
+      ),
+  ]);
+  // The usage insert is the last statement: its change count says whether this
+  // call charged anything. A token already charged, or a workspace with no
+  // profile, appends nothing and the caller must not log a phantom charge.
+  return { charged: (results[1]?.meta.changes ?? 0) > 0 };
 }
 
 /**

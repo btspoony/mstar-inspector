@@ -37,10 +37,10 @@ import {
 } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
-  recordUsageEvent,
+  chargeUsage,
   type UsageSource,
 } from "../store/usage-store";
-import { bindWorkspaceQuotaProfile, quotaMonth, readBotMultiplier, rpFor } from "../store/quota-store";
+import { QUOTA_PROFILES_EMPTY_ERROR, quotaMonth, readBotMultiplier } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   CHECK_BACKOFF_MS,
@@ -3026,34 +3026,38 @@ async function preparePhase(
   const usageOccurredAt = usageNow.toISOString();
   const usageMonth = quotaMonth(usageNow);
   try {
-    // (1) A replayed token is the same paid execution: nothing to charge and
-    // nothing to record. Check BEFORE binding, so a replay in a NEW month does
-    // not pin that month's version for a workspace that never metered in it (I1).
-    const alreadyCharged = await hasUsageEventForExecutionToken(deps.env.DB, executionToken);
-    if (!alreadyCharged) {
-      // (2)+(3) Pin the BINDING first, then price from what actually won it.
-      // Two first meterings of one month can resolve the profile on opposite
-      // sides of an `effective_from` boundary; `INSERT OR IGNORE` keeps one row,
-      // and reading it back is what makes both calls charge the SAME version.
-      const boundProfile = await bindWorkspaceQuotaProfile(deps.env.DB, {
-        workspaceId: usageWorkspaceId,
-        month: usageMonth.month,
-        at: usageOccurredAt,
-      });
-      const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
-      if (multiplier === null) {
-        throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    // One atomic charge: bind the month's version, price the review and append
+    // the usage row in one batch. The three commit together, so a replay binds
+    // nothing (I1), a failed lookup or insert leaves no binding behind, and a
+    // concurrent first metering cannot split the pin from its usage row.
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    if (multiplier === null) {
+      throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    }
+    const { charged } = await chargeUsage(deps.env.DB, {
+      reviewId,
+      executionToken,
+      workspaceId: usageWorkspaceId,
+      occurredAt: usageOccurredAt,
+      month: usageMonth.month,
+      level,
+      multiplier,
+      source: usageSource,
+      botId: payload.botRef.botId,
+    });
+    if (!charged) {
+      // The batch appended nothing. Two causes, and only one is benign:
+      //  * the token was already charged — a replay, nothing to do;
+      //  * no profile covers the instant, so the review ran unbilled. That is a
+      //    LOST CHARGE and must reach the failure row the backfill lane reads,
+      //    never be swallowed — so it throws into the catch below.
+      if (!(await hasUsageEventForExecutionToken(deps.env.DB, executionToken))) {
+        throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
       }
-      // (4) Price from the bound version, then append the row.
-      await recordUsageEvent(deps.env.DB, {
-        reviewId,
-        executionToken,
-        workspaceId: usageWorkspaceId,
-        occurredAt: usageOccurredAt,
-        rp: rpFor(level, multiplier, boundProfile),
-        source: usageSource,
-        botId: payload.botRef.botId,
-      });
+      deps.log.info(
+        { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId },
+        "usage already charged for this execution token — nothing appended",
+      );
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

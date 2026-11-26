@@ -224,6 +224,38 @@ describe("0121 C4 — ceilings scale from the profile in force, by ITS OWN base 
     db.close();
   });
 
+  test("a legal configuration that scales to zero is clamped to 1 RP, never aborting the deploy", () => {
+    const db = preLargeBaseDb();
+    // A 1-RP ceiling over equal 1000/1000/1000 bases: 1 * 450 / 3000 = 0, which
+    // 0063's `monthly_rp > 0` CHECK cannot store. Every weight is valid and
+    // positive, so this is a configuration an operator may legitimately publish.
+    db.prepare(
+      "UPDATE quota_profiles SET base_quick = 1000, base_standard = 1000, base_deep = 1000 WHERE id = 'quota-v1'",
+    ).run();
+    db.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
+    db.prepare("UPDATE quota_profile_plans SET monthly_rp = 1 WHERE profile_id = 'quota-v1' AND plan_id = 'pro'").run();
+
+    // The migration completes — no CHECK violation, no aborted deploy.
+    execMigrationScript(db, script("0121_quota_base_large.sql"));
+
+    expect(ceilingsOf(db, "quota-v2-large-base")).toEqual({ free: 1, pro: 1 });
+    db.close();
+  });
+
+  test("a fractional scale rounds DOWN, so the allowance never outgrows the price rise", () => {
+    const db = preLargeBaseDb();
+    // bases 1000/1000/1000 → factor 450/3000 = 0.15; a 7-RP ceiling → 1.05 → 1.
+    db.prepare(
+      "UPDATE quota_profiles SET base_quick = 1000, base_standard = 1000, base_deep = 1000 WHERE id = 'quota-v1'",
+    ).run();
+    db.prepare("UPDATE quota_profile_plans SET monthly_rp = 7 WHERE profile_id = 'quota-v1' AND plan_id = 'free'").run();
+
+    execMigrationScript(db, script("0121_quota_base_large.sql"));
+
+    expect(ceilingsOf(db, "quota-v2-large-base").free).toBe(1);
+    db.close();
+  });
+
   test("a future-scheduled operator version is neither the source nor rewritten", () => {
     const db = preLargeBaseDb();
     // Operator scheduled a version two months out with its own small ceilings.

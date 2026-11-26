@@ -27,13 +27,14 @@
 --     factor = (50 + 100 + 300) / (base_quick + base_standard + base_deep)
 --
 -- computed in integer arithmetic (multiply first, then divide) so a factor that
--- does not divide evenly still produces a ceiling rounded DOWN to whole RP: the
--- allowance never grows beyond the price rise. If ANY of that profile's three
--- base weights is NULL the whole conversion is undefined — a NULL weight means
--- the profile cannot price a level at all — so every `monthly_rp` for this
--- version is left NULL (unlimited) rather than guessed, and the operator sets
--- the real ceilings. A future-scheduled profile is never the source and its
--- ceilings are never touched.
+-- does not divide evenly rounds DOWN: the allowance never grows beyond the price
+-- rise. The result is then CLAMPED to `max(1, …)`, because `0063` requires
+-- `monthly_rp > 0` and a legal operator configuration can shrink a ceiling to
+-- zero (a 1-RP ceiling over a 1000/1000/1000 base gives 1 * 450 / 3000 = 0). A
+-- zero ceiling would mean "no review may ever run" — a state the schema cannot
+-- express — so the smallest expressible ceiling, 1 RP, is the honest clamp. A
+-- NULL source ceiling stays NULL (unlimited). A future-scheduled profile is
+-- never the source and its ceilings are never touched.
 --
 -- `review_bots.multiplier` needs no DDL change: 0115 already created it as
 -- `REAL NOT NULL CHECK (multiplier > 0)`, which admits 1.5. What changes is its
@@ -92,10 +93,15 @@ INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp)
 SELECT
   'quota-v2-large-base',
   q.plan_id,
+  -- Integer arithmetic, rounded DOWN, then clamped to at least 1 RP: 0063
+  -- requires `monthly_rp > 0`, and a legal operator configuration can shrink a
+  -- ceiling to zero (a 1-RP ceiling over a 1000/1000/1000 base yields
+  -- 1 * 450 / 3000 = 0). A ceiling of 0 would mean "no review may ever run",
+  -- which the DDL cannot even express, so the smallest expressible ceiling —
+  -- 1 RP — is the honest clamp. A NULL source ceiling stays NULL (unlimited).
   CASE
     WHEN q.monthly_rp IS NULL THEN NULL
-    WHEN src.base_quick IS NULL OR src.base_standard IS NULL OR src.base_deep IS NULL THEN NULL
-    ELSE (q.monthly_rp * 450) / (src.base_quick + src.base_standard + src.base_deep)
+    ELSE max(1, (q.monthly_rp * 450) / (src.base_quick + src.base_standard + src.base_deep))
   END
 FROM quota_profile_plans q
 JOIN quota_profiles src ON src.id = q.profile_id

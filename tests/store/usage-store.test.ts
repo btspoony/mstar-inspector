@@ -2,13 +2,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, createTestD1, execMigrationScript } from "./helpers";
-import { bindWorkspaceQuotaProfile, rpFor } from "../../src/store/quota-store";
+import { rpFor } from "../../src/store/quota-store";
 import { REVIEW_LEVELS } from "../../packages/shared/src/runtime";
 import {
+  chargeUsage,
   hasUsageEventForExecutionToken,
   readMonthlyRp,
   readMonthlyRpByWorkspace,
-  recordUsageEvent,
   sumMonthlyRp,
 } from "../../src/store/usage-store";
 
@@ -31,43 +31,31 @@ function seedUsageBot(db: ReturnType<typeof createMigratedTestD1>, id = "bot-usa
     .run(id, id, AT, AT);
 }
 
-describe("recordUsageEvent", () => {
+const USAGE = {
+  reviewId: "review-a",
+  workspaceId: "default",
+  occurredAt: AT,
+  month: "2026-10",
+  level: "deep" as const,
+  multiplier: 1,
+  source: "shared" as const,
+  botId: "bot-usage",
+};
+
+describe("chargeUsage — bind, price and append in ONE batch", () => {
   test("same review mints 1 then 2; distinct reviews each start at 1", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-    await recordUsageEvent(db, {
-      reviewId: "review-a",
-      executionToken: "token-a1",
-      workspaceId: "default",
-      occurredAt: AT,
-      rp: 60,
-      source: "shared",
-      botId: "bot-usage",
-    });
-    await recordUsageEvent(db, {
-      reviewId: "review-a",
-      executionToken: "token-a2",
-      workspaceId: "default",
-      occurredAt: AT,
-      rp: 2,
-      source: "byok",
-      botId: "bot-usage",
-    });
-    await recordUsageEvent(db, {
-      reviewId: "review-b",
-      executionToken: "token-b1",
-      workspaceId: "default",
-      occurredAt: AT,
-      rp: 1,
-      source: "byok",
-      botId: "bot-usage",
-    });
+    await chargeUsage(db, { ...USAGE, executionToken: "token-a1" });
+    await chargeUsage(db, { ...USAGE, executionToken: "token-a2", level: "quick", source: "byok" });
+    await chargeUsage(db, { ...USAGE, reviewId: "review-b", executionToken: "token-b1", level: "quick" });
 
     const rows = db.raw
       .query(
         "SELECT review_id, seq, execution_token, workspace_id, occurred_at, rp, source FROM usage_events ORDER BY review_id, seq",
       )
       .all();
+    // v1 base is quick 1 / standard 2 / deep 6, multiplier 1 (D11 ceil).
     expect(rows).toEqual([
       {
         review_id: "review-a",
@@ -75,7 +63,7 @@ describe("recordUsageEvent", () => {
         execution_token: "token-a1",
         workspace_id: "default",
         occurred_at: AT,
-        rp: 60,
+        rp: 6,
         source: "shared",
       },
       {
@@ -84,7 +72,7 @@ describe("recordUsageEvent", () => {
         execution_token: "token-a2",
         workspace_id: "default",
         occurred_at: AT,
-        rp: 2,
+        rp: 1,
         source: "byok",
       },
       {
@@ -94,192 +82,140 @@ describe("recordUsageEvent", () => {
         workspace_id: "default",
         occurred_at: AT,
         rp: 1,
-        source: "byok",
+        source: "shared",
       },
     ]);
   });
 
-  test("the same execution token is recorded once: a replay is a no-op, the next token still mints seq 2", async () => {
+  test("a replay is a no-op and reports charged: false; the next token still mints seq 2", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-    const input = {
-      reviewId: "review-a",
-      executionToken: "token-a1",
-      workspaceId: "default",
-      occurredAt: AT,
-      rp: 60,
-      source: "shared" as const,
-      botId: "bot-usage",
-    };
-    await recordUsageEvent(db, input);
-    await recordUsageEvent(db, input);
-    await recordUsageEvent(db, { ...input, executionToken: "token-a2", rp: 2 });
+    expect(await chargeUsage(db, { ...USAGE, executionToken: "token-a1" })).toEqual({ charged: true });
+    expect(await chargeUsage(db, { ...USAGE, executionToken: "token-a1" })).toEqual({ charged: false });
+    expect(await chargeUsage(db, { ...USAGE, executionToken: "token-a2", level: "quick" })).toEqual({
+      charged: true,
+    });
 
-    const rows = db.raw
-      .query("SELECT seq, execution_token FROM usage_events WHERE review_id = 'review-a' ORDER BY seq")
-      .all();
-    expect(rows).toEqual([
+    expect(
+      db.raw.query("SELECT seq, execution_token FROM usage_events WHERE review_id = 'review-a' ORDER BY seq").all(),
+    ).toEqual([
       { seq: 1, execution_token: "token-a1" },
       { seq: 2, execution_token: "token-a2" },
     ]);
   });
 
-  test("an unknown workspace is rejected by the FK", async () => {
+  test("the price follows the BINDING: a bound month ignores a newer profile", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // Bind October to v1 while it is in force…
+    await chargeUsage(db, { ...USAGE, executionToken: "bind-first" });
+    // …then a second call in the SAME month whose instant would resolve to the
+    // shipped large-base version if it were re-resolved. The binding wins, so it
+    // is still priced under v1.
+    const later = await chargeUsage(db, {
+      ...USAGE,
+      executionToken: "later-call",
+      occurredAt: "2027-06-01T00:00:00.000Z",
+    });
+    expect(later).toEqual({ charged: true });
+    expect(
+      db.raw.query("SELECT execution_token, rp FROM usage_events ORDER BY execution_token").all(),
+    ).toEqual([
+      // deep 6 × 1 under v1, not 300 under the large base.
+      { execution_token: "bind-first", rp: 6 },
+      { execution_token: "later-call", rp: 6 },
+    ]);
+    expect(
+      db.raw.query("SELECT profile_id FROM workspace_quota_binding WHERE month = '2026-10'").all(),
+    ).toEqual([{ profile_id: "quota-v1" }]);
+  });
+
+  test("an unknown workspace is rejected by the FK and nothing is bound", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
     await expect(
-      recordUsageEvent(db, {
-        reviewId: "review-a",
-        executionToken: "token-x",
-        workspaceId: "no-such-workspace",
-        occurredAt: AT,
-        rp: 1,
-        source: "byok",
-        botId: "bot-usage",
-      }),
+      chargeUsage(db, { ...USAGE, executionToken: "token-x", workspaceId: "no-such-workspace" }),
     ).rejects.toThrow(/FOREIGN KEY constraint failed/);
-    const count = db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get() as { n: number };
-    expect(count.n).toBe(0);
-  });
-});
-
-describe("bindWorkspaceQuotaProfile (D36: bind first, then price)", () => {
-  test("the first metering of a month pins the profile in force at that instant", async () => {
-    const db = createMigratedTestD1();
-    const bound = await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-10",
-      at: "2026-10-24T00:00:00.000Z",
-    });
-    expect(bound.id).toBe("quota-v1");
-    expect(db.raw.query("SELECT workspace_id, month, profile_id FROM workspace_quota_binding").all()).toEqual([
-      { workspace_id: "default", month: "2026-10", profile_id: "quota-v1" },
-    ]);
-    db.raw.close();
-  });
-
-  test("a later call of the same month answers the WINNER, never its own resolve", async () => {
-    const db = createMigratedTestD1();
-    // Bound first, while v1 was in force.
-    const first = await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-11",
-      at: "2026-11-01T00:00:00.000Z",
-    });
-    expect(first.id).toBe("quota-v1");
-    // A concurrent call resolving on the far side of the boundary: `at` now
-    // selects the shipped large-base profile, but the binding already exists, so
-    // it must answer v1 — the version the month is actually priced under.
-    const second = await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-11",
-      at: "2027-06-01T00:00:00.000Z",
-    });
-    expect(second.id).toBe(first.id);
-    expect(db.raw.query("SELECT profile_id FROM workspace_quota_binding WHERE month = '2026-11'").all()).toEqual([
-      { profile_id: "quota-v1" },
-    ]);
-    db.raw.close();
-  });
-
-  test("a new month binds its own row, leaving the previous month pinned", async () => {
-    const db = createMigratedTestD1();
-    await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-11",
-      at: "2026-11-30T23:00:00.000Z",
-    });
-    await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-12",
-      at: "2026-12-01T00:00:01.000Z",
-    });
-    expect(db.raw.query("SELECT month, profile_id FROM workspace_quota_binding ORDER BY month").all()).toEqual([
-      { month: "2026-11", profile_id: "quota-v1" },
-      { month: "2026-12", profile_id: "quota-v2-large-base" },
-    ]);
-    db.raw.close();
-  });
-
-  test("a replayed execution token creates no binding — the caller returns early", async () => {
-    const db = createMigratedTestD1();
-    seedUsageBot(db);
-    const input = {
-      reviewId: "review-replay",
-      executionToken: "token-replay",
-      workspaceId: "default",
-      occurredAt: "2026-10-24T00:00:00.000Z",
-      rp: 50,
-      source: "shared" as const,
-      botId: "bot-usage",
-    };
-    await recordUsageEvent(db, input);
-    expect(await hasUsageEventForExecutionToken(db, "token-replay")).toBe(true);
-    // The metering path's first step: a replay stops here, so the NEW month is
-    // never bound for a workspace that did not meter in it (I1).
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 0 });
-    db.raw.close();
+  });
+
+  test("an unknown review level is refused before any statement runs", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    await expect(
+      chargeUsage(db, { ...USAGE, executionToken: "t", level: "nope" as never }),
+    ).rejects.toThrow(/unknown review level/);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 0 });
   });
 });
 
-describe("C1 — two first-metering calls racing an effective_from boundary", () => {
-  /**
-   * The interleaving, simulated exactly: call A resolves while v1 is in force
-   * and binds v1; call B resolves on the far side of the boundary (its `at`
-   * selects the shipped large-base profile) but runs AFTER A's insert has landed.
-   * Without the read-back, B would price `ceil(base × m)` from v2 and append a
-   * differently priced row for the same month. With bind-then-read-back, B reads
-   * A's binding and charges A's version.
-   */
-  test("the loser of the race charges the winner's version, not its own resolve", async () => {
+describe("the three interleavings the atomic charge closes", () => {
+  test("I1 — a cross-month replay of one token binds NOTHING in the new month", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-
-    // A: first metering of November, inside v1's interval.
-    const a = await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
+    // The attempt was charged in October.
+    await chargeUsage(db, { ...USAGE, executionToken: "cross-month" });
+    // The same token replays after the month rolled over: the new month must not
+    // be pinned for a workspace that never metered in it, and nothing appends.
+    const replay = await chargeUsage(db, {
+      ...USAGE,
+      executionToken: "cross-month",
+      occurredAt: "2026-11-05T00:00:00.000Z",
       month: "2026-11",
-      at: "2026-11-02T00:00:00.000Z",
     });
-    expect(a.id).toBe("quota-v1");
-
-    // B: same month, but its `at` is past v2's effective_from. It must still
-    // price v1, because that is what the month is bound to.
-    const b = await bindWorkspaceQuotaProfile(db, {
-      workspaceId: "default",
-      month: "2026-11",
-      at: "2027-06-01T00:00:00.000Z",
-    });
-    expect(b.id).toBe(a.id);
-
-    // Both price the same version, so both charge the same RP.
-    expect(rpFor("deep", 1, a)).toBe(rpFor("deep", 1, b));
-    // And the table still holds exactly one binding for the month.
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 1 });
-    db.raw.close();
+    expect(replay).toEqual({ charged: false });
+    expect(db.raw.query("SELECT month FROM workspace_quota_binding ORDER BY month").all()).toEqual([
+      { month: "2026-10" },
+    ]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 1 });
   });
 
-  test("no row is appended twice for one execution token across a race", async () => {
+  test("premature binding — the price statement failing rolls the binding back with it", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-    const input = {
-      reviewId: "review-race",
-      executionToken: "token-race",
-      workspaceId: "default",
-      occurredAt: "2026-11-02T00:00:00.000Z",
-      rp: 300,
-      source: "shared" as const,
-      botId: "bot-usage",
-    };
-    // The second call is the loser of a duplicate delivery: it sees the token,
-    // returns early, and writes nothing — the guard `recordUsageEvent` keeps.
-    await recordUsageEvent(db, input);
-    expect(await hasUsageEventForExecutionToken(db, input.executionToken)).toBe(true);
-    await recordUsageEvent(db, input);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events WHERE execution_token = 'token-race'").get()).toEqual({
-      n: 1,
+    // A DB whose USAGE insert fails: the bot row the row's FK points at is
+    // absent, so statement 2 throws and the whole batch rolls back.
+    await expect(
+      chargeUsage(db, { ...USAGE, executionToken: "fails", botId: "no-such-bot" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+    // The binding statement 1 already ran inside the same batch — and is gone.
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 0 });
+  });
+
+  test("cross-month race — a binding never survives without its matching usage row", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    // Two first meterings of ONE month, back to back. Whichever binds, both rows
+    // price from the same bound version, and every binding has its row.
+    await chargeUsage(db, { ...USAGE, executionToken: "race-a", occurredAt: "2026-10-01T00:00:00.000Z" });
+    await chargeUsage(db, {
+      ...USAGE,
+      reviewId: "review-b",
+      executionToken: "race-b",
+      level: "quick",
+      occurredAt: "2026-10-02T00:00:00.000Z",
     });
-    db.raw.close();
+    expect(db.raw.query("SELECT month FROM workspace_quota_binding").all()).toEqual([{ month: "2026-10" }]);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 2 });
+    // Both rows were priced under the bound v1: deep 6 and quick 1.
+    expect(
+      db.raw.query("SELECT execution_token, rp FROM usage_events ORDER BY execution_token").all(),
+    ).toEqual([
+      { execution_token: "race-a", rp: 6 },
+      { execution_token: "race-b", rp: 1 },
+    ]);
+  });
+
+  test("no profile at the instant — nothing binds, nothing appends, charged: false", async () => {
+    const db = createMigratedTestD1();
+    seedUsageBot(db);
+    db.raw.prepare("DELETE FROM quota_profile_plans").run();
+    db.raw.prepare("DELETE FROM quota_profiles").run();
+    expect(await chargeUsage(db, { ...USAGE, executionToken: "no-profile" })).toEqual({ charged: false });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 0 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM usage_events").get()).toEqual({ n: 0 });
   });
 });
 
@@ -376,23 +312,20 @@ describe("usage_events.rp (migration 0064)", () => {
   test("the charge lands beside the seq the same statement minted", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-    await recordUsageEvent(db, {
-      reviewId: "review-a",
+    await chargeUsage(db, {
+      ...USAGE,
       executionToken: "token-a1",
-      workspaceId: "default",
       occurredAt: "2026-10-05T00:00:00.000Z",
-      rp: 60,
+      level: "deep",
+      multiplier: 10,
       source: "shared",
-      botId: "bot-usage",
     });
-    await recordUsageEvent(db, {
-      reviewId: "review-a",
+    await chargeUsage(db, {
+      ...USAGE,
       executionToken: "token-a2",
-      workspaceId: "default",
       occurredAt: "2026-10-06T00:00:00.000Z",
-      rp: 1,
+      level: "quick",
       source: "byok",
-      botId: "bot-usage",
     });
 
     expect(db.raw.query("SELECT seq, rp FROM usage_events ORDER BY seq").all()).toEqual([
@@ -445,21 +378,25 @@ describe("usage_events.source (migration 0065)", () => {
   test("one shared and one BYOK event split into the two rows, and the parts are the total", async () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
-    await recordUsageEvent(db, {
+    await chargeUsage(db, {
       reviewId: "shared-deep",
       executionToken: "token-shared",
       workspaceId: "default",
       occurredAt: "2026-10-05T00:00:00.000Z",
-      rp: 60,
+      month: "2026-10",
+      level: "deep",
+      multiplier: 10,
       source: "shared",
       botId: "bot-usage",
     });
-    await recordUsageEvent(db, {
+    await chargeUsage(db, {
       reviewId: "byok-standard",
       executionToken: "token-byok",
       workspaceId: "default",
       occurredAt: "2026-10-06T00:00:00.000Z",
-      rp: 2,
+      month: "2026-10",
+      level: "default",
+      multiplier: 1,
       source: "byok",
       botId: "bot-usage",
     });
@@ -478,12 +415,14 @@ describe("usage_events.source (migration 0065)", () => {
          VALUES ('unrecorded', 1, 'token-unrecorded', 'default', '2026-10-07T00:00:00.000Z', 6)`,
       )
       .run();
-    await recordUsageEvent(db, {
+    await chargeUsage(db, {
       reviewId: "byok-quick",
       executionToken: "token-byok",
       workspaceId: "default",
       occurredAt: "2026-10-08T00:00:00.000Z",
-      rp: 1,
+      month: "2026-10",
+      level: "quick",
+      multiplier: 1,
       source: "byok",
       botId: "bot-usage",
     });
@@ -609,12 +548,14 @@ describe("usage_events.bot_id (migration 0117)", () => {
          VALUES ('bot-metering', 'default', 'bot-metering', 1, ?, ?)`,
       )
       .run(AT, AT);
-    await recordUsageEvent(db, {
+    await chargeUsage(db, {
       reviewId: "review-metered",
       executionToken: "token-metered",
       workspaceId: "default",
       occurredAt: AT,
-      rp: 60,
+      month: "2026-10",
+      level: "deep",
+      multiplier: 10,
       source: "shared",
       botId: "bot-metering",
     });
@@ -628,12 +569,14 @@ describe("usage_events.bot_id (migration 0117)", () => {
     const db = createMigratedTestD1();
     seedUsageBot(db);
     await expect(
-      recordUsageEvent(db, {
+      chargeUsage(db, {
         reviewId: "review-orphan",
         executionToken: "token-orphan",
         workspaceId: "default",
         occurredAt: AT,
-        rp: 1,
+        month: "2026-10",
+        level: "quick",
+        multiplier: 1,
         source: "byok",
         botId: "no-such-bot",
       }),

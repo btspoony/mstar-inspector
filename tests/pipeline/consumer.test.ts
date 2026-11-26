@@ -9752,25 +9752,22 @@ describe("usage ledger (migration 0031)", () => {
     expect(row.error).toContain('"applied":false');
   });
 
-  test("an ambiguous usage failure records applied: true so it is not backfilled twice", async () => {
+  test("a usage failure that lands and then throws records applied: true so it is not backfilled twice", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    // Metering is a plain insert now, so the ambiguous case is its `run()`:
-    // the row COMMITS and the driver then throws, which is what the read-back
-    // must be able to tell apart from a pre-commit failure.
+    // The charge is one batch; its LAST statement (the usage insert) lands and
+    // the driver then throws. The read-back must see the row and report
+    // applied: true — a batch is atomic, so "landed" cannot mean "half landed".
+    let batchCalls = 0;
     const appliedThenThrew: TestD1 = {
       ...db,
-      prepare(query: string) {
-        const real = db.prepare(query);
-        if (!query.includes("INSERT INTO usage_events")) return real;
-        return {
-          bind: (...values: unknown[]) => ({
-            run: async () => {
-              await real.bind(...values).run();
-              throw new Error("usage boom after commit");
-            },
-          }),
-        } as never;
+      async batch(statements) {
+        batchCalls += 1;
+        const results = await db.batch(statements);
+        if (statements.length === 2 && results.every((r) => r.meta.changes > 0 || r.results !== undefined)) {
+          throw new Error("usage boom after commit");
+        }
+        return results;
       },
     };
     const consumer = createReviewConsumer(
@@ -9781,6 +9778,7 @@ describe("usage ledger (migration 0031)", () => {
 
     await consumer(h.makeBatch(makePayload()));
 
+    expect(batchCalls).toBeGreaterThan(0);
     expect(reviewCount(db)).toBe(1);
     expect(usageRows(db)).toHaveLength(1);
     expect(failureRows(db)).toHaveLength(1);
