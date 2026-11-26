@@ -13,6 +13,7 @@ import {
   parseSettings,
   pullRequestRefOf,
   scopedInsightsSummaryUrl,
+  type AppChainEntry,
   type AppDetailSearch,
   type AppDetailTab,
   type SettingsBlockedPayload,
@@ -52,6 +53,20 @@ const identityPayload = {
 };
 
 const BOOT = { locale: "en" as const, login: "mallory", name: null };
+
+/** One chain row with the fields the panel renders; callers override the ones under test. */
+function chainRow(overrides: Partial<AppChainEntry> & { position: number; bot_id: string }): AppChainEntry {
+  return {
+    name: overrides.bot_id,
+    description: null,
+    provider_workspace: "ws_0123456789abcdefghijkl",
+    owned: true,
+    available: true,
+    multiplier: 1,
+    month_used_rp: 0,
+    ...overrides,
+  };
+}
 
 const managePayload = {
   can_manage: true as const,
@@ -254,10 +269,11 @@ describe("tab shell rendering (static SSR)", () => {
       (tab) => tab.textContent ?? "",
     );
 
-  test("the manager's tab bar is the App's own three faces, settings first", async () => {
+  test("the manager's tab bar is the App's own four faces, settings first", async () => {
     const manage = renderDetail(managePayload);
     expect(await withMarkup(manage, pageTabs)).toEqual([
       t("en", "appDetail.tabSettings"),
+      t("en", "appDetail.tabBots"),
       t("en", "appDetail.tabDelivery"),
       t("en", "appDetail.tabInstallations"),
     ]);
@@ -339,7 +355,10 @@ describe("tab shell rendering (static SSR)", () => {
     expect(chainless).not.toContain(`href="${apiBase()}/apps/1/bot"`);
 
     // F7: a mounted chain links each mounted BOT id, never the App id.
-    const mounted = renderDetail({ ...managePayload, mounted_bot_ids: ["bot-a", "bot-b"] });
+    const mounted = renderDetail({
+      ...managePayload,
+      chain: [chainRow({ position: 1, bot_id: "bot-a" }), chainRow({ position: 2, bot_id: "bot-b" })],
+    });
     expect(mounted).toContain(`href="${apiBase()}/bots/bot-a"`);
     expect(mounted).toContain(`href="${apiBase()}/bots/bot-b"`);
     expect(mounted).not.toContain(`href="${apiBase()}/apps/1/bot"`);
@@ -775,7 +794,9 @@ describe("header metric band on the manage face (static SSR)", () => {
   }): SettingsManagePayload => ({
     ...managePayload,
     installations: Array.from({ length: counts.installations }, () => installation),
-    mounted_bot_ids: Array.from({ length: counts.mounted }, (_, index) => `bot-${index}`),
+    chain: Array.from({ length: counts.mounted }, (_, index) =>
+      chainRow({ position: index + 1, bot_id: `bot-${index}` }),
+    ),
     delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
   });
 
@@ -1167,5 +1188,79 @@ describe("投递状态 tab", () => {
         ].map((node) => node.getAttribute("href"))),
       ).not.toContain(`${apiBase()}/targets`);
     }
+  });
+});
+
+describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
+  const chainRows = async (markup: string): Promise<string[][]> =>
+    withMarkup(markup, (container) => {
+      const table = [...container.querySelectorAll("table")].find((node) =>
+        (node.querySelector("thead")?.textContent ?? "").includes(t("en", "apps.chain.columnPosition")),
+      );
+      if (table === undefined) return [];
+      return [...table.querySelectorAll("tbody tr")].map((row) =>
+        [...row.querySelectorAll("td")].map((cell) => (cell.textContent ?? "").trim()),
+      );
+    });
+
+  test("?tab=bots opens the tab and its inverse round-trips; unknown values still fall back", () => {
+    expect(parseAppDetailSearch("?tab=bots").tab).toBe("bots");
+    expect(appDetailSearchQuery({ tab: "bots", window: "30", repo: "", pr: "" })).toBe("?tab=bots");
+    expect(parseAppDetailSearch("?tab=chain").tab).toBe("settings");
+  });
+
+  test("position, bot name, provider, multiplier and the month cell render in chain order", async () => {
+    const markup = renderDetail(
+      {
+        ...managePayload,
+        chain: [
+          chainRow({ position: 1, bot_id: "bot-a", name: "Mstar Standard", owned: false, multiplier: 1.5, month_used_rp: 1240 }),
+          chainRow({ position: 2, bot_id: "bot-b", name: "acme-own", month_used_rp: 0 }),
+        ],
+      },
+      "bots",
+    );
+    const rows = await chainRows(markup);
+
+    expect(rows.map((cells) => cells[0])).toEqual(["1", "2"]);
+    expect(rows[0]![1]).toContain("Mstar Standard");
+    expect(rows[0]![1]).toContain(t("en", "apps.chain.tagShared"));
+    expect(rows[1]![1]).toContain(t("en", "apps.chain.tagMine"));
+    expect(rows.map((cells) => cells[3])).toEqual(["×1.5", "×1"]);
+    expect(rows[0]![4]).toContain("1240");
+  });
+
+  test("the chain offers no reorder, remove or add control — read-only until the relay ships", async () => {
+    const markup = renderDetail({ ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] }, "bots");
+    const controls = await withMarkup(markup, (container) =>
+      [...container.querySelectorAll("[data-slot='app-chain'] button, [data-slot='app-chain'] input")].map(
+        (node) => node.textContent ?? "",
+      ),
+    );
+    // No control of any kind inside the chain region: the editable order ships
+    // with the relay that reads it (D29), so this release renders none.
+    expect(controls).toEqual([]);
+  });
+
+  test("an empty chain names the next step instead of rendering a blank table", async () => {
+    const markup = renderDetail({ ...managePayload, chain: [] }, "bots");
+    expect(markup).toContain(t("en", "apps.chain.empty"));
+    expect(await chainRows(markup)).toEqual([]);
+  });
+
+  test("a bot its owner stopped sharing renders as a skipped row", async () => {
+    const markup = renderDetail(
+      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a", owned: false, available: false })] },
+      "bots",
+    );
+    expect(markup).toContain(t("en", "apps.chain.rowUnavailable"));
+  });
+
+  test("the App band and the bot link read the chain, not a same-id bot", async () => {
+    const markup = renderDetail(
+      { ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] },
+    );
+    expect(markup).toContain(`href="${apiBase()}/bots/bot-a"`);
+    expect(markup).toContain(t("en", "appDetail.metricMountedBots"));
   });
 });

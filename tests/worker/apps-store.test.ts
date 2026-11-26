@@ -553,7 +553,11 @@ describe("apps-store (createReviewBotsStore)", () => {
     await Bun.sleep(2);
     await s.reconcileInstallations(app.id, live, await s.currentTimestamp());
 
-    expect(db.boundValueCounts!.slice(-2)).toEqual([2, 2]);
+    // The batch is reconcile's two snapshot statements followed by the
+    // install-state sweep: the two that classify rows bind the App id and the
+    // snapshot (2 each, whatever the list length), and the sweep's two bind the
+    // App id alone (1 each).
+    expect(db.boundValueCounts!.slice(-4)).toEqual([2, 2, 1, 1]);
     const rows = await s.listInstallations(app.id);
     expect(rows.map((row) => row.installation_id).sort((a, b) => a - b)).toEqual([1, 100, 150]);
     const n = db.raw.query("SELECT COUNT(*) AS n FROM github_app_installations").get() as { n: number };

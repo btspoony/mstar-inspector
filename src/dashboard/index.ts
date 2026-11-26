@@ -2171,6 +2171,9 @@ const appListRoute = async (c: DashboardContext) => {
   // F1: an App's month state comes from the bots its CHAIN mounts — never from
   // a same-id bot. No chain means `null`, which the SPA renders as the dash.
   const chains = await apps.listInstallChainBots(gate.scope.workspaceId);
+  // Every live installation this workspace bound, per App — one statement for
+  // the whole page, never a read per row.
+  const boundInstallations = await apps.listBoundInstallationsByWorkspace(gate.scope.workspaceId);
   const quota = await readPlanMonthlyRp(
     gate.db,
     gate.scope.workspaceId,
@@ -2185,21 +2188,36 @@ const appListRoute = async (c: DashboardContext) => {
     ...(quota.kind === "unknown" ? {} : { month_plan_rp: quota.kind === "unlimited" ? null : quota.rp }),
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
+      const chain = chains.get(app.id) ?? [];
       return {
         github_app_id: app.github_app_id,
         owned: app.workspace_id === gate.scope.workspaceId,
         installed: installedIds.has(app.id),
+        // The workspace's own installations of this App, live only.
+        installations: boundInstallations.get(app.id) ?? [],
+        // The ordered chain: position is the array order, and each bot carries
+        // its own name, provider workspace, multiplier and this month's spend.
+        chain: chain.map((bot) => ({
+          position: bot.position,
+          bot_id: bot.botId,
+          name: bot.name,
+          description: bot.description,
+          provider_workspace: bot.providerWorkspace,
+          owned: bot.owned,
+          available: bot.available,
+          multiplier: bot.multiplier,
+          month_used_rp: spend.get(bot.botId) ?? 0,
+        })),
         // `null` = no chain mounted, so nothing is metered. A number is the
         // sum of this workspace's spend through the mounted bots.
-        month: (() => {
-          const chain = chains.get(app.id) ?? [];
-          if (chain.length === 0) return null;
-          return {
-            used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
-            owned: chain.every((bot) => bot.owned),
-            multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
-          };
-        })(),
+        month:
+          chain.length === 0
+            ? null
+            : {
+                used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
+                owned: chain.every((bot) => bot.owned),
+                multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
+              },
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2618,17 +2636,10 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       installation: binding,
       pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
       // F7: the bots this App's chain actually mounts in THIS workspace — the
-      // only App-to-bot relation that exists. Empty until install-state-chain
-      // writes the chain, and never inferred from an id coincidence.
-      mounted_bot_ids: (
-        await member.db
-          .prepare(
-            `SELECT bot_id FROM app_install_bots
-              WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position`,
-          )
-          .bind(appRow.id, member.scope.workspaceId)
-          .all<{ bot_id: string }>()
-      ).results.map((row) => row.bot_id),
+      // only App-to-bot relation that exists — in position order, each with its
+      // own facts and this month's spend. One statement, no fan-out; the spend
+      // aggregate is the same single query the Apps page reads.
+      chain: await appChainRead(member.db, appRow.id, member.scope.workspaceId),
       blocked: false,
       blocked_reason: null,
       official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
@@ -4646,6 +4657,59 @@ function installationsVisibleTo(
   return app.scope === "shared" || app.workspace_id !== workspaceId
     ? apps.listInstallationsBoundTo(app.id, workspaceId)
     : apps.listInstallations(app.id);
+}
+
+/** One chain row of the App detail's `bots` tab. */
+export type AppChainEntry = {
+  position: number;
+  bot_id: string;
+  name: string;
+  description: string | null;
+  provider_workspace: string;
+  owned: boolean;
+  available: boolean;
+  multiplier: number;
+  month_used_rp: number;
+};
+
+/**
+ * This workspace's ordered chain on one App, each bot with its own facts and
+ * this month's spend. Two statements for the whole chain — the rows and the
+ * spend aggregate — never a query per bot. Positions are the stored ones, so a
+ * gap (a bot the owner stopped sharing, until the editor removes it) stays
+ * visible rather than closing up.
+ */
+async function appChainRead(
+  db: DashboardDb,
+  appId: string,
+  workspaceId: string,
+): Promise<AppChainEntry[]> {
+  const chains = await createReviewBotsStore(db).listInstallChainBots(workspaceId);
+  const chain = chains.get(appId) ?? [];
+  if (chain.length === 0) return [];
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  return chain.map((bot) => ({
+    position: bot.position,
+    bot_id: bot.botId,
+    name: bot.name,
+    description: bot.description,
+    provider_workspace: bot.providerWorkspace,
+    owned: bot.owned,
+    available: bot.available,
+    multiplier: bot.multiplier,
+    month_used_rp: spend.get(bot.botId) ?? 0,
+  }));
 }
 
 const BIND_STATE_COOKIE = "__Host-mstar-bind-state";

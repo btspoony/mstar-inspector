@@ -1344,3 +1344,97 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
     expect(res.body!.repos).toEqual(["acme/api", "acme/web"]);
   });
 });
+
+describe("the install state's read faces (D43, D35)", () => {
+  const LIST = "/dashboard/default/api/apps";
+  const DETAIL = (githubAppId: number) => `/dashboard/default/api/apps/${githubAppId}`;
+
+  test("each list row carries its own installations and its ordered chain", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const appId = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+    // An installation bound to this workspace and a second, unbound one.
+    db.raw.run(
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, bound_workspace_id)
+         VALUES ('inst-bound', '${appId.id}', 4101, 'acme', '2026-01-01T00:00:00.000Z', 'default'),
+                ('inst-free', '${appId.id}', 4102, 'acme', '2026-01-01T00:00:00.000Z', NULL)`,
+    );
+
+    const body = (await (await get(LIST, cookie, makeEnv(db))).json()) as {
+      apps: Array<{
+        github_app_id: number;
+        installations: Array<{ installation_id: number }>;
+        chain: Array<Record<string, unknown>>;
+      }>;
+    };
+    const row = body.apps.find((app) => app.github_app_id === MALLORY_APP_ID)!;
+
+    // The workspace's OWN installation, never the unbound sibling.
+    expect(row.installations.map((entry) => entry.installation_id)).toEqual([4101]);
+    // `createApp` wrote the owner's state and its one chain row.
+    expect(row.chain).toEqual([
+      {
+        position: 1,
+        bot_id: appId.id,
+        name: "mstar-inspector-mallory",
+        description: null,
+        provider_workspace: "Default",
+        owned: true,
+        available: true,
+        multiplier: 1,
+        month_used_rp: 0,
+      },
+    ]);
+  });
+
+  test("the App detail serves the same ordered chain and no bare id list", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const appRow = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+
+    const body = (await (await get(DETAIL(MALLORY_APP_ID), cookie, makeEnv(db))).json()) as Record<
+      string,
+      unknown
+    > & { chain: Array<Record<string, unknown>> };
+
+    expect(body).not.toHaveProperty("mounted_bot_ids");
+    expect(body.chain).toEqual([
+      {
+        position: 1,
+        bot_id: appRow.id,
+        name: "mstar-inspector-mallory",
+        description: null,
+        provider_workspace: "Default",
+        owned: true,
+        available: true,
+        multiplier: 1,
+        month_used_rp: 0,
+      },
+    ]);
+  });
+
+  test("a chainless App serves an empty chain, which the SPA renders as its dash", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const appRow = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+    db.raw.run(`DELETE FROM app_install_bots WHERE github_app_id = '${appRow.id}'`);
+
+    const list = (await (await get(LIST, cookie, makeEnv(db))).json()) as {
+      apps: Array<{ github_app_id: number; chain: unknown[]; month: unknown }>;
+    };
+    const row = list.apps.find((app) => app.github_app_id === MALLORY_APP_ID)!;
+    expect(row.chain).toEqual([]);
+    expect(row.month).toBeNull();
+    // The install state survives without its chain: it is the aggregate, the
+    // chain is what it mounts.
+    expect(
+      db.raw.query("SELECT COUNT(*) AS n FROM app_installations WHERE github_app_id = ?").get(appRow.id),
+    ).toEqual({ n: 1 });
+  });
+});
