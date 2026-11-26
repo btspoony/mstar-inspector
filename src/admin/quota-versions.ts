@@ -63,7 +63,13 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
   const plans = (planResult?.results ?? []) as QuotaPlan[];
   // An empty table is a fresh deployment, not a read failure: the operator
   // needs the form to publish the first version, so nothing here throws.
-  const judging = profiles.length === 0 ? null : pickQuotaProfile(profiles, month.startIso);
+  //
+  // The marker names the version a workspace with NO binding gets, which under
+  // D13 is the profile in force at this instant — not the one covering the
+  // month's 1st. A bound workspace may sit on an older version; that is the
+  // point of the binding, and the list says so with `current` naming only the
+  // unbound answer.
+  const judging = profiles.length === 0 ? null : pickQuotaProfile(profiles, now.toISOString());
   const versions = profiles.map((profile: QuotaProfileVersion, index) => ({
     id: profile.id,
     version: profile.version,
@@ -72,7 +78,7 @@ export async function listQuotaVersions(db: DashboardD1, now: Date): Promise<Quo
     state:
       profile.id === judging?.id
         ? ("current" as const)
-        : profile.effectiveFrom > month.startIso
+        : profile.effectiveFrom > now.toISOString()
           ? ("scheduled" as const)
           : ("past" as const),
     base: profile.base,
@@ -125,6 +131,11 @@ async function liveWorkspacePlans(db: DashboardD1): Promise<Array<{ id: string; 
  * How many live workspaces would already be over these numbers at today's
  * usage. One month sum (`readMonthlyRp` with no workspace bound), one
  * comparison per workspace (`quotaSpent`), one date (`quotaStartsOn`).
+ *
+ * A workspace holding a binding for this month is NOT counted: its version is
+ * already pinned, so the candidate reaches it at its next month's first
+ * metering, never mid-month (D13, contract § 3). What the count reports is the
+ * population that adopts the candidate at its next metering — the unbound.
  */
 export async function previewQuotaImpact(
   db: DashboardD1,
@@ -132,13 +143,19 @@ export async function previewQuotaImpact(
   now: Date,
 ): Promise<QuotaImpact> {
   const month = quotaMonth(now);
-  const [workspaces, usage] = await Promise.all([
+  const [workspaces, usage, bound] = await Promise.all([
     liveWorkspacePlans(db),
     readMonthlyRpByWorkspace(db, month.startIso, month.endIso),
+    db
+      .prepare(`SELECT workspace_id AS workspaceId FROM workspace_quota_binding WHERE month = ?1`)
+      .bind(month.month)
+      .all<{ workspaceId: string }>(),
   ]);
   const spent = new Map(usage.map((row) => [row.workspaceId, row.total]));
+  const pinned = new Set(bound.results.map((row) => row.workspaceId));
   let count = 0;
   for (const workspace of workspaces) {
+    if (pinned.has(workspace.id)) continue;
     if (quotaSpent(spent.get(workspace.id) ?? 0, candidate.monthlyRp[workspace.planId] ?? null)) {
       count += 1;
     }

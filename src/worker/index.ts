@@ -47,7 +47,7 @@ import {
   reviewRunState,
 } from "../dashboard/runtime-config-store";
 import { checkEntitlement } from "../dashboard/entitlement";
-import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
+import { quotaMonth, readBotMultiplier, resolveWorkspaceQuotaProfile, rpFor } from "../store/quota-store";
 import { sumMonthlyRp } from "../store/usage-store";
 import { attachCheckAtAcceptance, createCheckLifecycle } from "../pipeline/checks";
 import { createReviewCommenter } from "../pipeline/comment";
@@ -415,14 +415,15 @@ export async function settleRefusedAfterAttach(input: {
 async function quotaRefusal(
   db: D1Database,
   target: ReviewTargetRow,
-  scope: BotScope,
+  multiplier: number,
   mode: DeploymentMode,
 ): Promise<DeliveryRefusal | null> {
-  const month = quotaMonth(new Date());
-  const profile = await resolveQuotaProfile(db, month.startIso);
+  const now = new Date();
+  const month = quotaMonth(now);
+  const profile = await resolveWorkspaceQuotaProfile(db, target.workspace_id, month.month, now.toISOString());
   let level = parseTargetReviewLevel(target.review_level);
   if (level === null) level = (await readDefaultReviewLevel(db)).value;
-  const cost = rpFor(level, scope === "shared" ? "shared" : "byok", profile);
+  const cost = rpFor(level, multiplier, profile);
   const used = await sumMonthlyRp(db, target.workspace_id, month.startIso, month.endIso);
 
   const verdict = await checkEntitlement({
@@ -430,7 +431,7 @@ async function quotaRefusal(
     mode,
     workspaceId: target.workspace_id,
     kind: "review-quota",
-    monthStart: month.startIso,
+    now,
     usedRp: used,
     costRp: cost,
   });
@@ -658,7 +659,9 @@ app.post("/webhook/:workspaceId/:appId", async (c) => {
         }
       }
       if (refusal === null && mode !== "self-hosted") {
-        refusal = await quotaRefusal(db, target, row.scope, mode);
+        const multiplier = await readBotMultiplier(db, row.id);
+        if (multiplier === null) refusal = { kind: "entitlement-unreadable" };
+        else refusal = await quotaRefusal(db, target, multiplier, mode);
       }
     } catch (err) {
       refusal = { kind: "entitlement-unreadable" };

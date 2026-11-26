@@ -40,7 +40,7 @@ import {
   recordUsageEvent,
   type UsageSource,
 } from "../store/usage-store";
-import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
+import { quotaMonth, readBotMultiplier, resolveWorkspaceQuotaProfile, rpFor } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   CHECK_BACKOFF_MS,
@@ -3024,15 +3024,30 @@ async function preparePhase(
   // therefore its own charge.
   const executionToken = `usage-attempt:${attemptId}`;
   const usageOccurredAt = usageNow.toISOString();
+  const usageMonth = quotaMonth(usageNow);
   try {
+    // The bound version is resolved at the INSTANT being charged, so a
+    // workspace metering for the first time today pins today's version rather
+    // than the one covering the 1st (D13).
+    const boundProfile = await resolveWorkspaceQuotaProfile(
+      deps.env.DB,
+      usageWorkspaceId,
+      usageMonth.month,
+      usageOccurredAt,
+    );
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    if (multiplier === null) {
+      throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    }
     await recordUsageEvent(deps.env.DB, {
       reviewId,
       executionToken,
       workspaceId: usageWorkspaceId,
       occurredAt: usageOccurredAt,
-      rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
+      rp: rpFor(level, multiplier, boundProfile),
       source: usageSource,
       botId: payload.botRef.botId,
+      quota: { month: usageMonth.month, profileId: boundProfile.id },
     });
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);

@@ -164,7 +164,14 @@ function directReadFiles(): string[] {
 // github_apps (Tasks 3–4 converted the publishing/ops trees); grep finds zero
 // remaining references in any of them. The bot table is read by the store
 // alone — the allowlist is the proof, not a leftover.
-const MAINTENANCE_SITES: Record<string, number> = {};
+const MAINTENANCE_SITES: Record<string, number> = {
+  // `readBotMultiplier` is the ONE read of `review_bots.multiplier`, shared by
+  // the metering path and the enqueue ceiling. Authorization happened upstream
+  // (the webhook resolved the bot row, the job carries `botRef.botId`), the row
+  // is addressed by its own id, and the projection is that single price column
+  // — no identity, no ownership, no workspace to scope by.
+  "store/quota-store.ts": 1,
+};
 
 const TENANT_DIRECT_SITES: Record<string, number> = {};
 

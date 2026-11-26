@@ -20,6 +20,10 @@ export type UsageEventInput = {
   // stays nullable for pre-split history, but no production row may be written
   // unattributed — an unwired caller is a compile error, never a NULL.
   botId: string;
+  // D36: the version this month is pinned to. The metering path is the binding's
+  // only writer, so it rides THIS batch — `INSERT OR IGNORE`, a no-op once the
+  // month's first metering has recorded one.
+  quota: { month: string; profileId: string };
 };
 
 /**
@@ -113,24 +117,38 @@ export async function sumMonthlyRp(
   return rows[0]?.total ?? 0;
 }
 
-/** Append one started-execution row, minting the attempt `seq`. */
+/**
+ * Append one started-execution row, minting the attempt `seq`, and pin the
+ * month's quota version in the SAME batch (D36). The two statements are one
+ * write: the row that spends RP and the version it is priced under can never
+ * be observed apart, so a retry cannot charge under one version and bind
+ * another. The binding is `INSERT OR IGNORE`, so every metering after the
+ * month's first is a no-op and the pinned version never moves.
+ */
 export async function recordUsageEvent(db: D1Like, input: UsageEventInput): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source, bot_id)
-       SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7
-       WHERE NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
-    )
-    .bind(
-      input.reviewId,
-      input.executionToken,
-      input.workspaceId,
-      input.occurredAt,
-      input.rp,
-      input.source,
-      input.botId,
-    )
-    .run();
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO usage_events (review_id, seq, execution_token, workspace_id, occurred_at, rp, source, bot_id)
+         SELECT ?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM usage_events WHERE review_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7
+         WHERE NOT EXISTS (SELECT 1 FROM usage_events existing WHERE existing.execution_token = ?2)`,
+      )
+      .bind(
+        input.reviewId,
+        input.executionToken,
+        input.workspaceId,
+        input.occurredAt,
+        input.rp,
+        input.source,
+        input.botId,
+      ),
+    db
+      .prepare(
+        `INSERT OR IGNORE INTO workspace_quota_binding (workspace_id, month, profile_id)
+         VALUES (?1, ?2, ?3)`,
+      )
+      .bind(input.workspaceId, input.quota.month, input.quota.profileId),
+  ]);
 }
 
 /**

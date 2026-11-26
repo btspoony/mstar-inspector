@@ -1,6 +1,6 @@
 import type { DeploymentMode } from "../worker/env";
 import type { D1Like } from "../store/types";
-import { quotaSpent, resolveMonthlyQuota } from "../store/quota-store";
+import { quotaSpent, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
 import type { WorkspaceStoreD1 } from "./workspace-store";
 
 /**
@@ -197,7 +197,10 @@ export type EntitlementCtx =
   | (Base & {
       kind: "review-quota";
       db: WorkspaceStoreD1 & D1Like;
-      monthStart: string;
+      // The instant the ceiling is judged at: it yields BOTH the month key and,
+      // with no binding for that month, the profile in force. A caller passes
+      // the moment it is deciding for, never a fixed month boundary (D13).
+      now: Date;
       usedRp: number;
       costRp: number;
     });
@@ -297,7 +300,7 @@ export async function checkEntitlement(
     }
     case "review-quota": {
       const limits = await plan(ctx.workspaceId);
-      const { monthlyRp } = await resolveMonthlyQuota(ctx.db, ctx.monthStart, limits.id);
+      const { monthlyRp } = await resolveWorkspaceMonthlyQuota(ctx.db, ctx.workspaceId, limits.id, ctx.now);
       if (monthlyRp !== null && quotaSpent(ctx.usedRp, monthlyRp, ctx.costRp)) {
         return {
           ok: false,

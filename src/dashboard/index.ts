@@ -113,7 +113,7 @@ import {
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
-import { quotaMonth, resolveMonthlyQuota } from "../store/quota-store";
+import { quotaMonth, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2164,7 +2164,7 @@ const appListRoute = async (c: DashboardContext) => {
   const quota = await readPlanMonthlyRp(
     gate.db,
     gate.scope.workspaceId,
-    month.startIso,
+    new Date(),
     deploymentModeOf(c.env.DEPLOYMENT_MODE),
   );
   return c.json({
@@ -2269,7 +2269,7 @@ async function usableBotsRead(
       .all<{ bot_id: string; total: number }>()
   ).results;
   const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
-  const quota = await readPlanMonthlyRp(db, workspaceId, month.startIso, mode);
+  const quota = await readPlanMonthlyRp(db, workspaceId, new Date(), mode);
   return {
     workspace_id: workspaceId,
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
@@ -2297,7 +2297,7 @@ async function usableBotsRead(
 async function readPlanMonthlyRp(
   db: DashboardDb,
   workspaceId: string,
-  monthStart: string,
+  now: Date,
   mode: DeploymentMode,
 ): Promise<{ kind: "ceiling"; rp: number } | { kind: "unlimited" } | { kind: "unknown" }> {
   // F10: the resolver is deployment-aware (self-hosted has no plan), and a
@@ -2306,7 +2306,7 @@ async function readPlanMonthlyRp(
   try {
     const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
     if (plan.id === UNLIMITED_PLAN_ID) return { kind: "unlimited" };
-    const monthlyRp = (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+    const monthlyRp = (await resolveWorkspaceMonthlyQuota(db, workspaceId, plan.id, now)).monthlyRp;
     // A NULL quota row is the profile's own "no ceiling" spelling.
     return monthlyRp === null ? { kind: "unlimited" } : { kind: "ceiling", rp: monthlyRp };
   } catch {
@@ -3309,7 +3309,7 @@ const appBotRoute = async (c: DashboardContext) => {
     readPlanMonthlyRp(
       member.db,
       member.scope.workspaceId,
-      month.startIso,
+      new Date(),
       deploymentModeOf(c.env.DEPLOYMENT_MODE),
     ),
     // F4: the capability summary reads the DEFAULT chain without owner
