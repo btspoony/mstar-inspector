@@ -8,8 +8,8 @@
  * from https://models.dev/api.json; the `api` field carries the base URL)
  * + the omp-facing override table in the generator (labels / env-name
  * contract / workers-ai template) + the vendored omp provider snapshot
- * `scripts/provider-catalog/generated/omp-api-key-providers.json` (omp 19.2.0,
- * extracted 2026-11-25). Runtime is fully static: zero network,
+ * `scripts/provider-catalog/generated/omp-api-key-providers.json` (omp 19.2.1,
+ * extracted 2026-11-26). Runtime is fully static: zero network,
  * zero ai-sdk runtime dependencies — the Worker, the dashboard, and the
  * sandbox image only import this module. PURE DATA + pure derivations:
  * zero imports of any kind.
@@ -45,7 +45,7 @@
  *   - rule (d) omp-owned mixed-protocol keys (4): the union's single
  *     row for that provider owns the key (its protocols carry the union vocabulary), so the
  *     single models.dev row is not emitted: commandcode, deepinfra, opencode-go, zenmux
- * omp provider union (omp 19.2.0, vendored 2026-11-25 — every omp
+ * omp provider union (omp 19.2.1, vendored 2026-11-26 — every omp
  * API-key provider id names its rule; 110 providers → 11 template rows):
  *   - (a) already in the catalog (builtin or template) (51): anthropic, zai, zai-coding-plan, openrouter, github-copilot, cursor, xai, alibaba-coding-plan, alibaba-token-plan, aiand, umans, sakana, sambanova, xiaomi, xiaomi-token-plan-sgp, xiaomi-token-plan-ams, xiaomi-token-plan-cn, cline-pass, deepseek, stepfun, meta, inception, cerebras, chutes, baseten, nvidia, huggingface, perplexity, modal, venice, siliconflow, siliconflow-cn, synthetic, wafer-serverless, cloudflare-ai-gateway, cloudflare-workers-ai, kilo, liquid, ollama-cloud, coralbricks, modular, mistral, scaleway, aimlapi, amazon-bedrock, azure, google, google-vertex, groq, minimax, openai
  *   - (b) naming alias of an existing catalog row (14): abliteration → abliteration-ai, zhipu-coding-plan → zhipuai-coding-plan, minimax-code → minimax-coding-plan, minimax-code-cn → minimax-cn-coding-plan, charm-hyper → hyper, moonshot → moonshotai, fireworks → fireworks-ai, together → togetherai, novita → novita-ai, nanogpt → nano-gpt, vercel-ai-gateway → vercel, opencode-zen → opencode, lm-studio → lmstudio, gmi-cloud → gmicloud
