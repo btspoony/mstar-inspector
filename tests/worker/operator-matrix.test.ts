@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import type { Env } from "../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, syncSplitPair, type TestD1 } from "../store/helpers";
 import { insertSupportGrant } from "../../src/dashboard/operator-store";
 
 const SESSION_SECRET = ["test", "operator", "matrix", "secret", "32-bytes!"].join("-");
@@ -14,6 +14,8 @@ const DAY = 24 * 60 * 60 * 1000;
 const WORKSPACE = "ws-acme";
 const REF = "acme";
 const APP_ID = 7001;
+// The seeded App's ROW id — bot-config surfaces bind this.
+const BOT_ID = "app-acme";
 
 function envFor(db: TestD1): Env {
   return {
@@ -86,7 +88,7 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
   const now = new Date().toISOString();
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'v1.primary.aXZpdi.cHJldGV4dA==', 'v1.primary.aXZpdi.cHJldGV4dA==',
@@ -98,11 +100,12 @@ function seedApp(db: TestD1, id: string, slug: string, workspaceId: string): voi
     now,
     now,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", id, workspaceId);
+  syncSplitPair(db);
   seed(
     db,
     `INSERT INTO review_targets
-       (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+       (id, workspace_id, app_id, name, created_by, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'dana', ?, ?)`,
     `target-${id}`,
     workspaceId,
@@ -182,27 +185,27 @@ const SURFACES: readonly Surface[] = [
   {
     name: "credentials",
     method: "POST",
-    path: `/dashboard/${REF}/api/apps/${APP_ID}/keys/verify`,
+    path: `/dashboard/${REF}/api/review-bots/${BOT_ID}/keys/verify`,
     body: () => "provider=anthropic&key=sk-not-a-real-key",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "settings read",
-    path: `/dashboard/${REF}/api/apps/${APP_ID}/settings`,
+    path: `/dashboard/${REF}/api/review-bots/${BOT_ID}/settings`,
     status: { member: 200, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "model chains",
-    path: `/dashboard/${REF}/api/apps/${APP_ID}/models`,
+    path: `/dashboard/${REF}/api/review-bots/${BOT_ID}/models`,
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },
   },
   {
     name: "settings write",
     method: "POST",
-    path: `/dashboard/${REF}/apps/${APP_ID}/settings`,
+    path: `/dashboard/${REF}/review-bots/${BOT_ID}/settings`,
     body: () => "op=save-chain&model_chain=",
     status: { member: 403, granted: 403, denied: 404, outsider: 404 },
     action: { granted: "support.forbidden", denied: "support.denied" },

@@ -42,7 +42,7 @@ export type MaintenanceReplayFailureRow = {
 };
 
 /** A live target, bot and workspace the replay job must resolve to. */
-export type MaintenanceReplayTarget = { targetId: string; botId: string };
+export type MaintenanceReplayTarget = { targetId: string; appId: string };
 
 /** Where a replay request stands on its failure row. */
 export type MaintenanceReplayState = "requested" | "sent";
@@ -87,7 +87,10 @@ export function maintenanceReplayPayload(
     head_sha: null,
     action: "maintenance_replay",
     triggered_by: "pull_request",
-    botRef: { appId: target.botId },
+    // In this release the executing bot equals the App the target binds: the
+    // split created exactly one bot per App under the same id, so both botRef
+    // names carry the same value for every migrated row.
+    botRef: { appId: target.appId, botId: target.appId },
     targetId: target.targetId,
   };
 }
@@ -110,16 +113,16 @@ async function readLiveTarget(db: DashboardD1, failureId: string): Promise<Maint
     // the tenant gate. upgrade: tenant-filter it once the maintenance replay becomes
     // workspace-scoped.
     .prepare(
-      `SELECT t.id AS target_id, t.bot_id AS bot_id
+      `SELECT t.id AS target_id, t.app_id AS app_id
          FROM review_failures f
          JOIN review_targets t ON t.id = f.target_id AND t.deleted_at IS NULL
-         JOIN review_bots b ON b.id = t.bot_id AND b.deleted_at IS NULL AND b.status = 'active'
+         JOIN github_apps g ON g.id = t.app_id AND g.deleted_at IS NULL AND g.status = 'active'
          JOIN workspaces w ON w.id = t.workspace_id AND w.deleted_at IS NULL
         WHERE f.id = ?`,
     )
     .bind(failureId)
-    .first<{ target_id: string; bot_id: string }>();
-  return row === null ? null : { targetId: row.target_id, botId: row.bot_id };
+    .first<{ target_id: string; app_id: string }>();
+  return row === null ? null : { targetId: row.target_id, appId: row.app_id };
 }
 
 async function stampAttempt(db: DashboardD1, id: string, now: string): Promise<void> {

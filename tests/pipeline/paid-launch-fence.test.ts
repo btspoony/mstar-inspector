@@ -35,7 +35,7 @@ const PAYLOAD = {
   repo: "widgets",
   pr_number: 42,
   head_sha: SHA,
-  botRef: { appId: "app-id" },
+  botRef: { appId: "app-id", botId: "app-id" },
 } as unknown as ReviewJobPayload;
 
 const GRANT = {

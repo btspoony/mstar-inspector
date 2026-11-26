@@ -22,7 +22,7 @@ import {
 import type { ReviewTargetRow } from "../../src/dashboard/targets-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
 
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -58,9 +58,8 @@ async function seedApp(
   const webhookSecretEnc = await box.encryptSecret(opts.secret, aad);
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`);
   const appCount = (db.raw.query("SELECT COUNT(*) AS n FROM review_bots").get() as { n: number }).n;
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, scope, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', ?, NULL, datetime('now'), datetime('now'))`,
@@ -74,15 +73,18 @@ async function seedApp(
       webhookSecretEnc,
       opts.scope ?? "owned",
     );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .run(id);
   const targetIds = (opts.targets ?? [{}]).map((target, index) => {
     const targetId = `target-${id}-${index}`;
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+           (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
             review_enabled, review_drafts, review_trigger_mode, created_by, created_at, updated_at)
          VALUES (?, 'default', ?, ?, ?, ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
       )
@@ -164,7 +166,7 @@ function setReviewGlobalOff(db: TestD1): void {
     .run();
 }
 
-const installUpsert = (query: string): boolean => query.includes("INSERT INTO bot_installations");
+const installUpsert = (query: string): boolean => query.includes("INSERT INTO github_app_installations");
 const flagRead = (query: string): boolean => query.includes("FROM server_flags");
 
 function failingDb(db: TestD1, match: (query: string) => boolean): TestD1 {
@@ -227,12 +229,12 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       head_sha: "abc123",
       action: "opened",
       triggered_by: "pull_request",
-      botRef: { appId: appRow.id },
+      botRef: { appId: appRow.id, botId: appRow.id },
       targetId: appRow.targetId,
     });
     expect(attachDeliveryId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
     const ledger = db.raw
-      .query("SELECT owner, repo, pr_number, state, head_sha FROM pull_requests WHERE bot_id = ?")
+      .query("SELECT owner, repo, pr_number, state, head_sha FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ owner: string; repo: string; pr_number: number; state: string; head_sha: string | null }>;
     expect(ledger).toEqual([
       { owner: "test-owner", repo: "test-repo", pr_number: 42, state: "open", head_sha: "abc123" },
@@ -258,7 +260,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(0);
 
     const delivery = db.raw
-      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
     expect(delivery.outcome).toBe("skipped");
 
@@ -298,7 +300,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(ENTITLEMENT_UNREADABLE_SKIP_REASON));
     expect(failures[0]!.error).not.toContain("does not include the shared bot");
     const delivery = db.raw
-      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
     expect(delivery.outcome).toBe("skipped");
   });
@@ -324,7 +326,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     const failures = db.raw.query("SELECT stage FROM review_failures").all() as Array<{ stage: string }>;
     expect(failures).toEqual([{ stage: SHARED_BOT_ENTITLEMENT_STAGE }]);
     const delivery = db.raw
-      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+      .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
     expect(delivery.outcome).toBe("skipped");
   });
@@ -348,7 +350,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent[0]!.targetId).toBe(appRow.targetId);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
     const delivery = db.raw
-      .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
+      .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1")
       .get(appRow.id) as { outcome: string };
     expect(delivery.outcome).toBe("ok");
   });
@@ -375,7 +377,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(sent).toHaveLength(1);
     const { head_at } = sent[0] as ReviewJobPayload;
     const row = db.raw
-      .query("SELECT head_at FROM pull_requests WHERE bot_id = ?")
+      .query("SELECT head_at FROM pull_requests WHERE app_id = ?")
       .get(appRow.id) as { head_at: string | null };
     expect({ queued: head_at, ledger: row.head_at }).toEqual({
       queued: "2026-03-01T10:00:00.000Z",
@@ -513,7 +515,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ outcome: "rejected", status_code: 401 }]);
   });
@@ -715,7 +717,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id }, targetId: appRow.targetId });
+    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id, botId: appRow.id }, targetId: appRow.targetId });
   });
 
   test("at-limit multi-byte UTF-8 body (exactly WEBHOOK_BODY_LIMIT bytes) → 200 accepted, enqueued (HMAC verifies)", async () => {
@@ -735,7 +737,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id }, targetId: appRow.targetId });
+    expect(sent[0]).toMatchObject({ pr_number: 42, botRef: { appId: appRow.id, botId: appRow.id }, targetId: appRow.targetId });
   });
 
   test("small valid webhook unchanged by the streamed cap → 200 accepted, enqueued", async () => {
@@ -851,7 +853,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       comment_id: 900000001,
       action: "created",
       triggered_by: "issue_comment",
-      botRef: { appId: appRow.id },
+      botRef: { appId: appRow.id, botId: appRow.id },
       targetId: appRow.targetId,
     });
   });
@@ -899,7 +901,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       head_sha: null,
       comment_id: 900000002,
       triggered_by: "issue_comment",
-      botRef: { appId: appRow.id },
+      botRef: { appId: appRow.id, botId: appRow.id },
       targetId: appRow.targetId,
     });
   });
@@ -940,7 +942,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_checks").get()).toEqual({ n: 0 });
       expect(db.raw.query("SELECT COUNT(*) AS n FROM review_failures").get()).toEqual({ n: 0 });
       const recorded = db.raw
-        .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+        .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
         .get(appRow.id) as { outcome: string };
       expect(recorded.outcome).toBe("ignored");
     });
@@ -1250,7 +1252,7 @@ describe("POST /webhook/:workspaceId/:appId (per-App routing)", () => {
 
 describe("tenant attribution on the webhook read face", () => {
   function dropWorkspaceMapping(db: TestD1, appId: string): void {
-    db.raw.prepare("DELETE FROM bot_workspaces WHERE bot_id = ?").run(appId);
+    db.raw.prepare("DELETE FROM app_workspaces WHERE app_id = ?").run(appId);
   }
 
   test("an unmapped (orphan) App answers 404 with zero decrypt, zero delivery row, zero enqueue", async () => {
@@ -1267,7 +1269,7 @@ describe("tenant attribution on the webhook read face", () => {
     expect(await res.text()).toBe("unknown webhook path");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT COUNT(*) AS n FROM webhook_deliveries WHERE app_id = ?")
       .get(appRow.id) as { n: number };
     expect(rows.n).toBe(0);
   });
@@ -1284,13 +1286,13 @@ describe("tenant attribution on the webhook read face", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(1);
-    expect(sent[0]!.botRef).toEqual({ appId: appRow.id });
+    expect(sent[0]!.botRef).toEqual({ appId: appRow.id, botId: appRow.id });
     expect(sent[0]!.targetId).toBe(appRow.targetId);
   });
 });
 
 describe("installations upsert wiring", () => {
-  test("per-App webhook with installation_id → bot_installations row INSERTED (seen_at set, login from the delivery)", async () => {
+  test("per-App webhook with installation_id → github_app_installations row INSERTED (seen_at set, login from the delivery)", async () => {
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     const { queue, sent } = makeQueue();
@@ -1307,10 +1309,10 @@ describe("installations upsert wiring", () => {
     expect(res.status).toBe(200);
     expect(sent).toHaveLength(1);
     const rows = db.raw
-      .query("SELECT bot_id, installation_id, account_login, seen_at FROM bot_installations")
-      .all() as Array<{ bot_id: string; installation_id: number; account_login: string | null; seen_at: string }>;
+      .query("SELECT app_id, installation_id, account_login, seen_at FROM github_app_installations")
+      .all() as Array<{ app_id: string; installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.bot_id).toBe(appRow.id);
+    expect(rows[0]!.app_id).toBe(appRow.id);
     expect(rows[0]!.installation_id).toBe(123);
     expect(rows[0]!.account_login).toBe("test-owner");
     expect(typeof rows[0]!.seen_at).toBe("string");
@@ -1330,7 +1332,7 @@ describe("installations upsert wiring", () => {
       env,
     );
     db.raw
-      .prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
+      .prepare("UPDATE github_app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
 
     const body2 = JSON.stringify({ ...PR_PAYLOAD, number: 43, pull_request: { number: 43, head: { sha: "def456" }, user: { login: "alice" } } });
@@ -1344,7 +1346,7 @@ describe("installations upsert wiring", () => {
     expect(res2.status).toBe(200);
     expect(sent).toHaveLength(2);
     const rows = db.raw
-      .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
+      .query("SELECT installation_id, account_login, seen_at FROM github_app_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.installation_id).toBe(123);
@@ -1360,7 +1362,7 @@ describe("installations upsert wiring", () => {
     const seedBody = JSON.stringify(PR_PAYLOAD);
     await postWebhook("/webhook/default/app-x", seedBody, await sigHeaders("secret-x", seedBody), env);
     db.raw
-      .prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
+      .prepare("UPDATE github_app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
 
     const body = JSON.stringify({
@@ -1373,7 +1375,7 @@ describe("installations upsert wiring", () => {
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT account_login, seen_at FROM bot_installations")
+      .query("SELECT account_login, seen_at FROM github_app_installations")
       .all() as Array<{ account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("alice");
@@ -1392,7 +1394,7 @@ describe("installations upsert wiring", () => {
     const first = await postWebhook("/webhook/default/app-x", body, headers, env);
     expect(first.status).toBe(200);
     db.raw
-      .prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
+      .prepare("UPDATE github_app_installations SET seen_at = '2000-01-01 00:00:00', account_login = 'alice'")
       .run();
 
     const second = await postWebhook("/webhook/default/app-x", body, headers, env);
@@ -1401,7 +1403,7 @@ describe("installations upsert wiring", () => {
     expect(sent).toHaveLength(1);
     expect(store.get(`idem:123:test-owner/test-repo:42:abc123`)).toBe("1");
     const rows = db.raw
-      .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
+      .query("SELECT installation_id, account_login, seen_at FROM github_app_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.account_login).toBe("alice");
@@ -1419,7 +1421,7 @@ describe("installations upsert wiring", () => {
       repository: { name: "test-repo", owner: { login: "alice" } },
     });
     await postWebhook("/webhook/default/app-x", prBody, await sigHeaders("secret-x", prBody), env);
-    db.raw.prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00'").run();
+    db.raw.prepare("UPDATE github_app_installations SET seen_at = '2000-01-01 00:00:00'").run();
 
     const bareBody = JSON.stringify({ action: "created", installation: { id: 123 } });
     const bare = await postWebhook("/webhook/default/app-x", bareBody, await sigHeaders("secret-x", bareBody, "installation"), env);
@@ -1427,7 +1429,7 @@ describe("installations upsert wiring", () => {
     expect(bare.status).toBe(200);
     expect(sent).toHaveLength(1);
     const rows = db.raw
-      .query("SELECT installation_id, account_login, seen_at FROM bot_installations")
+      .query("SELECT installation_id, account_login, seen_at FROM github_app_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.installation_id).toBe(123);
@@ -1447,9 +1449,9 @@ describe("installations upsert wiring", () => {
     expect(res.status).toBe(200);
     expect(sent).toHaveLength(1);
     const rows = db.raw
-      .query("SELECT bot_id, account_login FROM bot_installations")
-      .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+      .query("SELECT app_id, account_login FROM github_app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
     expect(sent[0]!.owner).toBe("test-owner");
   });
 
@@ -1467,9 +1469,9 @@ describe("installations upsert wiring", () => {
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT bot_id, account_login FROM bot_installations")
-      .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+      .query("SELECT app_id, account_login FROM github_app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
   });
 
   test("review_global OFF still records the login from a review-type delivery (the flag gates enqueue only)", async () => {
@@ -1486,9 +1488,9 @@ describe("installations upsert wiring", () => {
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT bot_id, account_login FROM bot_installations")
-      .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+      .query("SELECT app_id, account_login FROM github_app_installations")
+      .all() as Array<{ app_id: string; account_login: string | null }>;
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
   });
 
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
@@ -1517,17 +1519,17 @@ describe("installations upsert wiring", () => {
     expect(sent).toHaveLength(1);
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("installation_upsert_failed");
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number }).n).toBe(0);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM github_app_installations").get() as { n: number }).n).toBe(0);
   });
 });
 
 describe("installation event path", () => {
   function installationRows(
     db: TestD1,
-  ): Array<{ bot_id: string; installation_id: number; account_login: string | null }> {
+  ): Array<{ app_id: string; installation_id: number; account_login: string | null }> {
     return db.raw
-      .query("SELECT bot_id, installation_id, account_login FROM bot_installations")
-      .all() as Array<{ bot_id: string; installation_id: number; account_login: string | null }>;
+      .query("SELECT app_id, installation_id, account_login FROM github_app_installations")
+      .all() as Array<{ app_id: string; installation_id: number; account_login: string | null }>;
   }
 
   function deliveryRows(
@@ -1535,7 +1537,7 @@ describe("installation event path", () => {
     appId: string,
   ): Array<{ event_name: string | null; outcome: string; status_code: number | null }> {
     return db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appId) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
   }
 
@@ -1564,13 +1566,13 @@ describe("installation event path", () => {
       expect(await res.text()).toBe("accepted");
       expect(sent).toHaveLength(0);
       expect(installationRows(db)).toEqual([
-        { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+        { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
       ]);
       expect(deliveryRows(db, appRow.id)).toEqual([
         { event_name: "installation", outcome: "ignored", status_code: null },
       ]);
       const ops = db.raw
-        .query("SELECT last_webhook_at FROM review_bots WHERE id = ?")
+        .query("SELECT last_webhook_at FROM github_apps WHERE id = ?")
         .get(appRow.id) as { last_webhook_at: string | null };
       expect(ops.last_webhook_at).not.toBeNull();
     },
@@ -1581,7 +1583,7 @@ describe("installation event path", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw
       .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'alice', datetime('now'))",
+        "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'alice', datetime('now'))",
       )
       .run(appRow.id);
     const { queue, sent } = makeQueue();
@@ -1599,7 +1601,7 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
     ]);
   });
 
@@ -1644,7 +1646,7 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
     ]);
     expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
   });
@@ -1654,7 +1656,7 @@ describe("installation event path", () => {
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw
       .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'octo-org', datetime('now'))",
+        "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-1', ?, 555, 'octo-org', datetime('now'))",
       )
       .run(appRow.id);
     const { queue, sent } = makeQueue();
@@ -1672,7 +1674,7 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT installation_id, account_login, removed_at FROM bot_installations")
+      .query("SELECT installation_id, account_login, removed_at FROM github_app_installations")
       .all() as Array<{ installation_id: number; account_login: string | null; removed_at: string | null }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]!.installation_id).toBe(555);
@@ -1799,7 +1801,7 @@ describe("installation event path", () => {
     expect(sent).toHaveLength(0);
     const logged = warn.mock.calls.map((call) => String(call[0])).join("\n");
     expect(logged).toContain("installation_upsert_failed");
-    expect((db.raw.query("SELECT COUNT(*) AS n FROM bot_installations").get() as { n: number }).n).toBe(0);
+    expect((db.raw.query("SELECT COUNT(*) AS n FROM github_app_installations").get() as { n: number }).n).toBe(0);
   });
 });
 
@@ -1809,7 +1811,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     id: string,
   ): { review_enabled: number; last_webhook_at: string | null; updated_at: string } {
     return db.raw
-      .query("SELECT review_enabled, last_webhook_at, updated_at FROM review_bots WHERE id = ?")
+      .query("SELECT review_enabled, last_webhook_at, updated_at FROM github_apps WHERE id = ?")
       .get(id) as { review_enabled: number; last_webhook_at: string | null; updated_at: string };
   }
 
@@ -1872,7 +1874,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(sent).toHaveLength(0);
     expect(appOps(db, appRow.id).review_enabled).toBe(1);
     const rows = db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
   });
@@ -1891,11 +1893,11 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
     const ledger = db.raw
-      .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;
     expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
   });
@@ -1916,11 +1918,11 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "pull_request", outcome: "ignored", status_code: null }]);
     const ledger = db.raw
-      .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;
     expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
   });
@@ -1945,7 +1947,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(await res.text()).toBe("issue_comment payload missing required fields");
     expect(sent).toHaveLength(0);
     const rows = db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(rows).toEqual([{ event_name: "issue_comment", outcome: "rejected", status_code: 400 }]);
   });
@@ -1970,11 +1972,11 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const deliveries = db.raw
-      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome, status_code FROM webhook_deliveries WHERE app_id = ?")
       .all(appRow.id) as Array<{ event_name: string | null; outcome: string; status_code: number | null }>;
     expect(deliveries).toEqual([{ event_name: "pull_request", outcome: "paused", status_code: null }]);
     const ledger = db.raw
-      .query("SELECT pr_number, state FROM pull_requests WHERE bot_id = ?")
+      .query("SELECT pr_number, state FROM pull_requests WHERE app_id = ?")
       .all(appRow.id) as Array<{ pr_number: number; state: string }>;
     expect(ledger).toEqual([{ pr_number: 42, state: "open" }]);
     expect(appOps(db, appRow.id).last_webhook_at).not.toBeNull();
@@ -2014,7 +2016,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     expect(res.status).toBe(401);
     expect(sent).toHaveLength(0);
     expect(appOps(db, appRow.id).last_webhook_at).toBeNull();
-    expect(db.raw.query("SELECT pr_number FROM pull_requests WHERE bot_id = ?").all(appRow.id)).toEqual([]);
+    expect(db.raw.query("SELECT pr_number FROM pull_requests WHERE app_id = ?").all(appRow.id)).toEqual([]);
   });
 
   test("disabled / soft-deleted Apps → 404 never touch last_webhook_at (gate matrix)", async () => {
@@ -2046,7 +2048,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     const db = createMigratedTestD1();
     const appRow = await seedApp(db, { slug: "app-x", secret: "secret-x" });
     db.raw
-      .prepare("UPDATE review_bots SET updated_at = '2000-01-01 00:00:00', last_webhook_at = '2000-01-01 00:00:00' WHERE id = ?")
+      .prepare("UPDATE github_apps SET updated_at = '2000-01-01 00:00:00', last_webhook_at = '2000-01-01 00:00:00' WHERE id = ?")
       .run(appRow.id);
 
     await createReviewBotsStore(db).touchLastWebhook(appRow.id);
@@ -2085,7 +2087,7 @@ describe("per-App pause gate + last_webhook_at (spec 语义锁 B3 / L5)", () => 
     await store.upsertInstallation({ appId: appRow.id, installationId: 1, accountLogin: "old" });
     await store.upsertInstallation({ appId: appRow.id, installationId: 2, accountLogin: "recent" });
     await store.upsertInstallation({ appId: sibling.id, installationId: 3, accountLogin: "other-app" });
-    db.raw.prepare("UPDATE bot_installations SET seen_at = '2000-01-01 00:00:00' WHERE installation_id = 1").run();
+    db.raw.prepare("UPDATE github_app_installations SET seen_at = '2000-01-01 00:00:00' WHERE installation_id = 1").run();
 
     const rows = await store.listInstallations(appRow.id);
 
@@ -2111,7 +2113,7 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
 
     const box = createSecretbox(TEST_KEY);
     db.raw
-      .prepare("UPDATE review_bots SET webhook_secret_enc = ? WHERE id = ?")
+      .prepare("UPDATE github_apps SET webhook_secret_enc = ? WHERE id = ?")
       .run(await box.encryptSecret("secret-v2", `github_apps.webhook_secret_enc:${appRow.id}`), appRow.id);
 
     const secondQueue = makeQueue();
@@ -2132,16 +2134,16 @@ describe("verifier cache — rotation + cacheKey isolation (L1)", () => {
 describe("target resolution (webhook → review_targets by repository)", () => {
   function deliveries(db: TestD1, botId: string): Array<{ event_name: string | null; outcome: string }> {
     return db.raw
-      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE app_id = ?")
       .all(botId) as Array<{ event_name: string | null; outcome: string }>;
   }
 
   function ledgerCount(db: TestD1, botId: string): number {
-    return (db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE bot_id = ?").get(botId) as { n: number }).n;
+    return (db.raw.query("SELECT COUNT(*) AS n FROM pull_requests WHERE app_id = ?").get(botId) as { n: number }).n;
   }
 
   function lastWebhookAt(db: TestD1, botId: string): string | null {
-    return (db.raw.query("SELECT last_webhook_at FROM review_bots WHERE id = ?").get(botId) as {
+    return (db.raw.query("SELECT last_webhook_at FROM github_apps WHERE id = ?").get(botId) as {
       last_webhook_at: string | null;
     }).last_webhook_at;
   }
@@ -2221,7 +2223,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
 
     expect(await res.text()).toBe("accepted");
     expect(sent[0]!.targetId).toBe(appRow.targetId);
-    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ?").get(appRow.id)).toEqual({ n: 1 });
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM review_targets WHERE app_id = ?").get(appRow.id)).toEqual({ n: 1 });
     expect(
       db.raw.query("SELECT repo_owner, repo_name FROM review_targets WHERE id = ?").get(appRow.targetId),
     ).toEqual({ repo_owner: "acme-org", repo_name: "new-name" });
@@ -2341,7 +2343,7 @@ describe("target resolution (webhook → review_targets by repository)", () => {
     expect(deliveries(db, appRow.id)).toEqual([{ event_name: "pull_request", outcome: "paused" }]);
     expect(lastWebhookAt(db, appRow.id)).not.toBeNull();
     expect(warn.mock.calls.map((call) => String(call[0])).join("\n")).not.toContain("review_global_read_failed");
-    const bot = db.raw.query("SELECT review_enabled FROM review_bots WHERE id = ?").get(appRow.id) as {
+    const bot = db.raw.query("SELECT review_enabled FROM github_apps WHERE id = ?").get(appRow.id) as {
       review_enabled: number;
     };
     expect(bot.review_enabled).toBe(1);
@@ -2374,11 +2376,11 @@ describe("webhook install bookkeeping", () => {
 
   function installationRows(
     db: TestD1,
-  ): Array<{ bot_id: string; installation_id: number; account_login: string | null; removed_at: string | null }> {
+  ): Array<{ app_id: string; installation_id: number; account_login: string | null; removed_at: string | null }> {
     return db.raw
-      .query("SELECT bot_id, installation_id, account_login, removed_at FROM bot_installations")
+      .query("SELECT app_id, installation_id, account_login, removed_at FROM github_app_installations")
       .all() as Array<{
-      bot_id: string;
+      app_id: string;
       installation_id: number;
       account_login: string | null;
       removed_at: string | null;
@@ -2402,7 +2404,7 @@ describe("webhook install bookkeeping", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
+      { app_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
     ]);
   });
 
@@ -2469,7 +2471,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
     const target = db.raw
       .query("SELECT * FROM review_targets WHERE id = ?")
       .get(appRow.targetId) as ReviewTargetRow;
-    const bot = db.raw.query("SELECT github_app_id FROM review_bots WHERE id = ?").get(appRow.id) as {
+    const bot = db.raw.query("SELECT github_app_id FROM github_apps WHERE id = ?").get(appRow.id) as {
       github_app_id: number;
     };
     const scope = {
@@ -2483,7 +2485,7 @@ describe("settleRefusedAfterAttach — the settlement follows the attach", () =>
     db.raw
       .prepare(
         `INSERT INTO review_publications
-           (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+           (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
             payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
          VALUES ('refused-proof', ?, 123, ?, ?, 42, ?, 'review', 'confirmed', ?, ?, 1, 'done', 1000, 1000, 1000)`,
       )
@@ -2637,7 +2639,7 @@ describe("POST /webhook/:workspaceId/:appId — the monthly RP ceiling", () => {
         expect(failures[0]!.target_id).toBe(appRow.targetId);
         expect(failures[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
         const delivery = db.raw
-          .query("SELECT outcome FROM webhook_deliveries WHERE bot_id = ? ORDER BY rowid DESC LIMIT 1")
+          .query("SELECT outcome FROM webhook_deliveries WHERE app_id = ? ORDER BY rowid DESC LIMIT 1")
           .get(appRow.id) as { outcome: string };
         expect(delivery.outcome).toBe("skipped");
       }
@@ -2791,7 +2793,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     appRow: { id: string },
     repo: { owner: string; name: string } = FIXTURE_REPO,
   ): Promise<void> {
-    const bot = db.raw.query("SELECT github_app_id FROM review_bots WHERE id = ?").get(appRow.id) as {
+    const bot = db.raw.query("SELECT github_app_id FROM github_apps WHERE id = ?").get(appRow.id) as {
       github_app_id: number;
     };
     const octokit: ChecksOctokit = {
@@ -2874,7 +2876,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
       action: "rerequested",
       triggered_by: "check_run",
       rerun_check_run_id: RERUN_CHECK_RUN_ID,
-      botRef: { appId: appRow.id },
+      botRef: { appId: appRow.id, botId: appRow.id },
       targetId: appRow.targetId,
     });
     const attempts = db.raw
@@ -2892,7 +2894,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     const NEWER_HEAD = "fedcba9876543210fedcba9876543210fedcba98";
     db.raw
       .prepare(
-        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
+        `INSERT INTO pull_requests (id, app_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
          VALUES ('pr-rerun-42', ?, ?, ?, ?, 42, 'open', ?, '2099-01-01T00:00:00.000Z')`,
       )
       .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name, NEWER_HEAD);
@@ -2944,7 +2946,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     // the resolved head now differs, so only the delivery id can dedup it.
     db.raw
       .prepare(
-        `INSERT INTO pull_requests (id, bot_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
+        `INSERT INTO pull_requests (id, app_id, target_id, owner, repo, pr_number, state, head_sha, head_at)
          VALUES ('pr-rerun-redelivery', ?, ?, ?, ?, 42, 'open', 'fedcba9876543210fedcba9876543210fedcba98', '2099-01-01T00:00:00.000Z')`,
       )
       .run(appRow.id, appRow.targetId, FIXTURE_REPO.owner, FIXTURE_REPO.name);
@@ -3040,7 +3042,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(await res.text()).toBe("ignored");
     expect(sent).toHaveLength(0);
     const delivery = db.raw
-      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE app_id = ?")
       .get(appRow.id) as { event_name: string; outcome: string };
     expect(delivery).toEqual({ event_name: "check_run", outcome: "ignored" });
   });
@@ -3096,7 +3098,7 @@ describe("POST /webhook/:workspaceId/:appId — check_run.rerequested", () => {
     expect(lines.some((entry) => entry.includes("check_rerun_lookup_failed"))).toBe(true);
     expect(lines.some((entry) => entry.includes("check_rerun_no_attempt"))).toBe(false);
     const delivery = db.raw
-      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE bot_id = ?")
+      .query("SELECT event_name, outcome FROM webhook_deliveries WHERE app_id = ?")
       .get(appRow.id) as { event_name: string; outcome: string };
     expect(delivery).toEqual({ event_name: "check_run", outcome: "ignored" });
   });

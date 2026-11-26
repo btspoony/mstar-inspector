@@ -21,7 +21,7 @@ import {
 } from "../../../src/worker/check-reconcile";
 import type { ChecksAdapter } from "../../../src/pipeline/checks";
 import type { ScheduledEnv } from "../../../src/worker/env";
-import { createMigratedTestD1, type TestD1 } from "../../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1, syncReviewBotColumn } from "../../store/helpers";
 
 export const APP = "11111111-2222-3333-4444-555555555555";
 export const APP_B = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
@@ -66,18 +66,20 @@ export function seedApp(
     repoOwner = SCOPE.owner,
     repoName = SCOPE.repo,
   } = options;
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, review_enabled, created_at, updated_at)
        VALUES (?, ?, ?, ?, 'enc-pem', 'enc-secret', 'tester', ?, NULL, 1, datetime('now'), datetime('now'))`,
     )
     .run(id, `checks-${id}`, githubAppId, `checks-${id}`, status);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_owner, repo_name, check_min_score,
+         (id, workspace_id, app_id, name, repo_owner, repo_name, check_min_score,
           created_by, created_at, updated_at)
        VALUES (?, 'default', ?, ?, ?, ?, ?, 'tester', datetime('now'), datetime('now'))`,
     )
@@ -85,7 +87,7 @@ export function seedApp(
   if (install) {
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES (?, ?, ?, 'acme', datetime('now'))`,
       )
       .run(`inst-${id}-${installationId}`, id, installationId);
@@ -182,7 +184,7 @@ export function seedPublication(
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms, confirmed_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'done', ?, ?, ?)`,
     )
@@ -232,7 +234,7 @@ export function seedJournal(
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'review', ?, '{}', NULL, 0, 'pending', ?, ?)`,
     )
@@ -314,6 +316,7 @@ export function seedReview(db: TestD1, scope: Scope, headSha: string, verdict: s
       verdict,
       JSON.stringify(reviewEnvelope(verdict, scorePct)),
     );
+  syncReviewBotColumn(db);
 }
 
 export async function rawRow(db: TestD1, id: string): Promise<Record<string, string | number | null>> {

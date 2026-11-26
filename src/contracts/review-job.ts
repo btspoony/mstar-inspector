@@ -3,12 +3,17 @@
  * Produced by the worker (04) and consumed by the pipeline (06).
  * MUST NOT contain tokens, secrets, or private keys (compass contracts D).
  *
- * TWO ids, because the review configuration lives on two rows:
- * `botRef.appId` names the `review_bots` row the job executes as — its
- * credentials, model chain, sandbox image and operational pause (AL-24-2);
- * `targetId` names the `review_targets` row that owns the review level, the
- * Check gate and the business pause. Both are required on every enqueued job,
- * and the consumer refuses a message whose target belongs to another bot.
+ * THREE ids, because the pre-split review row is now two entities plus the
+ * target: `botRef.appId` names the `github_apps` row — the installation's
+ * credentials, webhook identity and publishing identity; `botRef.botId` names
+ * the `review_bots` row — the model chain, sandbox image, price multiplier and
+ * monthly quota the execution reads. The two ids are equal only for rows the
+ * entity split migrated: this release creates exactly one bot per App under
+ * the same id, and chained mounts make them diverge once the chain model
+ * ships. `targetId` names the `review_targets` row that owns the review level,
+ * the Check gate and the business pause. All three are required on every
+ * enqueued job, and the consumer refuses a message whose target belongs to
+ * another App.
  *
  * The ids are attached by the per-App `POST /webhook/:workspaceId/:appId`
  * route — the ONLY production producer — after it resolves the target.
@@ -34,7 +39,7 @@ export type ReviewJobPayload = {
    * and GitHub's redelivery of the same rerequested event enqueues once.
    */
   rerun_check_run_id?: number;
-  botRef: { appId: string };
+  botRef: { appId: string; botId: string };
   targetId: string;
   attachDeliveryId?: string;
   successor_of?: string;

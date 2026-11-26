@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { repoBackfill } from "../../src/admin/data-upgrades/repo-backfill";
 import { DATA_UPGRADES, resetDataUpgrade, stepDataUpgrade, verifyDataUpgrade, type UpgradeCursor } from "../../src/admin/data-upgrades";
 
@@ -22,7 +22,7 @@ function seedLeftoverTarget(
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           follow_workspace_defaults, check_min_score, review_level, created_by, created_at, updated_at,
           deleted_at)
        VALUES (?, ?, ?, ?, NULL, ?, ?, 0, ?, 'deep', 'fixture',
@@ -53,7 +53,7 @@ function seedPr(
   db.raw
     .prepare(
       `INSERT INTO pull_requests
-         (id, bot_id, owner, repo, pr_number, state, last_seen_at, target_id)
+         (id, app_id, owner, repo, pr_number, state, last_seen_at, target_id)
        VALUES (?, ?, ?, ?, ?, 'open', ?, ?)`,
     )
     .run(id, botId, owner, repo, prNumber, lastSeenAt, targetId);
@@ -71,11 +71,11 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews
-         (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id, target_id)
        VALUES (?, 1, ?, ?, ?, ?, ?, 'ship it', ?, ?)`,
     )
     .run(id, owner, repo, prNumber, `sha-${id}`, reviewedAt, botId, targetId);
+  syncReviewBotColumn(db);
 }
 
 function seedFailure(db: TestD1, id: string, targetId: string, owner: string, repo: string): void {
@@ -92,7 +92,7 @@ function seedFinding(db: TestD1, id: string, targetId: string, owner: string, re
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, created_ms, updated_ms)
        VALUES (?, ?, 1, ?, ?, 1, 'sha', 'review', 'applied', '{}', 1, 1)`,
     )
@@ -100,7 +100,7 @@ function seedFinding(db: TestD1, id: string, targetId: string, owner: string, re
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms, target_id)
        VALUES (?, ?, 1, ?, ?, 1, ?, '{}', ?, ?, 'sha', 'sha', 1, 1, 'open', 1, 1, ?)`,
@@ -357,11 +357,11 @@ describe("repo-backfill item", () => {
 
     const live = db.raw
       .query(
-        "SELECT id, bot_id, check_min_score FROM review_targets WHERE deleted_at IS NULL ORDER BY bot_id",
+        "SELECT id, app_id, check_min_score FROM review_targets WHERE deleted_at IS NULL ORDER BY app_id",
       )
-      .all() as Array<{ id: string; bot_id: string; check_min_score: number }>;
+      .all() as Array<{ id: string; app_id: string; check_min_score: number }>;
     expect(live).toHaveLength(2);
-    expect(live.map((row) => [row.bot_id, row.check_min_score])).toEqual([
+    expect(live.map((row) => [row.app_id, row.check_min_score])).toEqual([
       [BOT, 60],
       ["bot-2", 90],
     ]);
@@ -369,7 +369,7 @@ describe("repo-backfill item", () => {
       const pr = db.raw.prepare("SELECT target_id FROM pull_requests WHERE id = ?").get(id) as {
         target_id: string;
       };
-      expect(pr.target_id, id).toBe(live.find((row) => row.bot_id === botId)!.id);
+      expect(pr.target_id, id).toBe(live.find((row) => row.app_id === botId)!.id);
     }
     expect((await repoBackfill.verify(db, { runStartedAt: null })).duplicate_repository_groups).toBe(0);
   });

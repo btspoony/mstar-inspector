@@ -9,7 +9,7 @@ import { listQuotaVersions } from "../../src/admin/quota-versions";
 import type { DashboardD1, DashboardD1Statement } from "../../src/dashboard/users";
 import { QUOTA_SKIP_REASON, QUOTA_STAGE } from "../../src/contracts/failure-stages";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "quota", "faces", "session", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
@@ -494,7 +494,7 @@ async function seedDelivery(
   const privateKeyEnc = await box.encryptSecret("test-pem", `github_apps.private_key_enc:${appId}`);
   seed(
     db,
-    `INSERT INTO review_bots
+    `INSERT INTO github_apps
        (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
         created_by, status, scope, deleted_at, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', 'owned', NULL, datetime('now'), datetime('now'))`,
@@ -505,12 +505,12 @@ async function seedDelivery(
     privateKeyEnc,
     webhookSecretEnc,
   );
-  seed(db, "INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)", appId, workspaceId);
+  seed(db, "INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)", appId, workspaceId);
   const targetId = `target-${appId}`;
   seed(
     db,
     `INSERT INTO review_targets
-       (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+       (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
         review_enabled, review_trigger_mode, created_by, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'every_push', 'tester', datetime('now'), datetime('now'))`,
     targetId,
@@ -612,6 +612,7 @@ describe("GET /_internal_admin/api/quota-versions — plan coverage", () => {
           async run() {
             reads.readsOutsideBatch += 1;
             return inner.run();
+  syncSplitPair(db);
           },
         };
         wrapped.set(face, inner);

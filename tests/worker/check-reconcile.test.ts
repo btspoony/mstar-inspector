@@ -146,7 +146,7 @@ async function markedUnconfirmed(db: TestD1, headSha: string, publicationId: str
   db.raw
     .prepare(
       `INSERT INTO review_publications
-         (id, bot_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
+         (id, app_id, installation_id, owner, repo, pr_number, head_sha, kind, phase,
           payload_json, proof_json, attempts, recovery_state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'review', 'sending', '{}', NULL, 0, 'pending', ?, ?)`,
     )
@@ -454,7 +454,7 @@ describe("due selection (spec §7.11.2 predicate)", () => {
     db.raw
       .prepare(`UPDATE review_checks SET holder = NULL, lease_until_ms = NULL, recovery_state = 'suspended' WHERE id = ?`)
       .run(attempt.identity.attemptId);
-    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP);
     const fetchStub = stubFetch();
     try {
       const summary = await run(db, { now: () => T0, credentials: scriptedCredentials(db) });
@@ -1374,7 +1374,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
 
   test("§7.9a: a lowered score floor re-decides the owed correction instead of dropping it", async () => {
     const db = seededDb();
-    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE app_id = ?`).run(APP);
     const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
     const clock = confirmedAt + 1_000;
     const fetchStub = stubFetch();
@@ -1388,7 +1388,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     expect(row.correction_desired).toBe("failure");
     expect(row.correction_dispatched_ms).toBeNull();
 
-    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE app_id = ?`).run(APP);
 
     const pushed: CheckConclusion[] = [];
     const delivered = await run(db, {
@@ -1417,7 +1417,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
 
   test("§7.9a: a possibly-dispatched revision is read back, never rewritten", async () => {
     const db = seededDb();
-    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 90 WHERE app_id = ?`).run(APP);
     const { attemptId, confirmedAt } = await owedCorrectionFixture(db, 80);
     const clock = confirmedAt + 1_000;
     const fetchStub = stubFetch();
@@ -1435,7 +1435,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
     let row = await rawRow(db, attemptId);
     expect(row.correction_dispatched_ms).not.toBeNull();
 
-    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`UPDATE review_targets SET check_min_score = 70 WHERE app_id = ?`).run(APP);
     const pushed: CheckConclusion[] = [];
     const dropping = await run(db, {
       now: () => clock + 60_000,
@@ -1879,7 +1879,7 @@ describe("expired attempt → terminal conclusion from persisted proof (spec §7
         }),
         "publication-disabled",
       );
-    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP);
     const other = await claim(db, {
       scope: SCOPE_B,
       githubAppId: NUMERIC_APP_B,
@@ -2480,7 +2480,8 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
     expect(badRow.recovery_state).toBe("suspended");
     expect(badRow.terminal_ms).toBeNull();
     expect(badRow.external_id).toBe(bad.attempt.identity.externalId);
-    expect(badRow.bot_id).toBe(APP_B);
+    // 0115 renamed review_checks.bot_id back to app_id.
+    expect(badRow.app_id).toBe(APP_B);
     expect(badRow.attempts).toBe(0);
   });
 
@@ -2495,7 +2496,7 @@ describe("tenant/App isolation and status-driven re-enable (spec §7.6)", () => 
         )
         .run(checkSuspensionReason("disabled", "app disabled"), id);
     }
-    db.raw.prepare(`UPDATE review_bots SET status = 'disabled' WHERE id = ?`).run(APP_B);
+    db.raw.prepare(`UPDATE github_apps SET status = 'disabled' WHERE id = ?`).run(APP_B);
     const asked: string[] = [];
     const fetchStub = stubFetch();
     try {
@@ -2642,7 +2643,7 @@ describe("scheduled composition (spec §7.11)", () => {
   test("a throwing sweep and a throwing lifecycle lane never escape the handler", async () => {
     const db = seededDb();
     const { attempt } = await claim(db);
-    db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`DELETE FROM github_app_installations WHERE app_id = ?`).run(APP);
     const broken = {
       prepare(sql: string): never | { bind: () => { all: () => Promise<{ results: never[] }> } } {
         if (sql.includes("review_runtime_settings WHERE key IN")) {
@@ -2676,7 +2677,7 @@ describe("scheduled composition (spec §7.11)", () => {
         .run(`boom-${i}`);
     }
     const { attempt } = await claim(db);
-    db.raw.prepare(`DELETE FROM bot_installations WHERE bot_id = ?`).run(APP);
+    db.raw.prepare(`DELETE FROM github_app_installations WHERE app_id = ?`).run(APP);
     const env = { DB: db as unknown as ScheduledEnv["DB"], REVIEW_QUEUE: NOOP_QUEUE };
 
     const minute = await captureComposition(env, "* * * * *");
@@ -3428,7 +3429,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     const db = seededDb();
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const DIGEST = await sha256Hex(envelope.private_key_enc);
@@ -3465,7 +3466,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("an UNCHANGED credential failure is never re-probed and never re-enters the batch", async () => {
     const db = seededDb();
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const digest = await sha256Hex(envelope.private_key_enc);
@@ -3498,12 +3499,12 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("an operator-corrected envelope reopens the pair and resumes the SAME attempt identity", async () => {
     const db = seededDb();
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const oldDigest = await sha256Hex(envelope.private_key_enc);
     const id = await seedSuspended(db, "identity-mismatch", oldDigest);
-    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
 
     let probes = 0;
     const fetchStub = stubFetch();
@@ -3551,7 +3552,7 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
     }
     const repairedScope = { ...SCOPE, appId: "ffffffff-ffff-ffff-ffff-ffffffffffff", installationId: 9_999 };
     const repairedId = await suspend(repairedScope.appId, 9_999, repairedScope.installationId);
-    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(repairedScope.appId);
+    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(repairedScope.appId);
     return { stuckIds, repairedId, repairedScope };
   }
 
@@ -3609,12 +3610,12 @@ describe("credential suspension is durable, not churn (P68-QC-003)", () => {
 
   test("a KEPT-failing corrected envelope re-stamps with the new digest instead of churning", async () => {
     const db = seededDb();
-    const envelope = db.raw.prepare(`SELECT private_key_enc FROM review_bots WHERE id = ?`).get(APP) as {
+    const envelope = db.raw.prepare(`SELECT private_key_enc FROM github_apps WHERE id = ?`).get(APP) as {
       private_key_enc: string;
     };
     const oldDigest = await sha256Hex(envelope.private_key_enc);
     const id = await seedSuspended(db, "identity-mismatch", oldDigest);
-    db.raw.prepare(`UPDATE review_bots SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET private_key_enc = 'enc-pem-rotated' WHERE id = ?`).run(APP);
     const newDigest = await sha256Hex("enc-pem-rotated");
 
     let probes = 0;
@@ -3675,7 +3676,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
     const { attempt } = await claim(db);
     const id = attempt.identity.attemptId;
     const externalId = attempt.identity.externalId;
-    db.raw.prepare(`UPDATE review_bots SET review_enabled = 0 WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
     let creates = 0;
     const fetchStub = stubFetch();
     try {
@@ -3708,7 +3709,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
       expect(probes).toBe(0);
       expect(creates).toBe(0);
 
-      db.raw.prepare(`UPDATE review_bots SET review_enabled = 1 WHERE id = ?`).run(APP);
+      db.raw.prepare(`UPDATE github_apps SET review_enabled = 1 WHERE id = ?`).run(APP);
       const resumed = await run(db, {
         now: () => T0 + 30 * 60_000,
         credentials: scriptedCredentials(db, {
@@ -3743,7 +3744,7 @@ describe("paused work leaves the due batch and resumes without attempt spend (P6
     const db = seededDb();
     const { attempt } = await claim(db);
     db.raw.prepare(`UPDATE review_checks SET create_state = 'sending' WHERE id = ?`).run(attempt.identity.attemptId);
-    db.raw.prepare(`UPDATE review_bots SET review_enabled = 0 WHERE id = ?`).run(APP);
+    db.raw.prepare(`UPDATE github_apps SET review_enabled = 0 WHERE id = ?`).run(APP);
     let creates = 0;
     const fetchStub = stubFetch();
     try {
@@ -3856,7 +3857,7 @@ describe("the re-enable probe is admission-gated and never invents a verdict (F-
     const DISTRACTOR = 100;
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES ('inst-distractor', ?, ?, 'acme', datetime('now'))`,
       )
       .run(APP, DISTRACTOR);
@@ -4258,7 +4259,7 @@ describe("the publication-proof wait decides when abandonment may conclude (spec
     const db = seededDb();
     const { attempt, id } = await abandonedAttempt(db);
     seedReview(db, SCOPE, SHA, "ship it", 95);
-    db.raw.prepare(`UPDATE reviews SET bot_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
+    db.raw.prepare(`UPDATE reviews SET app_id = ? WHERE head_sha = ?`).run(SCOPE.appId, SHA);
     const proof = proofFor(attempt.identity);
     seedPublication(db, SCOPE, SHA, proof, "applied", reviewPayload(SCOPE, SHA, "needs fixes", 40));
     linkPublication(db, id, proof.publicationId);

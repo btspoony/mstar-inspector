@@ -188,7 +188,7 @@ export type FetchAppMetadataResult =
 /**
  * Fetch one App's public GitHub profile with a freshly minted App JWT.
  * `githubAppId` is the numeric GitHub App id
- * (`review_bots.github_app_id` — the JWT `iss` claim, NOT the row UUID);
+ * (`github_apps.github_app_id` — the JWT `iss` claim, NOT the row UUID);
  * `decryptedPem` is the already-secretbox-decrypted App private key
  * (decryption happens at the caller — the last responsible moment).
  *

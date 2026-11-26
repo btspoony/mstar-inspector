@@ -29,7 +29,7 @@ const RETIRED_LEDGER_ROWS = `FROM (${LEDGER_IDENTITIES}) x
   JOIN review_targets d ON d.id = x.target_id AND d.deleted_at IS NOT NULL
  WHERE EXISTS (
    SELECT 1 FROM review_targets l
-    WHERE l.deleted_at IS NULL AND l.bot_id = d.bot_id
+    WHERE l.deleted_at IS NULL AND l.app_id = d.app_id
       AND l.repo_owner = x.owner COLLATE NOCASE
       AND l.repo_name = x.repo COLLATE NOCASE)
    AND %s`;
@@ -42,7 +42,7 @@ function retiredRowsSql(kind: "blocking" | "historical", runStart: string | null
   return RETIRED_LEDGER_ROWS.replace("%s", `datetime(d.deleted_at) ${op} datetime(?1)`);
 }
 
-type WorklistRow = { id: string; bot_id: string };
+type WorklistRow = { id: string; app_id: string };
 
 type MemberRow = {
   id: string;
@@ -112,7 +112,7 @@ async function readMembers(db: DashboardD1, group: Group): Promise<MemberRow[]> 
                 WHERE r.target_id = t.id AND r.owner = ?2 COLLATE NOCASE
                   AND r.repo = ?3 COLLATE NOCASE) AS last_reviewed
          FROM review_targets t
-        WHERE t.bot_id = ?1 AND ${LEFTOVER_TARGET}
+        WHERE t.app_id = ?1 AND ${LEFTOVER_TARGET}
           AND EXISTS (SELECT 1 FROM (${LEDGER_IDENTITIES}) x
                        WHERE x.target_id = t.id AND x.owner = ?2 COLLATE NOCASE
                          AND x.repo = ?3 COLLATE NOCASE)`,
@@ -126,7 +126,7 @@ async function findNamedTarget(db: DashboardD1, group: Group): Promise<string | 
   const row = await db
     .prepare(
       `SELECT id FROM review_targets
-        WHERE bot_id = ?1 AND deleted_at IS NULL
+        WHERE app_id = ?1 AND deleted_at IS NULL
           AND repo_owner = ?2 COLLATE NOCASE AND repo_name = ?3 COLLATE NOCASE
         ORDER BY created_at, id LIMIT 1`,
     )
@@ -139,7 +139,7 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
   const after = typeof cursor?.last_target_id === "string" ? cursor.last_target_id : "";
   const worklist = await db
     .prepare(
-      `SELECT t.id, t.bot_id FROM review_targets t
+      `SELECT t.id, t.app_id FROM review_targets t
         WHERE t.id > ?1 AND ${LEFTOVER_TARGET}
           AND ${hasLedger("t.id")}
         ORDER BY t.id LIMIT ?2`,
@@ -168,7 +168,7 @@ async function planBatch(db: DashboardD1, cursor: UpgradeCursor | null): Promise
       .all<{ owner: string; repo: string }>();
     let drained = true;
     for (const pair of pairs.results) {
-      const group = { botId: row.bot_id, owner: pair.owner, repo: pair.repo };
+      const group = { botId: row.app_id, owner: pair.owner, repo: pair.repo };
       const key = JSON.stringify([
         group.botId,
         group.owner.replace(/[A-Z]/g, (char) => char.toLowerCase()),
@@ -233,7 +233,7 @@ async function planGroup(db: DashboardD1, plan: Plan, group: Group, batch: Set<s
       db
         .prepare(
           `INSERT INTO review_targets
-             (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+             (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
               follow_workspace_defaults, review_enabled, review_drafts, review_trigger_mode, review_level,
               check_min_score, check_pass_verdicts, created_by, created_at, updated_at)
            VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
@@ -367,7 +367,7 @@ export const repoBackfill: DataUpgradeItem = {
            SELECT x.owner, x.repo FROM (${LEDGER_IDENTITIES}) x
              JOIN review_targets t ON t.id = x.target_id
             WHERE ${LEFTOVER_TARGET}
-            GROUP BY t.bot_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE
+            GROUP BY t.app_id, x.owner COLLATE NOCASE, x.repo COLLATE NOCASE
            HAVING COUNT(DISTINCT t.id) > 1)`,
       ),
       leftover_without_ledger: await countRows(
@@ -415,10 +415,10 @@ export const repoBackfill: DataUpgradeItem = {
       duplicate_repository_groups: await countRows(
         db,
         `SELECT COUNT(*) AS n FROM (
-           SELECT t.bot_id, t.repo_owner, t.repo_name FROM review_targets t
+           SELECT t.app_id, t.repo_owner, t.repo_name FROM review_targets t
             WHERE t.deleted_at IS NULL AND t.repo_owner IS NOT NULL AND t.repo_name IS NOT NULL
               AND ${hasLedger("t.id")}
-            GROUP BY t.bot_id, t.repo_owner COLLATE NOCASE, t.repo_name COLLATE NOCASE
+            GROUP BY t.app_id, t.repo_owner COLLATE NOCASE, t.repo_name COLLATE NOCASE
            HAVING COUNT(*) > 1)`,
       ),
       ledger_rows_without_pr: await countRows(

@@ -41,7 +41,7 @@ const REVIEW_USAGE_SQL = `
     LEFT JOIN reviews r
            ON r.target_id = t.id
           AND r.reviewed_at >= ?1 AND r.reviewed_at < ?2
-    LEFT JOIN review_bots b ON b.id = t.bot_id
+    LEFT JOIN review_bots b ON b.id = t.app_id
    WHERE w.deleted_at IS NULL
      AND (?3 IS NULL OR w.id = ?3)
    GROUP BY w.id, w.name, w.slug

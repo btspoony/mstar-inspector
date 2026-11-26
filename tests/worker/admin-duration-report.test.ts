@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { DURATION_REPORT_WINDOW_DAYS, phaseBuckets } from "../../src/admin/duration-report";
 import { readAttemptHandoff, reserveAttemptHandoff } from "../../src/store/review-route-store";
 import type { ReviewJobPayload } from "../../src/contracts/review-job";
@@ -22,7 +22,7 @@ const PAYLOAD: ReviewJobPayload = {
   head_sha: "a".repeat(40),
   action: "opened",
   triggered_by: "pull_request",
-  botRef: { appId: "bot-1" },
+  botRef: { appId: "bot-1", botId: "bot-1" },
   targetId: "target-1",
 };
 
@@ -44,15 +44,17 @@ function fixture(): TestD1 {
   db.raw
     .prepare("INSERT INTO users (id, github_login, role, created_at, invited_by) VALUES (?, ?, 'member', ?, NULL)")
     .run(crypto.randomUUID(), OPERATOR, new Date().toISOString());
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 'duration-bot', ?, 'duration-bot', 'enc', 'enc', ?, 'active', NULL,
                datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, APP_NUMERIC_ID, OPERATOR);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   return db;
 }
 
@@ -141,7 +143,7 @@ function seedAttempt(db: TestD1, seed: AttemptSeed): void {
   db.raw
     .prepare(
       `INSERT INTO review_checks
-         (id, bot_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
+         (id, app_id, github_app_id, installation_id, owner, repo, pr_number, head_sha,
           triggered_by, action, attempt_key, generation, external_id, create_state,
           execution_deadline_ms, desired, observed, recovery_state, attempts, terminal_ms,
           created_ms, updated_ms)

@@ -7,7 +7,7 @@ import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/ap
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
-import { createTestD1 } from "../store/helpers";
+import { syncSplitPair, createTestD1 } from "../store/helpers";
 import { APPS_UI_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { SPA_BOOT_MARKER, htmlGet, withSpaAssets } from "../helpers/spa";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -17,6 +17,7 @@ const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const TEST_WEBHOOK_SECRET = ["test", "app", "webhook", "secret"].join("-");
 const MALLORY_APP_ID = 1001;
 const ADA_APP_ID = 1002;
+const MALLORY_BOT_ID = "app-mstar-inspector-mallory";
 
 async function encryptedColumns(id: string): Promise<{ privateKeyEnc: string; webhookSecretEnc: string }> {
   const box = createSecretbox(TEST_KEY);
@@ -149,7 +150,7 @@ async function postTargetJson(
 }
 
 function appStatus(db: ReturnType<typeof createAppsUiD1>, appId: number): string | null {
-  const row = db.raw.query("SELECT status FROM review_bots WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT status FROM github_apps WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
@@ -267,7 +268,7 @@ describe("POST /dashboard/default/apps/:appId/disable|enable|delete (pinned acti
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("ok");
     const row = db.raw
-      .query("SELECT deleted_at FROM review_bots WHERE github_app_id = 1001")
+      .query("SELECT deleted_at FROM github_apps WHERE github_app_id = 1001")
       .get() as { deleted_at: string | null };
     expect(row.deleted_at).not.toBeNull();
     const webhook = await post("/webhook/default/app-mstar-inspector-mallory", "", makeEnv(db));
@@ -289,12 +290,12 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
     db.raw
       .prepare(
         `UPDATE review_targets SET workspace_id = 'ws-other'
-          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+          WHERE app_id = (SELECT id FROM github_apps WHERE github_app_id = ?)`,
       )
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
-    const detail = await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`, cookie, makeEnv(db));
+    const detail = await get(`/dashboard/default/api/review-bots/${MALLORY_BOT_ID}/settings`, cookie, makeEnv(db));
     expect(detail.status).toBe(200);
     const body = (await detail.json()) as Record<string, unknown> & { app: Record<string, unknown> };
     for (const key of ["target_id", "check_gate"]) expect(body).not.toHaveProperty(key);
@@ -307,7 +308,7 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
     db.raw
       .prepare(
         `DELETE FROM review_targets
-          WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)`,
+          WHERE app_id = (SELECT id FROM github_apps WHERE github_app_id = ?)`,
       )
       .run(MALLORY_APP_ID);
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
@@ -324,12 +325,12 @@ describe("the Apps list's per-App pause state (target-owned)", () => {
 });
 
 describe("an App with no repository yet", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${MALLORY_BOT_ID}/settings`;
 
   test("a manager opens it: 200 with the App's own facts and no target-owned ones", async () => {
     const db = await seededWorld();
     db.raw
-      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .prepare("DELETE FROM review_targets WHERE app_id = (SELECT id FROM github_apps WHERE github_app_id = ?)")
       .run(MALLORY_APP_ID);
 
     const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("mallory")}`, makeEnv(db));
@@ -349,7 +350,7 @@ describe("an App with no repository yet", () => {
   test("a member reads the same App: 200, identity set only", async () => {
     const db = await seededWorld();
     db.raw
-      .prepare("DELETE FROM review_targets WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)")
+      .prepare("DELETE FROM review_targets WHERE app_id = (SELECT id FROM github_apps WHERE github_app_id = ?)")
       .run(MALLORY_APP_ID);
 
     const res = await get(SETTINGS_API, `${SESSION_COOKIE}=${await sessionCookie("hubot")}`, makeEnv(db));
@@ -366,11 +367,11 @@ describe("an App with no repository yet", () => {
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+           (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
             created_by, created_at, updated_at)
          SELECT 'target-second', 'default', b.id, 'acme/second', 901003, 'acme', 'second',
                 'mallory', datetime('now'), datetime('now')
-           FROM review_bots b WHERE b.github_app_id = ?`,
+           FROM github_apps b WHERE b.github_app_id = ?`,
       )
       .run(MALLORY_APP_ID);
 
@@ -390,6 +391,8 @@ describe("an App with no repository yet", () => {
 
 describe("GET /dashboard/default/apps/:appId/settings (retired address)", () => {
   const SETTINGS = `/dashboard/default/apps/${MALLORY_APP_ID}/settings`;
+  // ^ the retired spelling is the test subject — do NOT convert it to the
+  // live review-bots route.
   const ownerCookie = async () => `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
 
   test("HTML navigation GET answers one 302 to the app's settings tab (no shell read)", async () => {
@@ -426,18 +429,21 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
 
   function shareBot(db: ReturnType<typeof createAppsUiD1>, githubAppId: number): void {
     db.raw
-      .prepare(`UPDATE review_bots SET scope = 'shared', shared_at = datetime('now') WHERE github_app_id = ?`)
+      .prepare(
+        `UPDATE review_bots SET scope = 'shared', shared_at = datetime('now')
+         WHERE id = (SELECT id FROM github_apps WHERE github_app_id = ?)`,
+      )
       .run(githubAppId);
   }
 
-  const botFace = (ref: string, githubAppId: number) => `/dashboard/${ref}/api/apps/${githubAppId}/bot`;
+  const botFace = (ref: string, botId: string) => `/dashboard/${ref}/api/review-bots/${botId}/bot`;
 
   test("the owning workspace's manager reads the bot-scoped sections only", async () => {
     const db = await seededWorld();
     const fetchSpy = spyOn(globalThis, "fetch");
     try {
       const res = await get(
-        botFace("default", MALLORY_APP_ID),
+        botFace("default", MALLORY_BOT_ID),
         `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
         makeEnv(db),
       );
@@ -463,7 +469,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
       }
       expect(body.app.sandbox_image_id).toBe("omp");
       expect(body.app.scope).toBe("owned");
-      expect(body.app.github_slug).toBe("mstar-inspector-mallory");
+      expect(body.app.github_slug).toBeNull();
       for (const key of ["target_id", "check_gate", "allowlist", "installation", "workspace_id"]) {
         expect(body).not.toHaveProperty(key);
       }
@@ -478,7 +484,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
   test("a plain member reads the same sections, read-only", async () => {
     const db = await seededWorld();
     const res = await get(
-      botFace("default", MALLORY_APP_ID),
+      botFace("default", MALLORY_BOT_ID),
       `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
       makeEnv(db),
     );
@@ -494,7 +500,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     const db = await seededWorld();
     seedOtherWorkspace(db);
     const res = await get(
-      botFace("ws-other", MALLORY_APP_ID),
+      botFace("ws-other", MALLORY_BOT_ID),
       `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
       makeEnv(db),
     );
@@ -507,7 +513,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     seedOtherWorkspace(db);
     shareBot(db, MALLORY_APP_ID);
     const res = await get(
-      botFace("ws-other", MALLORY_APP_ID),
+      botFace("ws-other", MALLORY_BOT_ID),
       `${SESSION_COOKIE}=${await sessionCookie("hubot")}`,
       makeEnv(db),
     );
@@ -521,7 +527,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
     const res = await get(
-      botFace("default", MALLORY_APP_ID),
+      botFace("default", MALLORY_BOT_ID),
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -537,9 +543,9 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     const fetchSpy = spyOn(globalThis, "fetch");
     try {
       for (const path of [
-        botFace("default", 9999),
-        "/dashboard/default/api/apps/not-a-number/bot",
-        botFace("default", -1),
+        botFace("default", "9999"),
+        "/dashboard/default/api/review-bots/not-a-number/bot",
+        botFace("default", "-1"),
       ]) {
         const res = await get(path, cookie, makeEnv(db));
         expect(res.status, path).toBe(404);
@@ -555,7 +561,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     const db = await seededWorld();
     shareBot(db, MALLORY_APP_ID);
     const botSave = await postForm(
-      `/dashboard/default/apps/${MALLORY_APP_ID}/settings`,
+      `/dashboard/default/review-bots/${MALLORY_BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
       { op: "save-sandbox-image", sandbox_image_id: "omp" },
@@ -564,13 +570,13 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(
       (
         db.raw
-          .query("SELECT sandbox_image_id FROM review_bots WHERE github_app_id = ?")
+          .query("SELECT sandbox_image_id FROM review_bots WHERE id = (SELECT id FROM github_apps WHERE github_app_id = ?)")
           .get(MALLORY_APP_ID) as { sandbox_image_id: string }
       ).sandbox_image_id,
     ).toBe("omp");
     const targetRow = db.raw
       .query(
-        `SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id
+        `SELECT t.id FROM review_targets t JOIN github_apps b ON b.id = t.app_id
           WHERE b.github_app_id = ? AND t.deleted_at IS NULL`,
       )
       .get(MALLORY_APP_ID) as { id: string };
@@ -597,7 +603,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     try {
       for (const provider of ["anthropic", "matrix-custom"]) {
         const res = await postForm(
-          `/dashboard/default/api/apps/${MALLORY_APP_ID}/keys/verify`,
+          `/dashboard/default/api/review-bots/${MALLORY_BOT_ID}/keys/verify`,
           cookie,
           makeEnv(db),
           { provider, key: `test-matrix-${provider}` },
@@ -625,7 +631,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
     expect(deleted.status).toBe(200);
     expect(
       (
-        db.raw.query("SELECT deleted_at FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+        db.raw.query("SELECT deleted_at FROM github_apps WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
           deleted_at: string | null;
         }
       ).deleted_at,
@@ -634,7 +640,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
 
   test("no session → 302 to login", async () => {
     const db = await seededWorld();
-    const res = await get(botFace("default", MALLORY_APP_ID), "", makeEnv(db));
+    const res = await get(botFace("default", MALLORY_BOT_ID), "", makeEnv(db));
     expect(res.status).toBe(302);
     expect(res.headers.get("Location")).toBe("/dashboard/login");
   });
@@ -670,17 +676,22 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
          VALUES ('ws-other', 'ws-other', 'ws-other', 'hubot', datetime('now'))`,
       )
       .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, scope, shared_at, created_at, updated_at)
          VALUES ('app-platform', 'platform-app', 1099, 'Platform App', 'enc', 'enc', 'hubot',
                  'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
-      )
-      .run();
+    )
+    .run();
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .run();
+  // The split pair AFTER the ws-other mapping, and the share scope on the
+  // bot row — the list keys on review_bots.scope.
+  syncSplitPair(db);
+    db.raw
+      .prepare("UPDATE review_bots SET scope = 'shared', shared_at = datetime('now') WHERE id = 'app-platform'")
       .run();
 
     const fetchSpy = spyOn(globalThis, "fetch");
@@ -704,6 +715,7 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
 
 describe("a target on a shared bot is visible to the workspace that created it", () => {
   const SHARED_APP_ID = 1099;
+  const SHARED_BOT_ID = "app-platform";
   const OTHER_WS = "ws-other";
 
   function seedPlatformBot(
@@ -724,23 +736,29 @@ describe("a target on a shared bot is visible to the workspace that created it",
       )
       .run(OTHER_WS, OTHER_WS, OTHER_WS);
     const id = opts.id ?? "app-platform";
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, scope, shared_at, created_at, updated_at)
          VALUES (?, 'platform-app', ?, 'Platform App', 'enc', 'enc', 'hubot', 'active', ?,
                  datetime('now'), datetime('now'), datetime('now'))`,
-      )
-      .run(id, opts.githubAppId ?? SHARED_APP_ID, opts.scope ?? "shared");
+    )
+    .run(id, opts.githubAppId ?? SHARED_APP_ID, opts.scope ?? "shared");
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
       .run(id, OTHER_WS);
+  // The split pair AFTER the workspace mapping so the bot copies OTHER_WS,
+  // then the capability scope on the bot row — the bot is what the share
+  // switch prices.
+  syncSplitPair(db);
+    db.raw
+      .prepare("UPDATE review_bots SET scope = ?, shared_at = datetime('now') WHERE id = ?")
+      .run(opts.scope ?? "shared", id);
     if (opts.targetInDefault !== false) {
       db.raw
         .prepare(
           `INSERT INTO review_targets
-             (id, workspace_id, bot_id, name, review_enabled, created_by, created_at, updated_at)
+             (id, workspace_id, app_id, name, review_enabled, created_by, created_at, updated_at)
            VALUES (?, 'default', ?, 'Platform App', ?, 'hubot', datetime('now'), datetime('now'))`,
         )
         .run(`target-${id}`, id, opts.targetReviewEnabled ?? 1);
@@ -774,7 +792,7 @@ describe("a target on a shared bot is visible to the workspace that created it",
     seedPlatformBot(db);
 
     const res = await get(
-      `/dashboard/default/api/apps/${SHARED_APP_ID}/settings`,
+      `/dashboard/default/api/review-bots/${SHARED_BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -799,7 +817,7 @@ describe("a target on a shared bot is visible to the workspace that created it",
     expect(rows.map((row) => row.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
     for (const appId of [1098, 1097]) {
       const res = await get(
-        `/dashboard/default/api/apps/${appId}/settings`,
+        `/dashboard/default/api/review-bots/${appId}/settings`,
         `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
         makeEnv(db),
       );
@@ -810,6 +828,7 @@ describe("a target on a shared bot is visible to the workspace that created it",
 
 describe("the settings payload's pending installations", () => {
   const SHARED_APP_ID = 1099;
+  const SHARED_BOT_ID = "app-platform";
 
   function seedInstallation(
     db: ReturnType<typeof createAppsUiD1>,
@@ -819,7 +838,7 @@ describe("the settings payload's pending installations", () => {
   ): void {
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
          VALUES (?, ?, ?, 'acme', '2026-01-01 00:00:00', ${removed ? "datetime('now')" : "NULL"})`,
       )
       .run(`install-${installationId}`, botId, installationId);
@@ -832,22 +851,27 @@ describe("the settings payload's pending installations", () => {
          VALUES ('ws-other', 'ws-other', 'ws-other', NULL, datetime('now'))`,
       )
       .run();
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, scope, shared_at, created_at, updated_at)
          VALUES ('app-platform', 'platform-app', ?, 'Platform App', 'enc', 'enc', 'hubot',
                  'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
-      )
-      .run(SHARED_APP_ID);
+    )
+    .run(SHARED_APP_ID);
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('app-platform', 'ws-other')")
+      .run();
+  // The split pair AFTER the ws-other mapping, and the share scope on the
+  // bot row — the list keys on review_bots.scope.
+  syncSplitPair(db);
+    db.raw
+      .prepare("UPDATE review_bots SET scope = 'shared', shared_at = datetime('now') WHERE id = 'app-platform'")
       .run();
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+           (id, workspace_id, app_id, name, created_by, created_at, updated_at)
          VALUES ('target-default', 'default', 'app-platform', 'Platform App', 'hubot',
                  datetime('now'), datetime('now'))`,
       )
@@ -856,7 +880,7 @@ describe("the settings payload's pending installations", () => {
 
   async function settingsOf(db: ReturnType<typeof createAppsUiD1>): Promise<Record<string, unknown>> {
     const res = await get(
-      `/dashboard/default/api/apps/${SHARED_APP_ID}/settings`,
+      `/dashboard/default/api/review-bots/${SHARED_BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -864,7 +888,7 @@ describe("the settings payload's pending installations", () => {
     return (await res.json()) as Record<string, unknown>;
   }
 
-  test("lists the bot's live installations and keeps every existing key", async () => {
+  test("the bot payload carries no installation data — empty even when rows exist (D44)", async () => {
     const db = await seededWorld();
     seedWorldWithBot(db);
     seedInstallation(db, "app-platform", 500);
@@ -872,10 +896,10 @@ describe("the settings payload's pending installations", () => {
     seedInstallation(db, "app-platform", 700);
 
     const body = await settingsOf(db);
-    expect(body.pending_installations).toEqual([
-      { installation_id: 500, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-      { installation_id: 700, account_login: "acme", seen_at: "2026-01-01 00:00:00" },
-    ]);
+    // D44: installations are GitHub-App data, never Review-Bot data — the
+    // payload's installation keys stay empty however many rows the
+    // installations table holds.
+    expect(body.pending_installations).toEqual([]);
     expect(body.installation).toBeNull();
     expect(body.target_id).toBe("target-default");
     expect(body.workspace_id).toBe("default");
@@ -887,7 +911,7 @@ describe("the settings payload's pending installations", () => {
     expect((await settingsOf(db)).pending_installations).toEqual([]);
 
     const owned = await get(
-      `/dashboard/default/api/apps/${MALLORY_APP_ID}/settings`,
+      `/dashboard/default/api/review-bots/${MALLORY_BOT_ID}/settings`,
       `${SESSION_COOKIE}=${await sessionCookie("mallory")}`,
       makeEnv(db),
     );
@@ -898,6 +922,7 @@ describe("the settings payload's pending installations", () => {
 describe("a retained target on another workspace's bot grants no bot-scope write", () => {
   const CONSUMER_WS = "ws-consumer";
   const FOREIGN_APP_ID = MALLORY_APP_ID;
+  const FOREIGN_BOT_ID = "app-mstar-inspector-mallory";
   const MUTABLE_BOT_TABLES = [
     "bot_provider_keys",
     "bot_provider_models",
@@ -905,7 +930,7 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     "bot_model_chains",
     "bot_model_chain_seats",
     "bot_custom_providers",
-    "bot_installations",
+    "github_app_installations",
   ] as const;
 
   async function crossWorkspaceWorld(): Promise<ReturnType<typeof createAppsUiD1>> {
@@ -925,11 +950,11 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     db.raw
       .prepare(
         `INSERT INTO review_targets
-           (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+           (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
             created_by, created_at, updated_at)
          SELECT 'target-consumer', ?, b.id, 'consumer', 901002, 'acme', 'consumer-only',
                 'mallory', datetime('now'), datetime('now')
-           FROM review_bots b WHERE b.github_app_id = ?`,
+           FROM github_apps b WHERE b.github_app_id = ?`,
       )
       .run(CONSUMER_WS, FOREIGN_APP_ID);
     return db;
@@ -968,13 +993,13 @@ describe("a retained target on another workspace's bot grants no bot-scope write
         { op: "save-roles", "role_code-reviewer": "" },
       ];
       for (const fields of botOps) {
-        const res = await postForm(`${base}/apps/${FOREIGN_APP_ID}/settings`, cookie, env, fields);
+        const res = await postForm(`${base}/review-bots/${FOREIGN_BOT_ID}/settings`, cookie, env, fields);
         expect(res.status, fields.op).toBe(403);
         expect(((await res.json()) as { key: unknown }).key, fields.op).toBe("settings.error.botReadOnly");
       }
       const credentialProbes: Array<[string, Record<string, string>]> = [
-        [`${base}/api/apps/${FOREIGN_APP_ID}/keys/verify`, { provider: "anthropic", key: "sk-foreign" }],
-        [`${base}/api/apps/${FOREIGN_APP_ID}/keys/usage`, { provider: "zai", keyId: "nope" }],
+        [`${base}/api/review-bots/${FOREIGN_BOT_ID}/keys/verify`, { provider: "anthropic", key: "sk-foreign" }],
+        [`${base}/api/review-bots/${FOREIGN_BOT_ID}/keys/usage`, { provider: "zai", keyId: "nope" }],
       ];
       for (const [path, fields] of credentialProbes) {
         const res = await postForm(path, cookie, env, fields);
@@ -991,28 +1016,28 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(botScopedWriteCounts(db)).toEqual(before);
     expect(appStatus(db, FOREIGN_APP_ID)).toBe("active");
     expect(
-      db.raw.query("SELECT workspace_id FROM bot_workspaces WHERE bot_id = (SELECT id FROM review_bots WHERE github_app_id = ?)").get(FOREIGN_APP_ID),
+      db.raw.query("SELECT workspace_id FROM app_workspaces WHERE app_id = (SELECT id FROM github_apps WHERE github_app_id = ?)").get(FOREIGN_APP_ID),
     ).toEqual({ workspace_id: "default" });
     expect(
-      db.raw.query("SELECT github_metadata_synced_at FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID),
+      db.raw.query("SELECT github_metadata_synced_at FROM github_apps WHERE github_app_id = ?").get(FOREIGN_APP_ID),
     ).toEqual({ github_metadata_synced_at: null });
   });
 
   test("the settings and models faces carry only target-owned sections", async () => {
     const db = await crossWorkspaceWorld();
     const botId = (
-      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID) as { id: string }
+      db.raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").get(FOREIGN_APP_ID) as { id: string }
     ).id;
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
          VALUES ('install-leak', ?, 777, 'acme-org', '2026-01-01 00:00:00', NULL)`,
       )
       .run(botId);
     db.raw
       .prepare(
         `INSERT INTO webhook_deliveries
-           (id, bot_id, event_name, outcome, status_code, repository_full_name, created_at)
+           (id, app_id, event_name, outcome, status_code, repository_full_name, created_at)
          VALUES ('delivery-leak', ?, 'pull_request', 'ok', 200, 'secret-org/private-repo', datetime('now'))`,
       )
       .run(botId);
@@ -1025,7 +1050,7 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     let res: Response;
     try {
       res = await get(
-        `/dashboard/${CONSUMER_WS}/api/apps/${FOREIGN_APP_ID}/settings`,
+        `/dashboard/${CONSUMER_WS}/api/review-bots/${FOREIGN_BOT_ID}/settings`,
         cookie,
         env,
       );
@@ -1075,20 +1100,19 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect(serialized).not.toContain("secret-org/private-repo");
 
     expect(
-      db.raw.query("SELECT github_metadata_synced_at FROM review_bots WHERE github_app_id = ?").get(FOREIGN_APP_ID),
+      db.raw.query("SELECT github_metadata_synced_at FROM github_apps WHERE github_app_id = ?").get(FOREIGN_APP_ID),
     ).toEqual({ github_metadata_synced_at: null });
-    const models = await get(`/dashboard/${CONSUMER_WS}/api/apps/${FOREIGN_APP_ID}/models`, cookie, env);
+    const models = await get(`/dashboard/${CONSUMER_WS}/api/review-bots/${FOREIGN_BOT_ID}/models`, cookie, env);
     expect(models.status).toBe(403);
     expect(((await models.json()) as { key: unknown }).key).toBe("settings.error.botReadOnly");
 
-    const owner = await get(`/dashboard/default/api/apps/${FOREIGN_APP_ID}/settings`, cookie, env);
+    const owner = await get(`/dashboard/default/api/review-bots/${FOREIGN_BOT_ID}/settings`, cookie, env);
     expect(owner.status).toBe(200);
     const ownerBody = (await owner.json()) as Record<string, unknown>;
     expect(ownerBody.blocked).toBe(false);
     expect(ownerBody.blocked_reason).toBeNull();
-    expect(ownerBody.installations).toEqual([
-      { installation_id: 777, account_login: "acme-org", seen_at: "2026-01-01 00:00:00" },
-    ]);
+    // D44: installations are App data, never bot-payload data.
+    expect(ownerBody.installations).toEqual([]);
     expect(ownerBody.deliveries).toBeUndefined();
     expect(Array.isArray(ownerBody.keys)).toBe(true);
     expect(ownerBody.provider_catalog).toBeUndefined();
@@ -1115,7 +1139,7 @@ describe("a retained target on another workspace's bot grants no bot-scope write
     expect((await post(`/dashboard/default/apps/${FOREIGN_APP_ID}/disable`, ownerCookie, env)).status).toBe(200);
     expect(appStatus(db, FOREIGN_APP_ID)).toBe("disabled");
     const ownerOp = await postForm(
-      "/dashboard/default/apps/1001/settings",
+      `/dashboard/default/review-bots/${FOREIGN_BOT_ID}/settings`,
       ownerCookie,
       env,
       { op: "save-sandbox-image", sandbox_image_id: "omp" },
@@ -1130,7 +1154,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
 
   async function seedDeliveries(db: ReturnType<typeof createAppsUiD1>) {
     const botId = (
-      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+      db.raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
         id: string;
       }
     ).id;
@@ -1210,7 +1234,7 @@ describe("GET /dashboard/:ref/api/apps/:appId/deliveries (the delivery-status re
   test("paging returns the requested window and the unpaged total", async () => {
     const db = await seededWorld();
     const botId = (
-      db.raw.query("SELECT id FROM review_bots WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
+      db.raw.query("SELECT id FROM github_apps WHERE github_app_id = ?").get(MALLORY_APP_ID) as {
         id: string;
       }
     ).id;

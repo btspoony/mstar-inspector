@@ -7,53 +7,20 @@ import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser, type DashboardD1 } from "../../src/dashboard/users";
 import type { Env } from "../../src/worker/env";
-import { createTestD1, execMigrationScript } from "../store/helpers";
+import { createTestD1, applyMigration as applyMigrationShared, migrationsAfter } from "../store/helpers";
 
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const MIGRATIONS_DIR = join(import.meta.dir, "../../migrations");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const DEMO_APP_ID = 42;
+const DEMO_BOT_ID = "demo-app-bot";
 
 function createD1(): ReturnType<typeof createTestD1> {
+  // The PRODUCTION chain: the hand-kept prefix stopped in the bot era, and the
+  // read faces these tests exercise are post-split. migrationsAfter sorts
+  // numerically, which is dependency order.
   const db = createTestD1();
-  for (const name of [
-    "0003_dashboard_users.sql",
-    "0004_github_apps.sql",
-    "0006_app_provider_config.sql",
-    "0008_github_apps_ops.sql",
-    "0009_app_model_roles.sql",
-    "0012_custom_providers_and_key_updated_at.sql",
-    "0023_removed_logins.sql",
-    "0026_workspaces.sql",
-    "0040_runtime_config.sql",
-    "0028_workspace_invites.sql",
-    "0036_app_identity.sql",
-    "0018_app_sandbox_images.sql",
-    "0019_github_apps_metadata.sql",
-    "0022_app_trigger_mode.sql",
-    "0037_github_metadata_attempt.sql",
-    "0038_webhook_path_drop.sql",
-    "0045_review_gate_and_owner_allowlist.sql",
-    "0005_reviews_app_id.sql",
-    "0007_reviews_app_id_index.sql",
-    "0011_webhook_deliveries.sql",
-    "0043_webhook_delivery_repository.sql",
-    "0039_pull_requests.sql",
-    "0020_finding_lifecycle.sql",
-    "0021_review_checks.sql",
-    "0015_provider_verification.sql",
-    "0017_app_model_chains.sql",
-    "0024_provider_multi_key.sql",
-    "0025_provider_model_evidence.sql",
-    "0055_app_installations_removed_at.sql",
-    "0047_review_level_per_app.sql",
-    "0048_comment_trigger_claims.sql",
-    "0056_review_bots_rename.sql",
-    "0057_review_targets.sql",
-    "0058_review_bot_scope.sql",
-  ]) {
-    execMigrationScript(db.raw, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
-  }
+  applyMigrationShared(db.raw, migrationsAfter(2));
   return db;
 }
 
@@ -73,7 +40,7 @@ async function seed(db: ReturnType<typeof createD1>): Promise<void> {
        SELECT 'default', id, 'owner', '2026-01-01T00:00:00.000Z' FROM users WHERE github_login = 'octocat'`,
     )
     .run();
-  const id = crypto.randomUUID();
+  const id = DEMO_BOT_ID;
   const enc = await encryptedColumns(id);
   await createReviewBotsStore(db).createApp({
     id,
@@ -124,7 +91,7 @@ describe("POST mutation Accept routing (QC W-2)", () => {
     await seed(db);
     const env = makeEnv(db);
     const res = await worker.fetch(
-      new Request(`https://worker.local/dashboard/default/apps/${DEMO_APP_ID}/settings`, {
+      new Request(`https://worker.local/dashboard/default/review-bots/${DEMO_BOT_ID}/settings`, {
         method: "POST",
         headers: {
           Cookie: await cookie("octocat"),

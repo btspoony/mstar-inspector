@@ -8,14 +8,14 @@
  *
  * Two questions, each its own `COUNT(*)`:
  *
- *   1. Zero orphans. Every App must own exactly one `bot_workspaces` row:
+ *   1. Zero orphans. Every App must own exactly one `app_workspaces` row:
  *      every execution-facing App read INNER JOINs that table, so an unmapped
  *      App silently disappears from the pipeline — the failure is invisible,
  *      which is why an orphan count aborts the deploy instead of warning.
  *      `scripts/workspace-backfill.sql` is idempotent; replay it first.
- *   2. No target-less bot. Every live bot must own a live `review_targets`
+ *   2. No target-less App. Every live App must own a live `review_targets`
  *      row: the review configuration and the installation binding live on
- *      that row, so a bot without one answers no delivery at all.
+ *      that row, so an App without one answers no delivery at all.
  *
  * Both queries run through the same `wrangler d1 execute` path the deploy
  * uses, against the remote database, and against the environment's config
@@ -28,15 +28,15 @@
 
 /** The zero-orphan question. `n > 0` = Apps with no workspace mapping. */
 export const ZERO_ORPHAN_SQL =
-  "SELECT COUNT(*) AS n FROM review_bots g LEFT JOIN bot_workspaces w ON w.bot_id = g.id WHERE w.bot_id IS NULL";
+  "SELECT COUNT(*) AS n FROM github_apps g LEFT JOIN app_workspaces w ON w.app_id = g.id WHERE w.app_id IS NULL";
 
 /**
- * The target-less question. `n > 0` = live bots with no live target: the
- * `LEFT JOIN` keeps a bot whose only target is soft-deleted, which is the
- * state that answers no delivery.
+ * The target-less question. `n > 0` = live GitHub Apps without a live review
+ * target: the `LEFT JOIN` keeps an App whose only target is soft-deleted,
+ * which is the state that answers no delivery.
  */
 export const TARGETLESS_BOT_SQL =
-  "SELECT COUNT(*) AS n FROM review_bots g LEFT JOIN review_targets t ON t.bot_id = g.id AND t.deleted_at IS NULL WHERE g.deleted_at IS NULL AND t.id IS NULL";
+  "SELECT COUNT(*) AS n FROM github_apps g LEFT JOIN review_targets t ON t.app_id = g.id AND t.deleted_at IS NULL WHERE g.deleted_at IS NULL AND t.id IS NULL";
 
 export type AttributionVerdict = {
   ok: boolean;
@@ -81,18 +81,17 @@ export function attributionVerdict(stdout: string): AttributionVerdict {
   const read = readCount(stdout);
   if ("reason" in read) return { ok: false, count: null, message: `tenant attribution: ${read.reason}` };
   if (read.count === 0) {
-    return { ok: true, count: 0, message: "tenant attribution: 0 orphan Apps (every review_bots row has a bot_workspaces row)" };
+    return { ok: true, count: 0, message: "tenant attribution: 0 orphan Apps (every github_apps row has an app_workspaces row)" };
   }
   return {
     ok: false,
     count: read.count,
     message:
-      `tenant attribution: ${read.count} App(s) have no bot_workspaces row — every App read joins ` +
+      `tenant attribution: ${read.count} App(s) have no app_workspaces row — every App read joins ` +
       `that table, so they are invisible to the pipeline. Replay scripts/workspace-backfill.sql, then re-run this gate.`,
   };
 }
-
-/** The target-less verdict: `n > 0` names the bots that cannot review. */
+/** The target-less verdict: `n > 0` names the live GitHub Apps that cannot review. */
 export function targetlessVerdict(stdout: string): AttributionVerdict {
   const read = readCount(stdout);
   if ("reason" in read) return { ok: false, count: null, message: `tenant attribution: ${read.reason}` };
@@ -100,17 +99,17 @@ export function targetlessVerdict(stdout: string): AttributionVerdict {
     return {
       ok: true,
       count: 0,
-      message: "tenant attribution: 0 target-less bots (every live review_bots row has a live review_targets row)",
+      message: "tenant attribution: 0 target-less Apps (every live github_apps row has a live review_targets row)",
     };
   }
   return {
     ok: false,
     count: read.count,
     message:
-      `tenant attribution: ${read.count} bot(s) have no live review target — review configuration and the ` +
-      `installation binding live on that row, so they cannot review. 0057_review_targets.sql cannot be replayed ` +
-      `whole on a half-applied database: inspect its partial application and restore the missing target rows, ` +
-      `then re-run this gate.`,
+      `tenant attribution: ${read.count} live GitHub App(s) have no live review target — a delivery resolves ` +
+      `its repository through that row, so these Apps answer no delivery at all. 0057_review_targets.sql cannot ` +
+      `be replayed whole on a half-applied database: inspect its partial application and restore the missing ` +
+      `target rows, then re-run this gate.`,
   };
 }
 

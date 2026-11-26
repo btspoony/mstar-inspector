@@ -3,7 +3,7 @@ import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/env";
 import { createSessionValue, SESSION_COOKIE } from "../../src/dashboard/session";
 import { SPA_BOOT_MARKER, withSpaAssets } from "../helpers/spa";
-import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { createUser } from "../../src/dashboard/users";
@@ -106,8 +106,8 @@ async function insightsWorld(): Promise<{
 
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().replace("T", " ").slice(0, 19);
   const insertReview = db.raw.query(
-    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, bot_id, target_id)
-     VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}', ?, (SELECT id FROM review_targets WHERE bot_id = ?))`,
+    `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, summary_md, envelope, app_id, target_id)
+     VALUES (?, 123, ?, ?, ?, 'sha', ?, ?, 's', '{}', ?, (SELECT id FROM review_targets WHERE app_id = ?))`,
   );
   const insertFinding = db.raw.query(
     `INSERT INTO findings (id, review_id, severity, category, title, body, fingerprint)
@@ -121,6 +121,7 @@ async function insightsWorld(): Promise<{
   insertReview.run("r-d", "acme", "portal", 4, daysAgo(10), "approve", appId, appId);
   insertReview.run("r-c", "globex", "gadgets", 3, daysAgo(5), "request changes", otherAppId, otherAppId);
   insertFinding.run("f-c1", "r-c", "should-fix", "security", "Injection", "fp-z");
+  syncReviewBotColumn(db);
 
   const env = {
     REVIEW_QUEUE: { send: async () => {} } as unknown as Env["REVIEW_QUEUE"],

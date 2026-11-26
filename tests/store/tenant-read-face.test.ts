@@ -32,7 +32,7 @@ async function seedMappedAndOrphan() {
   const db = createMigratedTestD1();
   const mapped = await seedApp(db, { githubAppId: 1 });
   const orphan = await seedApp(db, { githubAppId: 2 });
-  db.raw.prepare(`DELETE FROM bot_workspaces WHERE bot_id = ?`).run(orphan.id);
+  db.raw.prepare(`DELETE FROM app_workspaces WHERE app_id = ?`).run(orphan.id);
   return { db, mapped, orphan };
 }
 
@@ -57,9 +57,9 @@ describe("apps-store tenant read face", () => {
 });
 
 describe("apps-store read SQL joins the tenant", () => {
-  test("APP_READ_SQL joins bot_workspaces and selects workspace_id", () => {
+  test("APP_READ_SQL joins app_workspaces and selects workspace_id", () => {
     for (const sql of Object.values(APP_READ_SQL)) {
-      expect(sql).toContain("INNER JOIN bot_workspaces");
+      expect(sql).toContain("INNER JOIN app_workspaces");
       expect(sql).toContain("w.workspace_id");
     }
   });
@@ -160,18 +160,13 @@ function directReadFiles(): string[] {
     .sort();
 }
 
-const MAINTENANCE_SITES: Record<string, number> = {
-  "admin/maintenance-replay.ts": 1,
-  "worker/lifecycle-reconcile.ts": 1,
-  "worker/check-reconcile.ts": 3,
-  "pipeline/review-threads.ts": 1,
-  "store/review-checks.ts": 1,
-  "admin/installation-repositories.ts": 1,
-};
+// Post-split truth: every one of these files' review_bots reads moved to
+// github_apps (Tasks 3–4 converted the publishing/ops trees); grep finds zero
+// remaining references in any of them. The bot table is read by the store
+// alone — the allowlist is the proof, not a leftover.
+const MAINTENANCE_SITES: Record<string, number> = {};
 
-const TENANT_DIRECT_SITES: Record<string, number> = {
-  "dashboard/targets-store.ts": 1,
-};
+const TENANT_DIRECT_SITES: Record<string, number> = {};
 
 describe("tenant read face allowlist", () => {
   test("tenant-facing modules hold no direct review_bots read", () => {
@@ -239,7 +234,7 @@ describe("tenant read face allowlist", () => {
     const sql = "select (select 1 from workspaces limit 1), b.name from review_bots b";
     expect(projection(sql)).toContain("b.name");
     expect(projection(sql)).not.toContain("review_bots");
-    const joined = "select t.id from review_targets t join review_bots b on b.id = t.bot_id and b.name = t.name";
+    const joined = "select t.id from review_targets t join review_bots b on b.id = t.app_id and b.name = t.name";
     expect(projection(joined)).not.toContain("b.name");
   });
 });

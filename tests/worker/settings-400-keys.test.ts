@@ -11,8 +11,10 @@ import { sk, OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
-const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
+// Bot-config routes bind the bot ROW id.
+const BOT_ID = "bot-settings-400";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
+const VERIFY = `/dashboard/default/api/review-bots/${BOT_ID}/keys/verify`;
 const ACCOUNT_ID = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
 
 async function seededWorld(malloryRole: "owner" | "member" = "owner") {
@@ -20,7 +22,7 @@ async function seededWorld(malloryRole: "owner" | "member" = "owner") {
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   seedDefaultMemberships(db, { octocat: "owner", mallory: malloryRole });
-  const id = crypto.randomUUID();
+  const id = BOT_ID;
   const box = createSecretbox(TEST_KEY);
   const app = await createReviewBotsStore(db).createApp({
     id,
@@ -405,7 +407,7 @@ describe("verify route: a spent provider account keeps its own reason", () => {
 });
 
 describe("review depth op (per-App review level)", () => {
-  const SETTINGS_API = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const SETTINGS_API = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
   const DEFAULT_LEVEL_SQL = "SELECT value FROM review_runtime_settings WHERE key = ?";
   const countDefaultLevelReads = (db: TestD1): { db: TestD1; reads: () => number } => {

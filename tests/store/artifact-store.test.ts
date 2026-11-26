@@ -9,7 +9,7 @@ import {
 import { computeFindingFingerprint } from "../../src/store/fingerprint";
 import { REDACTED } from "../../src/pipeline/redact";
 import { idemKey } from "../../src/contracts/idem";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
+import { syncSplitPair, syncReviewBotColumn, createMigratedTestD1, seedTarget, type TestD1 } from "./helpers";
 import type { ReviewRow } from "../../src/store/types";
 
 const SHA = "0123456789abcdef0123456789abcdef01234567";
@@ -53,14 +53,16 @@ function reviewDoc(overrides: Partial<ReviewArtifactDoc> = {}): ReviewArtifactDo
 }
 
 function seedAppRow(db: ReturnType<typeof createMigratedTestD1>, id: string): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, 1001, 'store-test-app', 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 function createSeededTestD1(): TestD1 {
@@ -172,6 +174,7 @@ describe("createArtifactStore().put", () => {
          VALUES (?, 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'old', 'mstar.review/v1', NULL)`,
       )
       .run(oldReviewId, "e".repeat(40));
+  syncReviewBotColumn(db);
     db.raw
       .prepare(
         `INSERT INTO findings (id, review_id, severity, file_path, line_start, title, body, fingerprint)
@@ -225,15 +228,19 @@ describe("createArtifactStore().put", () => {
 
     await store.put(reviewDoc());
 
-    const perApp = db.raw.query("SELECT bot_id, target_id FROM reviews WHERE head_sha = ?").get(SHA) as {
+    // Post-split a review row carries BOTH attribution columns, equal this
+    // release: app_id is the acting App, bot_id the executing bot.
+    const perApp = db.raw.query("SELECT app_id, bot_id, target_id FROM reviews WHERE head_sha = ?").get(SHA) as {
+      app_id: string | null;
       bot_id: string | null;
       target_id: string | null;
     };
+    expect(perApp.app_id).toBe(TEST_APP_ID);
     expect(perApp.bot_id).toBe(TEST_APP_ID);
     expect(perApp.target_id).toBe(TEST_TARGET_ID);
     db.raw
       .prepare(
-        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, bot_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, verdict, summary_md, skill_version, envelope, app_id)
          VALUES (?, 123, 'acme', 'widgets', 42, ?, 'needs fixes', 'historical', 'mstar.review/v1', NULL, NULL)`,
       )
       .run(crypto.randomUUID(), "f".repeat(40));
@@ -579,6 +586,7 @@ describe("createArtifactStore().get", () => {
          VALUES ('m1-row', 123, 'acme', 'widgets', 42, ?, 'comment', 'M1 history', '{}')`,
       )
       .run(SHA);
+  syncReviewBotColumn(db);
 
     expect(await store.get<MstarReviewV1>({ kind: "review", key: KEY })).toBeUndefined();
     expect(await store.findByIdempotencyKey(KEY_TUPLE)).not.toBeNull();

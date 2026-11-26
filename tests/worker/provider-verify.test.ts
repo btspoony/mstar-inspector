@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, createTestD1, type TestD1 } from "../store/helpers";
 import { PROVIDER_VERIFY_MIGRATIONS, applyMigrations } from "../helpers/migration-shapes";
 import { createReviewBotsStore, type GithubAppRow } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
@@ -71,8 +71,11 @@ async function createPopulatedPre0015D1(): Promise<TestD1> {
       await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
       await box.encryptSecret("test-webhook-secret", `github_apps.webhook_secret_enc:${id}`),
     );
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
-    .prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .run(id);
   rawRun(
     db,

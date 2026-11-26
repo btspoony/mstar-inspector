@@ -9,6 +9,9 @@ const TEST_ENCRYPTION_KEY = Buffer.alloc(32, 7).toString("base64");
 const OFFICIAL = "default";
 const OTHER = "ws-other";
 const HOME_BOT = 8201;
+// The seeded ROW id (bot-config routes bind this).
+const HOME_BOT_ROW = "bot-home";
+const OTHER_BOT_ROW = "bot-other";
 const OTHER_BOT = 8202;
 const READ_ONLY_KEY = "settings.error.botReadOnly";
 
@@ -43,7 +46,9 @@ function seedMembership(workspaceId: string, login: string, role: string): void 
 
 function seedOwnedBot(botId: string, githubAppId: number, workspaceId: string): void {
   seedBot(db, botId, githubAppId);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)").run(botId, workspaceId);
+  // The scoped read keys on review_bots.workspace_id.
+  db.raw.prepare("UPDATE review_bots SET workspace_id = ? WHERE id = ?").run(workspaceId, botId);
 }
 
 function world(): void {
@@ -87,10 +92,10 @@ async function request(
   );
 }
 
-async function getSettings(ref: string, login: string, githubAppId: number): Promise<Response> {
+async function getSettings(ref: string, login: string, botId: string): Promise<Response> {
   const session = await createSessionValue(login, null, SESSION_SECRET);
   return worker.fetch(
-    new Request("https://worker.local/dashboard/" + ref + "/api/apps/" + githubAppId + "/settings", {
+    new Request("https://worker.local/dashboard/" + ref + "/api/review-bots/" + botId + "/settings", {
       headers: { Cookie: SESSION_COOKIE + "=" + session, Accept: "application/json" },
     }),
     envFor(),
@@ -100,15 +105,15 @@ async function getSettings(ref: string, login: string, githubAppId: number): Pro
 const SEAMS: ReadonlyArray<{ name: string; path: string; form?: Record<string, string> }> = [
   { name: "lifecycle", path: "/apps/" + HOME_BOT + "/disable" },
   { name: "metadata refresh", path: "/api/apps/" + HOME_BOT + "/refresh-metadata" },
-  { name: "key verify", path: "/api/apps/" + HOME_BOT + "/keys/verify", form: { provider: "", key: "" } },
+  { name: "key verify", path: "/api/review-bots/" + HOME_BOT_ROW + "/keys/verify", form: { provider: "", key: "" } },
   {
     name: "settings op",
-    path: "/apps/" + HOME_BOT + "/settings",
+    path: "/review-bots/" + HOME_BOT_ROW + "/settings",
     form: { op: "save-sandbox-image", sandbox_image_id: "omp" },
   },
   {
     name: "key delete",
-    path: "/apps/" + HOME_BOT + "/settings/key/delete",
+    path: "/review-bots/" + HOME_BOT_ROW + "/settings/key/delete",
     form: { provider: "anthropic", key_id: "nope" },
   },
 ];
@@ -157,18 +162,18 @@ describe("the bot-scope write predicate: owning workspace in, consumer out", () 
     }
     expect(storedScope()).toBe("shared");
     expect(
-      (db.raw.query("SELECT status FROM review_bots WHERE id = 'bot-home'").get() as { status: string }).status,
+      (db.raw.query("SELECT status FROM github_apps WHERE id = 'bot-home'").get() as { status: string }).status,
     ).toBe("active");
   });
 });
 
 describe("the bot settings payload's share facts", () => {
-  async function readFacts(ref: string, login: string, githubAppId: number): Promise<Record<string, unknown>> {
+  async function readFacts(ref: string, login: string, botId: string): Promise<Record<string, unknown>> {
     const fetchSpy = spyOn(globalThis, "fetch").mockImplementation((() => {
       throw new Error("no external call in this test");
     }) as unknown as typeof fetch);
     try {
-      const res = await getSettings(ref, login, githubAppId);
+      const res = await getSettings(ref, login, botId);
       expect(res.status).toBe(200);
       return (await res.json()) as Record<string, unknown>;
     } finally {
@@ -178,7 +183,7 @@ describe("the bot settings payload's share facts", () => {
 
   test("the official workspace that owns the shared bot may configure it and may re-share", async () => {
     world();
-    const body = await readFacts(OFFICIAL, "dana", HOME_BOT);
+    const body = await readFacts(OFFICIAL, "dana", HOME_BOT_ROW);
     expect(body.can_manage).toBe(true);
     expect(body.official_workspace).toBe(true);
     expect(body.can_configure_bot).toBe(true);
@@ -187,21 +192,21 @@ describe("the bot settings payload's share facts", () => {
 
   test("a consumer sees the same bot as usable but not configurable", async () => {
     world();
-    const body = await readFacts(OTHER, "erin", HOME_BOT);
+    const body = await readFacts(OTHER, "erin", HOME_BOT_ROW);
     expect(body.official_workspace).toBe(true);
     expect(body.can_configure_bot).toBe(false);
   });
 
   test("a non-official workspace's own bot is configurable and not shareable", async () => {
     world();
-    const body = await readFacts(OTHER, "erin", OTHER_BOT);
+    const body = await readFacts(OTHER, "erin", OTHER_BOT_ROW);
     expect(body.official_workspace).toBe(false);
     expect(body.can_configure_bot).toBe(true);
   });
 
   test("a plain member's identity face carries neither fact", async () => {
     world();
-    const body = await readFacts(OFFICIAL, "mallory", HOME_BOT);
+    const body = await readFacts(OFFICIAL, "mallory", HOME_BOT_ROW);
     expect(body.can_manage).toBe(false);
     expect(body).not.toHaveProperty("official_workspace");
     expect(body).not.toHaveProperty("can_configure_bot");

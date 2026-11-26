@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readReviewUsage, reviewUsageMonth } from "../../src/dashboard/review-usage-store";
-import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { createMigratedTestD1, seedBot, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 
 const NOVEMBER = reviewUsageMonth(new Date("2026-11-16T05:00:00Z"));
 const DECEMBER_FIRST = "2026-12-01 00:00:00";
@@ -27,11 +27,11 @@ function seedReview(
 ): void {
   db.raw
     .prepare(
-      `INSERT INTO reviews
-         (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+      `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id, target_id)
        VALUES (?, 1, 'acme', 'widgets', ?, ?, ?, 'pass', ?, ?)`,
     )
     .run(row.id, row.prNumber, row.id, row.reviewedAt, row.botId, row.targetId);
+  syncReviewBotColumn(db);
 }
 
 function fixture(): TestD1 {
@@ -43,7 +43,7 @@ function fixture(): TestD1 {
   seedBot(db, "bot-shared", 9001);
   db.raw.prepare("UPDATE review_bots SET scope = 'shared', shared_at = '2026-10-01 00:00:00' WHERE id = 'bot-shared'").run();
   db.raw
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-shared', 'ws-alpha')")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('bot-shared', 'ws-alpha')")
     .run();
   seedBot(db, "bot-own", 9002);
   seedBot(db, "bot-gamma", 9003);
@@ -110,7 +110,7 @@ describe("readReviewUsage", () => {
     seedTarget(db, "bot-shared", { workspaceId: "ws-idle" });
     db.raw
       .prepare(
-        "UPDATE review_targets SET deleted_at = '2026-11-05 00:00:00' WHERE workspace_id = 'ws-idle' AND bot_id = 'bot-shared'",
+        "UPDATE review_targets SET deleted_at = '2026-11-05 00:00:00' WHERE workspace_id = 'ws-idle' AND app_id = 'bot-shared'",
       )
       .run();
 

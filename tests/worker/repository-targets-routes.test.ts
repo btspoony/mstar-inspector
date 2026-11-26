@@ -4,7 +4,7 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
 import { createUser } from "../../src/dashboard/users";
-import { createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedDefaultMemberships, seedTarget, type TestD1, syncReviewBotColumn } from "../store/helpers";
 import { testAppPem } from "../helpers/rsa-key";
 import type { Env } from "../../src/worker/env";
 import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
@@ -96,14 +96,16 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
     workspaceId: "default",
     maxApps: null,
   });
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
+  db.raw.prepare(
+      `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
                                  created_by, status, scope, created_at, updated_at)
        VALUES ('bot-foreign', 'foreign-bot', 9402, 'foreign-bot', 'enc', 'enc', 'mallory',
                'active', 'owned', datetime('now'), datetime('now'))`,
     )
     .run();
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   db.raw
     .prepare(
       `INSERT INTO workspaces (id, slug, name, created_by, created_at)
@@ -111,7 +113,7 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
     )
     .run(OTHER_WS, OTHER_WS, OTHER_WS);
   await db
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-foreign', ?)")
+    .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES ('bot-foreign', ?)")
     .bind(OTHER_WS)
     .run();
   seedTarget(db, "bot-foreign", {
@@ -129,7 +131,7 @@ async function seededWorld(opts: { installations?: number[]; target?: boolean } 
     });
   }
   db.raw
-    .prepare("UPDATE bot_installations SET seen_at = '2026-01-01 00:00:00.000' WHERE bot_id = ?")
+    .prepare("UPDATE github_app_installations SET seen_at = '2026-01-01 00:00:00.000' WHERE app_id = ?")
     .run(id);
   if (opts.target !== false) {
     seedTarget(db, id, { workspaceId: "default", repoId: 555001, repoOwner: "acme", repoName: "api" });
@@ -162,8 +164,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
   ): void {
     db.raw
       .prepare(
-        `INSERT INTO reviews
-           (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, bot_id, target_id)
+        `INSERT INTO reviews (id, installation_id, owner, repo, pr_number, head_sha, reviewed_at, verdict, app_id, target_id)
          VALUES (?, 1, 'acme', 'api', ?, ?, ?, 'pass', ?, ?)`,
       )
       .run(
@@ -174,12 +175,13 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
         row.botId,
         row.targetId,
       );
+  syncReviewBotColumn(db);
   }
 
   test("a live target carries its repository identity, its App name and no foreign row", async () => {
     const { db, botId } = await seededWorld({});
     db.raw
-      .prepare("UPDATE review_bots SET github_name = 'Acme Inspector' WHERE id = ?")
+      .prepare("UPDATE github_apps SET github_name = 'Acme Inspector' WHERE id = ?")
       .run(botId);
 
     const res = await get(db, "/dashboard/default/api/targets", "trudy");
@@ -219,7 +221,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
       repoName: undefined,
     });
     db.raw
-      .prepare("UPDATE review_targets SET repo_id = NULL, repo_owner = NULL, repo_name = NULL WHERE bot_id = ?")
+      .prepare("UPDATE review_targets SET repo_id = NULL, repo_owner = NULL, repo_name = NULL WHERE app_id = ?")
       .run(botId);
 
     const res = await get(db, "/dashboard/default/api/targets", "mallory");
@@ -246,7 +248,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
     });
     const apiId = (
       db.raw
-        .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
+        .query("SELECT id FROM review_targets WHERE app_id = ? AND repo_id = 555001")
         .get(botId) as { id: string }
     ).id;
     seedReview(db, { id: "r-old-1", targetId: apiId, botId, reviewedAt: "2025-01-01 00:00:00" });
@@ -274,7 +276,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
     const { db, botId } = await seededWorld({});
     const apiId = (
       db.raw
-        .query("SELECT id FROM review_targets WHERE bot_id = ? AND repo_id = 555001")
+        .query("SELECT id FROM review_targets WHERE app_id = ? AND repo_id = 555001")
         .get(botId) as { id: string }
     ).id;
     db.raw
@@ -429,7 +431,7 @@ describe("GET /dashboard/:workspaceRef/api/apps/:appId/installation-repositories
     });
     db.raw
       .prepare(
-        "UPDATE review_targets SET repo_id = NULL, repo_owner = 'acme', repo_name = 'migrated' WHERE bot_id = ?",
+        "UPDATE review_targets SET repo_id = NULL, repo_owner = 'acme', repo_name = 'migrated' WHERE app_id = ?",
       )
       .run(botId);
     stubRepositories({
@@ -572,10 +574,10 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(body.created).toHaveLength(1);
     expect(body.duplicates).toEqual([]);
     const holders = db.raw
-      .query("SELECT bot_id FROM review_targets WHERE repo_id = 777001 ORDER BY workspace_id")
-      .all() as Array<{ bot_id: string }>;
+      .query("SELECT app_id FROM review_targets WHERE repo_id = 777001 ORDER BY workspace_id")
+      .all() as Array<{ app_id: string }>;
     expect(holders).toHaveLength(2);
-    expect(new Set(holders.map((row) => row.bot_id)).size).toBe(2);
+    expect(new Set(holders.map((row) => row.app_id)).size).toBe(2);
   });
 
   test("an id the App does not grant refuses the whole request and writes nothing", async () => {
@@ -646,20 +648,22 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     const { db } = await seededWorld({ target: false });
     const sharedId = "bot-shared-platform";
     const box = createSecretbox(TEST_KEY);
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, scope, shared_at, created_at, updated_at)
          VALUES (?, 'platform-bot', 9403, 'platform-bot', 'enc', 'enc', 'mallory',
                  'active', 'shared', datetime('now'), datetime('now'), datetime('now'))`,
-      )
-      .run(sharedId);
+    )
+    .run(sharedId);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
-      .prepare("UPDATE review_bots SET private_key_enc = ? WHERE id = ?")
+      .prepare("UPDATE github_apps SET private_key_enc = ? WHERE id = ?")
       .run(await box.encryptSecret(await testAppPem(), `github_apps.private_key_enc:${sharedId}`), sharedId);
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
       .run(sharedId, OTHER_WS);
     await createReviewBotsStore(db).upsertInstallation({
       appId: sharedId,
@@ -680,7 +684,7 @@ describe("POST /dashboard/:workspaceRef/api/targets", () => {
     expect(refused.status).toBe(404);
     expect(await refused.json()).toEqual({ error: "unknown app" });
     const written = db.raw
-      .query("SELECT COUNT(*) AS n FROM review_targets WHERE bot_id = ?")
+      .query("SELECT COUNT(*) AS n FROM review_targets WHERE app_id = ?")
       .get(sharedId) as { n: number };
     expect(written.n).toBe(0);
 

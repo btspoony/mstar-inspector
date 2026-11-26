@@ -82,6 +82,7 @@ const { reconcileReviewRoute } = await import("../../src/pipeline/route-reconcil
 const { TERMINAL_FAILURE_TEXT, createCheckLifecycle, createChecksAdapter } = await import("../../src/pipeline/checks");
 import type { ChecksOctokit } from "../../src/pipeline/checks";
 
+const TEST_RUNNER_KEY = `${TEST_APP_ID}:${TEST_APP_ID}`; // composite appId:botId — consumer.ts writes it so; both equal this release
 const ATTEMPT_ID = "attempt-4b-0001";
 const SCOPE: Scope = {
   appId: TEST_APP_ID,
@@ -136,7 +137,7 @@ async function makeDeps(
     fingerprint: "test-fingerprint",
     githubAppId: 424242,
   });
-  deps.runnerConfigs.set(TEST_APP_ID, {
+  deps.runnerConfigs.set(TEST_RUNNER_KEY, {
     appCfg: { keys: { ark: ["sk-test"] }, modelChain: "ark/deepseek-v4-flash" },
     modelOverrides: undefined,
     customProviders: undefined,
@@ -411,14 +412,14 @@ describe("§7.9a condition 2 — the no-Check lane's post-apply line batch", () 
 
     const pem = await testAppPem();
     db.raw
-      .prepare(`UPDATE review_bots SET private_key_enc = ? WHERE id = ?`)
+      .prepare(`UPDATE github_apps SET private_key_enc = ? WHERE id = ?`)
       .run(
         await createSecretbox(TEST_KEY).encryptSecret(pem, `github_apps.private_key_enc:${TEST_APP_ID}`),
         TEST_APP_ID,
       );
     db.raw
       .prepare(
-        `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at)
+        `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
          VALUES (?, ?, 123, 'acme', datetime('now'))`,
       )
       .run(`inst-${TEST_APP_ID}-123`, TEST_APP_ID);
@@ -1306,7 +1307,7 @@ describe("the workflow host entry", () => {
 
     const config = await ensureRunnerConfig(payload, deps);
     expect(config.appCfg.modelChain).toBe("ark/deepseek-v4-flash");
-    expect(deps.runnerConfigs.get(TEST_APP_ID)).toBe(config);
+    expect(deps.runnerConfigs.get(TEST_RUNNER_KEY)).toBe(config);
   });
 });
 
@@ -1979,7 +1980,7 @@ describe("the SEC-01 publish gate", () => {
   }> {
     const { deps, db } = await makeDeps();
     if (writeTimeKey) {
-      deps.runnerConfigs.set(TEST_APP_ID, {
+      deps.runnerConfigs.set(TEST_RUNNER_KEY, {
         appCfg: { keys: { ark: [KEY] }, modelChain: "ark/deepseek-v4-flash" },
         modelOverrides: undefined,
         customProviders: undefined,
@@ -2091,7 +2092,7 @@ describe("the SEC-01 publish gate", () => {
     session: string[];
   }> {
     const { deps: paying, db } = await makeDeps();
-    paying.runnerConfigs.set(TEST_APP_ID, {
+    paying.runnerConfigs.set(TEST_RUNNER_KEY, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
       customProviders: undefined,
@@ -2573,7 +2574,7 @@ describe("the SEC-01 publish gate", () => {
   ): Promise<{ db: TestD1; resumed: ProcessDeps; ref: AttemptRef; steps: Map<string, unknown> }> {
     const { deps: paying, db } = await makeDeps();
     if (seed !== undefined) await seed(db);
-    paying.runnerConfigs.set(TEST_APP_ID, {
+    paying.runnerConfigs.set(TEST_RUNNER_KEY, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
       customProviders: undefined,
@@ -4023,7 +4024,7 @@ describe("design D6 — a terminal outcome crosses the step boundary as data", (
   test("no secret value appears in any step return value", async () => {
     const paidKey = "sk-step-boundary-secret-1";
     const { deps, db } = await makeDeps();
-    deps.runnerConfigs.set(TEST_APP_ID, {
+    deps.runnerConfigs.set(TEST_RUNNER_KEY, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
       customProviders: undefined,
@@ -4137,7 +4138,7 @@ describe("the runner's last traced stage", () => {
     // still be redacted everywhere the value can surface.
     const paidKey = "9d1f4c0a-77b3-4a1e-9a55-c0ffee123456";
     const { deps, db } = await makeDeps();
-    deps.runnerConfigs.set(TEST_APP_ID, {
+    deps.runnerConfigs.set(TEST_RUNNER_KEY, {
       appCfg: { keys: { ark: [paidKey] }, modelChain: "ark/deepseek-v4-flash" },
       modelOverrides: undefined,
       customProviders: undefined,

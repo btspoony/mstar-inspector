@@ -39,7 +39,6 @@ function dbAt0066(): TestD1 {
     .prepare("INSERT INTO users (id, github_login, role, created_at) VALUES ('user-1', 'acme', 'member', '2026-01-01')")
     .run();
   seedBot(db, "bot-1", 7001);
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bot-1', 'default')").run();
   db.raw
     .prepare(
       `INSERT INTO review_targets

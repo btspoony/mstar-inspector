@@ -53,10 +53,18 @@ export function migrationsAfter(
 
 const ALL_MIGRATIONS = migrationsAfter(0);
 
-function applyMigration(db: Database, migrations: readonly string[]): void {
+export function applyMigration(db: Database, migrations: readonly string[]): void {
   db.run("PRAGMA foreign_keys = ON;");
+  // Each file applies inside one transaction, the way D1 runs it: SQLite only
+  // carries child foreign keys onto a renamed parent while enforcement is on,
+  // and PRAGMA foreign_keys = OFF is inert inside a transaction — an
+  // autocommit apply would build a schema whose FK targets no production
+  // database ever has.
   for (const name of migrations) {
-    execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    const script = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+    db.transaction(() => {
+      for (const statement of splitSqlStatements(script)) db.run(statement);
+    })();
   }
 }
 
@@ -255,30 +263,120 @@ export function createMigratedTestD1(): TestD1 {
 
 /**
  * Attribute a raw-seeded App row to the `default` workspace. The one App read
- * face INNER JOINs `bot_workspaces`, so a fixture that inserts `review_bots`
- * directly (not through `createApp`) must map it or the row is invisible.
+ * face INNER JOINs `app_workspaces`, so a fixture that inserts `github_apps`
+ * directly (not through `createApp`) must map it or the row is invisible; the
+ * bot row the split schema requires comes with the mapping.
  */
 export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promise<void> {
+  // Idempotent: seedBot already creates the pair, and older callers invoke
+  // both — a second mapping must not fail.
   await db
-    .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')")
+    .prepare("INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')")
     .bind(appId)
+    .run();
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+       VALUES (?, 'default', ?, 1, datetime('now'), datetime('now'))`,
+    )
+    .bind(appId, appId)
     .run();
 }
 
 /**
- * Insert one live `review_bots` row. Targets, workspace mappings and review
- * trees reference it, so a fixture that seeds any of those needs the bot row
- * first; `githubAppId` is UNIQUE.
+ * Insert one live `github_apps` row. Targets, workspace mappings and review
+ * trees reference it, so a fixture that seeds any of those needs the App row
+ * first; `githubAppId` is UNIQUE. The bot half of the pair comes from
+ * `mapAppToDefaultWorkspace` — the same two writers as production.
  */
-export function seedBot(db: TestD1, id: string, githubAppId: number): void {
+/**
+ * Fixture seam for the split writer invariant: a reviews row carries both
+ * attribution columns, equal (bot_id = app_id), written by the artifact store.
+ * Fixtures inserting reviews rows call this after their seeds. It must be a
+ * TYPE-SCRIPT GATED helper, not inline SQL: fixture functions building
+ * pre-split / intermediate migration shapes have no bot_id column at all, and
+ * a bare UPDATE would fail at parse time before any guard predicate could run.
+ */
+export function syncReviewBotColumn(db: TestD1): void {
+  const cols = new Set(
+    (db.raw.query("PRAGMA table_info(reviews)").all() as Array<{ name: string }>).map((c) => c.name),
+  );
+  if (cols.has("bot_id") && cols.has("app_id")) {
+    db.raw.run("UPDATE reviews SET bot_id = app_id WHERE bot_id IS NULL");
+  }
+}
+
+/**
+ * Fixture seam for the split pair invariant: every App row exists with a
+ * workspace binding and a bot row at the same id. Era-gated — fixtures
+ * building pre-0026 or intermediate migration shapes have no ownership or bot
+ * table at all, and a bare INSERT would fail before any guard could run.
+ */
+export function syncSplitPair(db: TestD1): void {
+  const names = new Set(
+    (db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    ),
+  );
+  if (!names.has("github_apps")) return;
+  if (names.has("app_workspaces")) {
+    db.raw.run(
+      "INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) SELECT id, 'default' FROM github_apps WHERE id NOT IN (SELECT app_id FROM app_workspaces)",
+    );
+  }
+  if (names.has("review_bots")) {
+    db.raw.run(`INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+  SELECT id, COALESCE((SELECT workspace_id FROM app_workspaces WHERE app_id = github_apps.id), 'default'), name, 1, datetime('now'), datetime('now')
+  FROM github_apps WHERE id NOT IN (SELECT id FROM review_bots)`);
+    db.raw.run(
+      "UPDATE review_bots SET workspace_id = (SELECT workspace_id FROM app_workspaces WHERE app_id = review_bots.id) WHERE EXISTS (SELECT 1 FROM app_workspaces WHERE app_id = review_bots.id)",
+    );
+  }
+}
+
+export function seedBot(db: TestD1, id: string, githubAppId: number, opts: { workspaceId?: string } = {}): void {
+  const workspaceId = opts.workspaceId ?? "default";
+  // Era-aware: the credential parent is github_apps pre-0056 and post-0115,
+  // review_bots in between (0066-era migration worlds live in the bot era).
+  // Migration-era fixture worlds must build the schema shape they test — a
+  // post-split INSERT would fail before any assertion runs.
+  const names = new Set(
+    (db.raw.query("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>).map(
+      (r) => r.name,
+    ),
+  );
+  const postSplit = names.has("github_apps") && names.has("review_bots");
+  const parent = postSplit || names.has("github_apps") ? "github_apps" : "review_bots";
   db.raw
     .prepare(
-      `INSERT INTO review_bots
+      `INSERT INTO ${parent}
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'k', 'w', 'fixture', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, githubAppId, id);
+  if (postSplit) {
+    // The split pair: the bot row and the workspace mapping the same-id
+    // invariant of this release requires beside the App row. INSERT OR IGNORE
+    // so callers that add their own mapping/companions never collide.
+    db.raw
+      .prepare("INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
+      .run(id, workspaceId);
+    db.raw
+      .prepare(
+        `INSERT OR IGNORE INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+         VALUES (?, ?, ?, 1, datetime('now'), datetime('now'))`,
+      )
+      .run(id, workspaceId, id);
+  } else if (names.has("bot_workspaces")) {
+    db.raw
+      .prepare("INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)")
+      .run(id, workspaceId);
+  } else if (names.has("app_workspaces")) {
+    db.raw
+      .prepare("INSERT OR IGNORE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
+      .run(id, workspaceId);
+  }
 }
 
 /**
@@ -309,10 +407,16 @@ export function seedTarget(
   const now = opts.createdAt ?? "2026-01-01T00:00:00.000Z";
   let hash = 0x811c9dc5;
   for (const char of id) hash = Math.imul(hash ^ char.codePointAt(0)!, 0x01000193) >>> 0;
+  // Era-aware attribution: review_targets carries app_id pre-0056 and
+  // post-0115, bot_id in between — the same migration-era rule as seedBot.
+  const columns = (db.raw.query("PRAGMA table_info(review_targets)").all() as Array<{ name: string }>).map(
+    (r) => r.name,
+  );
+  const attribution = columns.includes("app_id") ? "app_id" : "bot_id";
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, ${attribution}, name, repo_id, repo_owner, repo_name,
           check_min_score, created_by, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'fixture', ?, ?)`,
     )

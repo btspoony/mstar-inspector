@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import worker from "../../src/worker/index";
-import { createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedTarget, type TestD1 } from "../store/helpers";
 import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { SESSION_COOKIE, createSessionValue } from "../../src/dashboard/session";
@@ -20,15 +20,16 @@ async function keyIdOf(plainKey: string): Promise<string> {
 const PLAIN_KEY_ID = await keyIdOf(PLAIN_KEY);
 
 const APP_ID = 1001;
+const ROW_APP_ID = "app-matrix";
 const TARGET_ID = "target-matrix";
 const SHARED_BOT_ID = "bot-shared-matrix";
 const SHARED_BOT_APP_ID = 1099;
 const SHARED_INSTALLATION_ID = 1200;
 const CREATE_BOT_ID = "bot-create-matrix";
 const CREATE_BOT_APP_ID = 1098;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
-const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
-const USAGE = `/dashboard/default/api/apps/${APP_ID}/keys/usage`;
+const SETTINGS = `/dashboard/default/review-bots/${ROW_APP_ID}/settings`;
+const VERIFY = `/dashboard/default/api/review-bots/${ROW_APP_ID}/keys/verify`;
+const USAGE = `/dashboard/default/api/review-bots/${ROW_APP_ID}/keys/usage`;
 
 async function seededWorld(): Promise<TestD1> {
   const db = createMigratedTestD1();
@@ -44,7 +45,7 @@ async function seededWorld(): Promise<TestD1> {
        FROM users`,
     )
     .run();
-  const id = crypto.randomUUID();
+  const id = ROW_APP_ID;
   const box = createSecretbox(TEST_KEY);
   await createReviewBotsStore(db).createApp({
     id,
@@ -78,30 +79,32 @@ async function seededWorld(): Promise<TestD1> {
     [SHARED_BOT_ID, SHARED_BOT_APP_ID],
     [CREATE_BOT_ID, CREATE_BOT_APP_ID],
   ] as const) {
-    db.raw
-      .prepare(
-        `INSERT INTO review_bots
+    db.raw.prepare(
+      `INSERT INTO github_apps
            (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
             created_by, status, scope, shared_at, created_at, updated_at)
          VALUES (?, 'platform-app', ?, 'platform-app', 'enc', 'enc', 'octocat', 'active',
                  'shared', datetime('now'), datetime('now'), datetime('now'))`,
-      )
-      .run(botId, githubAppId);
+    )
+    .run(botId, githubAppId);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
     db.raw
-      .prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'ws-shared')")
+      .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'ws-shared')")
       .run(botId);
   }
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, created_by, created_at, updated_at)
+         (id, workspace_id, app_id, name, created_by, created_at, updated_at)
        VALUES ('target-platform', 'default', ?, 'platform-app', 'octocat',
                datetime('now'), datetime('now'))`,
     )
     .run(SHARED_BOT_ID);
   db.raw
     .prepare(
-      `INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at)
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at)
        VALUES ('install-matrix', ?, ?, 'acme', '2026-01-01 00:00:00', NULL)`,
     )
     .run(SHARED_BOT_ID, SHARED_INSTALLATION_ID);
@@ -141,14 +144,14 @@ async function postForm(
 }
 
 function appStatus(db: TestD1, appId: number): string | null {
-  const row = db.raw.query("SELECT status FROM review_bots WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT status FROM github_apps WHERE github_app_id = ?").get(appId) as {
     status: string;
   } | null;
   return row?.status ?? null;
 }
 
 function reviewEnabled(db: TestD1, appId: number): number | null {
-  const row = db.raw.query("SELECT review_enabled FROM review_bots WHERE github_app_id = ?").get(appId) as {
+  const row = db.raw.query("SELECT review_enabled FROM github_apps WHERE github_app_id = ?").get(appId) as {
     review_enabled: number;
   } | null;
   return row?.review_enabled ?? null;
@@ -312,7 +315,7 @@ describe("App write-route permission matrix (T1b, spec §2)", () => {
 });
 
 describe("App detail read-face permission matrix (settings JSON)", () => {
-  const FACE = `/dashboard/default/api/apps/${APP_ID}/settings`;
+  const FACE = `/dashboard/default/api/review-bots/${ROW_APP_ID}/settings`;
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -345,7 +348,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
     expect(body.workspace_id).toBe("default");
     const target = db.raw
       .prepare(
-        "SELECT t.id FROM review_targets t JOIN review_bots b ON b.id = t.bot_id WHERE b.github_app_id = ?",
+        "SELECT t.id FROM review_targets t JOIN github_apps b ON b.id = t.app_id WHERE b.github_app_id = ?",
       )
       .get(APP_ID) as { id: string };
     expect(body.target_id).toBe(target.id);
@@ -364,10 +367,11 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
       "review_enabled",
       "status",
     ]);
-    expect(body.app.github_app_id).toBe(APP_ID);
-    expect(body.app.github_slug).toBe("mallorys-app");
+    // F2: App identity is null on the bot-config payload.
+    expect(body.app.github_app_id).toBeNull();
+    expect(body.app.github_slug).toBeNull();
     expect(typeof body.app.id).toBe("string");
-    expect(body.app.created_by).toBe("mallory");
+    expect(body.app.created_by).toBeNull();
     expect(typeof body.app.created_at).toBe("string");
     expect(JSON.stringify(body)).not.toContain("installations");
     expect(JSON.stringify(body)).not.toContain("deliveries");
@@ -402,7 +406,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
 
   test("unknown App id → 404", async () => {
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/api/apps/9999/settings", {
+      new Request("https://worker.local/dashboard/default/api/review-bots/9999/settings", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
       }),
       makeEnv(await seededWorld()),
@@ -413,7 +417,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
   for (const alias of ["0x1f", "1e3", "0x3e9", "1.001e3", "+1001"]) {
     test(`App-id segment spelled ${alias} → 404 (not an alias)`, async () => {
       const res = await worker.fetch(
-        new Request(`https://worker.local/dashboard/default/api/apps/${alias}/settings`, {
+        new Request(`https://worker.local/dashboard/default/api/review-bots/${alias}/settings`, {
           headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
         }),
         makeEnv(await seededWorld()),
@@ -424,7 +428,7 @@ describe("App detail read-face permission matrix (settings JSON)", () => {
 });
 
 describe("Bot settings read-face permission matrix", () => {
-  const FACE = `/dashboard/default/api/apps/${APP_ID}/bot`;
+  const FACE = `/dashboard/default/api/review-bots/${ROW_APP_ID}/bot`;
 
   async function getFace(login: string, env: Env): Promise<Response> {
     return worker.fetch(
@@ -453,7 +457,7 @@ describe("Bot settings read-face permission matrix", () => {
 
   test("unknown App id → 404", async () => {
     const res = await worker.fetch(
-      new Request("https://worker.local/dashboard/default/api/apps/9999/bot", {
+      new Request("https://worker.local/dashboard/default/api/review-bots/9999/bot", {
         headers: { Cookie: `${SESSION_COOKIE}=${await createSessionValue("hubot", null, SESSION_SECRET)}` },
       }),
       makeEnv(await seededWorld()),

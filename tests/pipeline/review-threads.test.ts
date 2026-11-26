@@ -28,7 +28,7 @@ import {
   type PublicationPayload,
   type VerifiedResolution,
 } from "../../src/store/finding-lifecycle";
-import { createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, mapAppToDefaultWorkspace, type TestD1 } from "../store/helpers";
 
 const APP_ID = "11111111-2222-3333-4444-555555555555";
 const GITHUB_APP_ID = 1001;
@@ -51,17 +51,19 @@ const uuid = (n: number): string => `${String(n).padStart(8, "0")}-aaaa-bbbb-ccc
 
 async function createSeededTestD1(): Promise<TestD1> {
   const db = createMigratedTestD1();
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(APP_ID, GITHUB_APP_ID, SLUG);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
   await mapAppToDefaultWorkspace(db, APP_ID);
   db.raw
-    .prepare(`INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)
+    .prepare(`INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES (?, ?, ?, 'acme', datetime('now'))`)
     .run(uuid(1), APP_ID, INSTALLATION_ID);
   return db;
 }
@@ -109,7 +111,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
   db.raw
     .prepare(
       `INSERT INTO review_findings
-         (id, bot_id, installation_id, owner, repo, pr_number, finding_id, original_json,
+         (id, app_id, installation_id, owner, repo, pr_number, finding_id, original_json,
           first_publication_id, last_publication_id, first_seen_sha, last_seen_sha,
           first_seen_round, last_seen_round, state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 1, 1, 'addressed', 1000, 1000)`,
@@ -118,7 +120,7 @@ async function seedLifecycle(db: TestD1): Promise<LineIntent> {
   db.raw
     .prepare(
       `INSERT INTO review_threads
-         (id, finding_row_id, publication_id, bot_id, installation_id, owner, repo, pr_number,
+         (id, finding_row_id, publication_id, app_id, installation_id, owner, repo, pr_number,
           original_sha, round, intent_json, review_id, comment_id, thread_id, resolution_state, created_ms, updated_ms)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 555, ?, ?, 'pending', 1000, 1000)`,
     )

@@ -640,7 +640,7 @@ type AssociationRow = {
   id: string;
   finding_row_id: string;
   publication_id: string;
-  bot_id: string;
+  app_id: string;
   installation_id: number;
   owner: string;
   repo: string;
@@ -722,14 +722,14 @@ type AppContext = { octokit: GraphqlOctokit; botLogin: string; githubAppId: numb
 async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise<AppContext | null> {
   try {
     const row = await deps.db
-      // shortcut: tenant-bypass — consumer bot resolution by exact (bot_id,
+      // shortcut: tenant-bypass — consumer bot resolution by exact (app_id,
       // installation_id); no tenant-facing field. Upgrade: tenant-filter it once
       // the consumer becomes workspace-scoped.
       .prepare(
         `SELECT ga.github_app_id AS github_app_id, ga.status AS status, ga.deleted_at AS deleted_at
-         FROM bot_installations ai
-         JOIN review_bots ga ON ga.id = ai.bot_id
-         WHERE ai.bot_id = ? AND ai.installation_id = ?`,
+         FROM github_app_installations ai
+         JOIN github_apps ga ON ga.id = ai.app_id
+         WHERE ai.app_id = ? AND ai.installation_id = ?`,
       )
       .bind(scope.appId, scope.installationId)
       .first<{ github_app_id: number; status: string; deleted_at: string | null }>();
@@ -754,7 +754,7 @@ async function resolveAppContext(deps: ReviewThreadsDeps, scope: Scope): Promise
 
 function sameScope(row: AssociationRow, scope: Scope): boolean {
   return (
-    row.bot_id === scope.appId &&
+    row.app_id === scope.appId &&
     row.installation_id === scope.installationId &&
     row.owner === scope.owner &&
     row.repo === scope.repo &&

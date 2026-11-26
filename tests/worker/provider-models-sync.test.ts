@@ -13,8 +13,10 @@ import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
-const PREVIEW = `/dashboard/default/api/apps/${APP_ID}/provider-models/preview`;
+// Bot-config routes bind the bot ROW id.
+const BOT_ID = "bot-provider-sync";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
+const PREVIEW = `/dashboard/default/api/review-bots/${BOT_ID}/provider-models/preview`;
 const SEED_KEY = "sk-commandcode-seed-1234";
 
 async function seededWorld() {
@@ -22,7 +24,7 @@ async function seededWorld() {
   await createUser(db, { login: "octocat", role: "admin" });
   await createUser(db, { login: "mallory", role: "member" });
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner" });
-  const id = crypto.randomUUID();
+  const id = BOT_ID;
   const box = createSecretbox(TEST_KEY);
   const app = await createReviewBotsStore(db).createApp({
     id,

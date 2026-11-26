@@ -100,7 +100,7 @@ describe("review route — the queue handler hands off only", () => {
 
   test("a skipped delivery still acks and creates no instance", async () => {
     const db = await createSeededTestD1();
-    db.raw.prepare("UPDATE review_bots SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
+    db.raw.prepare("UPDATE github_apps SET review_enabled = 0 WHERE id = ?").run(TEST_APP_ID);
     const route = recordingStarter();
     const consumer = createReviewConsumer(
       await h.makeEnv({ DB: db as never }),

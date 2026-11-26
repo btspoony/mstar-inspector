@@ -5,17 +5,24 @@ import { setMaintenanceMode } from "../src/dashboard/runtime-config-store";
 import worker from "../src/worker/index";
 import type { Env } from "../src/worker/env";
 import { withSpaAssets } from "../tests/helpers/spa";
-import { createMigratedTestD1, seedBot } from "../tests/store/helpers";
+import { createMigratedTestD1 } from "../tests/store/helpers";
 
 const db = createMigratedTestD1();
 const now = new Date().toISOString();
 db.raw.prepare("INSERT INTO users (id, github_login, role, created_at) VALUES ('u', 'bench', 'member', ?)").run(now);
 db.raw.prepare("INSERT INTO workspace_members (workspace_id, user_id, role, created_at) VALUES ('default', 'u', 'owner', ?)").run(now);
-seedBot(db, "bench-bot", 1);
-db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES ('bench-bot', 'default')").run();
+db.raw.prepare(
+  `INSERT INTO github_apps (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, status, created_at, updated_at)
+   VALUES ('bench-bot', 1, 'bench-bot', 'enc', 'enc', 'bench', 'active', ?, ?)`,
+).run(now, now);
+db.raw.prepare("INSERT INTO app_workspaces (app_id, workspace_id) VALUES ('bench-bot', 'default')").run();
+db.raw.prepare(
+  `INSERT INTO review_bots (id, workspace_id, name, multiplier, created_at, updated_at)
+   VALUES ('bench-bot', 'default', 'bench-bot', 1, ?, ?)`,
+).run(now, now);
 db.raw.prepare(
   `INSERT INTO review_targets
-     (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name, review_trigger_mode, created_by, created_at, updated_at)
+     (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name, review_trigger_mode, created_by, created_at, updated_at)
    VALUES ('bench-target', 'default', 'bench-bot', 'Fixture repo', 1, 'bench', 'repo', 'every_push', 'bench', ?, ?)`,
 ).run(now, now);
 const sessionSecret = "local-dashboard-benchmark-only";

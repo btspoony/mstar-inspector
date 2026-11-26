@@ -1,21 +1,17 @@
 /**
- * The settings read path's lazy
- * GitHub-metadata refresh + the response contract. Pinned here:
- *   - first sync (NULL synced_at) → exactly ONE GET https://api.github.com/app
- *     (App-JWT face) plus the anonymous `GET /apps/{slug}` visibility probe
- *     (migration 0045), the five migration-0019 columns persist via
- *     saveGithubMetadata, the response carries the profile, and the
- *     operator-mutation timestamp updated_at is untouched;
- *   - TTL: a synced_at inside 24h serves the cache with ZERO fetches (both
- *     faces); past 24h the refresh runs once and the response carries the
- *     update;
- *   - fail-open BY STRUCTURE (AD-531): a `{ok:false}` fetch, an envelope-level
- *     decrypt failure (the Task-1 review handoff), or a missing
- *     DASHBOARD_ENCRYPTION_KEY (architect watch item) all answer 200 with the
- *     cached columns — the refresh leg can never produce a non-200; the
- *     manage branch keeps its pre-existing fail-closed 500 for its own key;
- *   - both faces: the non-manager payload carries the same profile fields
- *     (AC3), and one refresh serves the two faces.
+ * GitHub-metadata refresh ownership (D45) + the bot-config payload contract.
+ * Pinned here:
+ *   - the settings GET performs ZERO GitHub fetches in every cache state
+ *     (empty, stale, attempt-marked) and writes nothing — 0115 split the
+ *     entity and the bot route never resolves App credentials (F2);
+ *   - the bot payload carries null App identity/profile fields even when the
+ *     cache holds a profile, and it is bot-shaped (`sandbox_image_id`, row id);
+ *   - a missing DASHBOARD_ENCRYPTION_KEY leaves the member face at 200: there
+ *     is no refresh leg to fail (the manager face keeps its own fail-closed
+ *     500 for its key section);
+ *   - `POST /api/apps/:appId/refresh-metadata` is the ONLY writer: it fills
+ *     the cache, probes visibility, reconciles installations, and leaves
+ *     `updated_at` untouched; a following GET still fetches nothing.
  *
  * Setup mirrors tests/worker/spa-page-apis.test.ts (real migrations over the
  * bun:sqlite double, session cookie, worker.fetch); the GitHub API is
@@ -35,6 +31,8 @@ import { OAUTH_CLIENT_SECRET } from "../helpers/fake-secrets";
 const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].join("-");
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const APP_ID = 1001;
+// Bot-config routes bind the bot ROW id.
+const BOT_ID = "bot-gh-metadata";
 
 
 async function generateKeyPair(): Promise<CryptoKeyPair> {
@@ -120,7 +118,7 @@ async function seededWorld(privateKeyPem: string): Promise<{ db: TestD1; appId: 
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
-  const id = crypto.randomUUID();
+  const id = BOT_ID;
   const box = createSecretbox(TEST_KEY);
   await createReviewBotsStore(db).createApp({
     id,
@@ -165,7 +163,7 @@ async function postRefresh(login: string, env: Env): Promise<Response> {
 
 async function getSettings(login: string, env: Env): Promise<Response> {
   return worker.fetch(
-    new Request(`https://worker.local/dashboard/default/api/apps/${APP_ID}/settings`, {
+    new Request(`https://worker.local/dashboard/default/api/review-bots/${BOT_ID}/settings`, {
       headers: { Cookie: `${SESSION_COOKIE}=${await cookie(login)}`, Accept: "application/json" },
     }),
     env,
@@ -188,22 +186,22 @@ type CachedColumns = {
 const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
   db.raw
     .query(
-      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM review_bots WHERE id = ?",
+      "SELECT github_name, github_description, github_html_url, github_avatar_url, github_metadata_synced_at, github_metadata_attempted_at, github_visibility, github_slug, created_at, updated_at FROM github_apps WHERE id = ?",
     )
     .get(appId) as CachedColumns;
 
 function seedCache(db: TestD1, appId: string, syncedAtSql: string): void {
   db.raw
     .query(
-      `UPDATE review_bots SET github_name = 'Cached App', github_description = 'cached description',
+      `UPDATE github_apps SET github_name = 'Cached App', github_description = 'cached description',
        github_html_url = 'https://github.com/apps/cached', github_avatar_url = 'https://avatars/u/2',
        github_metadata_synced_at = ${syncedAtSql} WHERE id = ?`,
     )
     .run(appId);
 }
 
-describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531)", () => {
-  test("first sync: NULL synced_at → one GET /app, columns persist, response carries the profile, updated_at untouched", async () => {
+describe("GET /api/review-bots/:botId/settings — no metadata refresh (D45)", () => {
+  test("an EMPTY cache performs zero GitHub fetches: the read face never refreshes", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
@@ -211,340 +209,154 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual([
-      GITHUB_APP_URL,
-      GITHUB_INSTALLATIONS_URL,
-      `${GITHUB_PUBLIC_APPS_URL}acme-inspector`,
-    ]);
-    expect(new Headers(appProfileCalls(calls)[0]!.init!.headers).get("authorization")!.startsWith("Bearer ")).toBe(true);
-
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_name).toBe("Acme Inspector");
-    expect(body.app.github_description).toBe("PR review bot for Acme");
-    expect(body.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(body.app.github_avatar_url).toBe(APP_AVATAR_URL);
-    expect(body.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(body.app.github_visibility).toBe("private");
-
+    expect(calls).toEqual([]);
     const row = cachedColumns(db, appId);
-    expect(row.github_name).toBe("Acme Inspector");
-    expect(row.github_description).toBe("PR review bot for Acme");
-    expect(row.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(row.github_avatar_url).toBe(APP_AVATAR_URL);
-    expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(row.github_visibility).toBe("private");
-    expect(row.updated_at).toBe(row.created_at);
-
-    const raw = JSON.stringify(body);
-    expect(raw).not.toContain("private_key");
-    expect(raw).not.toContain(pem);
-  });
-
-  test("TTL hit: a synced_at just inside 24h serves the cache with ZERO fetches, on both faces", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    seedCache(db, appId, "datetime('now', '-23 hours')");
-    const { calls } = stubFetch(() => {
-      throw new Error("the TTL window must not touch the network");
-    });
-
-    const manager = await getSettings("mallory", makeEnv(db));
-    expect(manager.status).toBe(200);
-    const managerBody = (await manager.json()) as { can_manage: boolean; app: Record<string, unknown> };
-    expect(managerBody.can_manage).toBe(true);
-    expect(managerBody.app.github_name).toBe("Cached App");
-    expect(managerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-
-    const viewer = await getSettings("hubot", makeEnv(db));
-    expect(viewer.status).toBe(200);
-    expect(((await viewer.json()) as { app: Record<string, unknown> }).app.github_name).toBe("Cached App");
-
-    expect(calls).toHaveLength(0);
-  });
-
-  test("TTL hit but NULL github_slug: an unsynced row still refreshes and persists the slug", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    seedCache(db, appId, "datetime('now', '-1 hours')");
-    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
-    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
-
-    const res = await getSettings("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_slug).toBe("acme-inspector");
-    const row = db.raw.query("SELECT github_slug FROM review_bots WHERE id = ?").get(appId) as {
-      github_slug: string | null;
-    };
-    expect(row.github_slug).toBe("acme-inspector");
-  });
-
-  test("TTL expired: past 24h the refresh runs once and the response carries the update", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    seedCache(db, appId, "datetime('now', '-25 hours')");
-    const { calls } = stubFetch(githubStub({ ...GITHUB_PROFILE, name: "Renamed Inspector" }));
-
-    const res = await getSettings("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_name).toBe("Renamed Inspector");
-    const row = cachedColumns(db, appId);
-    expect(row.github_name).toBe("Renamed Inspector");
-    expect(row.github_metadata_synced_at).not.toBeNull();
-  });
-
-  test("an inconclusive visibility probe (503) keeps the stored github_visibility", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE review_bots SET github_visibility = 'private' WHERE id = ?").run(appId);
-    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 503));
-
-    const res = await getSettings("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    expect(calls.map((call) => call.url)).toContain(`${GITHUB_PUBLIC_APPS_URL}acme-inspector`);
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_name).toBe("Acme Inspector");
-    expect(body.app.github_visibility).toBe("private");
-    const row = cachedColumns(db, appId);
-    expect(row.github_name).toBe("Acme Inspector");
-    expect(row.github_visibility).toBe("private");
-  });
-
-  test("a public probe answer (200) is cached as 'public' and served on the manager face", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    stubFetch(githubStub(GITHUB_PROFILE, 200));
-
-    const res = await getSettings("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_visibility).toBe("public");
-    expect(cachedColumns(db, appId).github_visibility).toBe("public");
-  });
-
-  test("fetch {ok:false} (HTTP 404) → 200 fail-open with the cached (null) columns; synced_at stays NULL", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    const { calls } = stubFetch(
-      () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
-    );
-
-    const res = await getSettings("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(calls).toHaveLength(1);
-    const body = (await res.json()) as { app: Record<string, unknown> };
-    expect(body.app.github_name).toBeNull();
-    expect(body.app.github_description).toBeNull();
-    expect(body.app.github_html_url).toBeNull();
-    expect(body.app.github_avatar_url).toBeNull();
-    expect(body.app.github_metadata_synced_at).toBeNull();
-    const row = cachedColumns(db, appId);
+    expect(row.github_name).toBeNull();
     expect(row.github_metadata_synced_at).toBeNull();
     expect(row.github_metadata_attempted_at).toBeNull();
     expect(row.updated_at).toBe(row.created_at);
   });
 
-  test("a permanently failing upstream costs ONE fetch across two settings reads (migration 0037)", async () => {
+  test("a STALE cache (synced_at far past any TTL) still performs zero fetches", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
-    const { calls } = stubFetch(
-      () => new Response(JSON.stringify({ message: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } }),
-    );
-    const env = makeEnv(db);
-
-    expect((await getSettings("mallory", env)).status).toBe(200);
-    expect((await getSettings("hubot", env)).status).toBe(200);
-
-    expect(calls).toHaveLength(1);
-    const row = cachedColumns(db, appId);
-    expect(row.github_slug).toBeNull();
-    expect(row.github_metadata_synced_at).toBeNull();
-    expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-  });
-
-  test("the attempt marker expires with the TTL: a later read fetches again", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    db.raw
-      .query(
-        `UPDATE review_bots SET github_slug = NULL,
-           github_metadata_attempted_at = datetime('now', '-25 hours') WHERE id = ?`,
-      )
-      .run(appId);
+    seedCache(db, appId, "'2020-01-01 00:00:00'");
+    const before = cachedColumns(db, appId);
     const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
 
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
+    expect(calls).toEqual([]);
+    expect(cachedColumns(db, appId)).toEqual(before);
   });
 
-  test("a successful payload WITHOUT a slug stamps the attempt and does not loop", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    db.raw.query("UPDATE review_bots SET github_slug = NULL WHERE id = ?").run(appId);
-    const { calls } = stubFetch(githubStub({ name: "Acme Inspector" }));
-    const env = makeEnv(db);
-
-    expect((await getSettings("mallory", env)).status).toBe(200);
-    expect(calls.map((call) => call.url)).toEqual([GITHUB_APP_URL, GITHUB_INSTALLATIONS_URL]);
-    const row = cachedColumns(db, appId);
-    expect(row.github_name).toBe("Acme Inspector");
-    expect(row.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(row.github_metadata_attempted_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-
-    expect((await getSettings("hubot", env)).status).toBe(200);
-    expect(calls).toHaveLength(2);
-  });
-
-  test("force ignores the attempt marker: the manager's refresh always asks GitHub", async () => {
+  test("an attempt marker does not trigger a refresh from the read face", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     db.raw
-      .query(
-        `UPDATE review_bots SET github_slug = NULL,
-           github_metadata_attempted_at = datetime('now') WHERE id = ?`,
-      )
+      .prepare("UPDATE github_apps SET github_metadata_attempted_at = '2020-01-01 00:00:00' WHERE id = ?")
       .run(appId);
-    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
-
-    const res = await postRefresh("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    expect(cachedColumns(db, appId).github_slug).toBe("acme-inspector");
-  });
-
-  test("envelope-level decrypt failure (Task-1 review handoff) → swallowed, 200 with the manage face intact", async () => {
-    const { db, appId } = await seededWorld("this plaintext is unreachable");
-    db.raw.query("UPDATE review_bots SET private_key_enc = 'not-an-envelope' WHERE id = ?").run(appId);
-    const { calls } = stubFetch(
-      () => new Response(JSON.stringify(GITHUB_PROFILE), { status: 200, headers: { "content-type": "application/json" } }),
-    );
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 200));
 
     const res = await getSettings("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
-    expect(calls).toHaveLength(0);
-    const body = (await res.json()) as { can_manage: boolean; app: Record<string, unknown>; keys: unknown };
-    expect(body.can_manage).toBe(true);
-    expect(body.app.github_name).toBeNull();
-    expect(body.app.github_metadata_synced_at).toBeNull();
-    expect(body.keys).toEqual([]);
-    expect(JSON.stringify(body)).not.toContain("not-an-envelope");
+    expect(calls).toEqual([]);
   });
 
-  test("missing DASHBOARD_ENCRYPTION_KEY → refresh skipped silently (never a 500); the manage branch keeps its existing fail-closed 500", async () => {
+  test("the payload carries null App profile fields even when the cache holds a profile", async () => {
     const pem = await pkcs8PemFixture();
-    const { db } = await seededWorld(pem);
-    const envNoKey = makeEnv(db, null);
-    const { calls } = stubFetch(
-      () => new Response(JSON.stringify(GITHUB_PROFILE), { status: 200, headers: { "content-type": "application/json" } }),
-    );
+    const { db, appId } = await seededWorld(pem);
+    seedCache(db, appId, "datetime('now')");
+    stubFetch(githubStub(GITHUB_PROFILE));
 
-    const viewer = await getSettings("hubot", envNoKey);
-    expect(viewer.status).toBe(200);
-    expect(calls).toHaveLength(0);
-    const viewerBody = (await viewer.json()) as { can_manage: boolean; app: Record<string, unknown> };
-    expect(viewerBody.can_manage).toBe(false);
-    expect(viewerBody.app.github_name).toBeNull();
+    const res = await getSettings("mallory", makeEnv(db));
 
-    const manager = await getSettings("mallory", envNoKey);
-    expect(manager.status).toBe(500);
-    expect(calls).toHaveLength(0);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { app: Record<string, unknown> };
+    // F2 + D45: the bot payload is bot-shaped; App identity never rides it.
+    for (const key of [
+      "github_name",
+      "github_description",
+      "github_html_url",
+      "github_avatar_url",
+      "github_metadata_synced_at",
+      "github_visibility",
+      "github_slug",
+      "github_app_id",
+    ]) {
+      expect(body.app[key], key).toBeNull();
+    }
+    // The bot's own fields are present.
+    expect(body.app.id).toBe(appId);
+    expect(body.app.sandbox_image_id).toBe("omp");
+    expect(JSON.stringify(body)).not.toContain("Cached App");
   });
 
-  test("non-manager sees the profile fields (AC3) — one refresh serves both faces", async () => {
+  test("manager and member read the same bot-shaped face; neither reaches GitHub", async () => {
     const pem = await pkcs8PemFixture();
-    const { db } = await seededWorld(pem);
-    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
+    const { db, appId } = await seededWorld(pem);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 200));
 
     const manager = await getSettings("mallory", makeEnv(db));
-    expect(manager.status).toBe(200);
-    expect(((await manager.json()) as { app: Record<string, unknown> }).app.github_name).toBe("Acme Inspector");
+    const member = await getSettings("hubot", makeEnv(db));
 
-    const viewer = await getSettings("hubot", makeEnv(db));
-    expect(viewer.status).toBe(200);
-    const viewerBody = (await viewer.json()) as {
-      can_manage: boolean;
-      app: Record<string, unknown>;
-      keys?: unknown;
-      provider_catalog?: unknown;
-    };
-    expect(viewerBody.can_manage).toBe(false);
-    expect(viewerBody.app.github_name).toBe("Acme Inspector");
-    expect(viewerBody.app.github_description).toBe("PR review bot for Acme");
-    expect(viewerBody.app.github_html_url).toBe("https://github.com/apps/acme-inspector");
-    expect(viewerBody.app.github_avatar_url).toBe(APP_AVATAR_URL);
-    expect(viewerBody.app.github_slug).toBe("acme-inspector");
-    expect(viewerBody.app.github_metadata_synced_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
-    expect(appProfileCalls(calls)).toHaveLength(1);
-    expect(calls).toHaveLength(3);
-    expect(viewerBody.keys).toBeUndefined();
-    expect(viewerBody.provider_catalog).toBeUndefined();
+    expect(manager.status).toBe(200);
+    expect(member.status).toBe(200);
+    expect(calls).toEqual([]);
+    const managerBody = (await manager.json()) as { can_manage: boolean; app: { github_name: unknown } };
+    const memberBody = (await member.json()) as { can_manage: boolean; app: { github_name: unknown } };
+    expect(managerBody.can_manage).toBe(true);
+    expect(memberBody.can_manage).toBe(false);
+    expect(managerBody.app.github_name).toBeNull();
+    expect(memberBody.app.github_name).toBeNull();
+    expect(cachedColumns(db, appId).github_metadata_synced_at).toBeNull();
   });
 
-  test("a real refresh reconciles installations: an absent row is stamped, a stored-removed row is cleared", async () => {
+  test("a missing DASHBOARD_ENCRYPTION_KEY leaves the read face at 200 — no refresh leg to fail", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db } = await seededWorld(pem);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE));
+
+    // The member face carries no key material, so it needs no encryption key;
+    // the manager face keeps its fail-closed 500 for its own key section.
+    const res = await getSettings("hubot", makeEnv(db, null));
+
+    expect(res.status).toBe(200);
+    expect(calls).toEqual([]);
+  });
+
+  test("POST is the only writer: it fills the cache, and a following GET fetches nothing and writes nothing", async () => {
+    const pem = await pkcs8PemFixture();
+    const { db, appId } = await seededWorld(pem);
+    const { calls } = stubFetch(githubStub(GITHUB_PROFILE, 200));
+
+    const forced = await postRefresh("mallory", makeEnv(db));
+    expect(forced.status).toBe(200);
+    expect(calls.map((call) => call.url)).toEqual([
+      GITHUB_APP_URL,
+      GITHUB_INSTALLATIONS_URL,
+      `${GITHUB_PUBLIC_APPS_URL}acme-inspector`,
+    ]);
+    const written = cachedColumns(db, appId);
+    expect(written.github_name).toBe("Acme Inspector");
+    expect(written.github_slug).toBe("acme-inspector");
+    expect(written.github_visibility).toBe("public");
+    expect(written.updated_at).toBe(written.created_at);
+
+    const callsBefore = calls.length;
+    const read = await getSettings("mallory", makeEnv(db));
+    expect(read.status).toBe(200);
+    expect(calls.length).toBe(callsBefore);
+    expect(cachedColumns(db, appId)).toEqual(written);
+  });
+
+  test("POST reconciles installations: an absent row is stamped, a stored-removed row is cleared", async () => {
     const pem = await pkcs8PemFixture();
     const { db, appId } = await seededWorld(pem);
     db.raw
       .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
+        "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at) VALUES ('seed-gone', ?, 10, 'gone-org', datetime('now'))",
       )
       .run(appId);
     db.raw
       .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
+        "INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at, removed_at) VALUES ('seed-back', ?, 20, 'back-org', datetime('now'), datetime('now'))",
       )
       .run(appId);
     stubFetch(githubStub(GITHUB_PROFILE, 404, [20]));
 
-    const res = await getSettings("mallory", makeEnv(db));
+    const res = await postRefresh("mallory", makeEnv(db));
 
     expect(res.status).toBe(200);
     const rows = db.raw
-      .query("SELECT installation_id, removed_at FROM bot_installations ORDER BY installation_id")
+      .query("SELECT installation_id, removed_at FROM github_app_installations ORDER BY installation_id")
       .all() as Array<{ installation_id: number; removed_at: string | null }>;
     expect(rows).toEqual([
       { installation_id: 10, removed_at: expect.any(String) },
       { installation_id: 20, removed_at: null },
     ]);
-  });
-
-  test("an unusable installation list changes no row and does not turn the refresh into a failure", async () => {
-    const pem = await pkcs8PemFixture();
-    const { db, appId } = await seededWorld(pem);
-    db.raw
-      .prepare(
-        "INSERT INTO bot_installations (id, bot_id, installation_id, account_login, seen_at) VALUES ('seed-live', ?, 10, 'live-org', datetime('now'))",
-      )
-      .run(appId);
-    const profileStub = githubStub(GITHUB_PROFILE);
-    stubFetch((url) =>
-      url === GITHUB_INSTALLATIONS_URL
-        ? new Response("boom", { status: 500 })
-        : profileStub(url),
-    );
-
-    const res = await postRefresh("mallory", makeEnv(db));
-
-    expect(res.status).toBe(200);
-    expect(cachedColumns(db, appId).github_name).toBe("Acme Inspector");
-    const row = db.raw
-      .query("SELECT removed_at FROM bot_installations WHERE installation_id = 10")
-      .get() as { removed_at: string | null };
-    expect(row.removed_at).toBeNull();
   });
 });
 

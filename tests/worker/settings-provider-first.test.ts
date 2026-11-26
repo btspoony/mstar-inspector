@@ -27,10 +27,13 @@ const SESSION_SECRET = ["test", "dashboard", "session", "secret", "32-bytes!"].j
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const PLAIN_KEY = sk("ant-mallory-verify-9988");
 const APP_ID = 1001;
-const SETTINGS = `/dashboard/default/apps/${APP_ID}/settings`;
-const VERIFY = `/dashboard/default/api/apps/${APP_ID}/keys/verify`;
-const MODELS = `/dashboard/default/api/apps/${APP_ID}/models`;
-const SETTINGS_JSON = `/dashboard/default/api/apps/${APP_ID}/settings`;
+// Bot-config routes bind the bot ROW id (Task 4: disjoint from the numeric
+// GitHub App id), so the fixture pins a stable row id.
+const BOT_ID = "bot-settings-first";
+const SETTINGS = `/dashboard/default/review-bots/${BOT_ID}/settings`;
+const VERIFY = `/dashboard/default/api/review-bots/${BOT_ID}/keys/verify`;
+const MODELS = `/dashboard/default/api/review-bots/${BOT_ID}/models`;
+const SETTINGS_JSON = `/dashboard/default/api/review-bots/${BOT_ID}/settings`;
 
 type ConfiguredRow = {
   kind: string;
@@ -52,7 +55,7 @@ async function seededWorld() {
   await createUser(db, { login: "mallory", role: "member" });
   await createUser(db, { login: "hubot", role: "member" });
   seedDefaultMemberships(db, { octocat: "owner", mallory: "owner", hubot: "member" });
-  const id = crypto.randomUUID();
+  const id = BOT_ID;
   const box = createSecretbox(TEST_KEY);
   const app = await createReviewBotsStore(db).createApp({
     id,
@@ -526,7 +529,7 @@ describe("POST save-sandbox-image (spec § Technical interfaces)", () => {
     expect(db.raw.query("SELECT sandbox_image_id FROM review_bots WHERE id = ?").get(app.id)).toEqual({
       sandbox_image_id: "omp",
     });
-    const payload = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const payload = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     const body = (await payload.json()) as {
       app: { sandbox_image_id: string };
       sandbox_images?: Array<{ id: string; enabled: boolean }>;
@@ -1003,7 +1006,7 @@ describe("POST /dashboard/apps/:appId/settings — add-template-provider materia
 describe("GET settings includes delivery_summary for the sidebar", () => {
   test("delivery_summary is present and never includes encrypted columns", async () => {
     const { db } = await seededWorld();
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, makeEnv(db))) as {
       delivery_summary: { latest: null; rejected24h: number };
@@ -1036,7 +1039,7 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
 
   test("other member GET is 200 with can_manage false and base+health only", async () => {
     const { db } = await seededWorld();
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "hubot", makeEnv(db));
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "hubot", makeEnv(db));
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       can_manage: boolean;
@@ -1049,8 +1052,9 @@ describe("GET settings includes delivery_summary for the sidebar", () => {
       custom_providers?: unknown;
     };
     expect(body.can_manage).toBe(false);
-    expect(body.app.github_app_id).toBe(APP_ID);
-    expect(body.app.github_slug).toBe("mallorys-app");
+    // F2: bot-config payloads carry null placeholders for App identity.
+    expect(body.app.github_app_id).toBeNull();
+    expect(body.app.github_slug).toBeNull();
     expect(body.keys).toBeUndefined();
     expect(body.configured_providers).toBeUndefined();
     expect(body.provider_catalog).toBeUndefined();
@@ -1075,7 +1079,7 @@ describe("GET settings configured_providers vs provider_catalog", () => {
     configured_providers: ConfiguredRow[];
     provider_catalog: Array<{ id: string; tier: string; eligibility: string }>;
   }> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     return (await readSettingsWithCatalog(res, env)) as {
       configured_providers: ConfiguredRow[];
@@ -1344,7 +1348,7 @@ describe("multi-key provider pools (routes)", () => {
       key_id: await keyIdOf(PLAIN_KEY),
     });
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app");
+    expect(await res.text()).toContain("Removed the stored anthropic key for mallorys-app.");
     const remaining = await store.listProviderKeys(app.id, "anthropic");
     expect(remaining.map((row) => row.keyId)).toEqual([await keyIdOf(SECOND_KEY)]);
   });
@@ -1441,7 +1445,7 @@ describe("multi-key provider pools (routes)", () => {
       key_id: await keyIdOf(PLAIN_KEY),
     });
     expect(removed.status).toBe(200);
-    expect(await removed.text()).toContain("Removed the stored my-custom key for mallorys-app");
+    expect(await removed.text()).toContain("Removed the stored my-custom key for mallorys-app.");
     expect(await store.listCustomProviderKeys(app.id, "my-custom")).toMatchObject([
       { keyId: await keyIdOf(SECOND_KEY) },
     ]);
@@ -1482,7 +1486,7 @@ describe("multi-key provider pools (routes)", () => {
     expect(matched.status).toBe(200);
     const matchedBody = (await matched.json()) as { changed: boolean; message: string };
     expect(matchedBody.changed).toBe(true);
-    expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app");
+    expect(matchedBody.message).toContain("Removed the stored anthropic key for mallorys-app.");
     expect(cacheRows()).toBe(0);
   });
 
@@ -1624,7 +1628,7 @@ describe("POST settings op=add-custom-provider-key (custom pool append)", () => 
       key: SECOND_KEY,
     });
     expect(added.status).toBe(200);
-    expect(await added.text()).toContain("Added another my-custom key for mallorys-app");
+    expect(await added.text()).toContain("Added another my-custom key for mallorys-app — it is only ever shown masked.");
     expect(spy).toHaveBeenCalledWith(
       "https://example.com/v1/models",
       expect.objectContaining({ method: "GET" }),
@@ -1789,7 +1793,7 @@ describe("GET settings provider_catalog display_group (AD-547)", () => {
   };
 
   async function getCatalog(env: Env): Promise<CatalogRow[]> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: CatalogRow[] };
     return body.provider_catalog;
@@ -1849,7 +1853,7 @@ describe("GET settings provider_catalog usage_probe (per-key usage action)", () 
   type StampRow = { id: string; tier: string; usage_probe: boolean };
 
   async function getCatalogRows(env: Env): Promise<StampRow[]> {
-    const res = await getJson(`/dashboard/default/api/apps/${APP_ID}/settings`, "mallory", env);
+    const res = await getJson(`/dashboard/default/api/review-bots/${BOT_ID}/settings`, "mallory", env);
     expect(res.status).toBe(200);
     const body = (await readSettingsWithCatalog(res, env)) as { provider_catalog: StampRow[] };
     return body.provider_catalog;

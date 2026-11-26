@@ -28,7 +28,7 @@ import {
   COMMENT_CLAIM_RETRY_DEFAULT,
   type CommentClaimSettingsLogFields,
 } from "../../src/pipeline/comment-claim-settings-reader";
-import { createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedBot, seedTarget, type TestD1 } from "../store/helpers";
 
 const SWEEP_FAILURE_THRESHOLD = QUEUE_MAX_ATTEMPTS + 1;
 const SWEEP_INVITE_LAPSE_CAP = 500;
@@ -62,7 +62,7 @@ function failureDb(): TestD1 {
 function insertLedgerPr(db: TestD1, id: string, prNumber: number, state: string, ageDays: number): void {
   db.raw
     .query(
-      `INSERT INTO pull_requests (id, bot_id, owner, repo, pr_number, state, last_seen_at)
+      `INSERT INTO pull_requests (id, app_id, owner, repo, pr_number, state, last_seen_at)
        VALUES (?, 'bot-sweep', 'acme', 'widgets', ?, ?, datetime('now', ?))`,
     )
     .run(id, prNumber, state, `-${ageDays} days`);
@@ -456,14 +456,15 @@ describe("runSweep", () => {
     if (settings) await setSweepSettings(db, settings, "operator");
     db.raw
       .query(
-        `INSERT INTO review_bots (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
+        `INSERT INTO github_apps (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc, created_by, created_at, updated_at)
          VALUES ('app-1', 'retention-app', 9001, 'retention-app', 'enc', 'enc', 'tester', datetime('now'), datetime('now'))`,
       )
       .run();
+  syncSplitPair(db);
     const insertDelivery = (id: string, ageDays: number): void => {
       db.raw
         .query(
-          `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
+          `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
            VALUES (?, 'app-1', 'pull_request', 'ok', datetime('now', ?))`,
         )
         .run(id, `-${ageDays} days`);
@@ -559,7 +560,7 @@ describe("runSweep", () => {
     const db = failureDb();
     await setSweepSettings(db, SWEEP_OVERRIDE, "operator");
     db.raw.run("UPDATE review_runtime_settings SET value = 'bad' WHERE key = 'platform.sweep.retention_days'");
-    db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
+    db.raw.run(`INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
                 VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
     insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
     await seedInWindow(db, 3);
@@ -576,7 +577,7 @@ describe("runSweep", () => {
 
   test("a failed settings read reports the redacted D1 error and skips both retention deletes", async () => {
     const db = failureDb();
-    db.raw.run(`INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, created_at)
+    db.raw.run(`INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, created_at)
                 VALUES ('delivery', 'bot-sweep', 'pull_request', 'ok', datetime('now', '-31 days'))`);
     insertLedgerPr(db, "pr-merged-old", 1, "merged", 120);
     const alertUrl = "https://ops.example/local-alert";
@@ -1623,7 +1624,7 @@ describe("runSweep — maintenance replay outbox", () => {
       head_sha: null,
       action: "maintenance_replay",
       triggered_by: "pull_request",
-      botRef: { appId: "bot-sweep" },
+      botRef: { appId: "bot-sweep", botId: "bot-sweep" },
       targetId: BASE.target_id,
     });
     expect(replayRow(db, id).maintenance_replay_sent_at).not.toBeNull();

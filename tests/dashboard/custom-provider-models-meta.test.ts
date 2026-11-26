@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createMigratedTestD1, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, type TestD1 } from "../store/helpers";
 import {
   InvalidCustomProviderError,
   createAppConfigStore,
@@ -27,14 +27,16 @@ const META = {
 };
 
 function seedApp(db: TestD1, id: string): void {
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_app_id, name, private_key_enc, webhook_secret_enc, created_by,
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'acme', 'active', NULL, datetime('now'), datetime('now'))`,
     )
     .run(id, 9101, id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
 }
 
 function world(): { db: TestD1; appId: string; store: ReturnType<typeof createAppConfigStore> } {

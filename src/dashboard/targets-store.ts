@@ -62,7 +62,7 @@ function storedPassVerdicts(raw: string): readonly PrVerdict[] | null {
 export type ReviewTargetRow = {
   id: string;
   workspace_id: string;
-  bot_id: string;
+  app_id: string;
   name: string;
   repo_id: number | null;
   repo_owner: string | null;
@@ -196,14 +196,14 @@ export type TargetReviewConfig = {
 
 const LIVE_TARGET = "id = ? AND workspace_id = ? AND deleted_at IS NULL";
 
-const DUPLICATE_REPO = `t.bot_id = ?3 AND t.deleted_at IS NULL
+const DUPLICATE_REPO = `t.app_id = ?3 AND t.deleted_at IS NULL
    AND (t.repo_id = ?4
         OR (t.repo_id IS NULL AND t.repo_owner = ?5 COLLATE NOCASE
             AND t.repo_name = ?6 COLLATE NOCASE))`;
 
 const CREATE_TARGET_SQL = `
   INSERT INTO review_targets
-    (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+    (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
      follow_workspace_defaults, created_by, created_at, updated_at)
   SELECT ?1, ?2, ?3, ?6, ?4, ?5, ?6, 1, ?7, datetime('now'), datetime('now')
    WHERE NOT EXISTS (SELECT 1 FROM review_targets t WHERE ${DUPLICATE_REPO})`;
@@ -545,7 +545,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
                   w.default_review_drafts AS workspace_default_review_drafts,
                   w.default_review_enabled AS workspace_default_review_enabled
              FROM review_targets t
-             LEFT JOIN review_bots b ON b.id = t.bot_id
+             LEFT JOIN github_apps b ON b.id = t.app_id AND b.deleted_at IS NULL
              LEFT JOIN workspaces w ON w.id = t.workspace_id AND w.deleted_at IS NULL
             WHERE t.workspace_id = ? AND t.deleted_at IS NULL
             ORDER BY (last_reviewed_at IS NULL), last_reviewed_at DESC, t.id`,
@@ -559,7 +559,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       const res = await db
         .prepare(
           `SELECT * FROM review_targets
-           WHERE bot_id = ? AND deleted_at IS NULL
+           WHERE app_id = ? AND deleted_at IS NULL
            ORDER BY created_at, id`,
         )
         .bind(botId)
@@ -575,7 +575,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
         const hit = await db
           .prepare(
             `SELECT * FROM review_targets
-             WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+             WHERE app_id = ? AND repo_id = ? AND deleted_at IS NULL
              ORDER BY created_at, id LIMIT 1`,
           )
           .bind(botId, repo.id)
@@ -595,7 +595,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       const unclaimed = await db
         .prepare(
           `SELECT * FROM review_targets
-            WHERE bot_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
+            WHERE app_id = ? AND repo_owner = ? COLLATE NOCASE AND repo_name = ? COLLATE NOCASE
               AND repo_id IS NULL AND deleted_at IS NULL
             ORDER BY created_at, id
             LIMIT 2`,
@@ -612,7 +612,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
                 SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
               WHERE id = ? AND repo_id IS NULL AND deleted_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM review_targets x
-                                 WHERE x.bot_id = review_targets.bot_id
+                                 WHERE x.app_id = review_targets.app_id
                                    AND x.repo_id = ? AND x.deleted_at IS NULL)`,
           )
           .bind(repo.id, repo.owner, repo.name, legacy.id, repo.id)
@@ -628,15 +628,15 @@ export function createTargetsStore(db: TargetsStoreD1) {
         .prepare(
           `UPDATE review_targets
               SET repo_id = ?, repo_owner = ?, repo_name = ?, updated_at = datetime('now')
-            WHERE bot_id = ?
+            WHERE app_id = ?
               AND repo_id IS NULL AND repo_owner IS NULL AND repo_name IS NULL
               AND deleted_at IS NULL
               AND (SELECT COUNT(*) FROM review_targets x
-                    WHERE x.bot_id = ? AND x.repo_id IS NULL
+                    WHERE x.app_id = ? AND x.repo_id IS NULL
                       AND x.repo_owner IS NULL AND x.repo_name IS NULL
                       AND x.deleted_at IS NULL) = 1
               AND NOT EXISTS (SELECT 1 FROM review_targets y
-                               WHERE y.bot_id = review_targets.bot_id
+                               WHERE y.app_id = review_targets.app_id
                                  AND y.repo_id = ? AND y.deleted_at IS NULL)`,
         )
         .bind(repo.id, repo.owner, repo.name, botId, botId, repo.id)
@@ -645,7 +645,7 @@ export function createTargetsStore(db: TargetsStoreD1) {
       return db
         .prepare(
           `SELECT * FROM review_targets
-            WHERE bot_id = ? AND repo_id = ? AND deleted_at IS NULL
+            WHERE app_id = ? AND repo_id = ? AND deleted_at IS NULL
             ORDER BY created_at, id LIMIT 1`,
         )
         .bind(botId, repo.id)

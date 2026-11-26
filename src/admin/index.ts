@@ -1,7 +1,7 @@
 import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
 import { isPlatformOperator, workspaceBoot } from "../dashboard/index";
-import { listBotScopes, setBotScope } from "../dashboard/apps-store";
+import { listBotScopes, setAppScope, setReviewBotScope, type BotScope } from "../dashboard/apps-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
   CHECK_TERMINALIZE_MAX,
@@ -190,7 +190,7 @@ async function readQueueBacklog(queue: QueueGaugeSource | undefined): Promise<Ru
  */
 const PAUSED_APPS_SQL = `
   SELECT COUNT(*) AS n
-    FROM review_bots
+    FROM github_apps
    WHERE deleted_at IS NULL AND review_enabled = 0`;
 
 async function readPausedApps(db: DashboardD1): Promise<number | null> {
@@ -673,40 +673,56 @@ async function assignOfficialWorkspace(c: AdminContext): Promise<Response> {
   }
 }
 
-async function assignBotScope(c: AdminContext): Promise<Response> {
-  const login = await operatorLogin(c);
-  if (!login) return c.notFound();
-  const db = c.env.DB;
-  if (!db) return c.notFound();
-  let scope: unknown;
-  let confirm: unknown;
-  try {
-    const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
-    scope = body.scope;
-    confirm = body.confirm;
-  } catch {
-  }
-  if (scope !== "owned" && scope !== "shared") {
-    return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
-  }
-  const botId = c.req.param("botId");
-  if (!botId) return c.notFound();
-  const outcome = await setBotScope(db, {
-    botId,
-    scope,
-    confirm: confirm === true,
-    actor: login,
-    now: new Date().toISOString(),
-  });
-  if (outcome.outcome === "bot_not_found") return c.json({ error: "bot not found" }, 404);
-  if (outcome.outcome === "outside_official_workspace") {
-    return c.json({ error: "bot is outside the official workspace" }, 409);
-  }
-  if (outcome.outcome === "confirm_required") {
-    return c.json({ error: "unsharing requires confirm: true" }, 400);
-  }
-  return c.json({ botId, scope: outcome.scope, sharedAt: outcome.sharedAt });
+/**
+ * The shared console scope-switch handler. `kind` picks the entity and the
+ * column: the APP route (`/api/bots/:botId/scope`, kept at its pre-split
+ * path) writes `github_apps.scope` audited as `runtime.app_scope.set`; the
+ * BOT route (`/api/review-bots/:botId/scope`, distinct) writes
+ * `review_bots.scope` audited as `runtime.bot_scope.set`.
+ */
+function assignScopeSwitch(kind: "app" | "bot") {
+  return async function assignScope(c: AdminContext): Promise<Response> {
+    const login = await operatorLogin(c);
+    if (!login) return c.notFound();
+    const db = c.env.DB;
+    if (!db) return c.notFound();
+    let scope: unknown;
+    let confirm: unknown;
+    try {
+      const body = (await c.req.json()) as { scope?: unknown; confirm?: unknown };
+      scope = body.scope;
+      confirm = body.confirm;
+    } catch {
+    }
+    if (scope !== "owned" && scope !== "shared") {
+      return c.json({ error: 'body must be { scope: "owned" | "shared" }' }, 400);
+    }
+    const botId = c.req.param("botId");
+    if (!botId) return c.notFound();
+    const args = {
+      scope: scope as BotScope,
+      confirm: confirm === true,
+      actor: login,
+      now: new Date().toISOString(),
+    };
+    const outcome =
+      kind === "app"
+        ? await setAppScope(db, { appId: botId, ...args })
+        : await setReviewBotScope(db, { botId, ...args });
+    const noun = kind === "app" ? "app" : "bot";
+    if (outcome.outcome === "bot_not_found") return c.json({ error: `${noun} not found` }, 404);
+    if (outcome.outcome === "outside_official_workspace") {
+      return c.json({ error: `${noun} is outside the official workspace` }, 409);
+    }
+    if (outcome.outcome === "confirm_required") {
+      return c.json({ error: "unsharing requires confirm: true" }, 400);
+    }
+    return c.json({ botId, scope: outcome.scope, sharedAt: outcome.sharedAt });
+  };
 }
+
+const assignAppScope = assignScopeSwitch("app");
+const assignReviewBotScope = assignScopeSwitch("bot");
 
 async function readBots(c: AdminContext): Promise<Response> {
   const login = await operatorLogin(c);
@@ -724,6 +740,8 @@ async function readBots(c: AdminContext): Promise<Response> {
       isOfficial: Boolean(row.is_official),
       scope: row.scope,
       sharedAt: row.shared_at,
+      botScope: row.bot_scope,
+      botSharedAt: row.bot_shared_at,
       installationCount: row.installation_count,
       liveTargetCount: row.live_target_count,
       deletedAt: row.deleted_at,
@@ -1075,7 +1093,7 @@ async function serveDocument(c: AdminContext): Promise<Response> {
   return c.html(html, 200, { "cache-control": "private, no-store" });
 }
 
-const ADMIN_ROUTES: readonly AdminRoute[] = [
+export const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "get", path: "/api/flags", handler: readFlags },
   { method: "patch", path: "/api/flags", handler: setFlag },
   { method: "get", path: "/api/runtime", handler: readRuntime },
@@ -1090,7 +1108,8 @@ const ADMIN_ROUTES: readonly AdminRoute[] = [
   { method: "patch", path: "/api/workspaces/:id/plan", handler: assignPlan },
   { method: "patch", path: "/api/workspaces/:id/slug", handler: setSlug },
   { method: "patch", path: "/api/official-workspace", handler: assignOfficialWorkspace },
-  { method: "patch", path: "/api/bots/:botId/scope", handler: assignBotScope },
+  { method: "patch", path: "/api/bots/:botId/scope", handler: assignAppScope },
+  { method: "patch", path: "/api/review-bots/:botId/scope", handler: assignReviewBotScope },
   { method: "get", path: "/api/bots", handler: readBots },
   { method: "get", path: "/api/support-grants", handler: readSupportGrants },
   { method: "post", path: "/api/support-grants", handler: createGrant },

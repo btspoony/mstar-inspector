@@ -8,7 +8,7 @@ import { defaultSweepLog } from "../../src/worker/sweep";
 import type { Env } from "../../src/worker/env";
 import { createSecretbox } from "../../src/dashboard/secretbox";
 import { setMaintenanceMode } from "../../src/dashboard/runtime-config-store";
-import { createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
+import { syncSplitPair, createMigratedTestD1, seedBot, type TestD1 } from "../store/helpers";
 
 const TEST_KEY = Buffer.alloc(32, 7).toString("base64");
 const SECRET = "test-webhook-secret";
@@ -28,9 +28,8 @@ function makeEnv(db: unknown): Env {
 async function seedApp(db: TestD1): Promise<string> {
   const id = "app-maintenance";
   const box = createSecretbox(TEST_KEY);
-  db.raw
-    .prepare(
-      `INSERT INTO review_bots
+  db.raw.prepare(
+      `INSERT INTO github_apps
          (id, github_slug, github_app_id, name, private_key_enc, webhook_secret_enc,
           created_by, status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, 'tester', 'active', NULL, datetime('now'), datetime('now'))`,
@@ -43,11 +42,14 @@ async function seedApp(db: TestD1): Promise<string> {
       await box.encryptSecret("test-pem", `github_apps.private_key_enc:${id}`),
       await box.encryptSecret(SECRET, `github_apps.webhook_secret_enc:${id}`),
     );
-  db.raw.prepare("INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, 'default')").run(id);
+  // The split pair: the bot row and the default-workspace mapping the
+  // same-id invariant of this release requires beside the App row.
+  syncSplitPair(db);
+  db.raw.prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, 'default')").run(id);
   db.raw
     .prepare(
       `INSERT INTO review_targets
-         (id, workspace_id, bot_id, name, repo_id, repo_owner, repo_name,
+         (id, workspace_id, app_id, name, repo_id, repo_owner, repo_name,
           review_trigger_mode, created_by, created_at, updated_at)
        VALUES (?, 'default', ?, ?, ?, ?, ?, 'every_push', 'tester', datetime('now'), datetime('now'))`,
     )
@@ -223,7 +225,7 @@ describe("the cron maintenance gate", () => {
     seedBot(db, "bot-sweep", 7001);
     db.raw
       .prepare(
-        `INSERT INTO webhook_deliveries (id, bot_id, event_name, outcome, status_code, created_at)
+        `INSERT INTO webhook_deliveries (id, app_id, event_name, outcome, status_code, created_at)
          VALUES ('wd-stale', 'bot-sweep', 'pull_request', 'accepted', 202, '2020-01-01 00:00:00')`,
       )
       .run();
