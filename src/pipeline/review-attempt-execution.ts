@@ -2784,17 +2784,17 @@ export function transientFactsOf(err: unknown): TransientFacts | undefined {
     for (const key of TRANSIENT_FACTS_KEYS) {
       if (!(key in facts)) return undefined;
     }
+    if (typeof facts.runnerReturned !== "boolean") return undefined;
+    if (typeof facts.headSha !== "string" && facts.headSha !== null) return undefined;
+    if (typeof facts.stage !== "string") return undefined;
+    // Optional fields are validated inside the SAME guard: a `has` trap that
+    // throws only on `errorClass` must degrade the classification, never abort
+    // the settlement. Garbage-shaped values are rejected either way.
+    if ("errorClass" in facts && typeof facts.errorClass !== "string") return undefined;
+    if ("lastStage" in facts && typeof facts.lastStage !== "string") return undefined;
   } catch {
     return undefined;
   }
-  if (typeof facts.runnerReturned !== "boolean") return undefined;
-  if (typeof facts.headSha !== "string" && facts.headSha !== null) return undefined;
-  if (typeof facts.stage !== "string") return undefined;
-  // Optional fields are validated too: an arbitrary object that happens to
-  // carry `errorClass` shaped like garbage must not become the class the row
-  // prints.
-  if ("errorClass" in facts && typeof facts.errorClass !== "string") return undefined;
-  if ("lastStage" in facts && typeof facts.lastStage !== "string") return undefined;
   return facts as TransientFacts;
 }
 
@@ -5219,6 +5219,11 @@ export async function settleAttemptFailure(
   }
   const sanitizedErrorClass =
     failure.errorClass === undefined ? undefined : ((await sanitize(failure.errorClass)) ?? undefined);
+  // The log sink is a durable surface too: the stage token joins the log fields
+  // ONLY as its exact-redacted self, and when nothing can be proven clean the
+  // field is omitted rather than shape-redacted on hope.
+  const sanitizedLastStage =
+    failure.lastStage === undefined ? undefined : ((await sanitize(failure.lastStage)) ?? undefined);
   const detail =
     code === "review.internal.unclassified"
       ? internalFailureDetail({
@@ -5277,8 +5282,6 @@ export async function settleAttemptFailure(
     // A stage token is free text the runner produced: it enters the same exact
     // pass as everything else, and when nothing can be proven clean it is
     // omitted entirely rather than shape-redacted and hoped for.
-    const sanitizedLastStage =
-      failure.lastStage === undefined ? undefined : await sanitize(failure.lastStage);
     const messageWithStage =
       sanitizedLastStage === undefined || sanitizedLastStage === null || sanitizedLastStage === ""
         ? observedMessage
@@ -5327,7 +5330,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
-        ...lastStageField(failure.lastStage),
+        ...lastStageField(sanitizedLastStage),
       },
       `review unresolved: ${detail} — the launch row records no readable paid outcome (${launchJudgement.kind}), so nothing was concluded, destroyed or reclaimed`,
     );
@@ -5362,7 +5365,7 @@ export async function settleAttemptFailure(
         ...elapsed,
         error_code: code,
         attempt_id: attemptId,
-        ...lastStageField(failure.lastStage),
+        ...lastStageField(sanitizedLastStage),
       },
       `review failed: ${budgetDetail}`,
     );
@@ -5403,7 +5406,7 @@ export async function settleAttemptFailure(
           event: "review_unresolved",
           error_code: code,
           attempt_id: attemptId,
-          ...lastStageField(failure.lastStage),
+          ...lastStageField(sanitizedLastStage),
         },
         `review unresolved: ${budgetDetail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
       );
@@ -5437,7 +5440,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
-        ...lastStageField(failure.lastStage),
+        ...lastStageField(sanitizedLastStage),
       },
       `review unresolved: ${detail} — nothing was collected, destroyed or reclaimed`,
     );
@@ -5456,7 +5459,7 @@ export async function settleAttemptFailure(
       ...elapsed,
       error_code: code,
       attempt_id: attemptId,
-      ...lastStageField(failure.lastStage),
+      ...lastStageField(sanitizedLastStage),
     },
     `review failed: ${detail}`,
   );
@@ -5505,7 +5508,7 @@ export async function settleAttemptFailure(
         event: "review_unresolved",
         error_code: code,
         attempt_id: attemptId,
-        ...lastStageField(failure.lastStage),
+        ...lastStageField(sanitizedLastStage),
       },
       `review unresolved: ${detail} — no durable outcome was recorded, so nothing was destroyed or reclaimed`,
     );

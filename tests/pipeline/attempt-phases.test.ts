@@ -5055,3 +5055,98 @@ describe("the observation cause resists a pre-cut regression (R7)", () => {
     expect(handoff?.observation?.cause).toContain(REDACTED);
   });
 });
+
+describe("the log sink carries only sanitized free text (T1/T2)", () => {
+  test("a shapeless sealed value in lastStage never reaches the structured log fields", async () => {
+    const secret = `k${"s".repeat(59)}`;
+    const { deps, db } = await makeDeps();
+    expect(await claimReviewAttempt(db as never, ATTEMPT_ID, Date.now(), null)).toBe("claimed");
+    expect(await claimReviewLaunch(db as never, ATTEMPT_ID, Date.now())).toEqual({ ok: true });
+    const sealed = await sealGateSecrets(TEST_KEY, ATTEMPT_ID, [secret]);
+    db.raw
+      .prepare("UPDATE review_launches SET gate_secrets_enc = ? WHERE attempt_id = ?")
+      .run(sealed, ATTEMPT_ID);
+    const ref = makeRef(makePayload());
+    await settleAttemptFailure(
+      deps,
+      ref,
+      {
+        class: "failure",
+        phase: "review",
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        message: "the runner input write failed: exit 3",
+        errorClass: "Error",
+        lastStage: `synthesize ${secret}`,
+        sendAttemptPublicationId: null,
+      },
+      null,
+    );
+    for (const line of h.logLines) {
+      expect(JSON.stringify(line.fields)).not.toContain(secret);
+      expect(JSON.stringify(line.fields)).not.toMatch(/ks{5,}/);
+    }
+    const errorLine = h.logLines.find((line) => line.level === "error");
+    expect(errorLine?.fields?.last_stage).toContain(REDACTED);
+  });
+
+  test("a has-trap that throws only on errorClass cannot abort settlement", async () => {
+    // QC3's trap: the optional-key `in` probe itself throws. The classification
+    // degrades to undefined — and settlement still writes the row.
+    // The target carries the REQUIRED keys so validation reaches the optional
+    // probe — a bare target would exit at the first missing required key and
+    // the trap would never fire.
+    const trapped = new Proxy(
+      {
+        stage: "runner",
+        headSha: SHA,
+        runnerReturned: true,
+        sendAttemptPublicationId: null,
+        rateLimited: null,
+      },
+      {
+        has(target, key) {
+          if (key === "errorClass") throw new Error("hostile has-trap");
+          return key in target;
+        },
+      },
+    );
+    expect(transientFactsOf(Object.assign(new Error("x"), { facts: trapped }))).toBeUndefined();
+
+    const { deps, db } = await makeDeps();
+    const payload = makePayload();
+    registerGitOpsCommands(h.sandbox, payload);
+    h.sandbox.resolvedSha = SHA;
+    const ref = makeRef(payload);
+    await reserveAttemptHandoff(db as never, {
+      deliveryKey: deliveryKeyOf(payload),
+      attemptId: ATTEMPT_ID,
+      payload,
+      nowMs: Date.now(),
+      createdMs: ref.roundStartedAt,
+      enqueuedMs: 0,
+      deadlineMs: ref.deadlineMs,
+    });
+    const trapSteps: WorkflowStep = {
+      do: async (name: string, configOrCallback: unknown, maybeCallback?: unknown): Promise<unknown> => {
+        if (name === "review") {
+          throw Object.assign(new Error("the step failed"), { facts: trapped });
+        }
+        const callback = (typeof configOrCallback === "function" ? configOrCallback : maybeCallback) as (
+          ctx: unknown,
+        ) => Promise<unknown>;
+        return callback({ step: { name, count: 1 }, attempt: 1, config: {} });
+      },
+      sleep: async () => {},
+      sleepUntil: async () => {},
+      waitForEvent: async (): Promise<never> => {
+        throw new Error("the test step store does not wait for events");
+      },
+    } as unknown as WorkflowStep;
+
+    await runReviewAttemptWorkflow(deps, ref, trapSteps, async () => {}).catch(() => {});
+    expect(failureRows(db).length).toBe(1);
+    expect(failureRows(db)[0]!.error_code).toBe("review.internal.unclassified");
+  });
+});
