@@ -328,12 +328,102 @@ function mountedBotCount(chain: readonly AppChainEntry[]): number {
  * that reads it. An empty chain names the next step instead of rendering a
  * blank table.
  */
-export function AppChainSection({
+/**
+ * The chain editor: order only, because order is all the relay reads. Every
+ * move rewrites the WHOLE order in one `PATCH /api/apps/:appId/chain`, whose
+ * store clears and re-inserts positions contiguously in one batch. The response
+ * carries the re-read chain, so the table the operator sees is the list the
+ * next delivery will walk.
+ *
+ * It is unreachable unless the store also admits this workspace as the
+ * installer; `can_manage` gates the UI, the store gates the write.
+ */
+function ChainReorderControls({
   locale,
+  appId,
   chain,
+  onReordered,
 }: {
   locale: SpaBoot["locale"];
+  appId: string;
   chain: readonly AppChainEntry[];
+  onReordered: () => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function move(from: number, to: number): Promise<void> {
+    if (to < 0 || to >= chain.length) return;
+    const order = chain.map((row) => row.bot_id);
+    const [moved] = order.splice(from, 1);
+    if (moved === undefined) return;
+    order.splice(to, 0, moved);
+    setBusy(true);
+    try {
+      const { status } = await patchJson(`${apiBase()}/api/apps/${encodeURIComponent(appId)}/chain`, {
+        botIds: order,
+      });
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+      } else {
+        setNotice(null);
+        // Re-read the CHAIN, not the page: the editor must never render an order
+        // the relay would not walk.
+        await onReordered();
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <NoticeRegion notice={notice} />
+      <div className="flex flex-wrap items-center gap-2" data-slot="app-chain-reorder">
+        {chain.map((row, index) => (
+          <span key={row.bot_id} className="flex items-center gap-1 rounded-md border border-(--border-default) px-2 py-1">
+            <span className="text-sm font-medium">{row.name}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === 0}
+              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
+              onClick={() => void move(index, index - 1)}
+            >
+              ↑
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === chain.length - 1}
+              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
+              onClick={() => void move(index, index + 1)}
+            >
+              ↓
+            </Button>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export function AppChainSection({
+  locale,
+  appId,
+  chain,
+  canManage,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  canManage: boolean;
+  onReordered: () => Promise<unknown>;
 }) {
   if (chain.length === 0) {
     return <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>;
@@ -387,6 +477,9 @@ export function AppChainSection({
     <div data-slot="app-chain">
       <FlowSection title={t(locale, "apps.chain.title")} subtitle={t(locale, "apps.chain.copy")}>
         <DataTable columns={columns} rows={chain} rowKey={(row) => `${row.position}:${row.bot_id}`} />
+        {canManage ? (
+          <ChainReorderControls locale={locale} appId={appId} chain={chain} onReordered={onReordered} />
+        ) : null}
       </FlowSection>
     </div>
   );
@@ -617,8 +710,15 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
-        {/* F3: the chain is what the App mounts, readable by every member. */}
-        <AppChainSection locale={locale} chain={payload.chain ?? []} />
+        {/* F3: the chain is what the App mounts, readable by every member; only
+            the installer's managers may rewrite its order. */}
+        <AppChainSection
+          locale={locale}
+          appId={appId}
+          chain={payload.chain ?? []}
+          canManage={payload.can_manage}
+          onReordered={onReload}
+        />
       </div>
     );
   }
@@ -691,7 +791,13 @@ export function AppDetailView({
             {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
               <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
             ) : (
-              <AppChainSection locale={locale} chain={payload.chain ?? []} />
+              <AppChainSection
+          locale={locale}
+          appId={appId}
+          chain={payload.chain ?? []}
+          canManage={payload.can_manage === true}
+          onReordered={onReload}
+        />
             )}
           </div>
         </TabsContent>
