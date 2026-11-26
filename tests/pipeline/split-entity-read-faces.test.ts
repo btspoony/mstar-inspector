@@ -4,13 +4,20 @@ import { createReviewBotsStore } from "../../src/dashboard/apps-store";
 import { createTargetsStore } from "../../src/dashboard/targets-store";
 
 /**
- * The five entity-split read faces the Task-3 conversion rewired, exercised on
- * the SPLIT schema (the migration chain fully applied): the Check gate's
- * target lookup, the publications and findings attribution queries, the
- * newer-head proof over review_checks, and the bot's sandbox write. The
- * pre-split fixture inventory cannot express this world; these tests run the
- * exact statement shapes the pipeline issues, against rows the split schema
- * accepts, so a regression of the column renames fails loudly here.
+ * The entity-split read faces the Task-3 conversion rewired, on the SPLIT schema
+ * (migration chain fully applied).
+ *
+ * Three cases below pin the SHAPES those reads issue — the Check gate's target
+ * lookup, the publications/findings attribution and the newer-head proof — by
+ * running the same statement text against rows the split schema accepts. They
+ * catch a schema/column regression and a fixture that stops matching it; they do
+ * not execute the pipeline's own closures (neither `getCheckGate` nor the
+ * journal reads are exported), so a change confined to that statement text would
+ * not fail here.
+ *
+ * The last two cases DO call product code (`createReviewBotsStore`,
+ * `createTargetsStore`) and are the production-exercised half of this file.
+ * Pipeline behaviour proper is covered by `tests/pipeline/*` on the same schema.
  */
 
 const APP_ID = "app-readface";

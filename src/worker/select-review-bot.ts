@@ -117,7 +117,6 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
   let planBlocked = false;
   let capabilityBlocked = false;
   let botBlocked: string | null = null;
-  let sawShared = false;
 
   for (const bot of chain) {
     // A bot the owner stopped sharing is skipped BEFORE any read, own or not:
@@ -139,7 +138,6 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
       // deployment that never needed quota at all.
       return { kind: "selected", botId: bot.botId };
     }
-    sawShared = true;
 
     const capability = await checkEntitlement({
       db,
@@ -193,7 +191,6 @@ export async function selectReviewBot(input: RelayInput): Promise<RelayOutcome> 
   if (planBlocked) return { kind: "refused", refusal: { kind: "quota-plan" } };
   if (botBlocked !== null) return { kind: "refused", refusal: { kind: "quota-bot", botId: botBlocked } };
   if (capabilityBlocked) return { kind: "refused", refusal: { kind: "shared-bot-not-included" } };
-  if (sawShared) return { kind: "refused", refusal: { kind: "shared-bot-not-included" } };
   return { kind: "refused", refusal: { kind: "no-review-bot" } };
 }
 
@@ -213,16 +210,3 @@ async function sharedMonthlyRp(
   return Number(row?.total ?? 0);
 }
 
-/** Map the relay's refusal onto the delivery outcome the worker records. */
-export function relayRefusalOutcome(refusal: RelayRefusal): DeliveryOutcome {
-  switch (refusal.kind) {
-    case "quota-plan":
-    case "quota-bot":
-      return "refused";
-    case "shared-bot-not-included":
-    case "no-review-bot":
-      return "refused";
-    case "entitlement-unreadable":
-      return "refused";
-  }
-}

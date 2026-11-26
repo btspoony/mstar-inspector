@@ -461,7 +461,7 @@ describe("migrations/0115_app_bot_split.sql", () => {
     expect(count(db, "github_apps")).toBe(2);
     expect(count(db, "review_bots")).toBe(2);
     expect(
-      (db.raw.query("SELECT id, app_id, app_id FROM reviews ORDER BY id").all() as Array<{ app_id: string }>).map(
+      (db.raw.query("SELECT id, app_id, bot_id FROM reviews ORDER BY id").all() as Array<{ app_id: string }>).map(
         (row) => row.app_id,
       ),
     ).toEqual(["bot-own", "bot-shared"]);
@@ -476,7 +476,7 @@ describe("migrations/0115_app_bot_split.sql", () => {
 
     const snapshot = {
       bots: db.raw.query("SELECT * FROM review_bots ORDER BY id").all(),
-      reviews: db.raw.query("SELECT id, app_id, app_id FROM reviews ORDER BY id").all(),
+      reviews: db.raw.query("SELECT id, app_id, bot_id FROM reviews ORDER BY id").all(),
       payload: claimPayload(db),
     };
 
@@ -484,7 +484,7 @@ describe("migrations/0115_app_bot_split.sql", () => {
     execBackfillFile(db);
 
     expect(db.raw.query("SELECT * FROM review_bots ORDER BY id").all()).toEqual(snapshot.bots);
-    expect(db.raw.query("SELECT id, app_id, app_id FROM reviews ORDER BY id").all()).toEqual(snapshot.reviews);
+    expect(db.raw.query("SELECT id, app_id, bot_id FROM reviews ORDER BY id").all()).toEqual(snapshot.reviews);
     expect(claimPayload(db)).toEqual(snapshot.payload);
     expect(count(db, "review_bots")).toBe(2);
     expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -566,7 +566,7 @@ describe("migrations/0116_github_apps_sandbox_image_drop.sql", () => {
 
     const snapshot = {
       bots: db.raw.query("SELECT id, workspace_id, name, scope, multiplier FROM review_bots ORDER BY id").all(),
-      reviews: db.raw.query("SELECT id, app_id, app_id FROM reviews ORDER BY id").all(),
+      reviews: db.raw.query("SELECT id, app_id, bot_id FROM reviews ORDER BY id").all(),
       payload: claimPayload(db),
     };
 
@@ -577,7 +577,7 @@ describe("migrations/0116_github_apps_sandbox_image_drop.sql", () => {
     expect(db.raw.query("SELECT id, workspace_id, name, scope, multiplier FROM review_bots ORDER BY id").all()).toEqual(
       snapshot.bots,
     );
-    expect(db.raw.query("SELECT id, app_id, app_id FROM reviews ORDER BY id").all()).toEqual(snapshot.reviews);
+    expect(db.raw.query("SELECT id, app_id, bot_id FROM reviews ORDER BY id").all()).toEqual(snapshot.reviews);
     expect(claimPayload(db)).toEqual(snapshot.payload);
     expect(count(db, "review_bots")).toBe(2);
     expect(db.raw.query("PRAGMA foreign_key_check").all()).toEqual([]);
