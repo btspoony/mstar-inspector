@@ -150,7 +150,7 @@ describe("app-config store — custom provider models_meta", () => {
     };
     await store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
 
-    await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
+    await store.updateCustomProviderModels(AUTHORITY, appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
 
     const [decl] = await store.listCustomProviders(appId);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
@@ -161,7 +161,7 @@ describe("app-config store — custom provider models_meta", () => {
     const { appId, store } = world();
     await store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
 
-    await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
+    await store.updateCustomProviderModels(AUTHORITY, appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
 
     const [decl] = await store.listCustomProviders(appId);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);

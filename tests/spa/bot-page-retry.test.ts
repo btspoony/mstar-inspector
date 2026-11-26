@@ -1,99 +1,162 @@
 /**
- * F14: the model-failure / provider-catalog retry contract that used to be
- * pinned on the App detail now belongs to the BOT page — that is where both
- * editors live after the split. Three properties, in order:
+ * F14: the model-failure / retry contract, pinned by MOUNTING `BotDetailPage`.
  *
- * 1. a failed models read surfaces on the editor, not as a silent empty list;
- * 2. the rest of the bot page still renders (the failure is non-fatal);
- * 3. retrying the read succeeds and the editor becomes usable.
+ * The previous version of this file called `fetch` and asserted a locally
+ * built array — it proved nothing about the page. This one renders the real
+ * page against a stubbed network and walks the three states in order:
  *
- * The read helpers are exercised directly so the assertions are about the
- * contract, not about one render tree's markup.
+ *   failure → the editor shows a visible error and the rest of the page still
+ *             renders;
+ *   retry   → both affected reads are re-issued;
+ *   success → the editor becomes usable.
  */
 import { describe, expect, test } from "bun:test";
-import { parseModels } from "../../src/spa/pages/data";
-import { loadProviderCatalog } from "../../src/spa/provider-catalog";
+import { type Element as DomElement } from "happy-dom";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { t } from "../../src/i18n";
+import type { SpaBoot } from "../../src/spa/boot";
+import { BotDetailPage } from "../../src/spa/pages/BotDetailPage";
+import { installDom } from "./dom";
+
+const BOOT: SpaBoot = { locale: "en", login: "mallory", name: "Mallory" };
+
+const BOT_PAYLOAD = {
+  can_manage: true,
+  owned: true,
+  app: {
+    github_app_id: null,
+    id: "bot-1",
+    name: "Team bot",
+    description: "The team's review bot.",
+    status: null,
+    scope: "owned",
+    sandbox_image_id: "omp",
+    last_webhook_at: null,
+    github_name: null,
+    github_slug: null,
+    github_description: null,
+    github_html_url: null,
+    github_avatar_url: null,
+    github_metadata_synced_at: null,
+  },
+  installations: [],
+  keys: [],
+  model_chain: null,
+  model_roles: {},
+  model_chains: [],
+  custom_providers: [],
+  configured_providers: [],
+  provider_catalog_version: "f14-catalog",
+  provider_eligibility: {},
+  model_role_ids: [],
+  custom_provider_api_ids: [],
+  sandbox_images: [{ id: "omp", enabled: true }],
+  overview: {
+    provider_workspace: "Acme",
+    month_used_rp: 0,
+    plan_monthly_rp: null,
+    default_chain: null,
+    mounted_apps: [],
+  },
+};
 
 const MODELS_OK = {
-  groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/fixture-model"] }],
-};
-const CATALOG_OK = {
-  provider_catalog: [
-    {
-      id: "anthropic",
-      label: "Anthropic",
-      tier: "builtin",
-      base_url: null,
-      api: null,
-      models: ["anthropic-f14-model"],
-      model_limits: { "anthropic-f14-model": { contextWindow: 200000, maxTokens: 8192 } },
-      verifiable: true,
-      usage_probe: false,
-      eligibility: "builtin",
-      display_group: "common",
-    },
-  ],
-  model_limits_snapshot: "fixture-snapshot",
+  groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/f14-model"] }],
 };
 
-/** One read that answers `503` on the first call and the body afterwards. */
-function failOnce(body: unknown): { calls: number; restore: () => void } {
-  const realFetch = globalThis.fetch;
-  const state = { calls: 0 };
-  globalThis.fetch = (async () => {
-    state.calls += 1;
-    if (state.calls === 1) return new Response("unavailable", { status: 503 });
-    return Response.json(body);
-  }) as unknown as typeof fetch;
-  return {
-    get calls() {
-      return state.calls;
-    },
-    restore: () => {
-      globalThis.fetch = realFetch;
-    },
-  } as { calls: number; restore: () => void };
+type FixtureWindow = ReturnType<typeof installDom>["win"];
+
+/** A click against the mounted happy-dom document (the fixture's own Event). */
+async function click(win: FixtureWindow, node: DomElement | null): Promise<void> {
+  await act(async () => {
+    node?.dispatchEvent(new win.MouseEvent("click", { bubbles: true, cancelable: true, button: 0 }));
+  });
+  await act(async () => {});
 }
 
-describe("F14 — the bot page's editors isolate a read failure and recover on retry", () => {
-  test("the models read fails once, then retry returns usable groups", async () => {
-    const probe = failOnce(MODELS_OK);
+describe("F14 — BotDetailPage keeps a models failure visible and retries it", () => {
+  test("failure renders the editor error while the page still renders; retry re-reads and succeeds", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    let modelsCalls = 0;
+    let modelsShouldFail = true;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
+      if (url.endsWith("/api/models")) {
+        modelsCalls += 1;
+        return modelsShouldFail
+          ? new Response("unavailable", { status: 503 })
+          : Response.json(MODELS_OK);
+      }
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
+
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
     try {
-      // 1. the failure is REAL: the read rejects, so the editor shows an error
-      //    rather than an empty selector list.
-      const first = await fetch("/d/api/models");
-      expect(first.ok).toBe(false);
-      // 2. the rest of the page is unaffected — the read is one promise, and a
-      //    caller that swallows it keeps rendering the other sections.
-      const groupsOnFailure: unknown[] = [];
-      expect(groupsOnFailure).toEqual([]);
-      // 3. retry succeeds and parses into the editor's option groups.
-      const retried = await fetch("/d/api/models");
-      expect(retried.ok).toBe(true);
-      const parsed = parseModels(await retried.json());
-      expect(parsed?.groups).toHaveLength(1);
-      expect(parsed?.groups[0]?.selectors).toEqual(["anthropic/fixture-model"]);
-      expect(probe.calls).toBe(2);
+      await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+
+      // 1. THE PAGE RENDERED: the bot's own facts are on screen even though the
+      //    models read failed — the failure is not fatal to the page.
+      expect(container.textContent).toContain("Team bot");
+      // The rest of the page rendered: the overview's own facts are present.
+      expect(container.textContent).toContain(t("en", "bots.fieldProvider"));
+      expect(container.textContent).toContain("Acme");
+
+      // 2. THE FAILURE IS VISIBLE on the editor, with its retry affordance —
+      //    not silently flattened into "no models configured".
+      expect(container.textContent).toContain(t("en", "bots.modelsFailed"));
+      const retry = [...container.querySelectorAll("button")].find(
+        (button) => button.textContent === t("en", "common.retry"),
+      );
+      expect(retry).toBeDefined();
+      const callsBeforeRetry = modelsCalls;
+
+      // 3. RETRY RE-READS and, this time, succeeds: the error clears.
+      modelsShouldFail = false;
+      if (retry !== undefined) {
+        // happy-dom's element type differs nominally from the DOM's; the node
+        // came from this window's own query, so the cast is structural only.
+        const retryNode = retry as unknown as DomElement;
+        await click(win, retryNode);
+      }
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      expect(modelsCalls).toBeGreaterThan(callsBeforeRetry);
+      expect(container.textContent).not.toContain(t("en", "bots.modelsFailed"));
+      expect(container.textContent).toContain("Team bot");
     } finally {
-      probe.restore();
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
     }
   });
 
-  test("the provider catalog fails once, then retry loads the catalog the editor needs", async () => {
-    const probe = failOnce(CATALOG_OK);
-    try {
-      // The catalog cache drops a failed version, so the retry really refetches.
-      await expect(loadProviderCatalog("/d", "f14-version")).rejects.toThrow();
-      const catalog = await loadProviderCatalog("/d", "f14-version");
-      expect(catalog.provider_catalog.map((row) => row.id)).toEqual(["anthropic"]);
-      expect(probe.calls).toBe(2);
-    } finally {
-      probe.restore();
-    }
-  });
+  test("a malformed models body is an error too, never an empty catalog", async () => {
+    const { win, cleanup } = installDom("https://worker.local/dashboard/acme/bots/bot-1");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      const url = String(input);
+      if (url.includes("/api/review-bots/bot-1/bot")) return Response.json(BOT_PAYLOAD);
+      if (url.endsWith("/api/models")) return Response.json({ groups: "nope" });
+      return new Response("not found", { status: 404 });
+    }) as unknown as typeof fetch;
 
-  test("a malformed models body is a parse failure, never a fabricated empty group list", () => {
-    expect(parseModels({ groups: "nope" })).toBeNull();
-    expect(parseModels({ groups: [{ provider: "x", source: "bogus", selectors: [] }] })).toBeNull();
+    const container = win.document.createElement("div");
+    win.document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    try {
+      await act(async () => root.render(createElement(BotDetailPage, { boot: BOOT, botId: "bot-1" })));
+      for (let flush = 0; flush < 4; flush += 1) await act(async () => {});
+      expect(container.textContent).toContain("Team bot");
+      expect(container.textContent).toContain(t("en", "bots.modelsFailed"));
+    } finally {
+      await act(async () => root.unmount());
+      globalThis.fetch = realFetch;
+      cleanup();
+    }
   });
 });

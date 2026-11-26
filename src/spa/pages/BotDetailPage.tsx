@@ -35,14 +35,18 @@ export function BotMonthLabel({
   locale,
   overview,
   owned,
+  quotaError,
 }: {
   locale: SpaBoot["locale"];
   overview: BotOverview | undefined;
   owned: boolean;
+  quotaError?: boolean;
 }) {
   if (!overview) return <>{t(locale, "apps.bots.monthNone")}</>;
   const used = overview.month_used_rp;
   if (owned) return <>{t(locale, "bots.monthOwn", { used })}</>;
+  // F10: an unresolvable ceiling is an ERROR, never "no ceiling".
+  if (quotaError === true) return <>{t(locale, "bots.monthUnknown")}</>;
   return overview.plan_monthly_rp === null ? (
     <>{t(locale, "bots.monthNoCeiling", { used })}</>
   ) : (
@@ -55,6 +59,10 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const [payload, setPayload] = useState<BotSettingsPayload | null>(null);
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
+  // F14: a models failure is its OWN state. The page still renders; the editor
+  // shows the error and a retry, and retry re-reads both affected sources.
+  const [modelsError, setModelsError] = useState(false);
+  const [modelsRetry, setModelsRetry] = useState(0);
   const [notice] = useState<{ kind: NoticeKind; message: string } | null>(null);
 
   const sequenceRef = useRef(0);
@@ -62,26 +70,36 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
 
   const load = async (): Promise<boolean> => {
     const sequence = ++sequenceRef.current;
-    try {
-      const [botData, modelsData] = await Promise.all([
-        fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`),
-        fetchJson(`${base}/api/models`).catch(() => null),
-      ]);
-      // F15: an older in-flight read must never overwrite a newer one.
-      if (sequence !== sequenceRef.current) return false;
-      const parsed = parseBotSettings(botData);
-      if (!parsed) {
-        setState("error");
-        return false;
-      }
-      setPayload(parsed);
-      setGroups(modelsData ? (parseModels(modelsData)?.groups ?? []) : []);
-      setState("ok");
-      return true;
-    } catch {
-      if (sequence === sequenceRef.current) setState("error");
+    setModelsError(false);
+    // The two reads fail INDEPENDENTLY: a models failure must not take the bot
+    // payload down with it, and must not be flattened into "no models".
+    const [botRead, modelsRead] = await Promise.allSettled([
+      fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`),
+      fetchJson(`${base}/api/models`),
+    ]);
+    if (sequence !== sequenceRef.current) return false;
+
+    if (botRead.status === "rejected") {
+      setState("error");
       return false;
     }
+    const parsed = parseBotSettings(botRead.value);
+    if (!parsed) {
+      setState("error");
+      return false;
+    }
+    setPayload(parsed);
+    if (modelsRead.status === "rejected") {
+      setModelsError(true);
+      setGroups([]);
+    } else {
+      const models = parseModels(modelsRead.value);
+      // A body that does not parse is a failure too — never an empty catalog.
+      setModelsError(models === null);
+      setGroups(models?.groups ?? []);
+    }
+    setState("ok");
+    return true;
   };
 
   // F15: keyed on BOTH the workspace base and the bot id — switching workspace
@@ -91,7 +109,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     setState("loading");
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, botId]);
+  }, [base, botId, modelsRetry]);
 
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="forms" />;
@@ -150,7 +168,12 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
             <span className="sr-only">{t(locale, "bots.monthHint")}</span>
           </dt>
           <dd>
-            <BotMonthLabel locale={locale} overview={overview} owned={owned} />
+            <BotMonthLabel
+              locale={locale}
+              overview={overview}
+              owned={owned}
+              quotaError={payload.quota_error === true}
+            />
           </dd>
 
           <dt className="text-muted-foreground">{t(locale, "bots.fieldCapability")}</dt>
@@ -168,12 +191,25 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
 
       {payload.can_manage ? (
         <SectionCard tier="secondary" title={t(locale, "bots.editableTitle")}>
+          {/* F14: a models failure surfaces on the editor WITH its retry; the
+              rest of the page above keeps rendering. */}
+          {modelsError ? (
+            <ErrorState
+              locale={locale}
+              message={t(locale, "bots.modelsFailed")}
+              onRetry={() => setModelsRetry((value) => value + 1)}
+            />
+          ) : null}
           <BotSettingsView
             locale={locale}
             payload={payload}
             groups={groups}
+            modelsLoading={false}
             notice={notice}
-            onReload={async () => await load()}
+            onReload={async () => {
+              setModelsRetry((value) => value + 1);
+              return await load();
+            }}
           />
         </SectionCard>
       ) : null}

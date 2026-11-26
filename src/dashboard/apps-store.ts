@@ -517,6 +517,18 @@ export type ReviewBotRow = {
  * `target_count` is the ADDRESSED workspace's live targets on that bot, so the
  * same bot reads a different number in each workspace that may use it.
  */
+/** F9: one shared App as the marketplace chooser renders it. */
+export type SharedAppCardRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  github_description: string | null;
+  owner_workspace_id: string | null;
+  owner_workspace_name: string | null;
+  capability: string | null;
+  target_count: number;
+};
+
 export type SharedBotRow = {
   id: string;
   github_slug: string | null;
@@ -559,23 +571,51 @@ const USABLE_BOT_LIST_SQL = `
    WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')
    ORDER BY (r.workspace_id = ?1) DESC, LOWER(r.name) ASC, r.id ASC`;
 
+/**
+ * The SHARED BOTS a workspace may create a target on — the review-usage face's
+ * "is a shared bot designated" read. Bot rows, bot scopes: this is NOT the
+ * marketplace chooser (that one lists shared **Apps**, see
+ * {@link SHARED_APP_LIST_SQL}).
+ */
 const SHARED_BOT_LIST_SQL = `
   SELECT r.id, b.github_slug, r.name,
-         b.github_description, w.workspace_id AS owner_workspace_id,
-         ws.name AS owner_workspace_name,
-         (SELECT group_concat(name, ', ') FROM (
-            SELECT rb.name AS name FROM app_install_bots ib
-              JOIN review_bots rb ON rb.id = ib.bot_id AND rb.deleted_at IS NULL
-             WHERE ib.github_app_id = r.id AND ib.workspace_id = w.workspace_id
-             ORDER BY ib.position)) AS capability,
          (SELECT COUNT(*) FROM review_targets t
            WHERE t.app_id = r.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
     FROM review_bots r
     JOIN github_apps b ON b.id = r.id AND b.deleted_at IS NULL
-    JOIN app_workspaces w ON w.app_id = b.id
-    LEFT JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
    WHERE r.scope = 'shared' AND r.deleted_at IS NULL
    ORDER BY r.name, r.id`;
+
+/**
+ * F9: the marketplace chooser is a list of shared **GitHub Apps** — selected by
+ * `github_apps.scope = 'shared'`, NEVER by a bot id that happens to equal an
+ * App id. A shared App with no bot therefore still appears; a private App with
+ * a same-id shared bot does not.
+ *
+ * Each card carries the App's own face (name, description, owner) plus one
+ * capability line per bot the App's chain mounts at its owner — the same read
+ * that initialises a chain at bind.
+ */
+const SHARED_APP_LIST_SQL = `
+  SELECT b.id, b.github_slug,
+         COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS name,
+         b.github_description, w.workspace_id AS owner_workspace_id,
+         ws.name AS owner_workspace_name,
+         (SELECT group_concat(cap, ' · ') FROM (
+            SELECT rb.name || ': ' ||
+                   COALESCE((SELECT bc.chain FROM bot_model_chains bc
+                              WHERE bc.bot_id = rb.id AND bc.name = 'default'), '—') AS cap
+              FROM app_install_bots ib
+              JOIN review_bots rb ON rb.id = ib.bot_id AND rb.deleted_at IS NULL
+             WHERE ib.github_app_id = b.id AND ib.workspace_id = w.workspace_id
+             ORDER BY ib.position)) AS capability,
+         (SELECT COUNT(*) FROM review_targets t
+           WHERE t.app_id = b.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
+    FROM github_apps b
+    JOIN app_workspaces w ON w.app_id = b.id
+    LEFT JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+   WHERE b.scope = 'shared' AND b.deleted_at IS NULL
+   ORDER BY name, b.id`;
 
 /** Create the github_apps / github_app_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
@@ -823,6 +863,18 @@ export function createReviewBotsStore(db: AppsStoreD1) {
 
     async listSharedBots(workspaceId: string): Promise<SharedBotRow[]> {
       const res = await db.prepare(SHARED_BOT_LIST_SQL).bind(workspaceId).all<SharedBotRow>();
+      return res.results;
+    },
+
+    /**
+     * F9: the marketplace chooser — shared **GitHub Apps** selected by
+     * `github_apps.scope`, never by an equal bot id.
+     */
+    async listSharedApps(workspaceId: string): Promise<SharedAppCardRow[]> {
+      const res = await db
+        .prepare(SHARED_APP_LIST_SQL)
+        .bind(workspaceId)
+        .all<SharedAppCardRow>();
       return res.results;
     },
 
@@ -1128,11 +1180,61 @@ export function createReviewBotsStore(db: AppsStoreD1) {
            SELECT DISTINCT i.app_id AS bot_id
              FROM github_app_installations i
              JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
-            WHERE i.removed_at IS NULL AND i.bound_workspace_id = ?1`,
+            WHERE i.removed_at IS NULL AND i.bound_workspace_id = ?1
+              AND (g.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = g.id AND w.workspace_id = ?1))`,
         )
         .bind(workspaceId)
         .all<{ bot_id: string }>();
       return res.results.map((row) => row.bot_id);
+    },
+
+    /**
+     * F1: each of this workspace's Apps and the bots its CHAIN mounts there.
+     * Empty means "no chain": the month cell must read a dash, not a number.
+     * One statement, batched, in chain position order.
+     */
+    async listInstallChainBots(
+      workspaceId: string,
+    ): Promise<
+      Map<
+        string,
+        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+      >
+    > {
+      const res = await db
+        .prepare(
+          `SELECT ib.github_app_id AS app_id, ib.bot_id, r.workspace_id AS bot_workspace_id,
+                  r.multiplier, r.monthly_rp
+             FROM app_install_bots ib
+             JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+            WHERE ib.workspace_id = ?1
+            ORDER BY ib.github_app_id, ib.position`,
+        )
+        .bind(workspaceId)
+        .all<{
+          app_id: string;
+          bot_id: string;
+          bot_workspace_id: string;
+          multiplier: number;
+          monthly_rp: number | null;
+        }>();
+      const byApp = new Map<
+        string,
+        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+      >();
+      for (const row of res.results) {
+        const list = byApp.get(row.app_id) ?? [];
+        list.push({
+          botId: row.bot_id,
+          owned: row.bot_workspace_id === workspaceId,
+          multiplier: row.multiplier,
+          monthlyRp: row.monthly_rp,
+        });
+        byApp.set(row.app_id, list);
+      }
+      return byApp;
     },
 
     /**

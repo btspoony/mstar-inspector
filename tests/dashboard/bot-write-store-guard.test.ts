@@ -20,7 +20,7 @@ const FOREIGN = "ws-foreign";
 function seedBot(db: ReturnType<typeof createMigratedTestD1>, id: string, workspaceId: string): void {
   db.raw
     .prepare(
-      `INSERT INTO workspaces (id, slug, name, created_by, created_at)
+      `INSERT OR IGNORE INTO workspaces (id, slug, name, created_by, created_at)
        VALUES (?, ?, ?, 'root', datetime('now'))`,
     )
     .run(workspaceId, workspaceId, workspaceId);
@@ -31,7 +31,7 @@ function seedBot(db: ReturnType<typeof createMigratedTestD1>, id: string, worksp
           status, deleted_at, created_at, updated_at)
        VALUES (?, ?, ?, 'enc', 'enc', 'root', 'active', NULL, datetime('now'), datetime('now'))`,
     )
-    .run(id, 9900, id);
+    .run(id, 9900 + id.length, id);
   db.raw
     .prepare("INSERT OR REPLACE INTO app_workspaces (app_id, workspace_id) VALUES (?, ?)")
     .run(id, workspaceId);
@@ -104,6 +104,40 @@ describe("F12 — the bot write store refuses without ownership + owner/admin au
     expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get()).toEqual({ n: 0 });
     expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_model_chains WHERE name <> 'default'").get()).toEqual({ n: 0 });
+  });
+
+  test("a MISMATCHED authority is refused: owning bot A cannot authorize a write to bot B", async () => {
+    const { db } = world();
+    seedBot(db, "bot-foreign", FOREIGN);
+    db.raw.prepare("UPDATE review_bots SET workspace_id = ? WHERE id = 'bot-foreign'").run(FOREIGN);
+    const store = createAppConfigStore(db, TEST_KEY);
+
+    // The caller owns `bot-owned` (its own authority), but names `bot-foreign`
+    // as the target. Binding the authority to the WRITTEN id is what refuses it.
+    await expect(
+      store.addProviderKey(owned(), "bot-foreign", "anthropic", "sk-ant-x"),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    await expect(
+      store.upsertModelChain(owned(), "bot-foreign", "fast", "a/b"),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_provider_keys").get()).toEqual({ n: 0 });
+  });
+
+  test("updateCustomProviderModels — the previously unguarded method — refuses a foreign workspace directly", async () => {
+    const { db, store } = world();
+    await expect(
+      store.updateCustomProviderModels(
+        owned({ workspaceId: FOREIGN }),
+        "bot-owned",
+        "p",
+        ["m"],
+      ),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    // …and a mismatched authority is refused even when the caller owns a bot.
+    await expect(
+      store.updateCustomProviderModels(owned(), "bot-other", "p", ["m"]),
+    ).rejects.toBeInstanceOf(BotWriteForbiddenError);
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers").get()).toEqual({ n: 0 });
   });
 
   test("the OWNER with the owner role still writes — the guard is authority, not obstruction", async () => {

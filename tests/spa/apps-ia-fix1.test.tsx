@@ -23,7 +23,7 @@ const app = (overrides: Partial<AppsPayload["apps"][number]> = {}): AppsPayload[
   github_app_id: 101,
   owned: true,
   installed: false,
-  month_used_rp: 0,
+  month: null,
   github_slug: "demo",
   github_name: null,
   github_avatar_url: null,
@@ -72,7 +72,11 @@ describe("F1 — installed membership is an installation relation, not visibilit
   });
 
   test("the installed table carries a month cell and never reads 0/limit when unmounted", () => {
-    const face = render(payload([app({ installed: true, month_used_rp: 0 })], { month_plan_rp: 5000 }));
+    // F1: the month state comes from the mounted chain, so an own bot's chain
+    // renders own-bot unlimited against the chain's spend.
+    const face = render(
+      payload([app({ installed: true, month: { used_rp: 0, owned: true, multiplier: 1 } })], { month_plan_rp: 5000 }),
+    );
     expect(face).toContain(t("en", "bots.monthLabel"));
     expect(face).toContain(t("en", "bots.monthOwn", { used: 0 }));
   });

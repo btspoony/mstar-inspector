@@ -650,20 +650,30 @@ describe("shared bots a workspace may create a target on", () => {
     seedTargetIn(db, "bot-shared", "ws-other");
 
     const store = createReviewBotsStore(db);
-    // D22/F9: the card's own fields ride the same row — description, owner
-    // workspace and the owner's chain capability (empty before the chain).
-    const card = (targetCount: number, owner: string, ownerName: string | null) => ({
-      id: "bot-shared",
-      github_slug: "alpha-app",
-      name: "Alpha",
-      github_description: null,
-      owner_workspace_id: owner,
-      owner_workspace_name: ownerName,
-      capability: null,
-      target_count: targetCount,
-    });
-    expect(await store.listSharedBots(WS)).toEqual([card(1, "ws-other", "ws-other")]);
-    expect(await store.listSharedBots("ws-other")).toEqual([card(2, "ws-other", "ws-other")]);
+    // `listSharedBots` is the BOT face (the review-usage "designated bot"
+    // read): bot rows, bot scopes, the caller's own target count.
+    expect(await store.listSharedBots(WS)).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 1 },
+    ]);
+    expect(await store.listSharedBots("ws-other")).toEqual([
+      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 2 },
+    ]);
+
+    // F9: the CHOOSER is the App face — a shared GitHub App, selected by
+    // `github_apps.scope`, with the App's own display chain (`github_name` is
+    // absent here, so it falls back to the slug), description and owner.
+    expect(await store.listSharedApps(WS)).toEqual([
+      {
+        id: "bot-shared",
+        github_slug: "alpha-app",
+        name: "alpha-app",
+        github_description: null,
+        owner_workspace_id: "ws-other",
+        owner_workspace_name: "ws-other",
+        capability: null,
+        target_count: 1,
+      },
+    ]);
   });
 
   test("an owned, soft-deleted or absent bot is never offered", async () => {

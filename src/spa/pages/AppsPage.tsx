@@ -20,6 +20,7 @@ import { t } from "../../i18n";
 import {
   Button,
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -52,6 +53,7 @@ import {
   parseUsableBots,
   reviewEnabled,
   type AppsPayload,
+  type SharedAppCard,
   type SharedBotRow,
   type UsableBotsPayload,
 } from "./data";
@@ -328,9 +330,9 @@ export function AppsView({
               locale={locale}
               payload={loaded}
               installed={installed}
+              quotaError={loaded.quota_error === true}
               canCreate={canCreate}
               createAction={createAction}
-              onOpenBots={() => onTabChange?.("bots")}
             />
           </TabsContent>
           <TabsContent value="created">
@@ -369,16 +371,16 @@ function InstalledTab({
   locale,
   payload,
   installed,
+  quotaError,
   canCreate,
   createAction,
-  onOpenBots,
 }: {
   locale: SpaBoot["locale"];
   payload: AppsPayload;
   installed: AppsPayload["apps"];
+  quotaError: boolean;
   canCreate: boolean;
   createAction: ReactNode;
-  onOpenBots: () => void;
 }) {
   const pending = payload.pending_installations ?? [];
   const planRp = payload.month_plan_rp ?? null;
@@ -391,10 +393,15 @@ function InstalledTab({
         action={
           <div className="flex flex-wrap items-center gap-2">
             {createAction}
+            {/* F9: browsing shared Apps opens the shared-APP chooser, whose
+                cards are GitHub Apps selected by `scope = 'shared'`. The Bots
+                tab lists bots, which is a different surface. */}
             {canCreate ? (
-              <Button variant="secondary" onClick={onOpenBots}>
-                {t(locale, "apps.installed.browseShared")}
-              </Button>
+              <SharedAppsDialog
+                locale={locale}
+                sharedApps={payload.shared_apps ?? []}
+                trigger={<Button variant="secondary">{t(locale, "apps.installed.browseShared")}</Button>}
+              />
             ) : null}
           </div>
         }
@@ -437,13 +444,16 @@ function InstalledTab({
       header: t(locale, "bots.monthLabel"),
       cell: (app) => (
         <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
-          {app.month_used_rp === undefined
+          {/* F1: no chain mounted means nothing is metered — a dash, never 0. */}
+          {app.month === null || app.month === undefined
             ? t(locale, "bots.monthNone")
-            : app.owned === true
-              ? t(locale, "bots.monthOwn", { used: app.month_used_rp })
-              : planRp === null
-                ? t(locale, "bots.monthNoCeiling", { used: app.month_used_rp })
-                : t(locale, "bots.monthLimit", { used: app.month_used_rp, limit: planRp })}
+            : app.month.owned
+              ? t(locale, "bots.monthOwn", { used: app.month.used_rp })
+              : quotaError
+                ? t(locale, "bots.monthUnknown")
+                : planRp === null
+                  ? t(locale, "bots.monthNoCeiling", { used: app.month.used_rp })
+                  : t(locale, "bots.monthLimit", { used: app.month.used_rp, limit: planRp })}
         </span>
       ),
     },
@@ -645,6 +655,78 @@ export function UsableBotsList({
  * that opens in a new tab — the dialog stays open so the reader can come back
  * and bind.
  */
+/**
+ * F9: the shared-APP chooser. Its cards are **GitHub Apps** with
+ * `scope = 'shared'`, each showing the App's own name, description and owner
+ * plus one capability line per bot its chain mounts at the owner. It never
+ * selects by bot id, so a shared App without a bot still appears and a private
+ * App with a same-id bot does not.
+ */
+export function SharedAppsDialog({
+  locale,
+  sharedApps,
+  trigger,
+}: {
+  locale: SpaBoot["locale"];
+  sharedApps: SharedAppCard[];
+  trigger: ReactNode;
+}) {
+  return (
+    <Dialog>
+      <DialogTrigger asChild>{trigger}</DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t(locale, "apps.sharedApps.title")}</DialogTitle>
+          <DialogDescription>{t(locale, "apps.sharedApps.copy")}</DialogDescription>
+        </DialogHeader>
+        {sharedApps.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t(locale, "apps.sharedApps.empty")}</p>
+        ) : (
+          <ul className="flex flex-col gap-3" data-slot="shared-apps">
+            {sharedApps.map((app) => {
+              const installHref = appInstallHref(app.github_slug);
+              return (
+                <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
+                  <span className="text-sm font-semibold">{app.name}</span>
+                  {app.github_description ? (
+                    <span className="text-sm text-muted-foreground">{app.github_description}</span>
+                  ) : null}
+                  {app.owner_workspace_name ? (
+                    <span className="text-xs text-muted-foreground">
+                      {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
+                    </span>
+                  ) : null}
+                  {app.capability ? (
+                    <span className="text-xs text-muted-foreground">{app.capability}</span>
+                  ) : null}
+                  <span className="flex flex-wrap items-center gap-2 pt-1">
+                    {installHref === null ? (
+                      <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
+                    ) : (
+                      <Button asChild variant="secondary" size="sm">
+                        <a href={installHref} target="_blank" rel="noreferrer noopener">
+                          {t(locale, "apps.cardInstall")}
+                        </a>
+                      </Button>
+                    )}
+                    <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <DialogFooter>
+          <DialogClose asChild>
+            <Button variant="outline">{t(locale, "common.cancel")}</Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+
 function CreateAppChooser({
   locale,
   canCreate,

@@ -98,7 +98,9 @@ export type AppsPayload = {
     github_app_id: number;
     owned?: boolean;
     installed?: boolean;
-    month_used_rp?: number;
+    /** F1: the App's month state from its MOUNTED CHAIN; `null` = no chain,
+     * which renders the dash rather than a fabricated number. */
+    month?: { used_rp: number; owned: boolean; multiplier: number } | null;
     bot_id?: string;
     github_name: string | null;
     github_slug: string | null;
@@ -112,8 +114,12 @@ export type AppsPayload = {
     };
   }>;
   shared_bots?: SharedBotRow[];
+  /** F9: shared GitHub Apps for the marketplace chooser (`scope = 'shared'`). */
+  shared_apps?: SharedAppCard[];
   pending_installations?: PendingBindRow[];
+  /** F10: absent = unknown (error face), `null` = known unlimited. */
   month_plan_rp?: number | null;
+  quota_error?: boolean;
 };
 
 /** One unbound physical installation of an App the workspace may install through. */
@@ -156,7 +162,11 @@ export type UsableBotRow = {
 
 export type UsableBotsPayload = {
   workspace_id: string;
+  /** `null` is a KNOWN unlimited plan; a failed read is `quota_error`. */
   plan_monthly_rp: number | null;
+  /** F10: the ceiling could not be resolved — render an error, never
+   * "no ceiling". */
+  quota_error?: boolean;
   bots: UsableBotRow[];
 };
 
@@ -179,14 +189,22 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
 export function parseUsableBots(data: unknown): UsableBotsPayload | null {
   if (!isRecord(data)) return null;
   if (typeof data.workspace_id !== "string") return null;
-  if (data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") return null;
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
+  if (data.plan_monthly_rp !== undefined && data.plan_monthly_rp !== null && typeof data.plan_monthly_rp !== "number") {
+    return null;
+  }
   if (!Array.isArray(data.bots)) return null;
   const bots: UsableBotRow[] = [];
   for (const row of data.bots) {
     if (!isUsableBotRow(row)) return null;
     bots.push(row);
   }
-  return { workspace_id: data.workspace_id, plan_monthly_rp: data.plan_monthly_rp, bots };
+  return {
+    workspace_id: data.workspace_id,
+    plan_monthly_rp: data.plan_monthly_rp ?? null,
+    ...(data.quota_error === true ? { quota_error: true } : {}),
+    bots,
+  };
 }
 
 /** One `shared` bot the workspace may create a target on. */
@@ -199,6 +217,32 @@ export type SharedBotRow = {
   capability?: string | null;
   target_count: number;
 };
+
+/** F9: one shared App card — the marketplace chooser's unit. */
+export type SharedAppCard = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  github_description: string | null;
+  owner_workspace_id: string | null;
+  owner_workspace_name: string | null;
+  capability: string | null;
+  target_count: number;
+};
+
+function isSharedAppCard(value: unknown): value is SharedAppCard {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    (value.github_slug === null || typeof value.github_slug === "string") &&
+    typeof value.name === "string" &&
+    (value.github_description === null || typeof value.github_description === "string") &&
+    (value.owner_workspace_id === null || typeof value.owner_workspace_id === "string") &&
+    (value.owner_workspace_name === null || typeof value.owner_workspace_name === "string") &&
+    (value.capability === null || typeof value.capability === "string") &&
+    typeof value.target_count === "number"
+  );
+}
 
 function isSharedBotRow(value: unknown): value is SharedBotRow {
   return (
@@ -837,6 +881,8 @@ function parseBotOverview(value: unknown): BotOverview | null {
 
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** F10: the ceiling could not be resolved — never render "no ceiling". */
+  quota_error?: boolean;
   /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
   owned?: boolean;
   official_workspace?: boolean;
@@ -2030,6 +2076,7 @@ export function parseApps(data: unknown): AppsPayload | null {
   return {
     ...(data as AppsPayload),
     shared_bots: parseSharedBots(data.shared_bots),
+    shared_apps: Array.isArray(data.shared_apps) ? data.shared_apps.filter(isSharedAppCard) : [],
     pending_installations: pending,
   };
 }
@@ -2591,6 +2638,7 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (data.overview !== undefined && data.overview !== null && parseBotOverview(data.overview) === null) return null;
   if (data.owned !== undefined && typeof data.owned !== "boolean") return null;
+  if (data.quota_error !== undefined && typeof data.quota_error !== "boolean") return null;
   return {
     ...(data as BotSettingsPayload),
     overview: data.overview == null ? undefined : parseBotOverview(data.overview) ?? undefined,
