@@ -102,6 +102,26 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     return true;
   };
 
+  /**
+   * The editor's own re-read. It fetches ONLY the bot payload (the section the
+   * editor mutates) and NEVER bumps `sequenceRef`, never flips `state` to
+   * "loading", and never re-reads the models — so a write that succeeded cannot
+   * be reported as a failed reload because it raced a second full load.
+   * A failed re-read is `false`; the caller turns that into a stale-data notice.
+   */
+  const reloadSection = async (): Promise<boolean> => {
+    try {
+      const parsed = parseBotSettings(
+        await fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`),
+      );
+      if (parsed === null) return false;
+      setPayload(parsed);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   // F15: keyed on BOTH the workspace base and the bot id — switching workspace
   // while keeping the bot id must reload, not retain the prior workspace's
   // provider, spend or permissions.
@@ -206,10 +226,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
             groups={groups}
             modelsLoading={false}
             notice={notice}
-            onReload={async () => {
-              setModelsRetry((value) => value + 1);
-              return await load();
-            }}
+            onReload={reloadSection}
           />
         </SectionCard>
       ) : null}

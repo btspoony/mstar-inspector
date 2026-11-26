@@ -3311,6 +3311,9 @@ const appBotRoute = async (c: DashboardContext) => {
   return c.json({
     can_manage: owned && canManageApp(member.scope),
     owned,
+    // F10: the top-level flag every consumer branches on. An unknown ceiling is
+    // an ERROR state — never "no ceiling".
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
     app: {
       github_app_id: app.github_app_id,
       id: app.id,

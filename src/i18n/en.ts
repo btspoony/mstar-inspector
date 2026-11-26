@@ -153,6 +153,8 @@ export const en = {
     capabilityChainUnset: "Default chain not configured",
     capabilitySandbox: "Runs under the {id} runtime harness.",
     modelsFailed: "The model options could not be read, so the model-chain editor is unavailable.",
+    staleAfterSave:
+      "The change was saved, but this page could not re-read it — reload to see the stored value.",
   },
   appDetail: {
     documentPage: "App",

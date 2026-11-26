@@ -132,6 +132,7 @@ export const zhCN: Dictionary = {
     capabilityChainUnset: "默认链未配置",
     capabilitySandbox: "在 {id} 运行时下执行。",
     modelsFailed: "无法读取模型选项，模型链编辑器暂不可用。",
+    staleAfterSave: "更改已保存，但本页无法重新读取 —— 请刷新以查看已保存的值。",
   },
   appDetail: {
     documentPage: "应用",

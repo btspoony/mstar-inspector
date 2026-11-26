@@ -99,15 +99,18 @@ export function BotSettingsView({
     }
     const outcome: OpNotice = settingsOpOutcome(locale, status, body);
     const reloaded = await onReload({ background: true });
-    return { ...outcome, reloaded };
+    // A write that LANDED stays a success even when the follow-up read fails:
+    // the failure is a stale-data notice, never a failed save.
+    if (outcome.kind !== "success" || reloaded) return { ...outcome, reloaded };
+    return {
+      kind: "warn",
+      message: `${outcome.message} ${t(locale, "bots.staleAfterSave")}`,
+      reloaded,
+    };
   }
 
   async function createDraftChain(fields: Record<string, string>): Promise<OpNotice> {
-    const outcome = await submitSettings(fields);
-    if (outcome.kind === "success" && !outcome.reloaded) {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
-    }
-    return outcome;
+    return await submitSettings(fields);
   }
 
   async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {

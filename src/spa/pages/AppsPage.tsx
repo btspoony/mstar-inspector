@@ -277,8 +277,10 @@ export function AppsView({
       locale={locale}
       canCreate={canCreate}
       reason={unavailableReason}
-      sharedBots={loaded?.shared_bots ?? []}
-      monthPlanRp={loaded?.month_plan_rp ?? null}
+      /* F9: the chooser's ONE source is `shared_apps` — scope-filtered GitHub
+         Apps. `shared_bots` is the bot face (review-usage) and no App chooser
+         may read it. */
+      sharedApps={loaded?.shared_apps ?? []}
     />
   );
 
@@ -572,11 +574,14 @@ export function UsableBotsList({
       header: t(locale, "bots.monthLabel"),
       cell: (bot) => (
         <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
+          {/* F10: an unknown ceiling is an error, never "no ceiling". */}
           {bot.owned
             ? t(locale, "bots.monthOwn", { used: bot.month_used_rp })
-            : payload.plan_monthly_rp === null
-              ? t(locale, "bots.monthNoCeiling", { used: bot.month_used_rp })
-              : t(locale, "bots.monthLimit", { used: bot.month_used_rp, limit: payload.plan_monthly_rp })}
+            : payload.quota_error === true
+              ? t(locale, "bots.monthUnknown")
+              : payload.plan_monthly_rp === null
+                ? t(locale, "bots.monthNoCeiling", { used: bot.month_used_rp })
+                : t(locale, "bots.monthLimit", { used: bot.month_used_rp, limit: payload.plan_monthly_rp })}
         </span>
       ),
     },
@@ -731,17 +736,14 @@ function CreateAppChooser({
   locale,
   canCreate,
   reason,
-  sharedBots,
-  monthPlanRp,
+  sharedApps,
 }: {
   locale: SpaBoot["locale"];
   canCreate: boolean;
   reason: string;
-  sharedBots: SharedBotRow[];
-  monthPlanRp: number | null;
+  sharedApps: SharedAppCard[];
 }) {
   const addHref = `${apiBase()}/repos`;
-  void monthPlanRp;
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">
       <Dialog>
@@ -753,25 +755,23 @@ function CreateAppChooser({
             <DialogTitle>{t(locale, "apps.createDialog.title")}</DialogTitle>
             <DialogDescription>{t(locale, "apps.createDialog.description")}</DialogDescription>
           </DialogHeader>
-          {sharedBots.length > 0 ? (
-            <ul className="flex flex-col gap-3" data-slot="shared-bots">
-              {sharedBots.map((bot) => {
-                const installHref = appInstallHref(bot.github_slug);
+          {sharedApps.length > 0 ? (
+            <ul className="flex flex-col gap-3" data-slot="shared-apps">
+              {sharedApps.map((app) => {
+                const installHref = appInstallHref(app.github_slug);
                 return (
-                  <li key={bot.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
-                    <span className="text-sm font-semibold">{bot.name}</span>
-                    {bot.github_description ? (
-                      <span className="text-sm text-muted-foreground">{bot.github_description}</span>
+                  <li key={app.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
+                    <span className="text-sm font-semibold">{app.name}</span>
+                    {app.github_description ? (
+                      <span className="text-sm text-muted-foreground">{app.github_description}</span>
                     ) : null}
-                    {bot.owner_workspace_name ? (
+                    {app.owner_workspace_name ? (
                       <span className="text-xs text-muted-foreground">
-                        {t(locale, "apps.cardOwner", { workspace: bot.owner_workspace_name })}
+                        {t(locale, "apps.cardOwner", { workspace: app.owner_workspace_name })}
                       </span>
                     ) : null}
-                    {bot.capability ? (
-                      <span className="text-xs text-muted-foreground">
-                        {t(locale, "bots.capabilityDefaultChain", { models: bot.capability })}
-                      </span>
+                    {app.capability ? (
+                      <span className="text-xs text-muted-foreground">{app.capability}</span>
                     ) : null}
                     <span className="flex flex-wrap items-center gap-2 pt-1">
                       {installHref === null ? (
