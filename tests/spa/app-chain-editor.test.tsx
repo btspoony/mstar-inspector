@@ -167,6 +167,26 @@ describe("the bot chain editor", () => {
     await single.close();
   });
 
+  test("an EMPTY chain still offers the add affordance to a manager", async () => {
+    const surface = await mount({
+      canManage: true,
+      chain: [],
+      mountableBots: [{ id: "bot-c", name: "Gamma" }],
+    });
+    expect(surface.text()).toContain(t("en", "apps.chain.empty"));
+    await surface.click(surface.labelled(t("en", "apps.chain.addNamed", { bot: "Gamma" }))[0]!);
+    const patch = surface.sent.find((request) => request.method === "PATCH");
+    // The FIRST bot: an empty list becomes one id.
+    expect(patch?.body).toEqual({ botIds: ["bot-c"] });
+    await surface.close();
+  });
+
+  test("an empty chain offers nothing to a reader", async () => {
+    const surface = await mount({ canManage: false, chain: [], mountableBots: [{ id: "bot-c", name: "Gamma" }] });
+    expect(surface.labelled(t("en", "apps.chain.addNamed", { bot: "Gamma" }))).toHaveLength(0);
+    await surface.close();
+  });
+
   test("a refused reorder says so and re-reads nothing", async () => {
     const { win, cleanup } = installDom("http://localhost/dashboard/ws/apps/app-1");
     globalThis.fetch = (async () =>

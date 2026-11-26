@@ -500,7 +500,23 @@ export function AppChainSection({
   onReordered: () => Promise<unknown>;
 }) {
   if (chain.length === 0) {
-    return <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>;
+    // An EMPTY chain is still a state a manager must be able to leave: the "add"
+    // affordance renders beside the empty copy, so the FIRST bot is reachable.
+    // A reader gets the copy alone.
+    return (
+      <div className="flex flex-col gap-2" data-slot="app-chain">
+        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
+        {canManage && mountableBots.length > 0 ? (
+          <ChainReorderControls
+            locale={locale}
+            appId={appId}
+            chain={chain}
+            mountableBots={mountableBots}
+            onReordered={onReordered}
+          />
+        ) : null}
+      </div>
+    );
   }
   const columns: DataTableColumn<AppChainEntry>[] = [
     {

@@ -3322,9 +3322,15 @@ const appBotRoute = async (c: DashboardContext) => {
   // F5: ownership (whose bot it is) is separate from publication scope (who
   // may use it) and from this viewer's manage permission.
   const owned = bot.workspace_id === member.scope.workspaceId;
+  const canManage = owned && canManageApp(member.scope);
   return c.json({
-    can_manage: owned && canManageApp(member.scope),
+    can_manage: canManage,
     owned,
+    // The owner's exception layer, read only for the owner: a consumer never sees
+    // another workspace's negotiated ceiling.
+    ...(canManage
+      ? { quota_overrides: await createReviewBotsStore(member.db).listBotQuotaOverrides(bot.id) }
+      : {}),
     // F10: the top-level flag every consumer branches on. An unknown ceiling is
     // an ERROR state — never "no ceiling".
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "../store/helpers";
 import { orphanLedgerAttributionBot } from "../../src/admin/data-upgrades/usage-bot-attribution";
+import { stepDataUpgrade, verifyDataUpgrade } from "../../src/admin/data-upgrades";
 
 const TS = "2026-10-24T00:00:00.000Z";
 
@@ -237,6 +238,35 @@ describe("usage-bot-attribution — runBatch", () => {
       bot_gone: 0,
       bot_deleted: 0,
       unmatched_review: 0,
+    });
+    db.raw.close();
+  });
+});
+
+describe("usage-bot-attribution — verify completes while printing permanent rows", () => {
+  test("permanent buckets are advisory; only attributable_rows gates", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "ws-a");
+    seedWorkspace(db, "ws-b");
+    seedBot(db, "bot-b", "ws-b");
+    // Charged rows nobody can ever attribute: cross-workspace and evidenceless.
+    seedPair(db, { review: "r-cross", token: "t-cross", workspaceId: "ws-a", botId: "bot-b", rp: 10 });
+    seedPair(db, { review: "r-none", token: "t-none", workspaceId: "ws-a", botId: null, rp: 10 });
+    // Plus one the item CAN attribute, so the run reaches `done`.
+    seedBot(db, "bot-a", "ws-a");
+    seedPair(db, { review: "r-mine", token: "t-mine", workspaceId: "ws-a", botId: "bot-a", rp: 10 });
+
+    // Drive the registered item through its real state machine.
+    const stepped = await stepDataUpgrade(db, orphanLedgerAttributionBot, "operator", TS);
+    expect(stepped.kind).toBe("ok");
+    const verified = await verifyDataUpgrade(db, orphanLedgerAttributionBot, "operator", TS);
+    if (verified.kind !== "ok") throw new Error(`verify refused: ${verified.reason}`);
+    // The permanent counts are PRINTED, not hidden.
+    expect(verified.checks).toMatchObject({
+      attributable_rows: 0,
+      permanently_unattributable_rows: 2,
+      cross_workspace: 1,
+      no_evidence: 1,
     });
     db.raw.close();
   });

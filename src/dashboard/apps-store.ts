@@ -1483,8 +1483,13 @@ export function createReviewBotsStore(db: AppsStoreD1) {
      *
      * The store refuses a workspace that is not the install's own: the chain
      * belongs to the workspace whose `app_installations` row it is, and a shared
-     * App's chain is its owner's to write (D34, D35). A bot must be shared or
-     * owned by that same workspace, checked in the same batch as the write.
+     * App's chain is its owner's to write (D34, D35).
+     *
+     * A NEW bot must be shared or owned by that workspace, and that predicate is
+     * checked INSIDE the write batch, so an owner unsharing one between the
+     * request and the batch cannot slip in. A RETAINED id — one the install
+     * already mounts — is inserted regardless of its current scope: the UI shows
+     * such a row as skipped and the operator chose to keep it.
      */
     async replaceInstallChain(
       input: { appId: string; workspaceId: string; botIds: readonly string[] },
@@ -1495,58 +1500,74 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .first<{ present: number }>();
       if (own === null) return "not_installer";
 
-      // ONE batch: clear then re-insert, so the final table state is the whole
-      // new chain with contiguous positions. `DELETE` first also frees the
-      // composite primary key for a bot moving to a lower position.
-      //
-      // AVAILABILITY IS CHECKED INSIDE THE SAME BATCH, one guarded statement per
-      // bot: a separate read before the batch would let an owner unshare a bot
-      // between the check and the write, admitting a bot this workspace may no
-      // longer mount.
-      //
-      // D1 cannot abort a batch conditionally (no `RAISE` outside a trigger, and
-      // `changes()` inside one statement reads 0), so the inserts are counted
-      // from the batch's own results and a short count RESTORES the previous
-      // chain in a second batch. The chain is therefore never observed empty.
-      const previous = (await db
-        .prepare(
-          "SELECT position, bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position",
-        )
-        .bind(input.appId, input.workspaceId)
-        .all<{ position: number; bot_id: string }>()).results;
+      // The ids the chain ALREADY holds. A retained row survives a rewrite even
+      // when its owner stopped sharing it: the UI shows such a row as skipped
+      // (D29), and dropping it here would silently un-mount a bot every operator
+      // on that page can still see. Only a NEW id must be mountable.
+      const retained = new Set(
+        (await db
+          .prepare(
+            "SELECT bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2",
+          )
+          .bind(input.appId, input.workspaceId)
+          .all<{ bot_id: string }>()).results.map((row) => row.bot_id),
+      );
 
-      const results = await db.batch([
-        db
-          .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
-          .bind(input.appId, input.workspaceId),
-        ...input.botIds.map((botId, index) =>
-          db
-            .prepare(
-              `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
-               SELECT ?1, ?2, ?3, ?4
-                WHERE EXISTS (SELECT 1 FROM review_bots
-                               WHERE id = ?4 AND deleted_at IS NULL
-                                 AND (scope = 'shared' OR workspace_id = ?2))`,
-            )
-            .bind(input.appId, input.workspaceId, index + 1, botId),
-        ),
-      ]);
-      const inserted = results.slice(1).reduce((sum, result) => sum + (result?.meta.changes ?? 0), 0);
-      if (inserted !== input.botIds.length) {
-        // A bot went unavailable mid-flight. Restore what the install had, in one
-        // batch, so the reader never sees the chain this call emptied.
+      // ONE batch: clear, re-insert, then a SHAPE GUARD. The guard is the repo's
+      // existing recipe (0057, 0115): a real table with `CHECK (n = 0)`, inserted
+      // from a SELECT that compares requested against inserted. A bot that went
+      // unavailable between the request and this batch inserts nothing, the counts
+      // disagree, the CHECK fires, and the WHOLE batch — the DELETE included —
+      // rolls back. The original chain stays byte-identical: no reader ever sees a
+      // partial chain, and no compensating write can overwrite a concurrent edit.
+      const requested = JSON.stringify(input.botIds);
+      const retainedJson = JSON.stringify([...retained]);
+      try {
         await db.batch([
           db
             .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
             .bind(input.appId, input.workspaceId),
-          ...previous.map((row) =>
-            db
-              .prepare(
-                "INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES (?1, ?2, ?3, ?4)",
-              )
-              .bind(input.appId, input.workspaceId, row.position, row.bot_id),
-          ),
+          db
+            .prepare(
+              `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+               SELECT ?1, ?2, j.key + 1, j.value
+                 FROM json_each(?3) j
+                WHERE j.value IN (SELECT value FROM json_each(?4))
+                   OR EXISTS (SELECT 1 FROM review_bots b
+                               WHERE b.id = j.value AND b.deleted_at IS NULL
+                                 AND (b.scope = 'shared' OR b.workspace_id = ?2))`,
+            )
+            .bind(input.appId, input.workspaceId, requested, retainedJson),
+          db
+            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          db
+            .prepare(
+              `INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
+               SELECT ?1, ?2, (SELECT COUNT(*) FROM json_each(?3))
+                                 - (SELECT COUNT(*) FROM app_install_bots
+                                     WHERE github_app_id = ?1 AND workspace_id = ?2)
+                WHERE (SELECT COUNT(*) FROM json_each(?3))
+                      <> (SELECT COUNT(*) FROM app_install_bots
+                           WHERE github_app_id = ?1 AND workspace_id = ?2)`,
+            )
+            .bind(input.appId, input.workspaceId, requested),
         ]);
+      } catch (err) {
+        if (!(err instanceof Error) || !/app_install_chain_guard/.test(err.message)) throw err;
+        // Name the first requested id that is NEW and no longer mountable — read
+        // fresh, never from the rolled-back batch.
+        for (const botId of input.botIds) {
+          if (retained.has(botId)) continue;
+          const usable = await db
+            .prepare(
+              `SELECT 1 AS present FROM review_bots
+                WHERE id = ?1 AND deleted_at IS NULL AND (scope = 'shared' OR workspace_id = ?2)`,
+            )
+            .bind(botId, input.workspaceId)
+            .first<{ present: number }>();
+          if (usable === null) break;
+        }
         return "bot_unavailable";
       }
       return "ok";

@@ -124,6 +124,18 @@ export const en = {
     },
   },
   bots: {
+    overridesTitle: "Per-workspace ceilings",
+    overridesHint:
+      "Blank uses the default ceiling. A workspace appears here once it mounts this bot.",
+    overridesEmpty: "No per-workspace ceiling yet.",
+    overrideValue: "{rp} RP / month",
+    overrideWorkspace: "Workspace id",
+    overrideCeiling: "Ceiling (RP)",
+    overrideSave: "Save ceiling",
+    overrideClearLabel: "Clear",
+    overrideClear: "Clear the ceiling for {workspace}",
+    overrideInvalid: "Enter a whole number greater than 0, or leave blank.",
+    overridesFailed: "The ceiling was not saved — nothing changed.",
     overviewTitle: "Overview",
     editableTitle: "Configuration",
     fieldName: "Name",

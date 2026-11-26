@@ -177,6 +177,104 @@ describe("replaceInstallChain — the reorder's batch shape", () => {
     db.raw.close();
   });
 
+  test("an unshare between the request and the batch leaves the chain BYTE-IDENTICAL", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-b", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+    const before = chainOf(db, "app-1", "default");
+
+    // bot-b is NEW to the chain and goes unavailable just before the batch runs.
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-b'").run();
+        return db.batch(statements);
+      },
+    } as TestD1;
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a", "bot-b"],
+      }),
+    ).toBe("bot_unavailable");
+
+    // The guard rolled the DELETE back with the skipped insert: nothing moved.
+    expect(chainOf(db, "app-1", "default")).toEqual(before);
+    expect(before).toEqual([{ position: 1, bot_id: "bot-a" }]);
+    db.raw.close();
+  });
+
+  test("a concurrent successful edit is never deleted by this call", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedBot(db, "bot-b", "provider", "shared");
+    seedBot(db, "bot-c", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+
+    // Another operator reorders first, and this call then loses a bot in the same
+    // window. The failed batch must roll back; nothing restores a stale snapshot
+    // over the winner.
+    const racing = {
+      ...db,
+      async batch(statements: Parameters<TestD1["batch"]>[0]) {
+        if (!(await db.raw.query("SELECT 1 AS n FROM app_install_bots WHERE bot_id = 'bot-c'").get())) {
+          db.raw.run("DELETE FROM app_install_bots");
+          db.raw.prepare("INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id) VALUES ('app-1','default',1,'bot-b')").run();
+          db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-c'").run();
+        }
+        return db.batch(statements);
+      },
+    } as TestD1;
+    expect(
+      await createReviewBotsStore(racing).replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a", "bot-c"],
+      }),
+    ).toBe("bot_unavailable");
+
+    // The OTHER operator's chain stands.
+    expect(chainOf(db, "app-1", "default")).toEqual([{ position: 1, bot_id: "bot-b" }]);
+    db.raw.close();
+  });
+
+  test("a retained unshared row survives a rewrite; only a NEW id must be mountable", async () => {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, "provider");
+    seedApp(db, "app-1");
+    seedBot(db, "bot-a", "provider", "shared");
+    seedInstall(db, "app-1", "default");
+    const store = createReviewBotsStore(db);
+    await store.replaceInstallChain({ appId: "app-1", workspaceId: "default", botIds: ["bot-a"] });
+    // Its owner stops sharing it: the row stays mounted as a skipped row.
+    db.raw.prepare("UPDATE review_bots SET scope = 'owned' WHERE id = 'bot-a'").run();
+    seedBot(db, "bot-new", "provider", "shared");
+
+    // Keeping bot-a AND adding a mountable bot succeeds.
+    expect(
+      await store.replaceInstallChain({
+        appId: "app-1",
+        workspaceId: "default",
+        botIds: ["bot-a", "bot-new"],
+      }),
+    ).toBe("ok");
+    expect(chainOf(db, "app-1", "default")).toEqual([
+      { position: 1, bot_id: "bot-a" },
+      { position: 2, bot_id: "bot-new" },
+    ]);
+    db.raw.close();
+  });
+
   test("the chain the relay reads is the chain the editor wrote", async () => {
     const db = createMigratedTestD1();
     seedWorkspace(db, "provider");

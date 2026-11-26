@@ -226,7 +226,20 @@ export const orphanLedgerAttributionBot: DataUpgradeItem = {
     };
   },
 
-  advisoryChecks: ["cross_workspace_rows", "no_evidence_rows"],
+  // Every PERMANENT bucket is advisory: inspect-and-accept. Only
+  // `attributable_rows` gates, because no run of this item can ever repair a row
+  // whose review is missing, names no bot, or names a bot of another workspace —
+  // failing on those would make the upgrade fail forever. The operator still sees
+  // them, which is the point: charged history nobody can attribute is a ceiling
+  // risk, not a defect this item can fix.
+  advisoryChecks: [
+    "permanently_unattributable_rows",
+    "cross_workspace",
+    "no_evidence",
+    "bot_gone",
+    "bot_deleted",
+    "unmatched_review",
+  ],
 
   /**
    * BOTH numbers, always. A zero work queue with a non-zero permanent total means
