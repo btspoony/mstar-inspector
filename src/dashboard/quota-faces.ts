@@ -1,4 +1,4 @@
-import { quotaMonth, resolveMonthlyQuota } from "../store/quota-store";
+import { quotaMonth, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
 import { readMonthlyRp } from "../store/usage-store";
 import type { DashboardD1 } from "./users";
 
@@ -22,7 +22,7 @@ export async function readWorkspaceQuota(
 ): Promise<WorkspaceQuota> {
   const month = quotaMonth(now);
   const [{ profile, monthlyRp }, rows] = await Promise.all([
-    resolveMonthlyQuota(db, month.startIso, planId),
+    resolveWorkspaceMonthlyQuota(db, workspaceId, planId, now),
     readMonthlyRp(db, workspaceId, month.startIso, month.endIso),
   ]);
   const usage = rows[0];

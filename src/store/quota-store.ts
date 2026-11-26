@@ -2,16 +2,12 @@
 import type { ReviewLevel } from "../../packages/shared/src/runtime";
 import type { D1Like } from "./types";
 
-/** The two key sources a review can be started from; the profile scales each. */
-export type QuotaSource = "byok" | "shared";
-
 /** One resolved profile, in the vocabulary the faces and the form use. */
 export type QuotaProfile = {
   id: string;
   version: number;
   effectiveFrom: string;
   base: Record<ReviewLevel, number>;
-  source: Record<QuotaSource, number>;
   rpPerCredit: number;
 };
 
@@ -22,8 +18,6 @@ type QuotaProfileRow = {
   base_quick: number;
   base_standard: number;
   base_deep: number;
-  source_byok: number;
-  source_shared: number;
   rp_per_credit: number;
 };
 
@@ -43,7 +37,6 @@ function quotaProfile(row: QuotaProfileRow): QuotaProfile {
     version: row.version,
     effectiveFrom: row.effective_from,
     base: { quick: row.base_quick, default: row.base_standard, deep: row.base_deep },
-    source: { byok: row.source_byok, shared: row.source_shared },
     rpPerCredit: row.rp_per_credit,
   };
 }
@@ -54,8 +47,6 @@ const PROFILE_COLUMNS = `id            AS id,
             base_quick    AS base_quick,
             base_standard AS base_standard,
             base_deep     AS base_deep,
-            source_byok   AS source_byok,
-            source_shared AS source_shared,
             rp_per_credit AS rp_per_credit`;
 
 /** The one error an empty `quota_profiles` table produces, on every read path. */
@@ -105,17 +96,70 @@ export async function resolveQuotaProfile(db: D1Like, at: string): Promise<Quota
 }
 
 /**
- * The profile judging the month `monthStart` opens (D5) plus this plan's
- * ceiling; `monthlyRp === null` means unlimited. Throws when the profile has no
- * row for the plan: a profile's plan set is closed and complete, so an absent
- * row is a configuration defect, never "no ceiling".
+ * The profile judging one workspace's month (D13, D36) — THE resolver every
+ * reader goes through. A binding pinned by the metering path wins; with no
+ * binding the answer is the profile in force at `at` (the month's 1st for every
+ * caller but the metering write, which passes the instant it charges for).
+ *
+ * This function NEVER writes. Binding on read would lock a version for a
+ * workspace that never metered and would make every reader a second writer,
+ * which is exactly the mid-month jump the binding exists to prevent.
  */
-export async function resolveMonthlyQuota(
+export async function resolveWorkspaceQuotaProfile(
   db: D1Like,
-  monthStart: string,
+  workspaceId: string,
+  month: string,
+  at: string,
+): Promise<QuotaProfile> {
+  const bound = await db
+    .prepare(
+      `SELECT ${PROFILE_COLUMNS}
+         FROM workspace_quota_binding b
+         JOIN quota_profiles p ON p.id = b.profile_id
+        WHERE b.workspace_id = ?1 AND b.month = ?2`,
+    )
+    .bind(workspaceId, month)
+    .first<QuotaProfileRow>();
+  if (bound !== null) return quotaProfile(bound);
+  return resolveQuotaProfile(db, at);
+}
+
+/**
+ * The executing bot's price multiplier (D11). One statement, one column: the
+ * metering path and the enqueue ceiling both read it here rather than each
+ * carrying their own copy of the SQL.
+ *
+ * A bot row that is missing or soft-deleted answers `null`; the callers treat
+ * that as unreadable and refuse, never as a free (1×) price.
+ */
+export async function readBotMultiplier(db: D1Like, botId: string): Promise<number | null> {
+  const row = await db
+    // shortcut: tenant-bypass — addressed by the bot's own id, and the
+    // projection is one price column; no identity or ownership is read.
+    .prepare(`SELECT multiplier FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ multiplier: number }>();
+  return row?.multiplier ?? null;
+}
+
+/**
+ * This workspace's ceiling for a plan under its bound profile; `monthlyRp ===
+ * null` means unlimited. One `now` yields both the month key and the instant
+ * the unbound answer is resolved at, so a workspace with no binding adopts the
+ * newest version the moment it reads (D13) instead of waiting for a boundary.
+ *
+ * Throws when the profile has no row for the plan: a profile's plan set is
+ * closed and complete, so an absent row is a configuration defect, never "no
+ * ceiling".
+ */
+export async function resolveWorkspaceMonthlyQuota(
+  db: D1Like,
+  workspaceId: string,
   planId: string,
+  now: Date,
 ): Promise<{ profile: QuotaProfile; monthlyRp: number | null }> {
-  const profile = await resolveQuotaProfile(db, monthStart);
+  const month = quotaMonth(now);
+  const profile = await resolveWorkspaceQuotaProfile(db, workspaceId, month.month, now.toISOString());
   const row = await db
     .prepare(`SELECT monthly_rp AS monthlyRp FROM quota_profile_plans WHERE profile_id = ? AND plan_id = ?`)
     .bind(profile.id, planId)
@@ -129,12 +173,17 @@ export async function resolveMonthlyQuota(
 }
 
 /**
- * Integer RP one started review costs. Pure. Every factor is > 0 by DDL CHECK,
- * so the result is always >= 1 — which is what lets 0 mark a pre-metering
- * `usage_events.rp` row unambiguously.
+ * Integer RP one started review costs: `ceil(base(level) × multiplier)` (D11).
+ * Pure. Both factors are > 0 by DDL CHECK, so the result is always >= 1 — which
+ * is what lets 0 mark a pre-metering `usage_events.rp` row unambiguously, even
+ * when the fractional product is below 1 RP.
+ *
+ * The multiplier belongs to the executing bot, not the profile (D37): a bot's
+ * own key source no longer scales its price, and the profile keeps only the
+ * level weights and the credit denominator.
  */
-export function rpFor(level: ReviewLevel, source: QuotaSource, profile: QuotaProfile): number {
-  return profile.base[level] * profile.source[source];
+export function rpFor(level: ReviewLevel, multiplier: number, profile: QuotaProfile): number {
+  return Math.max(1, Math.ceil(profile.base[level] * multiplier));
 }
 
 /**
@@ -205,8 +254,6 @@ export const QUOTA_PROFILES_SQL = `SELECT p.id            AS id,
               p.base_quick    AS base_quick,
               p.base_standard AS base_standard,
               p.base_deep     AS base_deep,
-              p.source_byok   AS source_byok,
-              p.source_shared AS source_shared,
               p.rp_per_credit AS rp_per_credit,
               p.notes         AS notes,
               q.plan_id       AS plan_id,

@@ -113,7 +113,7 @@ import {
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
-import { quotaMonth, resolveMonthlyQuota } from "../store/quota-store";
+import { quotaMonth, resolveWorkspaceMonthlyQuota } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -2164,7 +2164,7 @@ const appListRoute = async (c: DashboardContext) => {
   const quota = await readPlanMonthlyRp(
     gate.db,
     gate.scope.workspaceId,
-    month.startIso,
+    new Date(),
     deploymentModeOf(c.env.DEPLOYMENT_MODE),
   );
   return c.json({
@@ -2269,7 +2269,7 @@ async function usableBotsRead(
       .all<{ bot_id: string; total: number }>()
   ).results;
   const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
-  const quota = await readPlanMonthlyRp(db, workspaceId, month.startIso, mode);
+  const quota = await readPlanMonthlyRp(db, workspaceId, new Date(), mode);
   return {
     workspace_id: workspaceId,
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
@@ -2297,7 +2297,7 @@ async function usableBotsRead(
 async function readPlanMonthlyRp(
   db: DashboardDb,
   workspaceId: string,
-  monthStart: string,
+  now: Date,
   mode: DeploymentMode,
 ): Promise<{ kind: "ceiling"; rp: number } | { kind: "unlimited" } | { kind: "unknown" }> {
   // F10: the resolver is deployment-aware (self-hosted has no plan), and a
@@ -2306,7 +2306,7 @@ async function readPlanMonthlyRp(
   try {
     const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
     if (plan.id === UNLIMITED_PLAN_ID) return { kind: "unlimited" };
-    const monthlyRp = (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+    const monthlyRp = (await resolveWorkspaceMonthlyQuota(db, workspaceId, plan.id, now)).monthlyRp;
     // A NULL quota row is the profile's own "no ceiling" spelling.
     return monthlyRp === null ? { kind: "unlimited" } : { kind: "ceiling", rp: monthlyRp };
   } catch {
@@ -3309,7 +3309,7 @@ const appBotRoute = async (c: DashboardContext) => {
     readPlanMonthlyRp(
       member.db,
       member.scope.workspaceId,
-      month.startIso,
+      new Date(),
       deploymentModeOf(c.env.DEPLOYMENT_MODE),
     ),
     // F4: the capability summary reads the DEFAULT chain without owner
@@ -3322,9 +3322,15 @@ const appBotRoute = async (c: DashboardContext) => {
   // F5: ownership (whose bot it is) is separate from publication scope (who
   // may use it) and from this viewer's manage permission.
   const owned = bot.workspace_id === member.scope.workspaceId;
+  const canManage = owned && canManageApp(member.scope);
   return c.json({
-    can_manage: owned && canManageApp(member.scope),
+    can_manage: canManage,
     owned,
+    // The owner's exception layer, read only for the owner: a consumer never sees
+    // another workspace's negotiated ceiling.
+    ...(canManage
+      ? { quota_overrides: await createReviewBotsStore(member.db).listBotQuotaOverrides(bot.id) }
+      : {}),
     // F10: the top-level flag every consumer branches on. An unknown ceiling is
     // an ERROR state — never "no ceiling".
     ...(quota.kind === "unknown" ? { quota_error: true } : {}),
@@ -3441,6 +3447,54 @@ function scopeSwitchRoute(kind: ScopeSwitchKind) {
     return c.json({ scope: outcome.scope, sharedAt: outcome.sharedAt });
   };
 }
+
+/**
+ * The per-workspace ceiling writer (F8). Owner-only, one workspace at a time,
+ * `monthlyRp: null` clears the override back to the bot's default.
+ *
+ * This is the writer `bot_quota_overrides` was missing: `selectReviewBot` reads
+ * the table, and until now nothing in the product could populate it.
+ */
+const botQuotaOverrideRoute = async (c: DashboardContext): Promise<Response> => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  if (!canManageApp(gate.scope)) return c.json({ error: "forbidden" }, 403);
+  const bot = await createReviewBotsStore(gate.db).getScopedBotById(
+    c.req.param("botId") ?? "",
+    gate.scope.workspaceId,
+  );
+  if (!bot) return c.json({ error: "unknown bot" }, 404);
+  let body: { workspaceId?: unknown; monthlyRp?: unknown } | null = null;
+  try {
+    body = (await c.req.json()) as { workspaceId?: unknown; monthlyRp?: unknown };
+  } catch {
+    return c.json({ error: "body must be JSON" }, 400);
+  }
+  if (body === null || typeof body.workspaceId !== "string" || body.workspaceId.length === 0) {
+    return c.json({ error: "workspaceId must be a non-empty workspace id" }, 400);
+  }
+  const monthlyRp =
+    body.monthlyRp === null
+      ? null
+      : typeof body.monthlyRp === "number"
+        ? body.monthlyRp
+        : Number.NaN;
+  if (monthlyRp !== null && !Number.isInteger(monthlyRp)) {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
+  }
+  const outcome = await createReviewBotsStore(gate.db).setBotQuotaOverride({
+    botId: bot.id,
+    workspaceId: body.workspaceId,
+    ownerWorkspaceId: gate.scope.workspaceId,
+    monthlyRp,
+    now: new Date().toISOString(),
+  });
+  if (outcome === "not_owner") return c.json({ error: "only the bot's owner writes its ceilings" }, 403);
+  if (outcome === "invalid") {
+    return c.json({ error: "monthlyRp must be a whole number of RP greater than 0, or null" }, 400);
+  }
+  return c.json({ overrides: await createReviewBotsStore(gate.db).listBotQuotaOverrides(bot.id) });
+};
 
 const appScopeRoute = scopeSwitchRoute("app");
 const botScopeRoute = scopeSwitchRoute("bot");
@@ -4770,6 +4824,49 @@ async function readBindState(
  * OAuth step-up (`read:org`), and the callback binds only after the user's own
  * token proves they administer the installation's account.
  */
+/**
+ * Replace one install's chain. The editor and the code that reads the order ship
+ * together: `selectReviewBot` walks `position`, and this route is the only thing
+ * that writes it. Positions come out contiguous from 1 because the store clears
+ * and re-inserts in ONE batch — a reorder never leaves a hole a reader could
+ * mistake for an available slot.
+ *
+ * Gated on `can_manage` AND on the store's own installer check: the chain belongs
+ * to the workspace whose `app_installations` row it is.
+ */
+const appChainRoute = async (c: DashboardContext): Promise<Response> => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  if (!canManageApp(member.scope)) return c.json({ error: "forbidden" }, 403);
+  const body = (await c.req.json().catch(() => null)) as { botIds?: unknown } | null;
+  const botIds = body?.botIds;
+  if (!Array.isArray(botIds) || !botIds.every((id): id is string => typeof id === "string")) {
+    return c.json({ error: "botIds must be a list of bot ids" }, 400);
+  }
+  if (new Set(botIds).size !== botIds.length) {
+    return c.json({ error: "botIds names a bot twice" }, 400);
+  }
+  const apps = createReviewBotsStore(member.db);
+  // The URL segment is the NUMERIC GitHub App id, exactly as the detail GET and
+  // the SPA address it. `app_installations.github_app_id` holds the internal
+  // `github_apps.id`, so the segment must be resolved here — passing it straight
+  // through made every legitimate reorder answer 404.
+  const app = await resolveScopedApp(apps, c.req.param("appId") ?? "", member.scope);
+  if (!app) return c.json({ error: "unknown app" }, 404);
+  const outcome = await apps.replaceInstallChain({
+    appId: app.id,
+    workspaceId: member.scope.workspaceId,
+    botIds,
+  });
+  if (outcome === "not_installer") return c.json({ error: "unknown app" }, 404);
+  if (outcome === "bot_unavailable") {
+    return c.json({ error: "a bot in the chain is neither shared nor owned by this workspace" }, 400);
+  }
+  // Re-read the chain, not the whole page: the editor renders what the relay
+  // will actually walk.
+  return c.json({ chain: await appChainRead(member.db, app.id, member.scope.workspaceId) });
+};
+
 const appBindInstallationRoute = async (c: DashboardContext): Promise<Response> => {
   const member = await requireMember(c);
   if (!member.ok) return member.response;
@@ -5647,6 +5744,12 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
   { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },
   { method: "patch", path: "/api/review-bots/:botId/scope", handler: botScopeRoute, access: "write" },
+  {
+    method: "patch",
+    path: "/api/review-bots/:botId/quota-overrides",
+    handler: botQuotaOverrideRoute,
+    access: "write",
+  },
   { method: "get", path: "/api/apps/:appId/deliveries", handler: appDeliveriesRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/models", handler: appModelsRoute, access: "write" },
   {
@@ -5657,6 +5760,7 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
   },
   { method: "post", path: "/api/apps/:appId/refresh-metadata", handler: appRefreshMetadataRoute, access: "write" },
   { method: "post", path: "/api/apps/:appId/bind-installation", handler: appBindInstallationRoute, access: "write" },
+  { method: "patch", path: "/api/apps/:appId/chain", handler: appChainRoute, access: "write" },
   { method: "post", path: "/api/review-bots/:botId/keys/verify", handler: appKeyVerifyRoute, access: "write" },
   { method: "post", path: "/api/review-bots/:botId/keys/usage", handler: appKeyUsageRoute, access: "write" },
   { method: "post", path: "/review-bots/:botId/settings", handler: appSettingsSaveRoute, access: "write" },

@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { D1Database, KVNamespace, Queue } from "@cloudflare/workers-types";
 import {
-  QUOTA_SKIP_REASON,
+  QUOTA_PLAN_SKIP_REASON,
   QUOTA_STAGE,
   SHARED_BOT_ENTITLEMENT_SKIP_REASON,
   SHARED_BOT_ENTITLEMENT_STAGE,
@@ -175,7 +175,7 @@ describe("handleReviewJob — a quota refusal", () => {
 
     const outcome = await handleReviewJob(payload(), handlerDeps(db, kv, queue, attach), QUOTA_REFUSAL);
 
-    expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_SKIP_REASON });
+    expect(outcome).toEqual({ kind: "skipped", reason: QUOTA_PLAN_SKIP_REASON });
     expect(send).toHaveBeenCalledTimes(0);
     expect(countRows(db, "usage_events")).toBe(0);
     expect(countRows(db, "comment_trigger_claims")).toBe(0);
@@ -187,7 +187,7 @@ describe("handleReviewJob — a quota refusal", () => {
     const rows = db.raw.query(FAILURE_SQL).all() as FailureRow[];
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ stage: QUOTA_STAGE, target_id: TARGET_ID, head_sha: SHA });
-    expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_SKIP_REASON));
+    expect(rows[0]!.error).toBe(CHECK_SUMMARIES.skippedByDelivery(QUOTA_PLAN_SKIP_REASON));
     expect(rows[0]!.error).not.toContain("2000");
     db.raw.close();
   });

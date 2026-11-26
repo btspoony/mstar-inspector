@@ -1235,16 +1235,22 @@ describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
     expect(rows[0]![4]).toContain("1240");
   });
 
-  test("the chain offers no reorder, remove or add control — read-only until the relay ships", async () => {
-    const markup = renderDetail({ ...managePayload, chain: [chainRow({ position: 1, bot_id: "bot-a" })] }, "bots");
-    const controls = await withMarkup(markup, (container) =>
-      [...container.querySelectorAll("[data-slot='app-chain'] button, [data-slot='app-chain'] input")].map(
-        (node) => node.textContent ?? "",
-      ),
+  test("a manager gets reorder controls; a reader gets none", async () => {
+    const row = chainRow({ position: 1, bot_id: "bot-a" });
+    const managed = await withMarkup(renderDetail({ ...managePayload, chain: [row] }, "bots"), (container) =>
+      [...container.querySelectorAll("[data-slot='app-chain-reorder'] button")].map((node) => node.textContent ?? ""),
     );
-    // No control of any kind inside the chain region: the editable order ships
-    // with the relay that reads it (D29), so this release renders none.
-    expect(controls).toEqual([]);
+    // The order is editable now that `selectReviewBot` reads it (D29): the
+    // editor and the code that reads the order ship in the same release. One
+    // row, so both arrows are disabled and the remove control is present (D27
+    // keeps the LAST row visible).
+    expect(managed).toEqual(["↑", "↓", "✕"]);
+
+    const readOnly = await withMarkup(
+      renderDetail({ ...managePayload, can_manage: false, chain: [row] }, "bots"),
+      (container) => container.querySelectorAll("[data-slot='app-chain-reorder']").length,
+    );
+    expect(readOnly).toBe(0);
   });
 
   test("an empty chain names the next step instead of rendering a blank table", async () => {

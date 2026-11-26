@@ -164,9 +164,28 @@ function directReadFiles(): string[] {
 // github_apps (Tasks 3–4 converted the publishing/ops trees); grep finds zero
 // remaining references in any of them. The bot table is read by the store
 // alone — the allowlist is the proof, not a leftover.
-const MAINTENANCE_SITES: Record<string, number> = {};
+const MAINTENANCE_SITES: Record<string, number> = {
+  // `readBotMultiplier` is the ONE read of `review_bots.multiplier`, shared by
+  // the metering path and the enqueue ceiling. Authorization happened upstream
+  // (the webhook resolved the bot row, the job carries `botRef.botId`), the row
+  // is addressed by its own id, and the projection is that single price column
+  // — no identity, no ownership, no workspace to scope by.
+  "store/quota-store.ts": 1,
+  // The relay's ceiling fallback: `review_bots` by the bot id the chain named,
+  // projecting one price column.
+  "worker/select-review-bot.ts": 1,
+};
 
-const TENANT_DIRECT_SITES: Record<string, number> = {};
+/**
+ * The attribution upgrade is a TENANT-SCOPED reader, not a maintenance one: its
+ * whole job is the workspace equality (`b.workspace_id = u.workspace_id`), so the
+ * workspace predicate is present on every statement and the pin below is what
+ * the audit counts. One `prepare` call: the UPDATE that carries the guard (the
+ * count helpers and the page builder are template literals passed to it).
+ */
+const TENANT_DIRECT_SITES: Record<string, number> = {
+  "admin/data-upgrades/usage-bot-attribution.ts": 1,
+};
 
 describe("tenant read face allowlist", () => {
   test("tenant-facing modules hold no direct review_bots read", () => {

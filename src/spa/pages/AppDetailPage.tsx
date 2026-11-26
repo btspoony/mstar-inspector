@@ -33,6 +33,7 @@ import { DataTable, type DataTableColumn } from "@/components/DataTable";
 import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
+import { loadUsableBots } from "./AppsPage";
 import { apiBase, currentOrigin } from "../workspace-base";
 import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
@@ -142,6 +143,10 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const [groups, setGroups] = useState<ModelOptionGroup[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const loadSequence = useRef(0);
+  // Every bot this workspace may mount. Read ONCE beside the page: the editor's
+  // "add" list must exclude what the chain already carries, and the server's
+  // ordering (D18) is the order an operator expects.
+  const [mountable, setMountable] = useState<Array<{ id: string; name: string }>>([]);
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice, setNotice] = useState<{ kind: NoticeKind; message: string } | null>(null);
   const cancelledRef = useRef(false);
@@ -196,6 +201,22 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
   const refreshedRef = useRef(false);
 
   useEffect(() => {
+    let live = true;
+    void loadUsableBots(base)
+      .then((payload) => {
+        // Names only: the editor adds a bot by id and labels it by name.
+        if (live) setMountable(payload.bots.map((bot) => ({ id: bot.id, name: bot.name })));
+      })
+      .catch(() => {
+        // A failed read simply offers no "add" list; the chain stays editable.
+        if (live) setMountable([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [base]);
+
+  useEffect(() => {
     cancelledRef.current = false;
     void load();
     setSearch(parseAppDetailSearch(window.location.search));
@@ -245,6 +266,7 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
           modelsLoading={modelsLoading}
           notice={notice}
           search={search}
+          mountable={mountable}
           onReload={load}
           onSearch={commitSearch}
         />
@@ -328,15 +350,173 @@ function mountedBotCount(chain: readonly AppChainEntry[]): number {
  * that reads it. An empty chain names the next step instead of rendering a
  * blank table.
  */
-export function AppChainSection({
+/**
+ * The chain editor: order only, because order is all the relay reads. Every
+ * move rewrites the WHOLE order in one `PATCH /api/apps/:appId/chain`, whose
+ * store clears and re-inserts positions contiguously in one batch. The response
+ * carries the re-read chain, so the table the operator sees is the list the
+ * next delivery will walk.
+ *
+ * It is unreachable unless the store also admits this workspace as the
+ * installer; `can_manage` gates the UI, the store gates the write.
+ */
+function ChainReorderControls({
   locale,
+  appId,
   chain,
+  mountableBots,
+  onReordered,
 }: {
   locale: SpaBoot["locale"];
+  appId: string;
   chain: readonly AppChainEntry[];
+  /** Every bot this workspace may mount; the section subtracts the mounted ones. */
+  mountableBots: readonly { id: string; name: string }[];
+  onReordered: () => Promise<unknown>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  /** One PATCH for all three verbs: add, remove and reorder all rewrite the order. */
+  async function save(order: readonly string[]): Promise<void> {
+    setBusy(true);
+    try {
+      const { status } = await patchJson(`${apiBase()}/api/apps/${encodeURIComponent(appId)}/chain`, {
+        botIds: order,
+      });
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+      } else {
+        setNotice(null);
+        // Re-read the CHAIN, not the page: the editor must never render an order
+        // the relay would not walk.
+        await onReordered();
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "apps.chain.reorderFailed") });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function move(from: number, to: number): void {
+    if (to < 0 || to >= chain.length) return;
+    const order = chain.map((row) => row.bot_id);
+    const [moved] = order.splice(from, 1);
+    if (moved === undefined) return;
+    order.splice(to, 0, moved);
+    void save(order);
+  }
+
+  function remove(botId: string): void {
+    void save(chain.map((row) => row.bot_id).filter((id) => id !== botId));
+  }
+
+  function add(botId: string): void {
+    void save([...chain.map((row) => row.bot_id), botId]);
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <NoticeRegion notice={notice} />
+      <div className="flex flex-wrap items-center gap-2" data-slot="app-chain-reorder">
+        {chain.map((row, index) => (
+          <span key={row.bot_id} className="flex items-center gap-1 rounded-md border border-(--border-default) px-2 py-1">
+            <span className="text-sm font-medium">{row.name}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === 0}
+              aria-label={t(locale, "apps.chain.moveUp", { bot: row.name })}
+              onClick={() => move(index, index - 1)}
+            >
+              ↑
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || index === chain.length - 1}
+              aria-label={t(locale, "apps.chain.moveDown", { bot: row.name })}
+              onClick={() => move(index, index + 1)}
+            >
+              ↓
+            </Button>
+            {/* D27: the LAST bot's row stays visible and cannot be removed — the
+                UI never offers an empty chain, though the store would refuse one. */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={busy || chain.length === 1}
+              aria-label={t(locale, "apps.chain.removeBot", { bot: row.name })}
+              onClick={() => remove(row.bot_id)}
+            >
+              ✕
+            </Button>
+          </span>
+        ))}
+      </div>
+      {mountableBots.length === 0 ? null : (
+        <details data-slot="app-chain-add">
+          <summary className="cursor-pointer text-sm text-muted-foreground">
+            {t(locale, "apps.chain.addBot")}
+          </summary>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {mountableBots.map((bot) => (
+              <Button
+                key={bot.id}
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                aria-label={t(locale, "apps.chain.addNamed", { bot: bot.name })}
+                onClick={() => add(bot.id)}
+              >
+                + {bot.name}
+              </Button>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+export function AppChainSection({
+  locale,
+  appId,
+  chain,
+  canManage,
+  mountableBots,
+  onReordered,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  chain: readonly AppChainEntry[];
+  canManage: boolean;
+  mountableBots: readonly { id: string; name: string }[];
+  onReordered: () => Promise<unknown>;
 }) {
   if (chain.length === 0) {
-    return <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>;
+    // An EMPTY chain is still a state a manager must be able to leave: the "add"
+    // affordance renders beside the empty copy, so the FIRST bot is reachable.
+    // A reader gets the copy alone.
+    return (
+      <div className="flex flex-col gap-2" data-slot="app-chain">
+        <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.empty")}</p>
+        {canManage && mountableBots.length > 0 ? (
+          <ChainReorderControls
+            locale={locale}
+            appId={appId}
+            chain={chain}
+            mountableBots={mountableBots}
+            onReordered={onReordered}
+          />
+        ) : null}
+      </div>
+    );
   }
   const columns: DataTableColumn<AppChainEntry>[] = [
     {
@@ -387,6 +567,15 @@ export function AppChainSection({
     <div data-slot="app-chain">
       <FlowSection title={t(locale, "apps.chain.title")} subtitle={t(locale, "apps.chain.copy")}>
         <DataTable columns={columns} rows={chain} rowKey={(row) => `${row.position}:${row.bot_id}`} />
+        {canManage ? (
+          <ChainReorderControls
+            locale={locale}
+            appId={appId}
+            chain={chain}
+            mountableBots={mountableBots.filter((bot) => !chain.some((row) => row.bot_id === bot.id))}
+            onReordered={onReordered}
+          />
+        ) : null}
       </FlowSection>
     </div>
   );
@@ -598,6 +787,7 @@ export function AppDetailView({
   modelsLoading = false,
   notice,
   search,
+  mountable = [],
   onReload,
   onSearch,
 }: {
@@ -608,6 +798,8 @@ export function AppDetailView({
   modelsLoading?: boolean;
   notice: { kind: NoticeKind; message: string } | null;
   search: AppDetailSearch;
+  /** Bots this workspace may mount, unfiltered — the view subtracts the chain. */
+  mountable?: Array<{ id: string; name: string }>;
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
   onSearch: (next: AppDetailSearch) => void;
 }) {
@@ -617,8 +809,16 @@ export function AppDetailView({
         <TargetHeader locale={locale} appId={appId} payload={payload} />
         {notice ? <PageNotice kind={notice.kind} message={notice.message} /> : null}
         <SettingsView locale={locale} payload={payload} />
-        {/* F3: the chain is what the App mounts, readable by every member. */}
-        <AppChainSection locale={locale} chain={payload.chain ?? []} />
+        {/* F3: the chain is what the App mounts, readable by every member; only
+            the installer's managers may rewrite its order. */}
+        <AppChainSection
+          locale={locale}
+          appId={appId}
+          chain={payload.chain ?? []}
+          canManage={payload.can_manage}
+          mountableBots={mountable}
+          onReordered={onReload}
+        />
       </div>
     );
   }
@@ -691,7 +891,14 @@ export function AppDetailView({
             {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
               <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
             ) : (
-              <AppChainSection locale={locale} chain={payload.chain ?? []} />
+              <AppChainSection
+                locale={locale}
+                appId={appId}
+                chain={payload.chain ?? []}
+                canManage={payload.can_manage === true}
+                mountableBots={mountable}
+                onReordered={onReload}
+              />
             )}
           </div>
         </TabsContent>

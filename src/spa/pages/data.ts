@@ -930,8 +930,13 @@ function parseBotOverview(value: unknown): BotOverview | null {
   };
 }
 
+/** One owner-set per-workspace ceiling exception. */
+export type BotQuotaOverride = { workspaceId: string; monthlyRp: number };
+
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** The owner's exception layer over the default ceiling; owner-only. */
+  quota_overrides?: BotQuotaOverride[];
   /** F10: the ceiling could not be resolved — never render "no ceiling". */
   quota_error?: boolean;
   /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
@@ -2665,6 +2670,15 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!isRecord(data)) return null;
   if (!isRecord(data.app)) return null;
   if (typeof data.can_manage !== "boolean") return null;
+  let quotaOverrides: BotQuotaOverride[] | undefined;
+  if (data.quota_overrides !== undefined) {
+    if (!Array.isArray(data.quota_overrides)) return null;
+    quotaOverrides = [];
+    for (const row of data.quota_overrides) {
+      if (!isRecord(row) || typeof row.workspaceId !== "string" || typeof row.monthlyRp !== "number") return null;
+      quotaOverrides.push({ workspaceId: row.workspaceId, monthlyRp: row.monthlyRp });
+    }
+  }
   const app = data.app;
   if ((app.github_app_id !== null && typeof app.github_app_id !== "number") || typeof app.id !== "string") return null;
   if (app.status !== null && typeof app.status !== "string") return null;

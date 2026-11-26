@@ -2,12 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { createMigratedTestD1, type TestD1 } from "./helpers";
 import {
   quotaMonth,
-  resolveMonthlyQuota,
+  resolveWorkspaceMonthlyQuota,
+  resolveWorkspaceQuotaProfile,
   quotaSpent,
   resolveQuotaProfile,
   rpFor,
   type QuotaProfile,
-  type QuotaSource,
 } from "../../src/store/quota-store";
 import { resolveWorkspacePlan } from "../../src/dashboard/entitlement";
 import { REVIEW_LEVELS, type ReviewLevel } from "../../packages/shared/src/runtime";
@@ -16,16 +16,18 @@ const V1_AT = "2026-10-24T00:00:00.000Z";
 
 function insertProfile(
   db: TestD1,
-  row: { id: string; version: number; effectiveFrom: string; baseStandard?: number },
+  row: { id: string; version?: number; effectiveFrom: string; baseStandard?: number },
 ): void {
+  const version =
+    row.version ?? (db.raw.query("SELECT COALESCE(MAX(version), 0) + 1 AS n FROM quota_profiles").get() as { n: number }).n;
   db.raw
     .prepare(
       `INSERT INTO quota_profiles (
          id, version, effective_from, base_quick, base_standard, base_deep,
-         source_byok, source_shared, rp_per_credit, notes, created_at, created_by
-       ) VALUES (?, ?, ?, 1, ?, 6, 1, 10, 20, NULL, ?, 'test')`,
+         rp_per_credit, notes, created_at, created_by
+       ) VALUES (?, ?, ?, 50, ?, 300, 1000, NULL, ?, 'test')`,
     )
-    .run(row.id, row.version, row.effectiveFrom, row.baseStandard ?? 2, row.effectiveFrom);
+    .run(row.id, version, row.effectiveFrom, row.baseStandard ?? 2, row.effectiveFrom);
   for (const planId of ["free", "pro", "unlimited"]) {
     db.raw
       .prepare(`INSERT INTO quota_profile_plans (profile_id, plan_id, monthly_rp) VALUES (?, ?, ?)`)
@@ -33,36 +35,52 @@ function insertProfile(
   }
 }
 
-describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
-  test("the v1 seed is one profile with the catalogue's own instant and three plan ceilings", () => {
+describe("the seeded quota profiles", () => {
+  test("v1 stays as recorded, and v2 ships the large base on the NEXT month's 1st", () => {
     const db = createMigratedTestD1();
+    const profiles = db.raw
+      .query(
+        `SELECT id, version, effective_from, base_quick, base_standard, base_deep,
+                rp_per_credit, created_at
+           FROM quota_profiles ORDER BY version`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    expect(profiles).toHaveLength(2);
+    expect(profiles[0]).toEqual({
+      id: "quota-v1",
+      version: 1,
+      effective_from: V1_AT,
+      base_quick: 1,
+      base_standard: 2,
+      base_deep: 6,
+      rp_per_credit: 20,
+      created_at: V1_AT,
+    });
+    // D11/D12: base 50/100/300 with 1 credit = 1000 RP, effective on a month
+    // boundary so no single month is priced on two scales.
+    expect(profiles[1]).toMatchObject({
+      id: "quota-v2-large-base",
+      version: 2,
+      base_quick: 50,
+      base_standard: 100,
+      base_deep: 300,
+      rp_per_credit: 1000,
+    });
+    const effective = new Date(profiles[1]!.effective_from as string);
+    expect(effective.getUTCDate()).toBe(1);
+    expect(effective.getUTCMonth()).toBe((new Date().getUTCMonth() + 1) % 12);
+
+    // The allowance scales with the price: 50× the v1 ceilings, unlimited stays NULL.
     expect(
       db.raw
         .query(
-          `SELECT id, version, effective_from, base_quick, base_standard, base_deep,
-                  source_byok, source_shared, rp_per_credit, created_at
-             FROM quota_profiles`,
+          `SELECT plan_id, monthly_rp FROM quota_profile_plans
+            WHERE profile_id = 'quota-v2-large-base' ORDER BY plan_id`,
         )
         .all(),
     ).toEqual([
-      {
-        id: "quota-v1",
-        version: 1,
-        effective_from: V1_AT,
-        base_quick: 1,
-        base_standard: 2,
-        base_deep: 6,
-        source_byok: 1,
-        source_shared: 10,
-        rp_per_credit: 20,
-        created_at: V1_AT,
-      },
-    ]);
-    expect(
-      db.raw.query("SELECT plan_id, monthly_rp FROM quota_profile_plans ORDER BY plan_id").all(),
-    ).toEqual([
-      { plan_id: "free", monthly_rp: 2000 },
-      { plan_id: "pro", monthly_rp: 20000 },
+      { plan_id: "free", monthly_rp: 100_000 },
+      { plan_id: "pro", monthly_rp: 1_000_000 },
       { plan_id: "unlimited", monthly_rp: null },
     ]);
     db.raw.close();
@@ -70,24 +88,28 @@ describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
 
   test("a second profile at an existing effective_from is refused by the database", () => {
     const db = createMigratedTestD1();
-    const insertAt = (id: string, version: number, effectiveFrom: string) =>
+    const before = (db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get() as { n: number }).n;
+    const insertAt = (id: string, effectiveFrom: string) =>
       db.raw
         .prepare(
           `INSERT INTO quota_profiles (
              id, version, effective_from, base_quick, base_standard, base_deep,
-             source_byok, source_shared, rp_per_credit, notes, created_at, created_by
-           ) VALUES (?, ?, ?, 1, 2, 6, 1, 10, 20, NULL, ?, 'operator')`,
+             rp_per_credit, notes, created_at, created_by
+           ) VALUES (?, (SELECT COALESCE(MAX(version), 0) + 1 FROM quota_profiles),
+                     ?, 50, 100, 300, 1000, NULL, ?, 'operator')`,
         )
-        .run(id, version, effectiveFrom, V1_AT);
+        .run(id, effectiveFrom, V1_AT);
 
-    expect(() => insertAt("quota-v2", 2, V1_AT)).toThrow(/UNIQUE constraint failed/);
-    expect(() => insertAt("quota-v2", 1, "2026-11-15T00:00:00.000Z")).toThrow(
+    // `effective_from` already held by the v1 seed.
+    expect(() => insertAt("quota-dup-instant", V1_AT)).toThrow(/UNIQUE constraint failed/);
+    // A fresh instant is accepted once; the second attempt at it is refused.
+    expect(() => insertAt("quota-dup-a", "2026-11-15T00:00:00.000Z")).not.toThrow();
+    expect(() => insertAt("quota-dup-b", "2026-11-15T00:00:00.000Z")).toThrow(
       /UNIQUE constraint failed/,
     );
-    expect(() => insertAt("quota-v2", 2, "2026-11-15T00:00:00.000Z")).not.toThrow();
     expect(
       db.raw.query("SELECT COUNT(*) AS n FROM quota_profiles").get(),
-    ).toEqual({ n: 2 });
+    ).toEqual({ n: before + 1 });
     db.raw.close();
   });
 
@@ -134,18 +156,19 @@ describe("migration 0063 (quota_profiles + quota_profile_plans)", () => {
 describe("resolveQuotaProfile", () => {
   test("answers the profile whose effective_from is the greatest <= the instant", async () => {
     const db = createMigratedTestD1();
-    insertProfile(db, { id: "quota-v2", version: 2, effectiveFrom: "2026-11-15T00:00:00.000Z" });
+    insertProfile(db, { id: "quota-v2", effectiveFrom: "2026-11-15T00:00:00.000Z" });
 
     expect((await resolveQuotaProfile(db, V1_AT)).id).toBe("quota-v1");
     expect((await resolveQuotaProfile(db, "2026-11-14T23:59:59.999Z")).id).toBe("quota-v1");
     expect((await resolveQuotaProfile(db, "2026-11-15T00:00:00.000Z")).id).toBe("quota-v2");
-    expect((await resolveQuotaProfile(db, "2030-01-01T00:00:00.000Z")).id).toBe("quota-v2");
+    // Far ahead: the newest profile of all, which is the shipped large-base seed.
+    expect((await resolveQuotaProfile(db, "2030-01-01T00:00:00.000Z")).id).toBe("quota-v2-large-base");
     db.raw.close();
   });
 
   test("an instant before every profile answers the EARLIEST profile", async () => {
     const db = createMigratedTestD1();
-    insertProfile(db, { id: "quota-v2", version: 2, effectiveFrom: "2026-11-15T00:00:00.000Z" });
+    insertProfile(db, { id: "quota-v2", effectiveFrom: "2026-11-15T00:00:00.000Z" });
 
     expect((await resolveQuotaProfile(db, "2020-01-01T00:00:00.000Z")).id).toBe("quota-v1");
     db.raw.close();
@@ -160,25 +183,49 @@ describe("resolveQuotaProfile", () => {
   });
 });
 
-describe("resolveMonthlyQuota — the month is judged by the profile covering its 1st", () => {
-  test("a profile published mid-month does not judge that month", async () => {
-    const db = createMigratedTestD1();
-    insertProfile(db, { id: "quota-v2", version: 2, effectiveFrom: "2026-11-15T00:00:00.000Z" });
+describe("resolveWorkspaceMonthlyQuota — the month is pinned per workspace (D13)", () => {
+  function bind(db: TestD1, workspaceId: string, month: string, profileId: string): void {
+    db.raw
+      .prepare("INSERT INTO workspace_quota_binding (workspace_id, month, profile_id) VALUES (?, ?, ?)")
+      .run(workspaceId, month, profileId);
+  }
 
-    expect(await resolveMonthlyQuota(db, "2026-11-01T00:00:00.000Z", "pro")).toEqual({
+  test("a binding wins over the profile in force, mid-month publish included", async () => {
+    const db = createMigratedTestD1();
+    insertProfile(db, { id: "quota-v2", effectiveFrom: "2026-11-15T00:00:00.000Z" });
+    bind(db, "default", "2026-11", "quota-v1");
+
+    // Bound to v1: the version the month opened under, though v2 is in force now.
+    expect(await resolveWorkspaceMonthlyQuota(db, "default", "pro", new Date("2026-11-20T00:00:00.000Z"))).toEqual({
       profile: expect.objectContaining({ id: "quota-v1", version: 1 }),
       monthlyRp: 20000,
     });
-    expect(await resolveMonthlyQuota(db, "2026-12-01T00:00:00.000Z", "pro")).toEqual({
-      profile: expect.objectContaining({ id: "quota-v2", version: 2 }),
+    db.raw.close();
+  });
+
+  test("no binding answers the profile in force NOW, so a new workspace adopts the latest at once", async () => {
+    const db = createMigratedTestD1();
+    insertProfile(db, { id: "quota-v2", effectiveFrom: "2026-11-15T00:00:00.000Z" });
+
+    // Unbound and reading mid-month: the newest version, not the one covering the 1st.
+    expect(await resolveWorkspaceMonthlyQuota(db, "default", "pro", new Date("2026-11-20T00:00:00.000Z"))).toEqual({
+      profile: expect.objectContaining({ id: "quota-v2", version: 3 }),
       monthlyRp: 1000,
     });
     db.raw.close();
   });
 
+  test("the resolver never writes: a read leaves no binding behind", async () => {
+    const db = createMigratedTestD1();
+    await resolveWorkspaceQuotaProfile(db, "default", "2026-11", "2026-11-20T00:00:00.000Z");
+    await resolveWorkspaceMonthlyQuota(db, "default", "pro", new Date("2026-11-20T00:00:00.000Z"));
+    expect(db.raw.query("SELECT COUNT(*) AS n FROM workspace_quota_binding").get()).toEqual({ n: 0 });
+    db.raw.close();
+  });
+
   test("a month before every profile resolves to the earliest profile", async () => {
     const db = createMigratedTestD1();
-    expect(await resolveMonthlyQuota(db, "2026-01-01T00:00:00.000Z", "free")).toEqual({
+    expect(await resolveWorkspaceMonthlyQuota(db, "default", "free", new Date("2026-01-01T00:00:00.000Z"))).toEqual({
       profile: expect.objectContaining({ id: "quota-v1" }),
       monthlyRp: 2000,
     });
@@ -187,7 +234,7 @@ describe("resolveMonthlyQuota — the month is judged by the profile covering it
 
   test("unlimited has no ceiling — a null monthlyRp, never a zero limit", async () => {
     const db = createMigratedTestD1();
-    const quota = await resolveMonthlyQuota(db, "2026-11-01T00:00:00.000Z", "unlimited");
+    const quota = await resolveWorkspaceMonthlyQuota(db, "default", "unlimited", new Date("2026-11-01T00:00:00.000Z"));
     expect(quota.monthlyRp).toBeNull();
     db.raw.close();
   });
@@ -195,50 +242,64 @@ describe("resolveMonthlyQuota — the month is judged by the profile covering it
   test("a plan the profile has no row for throws instead of reading as unlimited", async () => {
     const db = createMigratedTestD1();
     db.raw.prepare("DELETE FROM quota_profile_plans WHERE plan_id = 'pro'").run();
-    await expect(resolveMonthlyQuota(db, "2026-11-01T00:00:00.000Z", "pro")).rejects.toThrow(
-      /no ceiling for plan 'pro'/,
-    );
+    await expect(
+      resolveWorkspaceMonthlyQuota(db, "default", "pro", new Date("2026-11-01T00:00:00.000Z")),
+    ).rejects.toThrow(/no ceiling for plan 'pro'/);
     db.raw.close();
   });
 });
 
-describe("rpFor", () => {
+describe("rpFor — ceil(base × multiplier)", () => {
   const profile: QuotaProfile = {
     id: "quota-v1",
     version: 1,
     effectiveFrom: V1_AT,
-    base: { quick: 1, default: 2, deep: 6 },
-    source: { byok: 1, shared: 10 },
-    rpPerCredit: 20,
+    base: { quick: 50, default: 100, deep: 300 },
+    rpPerCredit: 1000,
   };
 
-  test("1/2/6 RP for BYOK and 10/20/60 for the shared bot, at every plan", async () => {
-    const db = createMigratedTestD1();
-    const expected: Record<QuotaSource, Record<ReviewLevel, number>> = {
-      byok: { quick: 1, default: 2, deep: 6 },
-      shared: { quick: 10, default: 20, deep: 60 },
-    };
+  const cases: Array<{ base: number; multiplier: number; rp: number; why: string }> = [
+    { base: 50, multiplier: 1, rp: 50, why: "an integer multiplier is exact" },
+    { base: 50, multiplier: 1.5, rp: 75, why: "half the base adds half" },
+    { base: 100, multiplier: 1.5, rp: 150, why: "standard at 1.5" },
+    { base: 300, multiplier: 1.5, rp: 450, why: "deep at 1.5" },
+    { base: 50, multiplier: 0.01, rp: 1, why: "a product under 1 RP still costs 1: 0 marks pre-metering" },
+    { base: 50, multiplier: 0.1, rp: 5, why: "a tenth of the base" },
+    { base: 100, multiplier: 0.333, rp: 34, why: "33.3 rounds UP to 34, never down to 33" },
+    { base: 300, multiplier: 0.333, rp: 100, why: "99.9 rounds up to 100" },
+    { base: 50, multiplier: 2.5, rp: 125, why: "above 1 the multiplier scales up" },
+    { base: 100, multiplier: 0.001, rp: 1, why: "the floor of 1 RP holds at any tiny product" },
+  ];
 
-    for (const planId of ["free", "pro", "unlimited"] as const) {
-      const { profile: resolved } = await resolveMonthlyQuota(db, V1_AT, planId);
-      for (const source of ["byok", "shared"] as const) {
-        for (const level of REVIEW_LEVELS) {
-          expect(rpFor(level, source, resolved)).toBe(expected[source]![level]);
-        }
+  for (const row of cases) {
+    test(`${row.base} × ${row.multiplier} = ${row.rp} RP — ${row.why}`, () => {
+      const scaled: QuotaProfile = {
+        ...profile,
+        base: { quick: row.base, default: row.base, deep: row.base },
+      };
+      expect(rpFor("quick", row.multiplier, scaled)).toBe(row.rp);
+    });
+  }
+
+  test("the level picks the base weight; every product is a whole RP >= 1", () => {
+    for (const level of REVIEW_LEVELS) {
+      for (const multiplier of [0.001, 0.5, 1, 1.5, 2.25, 7]) {
+        const rp = rpFor(level, multiplier, profile);
+        expect(Number.isInteger(rp)).toBe(true);
+        expect(rp).toBeGreaterThanOrEqual(1);
+        expect(rp).toBe(Math.ceil(profile.base[level] * multiplier));
       }
     }
-    db.raw.close();
   });
 
-  test("reads the weights from the profile, so a later version re-prices without code", () => {
+  test("the weights come from the profile, so a later version re-prices without code", () => {
     const repriced: QuotaProfile = {
       ...profile,
-      base: { quick: 2, default: 4, deep: 12 },
-      source: { byok: 1, shared: 5 },
-      rpPerCredit: 10,
+      base: { quick: 60, default: 120, deep: 360 },
+      rpPerCredit: 500,
     };
-    expect(rpFor("deep", "shared", repriced)).toBe(60);
-    expect(rpFor("quick", "byok", repriced)).toBe(2);
+    expect(rpFor("deep", 1.5, repriced)).toBe(540);
+    expect(rpFor("quick", 1.5, repriced)).toBe(90);
   });
 });
 

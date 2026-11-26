@@ -37,10 +37,10 @@ import {
 } from "../store/failure-store";
 import {
   hasUsageEventForExecutionToken,
-  recordUsageEvent,
+  chargeUsage,
   type UsageSource,
 } from "../store/usage-store";
-import { quotaMonth, resolveQuotaProfile, rpFor } from "../store/quota-store";
+import { QUOTA_PROFILES_EMPTY_ERROR, quotaMonth, readBotMultiplier } from "../store/quota-store";
 import { computeFindingFingerprint } from "../store/fingerprint";
 import {
   CHECK_BACKOFF_MS,
@@ -3024,16 +3024,41 @@ async function preparePhase(
   // therefore its own charge.
   const executionToken = `usage-attempt:${attemptId}`;
   const usageOccurredAt = usageNow.toISOString();
+  const usageMonth = quotaMonth(usageNow);
   try {
-    await recordUsageEvent(deps.env.DB, {
+    // One atomic charge: bind the month's version, price the review and append
+    // the usage row in one batch. The three commit together, so a replay binds
+    // nothing (I1), a failed lookup or insert leaves no binding behind, and a
+    // concurrent first metering cannot split the pin from its usage row.
+    const multiplier = await readBotMultiplier(deps.env.DB, payload.botRef.botId);
+    if (multiplier === null) {
+      throw new Error(`no live review bot '${payload.botRef.botId}' to price this execution`);
+    }
+    const { charged } = await chargeUsage(deps.env.DB, {
       reviewId,
       executionToken,
       workspaceId: usageWorkspaceId,
       occurredAt: usageOccurredAt,
-      rp: rpFor(level, usageSource, await resolveQuotaProfile(deps.env.DB, quotaMonth(usageNow).startIso)),
+      month: usageMonth.month,
+      level,
+      multiplier,
       source: usageSource,
       botId: payload.botRef.botId,
     });
+    if (!charged) {
+      // The batch appended nothing. Two causes, and only one is benign:
+      //  * the token was already charged — a replay, nothing to do;
+      //  * no profile covers the instant, so the review ran unbilled. That is a
+      //    LOST CHARGE and must reach the failure row the backfill lane reads,
+      //    never be swallowed — so it throws into the catch below.
+      if (!(await hasUsageEventForExecutionToken(deps.env.DB, executionToken))) {
+        throw new Error(QUOTA_PROFILES_EMPTY_ERROR);
+      }
+      deps.log.info(
+        { ...fields, review_id: reviewId, workspace_id: usageWorkspaceId },
+        "usage already charged for this execution token — nothing appended",
+      );
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     const applied: true | false | "unknown" = await hasUsageEventForExecutionToken(

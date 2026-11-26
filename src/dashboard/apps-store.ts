@@ -1423,6 +1423,148 @@ export function createReviewBotsStore(db: AppsStoreD1) {
     },
 
     /**
+     * Set, or clear, one bot's ceiling for ONE workspace. The bot's owner is the
+     * only writer — a per-workspace override is the owner's commercial decision,
+     * not the consumer's — and `monthly_rp > 0` is the DDL's own contract (D32:
+     * there is no "0 = disable").
+     *
+     * `null` deletes the row, which returns that workspace to the bot's DEFAULT
+     * ceiling. Both paths are one statement, so an override never lingers half
+     * written.
+     */
+    async setBotQuotaOverride(input: {
+      botId: string;
+      workspaceId: string;
+      ownerWorkspaceId: string;
+      monthlyRp: number | null;
+      now: string;
+    }): Promise<"ok" | "not_owner" | "invalid"> {
+      const owner = await db
+        .prepare("SELECT workspace_id FROM review_bots WHERE id = ?1 AND deleted_at IS NULL")
+        .bind(input.botId)
+        .first<{ workspace_id: string }>();
+      // The caller passes the OWNER it resolved; the store re-checks it against
+      // the row, so a caller that bypasses the route cannot write.
+      if (owner === null || owner.workspace_id !== input.ownerWorkspaceId) return "not_owner";
+      if (input.monthlyRp !== null && (!Number.isInteger(input.monthlyRp) || input.monthlyRp <= 0)) {
+        return "invalid";
+      }
+      if (input.monthlyRp === null) {
+        await db
+          .prepare("DELETE FROM bot_quota_overrides WHERE bot_id = ?1 AND workspace_id = ?2")
+          .bind(input.botId, input.workspaceId)
+          .run();
+        return "ok";
+      }
+      await db
+        .prepare(
+          `INSERT INTO bot_quota_overrides (bot_id, workspace_id, monthly_rp, updated_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT (bot_id, workspace_id) DO UPDATE SET monthly_rp = excluded.monthly_rp, updated_at = excluded.updated_at`,
+        )
+        .bind(input.botId, input.workspaceId, input.monthlyRp, input.now)
+        .run();
+      return "ok";
+    },
+
+    /** Every override one bot carries, for the owner's editor. */
+    async listBotQuotaOverrides(botId: string): Promise<Array<{ workspaceId: string; monthlyRp: number }>> {
+      const res = await db
+        .prepare("SELECT workspace_id AS workspaceId, monthly_rp AS monthlyRp FROM bot_quota_overrides WHERE bot_id = ?1 ORDER BY workspace_id")
+        .bind(botId)
+        .all<{ workspaceId: string; monthlyRp: number }>();
+      return res.results;
+    },
+
+    /**
+     * Rewrite one install's chain to exactly `botIds`, in the order given,
+     * positions contiguous from 1, in ONE batch — the whole reorder commits or
+     * none of it does, so a reader can never see a hole or a duplicate position.
+     *
+     * The store refuses a workspace that is not the install's own: the chain
+     * belongs to the workspace whose `app_installations` row it is, and a shared
+     * App's chain is its owner's to write (D34, D35).
+     *
+     * A NEW bot must be shared or owned by that workspace, and that predicate is
+     * checked INSIDE the write batch, so an owner unsharing one between the
+     * request and the batch cannot slip in. A RETAINED id — one the install
+     * already mounts — is inserted regardless of its current scope: the UI shows
+     * such a row as skipped and the operator chose to keep it.
+     */
+    async replaceInstallChain(
+      input: { appId: string; workspaceId: string; botIds: readonly string[] },
+    ): Promise<"ok" | "not_installer" | "bot_unavailable"> {
+      const own = await db
+        .prepare(`SELECT 1 AS present FROM app_installations WHERE github_app_id = ?1 AND workspace_id = ?2`)
+        .bind(input.appId, input.workspaceId)
+        .first<{ present: number }>();
+      if (own === null) return "not_installer";
+
+      // The ids the chain ALREADY holds. A retained row survives a rewrite even
+      // when its owner stopped sharing it: the UI shows such a row as skipped
+      // (D29), and dropping it here would silently un-mount a bot every operator
+      // on that page can still see. Only a NEW id must be mountable.
+      const retained = new Set(
+        (await db
+          .prepare(
+            "SELECT bot_id FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2",
+          )
+          .bind(input.appId, input.workspaceId)
+          .all<{ bot_id: string }>()).results.map((row) => row.bot_id),
+      );
+
+      // ONE batch: clear, re-insert, then a SHAPE GUARD. The guard is the repo's
+      // existing recipe (0057, 0115): a real table with `CHECK (n = 0)`, inserted
+      // from a SELECT that compares requested against inserted. A bot that went
+      // unavailable between the request and this batch inserts nothing, the counts
+      // disagree, the CHECK fires, and the WHOLE batch — the DELETE included —
+      // rolls back. The original chain stays byte-identical: no reader ever sees a
+      // partial chain, and no compensating write can overwrite a concurrent edit.
+      const requested = JSON.stringify(input.botIds);
+      const retainedJson = JSON.stringify([...retained]);
+      try {
+        await db.batch([
+          db
+            .prepare("DELETE FROM app_install_bots WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          db
+            .prepare(
+              `INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+               SELECT ?1, ?2, j.key + 1, j.value
+                 FROM json_each(?3) j
+                WHERE j.value IN (SELECT value FROM json_each(?4))
+                   OR EXISTS (SELECT 1 FROM review_bots b
+                               WHERE b.id = j.value AND b.deleted_at IS NULL
+                                 AND (b.scope = 'shared' OR b.workspace_id = ?2))`,
+            )
+            .bind(input.appId, input.workspaceId, requested, retainedJson),
+          db
+            .prepare("DELETE FROM app_install_chain_guard WHERE github_app_id = ?1 AND workspace_id = ?2")
+            .bind(input.appId, input.workspaceId),
+          db
+            .prepare(
+              `INSERT INTO app_install_chain_guard (github_app_id, workspace_id, n)
+               SELECT ?1, ?2, (SELECT COUNT(*) FROM json_each(?3))
+                                 - (SELECT COUNT(*) FROM app_install_bots
+                                     WHERE github_app_id = ?1 AND workspace_id = ?2)
+                WHERE (SELECT COUNT(*) FROM json_each(?3))
+                      <> (SELECT COUNT(*) FROM app_install_bots
+                           WHERE github_app_id = ?1 AND workspace_id = ?2)`,
+            )
+            .bind(input.appId, input.workspaceId, requested),
+        ]);
+      } catch (err) {
+        if (!(err instanceof Error) || !/app_install_chain_guard/.test(err.message)) throw err;
+        // The batch rolled back; the ids that failed to insert are the ones this
+        // caller must retry without. Naming a specific one here would require
+        // reading state the failed batch never wrote, so the caller re-reads the
+        // chain and re-derives the list — the guard's rollback is the authority.
+        return "bot_unavailable";
+      }
+      return "ok";
+    },
+
+    /**
      * F1: each of this workspace's Apps and the bots its CHAIN mounts there, in
      * position order — one statement, no per-row read. Empty means "no chain":
      * the month cell must read a dash, not a number.

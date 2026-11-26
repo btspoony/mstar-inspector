@@ -1,0 +1,34 @@
+-- 0120_quota_profile_source_drop.sql — the two key-source rates leave the
+-- quota profile.
+--
+-- 0063 priced a review as `base(level) × source(byok | shared)`: the profile
+-- carried both rates and every caller picked one from the bot's scope. D11/D12
+-- replace that with `rp = ceil(base(level) × the executing bot's multiplier)`:
+-- the multiplier is a property of the bot (`review_bots.multiplier`, 0115),
+-- base weights are large integers (50/100/300), and the profile keeps only the
+-- weights and the credit denominator.
+--
+-- The switch that stops reading these columns — `rpFor` — lands in this same
+-- release (D37), so nothing in `src/` reads either column now. Two re-runnable
+-- scripts DID read `quota_profiles.source_shared` to derive a shared bot's
+-- multiplier, and both are rewritten in this change so the deploy replay keeps
+-- working after this drop (D9):
+--
+--   * scripts/app-bot-backfill.sql — the replayable artifact of the 0115 split.
+--   * scripts/workspace-backfill.sql — the file both deploy workflows re-run
+--     after `d1 migrations apply`, so it MUST NOT read this column.
+--
+-- `migrations/0115_app_bot_split.sql` keeps its derivation untouched: it is
+-- apply-once and runs BEFORE this file in every fresh apply, so it still reads
+-- both columns legally and still reproduces each existing bot's pre-change
+-- price. Editing it would change what already-migrated databases did.
+--
+-- This is an apply-once file: a bare `DROP COLUMN` is not re-runnable, like
+-- `migrations/0057_review_targets.sql:236-240` and
+-- `0067_repo_target_identity.sql:57-59`. It is never re-run, which is exactly
+-- what keeps the backfill files above replayable after it.
+--
+-- Must apply AFTER 0119 (the binding table) and after the `rpFor` switch.
+
+ALTER TABLE quota_profiles DROP COLUMN source_byok;
+ALTER TABLE quota_profiles DROP COLUMN source_shared;

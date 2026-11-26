@@ -17,6 +17,7 @@ import type { SpaBoot } from "../boot";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import { apiBase } from "../workspace-base";
+import { patchJson } from "../api";
 import { PageHeader } from "../components/PageHeader";
 import { SectionCard } from "../components/SectionCard";
 import {
@@ -228,8 +229,127 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
             notice={notice}
             onReload={reloadSection}
           />
+          <div className="mt-4 flex flex-col gap-2">
+            <h3 className="text-sm font-medium">{t(locale, "bots.overridesTitle")}</h3>
+            <BotQuotaOverridesEditor
+              locale={locale}
+              botId={app.id}
+              initial={payload.quota_overrides ?? []}
+            />
+          </div>
         </SectionCard>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * The owner's per-workspace ceiling editor (F8). `bot_quota_overrides` is the
+ * exception layer over the bot's DEFAULT ceiling, and this is the only surface
+ * that writes it.
+ *
+ * Every write goes through `PATCH /api/review-bots/:botId/quota-overrides`; an
+ * empty ceiling clears the row, returning that workspace to the default. The
+ * list is re-read from the response, so the table always shows what the store
+ * holds — never an optimistic guess.
+ */
+export function BotQuotaOverridesEditor({
+  locale,
+  botId,
+  initial,
+}: {
+  locale: SpaBoot["locale"];
+  botId: string;
+  initial: ReadonlyArray<{ workspaceId: string; monthlyRp: number }>;
+}) {
+  const [rows, setRows] = useState(initial);
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [ceiling, setCeiling] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  async function write(target: string, monthlyRp: number | null): Promise<void> {
+    setBusy(true);
+    try {
+      const { status, body } = await patchJson(
+        `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}/quota-overrides`,
+        { workspaceId: target, monthlyRp },
+      );
+      if (status < 200 || status >= 300) {
+        setNotice(t(locale, "bots.overridesFailed"));
+        return;
+      }
+      const parsed = JSON.parse(body) as { overrides?: Array<{ workspaceId: string; monthlyRp: number }> };
+      setRows(parsed.overrides ?? []);
+      setNotice(null);
+      setWorkspaceId("");
+      setCeiling("");
+    } catch {
+      setNotice(t(locale, "bots.overridesFailed"));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function submit(): void {
+    const target = workspaceId.trim();
+    const rp = ceiling.trim();
+    if (target.length === 0) return;
+    if (rp.length === 0) {
+      void write(target, null);
+      return;
+    }
+    if (!/^\d+$/.test(rp) || Number(rp) <= 0) {
+      setNotice(t(locale, "bots.overrideInvalid"));
+      return;
+    }
+    void write(target, Number(rp));
+  }
+
+  return (
+    <div className="flex flex-col gap-3" data-slot="bot-quota-overrides">
+      <p className="text-sm text-muted-foreground">{t(locale, "bots.overridesHint")}</p>
+      {notice === null ? null : <p className="text-sm text-(--tone-warn-fg)">{notice}</p>}
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{t(locale, "bots.overridesEmpty")}</p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {rows.map((row) => (
+            <li key={row.workspaceId} className="flex items-center justify-between gap-2 text-sm">
+              <span className="font-mono text-xs">{row.workspaceId}</span>
+              <span className="tabular-nums">{t(locale, "bots.overrideValue", { rp: row.monthlyRp })}</span>
+              <button
+                type="button"
+                className="text-xs underline"
+                disabled={busy}
+                aria-label={t(locale, "bots.overrideClear", { workspace: row.workspaceId })}
+                onClick={() => void write(row.workspaceId, null)}
+              >
+                {t(locale, "bots.overrideClearLabel")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex flex-wrap items-end gap-2">
+        <input
+          className="w-56 rounded-md border border-(--border-default) px-2 py-1 text-sm"
+          aria-label={t(locale, "bots.overrideWorkspace")}
+          placeholder={t(locale, "bots.overrideWorkspace")}
+          value={workspaceId}
+          onChange={(event) => setWorkspaceId(event.target.value)}
+        />
+        <input
+          className="w-32 rounded-md border border-(--border-default) px-2 py-1 text-sm tabular-nums"
+          aria-label={t(locale, "bots.overrideCeiling")}
+          placeholder={t(locale, "bots.overrideCeiling")}
+          value={ceiling}
+          onChange={(event) => setCeiling(event.target.value)}
+        />
+        <button type="button" className="rounded-md border border-(--border-default) px-3 py-1 text-sm" disabled={busy} onClick={submit}>
+          {t(locale, "bots.overrideSave")}
+        </button>
+      </div>
     </div>
   );
 }

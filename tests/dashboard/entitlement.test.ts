@@ -209,7 +209,7 @@ describe("checkEntitlement — review-quota", () => {
         mode: "saas",
         workspaceId: WS,
         kind: "review-quota",
-        monthStart: MONTH_START,
+        now: new Date(MONTH_START),
         usedRp,
         costRp,
       });
@@ -228,7 +228,7 @@ describe("checkEntitlement — review-quota", () => {
       mode: "saas",
       workspaceId: WS,
       kind: "review-quota",
-      monthStart: MONTH_START,
+      now: new Date(MONTH_START),
       usedRp: 5000,
       costRp: 100,
     });
@@ -244,7 +244,7 @@ describe("checkEntitlement — review-quota", () => {
       mode: "saas",
       workspaceId: WS,
       kind: "review-quota",
-      monthStart: MONTH_START,
+      now: new Date(MONTH_START),
       usedRp: 10_000_000,
       costRp: 1000,
     });

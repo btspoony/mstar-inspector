@@ -339,7 +339,9 @@ describe("migrations/0115_app_bot_split.sql", () => {
     expect(shared.scope).toBe("shared");
     expect(shared.shared_at).toBe(TS);
     expect(shared.deleted_at).toBeNull();
-    // The seeded profile in force (0063, v1) prices a shared review at source_shared = 10.
+    // The split backfills a shared bot's multiplier from the profile in force
+    // (0063, v1, source_shared = 10). That value is what keeps the bot's price
+    // unchanged when Task 3 switches the formula to ceil(base × multiplier).
     expect(shared.multiplier).toBe(10);
     expect(shared.monthly_rp).toBeNull();
     db.raw.close();
