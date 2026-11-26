@@ -106,12 +106,14 @@ import {
   MemberCapError,
   WORKSPACE_CREATION_CLOSED_REFUSAL,
   checkEntitlement,
+  UNLIMITED_PLAN_ID,
   resolveWorkspacePlan,
   resolveWorkspacePlans,
   sharedBotAvailability,
 } from "./entitlement";
 import { readReviewUsage, reviewUsageMonth } from "./review-usage-store";
 import { readWorkspaceQuota } from "./quota-faces";
+import { quotaMonth, resolveMonthlyQuota } from "../store/quota-store";
 import { countUsageEventsSince } from "../store/usage-store";
 import {
   type AcceptInviteOutcome,
@@ -160,6 +162,7 @@ import {
   parseModelChain,
   type AppConfigBatchFace,
   type AppConfigStore,
+  type BotWriteAuthority,
   type CustomProviderApi,
   type CustomProviderModelMeta,
   type CustomProviderModelsMeta,
@@ -2099,18 +2102,27 @@ function blockedReasonFor(
  * (single-tenant scale today); upgrade: to a workspace-filtered store query
  * when a workspace can hold enough Apps for the scan to matter.
  */
+/**
+ * F1: the App list's MEMBERSHIP is the union the installation relation
+ * defines — an App this workspace owns, an App it holds a bound installation
+ * on, or a shared App it has a live target on. The relation is NOT filtered
+ * back through a visibility list: a shared App with a bound installation and
+ * no target must still appear (and select the `installed` default).
+ *
+ * DEFERRED by recorded PM decision D43 (delivery-compass): `app_installations`
+ * belongs to install-state-chain Task 2; membership reads `app_workspaces`,
+ * `github_apps` and the bound `github_app_installations` row instead.
+ */
 async function appsListWithHealth(
   apps: ReturnType<typeof createReviewBotsStore>,
   scope: WorkspaceScope,
+  installedIds: ReadonlySet<string>,
   targetedBotIds: ReadonlySet<string>,
 ): Promise<Array<GithubAppRow & { health: DeliverySummary }>> {
-  // DEFERRED by recorded PM decision D43 (delivery-compass): the switch to
-  // `app_installations` belongs to install-state-chain Task 2, which fills
-  // that table. It still reads app_workspaces + github_apps here — switching
-  // now would empty every list, since nothing populates app_installations yet.
   const rows = (await apps.listApps()).filter(
     (app) =>
       app.workspace_id === scope.workspaceId ||
+      installedIds.has(app.id) ||
       (app.scope === "shared" && targetedBotIds.has(app.id)),
   );
   const owned = rows.filter((app) => canWriteBotScope(app, scope));
@@ -2134,13 +2146,60 @@ const appListRoute = async (c: DashboardContext) => {
     ]),
   );
   const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
-  const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // F1/D43: installation membership comes from relations that exist today —
+  // never from `app_installations` (install-state-chain owns that cutover) —
+  // and it is what the LIST is built from, not a post-filter.
+  const installedIds = new Set(await apps.listInstalledBotIds(gate.scope.workspaceId));
+  const rows = await appsListWithHealth(
+    apps,
+    gate.scope,
+    installedIds,
+    new Set(targetByBot.keys()),
+  );
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await gate.db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(gate.scope.workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  // F1: an App's month state comes from the bots its CHAIN mounts — never from
+  // a same-id bot. No chain means `null`, which the SPA renders as the dash.
+  const chains = await apps.listInstallChainBots(gate.scope.workspaceId);
+  const quota = await readPlanMonthlyRp(
+    gate.db,
+    gate.scope.workspaceId,
+    month.startIso,
+    deploymentModeOf(c.env.DEPLOYMENT_MODE),
+  );
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
+    // F10: an UNKNOWN ceiling is an explicit error state, not an omitted field
+    // that a UI could read as "no ceiling".
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
+    ...(quota.kind === "unknown" ? {} : { month_plan_rp: quota.kind === "unlimited" ? null : quota.rp }),
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
       return {
         github_app_id: app.github_app_id,
+        owned: app.workspace_id === gate.scope.workspaceId,
+        installed: installedIds.has(app.id),
+        // `null` = no chain mounted, so nothing is metered. A number is the
+        // sum of this workspace's spend through the mounted bots.
+        month: (() => {
+          const chain = chains.get(app.id) ?? [];
+          if (chain.length === 0) return null;
+          return {
+            used_rp: chain.reduce((total, bot) => total + (spend.get(bot.botId) ?? 0), 0),
+            owned: chain.every((bot) => bot.owned),
+            multiplier: chain.reduce((product, bot) => product * bot.multiplier, 1),
+          };
+        })(),
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2163,8 +2222,103 @@ const appListRoute = async (c: DashboardContext) => {
         },
       };
     }),
+    // F9: the chooser lists shared GitHub AppS, selected by `scope`.
+    shared_apps: await apps.listSharedApps(gate.scope.workspaceId),
     shared_bots: await apps.listSharedBots(gate.scope.workspaceId),
+    // The installed tab's pending-bind rows: every unbound physical
+    // installation of an App this workspace may install through — its own,
+    // or a shared one (D8/D43 — install states are install-state-chain Task 2's).
+    pending_installations: await apps.listWorkspacePendingInstallationsNamed(gate.scope.workspaceId),
   });
+};
+
+/**
+ * One ordered read of every bot this workspace may use (D6/D18): its own
+ * first — own-before-shared, name case-insensitively inside each group, the
+ * bot id as tie-break — plus the caller's month spend per bot, batched in
+ * ONE aggregate statement so the read never fans out per row.
+ */
+async function usableBotsRead(
+  db: DashboardDb,
+  workspaceId: string,
+  role: WorkspaceRole,
+  mode: DeploymentMode,
+): Promise<{
+  workspace_id: string;
+  plan_monthly_rp?: number | null;
+  bots: Array<Record<string, unknown>>;
+}> {
+  const rows = await createReviewBotsStore(db).listUsableBots(workspaceId);
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total
+           FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  const quota = await readPlanMonthlyRp(db, workspaceId, month.startIso, mode);
+  return {
+    workspace_id: workspaceId,
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
+    ...(quota.kind === "unknown" ? {} : { plan_monthly_rp: quota.kind === "unlimited" ? null : quota.rp }),
+    bots: rows.map((bot) => ({
+      id: bot.id,
+      name: bot.name,
+      description: bot.description,
+      workspace_id: bot.workspace_id,
+      workspace_name: bot.workspace_name,
+      owned: bot.workspace_id === workspaceId,
+      can_manage: bot.workspace_id === workspaceId && canManageRole(role),
+      scope: bot.scope,
+      multiplier: bot.multiplier,
+      month_used_rp: spend.get(bot.id) ?? 0,
+    })),
+  };
+}
+
+/**
+ * The consuming workspace's plan ceiling (D31): NULL when the plan is
+ * unlimited, the deployment is self-hosted, or no profile row covers the
+ * plan — every such case reads as "no ceiling", never as an error.
+ */
+async function readPlanMonthlyRp(
+  db: DashboardDb,
+  workspaceId: string,
+  monthStart: string,
+  mode: DeploymentMode,
+): Promise<{ kind: "ceiling"; rp: number } | { kind: "unlimited" } | { kind: "unknown" }> {
+  // F10: the resolver is deployment-aware (self-hosted has no plan), and a
+  // failed read reports "unknown" — never a fabricated unlimited allowance.
+  if (mode !== "saas") return { kind: "unlimited" };
+  try {
+    const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
+    if (plan.id === UNLIMITED_PLAN_ID) return { kind: "unlimited" };
+    const monthlyRp = (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+    // A NULL quota row is the profile's own "no ceiling" spelling.
+    return monthlyRp === null ? { kind: "unlimited" } : { kind: "ceiling", rp: monthlyRp };
+  } catch {
+    return { kind: "unknown" };
+  }
+}
+
+const usableBotsRoute = async (c: DashboardContext) => {
+  const gate = await requireMember(c);
+  if (!gate.ok) return gate.response;
+  c.header("Cache-Control", "private, no-store");
+  return c.json(
+    await usableBotsRead(
+      gate.db,
+      gate.scope.workspaceId,
+      gate.scope.role,
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+  );
 };
 
 async function appStatusAction(
@@ -2281,6 +2435,213 @@ async function requireAppVisible(c: DashboardContext): Promise<AppSettingsGate> 
   };
 }
 
+/**
+ * The App detail's settings face — the same contract as the pre-split
+ * `/api/apps/:appId/settings`: resolution by numeric GitHub App id, REAL App
+ * fields (the bot route's null placeholders stay on the bot routes), the
+ * App's own installations and pending binds, and the bot-scoped sections
+ * keyed by the SAME id (the ids are equal this release — D34 keeps them
+ * independent, so nothing here joins App onto bot).
+ */
+const appDetailSettingsRoute = async (c: DashboardContext) => {
+  const member = await requireMember(c);
+  if (!member.ok) return member.response;
+  const store = createReviewBotsStore(member.db);
+  const githubAppId = parseGithubAppId(c.req.param("appId") ?? "");
+  const appRow = githubAppId === null ? null : await store.getScopedAppByGithubId(githubAppId, member.scope.workspaceId);
+  if (!appRow) return c.json({ error: "unknown app" }, 404);
+  const live = await liveTargetsForBot(member.db, member.scope.workspaceId, appRow.id);
+  const target = live.length === 1 ? live[0]! : null;
+  const targetsMany = live.length > 1;
+  const blockedReason = blockedReasonFor(appRow, member.scope.workspaceId);
+  try {
+    c.header("Cache-Control", "private, no-store");
+    const defaults = await getWorkspaceReviewDefaults(member.db, member.scope.workspaceId);
+    if (!canManageApp(member.scope)) {
+      return c.json({
+        can_manage: false,
+        workspace_id: member.scope.workspaceId,
+        ...(target === null ? {} : { target_id: target.id }),
+        blocked: blockedReason !== null,
+        blocked_reason: blockedReason,
+        installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
+        app: {
+          github_app_id: appRow.github_app_id,
+          status: appRow.status,
+          ...(target === null
+            ? {}
+            : { review_enabled: effectiveTargetSettings(target, defaults).reviewEnabled }),
+          created_by: appRow.created_by,
+          created_at: appRow.created_at,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          id: appRow.id,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          ...(blockedReason === null
+            ? { github_metadata_synced_at: appRow.github_metadata_synced_at ?? null }
+            : {}),
+        },
+      });
+    }
+    // No target holds an installation id (the pre-split route already served
+    // `installation: null` here), so the bound row stays unresolved until
+    // install-state-chain owns the binding read.
+    const binding = null;
+    if (blockedReason !== null) {
+      const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+      const checkGate = effective === null ? null : checkGateOf(effective);
+      const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+      return c.json({
+        can_manage: true,
+        blocked: true,
+        blocked_reason: blockedReason,
+        workspace_id: member.scope.workspaceId,
+        targets_many: targetsMany,
+        target_id: target === null ? null : target.id,
+        ...(target === null
+          ? {}
+          : {
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            }),
+        app: {
+          github_app_id: appRow.github_app_id,
+          id: appRow.id,
+          status: appRow.status,
+          created_by: appRow.created_by,
+          ...(target === null
+            ? {}
+            : {
+                review_enabled: effective!.reviewEnabled,
+                review_trigger_mode: effective!.triggerMode,
+                review_level: effective!.level,
+                default_review_level: defaultReviewLevel,
+              }),
+          scope: appRow.scope,
+          github_name: appRow.github_name ?? null,
+          github_slug: appRow.github_slug ?? null,
+          github_description: appRow.github_description ?? null,
+          github_html_url: appRow.github_html_url ?? null,
+          github_avatar_url: appRow.github_avatar_url ?? null,
+          github_visibility: appRow.github_visibility ?? null,
+        },
+        installation: binding,
+      });
+    }
+    const effective = target === null ? null : effectiveTargetSettings(target, defaults);
+    const checkGate = effective === null ? null : checkGateOf(effective);
+    const defaultReviewLevel = target === null ? null : (await readDefaultReviewLevel(member.db)).value;
+    const officialWorkspaceId = await readOfficialWorkspaceId(member.db);
+    const targetOwned =
+      target === null
+        ? { app: {}, top: {} }
+        : {
+            app: {
+              review_enabled: effective!.reviewEnabled,
+              review_trigger_mode: effective!.triggerMode,
+              review_level: effective!.level,
+              default_review_level: defaultReviewLevel,
+            },
+            top: {
+              target_id: target.id,
+              check_gate:
+                checkGate === null
+                  ? null
+                  : { min_score: checkGate.minScore, pass_verdicts: [...checkGate.passVerdicts] },
+            },
+          };
+    if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
+      return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
+    }
+    // F11: the App face is App-scoped. Nothing here reads a BOT through an
+    // equal id — the split keeps them independent, so a same-id bot's keys,
+    // chains, providers or sandbox would be a different entity's data.
+    // The bot-owned sections therefore stay empty on the App payload; the
+    // bot's configuration lives only on `/bots/:botId`.
+    const catalog = await providerCatalog();
+    const appInstallations = await installationsVisibleTo(store, appRow, member.scope.workspaceId);
+    const appDelivery = await store.deliverySummary(appRow.id, member.scope.workspaceId);
+    const sections = {
+      installations: [] as Array<unknown>,
+      keys: [] as Array<unknown>,
+      model_chain: null as string | null,
+      model_roles: {} as Record<string, string>,
+      model_chains: [] as Array<unknown>,
+      custom_providers: [] as Array<unknown>,
+      configured_providers: [] as Array<unknown>,
+      provider_catalog_version: catalog.version,
+      provider_eligibility: {} as Record<string, string>,
+      model_role_ids: MODEL_ROLE_IDS,
+      custom_provider_api_ids: CUSTOM_PROVIDER_API_IDS,
+      sandbox_images: enabledSandboxImages().map((image) => ({ id: image.id, enabled: image.enabled })),
+      delivery_summary: {
+        latest: appDelivery.latest
+          ? {
+              event_name: appDelivery.latest.event_name,
+              outcome: appDelivery.latest.outcome,
+              status_code: appDelivery.latest.status_code,
+              created_at: appDelivery.latest.created_at,
+            }
+          : null,
+        rejected24h: appDelivery.rejected24h,
+      },
+    };
+    const installations = appInstallations;
+    return c.json({
+      can_manage: true,
+      workspace_id: member.scope.workspaceId,
+      targets_many: targetsMany,
+      ...targetOwned.top,
+      app: {
+        github_app_id: appRow.github_app_id,
+        status: appRow.status,
+        created_by: appRow.created_by,
+        last_webhook_at: appRow.last_webhook_at ?? null,
+        // F11: no same-id bot read — sandbox_image_id is the BOT's column. The
+        // App payload omits it; the bot page is where it is configured.
+
+        github_name: appRow.github_name ?? null,
+        github_slug: appRow.github_slug ?? null,
+        github_visibility: appRow.github_visibility ?? null,
+        scope: appRow.scope,
+        id: appRow.id,
+        github_description: appRow.github_description ?? null,
+        github_html_url: appRow.github_html_url ?? null,
+        github_avatar_url: appRow.github_avatar_url ?? null,
+        github_metadata_synced_at: appRow.github_metadata_synced_at ?? null,
+        ...targetOwned.app,
+      },
+      installation: binding,
+      pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
+      // F7: the bots this App's chain actually mounts in THIS workspace — the
+      // only App-to-bot relation that exists. Empty until install-state-chain
+      // writes the chain, and never inferred from an id coincidence.
+      mounted_bot_ids: (
+        await member.db
+          .prepare(
+            `SELECT bot_id FROM app_install_bots
+              WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position`,
+          )
+          .bind(appRow.id, member.scope.workspaceId)
+          .all<{ bot_id: string }>()
+      ).results.map((row) => row.bot_id),
+      blocked: false,
+      blocked_reason: null,
+      official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
+      can_configure_bot: canWriteBotScope(appRow, member.scope),
+      ...sections,
+      installations,
+    });
+  } catch (err) {
+    logSettingsFailure("api_render", appRow.id, err);
+    return c.text("the app settings could not be read from encrypted storage", 500);
+  }
+};
+
 async function requireAppSettings(c: DashboardContext): Promise<AppSettingsGate> {
   const gate = await requireAppVisible(c);
   if (!gate.ok) return gate;
@@ -2320,6 +2681,11 @@ function isOmpRuntimeImage(sandboxImageId: string): boolean {
 
 function repositoryLandingPath(gate: { target: ReviewTargetRow | null }): string | null {
   return gate.target === null ? null : `${REPOS_LIST_REDIRECT}/${gate.target.id}`;
+}
+
+/** F12: the authority a bot-configuration write carries into the store. */
+function botWriteAuthority(gate: { app: { id: string }; scope: WorkspaceScope }): BotWriteAuthority {
+  return { botId: gate.app.id, workspaceId: gate.scope.workspaceId, role: gate.scope.role };
 }
 
 function settingsPostResponse(
@@ -2900,15 +3266,65 @@ const appBotRoute = async (c: DashboardContext) => {
   if (!c.env.DASHBOARD_ENCRYPTION_KEY) {
     return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
   }
-  const sections = await botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope);
+  const month = quotaMonth(new Date());
+  const apps = createReviewBotsStore(member.db);
+  const [sections, provider, spendRow, mountRows, quota, defaultChain] = await Promise.all([
+    botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope),
+    member.db
+      .prepare(`SELECT name FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
+      .bind(bot.workspace_id)
+      .first<{ name: string }>(),
+    member.db
+      .prepare(
+        `SELECT COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND bot_id = ?2 AND occurred_at >= ?3 AND occurred_at < ?4`,
+      )
+      .bind(member.scope.workspaceId, bot.id, month.startIso, month.endIso)
+      .first<{ total: number }>(),
+    // F6: the chain rows, joined to the App's numeric id + display name — the
+    // values the App detail route resolves. Empty until install-state-chain's
+    // writers land, which is an honest "not mounted" answer.
+    member.db
+      .prepare(
+        `SELECT DISTINCT m.github_app_id FROM app_install_bots m
+          WHERE m.workspace_id = ?1 AND m.bot_id = ?2
+          ORDER BY m.github_app_id`,
+      )
+      .bind(member.scope.workspaceId, bot.id)
+      .all<{ github_app_id: string }>(),
+    readPlanMonthlyRp(
+      member.db,
+      member.scope.workspaceId,
+      month.startIso,
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+    // F4: the capability summary reads the DEFAULT chain without owner
+    // authority — no keys, no named chains, nothing secret.
+    apps.readDefaultChainSummary(bot.id),
+  ]);
+  const mountIdentities = await apps.listAppIdentities(
+    mountRows.results.map((row) => row.github_app_id),
+  );
+  // F5: ownership (whose bot it is) is separate from publication scope (who
+  // may use it) and from this viewer's manage permission.
+  const owned = bot.workspace_id === member.scope.workspaceId;
   return c.json({
-    can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
+    can_manage: owned && canManageApp(member.scope),
+    owned,
+    // F10: the top-level flag every consumer branches on. An unknown ceiling is
+    // an ERROR state — never "no ceiling".
+    ...(quota.kind === "unknown" ? { quota_error: true } : {}),
     app: {
       github_app_id: app.github_app_id,
       id: app.id,
+      name: bot.name,
+      description: bot.description,
       status: app.status,
       scope: app.scope,
+      shared_at: bot.shared_at,
       sandbox_image_id: app.sandbox_image_id,
+      multiplier: bot.multiplier,
+      monthly_rp: bot.monthly_rp,
       last_webhook_at: app.last_webhook_at ?? null,
       github_name: app.github_name ?? null,
       github_slug: app.github_slug ?? null,
@@ -2916,6 +3332,19 @@ const appBotRoute = async (c: DashboardContext) => {
       github_html_url: app.github_html_url ?? null,
       github_avatar_url: app.github_avatar_url ?? null,
       github_metadata_synced_at: app.github_metadata_synced_at ?? null,
+    },
+    overview: {
+      provider_workspace: provider?.name ?? bot.workspace_id,
+      month_used_rp: Number(spendRow?.total ?? 0),
+      plan_quota: quota.kind,
+      plan_monthly_rp: quota.kind === "ceiling" ? quota.rp : null,
+      default_chain: defaultChain,
+      mounted_apps: mountIdentities.map((row) => ({
+        id: row.id,
+        github_app_id: row.github_app_id,
+        name: row.name,
+      })),
+      mounted_bot_ids: mountRows.results.map((row) => row.github_app_id),
     },
     ...sections,
   });
@@ -2980,8 +3409,15 @@ function scopeSwitchRoute(kind: ScopeSwitchKind) {
     const outcome =
       kind === "app"
         ? await setAppScope(gate.db, { appId: entity.id, ...args })
-        : await setReviewBotScope(gate.db, { botId: entity.id, ...args });
+        : await setReviewBotScope(gate.db, {
+            botId: entity.id,
+            ...args,
+            // F12: the store itself re-checks ownership and the owner/admin
+            // authority, so a caller that bypasses this route cannot write.
+            authority: { workspaceId: gate.scope.workspaceId, role: gate.scope.role },
+          });
     if (outcome.outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
+    if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
     if (outcome.outcome === "outside_official_workspace") {
       return c.json({ error: copy.outsideOfficial }, 409);
     }
@@ -3243,6 +3679,7 @@ type DeclaredKeyAppendOutcome =
 
 async function appendDeclaredProviderKey(
   store: AppConfigStore,
+  authority: BotWriteAuthority,
   appId: string,
   providerId: string,
   plainKey: string,
@@ -3256,7 +3693,7 @@ async function appendDeclaredProviderKey(
   });
   if (!verified.ok) return { status: "rejected", reason: verified.reason };
   try {
-    await store.addCustomProviderKey(appId, providerId, plainKey, {
+    await store.addCustomProviderKey(authority, appId, providerId, plainKey, {
       base_url: declared.base_url,
       api: declared.api,
     });
@@ -3306,7 +3743,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
   const store = createAppConfigStore(gate.db, c.env.DASHBOARD_ENCRYPTION_KEY);
   if (!PROVIDER_IDS.includes(provider)) {
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, provider, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, provider, plainKey);
       if (outcome.status === "undeclared") {
         return verifyKeyed400(c, SETTINGS_400_KEYS.customProviderUndeclared, { provider });
       }
@@ -3348,7 +3785,7 @@ const appKeyVerifyRoute = async (c: DashboardContext) => {
     if (!verified.ok) {
       return c.json({ ok: false, reason: mapVerifyReason(verified.reason) }, 400);
     }
-    await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+    await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     return c.json({ ok: true, provider, models: verified.models });
   } catch (err) {
     logSettingsFailure("verify_key", gate.app.id, err);
@@ -3470,7 +3907,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (!verified.ok) {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
-      await store.saveVerifiedKey(gate.app.id, provider, plainKey, verified.models);
+      await store.saveVerifiedKey(botWriteAuthority(gate), gate.app.id, provider, plainKey, verified.models);
     } catch (err) {
       logSettingsFailure("add_key", gate.app.id, err);
       if (err instanceof ProviderKeyLimitError) {
@@ -3488,7 +3925,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const raw = typeof form.model_chain === "string" ? form.model_chain : "";
     try {
       if (raw.trim() === "") {
-        await store.setModelChain(gate.app.id, null);
+        await store.setModelChain(botWriteAuthority(gate), gate.app.id, null);
         return settingsPostResponse(c, repositoryLandingPath(gate), `Cleared the model chain for ${appDisplayName(gate.app)} — reviews fail closed until a chain + provider keys are configured (per-App only).`,
         );
       }
@@ -3510,7 +3947,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       if (failing) {
         return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
       }
-      await store.setModelChain(gate.app.id, raw);
+      await store.setModelChain(botWriteAuthority(gate), gate.app.id, raw);
     } catch (err) {
       logSettingsFailure("save_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3552,7 +3989,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
           return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.roleChainUnknown, { role });
         }
       }
-      await store.setModelChainSeats(gate.app.id, refs);
+      await store.setModelChainSeats(botWriteAuthority(gate), gate.app.id, refs);
     } catch (err) {
       logSettingsFailure("save_roles", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3589,7 +4026,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settingsMembershipFailResponse(c, repositoryLandingPath(gate), failing);
     }
     try {
-      await store.upsertModelChain(gate.app.id, name, chain);
+      await store.upsertModelChain(botWriteAuthority(gate), gate.app.id, name, chain);
     } catch (err) {
       logSettingsFailure("add_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3602,7 +4039,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.defaultChainRemoveProtected);
     }
     try {
-      await store.removeModelChain(gate.app.id, name);
+      await store.removeModelChain(botWriteAuthority(gate), gate.app.id, name);
     } catch (err) {
       logSettingsFailure("remove_chain", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -3695,6 +4132,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: providerId, base_url: baseUrl, api: api as (typeof CUSTOM_PROVIDER_API_IDS)[number], model_ids: modelIds },
         plainKey,
@@ -3741,7 +4179,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.apiKeyCommandPrefix);
     }
     try {
-      const outcome = await appendDeclaredProviderKey(store, gate.app.id, providerId, plainKey);
+      const outcome = await appendDeclaredProviderKey(store, botWriteAuthority(gate), gate.app.id, providerId, plainKey);
       if (outcome.status === "undeclared") {
         return settings400Response(c, repositoryLandingPath(gate), SETTINGS_400_KEYS.customProviderUndeclared, {
           provider: providerId,
@@ -3869,6 +4307,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
         return settingsVerifyFailResponse(c, repositoryLandingPath(gate), verified.reason);
       }
       await store.upsertCustomProvider(
+        botWriteAuthority(gate),
         gate.app.id,
         { provider_id: templateId, base_url: baseUrl, api: declApi, model_ids: declModelIds },
         plainKey,
@@ -3929,7 +4368,13 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
       }
     }
     try {
-      await store.updateCustomProviderModels(gate.app.id, providerId, modelIds, statedMeta);
+      await store.updateCustomProviderModels(
+        botWriteAuthority(gate),
+        gate.app.id,
+        providerId,
+        modelIds,
+        statedMeta,
+      );
     } catch (err) {
       logSettingsFailure("update_provider_models", gate.app.id, err);
       if (err instanceof InvalidCustomProviderError) {
@@ -3950,7 +4395,12 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     try {
       const vocabulary = await loadDeclaredVocabulary(c, gate, store, providerId);
       if (!vocabulary.ok) return vocabulary.response;
-      await store.updateCustomProviderModels(gate.app.id, providerId, vocabulary.models);
+      await store.updateCustomProviderModels(
+        botWriteAuthority(gate),
+        gate.app.id,
+        providerId,
+        vocabulary.models,
+      );
       return settingsPostResponse(
         c,
         repositoryLandingPath(gate),
@@ -3970,7 +4420,7 @@ const appSettingsSaveRoute = async (c: DashboardContext) => {
     const providerId = typeof form.provider_id === "string" ? form.provider_id.trim() : "";
     let removed: boolean;
     try {
-      removed = await store.removeCustomProvider(gate.app.id, providerId);
+      removed = await store.removeCustomProvider(botWriteAuthority(gate), gate.app.id, providerId);
     } catch (err) {
       logSettingsFailure("remove_custom_provider", gate.app.id, err);
       return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -4015,8 +4465,8 @@ const appKeyDeleteRoute = async (c: DashboardContext) => {
       (row) => row.provider_id === provider,
     );
     removed = declaredCustom
-      ? await store.deleteCustomProviderKey(gate.app.id, provider, keyId)
-      : await store.deleteProviderKey(gate.app.id, provider, keyId);
+      ? await store.deleteCustomProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId)
+      : await store.deleteProviderKey(botWriteAuthority(gate), gate.app.id, provider, keyId);
   } catch (err) {
     logSettingsFailure("remove_key", gate.app.id, err);
     return settingsPostResponse(c, repositoryLandingPath(gate), settingsFailureNotice(err), 500);
@@ -5120,6 +5570,8 @@ export const APP_ROUTES: ReadonlyArray<AppRoute> = [
     handler: appInstallationRepositoriesRoute,
     access: "write",
   },
+  { method: "get", path: "/api/review-bots", handler: usableBotsRoute, access: "write" },
+  { method: "get", path: "/api/apps/:appId", handler: appDetailSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/settings", handler: appSettingsRoute, access: "write" },
   { method: "get", path: "/api/review-bots/:botId/bot", handler: appBotRoute, access: "write" },
   { method: "patch", path: "/api/apps/:appId/scope", handler: appScopeRoute, access: "write" },

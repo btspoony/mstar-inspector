@@ -272,18 +272,18 @@ describe("tab shell rendering (static SSR)", () => {
     expect(identity).not.toContain(t("en", "settings.providers.title"));
   });
 
-  test("应用设置 composes the identity header, the ops zone and the bot's own sections", () => {
+  test("应用设置 composes the identity header, the ops zone and the App's own scope switch", () => {
     const settings = renderDetail(managePayload);
     expect(settings).toContain(t("en", "settings.ops"));
     expect(settings).not.toContain(t("en", "settings.pauseReviews"));
     expect(settings).not.toContain(t("en", "settings.resumeReviews"));
-    for (const key of [
-      "settings.providers.title",
-      "settings.modelChains",
-      "settings.seats",
-    ] as const) {
-      expect(settings).toContain(t("en", key));
-    }
+    // The bot's own sections moved to /bots/:botId with the App/bot split:
+    // no providers block and no seat editor render on the App face. (The
+    // metric band's "Model chains" count is an App-payload fact and stays,
+    // so the editor is pinned by its section, not by that shared word.)
+    expect(settings).not.toContain(t("en", "settings.providers.title"));
+    expect(settings).not.toContain(t("en", "settings.seats"));
+    expect(settings).toContain(t("en", "apps.shareAppSwitch"));
     for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
       expect(settings).not.toContain(t("en", key));
     }
@@ -315,7 +315,8 @@ describe("tab shell rendering (static SSR)", () => {
     for (const key of ["settings.reviewTrigger", "settings.reviewDepth", "settings.reviewGate"] as const) {
       expect(markup).not.toContain(t("en", key));
     }
-    expect(markup).toContain(t("en", "settings.providers.title"));
+    expect(markup).not.toContain(t("en", "settings.providers.title"));
+    expect(markup).toContain(t("en", "apps.shareAppSwitch"));
   });
 
   test("an App with several repositories says so, not the zero-repository state", () => {
@@ -325,19 +326,23 @@ describe("tab shell rendering (static SSR)", () => {
     expect(markup).toContain(t("en", "appDetail.targetsMany"));
     expect(markup).not.toContain(t("en", "appDetail.noRepository"));
     expect(markup).not.toContain(t("en", "settings.ops"));
-    expect(markup).toContain(t("en", "settings.providers.title"));
+    expect(markup).not.toContain(t("en", "settings.providers.title"));
+    expect(markup).toContain(t("en", "apps.shareAppSwitch"));
     expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
   });
 
-  test("the detail links to the bot's own settings page", () => {
-    for (const [payload, label] of [
-      [managePayload, "manager"],
-      [identityPayload, "member"],
-    ] as const) {
-      const markup = renderDetail(payload);
-      expect(markup, label).toContain(`href="${apiBase()}/apps/1/bot"`);
-      expect(markup, label).toContain(t("en", "appDetail.botSettingsLink"));
-    }
+  test("the detail links to REAL bots — the mounted chain, or the usable-bot list, never an inferred App id", () => {
+    // F7: with no chain row the link is the workspace's usable-bot list.
+    const chainless = renderDetail(managePayload);
+    expect(chainless).toContain(`href="${apiBase()}/apps?tab=bots"`);
+    expect(chainless).toContain(t("en", "appDetail.botSettingsLink"));
+    expect(chainless).not.toContain(`href="${apiBase()}/apps/1/bot"`);
+
+    // F7: a mounted chain links each mounted BOT id, never the App id.
+    const mounted = renderDetail({ ...managePayload, mounted_bot_ids: ["bot-a", "bot-b"] });
+    expect(mounted).toContain(`href="${apiBase()}/bots/bot-a"`);
+    expect(mounted).toContain(`href="${apiBase()}/bots/bot-b"`);
+    expect(mounted).not.toContain(`href="${apiBase()}/apps/1/bot"`);
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {
@@ -593,27 +598,19 @@ describe("tab shell mounted behaviour (forceMount)", () => {
     };
   }
 
-  test("settings and delivery render before models/catalog resolve; only their editors wait", async () => {
+  test("the App's settings tab renders without the bot's model editors, which moved to the bot page", async () => {
     const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
     const realFetch = globalThis.fetch;
     let releaseModels!: () => void;
-    let releaseCatalog!: () => void;
     const models = new Promise<void>((resolve) => { releaseModels = resolve; });
-    const catalog = new Promise<void>((resolve) => { releaseCatalog = resolve; });
-    const calls: string[] = [];
     globalThis.fetch = (async (input: unknown) => {
       const url = String(input);
-      calls.push(url);
-      if (url.endsWith("/settings")) return Response.json({
+      if (url.endsWith("/apps/1")) return Response.json({
         ...managePayload, provider_catalog_version: "fixture-ready", provider_eligibility: {},
       });
       if (url.endsWith("/models")) {
         await models;
         return Response.json({ groups: [{ provider: "anthropic", source: "verified", selectors: ["anthropic/fixture-model"] }] });
-      }
-      if (url.includes("/api/provider-catalog")) {
-        await catalog;
-        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
       }
       if (url.includes("/deliveries")) return Response.json({ deliveries: [], total: 0, repos: [], types: [] });
       throw new Error(`Unexpected request: ${url}`);
@@ -625,64 +622,25 @@ describe("tab shell mounted behaviour (forceMount)", () => {
       await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
       expect(container.textContent).toContain("Demo");
       expect(tabTrigger(container, t("en", "appDetail.tabDelivery"))).toBeDefined();
+      // Models may still be in flight; the App face never waits on them and
+      // never shows the bot's editors (those live on /bots/:botId now).
       expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).toBeNull();
-      expect(container.textContent).toContain(t("en", "common.loading"));
-      expect(container.textContent).toContain(t("en", "settings.seats"));
+      expect(container.textContent).toContain(t("en", "apps.shareAppSwitch"));
       await click(win, tabTrigger(container, t("en", "appDetail.tabDelivery")));
       expect(container.textContent).toContain(t("en", "appDetail.delivery.emptyTitle"));
-      await click(win, tabTrigger(container, t("en", "appDetail.tabSettings")));
       await act(async () => { releaseModels(); });
-      const picker = container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`);
-      expect(picker).not.toBeNull();
-      await click(win, picker);
-      expect(win.document.body.textContent).toContain("anthropic/fixture-model");
-      await act(async () => { releaseCatalog(); });
-      expect(container.textContent).toContain(t("en", "settings.addProvider"));
-      expect(calls.filter((url) => url.includes("/api/provider-catalog"))).toHaveLength(1);
+      expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).toBeNull();
     } finally {
       releaseModels();
-      releaseCatalog();
       await act(async () => root.unmount());
       globalThis.fetch = realFetch;
       cleanup();
     }
   });
 
-  test("model failure stays nonfatal and a provider-local catalog failure can be retried", async () => {
-    const { win, cleanup } = installDom("https://worker.local/dashboard/default/apps/1");
-    const realFetch = globalThis.fetch;
-    let catalogAttempts = 0;
-    globalThis.fetch = (async (input: unknown) => {
-      if (String(input).endsWith("/settings")) return Response.json({
-        ...managePayload, provider_catalog_version: "fixture-section-error", provider_eligibility: {},
-      });
-      if (String(input).includes("/api/provider-catalog") && ++catalogAttempts > 1) {
-        return Response.json({ provider_catalog: [], model_limits_snapshot: "fixture-snapshot" });
-      }
-      return new Response("unavailable", { status: 503 });
-    }) as typeof fetch;
-    const container = win.document.createElement("div");
-    win.document.body.appendChild(container);
-    const root = createRoot(container as unknown as Element);
-    try {
-      await act(async () => root.render(createElement(AppDetailPage, { boot: BOOT, appId: "1" })));
-      expect(container.textContent).toContain("Demo");
-      expect(container.querySelector(`[aria-label="${t("en", "settings.modelChainField")}"]`)).not.toBeNull();
-      const alerts = [...container.querySelectorAll('[role="alert"]')];
-      expect(alerts).toHaveLength(1);
-      expect(alerts[0]?.parentElement?.textContent).toContain(t("en", "settings.providers.title"));
-      const retry = [...container.querySelectorAll("button")].find((button) => button.textContent === t("en", "common.retry"));
-      expect(retry).toBeDefined();
-      await click(win, retry!);
-      expect(catalogAttempts).toBe(2);
-      expect(container.querySelectorAll('[role="alert"]')).toHaveLength(0);
-      expect(container.textContent).toContain(t("en", "settings.addProvider"));
-    } finally {
-      await act(async () => root.unmount());
-      globalThis.fetch = realFetch;
-      cleanup();
-    }
-  });
+  // Deleted: "model failure stays nonfatal and a provider-local catalog
+  // failure can be retried" — both behaviours belong to the bot page's
+  // model/catalog editors, which the App detail no longer renders.
 
   const activeTabLabel = (win: Window, container: DomElement) => {
     const active = shellPanels(container).filter((panel) => panel.getAttribute("data-state") === "active");
@@ -770,10 +728,10 @@ describe("workspace switch on the App detail page (SF-1)", () => {
 
   test("two workspaces sharing an app id issue two reads, the second under the new base", async () => {
     expect(await readUnder("/dashboard/acme/apps/1")).toEqual([
-      "/dashboard/acme/api/apps/1/settings",
+      "/dashboard/acme/api/apps/1",
     ]);
     expect(await readUnder("/dashboard/beta/apps/1")).toEqual([
-      "/dashboard/beta/api/apps/1/settings",
+      "/dashboard/beta/api/apps/1",
     ]);
   });
 
@@ -787,7 +745,7 @@ describe("workspace switch on the App detail page (SF-1)", () => {
     try {
       const loaded = await loadAppDetail("/dashboard/beta", "1");
       expect(loaded?.can_manage).toBe(true);
-      expect(calls).toEqual(["/dashboard/beta/api/apps/1/settings"]);
+      expect(calls).toEqual(["/dashboard/beta/api/apps/1"]);
     } finally {
       globalThis.fetch = realFetch;
     }
@@ -807,31 +765,43 @@ describe("header metric band on the manage face (static SSR)", () => {
     [...renderDetail(payload).matchAll(/data-slot="metric-key"[^>]*>([^<]+)<\/span><span data-slot="metric-value"[^>]*class="([^"]*)"[^>]*>(\d+)<\/span>/g)]
       .map((m) => ({ key: m[1]!, value: m[3]!, danger: m[2]!.includes("tone-danger") }));
 
-  const payloadWith = (counts: { keys: number; chains: number; installations: number; rejected: number | null }): SettingsManagePayload => ({
+  // F11: the band is App-scoped. `keys` and `model_chains` were BOT
+  // configuration reached through an equal id, so the counts that remain are
+  // installations, mounted bots (the chain), and the delivery refusals.
+  const payloadWith = (counts: {
+    mounted: number;
+    installations: number;
+    rejected: number | null;
+  }): SettingsManagePayload => ({
     ...managePayload,
-    keys: Array.from({ length: counts.keys }, () => keyRow),
-    model_chains: Array.from({ length: counts.chains }, () => chain),
     installations: Array.from({ length: counts.installations }, () => installation),
+    mounted_bot_ids: Array.from({ length: counts.mounted }, (_, index) => `bot-${index}`),
     delivery_summary: counts.rejected === null ? undefined : summary(counts.rejected),
   });
 
-  test("the four figures render in band order, each wired to its own source count", () => {
-    const pairs = band(payloadWith({ installations: 2, keys: 3, chains: 5, rejected: 7 }));
+  test("the three figures render in band order, each wired to its own source count", () => {
+    const pairs = band(payloadWith({ installations: 2, mounted: 5, rejected: 7 }));
     expect(pairs.map(({ key, value }) => [key, value])).toEqual([
       ["Installations", "2"],
-      ["Keys", "3"],
-      ["Model chains", "5"],
+      ["Mounted bots", "5"],
       ["24h rejected", "7"],
     ]);
   });
 
+  test("no bot-owned figure appears on the App band", () => {
+    const pairs = band(payloadWith({ installations: 1, mounted: 1, rejected: 0 }));
+    const keys = pairs.map(({ key }) => key);
+    expect(keys).not.toContain("Keys");
+    expect(keys).not.toContain("Model chains");
+  });
+
   test("a zero rejected count renders without the danger tone; non-zero wears it", () => {
-    const zero = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 0 }));
-    expect(zero[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const absent = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: null }));
-    expect(absent[3]!).toEqual({ key: "24h rejected", value: "0", danger: false });
-    const refused = band(payloadWith({ installations: 1, keys: 1, chains: 1, rejected: 4 }));
-    expect(refused[3]!).toEqual({ key: "24h rejected", value: "4", danger: true });
+    const zero = band(payloadWith({ installations: 1, mounted: 1, rejected: 0 }));
+    expect(zero[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    const absent = band(payloadWith({ installations: 1, mounted: 1, rejected: null }));
+    expect(absent[2]!).toEqual({ key: "24h rejected", value: "0", danger: false });
+    const refused = band(payloadWith({ installations: 1, mounted: 1, rejected: 4 }));
+    expect(refused[2]!).toEqual({ key: "24h rejected", value: "4", danger: true });
   });
 });
 

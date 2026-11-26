@@ -39,6 +39,9 @@ function seedApp(db: TestD1, id: string): void {
   syncSplitPair(db);
 }
 
+/** F12: the bot-configuration writes carry the owning workspace's authority. */
+const AUTHORITY = { botId: "app-meta", workspaceId: "default", role: "owner" as const };
+
 function world(): { db: TestD1; appId: string; store: ReturnType<typeof createAppConfigStore> } {
   const db = createMigratedTestD1();
   seedApp(db, "app-meta");
@@ -55,7 +58,7 @@ function storedMeta(db: TestD1, appId: string): unknown {
 describe("app-config store — custom provider models_meta", () => {
   test("stores the overlay beside model_ids and reads it back on both faces", async () => {
     const { db, appId, store } = world();
-    await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
 
     expect(storedMeta(db, appId)).toEqual(META);
     expect((await store.listCustomProviders(appId))[0]!.models_meta).toEqual(META);
@@ -66,7 +69,7 @@ describe("app-config store — custom provider models_meta", () => {
 
   test("a declaration that states no metadata keeps the legacy read shape (no invented value)", async () => {
     const { db, appId, store } = world();
-    await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, CUSTOM, PLAIN_KEY);
 
     expect(storedMeta(db, appId)).toEqual({});
     await expect(store.listCustomProviders(appId)).resolves.toEqual([{ ...CUSTOM, has_keys: true }]);
@@ -77,10 +80,10 @@ describe("app-config store — custom provider models_meta", () => {
   test("refuses a metadata key that is not a declared model id, naming it and storing nothing", async () => {
     const { db, appId, store } = world();
     await expect(
-      store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: { "not-declared": META["deepseek-r1"] } }, PLAIN_KEY),
+      store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: { "not-declared": META["deepseek-r1"] } }, PLAIN_KEY),
     ).rejects.toThrow(InvalidCustomProviderError);
     await expect(
-      store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: { "not-declared": META["deepseek-r1"] } }, PLAIN_KEY),
+      store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: { "not-declared": META["deepseek-r1"] } }, PLAIN_KEY),
     ).rejects.toThrow(/not-declared/);
     expect(db.raw.query("SELECT COUNT(*) AS n FROM bot_custom_providers WHERE bot_id = ?").get(appId)).toEqual({ n: 0 });
   });
@@ -98,14 +101,14 @@ describe("app-config store — custom provider models_meta", () => {
     ];
     for (const [meta, field] of cases) {
       await expect(
-        store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: { "deepseek-r1": meta } }, PLAIN_KEY),
+        store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: { "deepseek-r1": meta } }, PLAIN_KEY),
       ).rejects.toThrow(field);
     }
   });
 
   test("a tampered overlay throws on read (a key outside model_ids, or a non-object)", async () => {
     const { db, appId, store } = world();
-    await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, CUSTOM, PLAIN_KEY);
 
     db.raw
       .prepare("UPDATE bot_custom_providers SET models_meta = ? WHERE bot_id = ?")
@@ -121,7 +124,7 @@ describe("app-config store — custom provider models_meta", () => {
 
   test("a null-shaped stored field reads back as UNSTATED on both faces (never null, never false)", async () => {
     const { db, appId, store } = world();
-    await store.upsertCustomProvider(appId, CUSTOM, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, CUSTOM, PLAIN_KEY);
     db.raw
       .prepare("UPDATE bot_custom_providers SET models_meta = ? WHERE bot_id = ?")
       .run(
@@ -145,9 +148,9 @@ describe("app-config store — custom provider models_meta", () => {
       "deepseek-v4-flash": { contextWindow: 32_000, maxTokens: 4_096 },
       "deepseek-r1": { contextWindow: 128_000, maxTokens: 8_192 },
     };
-    await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: both }, PLAIN_KEY);
 
-    await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
+    await store.updateCustomProviderModels(AUTHORITY, appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
 
     const [decl] = await store.listCustomProviders(appId);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);
@@ -156,9 +159,9 @@ describe("app-config store — custom provider models_meta", () => {
 
   test("removing a model id drops its overlay so the row stays readable", async () => {
     const { appId, store } = world();
-    await store.upsertCustomProvider(appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
+    await store.upsertCustomProvider(AUTHORITY, appId, { ...CUSTOM, models_meta: META }, PLAIN_KEY);
 
-    await store.updateCustomProviderModels(appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
+    await store.updateCustomProviderModels(AUTHORITY, appId, CUSTOM.provider_id, ["deepseek-v4-flash"]);
 
     const [decl] = await store.listCustomProviders(appId);
     expect(decl!.model_ids).toEqual(["deepseek-v4-flash"]);

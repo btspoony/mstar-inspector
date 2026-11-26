@@ -30,7 +30,7 @@ async function mount(handler: (url: string, init?: RequestInit) => Promise<Respo
             open = next;
             void render();
           },
-          appId: 1001,
+          botId: "bot-1001",
           provider: "commandcode",
           label: "Command Code",
           onOutcome: (notice: OpNotice) => outcomes.push(notice),
@@ -176,7 +176,7 @@ describe("the provider model sync dialog (I-000644)", () => {
 
   test("a fetched list states the replace arithmetic before anything is written", async () => {
     const view = await mount(async (url) => {
-      expect(url).toContain("/api/apps/1001/provider-models/preview?provider=commandcode");
+      expect(url).toContain("/api/review-bots/bot-1001/provider-models/preview?provider=commandcode");
       return previewBody({ current: 50, fetched: 104, kept: 44, added: 60, dropped: 6 });
     });
     try {

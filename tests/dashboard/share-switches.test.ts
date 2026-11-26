@@ -138,6 +138,7 @@ describe("the bot share switch (review_bots.scope)", () => {
       scope: "shared",
       actor: "operator",
       now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
     });
 
     expect(outcome).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
@@ -167,6 +168,7 @@ describe("the bot share switch (review_bots.scope)", () => {
       scope: "owned",
       actor: "operator",
       now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
     });
     expect(refused).toEqual({ outcome: "confirm_required" });
     expect(botScope(db, "bot-unshare")).toEqual({ scope: "shared", shared_at: NOW });
@@ -177,6 +179,7 @@ describe("the bot share switch (review_bots.scope)", () => {
       confirm: true,
       actor: "operator",
       now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
     });
     expect(accepted).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(audits(db)[0]?.action).toBe("runtime.bot_scope.set");
@@ -215,6 +218,7 @@ describe("the non-owner refusal (neither switch writes outside the official work
       scope: "shared",
       actor: "operator",
       now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
     });
     expect(outcome).toEqual({ outcome: "outside_official_workspace" });
     expect(botScope(db, "bot-guarded")).toEqual({ scope: "owned", shared_at: null });
@@ -228,6 +232,7 @@ describe("the non-owner refusal (neither switch writes outside the official work
       scope: "shared",
       actor: "operator",
       now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
     });
     expect(outcome2).toEqual({ outcome: "outside_official_workspace" });
     expect(botScope(db2, "bot-nowhere")).toEqual({ scope: "owned", shared_at: null });

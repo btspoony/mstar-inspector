@@ -60,10 +60,17 @@ async function declare(
   decl: { provider_id: string; base_url: string; api: "openai-completions"; model_ids: string[] },
   withKey: boolean,
 ): Promise<void> {
-  await store.upsertCustomProvider(appId, decl, SEED_KEY);
+  await store.upsertCustomProvider({ botId: appId, workspaceId: "default", role: "owner" }, appId, decl, SEED_KEY);
   if (!withKey) {
     const [key] = await store.listCustomProviderKeys(appId, decl.provider_id);
-    if (key !== undefined) await store.deleteCustomProviderKey(appId, decl.provider_id, key.keyId);
+    if (key !== undefined) {
+      await store.deleteCustomProviderKey(
+        { botId: appId, workspaceId: "default", role: "owner" },
+        appId,
+        decl.provider_id,
+        key.keyId,
+      );
+    }
   }
 }
 

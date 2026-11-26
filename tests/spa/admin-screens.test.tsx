@@ -2021,8 +2021,10 @@ describe("Bots screen", () => {
 
     const dialog = surface.win.document.querySelector('[data-slot="dialog-content"]');
     expect(dialog?.textContent).toContain("Stop sharing mstar-inspector?");
+    // D9/F13: a consumer's chain may hold other bots, so the consequence is
+    // chain fall-through, not a Blocked target.
     expect(dialog?.textContent).toContain(
-      "Targets in other workspaces become Blocked until the bot is shared again.",
+      "Workspaces using this bot skip it from then on: a delivery falls through to the next bot in its chain, or is refused when none is left, until it is shared again.",
     );
     await surface.click(confirmButton(surface));
 

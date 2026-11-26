@@ -69,8 +69,10 @@ try {
     githubHtmlUrl: "https://github.com/apps/benchmark-app", githubAvatarUrl: null,
   });
   const config = createAppConfigStore(db, encryptionKey);
-  await config.saveVerifiedKey(appId, "anthropic", "fixture-built-in-key", ["fixture-model"]);
-  await config.upsertCustomProvider(appId, {
+  // F12: bot configuration writes carry the owning workspace's authority.
+  const authority = { botId: appId, workspaceId: "default", role: "owner" as const };
+  await config.saveVerifiedKey(authority, appId, "anthropic", "fixture-built-in-key", ["fixture-model"]);
+  await config.upsertCustomProvider(authority, appId, {
     provider_id: "fixture-custom", base_url: "https://provider.example/v1",
     api: "openai-completions", model_ids: ["custom-model"],
   }, "fixture-custom-key");

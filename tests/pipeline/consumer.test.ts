@@ -2856,7 +2856,11 @@ describe("createReviewConsumer", () => {
   test("BB-1: an App with NO modelChain fails closed — no in-image default run, structured channel (AL-24-5)", async () => {
     h.sandbox.runnerStdout = JSON.stringify(VALID_OUTPUT);
     const db = await createSeededTestD1();
-    await createAppConfigStore(db, TEST_KEY).setModelChain(TEST_APP_ID, "");
+    await createAppConfigStore(db, TEST_KEY).setModelChain(
+      { botId: TEST_APP_ID, workspaceId: "default", role: "owner" },
+      TEST_APP_ID,
+      "",
+    );
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), h.testLog, h.overrides);
 
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow(
@@ -3100,7 +3104,12 @@ describe("createReviewConsumer", () => {
       openai: sk("openai-x"),
       groq: sk("groq-x"),
     });
-    await createAppConfigStore(db, TEST_KEY).addProviderKey(TEST_APP_ID, "mistral", " ");
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(
+      { botId: TEST_APP_ID, workspaceId: "default", role: "owner" },
+      TEST_APP_ID,
+      "mistral",
+      " ",
+    );
     const consumer = createReviewConsumer(await h.makeEnv({ DB: db as never }), undefined, h.overrides);
 
     await consumer(h.makeBatch(makePayload()));

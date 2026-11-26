@@ -72,9 +72,11 @@ export function BotSettingsView({
   onReload: (options?: { background?: boolean }) => Promise<boolean>;
 }) {
   const { app } = payload;
-  const appPath = `${apiBase()}/apps/${app.github_app_id}`;
-  const appApiPath = `${apiBase()}/api/apps/${app.github_app_id}`;
-  const base = `${appPath}/settings`;
+  // Bot-scoped writes address the bot row id — a shared bot carries no App
+  // identity (`github_app_id` is null on the bot payload), so every path keys
+  // `review_bots.id`, never the numeric App id space.
+  const botApiPath = `${apiBase()}/api/review-bots/${encodeURIComponent(app.id)}`;
+  const base = `${apiBase()}/review-bots/${encodeURIComponent(app.id)}/settings`;
   const [pending, setPending] = useState<PendingAction | null>(null);
   const [busy, setBusy] = useState(false);
   const [providersNotice, setProvidersNotice] = useState<OpNotice | null>(null);
@@ -97,15 +99,18 @@ export function BotSettingsView({
     }
     const outcome: OpNotice = settingsOpOutcome(locale, status, body);
     const reloaded = await onReload({ background: true });
-    return { ...outcome, reloaded };
+    // A write that LANDED stays a success even when the follow-up read fails:
+    // the failure is a stale-data notice, never a failed save.
+    if (outcome.kind !== "success" || reloaded) return { ...outcome, reloaded };
+    return {
+      kind: "warn",
+      message: `${outcome.message} ${t(locale, "bots.staleAfterSave")}`,
+      reloaded,
+    };
   }
 
   async function createDraftChain(fields: Record<string, string>): Promise<OpNotice> {
-    const outcome = await submitSettings(fields);
-    if (outcome.kind === "success" && !outcome.reloaded) {
-      return { kind: "error", message: t(locale, "common.loadFailed") };
-    }
-    return outcome;
+    return await submitSettings(fields);
   }
 
   async function submitVerify(fields: Record<string, string>): Promise<OpNotice> {
@@ -113,7 +118,7 @@ export function BotSettingsView({
     let body: string;
     try {
       ({ status, body } = await postForm(
-        `${apiBase()}/api/apps/${encodeURIComponent(String(app.github_app_id))}/keys/verify`,
+        `${botApiPath}/keys/verify`,
         fields,
       ));
     } catch {
@@ -133,7 +138,7 @@ export function BotSettingsView({
     let status: number;
     let body: string;
     try {
-      ({ status, body } = await patchJson(`${appApiPath}/bot/scope`, {
+      ({ status, body } = await patchJson(`${botApiPath}/scope`, {
         scope,
         ...(scope === "owned" ? { confirm: true } : {}),
       }));

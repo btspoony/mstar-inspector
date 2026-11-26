@@ -56,7 +56,7 @@ function managePayload(overrides: Partial<SettingsManagePayload & ProviderManage
       created_by: "mallory",
       last_webhook_at: null,
       scope: "owned" as const,
-      id: "app-test",
+      id: "bot-42",
       sandbox_image_id: "omp",
       review_trigger_mode: "every_push",
       review_level: null,
@@ -293,7 +293,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
       });
       await view.flush();
       expect(view.calls).toHaveLength(1);
-      expect(view.calls[0]!.url).toBe("/dashboard/acme/api/apps/42/keys/usage");
+      expect(view.calls[0]!.url).toBe("/dashboard/acme/api/review-bots/bot-42/keys/usage");
       const body = new URLSearchParams(view.calls[0]!.body);
       expect(body.get("provider")).toBe(probedProvider);
       expect(body.get("keyId")).toBe("deadbeefcafe1234");
@@ -726,7 +726,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
         createElement(UsagePanel, {
           key: "first",
           locale,
-          appId: 42,
+          botId: "bot-42",
           provider: probedProvider,
           keyId: "aaaa1111bbbb2222",
           open: true,
@@ -735,7 +735,7 @@ describe("UsagePanel — inline probe under the owning row", () => {
         createElement(UsagePanel, {
           key: "second",
           locale,
-          appId: 42,
+          botId: "bot-42",
           provider: probedProvider,
           keyId: "cccc3333dddd4444",
           open: true,

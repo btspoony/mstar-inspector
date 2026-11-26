@@ -687,7 +687,7 @@ export function AddRepositoryDialog({
       setInstallations({ state: "loading" });
       try {
         const parsed = parseAppInstallations(
-          await fetchJson(`${base}/api/apps/${targetAppId}/settings`),
+          await fetchJson(`${base}/api/apps/${targetAppId}`),
         );
         if (installationsRef.current !== request) return;
         setInstallations(parsed === null ? { state: "error" } : { state: "ok", installations: parsed });

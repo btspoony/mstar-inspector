@@ -19,6 +19,7 @@ import {
   TabsTrigger,
 } from "@design-system";
 import {
+  AppInfoSection,
   AppInstallationsSection,
   AppInstallSection,
   OpsSection,
@@ -27,12 +28,11 @@ import {
   postPinnedOutcome,
 } from "./SettingsPage";
 import { AppDeliveryTab } from "./AppDeliveryTab";
-import { BotSettingsView } from "./BotSettingsPage";
-import { fetchJson } from "../api";
+import { fetchJson, patchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { spaClick } from "../spa-click";
-import { apiBase } from "../workspace-base";
-import { PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
+import { apiBase, currentOrigin } from "../workspace-base";
+import { NoticeRegion, PageNotice, type NoticeKind, type OpNotice } from "./PageNotice";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
 import {
@@ -97,7 +97,7 @@ export function AppDetailShell({
  * pathnames.
  */
 export async function loadAppDetail(base: string, appId: string): Promise<SettingsPayload | null> {
-  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}/settings`));
+  return parseSettings(await fetchJson(`${base}/api/apps/${encodeURIComponent(appId)}`));
 }
 
 async function loadModelGroups(base: string, appId: string): Promise<ModelOptionGroup[]> {
@@ -187,6 +187,11 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     [base, appId, locale],
   );
 
+  // F10/D45: an App whose cached GitHub metadata was never synced gets ONE
+  // first-load refresh — a POST to `/api/apps/:appId/refresh-metadata`, the
+  // only sanctioned refresh. The GET stays a pure read.
+  const refreshedRef = useRef(false);
+
   useEffect(() => {
     cancelledRef.current = false;
     void load();
@@ -195,6 +200,16 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
       cancelledRef.current = true;
     };
   }, [load]);
+
+  useEffect(() => {
+    if (refreshedRef.current) return;
+    if (payload === null || payload.can_manage !== true || payload.blocked) return;
+    const meta = payload.app as { github_metadata_synced_at?: string | null };
+    if (meta.github_metadata_synced_at !== null && meta.github_metadata_synced_at !== undefined) return;
+    if (payload.app.github_app_id === null) return;
+    refreshedRef.current = true;
+    void refreshAppMetadata(apiBase(), payload.app.github_app_id);
+  }, [payload]);
 
   useEffect(() => {
     const onPop = () => setSearch(parseAppDetailSearch(window.location.search));
@@ -236,22 +251,71 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
 }
 
 /**
- * The link from a target detail to the App's own settings face. The href is
- * derived from the page's own API base, so it is the real target on both the
- * legacy and the workspace-scoped path; `/bot` answers one redirect to the
- * settings tab.
+ * F7: the way from App detail to the bot configuration. There is NO App→bot
+ * relation to infer (the split keeps them independent), so this links the bots
+ * the App's chain actually mounts in this workspace — and, when the chain is
+ * still empty, the workspace's usable-bot list. It never derives a bot id from
+ * the App id.
  */
-export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; appId: string }) {
-  const href = `${apiBase()}/apps/${encodeURIComponent(appId)}/bot`;
+export function BotSettingsLink({
+  locale,
+  mountedBotIds,
+}: {
+  locale: SpaBoot["locale"];
+  mountedBotIds: readonly string[];
+}) {
+  const bots = [...mountedBotIds];
+  if (bots.length === 0) {
+    const listHref = `${apiBase()}/apps?tab=bots`;
+    return (
+      <a
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+        href={listHref}
+        onClick={(event) => spaClick(listHref, event)}
+      >
+        {t(locale, "appDetail.botSettingsLink")}
+      </a>
+    );
+  }
   return (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href={href}
-      onClick={(event) => spaClick(href, event)}
-    >
-      {t(locale, "appDetail.botSettingsLink")}
-    </a>
+    <span className="flex flex-wrap items-center gap-3">
+      {bots.map((botId) => {
+        const href = `${apiBase()}/bots/${encodeURIComponent(botId)}`;
+        return (
+          <a
+            key={botId}
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+            href={href}
+            onClick={(event) => spaClick(href, event)}
+          >
+            {t(locale, "appDetail.botSettingsLink")}
+          </a>
+        );
+      })}
+    </span>
   );
+}
+
+/**
+ * F10/D45: the single first-load metadata refresh. It is a POST so the GET
+ * stays pure; a failure is silent here — the App metadata controls carry the
+ * retry affordance.
+ */
+export async function refreshAppMetadata(base: string, githubAppId: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${base}/api/apps/${githubAppId}/refresh-metadata`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** F11: the chain is the only App→bot relation; its row count is an App fact. */
+function mountedBotCount(mountedBotIds: readonly string[]): number {
+  return new Set(mountedBotIds).size;
 }
 
 const BLOCKED_REASON_KEYS = {
@@ -279,11 +343,15 @@ export function TargetHeader({
       ? t(locale, BLOCKED_REASON_KEYS[payload.blocked_reason])
       : null;
 
+  // F11: App-scoped facts ONLY. `keys.length` and `model_chains.length` were
+  // BOT configuration reached through an equal id — a different entity after
+  // the split — so the band carries installations, Apps mounted through the
+  // chain, the delivery refusal count and the App's scope, nothing else.
+  const mountedBotNames = payload.can_manage ? (payload.mounted_bot_ids ?? []) : [];
   const metrics: Metric[] = payload.can_manage && !payload.blocked
     ? [
         { key: t(locale, "settings.installations"), value: payload.installations.length },
-        { key: t(locale, "settings.metricKeys"), value: payload.keys.length },
-        { key: t(locale, "settings.modelChains"), value: payload.model_chains.length },
+        { key: t(locale, "appDetail.metricMountedBots"), value: mountedBotCount(mountedBotNames) },
         {
           key: t(locale, "apps.metricRejected24h"),
           value: payload.delivery_summary?.rejected24h ?? 0,
@@ -296,10 +364,15 @@ export function TargetHeader({
     <>
       <PageHeader
         title={appDisplayName(payload.app)}
-        description={t(locale, "apps.by", { login: payload.app.created_by })}
+        description={t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
         actions={
           <>
-            {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
+            {blockedMessage ? null : (
+              <BotSettingsLink
+                locale={locale}
+                mountedBotIds={payload.can_manage ? (payload.mounted_bot_ids ?? []) : []}
+              />
+            )}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
         }
@@ -403,6 +476,45 @@ function TargetOpsZone({
 }
 
 /**
+ * F11: the credential controls the plan keeps on the App face for managers.
+ * They are APP facts — the webhook endpoint the App receives on, its numeric
+ * id, and where its stored private key and webhook secret live. The secrets
+ * themselves are never in the payload; this block names them and links the
+ * place they are rotated.
+ */
+export function AppCredentialsSection({
+  locale,
+  workspaceId,
+  app,
+}: {
+  locale: SpaBoot["locale"];
+  workspaceId: string;
+  app: SettingsPayload["app"];
+}) {
+  const webhookUrl = `${currentOrigin()}/webhook/${workspaceId}/${app.id}`;
+  return (
+    <section className="flex flex-col gap-2 py-3" data-slot="app-credentials">
+      <h3 className="text-sm font-semibold">{t(locale, "appDetail.credentialsTitle")}</h3>
+      <p className="text-sm text-muted-foreground">{t(locale, "appDetail.credentialsCopy")}</p>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsWebhook")}</dt>
+        <dd>
+          <code className="select-all rounded bg-muted px-1 py-0.5 font-mono text-foreground">{webhookUrl}</code>
+        </dd>
+        {app.github_app_id === null ? null : (
+          <>
+            <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsAppId")}</dt>
+            <dd className="tabular-nums">{app.github_app_id}</dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">{t(locale, "appDetail.credentialsStored")}</dt>
+        <dd>{t(locale, "appDetail.credentialsStoredValue")}</dd>
+      </dl>
+    </section>
+  );
+}
+
+/**
  * The App detail face — pure `t()` + data rendering, no window/router access,
  * so tests can static-render it. A non-manager gets the D4 identity card; a
  * manager gets 应用设置 (identity header, ops, the bot's sections) and 已安装.
@@ -461,6 +573,19 @@ export function AppDetailView({
         </TabsList>
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
+            {/* F11: the App's own identity and credentials stay on the App
+                face — the bot configuration moved, the App metadata did not.
+                A Blocked App (its bot is no longer shared) renders neither:
+                the payload carries no App-side facts for it. */}
+            {payload.blocked ? null : (
+              <AppInfoSection
+                locale={locale}
+                app={payload.app}
+                workspaceId={payload.workspace_id}
+                canManage={true}
+                onReload={onReload}
+              />
+            )}
             {target === null ? (
               payload.targets_many ? (
                 <RepositoriesNotice locale={locale} copy="appDetail.targetsMany" />
@@ -471,15 +596,11 @@ export function AppDetailView({
             {target === null ? null : (
               <TargetOpsZone locale={locale} payload={target} onReload={onReload} />
             )}
-            {bot === null ? null : (
-              <BotSettingsView
-                locale={locale}
-                payload={{ ...bot, can_manage: bot.can_configure_bot === true }}
-                groups={groups}
-                modelsLoading={modelsLoading}
-                notice={null}
-                onReload={onReload}
-              />
+            {payload.blocked ? null : (
+              <AppCredentialsSection locale={locale} workspaceId={payload.workspace_id} app={payload.app} />
+            )}
+            {bot === null || payload.can_manage !== true ? null : (
+              <AppShareSection locale={locale} appId={appId} app={payload.app} onReload={onReload} />
             )}
           </div>
         </TabsContent>
@@ -516,6 +637,95 @@ export function AppDetailView({
           </div>
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+/**
+ * "Share this app" (Task 5's second block): the one App-owned mutating
+ * control the detail keeps, PATCHing `/api/apps/:appId/scope` behind the
+ * same confirm-then-write shape the bot's share switch uses. Sharing is an
+ * App property — a shared App is installable by any workspace — never a bot
+ * property, so the control lives here and nowhere on the bot page.
+ */
+export function AppShareSection({
+  locale,
+  appId,
+  app,
+  onReload,
+}: {
+  locale: SpaBoot["locale"];
+  appId: string;
+  app: { scope: "owned" | "shared" };
+  onReload: (options?: { background?: boolean }) => Promise<unknown>;
+}) {
+  const [pending, setPending] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<OpNotice | null>(null);
+
+  async function submitScope(scope: "owned" | "shared"): Promise<void> {
+    setBusy(true);
+    try {
+      const { status } = await patchJson(
+        `${apiBase()}/api/apps/${encodeURIComponent(appId)}/scope`,
+        { scope, ...(scope === "owned" ? { confirm: true } : {}) },
+      );
+      if (status < 200 || status >= 300) {
+        setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+      } else {
+        await onReload({ background: true });
+        setNotice({
+          kind: "success",
+          message: t(locale, scope === "shared" ? "apps.shareAppSaved" : "apps.unshareAppSaved"),
+        });
+      }
+    } catch {
+      setNotice({ kind: "error", message: t(locale, "common.saveFailed") });
+    } finally {
+      setBusy(false);
+      setPending(false);
+    }
+  }
+
+  const sharing = app.scope === "shared";
+  return (
+    <div className="flex flex-col gap-2 py-3" data-slot="app-share">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-muted-foreground">
+          {t(locale, sharing ? "apps.shareAppOn" : "apps.shareAppOff")}
+        </p>
+        <Button type="button" variant={sharing ? "destructive-outline" : "secondary"} onClick={() => setPending(true)}>
+          {t(locale, "apps.shareAppSwitch")}
+        </Button>
+      </div>
+      <NoticeRegion notice={notice} />
+      {pending ? (
+        <Dialog open onOpenChange={(open) => { if (!open) setPending(false); }}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>{t(locale, "apps.shareAppSwitch")}</DialogTitle>
+              <DialogDescription>
+                {t(locale, sharing ? "apps.shareAppConfirmOff" : "apps.shareAppConfirm")}
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button type="button" variant="outline">
+                  {t(locale, "common.cancel")}
+                </Button>
+              </DialogClose>
+              <Button
+                type="button"
+                variant={sharing ? "destructive" : "default"}
+                disabled={busy}
+                onClick={() => void submitScope(sharing ? "owned" : "shared")}
+              >
+                {t(locale, "apps.shareAppSwitch")}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      ) : null}
     </div>
   );
 }

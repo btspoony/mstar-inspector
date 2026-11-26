@@ -98,7 +98,18 @@ describe("AppsPage create eligibility — addressed workspace", () => {
 });
 
 describe("AppsPage create dialog", () => {
-  const SHARED = { id: "bot-platform", github_slug: "platform-app", name: "Platform App", target_count: 1 };
+  // F9: the chooser's ONE source is `shared_apps` — scope-filtered GitHub Apps,
+  // never a same-id bot row.
+  const SHARED = {
+    id: "app-platform",
+    github_slug: "platform-app",
+    name: "Platform App",
+    github_description: "Platform review app",
+    owner_workspace_id: "ws-platform",
+    owner_workspace_name: "Platform",
+    capability: "Platform bot: anthropic/claude",
+    target_count: 0,
+  };
 
   type Sent = { url: string; method: string; body: string };
 
@@ -126,7 +137,7 @@ describe("AppsPage create dialog", () => {
               health: { latest: null, rejected24h: 0 },
             },
           ],
-          shared_bots: sharedBots,
+          shared_apps: sharedBots,
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
@@ -183,7 +194,13 @@ describe("AppsPage create dialog", () => {
       expect(page.addLink()?.getAttribute("href")).toBe("/dashboard/acme/repos");
       expect(page.dialog()?.querySelector('[data-slot="create-target-form"]')).toBeNull();
       expect(page.dialog()?.querySelector("form[action$='/api/targets']")).toBeNull();
-      expect(page.dialog()?.querySelector('[data-slot="shared-bots"]')?.textContent).toContain("Platform App");
+      const cards = page.dialog()?.querySelector('[data-slot="shared-apps"]');
+      expect(cards?.textContent).toContain("Platform App");
+      // The card is the APP's own face: description, owner and the mounted
+      // bot's capability.
+      expect(cards?.textContent).toContain("Platform review app");
+      expect(cards?.textContent).toContain("Platform");
+      expect(cards?.textContent).toContain("anthropic/claude");
       expect(page.sent.filter((request) => request.method === "POST")).toHaveLength(0);
     } finally {
       await page.cleanup();
@@ -191,7 +208,7 @@ describe("AppsPage create dialog", () => {
   });
 
   test("the self-hosted manifest flow stays available beside it", async () => {
-    const page = await mountPage("/dashboard/acme/apps", [{ id: 7, name: "Broken" }]);
+    const page = await mountPage("/dashboard/acme/apps", []);
     try {
       await page.open();
       expect(page.dialog()?.querySelector('form[action="/dashboard/acme/manifest/start"]')).not.toBeNull();

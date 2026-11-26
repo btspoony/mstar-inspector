@@ -3,6 +3,7 @@ import { normalizeRfc3339 } from "../contracts/rfc3339";
 import { FINDING_SEVERITIES, MUST_FIX_SEVERITY } from "../contracts/finding-severity";
 import { getSandboxImage } from "../contracts/sandbox-images";
 import { OFFICIAL_WORKSPACE_KEY } from "./runtime-config-store";
+import type { WorkspaceRole } from "./workspace-store";
 
 /** A row of `github_apps` (D1 column names, snake_case; migrations 0004/0036). */
 export type GithubAppRow = {
@@ -516,13 +517,66 @@ export type ReviewBotRow = {
  * `target_count` is the ADDRESSED workspace's live targets on that bot, so the
  * same bot reads a different number in each workspace that may use it.
  */
+/** F9: one shared App as the marketplace chooser renders it. */
+export type SharedAppCardRow = {
+  id: string;
+  github_slug: string | null;
+  name: string;
+  github_description: string | null;
+  owner_workspace_id: string | null;
+  owner_workspace_name: string | null;
+  capability: string | null;
+  target_count: number;
+};
+
 export type SharedBotRow = {
   id: string;
   github_slug: string | null;
   name: string;
+  /** The owning App's cached GitHub description — omitted when empty (D22). */
+  github_description?: string | null;
+  owner_workspace_id?: string | null;
+  owner_workspace_name?: string | null;
+  /** The owner's chain on this App, position order (D38) — empty pre-chain. */
+  capability?: string | null;
   target_count: number;
 };
 
+/**
+ * One "Bots I can use" row (D6): the bot's own columns plus its providing
+ * workspace's display name, so the list never needs a second lookup.
+ */
+export type UsableBotListRow = {
+  id: string;
+  name: string;
+  description: string | null;
+  workspace_id: string;
+  workspace_name: string;
+  scope: BotScope;
+  shared_at: string | null;
+  multiplier: number;
+  monthly_rp: number | null;
+};
+
+/**
+ * "Bots I can use" (D6/D18): the caller's own bots first, then shared ones —
+ * name case-insensitively inside each group, the bot id as tie-break. Scoped
+ * to the workspace in SQL, so no caller can widen it by dropping a filter.
+ */
+const USABLE_BOT_LIST_SQL = `
+  SELECT r.id, r.name, r.description, r.workspace_id, r.scope, r.shared_at, r.multiplier, r.monthly_rp,
+         ws.name AS workspace_name
+    FROM review_bots r
+    JOIN workspaces ws ON ws.id = r.workspace_id AND ws.deleted_at IS NULL
+   WHERE r.deleted_at IS NULL AND (r.workspace_id = ?1 OR r.scope = 'shared')
+   ORDER BY (r.workspace_id = ?1) DESC, LOWER(r.name) ASC, r.id ASC`;
+
+/**
+ * The SHARED BOTS a workspace may create a target on — the review-usage face's
+ * "is a shared bot designated" read. Bot rows, bot scopes: this is NOT the
+ * marketplace chooser (that one lists shared **Apps**, see
+ * {@link SHARED_APP_LIST_SQL}).
+ */
 const SHARED_BOT_LIST_SQL = `
   SELECT r.id, b.github_slug, r.name,
          (SELECT COUNT(*) FROM review_targets t
@@ -531,6 +585,37 @@ const SHARED_BOT_LIST_SQL = `
     JOIN github_apps b ON b.id = r.id AND b.deleted_at IS NULL
    WHERE r.scope = 'shared' AND r.deleted_at IS NULL
    ORDER BY r.name, r.id`;
+
+/**
+ * F9: the marketplace chooser is a list of shared **GitHub Apps** — selected by
+ * `github_apps.scope = 'shared'`, NEVER by a bot id that happens to equal an
+ * App id. A shared App with no bot therefore still appears; a private App with
+ * a same-id shared bot does not.
+ *
+ * Each card carries the App's own face (name, description, owner) plus one
+ * capability line per bot the App's chain mounts at its owner — the same read
+ * that initialises a chain at bind.
+ */
+const SHARED_APP_LIST_SQL = `
+  SELECT b.id, b.github_slug,
+         COALESCE(b.github_name, b.github_slug, CAST(b.github_app_id AS TEXT)) AS name,
+         b.github_description, w.workspace_id AS owner_workspace_id,
+         ws.name AS owner_workspace_name,
+         (SELECT group_concat(cap, ' · ') FROM (
+            SELECT rb.name || ': ' ||
+                   COALESCE((SELECT bc.chain FROM bot_model_chains bc
+                              WHERE bc.bot_id = rb.id AND bc.name = 'default'), '—') AS cap
+              FROM app_install_bots ib
+              JOIN review_bots rb ON rb.id = ib.bot_id AND rb.deleted_at IS NULL
+             WHERE ib.github_app_id = b.id AND ib.workspace_id = w.workspace_id
+             ORDER BY ib.position)) AS capability,
+         (SELECT COUNT(*) FROM review_targets t
+           WHERE t.app_id = b.id AND t.workspace_id = ?1 AND t.deleted_at IS NULL) AS target_count
+    FROM github_apps b
+    JOIN app_workspaces w ON w.app_id = b.id
+    LEFT JOIN workspaces ws ON ws.id = w.workspace_id AND ws.deleted_at IS NULL
+   WHERE b.scope = 'shared' AND b.deleted_at IS NULL
+   ORDER BY name, b.id`;
 
 /** Create the github_apps / github_app_installations store over one D1 handle. */
 export function createReviewBotsStore(db: AppsStoreD1) {
@@ -781,6 +866,31 @@ export function createReviewBotsStore(db: AppsStoreD1) {
       return res.results;
     },
 
+    /**
+     * F9: the marketplace chooser — shared **GitHub Apps** selected by
+     * `github_apps.scope`, never by an equal bot id.
+     */
+    async listSharedApps(workspaceId: string): Promise<SharedAppCardRow[]> {
+      const res = await db
+        .prepare(SHARED_APP_LIST_SQL)
+        .bind(workspaceId)
+        .all<SharedAppCardRow>();
+      return res.results;
+    },
+
+    /**
+     * Every bot the workspace may use, in the D18 order the page renders. The
+     * store owns the `review_bots` read (tenant read-face allowlist), so the
+     * dashboard handler never names the table.
+     */
+    async listUsableBots(workspaceId: string): Promise<UsableBotListRow[]> {
+      const res = await db
+        .prepare(USABLE_BOT_LIST_SQL)
+        .bind(workspaceId)
+        .all<UsableBotListRow>();
+      return res.results;
+    },
+
     async getAppById(id: string): Promise<GithubAppTenantRow | null> {
       return db.prepare(APP_READ_SQL.getAppById).bind(id).first<GithubAppTenantRow>();
     },
@@ -1025,6 +1135,172 @@ export function createReviewBotsStore(db: AppsStoreD1) {
         .bind(appId, workspaceId)
         .all<AppInstallationRow>();
       return res.results;
+    },
+
+    /**
+     * Every unbound live installation of an App the workspace may install
+     * through (its own, or a shared one) — the installed tab's "Waiting to be
+     * bound" rows, each carrying its App row id so the UI can name the App.
+     */
+    async listWorkspacePendingInstallations(
+      workspaceId: string,
+    ): Promise<Array<AppInstallationRow & { app_id: string }>> {
+      const res = await db
+        .prepare(
+          `SELECT i.installation_id, i.account_login, i.seen_at, i.app_id FROM github_app_installations i
+             JOIN github_apps b ON b.id = i.app_id AND b.deleted_at IS NULL
+            WHERE i.removed_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM workspaces bw
+                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
+              AND (b.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = b.id AND w.workspace_id = ?1))
+            ORDER BY i.seen_at DESC, i.installation_id`,
+        )
+        .bind(workspaceId)
+        .all<AppInstallationRow & { app_id: string }>();
+      return res.results;
+    },
+
+    /**
+     * F1/D43 (install-state-chain owns the `app_installations` cutover): the
+     * installed set derived from relations that EXIST today — a live
+     * `review_targets.app_id` row for this workspace, or (for the workspace's
+     * own App) a `github_app_installations` row bound to it. An owned App with
+     * neither relation is NOT installed; it belongs to `created`.
+     */
+    async listInstalledBotIds(workspaceId: string): Promise<string[]> {
+      const res = await db
+        .prepare(
+          `SELECT DISTINCT t.app_id AS bot_id
+             FROM review_targets t
+             JOIN github_apps g ON g.id = t.app_id AND g.deleted_at IS NULL
+            WHERE t.workspace_id = ?1 AND t.deleted_at IS NULL
+            UNION
+           SELECT DISTINCT i.app_id AS bot_id
+             FROM github_app_installations i
+             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+            WHERE i.removed_at IS NULL AND i.bound_workspace_id = ?1
+              AND (g.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = g.id AND w.workspace_id = ?1))`,
+        )
+        .bind(workspaceId)
+        .all<{ bot_id: string }>();
+      return res.results.map((row) => row.bot_id);
+    },
+
+    /**
+     * F1: each of this workspace's Apps and the bots its CHAIN mounts there.
+     * Empty means "no chain": the month cell must read a dash, not a number.
+     * One statement, batched, in chain position order.
+     */
+    async listInstallChainBots(
+      workspaceId: string,
+    ): Promise<
+      Map<
+        string,
+        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+      >
+    > {
+      const res = await db
+        .prepare(
+          `SELECT ib.github_app_id AS app_id, ib.bot_id, r.workspace_id AS bot_workspace_id,
+                  r.multiplier, r.monthly_rp
+             FROM app_install_bots ib
+             JOIN review_bots r ON r.id = ib.bot_id AND r.deleted_at IS NULL
+            WHERE ib.workspace_id = ?1
+            ORDER BY ib.github_app_id, ib.position`,
+        )
+        .bind(workspaceId)
+        .all<{
+          app_id: string;
+          bot_id: string;
+          bot_workspace_id: string;
+          multiplier: number;
+          monthly_rp: number | null;
+        }>();
+      const byApp = new Map<
+        string,
+        Array<{ botId: string; owned: boolean; multiplier: number; monthlyRp: number | null }>
+      >();
+      for (const row of res.results) {
+        const list = byApp.get(row.app_id) ?? [];
+        list.push({
+          botId: row.bot_id,
+          owned: row.bot_workspace_id === workspaceId,
+          multiplier: row.multiplier,
+          monthlyRp: row.monthly_rp,
+        });
+        byApp.set(row.app_id, list);
+      }
+      return byApp;
+    },
+
+    /**
+     * F6: the display name and numeric GitHub App id for each mounted App, so
+     * the bot page can link the App detail route's accepted identifier. Keyed
+     * by the local text id the chain stores.
+     */
+    async listAppIdentities(
+      appIds: readonly string[],
+    ): Promise<Array<{ id: string; github_app_id: number; name: string }>> {
+      const unique = [...new Set(appIds)];
+      if (unique.length === 0) return [];
+      const placeholders = unique.map((_, index) => `?${index + 1}`).join(", ");
+      const res = await db
+        .prepare(
+          `SELECT g.id, g.github_app_id, COALESCE(g.github_name, g.github_slug, CAST(g.github_app_id AS TEXT)) AS name
+             FROM github_apps g
+            WHERE g.deleted_at IS NULL AND g.id IN (${placeholders})`,
+        )
+        .bind(...unique)
+        .all<{ id: string; github_app_id: number; name: string }>();
+      return res.results;
+    },
+
+    /**
+     * F16: the same pending rows, each carrying the App's DISPLAY name and
+     * numeric GitHub id — an uninstalled shared App is absent from
+     * `/api/apps`, so the UI must not resolve the name from that list.
+     */
+    async listWorkspacePendingInstallationsNamed(workspaceId: string): Promise<
+      Array<
+        AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }
+      >
+    > {
+      const res = await db
+        .prepare(
+          `SELECT i.installation_id, i.account_login, i.seen_at, i.app_id,
+                  g.github_app_id AS app_github_app_id,
+                  COALESCE(g.github_name, g.github_slug, CAST(g.github_app_id AS TEXT)) AS app_name
+             FROM github_app_installations i
+             JOIN github_apps g ON g.id = i.app_id AND g.deleted_at IS NULL
+            WHERE i.removed_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM workspaces bw
+                               WHERE bw.id = i.bound_workspace_id AND bw.deleted_at IS NULL)
+              AND (g.scope = 'shared'
+                   OR EXISTS (SELECT 1 FROM app_workspaces w
+                               WHERE w.app_id = g.id AND w.workspace_id = ?1))
+            ORDER BY i.seen_at DESC, i.installation_id`,
+        )
+        .bind(workspaceId)
+        .all<AppInstallationRow & { app_id: string; app_github_app_id: number; app_name: string }>();
+      return res.results;
+    },
+
+    /**
+     * F4/F9: the DEFAULT chain's selector string, read WITHOUT owner authority
+     * — the capability summary (D21) every viewer sees. It exposes no keys,
+     * no custom-provider material and no named chains, so publishing it to a
+     * consuming workspace leaks nothing but what the bot already does.
+     */
+    async readDefaultChainSummary(botId: string): Promise<string | null> {
+      const row = await db
+        .prepare(`SELECT chain FROM bot_model_chains WHERE bot_id = ? AND name = 'default'`)
+        .bind(botId)
+        .first<{ chain: string }>();
+      return row?.chain ?? null;
     },
 
     async getInstallation(
@@ -1603,7 +1879,9 @@ export type BotScopeOutcome =
   | { outcome: "ok"; scope: BotScope; sharedAt: string | null }
   | { outcome: "bot_not_found" }
   | { outcome: "outside_official_workspace" }
-  | { outcome: "confirm_required" };
+  | { outcome: "confirm_required" }
+  /** F12: the caller does not own the bot, or lacks the owner/admin role. */
+  | { outcome: "forbidden" };
 
 /**
  * One live App/bot pair as the operator console lists it (contract § 8.3).
@@ -1632,7 +1910,7 @@ const APP_SCOPE_READ_SQL = `
   SELECT scope, shared_at FROM github_apps WHERE id = ? AND deleted_at IS NULL`;
 
 const REVIEW_BOT_SCOPE_READ_SQL = `
-  SELECT scope, shared_at FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
+  SELECT scope, shared_at, workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`;
 
 const BOT_SCOPE_LIST_SQL = `
   SELECT b.id, b.name, b.github_app_id, w.workspace_id, b.scope, b.shared_at, b.deleted_at,
@@ -1822,8 +2100,27 @@ export async function setAppScope(
  */
 export async function setReviewBotScope(
   db: AppsStoreD1,
-  input: { botId: string; scope: BotScope; confirm?: boolean; actor: string; now: string },
+  input: {
+    botId: string;
+    scope: BotScope;
+    confirm?: boolean;
+    actor: string;
+    now: string;
+    /** F12: the AUTHORIZING workspace + role. A mutation that bypasses the
+     * route still cannot write another workspace's bot, or write without the
+     * owner/admin authority the plan requires. */
+    authority: { workspaceId: string; role: WorkspaceRole };
+  },
 ): Promise<BotScopeOutcome> {
+  const owner = await db
+    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(input.botId)
+    .first<{ workspace_id: string }>();
+  if (owner === null) return { outcome: "bot_not_found" };
+  if (owner.workspace_id !== input.authority.workspaceId) return { outcome: "forbidden" };
+  if (input.authority.role !== "owner" && input.authority.role !== "admin") {
+    return { outcome: "forbidden" };
+  }
   return scopeTransition(
     db,
     { ...input, id: input.botId },
@@ -1842,6 +2139,19 @@ export async function setReviewBotScope(
  * (workspace name, the official-workspace flag, live installation and target
  * counts) — name-ordered, one statement.
  */
+/** F12: the owner workspace a bot write is authorized against — the store is
+ * the only reader of `review_bots`, so this lookup lives here too. */
+export async function readBotOwnerWorkspace(
+  db: AppsStoreD1,
+  botId: string,
+): Promise<string | null> {
+  const row = await db
+    .prepare(`SELECT workspace_id FROM review_bots WHERE id = ? AND deleted_at IS NULL`)
+    .bind(botId)
+    .first<{ workspace_id: string }>();
+  return row?.workspace_id ?? null;
+}
+
 export async function listBotScopes(db: AppsStoreD1): Promise<BotScopeRow[]> {
   const res = await db.prepare(BOT_SCOPE_LIST_SQL).all<BotScopeRow>();
   return res.results;

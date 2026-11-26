@@ -30,7 +30,7 @@ function payload(overrides: Partial<BotSettingsPayload> = {}): BotSettingsPayloa
       status: "active",
       last_webhook_at: null,
       scope: "owned",
-      id: "app-test",
+      id: "1",
       sandbox_image_id: "omp",
       github_name: null,
       github_slug: null,
@@ -116,7 +116,7 @@ async function mount(overrides: Partial<BotSettingsPayload> = {}, status = 200, 
     buttonWith,
     dialog,
     click,
-    scopeCalls: () => sent.filter((row) => row.path.endsWith("/bot/scope")),
+    scopeCalls: () => sent.filter((row) => row.path.endsWith("/scope")),
     cleanup: async () => {
       await act(async () => root.unmount());
       globalThis.fetch = originalFetch;

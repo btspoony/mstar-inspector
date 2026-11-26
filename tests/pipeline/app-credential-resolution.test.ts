@@ -65,8 +65,10 @@ async function seedApp(db: ReturnType<typeof createTestD1>, opts: SeedOptions): 
     )
     .run(targetId, id, opts.slug);
   const configStore = createAppConfigStore(db, TEST_KEY);
-  await configStore.setModelChain(id, "ark/deepseek-v4-flash");
-  await configStore.addProviderKey(id, "ark", "ark-key");
+  // F12: these seeds own the bot they configure.
+  const authority = { botId: id, workspaceId: "default", role: "owner" as const };
+  await configStore.setModelChain(authority, id, "ark/deepseek-v4-flash");
+  await configStore.addProviderKey(authority, id, "ark", "ark-key");
   return { id, targetId };
 }
 
@@ -247,7 +249,12 @@ describe("consumer bot/target resolution (lock L4)", () => {
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
     await seedApp(db, { slug: "app-y", githubAppId: 333444, pem: PEM_Y });
     const configStore = createAppConfigStore(db, TEST_KEY);
-    await configStore.addProviderKey(appX.id, "ark", "second-ark-key");
+    await configStore.addProviderKey(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
+      appX.id,
+      "ark",
+      "second-ark-key",
+    );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
@@ -535,7 +542,12 @@ describe("appCommenters fingerprint cache (hardening item 1, architect lock L1)"
     reset();
     const db = createMigratedD1();
     const appX = await seedApp(db, { slug: "app-x", githubAppId: 111222, pem: PEM_X });
-    await createAppConfigStore(db, TEST_KEY).addProviderKey(appX.id, "not-a-provider", sk("rogue-SECRET"));
+    await createAppConfigStore(db, TEST_KEY).addProviderKey(
+      { botId: appX.id, workspaceId: "default", role: "owner" },
+      appX.id,
+      "not-a-provider",
+      sk("rogue-SECRET"),
+    );
     const consumer = createReviewConsumer(makeEnv({ DB: db as never }), testLog, testOverrides);
 
     await consumer(makeBatch(makePayload({ botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
@@ -722,8 +734,9 @@ describe("per-App pause ack-skip (architect lock L4)", () => {
       )
       .run(appX.targetId, row.id, row.name);
     const configStore = createAppConfigStore(db, TEST_KEY);
-    await configStore.setModelChain(row.id, "ark/deepseek-v4-flash");
-    await configStore.addProviderKey(row.id, "ark", "ark-key");
+    const authority = { botId: row.id, workspaceId: "default", role: "owner" as const };
+    await configStore.setModelChain(authority, row.id, "ark/deepseek-v4-flash");
+    await configStore.addProviderKey(authority, row.id, "ark", "ark-key");
     await consumer(makeBatch(makePayload({ pr_number: 44, botRef: { appId: appX.id, botId: appX.id }, targetId: appX.targetId })));
     expect(factoryCreds).toHaveLength(2);
     expect(factoryCreds[1]!.cred).toEqual({ APP_ID: "111222", PRIVATE_KEY: PEM_X });

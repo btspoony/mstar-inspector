@@ -367,8 +367,12 @@ describe("members/apps/settings parsers", () => {
       custom_provider_api_ids: [],
       sandbox_images: [{ id: "omp", enabled: true }],
     };
+    // F11: the sandbox image is BOT configuration. The App face no longer
+    // serves it, so its absence is VALID on the App payload…
     const { sandbox_image_id: _dropped, ...appWithoutImage } = manageBase.app;
-    expect(parseSettings({ ...manageBase, app: appWithoutImage })).toBeNull();
+    expect(parseSettings({ ...manageBase, app: appWithoutImage })).not.toBeNull();
+    // …while a malformed value is still rejected on either face.
+    expect(parseSettings({ ...manageBase, app: { ...manageBase.app, sandbox_image_id: 7 } })).toBeNull();
     const { sandbox_images: _omitted, ...withoutImages } = manageBase;
     expect(parseSettings(withoutImages)).toBeNull();
     expect(parseSettings({ ...manageBase, sandbox_images: [{ id: 7, enabled: true }] })).toBeNull();

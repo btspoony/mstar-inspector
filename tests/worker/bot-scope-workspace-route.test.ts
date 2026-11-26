@@ -387,12 +387,23 @@ describe("GET a shared bot's read faces from a workspace that does not own it", 
     delivery.run("d-third-gadgets", "check_run", "rejected", 401, "acme/gadgets");
     delivery.run("d-third-globex", "pull_request", "ok", null, "globex/secret-repo");
 
-    // A shared bot never joins the consumer's Apps list (it is a separate
-    // `shared_bots` block without a health column), so its delivery records
-    // never reach the consumer's health view.
+    // F1: the Apps list's membership is the INSTALLATION RELATION. A consumer
+    // that holds a live target on a shared bot therefore DOES list it (the
+    // `installed` tab) — but its health column is scoped to the consumer's own
+    // repositories, so the owner's delivery records never reach it.
     const consumerIds = await listAppIds(OTHER, "erin");
-    expect(consumerIds).not.toContain("bot-home");
-    expect(consumerIds).not.toContain("bot-third");
+    expect(consumerIds).toContain("bot-home");
+    expect(consumerIds).toContain("bot-third");
+
+    // `bot-home`'s consumer target is acme/widgets, and the d-acme delivery on
+    // that repo is the consumer's own — the globex ones are not.
+    const consumerHome = await listHealth(OTHER, "erin", "bot-home");
+    expect(consumerHome.rejected24h).toBe(0);
+    expect(consumerHome.latest).toEqual(expect.objectContaining({ outcome: "ok" }));
+    const consumerThird = await listHealth(OTHER, "erin", "bot-third");
+    // `bot-third` has a consumer target on acme/gadgets, so its own refusal is
+    // visible — but the globex delivery on the OWNER's repo is not.
+    expect(consumerThird.latest).toEqual(expect.objectContaining({ event_name: "check_run" }));
 
     const owner = await listHealth(OFFICIAL, "dana", "bot-home");
     expect(owner.rejected24h).toBe(1);

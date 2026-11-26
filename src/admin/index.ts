@@ -1,7 +1,13 @@
 import { RECONCILE_LIMITS } from "../contracts/reconcile-settings";
 import { Hono } from "hono";
 import { isPlatformOperator, workspaceBoot } from "../dashboard/index";
-import { listBotScopes, setAppScope, setReviewBotScope, type BotScope } from "../dashboard/apps-store";
+import {
+  listBotScopes,
+  readBotOwnerWorkspace,
+  setAppScope,
+  setReviewBotScope,
+  type BotScope,
+} from "../dashboard/apps-store";
 import { listAllActiveSupportGrants } from "../dashboard/operator-store";
 import {
   CHECK_TERMINALIZE_MAX,
@@ -705,12 +711,22 @@ function assignScopeSwitch(kind: "app" | "bot") {
       actor: login,
       now: new Date().toISOString(),
     };
+    // F12: the bot write re-checks ownership at the store boundary, so the
+    // console passes the bot's own workspace as the authorizing authority —
+    // the operator console is not a tenant caller.
+    const ownerWorkspace =
+      kind === "app" ? null : await readBotOwnerWorkspace(db, botId);
     const outcome =
       kind === "app"
         ? await setAppScope(db, { appId: botId, ...args })
-        : await setReviewBotScope(db, { botId, ...args });
+        : await setReviewBotScope(db, {
+            botId,
+            ...args,
+            authority: { workspaceId: ownerWorkspace ?? "", role: "owner" },
+          });
     const noun = kind === "app" ? "app" : "bot";
     if (outcome.outcome === "bot_not_found") return c.json({ error: `${noun} not found` }, 404);
+    if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
     if (outcome.outcome === "outside_official_workspace") {
       return c.json({ error: `${noun} is outside the official workspace` }, 409);
     }

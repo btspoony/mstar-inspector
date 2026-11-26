@@ -13,7 +13,7 @@ type ProviderSyncDialogProps = {
   locale: SpaBoot["locale"];
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  appId: number;
+  botId: string;
   provider: string;
   label: string;
   onOutcome: (notice: OpNotice) => void;
@@ -28,7 +28,7 @@ function OpenProviderSyncDialog({
   locale,
   open,
   onOpenChange,
-  appId,
+  botId,
   provider,
   label,
   onOutcome,
@@ -46,7 +46,7 @@ function OpenProviderSyncDialog({
     setPreview(null);
     try {
       const res = await fetch(
-        `${apiBase()}/api/apps/${encodeURIComponent(String(appId))}/provider-models/preview?provider=${encodeURIComponent(provider)}`,
+        `${apiBase()}/api/review-bots/${encodeURIComponent(botId)}/provider-models/preview?provider=${encodeURIComponent(provider)}`,
         { credentials: "same-origin", headers: { Accept: "application/json" }, redirect: "manual" },
       );
       const body = await res.text();
@@ -67,7 +67,7 @@ function OpenProviderSyncDialog({
     setPending("write");
     setNotice(null);
     try {
-      const { status, body } = await postForm(`${apiBase()}/apps/${encodeURIComponent(String(appId))}/settings`, {
+      const { status, body } = await postForm(`${apiBase()}/review-bots/${encodeURIComponent(botId)}/settings`, {
         op: "sync-provider-models",
         provider,
       });

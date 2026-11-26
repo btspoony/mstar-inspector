@@ -426,9 +426,11 @@ export function AppInfoSection({
             )
           ) : null}
           {app.github_description ? <p className="text-sm">{app.github_description}</p> : null}
-          <p className="text-sm text-muted-foreground">
-            {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
-          </p>
+          {app.github_app_id === null ? null : (
+            <p className="text-sm text-muted-foreground">
+              {t(locale, "settings.appInfoAppId", { id: app.github_app_id })}
+            </p>
+          )}
           <p className="text-sm text-muted-foreground">
             {t(locale, "settings.appInfoLocalId", { id: app.id })}
           </p>

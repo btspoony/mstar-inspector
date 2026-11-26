@@ -8,11 +8,11 @@ export function AppAvatar({
   className,
 }: {
   src: string | null;
-  appId?: number;
+  appId?: number | null;
   className: string;
 }) {
   const [failed, setFailed] = useState(false);
-  const url = src ?? (appId === undefined ? null : appAvatarUrl(appId));
+  const url = src ?? (appId === undefined || appId === null ? null : appAvatarUrl(appId));
   useEffect(() => setFailed(false), [url]);
   if (url !== null && !failed) {
     return <img src={url} alt="" className={className} onError={() => setFailed(true)} />;
