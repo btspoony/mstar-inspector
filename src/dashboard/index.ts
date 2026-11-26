@@ -2137,13 +2137,39 @@ const appListRoute = async (c: DashboardContext) => {
   );
   const defaults = await getWorkspaceReviewDefaults(gate.db, gate.scope.workspaceId);
   const rows = await appsListWithHealth(apps, gate.scope, new Set(targetByBot.keys()));
+  // F1/D43: installation membership comes from relations that exist today —
+  // never from `app_installations` (install-state-chain owns that cutover).
+  const installedIds = new Set(await apps.listInstalledBotIds(gate.scope.workspaceId));
+  const month = quotaMonth(new Date());
+  const spendRows = (
+    await gate.db
+      .prepare(
+        `SELECT bot_id, COALESCE(SUM(rp), 0) AS total FROM usage_events
+          WHERE workspace_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3 AND bot_id IS NOT NULL
+          GROUP BY bot_id`,
+      )
+      .bind(gate.scope.workspaceId, month.startIso, month.endIso)
+      .all<{ bot_id: string; total: number }>()
+  ).results;
+  const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  const quota = await readPlanMonthlyRp(
+    gate.db,
+    gate.scope.workspaceId,
+    month.startIso,
+    deploymentModeOf(c.env.DEPLOYMENT_MODE),
+  );
   return c.json({
     viewer: { login: gate.user.github_login, role: gate.user.role },
+    // F10: omitted (not null) when the ceiling is unknown — a dash, never a
+    // fabricated unlimited allowance.
+    ...(quota.kind === "unknown" ? {} : { month_plan_rp: quota.kind === "unlimited" ? null : quota.rp }),
     apps: rows.map((app) => {
       const target = targetByBot.get(app.id);
       return {
         github_app_id: app.github_app_id,
         owned: app.workspace_id === gate.scope.workspaceId,
+        installed: installedIds.has(app.id),
+        month_used_rp: spend.get(app.id) ?? 0,
         bot_id: app.id,
         github_name: app.github_name ?? null,
         github_slug: app.github_slug ?? null,
@@ -2170,7 +2196,7 @@ const appListRoute = async (c: DashboardContext) => {
     // The installed tab's pending-bind rows: every unbound physical
     // installation of an App this workspace may install through — its own,
     // or a shared one (D8/D43 — install states are install-state-chain Task 2's).
-    pending_installations: await apps.listWorkspacePendingInstallations(gate.scope.workspaceId),
+    pending_installations: await apps.listWorkspacePendingInstallationsNamed(gate.scope.workspaceId),
   });
 };
 
@@ -2183,9 +2209,11 @@ const appListRoute = async (c: DashboardContext) => {
 async function usableBotsRead(
   db: DashboardDb,
   workspaceId: string,
+  role: WorkspaceRole,
+  mode: DeploymentMode,
 ): Promise<{
   workspace_id: string;
-  plan_monthly_rp: number | null;
+  plan_monthly_rp?: number | null;
   bots: Array<Record<string, unknown>>;
 }> {
   const rows = await createReviewBotsStore(db).listUsableBots(workspaceId);
@@ -2202,9 +2230,10 @@ async function usableBotsRead(
       .all<{ bot_id: string; total: number }>()
   ).results;
   const spend = new Map(spendRows.map((row) => [row.bot_id, Number(row.total)]));
+  const quota = await readPlanMonthlyRp(db, workspaceId, month.startIso, mode);
   return {
     workspace_id: workspaceId,
-    plan_monthly_rp: await readPlanMonthlyRp(db, workspaceId, month.startIso),
+    ...(quota.kind === "unknown" ? {} : { plan_monthly_rp: quota.kind === "unlimited" ? null : quota.rp }),
     bots: rows.map((bot) => ({
       id: bot.id,
       name: bot.name,
@@ -2212,6 +2241,7 @@ async function usableBotsRead(
       workspace_id: bot.workspace_id,
       workspace_name: bot.workspace_name,
       owned: bot.workspace_id === workspaceId,
+      can_manage: bot.workspace_id === workspaceId && canManageRole(role),
       scope: bot.scope,
       multiplier: bot.multiplier,
       month_used_rp: spend.get(bot.id) ?? 0,
@@ -2228,13 +2258,19 @@ async function readPlanMonthlyRp(
   db: DashboardDb,
   workspaceId: string,
   monthStart: string,
-): Promise<number | null> {
+  mode: DeploymentMode,
+): Promise<{ kind: "ceiling"; rp: number } | { kind: "unlimited" } | { kind: "unknown" }> {
+  // F10: the resolver is deployment-aware (self-hosted has no plan), and a
+  // failed read reports "unknown" — never a fabricated unlimited allowance.
+  if (mode !== "saas") return { kind: "unlimited" };
   try {
     const plan = await resolveWorkspacePlan(db, workspaceId, "saas");
-    if (plan.id === UNLIMITED_PLAN_ID) return null;
-    return (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+    if (plan.id === UNLIMITED_PLAN_ID) return { kind: "unlimited" };
+    const monthlyRp = (await resolveMonthlyQuota(db, monthStart, plan.id)).monthlyRp;
+    // A NULL quota row is the profile's own "no ceiling" spelling.
+    return monthlyRp === null ? { kind: "unlimited" } : { kind: "ceiling", rp: monthlyRp };
   } catch {
-    return null;
+    return { kind: "unknown" };
   }
 }
 
@@ -2242,7 +2278,14 @@ const usableBotsRoute = async (c: DashboardContext) => {
   const gate = await requireMember(c);
   if (!gate.ok) return gate.response;
   c.header("Cache-Control", "private, no-store");
-  return c.json(await usableBotsRead(gate.db, gate.scope.workspaceId));
+  return c.json(
+    await usableBotsRead(
+      gate.db,
+      gate.scope.workspaceId,
+      gate.scope.role,
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+  );
 };
 
 async function appStatusAction(
@@ -2388,6 +2431,7 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         ...(target === null ? {} : { target_id: target.id }),
         blocked: blockedReason !== null,
         blocked_reason: blockedReason,
+        installations: await installationsVisibleTo(store, appRow, member.scope.workspaceId),
         app: {
           github_app_id: appRow.github_app_id,
           status: appRow.status,
@@ -2528,6 +2572,18 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
       },
       installation: binding,
       pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
+      // F7: the bots this App's chain actually mounts in THIS workspace — the
+      // only App-to-bot relation that exists. Empty until install-state-chain
+      // writes the chain, and never inferred from an id coincidence.
+      mounted_bot_ids: (
+        await member.db
+          .prepare(
+            `SELECT bot_id FROM app_install_bots
+              WHERE github_app_id = ?1 AND workspace_id = ?2 ORDER BY position`,
+          )
+          .bind(appRow.id, member.scope.workspaceId)
+          .all<{ bot_id: string }>()
+      ).results.map((row) => row.bot_id),
       blocked: false,
       blocked_reason: null,
       official_workspace: officialWorkspaceId !== null && officialWorkspaceId === appRow.workspace_id,
@@ -3161,7 +3217,8 @@ const appBotRoute = async (c: DashboardContext) => {
     return c.text("the app settings need a configured DASHBOARD_ENCRYPTION_KEY", 500);
   }
   const month = quotaMonth(new Date());
-  const [sections, provider, spendRow, mountRows, planMonthlyRp] = await Promise.all([
+  const apps = createReviewBotsStore(member.db);
+  const [sections, provider, spendRow, mountRows, quota, defaultChain] = await Promise.all([
     botScopedSections(member.db, app, c.env.DASHBOARD_ENCRYPTION_KEY, member.scope),
     member.db
       .prepare(`SELECT name FROM workspaces WHERE id = ? AND deleted_at IS NULL`)
@@ -3174,22 +3231,36 @@ const appBotRoute = async (c: DashboardContext) => {
       )
       .bind(member.scope.workspaceId, bot.id, month.startIso, month.endIso)
       .first<{ total: number }>(),
-    // The caller's Apps whose chain holds this bot (D23 "Mounted by"): the
-    // chain table is empty until install-state-chain's writers land, so the
-    // read honestly answers nothing before then.
+    // F6: the chain rows, joined to the App's numeric id + display name — the
+    // values the App detail route resolves. Empty until install-state-chain's
+    // writers land, which is an honest "not mounted" answer.
     member.db
       .prepare(
         `SELECT DISTINCT m.github_app_id FROM app_install_bots m
-          JOIN github_apps g ON g.id = m.github_app_id AND g.deleted_at IS NULL
           WHERE m.workspace_id = ?1 AND m.bot_id = ?2
           ORDER BY m.github_app_id`,
       )
       .bind(member.scope.workspaceId, bot.id)
       .all<{ github_app_id: string }>(),
-    readPlanMonthlyRp(member.db, member.scope.workspaceId, month.startIso),
+    readPlanMonthlyRp(
+      member.db,
+      member.scope.workspaceId,
+      month.startIso,
+      deploymentModeOf(c.env.DEPLOYMENT_MODE),
+    ),
+    // F4: the capability summary reads the DEFAULT chain without owner
+    // authority — no keys, no named chains, nothing secret.
+    apps.readDefaultChainSummary(bot.id),
   ]);
+  const mountIdentities = await apps.listAppIdentities(
+    mountRows.results.map((row) => row.github_app_id),
+  );
+  // F5: ownership (whose bot it is) is separate from publication scope (who
+  // may use it) and from this viewer's manage permission.
+  const owned = bot.workspace_id === member.scope.workspaceId;
   return c.json({
-    can_manage: canWriteBotScope(app, member.scope) && canManageApp(member.scope),
+    can_manage: owned && canManageApp(member.scope),
+    owned,
     app: {
       github_app_id: app.github_app_id,
       id: app.id,
@@ -3212,11 +3283,15 @@ const appBotRoute = async (c: DashboardContext) => {
     overview: {
       provider_workspace: provider?.name ?? bot.workspace_id,
       month_used_rp: Number(spendRow?.total ?? 0),
-      plan_monthly_rp: planMonthlyRp,
-      mounted_apps: mountRows.results.map((row) => ({
-        id: row.github_app_id,
-        name: row.github_app_id,
+      plan_quota: quota.kind,
+      plan_monthly_rp: quota.kind === "ceiling" ? quota.rp : null,
+      default_chain: defaultChain,
+      mounted_apps: mountIdentities.map((row) => ({
+        id: row.id,
+        github_app_id: row.github_app_id,
+        name: row.name,
       })),
+      mounted_bot_ids: mountRows.results.map((row) => row.github_app_id),
     },
     ...sections,
   });
@@ -3281,8 +3356,15 @@ function scopeSwitchRoute(kind: ScopeSwitchKind) {
     const outcome =
       kind === "app"
         ? await setAppScope(gate.db, { appId: entity.id, ...args })
-        : await setReviewBotScope(gate.db, { botId: entity.id, ...args });
+        : await setReviewBotScope(gate.db, {
+            botId: entity.id,
+            ...args,
+            // F12: the store itself re-checks ownership and the owner/admin
+            // authority, so a caller that bypasses this route cannot write.
+            authority: { workspaceId: gate.scope.workspaceId, role: gate.scope.role },
+          });
     if (outcome.outcome === "bot_not_found") return c.json({ error: copy.notFound }, 404);
+    if (outcome.outcome === "forbidden") return c.json({ error: "forbidden" }, 403);
     if (outcome.outcome === "outside_official_workspace") {
       return c.json({ error: copy.outsideOfficial }, 409);
     }

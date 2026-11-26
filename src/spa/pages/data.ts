@@ -97,6 +97,9 @@ export type AppsPayload = {
   apps: Array<{
     github_app_id: number;
     owned?: boolean;
+    installed?: boolean;
+    month_used_rp?: number;
+    bot_id?: string;
     github_name: string | null;
     github_slug: string | null;
     github_avatar_url: string | null;
@@ -110,6 +113,7 @@ export type AppsPayload = {
   }>;
   shared_bots?: SharedBotRow[];
   pending_installations?: PendingBindRow[];
+  month_plan_rp?: number | null;
 };
 
 /** One unbound physical installation of an App the workspace may install through. */
@@ -118,6 +122,8 @@ export type PendingBindRow = {
   account_login: string | null;
   seen_at: string;
   app_id: string;
+  app_github_app_id: number;
+  app_name: string;
 };
 
 function isPendingBindRow(value: unknown): value is PendingBindRow {
@@ -126,6 +132,8 @@ function isPendingBindRow(value: unknown): value is PendingBindRow {
     typeof value.installation_id === "number" &&
     Number.isSafeInteger(value.installation_id) &&
     typeof value.app_id === "string" &&
+    typeof value.app_github_app_id === "number" &&
+    typeof value.app_name === "string" &&
     isNullableString(value.account_login) &&
     typeof value.seen_at === "string"
   );
@@ -139,6 +147,8 @@ export type UsableBotRow = {
   workspace_id: string;
   workspace_name: string;
   owned: boolean;
+  /** This caller may change the bot's configuration — ownership AND role. */
+  can_manage: boolean;
   scope: BotScope;
   multiplier: number;
   month_used_rp: number;
@@ -159,6 +169,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.workspace_id === "string" &&
     typeof value.workspace_name === "string" &&
     typeof value.owned === "boolean" &&
+    typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
     typeof value.multiplier === "number" &&
     typeof value.month_used_rp === "number"
@@ -183,6 +194,9 @@ export type SharedBotRow = {
   id: string;
   github_slug: string | null;
   name: string;
+  github_description?: string | null;
+  owner_workspace_name?: string | null;
+  capability?: string | null;
   target_count: number;
 };
 
@@ -193,7 +207,10 @@ function isSharedBotRow(value: unknown): value is SharedBotRow {
     value.id !== "" &&
     (value.github_slug === null || typeof value.github_slug === "string") &&
     typeof value.name === "string" &&
-    typeof value.target_count === "number"
+    typeof value.target_count === "number" &&
+    (value.github_description === undefined || value.github_description === null || typeof value.github_description === "string") &&
+    (value.owner_workspace_name === undefined || value.owner_workspace_name === null || typeof value.owner_workspace_name === "string") &&
+    (value.capability === undefined || value.capability === null || typeof value.capability === "string")
   );
 }
 
@@ -775,7 +792,9 @@ export type BotOverview = {
   provider_workspace: string;
   month_used_rp: number;
   plan_monthly_rp: number | null;
-  mounted_apps: Array<{ id: string; name: string }>;
+  default_chain: string | null;
+  mounted_apps: Array<{ id: string; github_app_id: number; name: string }>;
+  mounted_bot_ids?: string[];
 };
 
 function parseBotOverview(value: unknown): BotOverview | null {
@@ -783,20 +802,37 @@ function parseBotOverview(value: unknown): BotOverview | null {
   if (typeof value.provider_workspace !== "string") return null;
   if (typeof value.month_used_rp !== "number") return null;
   if (value.plan_monthly_rp !== null && typeof value.plan_monthly_rp !== "number") return null;
+  if (value.default_chain !== null && typeof value.default_chain !== "string") return null;
   if (!Array.isArray(value.mounted_apps)) return null;
   for (const row of value.mounted_apps) {
-    if (!isRecord(row) || typeof row.id !== "string" || typeof row.name !== "string") return null;
+    if (
+      !isRecord(row) ||
+      typeof row.id !== "string" ||
+      typeof row.github_app_id !== "number" ||
+      typeof row.name !== "string"
+    ) {
+      return null;
+    }
   }
+  if (value.mounted_bot_ids !== undefined && !isStringArray(value.mounted_bot_ids)) return null;
   return {
     provider_workspace: value.provider_workspace,
     month_used_rp: value.month_used_rp,
     plan_monthly_rp: value.plan_monthly_rp,
-    mounted_apps: value.mounted_apps.map((row) => ({ id: row.id, name: row.name })),
+    default_chain: value.default_chain,
+    mounted_apps: value.mounted_apps.map((row) => ({
+      id: row.id,
+      github_app_id: row.github_app_id,
+      name: row.name,
+    })),
+    ...(value.mounted_bot_ids === undefined ? {} : { mounted_bot_ids: value.mounted_bot_ids }),
   };
 }
 
 export type BotSettingsPayload = {
   can_manage: boolean;
+  /** Whose bot it is — independent of `scope` (publication) and `can_manage`. */
+  owned?: boolean;
   official_workspace?: boolean;
   overview?: BotOverview;
 } & BotConfigSections;
@@ -849,6 +885,9 @@ type SettingsManageBase = {
   targets_many?: boolean;
   official_workspace?: boolean;
   can_configure_bot?: boolean;
+  /** F7: the bot ids this App's chain mounts in this workspace (empty until
+   * install-state-chain writes the chain). */
+  mounted_bot_ids?: string[];
 } & BotConfigSections;
 
 /**
@@ -2538,7 +2577,11 @@ export function parseBotSettings(data: unknown): BotSettingsPayload | null {
   if (!Array.isArray(data.custom_provider_api_ids) || !isStringArray(data.custom_provider_api_ids)) return null;
   if (!isSandboxImageList(data.sandbox_images)) return null;
   if (data.overview !== undefined && data.overview !== null && parseBotOverview(data.overview) === null) return null;
-  return { ...(data as BotSettingsPayload), overview: data.overview == null ? undefined : parseBotOverview(data.overview) ?? undefined };
+  if (data.owned !== undefined && typeof data.owned !== "boolean") return null;
+  return {
+    ...(data as BotSettingsPayload),
+    overview: data.overview == null ? undefined : parseBotOverview(data.overview) ?? undefined,
+  };
 }
 
 function isPrVerdict(value: unknown): value is (typeof PR_VERDICTS)[number] {

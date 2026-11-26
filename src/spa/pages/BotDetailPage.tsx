@@ -10,7 +10,7 @@
  * the capability summary built from the model's default chain plus its
  * sandbox image (D21) — never a client-derived guess.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { t } from "../../i18n";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
@@ -57,12 +57,18 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
   const [state, setState] = useState<"loading" | "ok" | "error">("loading");
   const [notice] = useState<{ kind: NoticeKind; message: string } | null>(null);
 
+  const sequenceRef = useRef(0);
+  const base = apiBase();
+
   const load = async (): Promise<boolean> => {
+    const sequence = ++sequenceRef.current;
     try {
       const [botData, modelsData] = await Promise.all([
-        fetchJson(`${apiBase()}/api/review-bots/${encodeURIComponent(botId)}/bot`),
-        fetchJson(`${apiBase()}/api/models`).catch(() => null),
+        fetchJson(`${base}/api/review-bots/${encodeURIComponent(botId)}/bot`),
+        fetchJson(`${base}/api/models`).catch(() => null),
       ]);
+      // F15: an older in-flight read must never overwrite a newer one.
+      if (sequence !== sequenceRef.current) return false;
       const parsed = parseBotSettings(botData);
       if (!parsed) {
         setState("error");
@@ -73,15 +79,19 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
       setState("ok");
       return true;
     } catch {
-      setState("error");
+      if (sequence === sequenceRef.current) setState("error");
       return false;
     }
   };
 
+  // F15: keyed on BOTH the workspace base and the bot id — switching workspace
+  // while keeping the bot id must reload, not retain the prior workspace's
+  // provider, spend or permissions.
   useEffect(() => {
+    setState("loading");
     void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [botId]);
+  }, [base, botId]);
 
   if (state === "loading") {
     return <PageSkeleton locale={locale} kind="forms" />;
@@ -90,8 +100,13 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
     return <ErrorState locale={locale} onRetry={() => void load()} />;
   }
   const { app, overview } = payload;
-  const owned = app.scope === "owned";
-  const defaultChain = splitModelChain(payload.model_chain);
+  // F5: ownership is the bot's workspace, NOT its publication scope — an
+  // owner who publishes a bot still reads own-bot unlimited usage.
+  const owned = payload.owned === true;
+  // F4: the capability summary reads the NON-OWNER overview read, so a shared
+  // bot's configured default chain is visible to its consumers; `model_chain`
+  // stays owner-only configuration.
+  const defaultChain = splitModelChain(overview?.default_chain ?? payload.model_chain);
   const namedChains = payload.model_chains
     .filter((entry) => entry.name !== "default")
     .map((entry) => ({ name: entry.name, chain: splitModelChain(entry.chain) }));
@@ -117,7 +132,7 @@ export function BotDetailPage({ boot, botId }: { boot: SpaBoot; botId: string })
             {overview && overview.mounted_apps.length > 0 ? (
               <span className="flex flex-wrap gap-2">
                 {overview.mounted_apps.map((mounted) => (
-                  <a key={mounted.id} href={`${apiBase()}/apps/${encodeURIComponent(mounted.id)}`}>
+                  <a key={mounted.id} href={`${apiBase()}/apps/${mounted.github_app_id}`}>
                     {mounted.name}
                   </a>
                 ))}

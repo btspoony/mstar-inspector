@@ -331,15 +331,18 @@ describe("tab shell rendering (static SSR)", () => {
     expect(parseSettings({ ...untargetedPayload, targets_many: "yes" })).toBeNull();
   });
 
-  test("the detail links to the bot's own settings page", () => {
-    for (const [payload, label] of [
-      [managePayload, "manager"],
-      [identityPayload, "member"],
-    ] as const) {
-      const markup = renderDetail(payload);
-      expect(markup, label).toContain(`href="${apiBase()}/apps/1/bot"`);
-      expect(markup, label).toContain(t("en", "appDetail.botSettingsLink"));
-    }
+  test("the detail links to REAL bots — the mounted chain, or the usable-bot list, never an inferred App id", () => {
+    // F7: with no chain row the link is the workspace's usable-bot list.
+    const chainless = renderDetail(managePayload);
+    expect(chainless).toContain(`href="${apiBase()}/apps?tab=bots"`);
+    expect(chainless).toContain(t("en", "appDetail.botSettingsLink"));
+    expect(chainless).not.toContain(`href="${apiBase()}/apps/1/bot"`);
+
+    // F7: a mounted chain links each mounted BOT id, never the App id.
+    const mounted = renderDetail({ ...managePayload, mounted_bot_ids: ["bot-a", "bot-b"] });
+    expect(mounted).toContain(`href="${apiBase()}/bots/bot-a"`);
+    expect(mounted).toContain(`href="${apiBase()}/bots/bot-b"`);
+    expect(mounted).not.toContain(`href="${apiBase()}/apps/1/bot"`);
   });
 
   test("the identity status pill renders the shared primitive from the single derivation", () => {

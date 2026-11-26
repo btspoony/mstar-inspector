@@ -19,6 +19,7 @@ import {
   TabsTrigger,
 } from "@design-system";
 import {
+  AppInfoSection,
   AppInstallationsSection,
   AppInstallSection,
   OpsSection,
@@ -186,6 +187,11 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
     [base, appId, locale],
   );
 
+  // F10/D45: an App whose cached GitHub metadata was never synced gets ONE
+  // first-load refresh — a POST to `/api/apps/:appId/refresh-metadata`, the
+  // only sanctioned refresh. The GET stays a pure read.
+  const refreshedRef = useRef(false);
+
   useEffect(() => {
     cancelledRef.current = false;
     void load();
@@ -194,6 +200,16 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
       cancelledRef.current = true;
     };
   }, [load]);
+
+  useEffect(() => {
+    if (refreshedRef.current) return;
+    if (payload === null || payload.can_manage !== true || payload.blocked) return;
+    const meta = payload.app as { github_metadata_synced_at?: string | null };
+    if (meta.github_metadata_synced_at !== null && meta.github_metadata_synced_at !== undefined) return;
+    if (payload.app.github_app_id === null) return;
+    refreshedRef.current = true;
+    void refreshAppMetadata(apiBase(), payload.app.github_app_id);
+  }, [payload]);
 
   useEffect(() => {
     const onPop = () => setSearch(parseAppDetailSearch(window.location.search));
@@ -235,22 +251,66 @@ export function AppDetailPage({ boot, appId }: { boot: SpaBoot; appId: string })
 }
 
 /**
- * The link from a target detail to the App's own settings face. The href is
- * derived from the page's own API base, so it is the real target on both the
- * legacy and the workspace-scoped path; `/bot` answers one redirect to the
- * settings tab.
+ * F7: the way from App detail to the bot configuration. There is NO App→bot
+ * relation to infer (the split keeps them independent), so this links the bots
+ * the App's chain actually mounts in this workspace — and, when the chain is
+ * still empty, the workspace's usable-bot list. It never derives a bot id from
+ * the App id.
  */
-export function BotSettingsLink({ locale, appId }: { locale: SpaBoot["locale"]; appId: string }) {
-  const href = `${apiBase()}/apps/${encodeURIComponent(appId)}/bot`;
+export function BotSettingsLink({
+  locale,
+  mountedBotIds,
+}: {
+  locale: SpaBoot["locale"];
+  mountedBotIds: readonly string[];
+}) {
+  const bots = [...mountedBotIds];
+  if (bots.length === 0) {
+    const listHref = `${apiBase()}/apps?tab=bots`;
+    return (
+      <a
+        className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+        href={listHref}
+        onClick={(event) => spaClick(listHref, event)}
+      >
+        {t(locale, "appDetail.botSettingsLink")}
+      </a>
+    );
+  }
   return (
-    <a
-      className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
-      href={href}
-      onClick={(event) => spaClick(href, event)}
-    >
-      {t(locale, "appDetail.botSettingsLink")}
-    </a>
+    <span className="flex flex-wrap items-center gap-3">
+      {bots.map((botId) => {
+        const href = `${apiBase()}/bots/${encodeURIComponent(botId)}`;
+        return (
+          <a
+            key={botId}
+            className="inline-flex items-center gap-1.5 text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+            href={href}
+            onClick={(event) => spaClick(href, event)}
+          >
+            {t(locale, "appDetail.botSettingsLink")}
+          </a>
+        );
+      })}
+    </span>
   );
+}
+
+/**
+ * F10/D45: the single first-load metadata refresh. It is a POST so the GET
+ * stays pure; a failure is silent here — the App metadata controls carry the
+ * retry affordance.
+ */
+export async function refreshAppMetadata(base: string, githubAppId: number): Promise<boolean> {
+  try {
+    const res = await fetch(`${base}/api/apps/${githubAppId}/refresh-metadata`, {
+      method: "POST",
+      headers: { Accept: "application/json" },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 const BLOCKED_REASON_KEYS = {
@@ -298,7 +358,14 @@ export function TargetHeader({
         description={t(locale, "apps.by", { login: payload.app.created_by ?? "—" })}
         actions={
           <>
-            {blockedMessage ? null : <BotSettingsLink locale={locale} appId={appId} />}
+            {blockedMessage ? null : (
+              <BotSettingsLink
+                locale={locale}
+                mountedBotIds={
+                  payload.can_manage ? ((payload as { mounted_bot_ids?: string[] }).mounted_bot_ids ?? []) : []
+                }
+              />
+            )}
             <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>
           </>
         }
@@ -460,6 +527,19 @@ export function AppDetailView({
         </TabsList>
         <TabsContent value="settings" forceMount>
           <div className="flex flex-col">
+            {/* F11: the App's own identity and credentials stay on the App
+                face — the bot configuration moved, the App metadata did not.
+                A Blocked App (its bot is no longer shared) renders neither:
+                the payload carries no App-side facts for it. */}
+            {payload.blocked ? null : (
+              <AppInfoSection
+                locale={locale}
+                app={payload.app}
+                workspaceId={payload.workspace_id}
+                canManage={true}
+                onReload={onReload}
+              />
+            )}
             {target === null ? (
               payload.targets_many ? (
                 <RepositoriesNotice locale={locale} copy="appDetail.targetsMany" />

@@ -646,8 +646,9 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) => {
-        if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
         if (wire.url.endsWith("/api/apps/9401/installation-repositories")) return firstAnswer;
+        if (wire.url.endsWith("/api/apps/9402")) return settingsWith(INSTALLED);
+        if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
         if (wire.url.endsWith("/api/apps/9402/installation-repositories")) {
           return listing([{ repo_id: 502, owner: "acme", name: "web" }]);
         }
@@ -690,7 +691,7 @@ describe("add-repository dialog (mounted)", () => {
           shared_bots: [],
         });
       }
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }
@@ -736,7 +737,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing(many(45))
@@ -776,7 +777,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing(many(45))
@@ -808,7 +809,7 @@ describe("add-repository dialog (mounted)", () => {
           shared_bots: [],
         });
       }
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) return listing(many(45));
       return wireJson({});
     });
@@ -844,7 +845,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing(many(45))
@@ -877,7 +878,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing(many(45))
@@ -907,7 +908,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing([
@@ -941,7 +942,7 @@ describe("add-repository dialog (mounted)", () => {
         onClose: () => {},
       }),
       (wire) =>
-        wire.url.endsWith("/settings")
+        wire.url.endsWith("/api/apps/9401")
           ? settingsWith(INSTALLED)
           : wire.url.endsWith("/installation-repositories")
             ? listing([
@@ -977,7 +978,7 @@ describe("add-repository dialog (mounted)", () => {
           shared_bots: [],
         });
       }
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }
@@ -1026,7 +1027,7 @@ describe("add-repository dialog (mounted)", () => {
           shared_bots: [],
         });
       }
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([
           { repo_id: 501, owner: "acme", name: "api" },
@@ -1077,7 +1078,7 @@ describe("add-repository dialog (mounted)", () => {
           shared_bots: [],
         });
       }
-      if (wire.url.endsWith("/settings")) return settingsWith(installed ? INSTALLED : []);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(installed ? INSTALLED : []);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }
@@ -1090,7 +1091,7 @@ describe("add-repository dialog (mounted)", () => {
       await view.click(addButton);
       expect(view.dialog()?.textContent ?? "").toContain(t("en", "targets.addDialog.noInstallations"));
       expect(view.win.document.querySelector("#add-repository-search")).toBeNull();
-      const before = view.sent.filter((wire) => wire.url.endsWith("/settings")).length;
+      const before = view.sent.filter((wire) => wire.url.endsWith("/api/apps/9401")).length;
 
       installed = true;
       const recheck = [...(view.dialog()?.querySelectorAll("button") ?? [])].find(
@@ -1098,7 +1099,7 @@ describe("add-repository dialog (mounted)", () => {
       );
       await view.click(recheck as unknown as DomElement | undefined);
 
-      expect(view.sent.filter((wire) => wire.url.endsWith("/settings")).length).toBe(before + 1);
+      expect(view.sent.filter((wire) => wire.url.endsWith("/api/apps/9401")).length).toBe(before + 1);
       expect(view.win.document.querySelector("#add-repository-search")).not.toBeNull();
       expect(view.dialog()?.textContent ?? "").not.toContain(t("en", "targets.addDialog.noInstallations"));
     } finally {
@@ -1164,7 +1165,7 @@ describe("the list failure face", () => {
     const view = await mountTargets(createElement(TargetsPage, { boot: BOOT }), (wire) => {
       if (wire.url.endsWith("/api/apps")) return heldApps;
       if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }
@@ -1187,7 +1188,7 @@ describe("the list failure face", () => {
       expect(text).not.toContain(t("en", "targets.addDialog.noApps"));
       const combobox = view.win.document.querySelector('[role="dialog"] [role="combobox"]');
       expect(combobox?.textContent ?? "").toContain("Acme Inspector");
-      expect(view.sent.some((wire) => wire.url.endsWith("/settings"))).toBe(true);
+      expect(view.sent.some((wire) => wire.url.endsWith("/api/apps/9401"))).toBe(true);
       expect(view.sent.some((wire) => wire.url.endsWith("/installation-repositories"))).toBe(true);
     } finally {
       await view.unmount();
@@ -1207,7 +1208,7 @@ describe("the list failure face", () => {
         });
       }
       if (wire.url.endsWith("/api/targets")) return wireJson({ targets: [] });
-      if (wire.url.endsWith("/settings")) return settingsWith(INSTALLED);
+      if (wire.url.endsWith("/api/apps/9401")) return settingsWith(INSTALLED);
       if (wire.url.endsWith("/installation-repositories")) {
         return listing([{ repo_id: 501, owner: "acme", name: "api" }]);
       }

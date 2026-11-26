@@ -258,6 +258,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
       scope: "shared",
       actor: "operator",
       now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
     });
 
     expect(outcome).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
@@ -286,6 +287,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         confirm,
         actor: "operator",
         now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
       });
       expect(refused).toEqual({ outcome: "confirm_required" });
     }
@@ -298,6 +300,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
       confirm: true,
       actor: "operator",
       now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
     });
     expect(accepted).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(storedScope(db, "bot-unshare")).toEqual({ scope: "owned", shared_at: null });
@@ -321,10 +324,10 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedOfficialWorkspace(db, WS);
 
     expect(
-      await setReviewBotScope(db, { botId: "bot-owned", scope: "owned", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-owned", scope: "owned", actor: "operator", now: LATER , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(
-      await setReviewBotScope(db, { botId: "bot-still-shared", scope: "shared", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-still-shared", scope: "shared", actor: "operator", now: LATER , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
 
     expect(storedScope(db, "bot-owned")).toEqual({ scope: "owned", shared_at: null });
@@ -339,12 +342,14 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-home", { workspaceId: WS });
 
     expect(
-      await setReviewBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-home", scope: "shared", actor: "operator", now: NOW , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "outside_official_workspace" });
 
     seedOfficialWorkspace(db, WS);
+    // F12: a FOREIGN bot is refused by ownership first, never by the official
+    // rule — authorize as its own workspace to isolate the rule under test.
     expect(
-      await setReviewBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-elsewhere", scope: "shared", actor: "operator", now: NOW , authority: { workspaceId: "other", role: "owner" } }),
     ).toEqual({ outcome: "outside_official_workspace" });
 
     expect(storedScope(db, "bot-home")).toEqual({ scope: "owned", shared_at: null });
@@ -365,6 +370,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         confirm: true,
         actor: "operator",
         now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
       }),
     ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(storedScope(db, "bot-stale-share")).toEqual({ scope: "owned", shared_at: null });
@@ -376,13 +382,14 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedScopedBot(db, "bot-cycle", { workspaceId: WS });
     seedOfficialWorkspace(db, WS);
 
-    await setReviewBotScope(db, { botId: "bot-cycle", scope: "shared", actor: "operator", now: NOW });
-    await setReviewBotScope(db, { botId: "bot-cycle", scope: "owned", confirm: true, actor: "operator", now: LATER });
+    await setReviewBotScope(db, { botId: "bot-cycle", scope: "shared", actor: "operator", now: NOW , authority: { workspaceId: WS, role: "owner" } });
+    await setReviewBotScope(db, { botId: "bot-cycle", scope: "owned", confirm: true, actor: "operator", now: LATER , authority: { workspaceId: WS, role: "owner" } });
     const reShared = await setReviewBotScope(db, {
       botId: "bot-cycle",
       scope: "shared",
       actor: "operator",
       now: "2026-03-01T00:00:00.000Z",
+      authority: { workspaceId: WS, role: "owner" },
     });
 
     expect(reShared).toEqual({ outcome: "ok", scope: "shared", sharedAt: "2026-03-01T00:00:00.000Z" });
@@ -399,10 +406,10 @@ describe("bot scope transitions (contract § 7.1)", () => {
     seedOfficialWorkspace(db, WS);
 
     expect(
-      await setReviewBotScope(db, { botId: "bot-absent", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-absent", scope: "shared", actor: "operator", now: NOW , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(
-      await setReviewBotScope(db, { botId: "bot-gone", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(db, { botId: "bot-gone", scope: "shared", actor: "operator", now: NOW , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(scopeAudits(db)).toEqual([]);
   });
@@ -426,7 +433,13 @@ describe("bot scope transitions (contract § 7.1)", () => {
     };
 
     expect(
-      await setReviewBotScope(racingDb, { botId: "bot-raced", scope: "shared", actor: "operator", now: NOW }),
+      await setReviewBotScope(racingDb, {
+        botId: "bot-raced",
+        scope: "shared",
+        actor: "operator",
+        now: NOW,
+        authority: { workspaceId: WS, role: "owner" },
+      }),
     ).toEqual({ outcome: "bot_not_found" });
     expect(fired).toBe(true);
     expect(storedScope(db, "bot-raced")).toEqual({ scope: "owned", shared_at: null });
@@ -457,6 +470,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         scope: "shared",
         actor: "operator",
         now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
       }),
     ).toEqual({ outcome: "outside_official_workspace" });
     expect(fired).toBe(true);
@@ -482,6 +496,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
               scope: "shared",
               actor: "operator",
               now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
             }),
           ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
         }
@@ -495,6 +510,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         scope: "shared",
         actor: "operator",
         now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
       }),
     ).toEqual({ outcome: "ok", scope: "shared", sharedAt: NOW });
     expect(fired).toBe(true);
@@ -530,6 +546,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
               confirm: true,
               actor: "operator",
               now: NOW,
+      authority: { workspaceId: WS, role: "owner" },
             }),
           ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
         }
@@ -544,6 +561,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         confirm: true,
         actor: "operator",
         now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
       }),
     ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(fired).toBe(true);
@@ -571,7 +589,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
     expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "shared", shared_at: NOW });
 
     expect(
-      await setReviewBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER }),
+      await setReviewBotScope(db, { botId: "bot-new", scope: "shared", actor: "operator", now: LATER , authority: { workspaceId: WS, role: "owner" } }),
     ).toEqual({ outcome: "outside_official_workspace" });
     expect(storedScope(db, "bot-new")).toEqual({ scope: "owned", shared_at: null });
 
@@ -582,6 +600,7 @@ describe("bot scope transitions (contract § 7.1)", () => {
         confirm: true,
         actor: "operator",
         now: LATER,
+      authority: { workspaceId: WS, role: "owner" },
       }),
     ).toEqual({ outcome: "ok", scope: "owned", sharedAt: null });
     expect(storedScope(db, "bot-orphan-share")).toEqual({ scope: "owned", shared_at: null });
@@ -631,12 +650,20 @@ describe("shared bots a workspace may create a target on", () => {
     seedTargetIn(db, "bot-shared", "ws-other");
 
     const store = createReviewBotsStore(db);
-    expect(await store.listSharedBots(WS)).toEqual([
-      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 1 },
-    ]);
-    expect(await store.listSharedBots("ws-other")).toEqual([
-      { id: "bot-shared", github_slug: "alpha-app", name: "Alpha", target_count: 2 },
-    ]);
+    // D22/F9: the card's own fields ride the same row — description, owner
+    // workspace and the owner's chain capability (empty before the chain).
+    const card = (targetCount: number, owner: string, ownerName: string | null) => ({
+      id: "bot-shared",
+      github_slug: "alpha-app",
+      name: "Alpha",
+      github_description: null,
+      owner_workspace_id: owner,
+      owner_workspace_name: ownerName,
+      capability: null,
+      target_count: targetCount,
+    });
+    expect(await store.listSharedBots(WS)).toEqual([card(1, "ws-other", "ws-other")]);
+    expect(await store.listSharedBots("ws-other")).toEqual([card(2, "ws-other", "ws-other")]);
   });
 
   test("an owned, soft-deleted or absent bot is never offered", async () => {

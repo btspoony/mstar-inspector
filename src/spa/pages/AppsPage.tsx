@@ -1,13 +1,21 @@
 /**
- * The Apps page (D6/D8): ONE list surface split into three URL-addressable
- * tabs — `installed` (the workspace's live install rows plus the pending
- * binds a shared App leaves before binding), `created` (the Apps the
- * workspace owns, whose create dialog keeps this tab's action), and `bots`
- * ("Bots I can use", one server-ordered read with client-side owner filters).
- * The tab rides `?tab=` with the workspace's OWN default omitted, so a
- * shared/reload link lands on the same tab the reader left.
+ * The Apps page (D6/D8/D22/D25): ONE list surface split into three
+ * URL-addressable tabs.
+ *
+ * - `installed` — Apps this workspace holds an INSTALLATION RELATION to, plus
+ *   one "Waiting to be bound" row per pending physical installation. Under D43
+ *   the membership is derived from relations that exist today (a live
+ *   `review_targets.app_id` row, or a bound `github_app_installations` row) —
+ *   never from `app_installations`, which install-state-chain fills.
+ * - `created` — the Apps the workspace owns, installed or not.
+ * - `bots` — "Bots I can use": one server-ordered read, client-side filters, no
+ *   App column.
+ *
+ * The tab rides `?tab=`; only the tab equal to the REAL default is omitted, an
+ * unknown value is corrected once the payload lands, and tab changes push
+ * history entries so Back/Forward walk them.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { t } from "../../i18n";
 import {
   Button,
@@ -30,6 +38,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { fetchJson } from "../api";
 import type { SpaBoot } from "../boot";
 import { AppAvatar } from "../components/AppAvatar";
+import { appInstallHref } from "../components/AppInstallIdentity";
 import { EmptyState } from "../components/state/EmptyState";
 import { ErrorState } from "../components/state/ErrorState";
 import { PageSkeleton } from "../components/state/PageSkeleton";
@@ -76,39 +85,53 @@ export async function loadApps(base: string): Promise<AppsPayload | null> {
 }
 
 /** One "Bots I can use" read — the server already serves the D18 ordering. */
-export async function loadUsableBots(base: string): Promise<UsableBotsPayload | null> {
-  try {
-    return parseUsableBots(await fetchJson(`${base}/api/review-bots`));
-  } catch {
-    return null;
-  }
+export async function loadUsableBots(base: string): Promise<UsableBotsPayload> {
+  const parsed = parseUsableBots(await fetchJson(`${base}/api/review-bots`));
+  if (parsed === null) throw new Error("unreadable bot list");
+  return parsed;
 }
 
 export type AppsTab = "installed" | "created" | "bots";
 
+const APP_TABS: readonly AppsTab[] = ["installed", "created", "bots"];
+
 /**
- * The tab the URL names, or the workspace's own default (D8): `created` when
- * the workspace has created no App (nothing COULD be installed yet),
- * `installed` otherwise. An unknown value falls back to the same default —
- * it is never rendered as a selected tab that has no panel.
+ * F1/D8: an App is INSTALLED when this workspace holds an installation
+ * relation to it — a live target, or a bound physical installation. Ownership
+ * alone is not membership; an owned-but-uninstalled App is created-only.
  */
-export function appsTabOf(search: string, hasCreated: boolean): AppsTab {
-  const value = new URLSearchParams(search).get("tab");
-  if (value === "installed" || value === "created" || value === "bots") return value;
-  return hasCreated ? "installed" : "created";
+export function installedAppsOf(payload: AppsPayload): AppsPayload["apps"] {
+  return payload.apps.filter((app) => app.installed === true);
 }
 
-/** `?tab` omitted when the tab IS the default — sharing the URL reproduces the default either way. */
+/** The tab the URL names, or the D8 default once membership is known. */
+export function appsTabOf(search: string, hasInstalled: boolean): AppsTab {
+  const value = new URLSearchParams(search).get("tab");
+  if (value === "installed" || value === "created" || value === "bots") return value;
+  return hasInstalled ? "installed" : "created";
+}
+
+/** F2: the real default is omitted; every other tab is spelled out. */
 export function appsTabQuery(tab: AppsTab, defaultTab: AppsTab): string {
   return tab === defaultTab ? "" : `?tab=${tab}`;
 }
 
+export type AppsReadState =
+  | { kind: "loading" }
+  | { kind: "ok"; payload: AppsPayload }
+  | { kind: "error"; message: string };
+
+export type BotsReadState =
+  | { kind: "loading" }
+  | { kind: "ok"; payload: UsableBotsPayload }
+  | { kind: "error"; message: string };
+
 export function AppsPage({ boot }: { boot: SpaBoot }) {
   const locale = boot.locale;
-  const [payload, setPayload] = useState<AppsPayload | null>(null);
-  const [bots, setBots] = useState<UsableBotsPayload | null>(null);
-  const [state, setState] = useState<"loading" | "ok" | "error">("loading");
-  const [tab, setTab] = useState<AppsTab>(() => appsTabOf(window.location.search, true));
+  const [apps, setApps] = useState<AppsReadState>({ kind: "loading" });
+  // F3: a failed bot read is its OWN state — never an empty list.
+  const [bots, setBots] = useState<BotsReadState>({ kind: "loading" });
+  const [tab, setTab] = useState<AppsTab>(() => appsTabOf(window.location.search, false));
   const base = apiBase();
   const canCreate = canCreateAppFor(boot, base === "/dashboard" ? null : base.slice("/dashboard/".length));
   const unavailableReason =
@@ -117,58 +140,87 @@ export function AppsPage({ boot }: { boot: SpaBoot }) {
       : t(locale, "apps.createUnavailable.role");
 
   const load = useCallback(async (): Promise<void> => {
-    setState("loading");
+    setApps({ kind: "loading" });
+    setBots({ kind: "loading" });
+    // The two reads fail independently: an Apps failure must not hide the bot
+    // list, and a bot failure must never read as "no bot is available".
     try {
-      const [parsed, usable] = await Promise.all([loadApps(base), loadUsableBots(base)]);
-      if (!parsed) {
-        setState("error");
-        return;
-      }
-      setPayload(parsed);
-      setBots(usable);
-      setState("ok");
-      // The first read is what learns the workspace's OWN default (D8) —
-      // before it, nothing can say whether a bare path means `installed` or
-      // `created` — so an un-named tab settles here, once.
-      if (!new URLSearchParams(window.location.search).get("tab")) {
-        setTab(appsTabOf("", parsed.apps.some((app) => app.owned !== false)));
-      }
-    } catch {
-      setState("error");
+      const parsed = await loadApps(base);
+      setApps(
+        parsed === null
+          ? { kind: "error", message: t(locale, "common.loadFailed") }
+          : { kind: "ok", payload: parsed },
+      );
+    } catch (err) {
+      setApps({
+        kind: "error",
+        message: err instanceof Error && err.message !== "" ? err.message : t(locale, "common.loadFailed"),
+      });
     }
-  }, [base]);
+    try {
+      setBots({ kind: "ok", payload: await loadUsableBots(base) });
+    } catch {
+      setBots({ kind: "error", message: t(locale, "common.loadFailed") });
+    }
+  }, [base, locale]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
-  // URL-derived per the spa-url-state-resync contract: one []-mounted
-  // popstate listener, writes replaceState — never popstate, so no loop.
+  const defaultTab: AppsTab | null =
+    apps.kind === "ok" ? (installedAppsOf(apps.payload).length > 0 ? "installed" : "created") : null;
+
+  // F2: an unknown / stale `?tab=` resolves to the REAL default once the
+  // payload lands, and the URL is corrected to the canonical
+  // (default-omitted) spelling. A known tab is the reader's choice — kept.
   useEffect(() => {
-    const onPop = () =>
-      setTab(appsTabOf(window.location.search, payload?.apps.some((app) => app.owned !== false) ?? true));
+    if (defaultTab === null) return;
+    const raw = new URLSearchParams(window.location.search).get("tab");
+    if (raw !== null && APP_TABS.includes(raw as AppsTab)) {
+      setTab(raw as AppsTab);
+      return;
+    }
+    setTab(defaultTab);
+    if (raw !== null) {
+      window.history.replaceState(
+        null,
+        "",
+        `${window.location.pathname}${appsTabQuery(defaultTab, defaultTab)}`,
+      );
+    }
+  }, [defaultTab]);
+
+  useEffect(() => {
+    const onPop = () => {
+      if (defaultTab === null) return;
+      setTab(appsTabOf(window.location.search, defaultTab === "installed"));
+    };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [payload]);
+  }, [defaultTab]);
 
-  if (state === "loading") {
+  if (apps.kind === "loading") {
     return <PageSkeleton locale={locale} kind="table" />;
   }
 
-  const hasCreated = payload?.apps.some((app) => app.owned !== false) ?? false;
-  const defaultTab: AppsTab = hasCreated ? "installed" : "created";
-
   function onTabChange(next: string): void {
-    if (next !== "installed" && next !== "created" && next !== "bots") return;
-    window.history.replaceState(null, "", `${window.location.pathname}${appsTabQuery(next as AppsTab, defaultTab)}`);
-    setTab(next as AppsTab);
+    if (!APP_TABS.includes(next as AppsTab)) return;
+    const target = next as AppsTab;
+    // F2: tab changes are HISTORY entries, so Back/Forward walk them; only the
+    // real default stays out of the URL.
+    window.history.pushState(
+      null,
+      "",
+      `${window.location.pathname}${appsTabQuery(target, defaultTab ?? "created")}`,
+    );
+    setTab(target);
   }
 
   return (
     <AppsView
       locale={locale}
-      state={state}
-      payload={payload}
+      apps={apps}
       bots={bots}
       canCreate={canCreate}
       unavailableReason={unavailableReason}
@@ -188,6 +240,7 @@ export function AppsView({
   locale,
   state,
   payload,
+  apps,
   bots,
   canCreate,
   unavailableReason,
@@ -196,52 +249,56 @@ export function AppsView({
   onRetry,
 }: {
   locale: SpaBoot["locale"];
-  state: "ok" | "error";
-  payload: AppsPayload | null;
-  bots?: UsableBotsPayload | null;
+  /** Static-SSR form: a loaded face plus its payload. */
+  state?: "ok" | "error";
+  payload?: AppsPayload | null;
+  /** Mounted form: the page's own read states, which distinguish loading from
+   * a failed read from an empty result (F3). */
+  apps?: AppsReadState;
+  bots?: BotsReadState;
   canCreate: boolean;
   unavailableReason: string;
   tab?: AppsTab;
   onTabChange?: (tab: string) => void;
   onRetry: () => void;
 }) {
-  const ownedApps = payload?.apps.filter((app) => app.owned !== false) ?? [];
+  const appsState: AppsReadState =
+    apps ?? (state === "error" ? { kind: "error", message: t(locale, "common.loadFailed") } : state === "ok" && payload ? { kind: "ok", payload } : { kind: "error", message: t(locale, "common.loadFailed") });
+  const botsState: BotsReadState = bots ?? { kind: "loading" };
+  const loaded = appsState.kind === "ok" ? appsState.payload : null;
+  const installed = loaded ? installedAppsOf(loaded) : [];
+  const ownedApps = loaded?.apps.filter((app) => app.owned !== false) ?? [];
   const hasCreated = ownedApps.length > 0;
-  // The view's tab follows the page's own default when the caller passes
-  // none: `created` before the workspace owns an App, `installed` after.
-  const activeTab: AppsTab = tab ?? (hasCreated ? "installed" : "created");
+  const activeTab: AppsTab = tab ?? (installed.length > 0 ? "installed" : "created");
   const createAction = (
     <CreateAppChooser
       locale={locale}
       canCreate={canCreate}
       reason={unavailableReason}
-      sharedBots={payload?.shared_bots ?? []}
+      sharedBots={loaded?.shared_bots ?? []}
+      monthPlanRp={loaded?.month_plan_rp ?? null}
     />
   );
 
-  const rejected24h =
-    state === "ok" && payload
-      ? payload.apps.reduce((total, app) => total + app.health.rejected24h, 0)
-      : 0;
-  const metrics: Metric[] =
-    state === "ok" && payload
-      ? [
-          { key: t(locale, "apps.metricApps"), value: payload.apps.length },
-          {
-            key: t(locale, "apps.metricEnabled"),
-            value: payload.apps.filter((app) => app.status !== "disabled").length,
-          },
-          {
-            key: t(locale, "apps.metricReviewOff"),
-            value: payload.apps.filter((app) => !reviewEnabled(app)).length,
-          },
-          {
-            key: t(locale, "apps.metricRejected24h"),
-            value: rejected24h,
-            tone: rejected24h > 0 ? "danger" : undefined,
-          },
-        ]
-      : [];
+  const rejected24h = loaded?.apps.reduce((total, app) => total + app.health.rejected24h, 0) ?? 0;
+  const metrics: Metric[] = loaded
+    ? [
+        { key: t(locale, "apps.metricApps"), value: loaded.apps.length },
+        {
+          key: t(locale, "apps.metricEnabled"),
+          value: loaded.apps.filter((app) => app.status !== "disabled").length,
+        },
+        {
+          key: t(locale, "apps.metricReviewOff"),
+          value: loaded.apps.filter((app) => !reviewEnabled(app)).length,
+        },
+        {
+          key: t(locale, "apps.metricRejected24h"),
+          value: rejected24h,
+          tone: rejected24h > 0 ? "danger" : undefined,
+        },
+      ]
+    : [];
 
   return (
     <div className="flex flex-col gap-6">
@@ -251,8 +308,12 @@ export function AppsView({
         actions={hasCreated ? createAction : null}
         metrics={<MetricBand metrics={metrics} />}
       />
-      {state === "error" ? <ErrorState locale={locale} onRetry={onRetry} /> : null}
-      {state === "ok" && payload ? (
+      {appsState.kind === "error" ? (
+        // F3: a read failure is an error carrying the server message plus a
+        // retry — never an empty list.
+        <ErrorState locale={locale} message={appsState.message} onRetry={onRetry} />
+      ) : null}
+      {appsState.kind === "ok" && loaded ? (
         <Tabs value={activeTab} onValueChange={(next) => onTabChange?.(next)}>
           <TabsList
             variant="line"
@@ -263,11 +324,18 @@ export function AppsView({
             <TabsTrigger value="bots">{t(locale, "apps.tabBots")}</TabsTrigger>
           </TabsList>
           <TabsContent value="installed">
-            <InstalledTab locale={locale} payload={payload} />
+            <InstalledTab
+              locale={locale}
+              payload={loaded}
+              installed={installed}
+              canCreate={canCreate}
+              createAction={createAction}
+              onOpenBots={() => onTabChange?.("bots")}
+            />
           </TabsContent>
           <TabsContent value="created">
             {hasCreated ? (
-              <AppsList locale={locale} payload={{ ...payload, apps: ownedApps }} />
+              <AppsList locale={locale} payload={{ ...loaded, apps: ownedApps }} />
             ) : (
               <EmptyState
                 icon={<GitHubMark />}
@@ -280,8 +348,9 @@ export function AppsView({
           <TabsContent value="bots">
             <UsableBotsList
               locale={locale}
-              bots={bots ?? null}
+              bots={botsState}
               onOpenInstalled={() => onTabChange?.("installed")}
+              onRetry={onRetry}
             />
           </TabsContent>
         </Tabs>
@@ -291,35 +360,119 @@ export function AppsView({
 }
 
 /**
- * The installed tab: ONE list of the workspace's live install rows — today
- * every consumable App row, merged with the pending binds the server reads
- * off the physical installation table (D8). The install-state rows the chain
- * tables will hold join here when install-state-chain's writers land; until
- * then the read honestly answers what exists.
+ * F1/F9: the installed tab — ONLY Apps this workspace holds an installation
+ * relation to, with the plan's per-install month cell, plus one "Waiting to be
+ * bound" row per pending physical installation. The empty state carries the
+ * documented actions: browse the shared Apps and create one.
  */
-function InstalledTab({ locale, payload }: { locale: SpaBoot["locale"]; payload: AppsPayload }) {
+function InstalledTab({
+  locale,
+  payload,
+  installed,
+  canCreate,
+  createAction,
+  onOpenBots,
+}: {
+  locale: SpaBoot["locale"];
+  payload: AppsPayload;
+  installed: AppsPayload["apps"];
+  canCreate: boolean;
+  createAction: ReactNode;
+  onOpenBots: () => void;
+}) {
   const pending = payload.pending_installations ?? [];
-  const appNameOf = (appId: string): string => {
-    const numeric = /^[0-9]+$/.test(appId) ? Number(appId) : null;
-    const row = numeric === null ? undefined : payload.apps.find((app) => app.github_app_id === numeric);
-    return row ? appDisplayName(row) : appId;
-  };
-  if (payload.apps.length === 0 && pending.length === 0) {
-    return <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.installed.emptyTitle")}</p>;
+  const planRp = payload.month_plan_rp ?? null;
+  if (installed.length === 0 && pending.length === 0) {
+    return (
+      <EmptyState
+        icon={<GitHubMark />}
+        title={t(locale, "apps.installed.emptyTitle")}
+        description={t(locale, "apps.installed.emptyDescription")}
+        action={
+          <div className="flex flex-wrap items-center gap-2">
+            {createAction}
+            {canCreate ? (
+              <Button variant="secondary" onClick={onOpenBots}>
+                {t(locale, "apps.installed.browseShared")}
+              </Button>
+            ) : null}
+          </div>
+        }
+      />
+    );
   }
+  const hrefOf = (appId: number): string => `${apiBase()}/apps/${appId}`;
+  const columns: DataTableColumn<AppsPayload["apps"][number]>[] = [
+    {
+      header: t(locale, "apps.tableName"),
+      cell: (app) => (
+        <span className="flex items-center gap-3">
+          <AppAvatar
+            src={app.github_avatar_url}
+            appId={app.github_app_id}
+            className="h-9 w-9 shrink-0 rounded-full border border-(--border-default) object-cover"
+          />
+          <a
+            className="text-sm font-semibold text-foreground no-underline hover:underline"
+            href={hrefOf(app.github_app_id)}
+            onClick={(event) => spaClick(hrefOf(app.github_app_id), event)}
+          >
+            {appDisplayName(app)}
+          </a>
+        </span>
+      ),
+    },
+    {
+      header: t(locale, "apps.tableStatus"),
+      cell: (app) => {
+        const pill = appStatusPill(locale, app);
+        return <StatusBadge tone={pill.tone}>{pill.label}</StatusBadge>;
+      },
+    },
+    {
+      header: t(locale, "apps.tableCreator"),
+      cell: (app) => <span className="text-muted-foreground">{app.created_by}</span>,
+    },
+    {
+      header: t(locale, "bots.monthLabel"),
+      cell: (app) => (
+        <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
+          {app.month_used_rp === undefined
+            ? t(locale, "bots.monthNone")
+            : app.owned === true
+              ? t(locale, "bots.monthOwn", { used: app.month_used_rp })
+              : planRp === null
+                ? t(locale, "bots.monthNoCeiling", { used: app.month_used_rp })
+                : t(locale, "bots.monthLimit", { used: app.month_used_rp, limit: planRp })}
+        </span>
+      ),
+    },
+  ];
   return (
     <div className="flex flex-col gap-4">
-      {payload.apps.length > 0 ? <AppsList locale={locale} payload={payload} /> : null}
+      {installed.length > 0 ? (
+        <DataTable
+          columns={columns}
+          rows={installed}
+          rowKey={(app) => String(app.github_app_id)}
+          rowProps={(app) => ({
+            className: "cursor-pointer",
+            onClick: (event) => spaClick(hrefOf(app.github_app_id), event),
+          })}
+        />
+      ) : null}
       {pending.length > 0 ? (
-        <ul className="flex flex-col gap-2">
+        <ul className="flex flex-col gap-2" data-slot="pending-installations">
           {pending.map((row) => (
             <li key={row.installation_id} className="flex items-center justify-between gap-3 text-sm">
               <span>
-                {row.account_login ?? t(locale, "settings.installPendingUnknownAccount", { id: row.installation_id })}
+                {row.account_login ??
+                  t(locale, "settings.installPendingUnknownAccount", { id: row.installation_id })}
                 {" · "}
                 <span className="text-muted-foreground">{t(locale, "settings.installPending")}</span>
               </span>
-              <span className="text-muted-foreground">{appNameOf(row.app_id)}</span>
+              {/* F16: the server joins the App's own display name. */}
+              <span className="text-muted-foreground">{row.app_name}</span>
             </li>
           ))}
         </ul>
@@ -329,12 +482,11 @@ function InstalledTab({ locale, payload }: { locale: SpaBoot["locale"]; payload:
 }
 
 /**
- * "Bots I can use" (D6/D18): ONE server-ordered list — the server answers
- * own-before-shared, name-insensitive, id as tie-break; a filter only HIDES
- * rows and never reorders them. Membership is exclusive (own wins when the
- * bot's workspace is the caller's), and the filter is in-memory only — a
- * reload or a tab switch returns to All. No App column: the bot list is the
- * universe of usable bots, not a per-App chain.
+ * "Bots I can use" (D6/D18): ONE server-ordered list — own before shared, name
+ * case-insensitively, id as tie-break; a filter only HIDES rows and never
+ * reorders them. Membership is exclusive, the filter is in-memory only (a
+ * reload or tab switch returns to All), and F5 keys the access word on this
+ * viewer's MANAGE permission, not the bot's publication scope.
  */
 export type BotsFilter = "all" | "mine" | "shared";
 
@@ -342,13 +494,23 @@ export function UsableBotsList({
   locale,
   bots,
   onOpenInstalled,
+  onRetry,
 }: {
   locale: SpaBoot["locale"];
-  bots: UsableBotsPayload | null;
+  bots: BotsReadState;
   onOpenInstalled?: () => void;
+  onRetry?: () => void;
 }) {
   const [filter, setFilter] = useState<BotsFilter>("all");
-  if (bots === null || bots.bots.length === 0) {
+  if (bots.kind === "loading") {
+    return <PageSkeleton locale={locale} kind="table" />;
+  }
+  // F3: a failed read is an error with a retry — never "no bot available".
+  if (bots.kind === "error") {
+    return <ErrorState locale={locale} message={bots.message} onRetry={onRetry} />;
+  }
+  const payload = bots.payload;
+  if (payload.bots.length === 0) {
     return (
       <EmptyState
         icon={<GitHubMark />}
@@ -364,13 +526,13 @@ export function UsableBotsList({
       />
     );
   }
-  const rows = bots.bots.filter((bot) => {
+  const rows = payload.bots.filter((bot) => {
     if (filter === "mine") return bot.owned;
     if (filter === "shared") return !bot.owned;
     return true;
   });
   const hrefOf = (botId: string): string => `${apiBase()}/bots/${encodeURIComponent(botId)}`;
-  const columns: DataTableColumn<(typeof bots.bots)[number]>[] = [
+  const columns: DataTableColumn<(typeof payload.bots)[number]>[] = [
     {
       header: t(locale, "apps.bots.columnName"),
       cell: (bot) => (
@@ -402,9 +564,9 @@ export function UsableBotsList({
         <span className="text-muted-foreground tabular-nums" title={t(locale, "bots.monthHint")}>
           {bot.owned
             ? t(locale, "bots.monthOwn", { used: bot.month_used_rp })
-            : bots.plan_monthly_rp === null
+            : payload.plan_monthly_rp === null
               ? t(locale, "bots.monthNoCeiling", { used: bot.month_used_rp })
-              : t(locale, "bots.monthLimit", { used: bot.month_used_rp, limit: bots.plan_monthly_rp })}
+              : t(locale, "bots.monthLimit", { used: bot.month_used_rp, limit: payload.plan_monthly_rp })}
         </span>
       ),
     },
@@ -412,27 +574,31 @@ export function UsableBotsList({
       header: t(locale, "apps.bots.columnAccess"),
       cell: (bot) => (
         <span className="text-muted-foreground">
-          {t(locale, bot.owned ? "apps.bots.editable" : "apps.bots.readOnly")}
+          {t(locale, bot.can_manage ? "apps.bots.editable" : "apps.bots.readOnly")}
         </span>
       ),
     },
   ];
-  const filters: Array<{ id: BotsFilter; key: "apps.bots.filterAll" | "apps.bots.filterMine" | "apps.bots.filterShared" }> = [
+  const filters: Array<{
+    id: BotsFilter;
+    key: "apps.bots.filterAll" | "apps.bots.filterMine" | "apps.bots.filterShared";
+  }> = [
     { id: "all", key: "apps.bots.filterAll" },
     { id: "mine", key: "apps.bots.filterMine" },
     { id: "shared", key: "apps.bots.filterShared" },
   ];
-  const emptyFor = (): { title: string; description: string } =>
-    filter === "mine"
-      ? {
-          title: t(locale, "apps.bots.emptyMineTitle"),
-          description: t(locale, "apps.bots.emptyMineDescription"),
-        }
-      : {
-          title: t(locale, "apps.bots.emptySharedTitle"),
-          description: t(locale, "apps.bots.emptySharedDescription"),
-        };
-  const empty = filter !== "all" && rows.length === 0 ? emptyFor() : null;
+  const empty =
+    filter !== "all" && rows.length === 0
+      ? filter === "mine"
+        ? {
+            title: t(locale, "apps.bots.emptyMineTitle"),
+            description: t(locale, "apps.bots.emptyMineDescription"),
+          }
+        : {
+            title: t(locale, "apps.bots.emptySharedTitle"),
+            description: t(locale, "apps.bots.emptySharedDescription"),
+          }
+      : null;
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2" data-slot="bots-filter">
@@ -473,18 +639,27 @@ export function UsableBotsList({
   );
 }
 
+/**
+ * F9: the Create dialog's shared-App cards (D22) carry the App's name,
+ * description, owner and its capability summary, plus a GitHub Install action
+ * that opens in a new tab — the dialog stays open so the reader can come back
+ * and bind.
+ */
 function CreateAppChooser({
   locale,
   canCreate,
   reason,
   sharedBots,
+  monthPlanRp,
 }: {
   locale: SpaBoot["locale"];
   canCreate: boolean;
   reason: string;
   sharedBots: SharedBotRow[];
+  monthPlanRp: number | null;
 }) {
   const addHref = `${apiBase()}/repos`;
+  void monthPlanRp;
   return (
     <div className="flex flex-wrap items-center gap-2" data-slot="create-app-chooser">
       <Dialog>
@@ -496,17 +671,41 @@ function CreateAppChooser({
             <DialogTitle>{t(locale, "apps.createDialog.title")}</DialogTitle>
             <DialogDescription>{t(locale, "apps.createDialog.description")}</DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">{t(locale, "targets.addDialog.description")}</p>
           {sharedBots.length > 0 ? (
-            <ul className="flex flex-col gap-1 text-sm text-muted-foreground" data-slot="shared-bots">
-              {sharedBots.map((bot) => (
-                <li key={bot.id}>
-                  {t(locale, "apps.createDialog.botTargets", {
-                    name: bot.name === "" ? bot.id : bot.name,
-                    count: bot.target_count,
-                  })}
-                </li>
-              ))}
+            <ul className="flex flex-col gap-3" data-slot="shared-bots">
+              {sharedBots.map((bot) => {
+                const installHref = appInstallHref(bot.github_slug);
+                return (
+                  <li key={bot.id} className="flex flex-col gap-1 rounded-md border border-border p-3">
+                    <span className="text-sm font-semibold">{bot.name}</span>
+                    {bot.github_description ? (
+                      <span className="text-sm text-muted-foreground">{bot.github_description}</span>
+                    ) : null}
+                    {bot.owner_workspace_name ? (
+                      <span className="text-xs text-muted-foreground">
+                        {t(locale, "apps.cardOwner", { workspace: bot.owner_workspace_name })}
+                      </span>
+                    ) : null}
+                    {bot.capability ? (
+                      <span className="text-xs text-muted-foreground">
+                        {t(locale, "bots.capabilityDefaultChain", { models: bot.capability })}
+                      </span>
+                    ) : null}
+                    <span className="flex flex-wrap items-center gap-2 pt-1">
+                      {installHref === null ? (
+                        <span className="text-xs text-muted-foreground">{t(locale, "settings.installNoSlug")}</span>
+                      ) : (
+                        <Button asChild variant="secondary" size="sm">
+                          <a href={installHref} target="_blank" rel="noreferrer noopener">
+                            {t(locale, "apps.cardInstall")}
+                          </a>
+                        </Button>
+                      )}
+                      <span className="text-xs text-muted-foreground">{t(locale, "apps.installReturnHint")}</span>
+                    </span>
+                  </li>
+                );
+              })}
             </ul>
           ) : (
             <p className="text-sm text-muted-foreground">{t(locale, "apps.createDialog.noSharedBots")}</p>

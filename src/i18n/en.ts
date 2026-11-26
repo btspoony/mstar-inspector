@@ -137,6 +137,9 @@ export const en = {
     stateOwn: "Not shared",
     mountedNone: "Not mounted by any of this workspace's Apps",
     monthLabel: "This month",
+    monthNone: "\u2014",
+    monthNoneHint: "No review bot is mounted, so nothing is metered.",
+    writeForbidden: "Only an owner or admin of the workspace that provides this bot can change its configuration.",
     monthHint: "RP this workspace spent through this bot this month (UTC).",
     monthLimit: "{used} / {limit} RP",
     monthNoCeiling: "{used} RP \u00b7 no ceiling",
@@ -280,7 +283,7 @@ export const en = {
       "Other workspaces can then create targets on their own repositories and trigger reviews on this bot, billed to its plan.",
     confirmUnshareTitle: "Stop sharing {name}?",
     confirmUnshareBody:
-      "Targets other workspaces hold on this bot become Blocked — they stop reviewing — until it is shared again.",
+      "Workspaces using this bot skip it from then on: a delivery falls through to the next bot in its chain, or is refused when none is left, until it is shared again.",
     shareOutsideOfficial:
       "This bot's workspace is no longer the platform's official workspace, so it cannot be shared. An operator sets the designation first.",
     shareForbidden: "Only an owner or admin of this workspace can share its bot.",
@@ -1472,7 +1475,7 @@ export const en = {
         "Other workspaces can then run this bot on their own repositories, billed to their own plan. Its credentials and model chain stay configured here.",
       unshareConfirmTitle: "Stop sharing {name}?",
       unshareConsequence:
-        "Targets in other workspaces become Blocked until the bot is shared again. This workspace keeps configuring it.",
+        "Workspaces using this bot skip it from then on: a delivery falls through to the next bot in its chain, or is refused when none is left, until it is shared again. This workspace keeps configuring it.",
       confirmAction: "Confirm",
       cancelAction: "Cancel",
       scopeChangeFailed: "Could not change the sharing of {name}.",

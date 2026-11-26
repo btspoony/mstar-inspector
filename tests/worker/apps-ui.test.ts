@@ -647,7 +647,16 @@ describe("GET /dashboard/:ref/api/apps/:appId/bot (the bot settings read face)",
 });
 
 describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
-  type SharedBotPayload = { id: string; github_slug: string | null; name: string; target_count: number };
+  type SharedBotPayload = {
+    id: string;
+    github_slug: string | null;
+    name: string;
+    github_description: string | null;
+    owner_workspace_id: string | null;
+    owner_workspace_name: string | null;
+    capability: string | null;
+    target_count: number;
+  };
   type ListBody = {
     viewer: { login: string; role: string };
     apps: Array<{ github_app_id: number }>;
@@ -702,8 +711,19 @@ describe("GET /dashboard/:ref/api/apps — the shared-bot block", () => {
         makeEnv(db),
       );
       const body = (await res.json()) as ListBody;
+      // D22/F9: the card carries the App's cached description, its owner
+      // workspace and the owner's chain capability (null before the chain).
       expect(body.shared_bots).toEqual([
-        { id: "app-platform", github_slug: "platform-app", name: "Platform App", target_count: 0 },
+        {
+          id: "app-platform",
+          github_slug: "platform-app",
+          name: "Platform App",
+          github_description: null,
+          owner_workspace_id: "ws-other",
+          owner_workspace_name: "ws-other",
+          capability: null,
+          target_count: 0,
+        },
       ]);
       expect(body.apps.map((app) => app.github_app_id).sort()).toEqual([MALLORY_APP_ID, ADA_APP_ID]);
       expect(fetchSpy).not.toHaveBeenCalled();
