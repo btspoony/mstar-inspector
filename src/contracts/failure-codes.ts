@@ -105,5 +105,5 @@ export const FAILURE_SUMMARIES: Record<FailureCode, string> = {
   "review.recheck.unaccounted":
     "A follow-up check could not be reconciled. Nothing extra was charged; the check may need a manual re-run.",
   "review.internal.unclassified":
-    "The review stopped for a reason that has not been classified yet. Whether anything was charged is unknown; an operator can look it up by this code.",
+    "The review stopped because something failed inside the review service. Whether anything was charged is unknown; the recorded failure names where it stopped and what caused it, so an operator can act.",
 };

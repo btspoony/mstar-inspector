@@ -14,6 +14,8 @@ import {
   readDurablePaid,
   settleAttemptFailure,
   phaseFailureRecord,
+  errorClassOf,
+  safeStringify,
   PhaseTransientError,
   transientFactsOf,
   settleSkippedRow,
@@ -109,6 +111,10 @@ export async function runReviewAttemptWorkflow(
     const handoff = prepared;
     cleanup.headSha = handoff.headSha;
     const remainingMs = Math.max(1, handoff.runnerDeadlineMs - Date.now());
+    // The phase is set BEFORE the boundary, as collect and publish already do:
+    // a platform failure of the step itself — the callback never ran — must
+    // still attribute the throw to the phase the instance was in.
+    inPhase = "review";
     const reviewed = await step.do(
       "review",
       {
@@ -129,7 +135,6 @@ export async function runReviewAttemptWorkflow(
         if ((await readDurablePaid(deps, ref.attemptId)).kind === "payable") {
           await ensureRunnerConfig(ref.payload, deps);
         }
-        inPhase = "review";
         return reviewAttempt(deps, ref, handoff);
       },
     );
@@ -228,13 +233,27 @@ export async function runReviewAttemptWorkflow(
  * MESSAGE only — extracted without `instanceof`, with a leading `"<name>: "`
  * stripped — and settled as the ordinary branch those errors take.
  */
-function ordinaryFailure(
+export function ordinaryFailure(
   err: unknown,
   phase: AttemptPhase,
   prepared: PreparedAttempt | null,
   transient?: PhaseTransientError["facts"],
 ): PhaseFailure {
-  const raw = err instanceof Error ? err.message : String(err);
+  // Every read of the thrown value is guarded: a hostile getter or a
+  // null-prototype throw must degrade the record's text, never abort the
+  // settlement the record feeds.
+  let raw: string;
+  try {
+    raw = err instanceof Error ? String(err.message) : safeStringify(err);
+  } catch {
+    raw = "(unprintable throw value)";
+  }
+  // The class the throw site captured rides the transient facts as plain data;
+  // only a throw with no wrapper — this file's own host probes — is asked for
+  // its constructor directly, and a rebuild without a prototype still answers
+  // through its surviving `name`.
+  const errorClass = transient?.errorClass ?? errorClassOf(err);
+  const message = raw.replace(/^[A-Za-z][\w.]*Error: /, "");
   return {
     class: "failure",
     phase,
@@ -247,11 +266,32 @@ function ordinaryFailure(
     // must not claim the runner returned: the settlement's `paid-unknown` guard
     // reads this field to decide whether an unconfirmed row may be concluded.
     runnerReturned: transient?.runnerReturned ?? false,
-    message: raw.replace(/^[A-Za-z][\w.]*Error: /, ""),
+    message,
+    // The throw site's own cause when one was chained, otherwise the class and
+    // the bounded message the settlement would otherwise have to re-derive —
+    // the observation the reconciler renders carries the facts as data, never
+    // a sentence parsed back out of the composed text.
+    // The cause is NOT bounded here: it is sanitized at settlement, and a cut
+    // that ran first would destroy the exact match the redaction needs. The
+    // observation path bounds it after the exact pass.
+    cause: errorCauseText(err) ?? (errorClass === undefined ? message : `${errorClass}: ${message}`),
     ...(transient?.lastStage === undefined ? {} : { lastStage: transient.lastStage }),
+    ...(errorClass === undefined ? {} : { errorClass }),
     sendAttemptPublicationId: transient?.sendAttemptPublicationId ?? null,
     rateLimited: transient?.rateLimited ?? null,
   };
+}
+
+/** A chained string cause, narrowed first, read once, guarded against hostile getters. */
+function errorCauseText(err: unknown): string | undefined {
+  if (err === null || typeof err !== "object") return undefined;
+  try {
+    if (!("cause" in err)) return undefined;
+    const cause = (err as Error).cause;
+    return typeof cause === "string" && cause !== "" ? cause : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

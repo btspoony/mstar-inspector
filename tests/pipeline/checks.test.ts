@@ -25,6 +25,7 @@ import {
   type Scope,
 } from "../../src/store/review-checks";
 import { readCheckIdentity } from "../../src/store/review-checks";
+import { boundedCheckDetail } from "../../src/pipeline/redact";
 import {
   CHECK_SUMMARIES,
   TERMINAL_FAILURE_TEXT,
@@ -1438,6 +1439,38 @@ describe("decideConclusion — the §7.9 gate matrix from persisted proof", () =
     expect(decided.desired).toBe("failure");
     expect(decided.failureStatus).toBe("unknown-failure");
     expect(decided.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+  });
+
+  test("an execution fault carries the settlement's stage+class text after the approved sentence", () => {
+    const detail = "internal error in phase review: TypeError: the input write failed (attempt attempt-1)";
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate,
+      review: null,
+      failureDetail: detail,
+    });
+    expect(decided.desired).toBe("failure");
+    expect(decided.failureStatus).toBe("unknown-failure");
+    // The approved sentence stands FIRST; the recorded facts follow it, bounded,
+    // so a red Check already says where and what.
+    expect(decided.summary.startsWith(TERMINAL_FAILURE_TEXT["unknown-failure"])).toBe(true);
+    expect(decided.summary).toContain("phase review");
+    expect(decided.summary).toContain("TypeError");
+    // Without the detail nothing changes: the approved wording alone.
+    const bare = decideConclusion({ proof: null, outcome: "pre-publication-failure", gate, review: null });
+    expect(bare.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+  });
+
+  test("a credential shape inside the detail never reaches the summary", () => {
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate,
+      review: null,
+      failureDetail: "internal error in phase review: Error: the token ghp_abcdefghijklmnop was refused (attempt a)",
+    });
+    expect(decided.summary).not.toContain("ghp_abcdefghijklmnop");
   });
 
   test("no proof + degraded-not-posted carries the approved wording", () => {
@@ -3881,5 +3914,39 @@ describe("a resumed settlement acts only on the frozen generation", () => {
       .prepare("SELECT COUNT(*) AS n FROM review_checks WHERE attempt_key = ?")
       .get(frozen.key) as { n: number };
     expect(rows.n).toBe(1);
+  });
+});
+
+describe("the Check excerpt of a recorded detail", () => {
+  test("a long detail keeps the attempt reference and marks truncation", () => {
+    const longMessage = `internal error in phase review (stage runner): Error: ${"x".repeat(600)}`;
+    const detail = `${longMessage} (attempt attempt-4b-0001)`;
+    const decided = decideConclusion({
+      proof: null,
+      outcome: "pre-publication-failure",
+      gate: { minScore: 80, passVerdicts: ["ship it"] },
+      review: null,
+      failureDetail: detail,
+    });
+    expect(decided.summary).toContain("(attempt attempt-4b-0001)");
+    expect(decided.summary).toContain("…");
+    expect(decided.summary.length).toBeLessThan(500);
+  });
+});
+
+describe("boundedCheckDetail honours its cap", () => {
+  test("a parenthesised token mid-text cannot inflate the tail past the cap", () => {
+    // QC's repro: `[^)]+` used to cross the second `(`, so the tail swallowed
+    // 262 characters and the output exceeded the cap.
+    const input = `phase (attempt ${"x".repeat(241)} (attempt a)`;
+    const out = boundedCheckDetail(input);
+    expect(out.length).toBeLessThanOrEqual(240);
+    expect(out).toContain("…");
+    // A legitimate composed detail keeps its attempt reference under truncation.
+    const legit = `internal error in phase review (stage runner): Error: ${"x".repeat(500)} (attempt attempt-4b-0001)`;
+    const legitOut = boundedCheckDetail(legit);
+    expect(legitOut.length).toBeLessThanOrEqual(240);
+    expect(legitOut).toContain("(attempt attempt-4b-0001)");
+    expect(legitOut).toContain("…");
   });
 });
