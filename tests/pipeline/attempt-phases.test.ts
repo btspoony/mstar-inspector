@@ -4486,7 +4486,9 @@ describe("an unclassified internal error reports its stage and cause", () => {
     expect(failureRows(db)).toHaveLength(0);
     expect(concluded).toHaveLength(1);
     expect(concluded[0]!.failureDetail).not.toContain("the detail is recorded with the failure");
-    expect(concluded[0]!.failureDetail).toContain("the failure could not be recorded");
+    expect(concluded[0]!.failureDetail).not.toContain("nothing durable");
+    expect(concluded[0]!.failureDetail).toContain("the failure row could not be written");
+    expect(concluded[0]!.failureDetail).toContain("log");
     expect(concluded[0]!.failureDetail).toContain(`attempt ${ATTEMPT_ID}`);
   });
 

@@ -2757,7 +2757,7 @@ export function internalFailureCheckText(input: {
   // the operator hunting for a row that does not exist.
   const recordClause = input.recorded
     ? "the detail is recorded with the failure, not published here"
-    : "the failure could not be recorded — nothing durable exists beyond this attempt";
+    : "the failure row could not be written — the detail survives only in this step's log";
   const what =
     input.errorClass === undefined
       ? `${phaseClause} — ${recordClause}`
