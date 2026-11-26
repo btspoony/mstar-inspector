@@ -816,7 +816,11 @@ describe("createReviewConsumer", () => {
     await expect(consumer(h.makeBatch(makePayload()))).rejects.toThrow("container unavailable");
     expect(reviewCount(db)).toBe(0);
     expect(failureRows(db)).toHaveLength(1);
-    expect(failureRows(db)[0]).toMatchObject({ stage: "sandbox", error: "container unavailable" });
+    const failureRow = failureRows(db)[0]!;
+    expect(failureRow).toMatchObject({ stage: "sandbox" });
+    expect(String(failureRow.error)).toBe(
+      `internal error in phase prepare (stage sandbox): Error: container unavailable (attempt ${failureRow.id})`,
+    );
     expect(h.sandbox.destroyCalls).toBe(1);
   });
 
@@ -7037,7 +7041,10 @@ describe("check lifecycle (consumer binding, spec §7.10/§7.9)", () => {
     expect(checkRequests.map((r) => r.op)).toEqual(["create", "update", "update"]);
     const update = checkRequests[2]!.params as unknown as ChecksUpdateParams;
     expect(update.conclusion).toBe("failure");
-    expect(update.output.summary).toBe(TERMINAL_FAILURE_TEXT["unknown-failure"]);
+    const dlqFailureRow = failureRows(db)[0]!;
+    expect(update.output.summary).toBe(
+      `${TERMINAL_FAILURE_TEXT["unknown-failure"]} Recorded: internal error in phase review (stage runner): Error — the detail is recorded with the failure, not published here (attempt ${dlqFailureRow.id})`,
+    );
     expect(checkRows(db)).toHaveLength(1);
     const row = checkRowFor(db, SHA);
     expect(row.desired).toBe("failure");

@@ -429,7 +429,7 @@ export const MODEL_ROLE_IDS: readonly string[] = Object.freeze([
 /**
  * Mirror of packages/runner/src/runtime-omp.ts `parseModelSelectors` (runtime-omp.ts:119):
  * comma-separated, trimmed, empty segments dropped; `undefined`/empty → `[]`.
- * Selectors pass through verbatim — a `:thinking`-style suffix is legal omp
+ * Selectors pass through verbatim — a `:<thinking-level>` suffix is legal omp
  * selector syntax and is NOT rejected here; full selector validation stays
  * omp-side (plan brief). Local copy because dashboard modules must not import
  * review code (Q2); parity is locked by tests/worker/app-config.test.ts.

@@ -16,6 +16,29 @@ export function redactSecrets(text: string): string {
 }
 
 /**
+ * The Check excerpt of a composed failure detail. The attempt reference is the
+ * lookup key an operator pastes into the store, so it survives any cut: a
+ * detail too long for the Check is truncated before it with a marker, and the
+ * reference is re-appended intact.
+ */
+export function boundedCheckDetail(detail: string, maxChars = 240): string {
+  if (detail.length <= maxChars) return detail;
+  // `[^()]` — not `[^)]`: a parenthesised token earlier in the text must not be
+  // swallowed into the tail. The tail is capped too: a long tail joined to an
+  // already-long body is truncated like everything else, never re-appended whole.
+  const attemptMatch = /(\(attempt [^()]+\))$/.exec(detail);
+  const tail = attemptMatch?.[1];
+  const marker = "…";
+  if (tail === undefined || tail.length + 1 > maxChars - marker.length) {
+    return `${detail.slice(0, maxChars - marker.length)}${marker}`;
+  }
+  const body = detail.slice(0, detail.length - tail.length - 1);
+  const budget = maxChars - tail.length - 1;
+  const cut = body.slice(0, Math.max(0, budget - marker.length));
+  return `${cut}${marker} ${tail}`;
+}
+
+/**
  * Exact-value redaction (SEC-01 defense-in-depth): replace every occurrence
  * of each distinct non-empty value with `[REDACTED]`. This is the strongest
  * defense — a credential that evades every shape pattern (e.g. a UUID-ish
