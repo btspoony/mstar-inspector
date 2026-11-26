@@ -682,11 +682,13 @@ export function AppDetailView({
         </TabsContent>
         <TabsContent value="bots">
           <div className="flex flex-col">
-            {/* F4: the copy follows the REAL binding state, not `blocked`. No
-                installation this workspace bound means the chain cannot exist
-                yet; once something is bound, an empty chain is the honest
-                "nothing mounted" answer and unavailable rows render skipped. */}
-            {(payload.chain ?? []).length === 0 && (payload.installations ?? []).length === 0 ? (
+            {/* F4/D47: the copy follows the REAL bind state. A pending row is an
+                UNBOUND installation of a SHARED App (the server sends none for an
+                owned App, which never binds) — that, and only that, is "the chain
+                appears once the installation is bound". Everything else with an
+                empty chain is the honest "nothing mounted" answer, and rows whose
+                bot is no longer shared render skipped. */}
+            {(payload.chain ?? []).length === 0 && (payload.pending_installations ?? []).length > 0 ? (
               <p className="py-3 text-sm text-muted-foreground">{t(locale, "apps.chain.pendingBind")}</p>
             ) : (
               <AppChainSection locale={locale} chain={payload.chain ?? []} />

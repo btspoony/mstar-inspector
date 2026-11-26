@@ -186,8 +186,7 @@ function isUsableBotRow(value: unknown): value is UsableBotRow {
     typeof value.can_manage === "boolean" &&
     isBotScope(value.scope) &&
     typeof value.multiplier === "number" &&
-    typeof value.month_used_rp === "number" &&
-    (value.monthly_rp === null || typeof value.monthly_rp === "number")
+    typeof value.month_used_rp === "number"
   );
 }
 
@@ -568,13 +567,15 @@ export type AppChainEntry = {
 
 /**
  * The install-state slice every App face carries: the workspace's own live
- * installations of this App and its ordered chain. `installations` is how the
- * page tells "nothing is bound yet, so no chain can exist" from "a chain exists
- * and some of its rows are unavailable" — `blocked` says neither.
+ * installations of this App and its ordered chain. `pending_installations` is
+ * what tells "the chain appears once an installation is bound" from "nothing is
+ * mounted": it holds only UNBOUND installations of a SHARED App — an owned App
+ * never binds (D47), so it carries none.
  */
 export type AppChain = {
   chain?: AppChainEntry[];
   installations?: Array<{ installation_id: number; account_login: string | null; seen_at: string }>;
+  pending_installations?: PendingInstallation[];
 };
 
 function isAppChainEntry(value: unknown): value is AppChainEntry {

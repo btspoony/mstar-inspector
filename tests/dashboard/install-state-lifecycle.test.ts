@@ -624,3 +624,111 @@ describe("F2 — a revived installation recreates its state and chain", () => {
     db.raw.close();
   });
 });
+
+describe("F2 R2 — the revival decision lives inside the batch", () => {
+  /**
+   * The race the fix closes: a removal lands AFTER whatever the writer read and
+   * BEFORE its batch runs, so a pre-batch "is this row removed?" answer is stale.
+   * Each case runs the removing statement first and then the authoritative path,
+   * which is the observable shape of that interleaving.
+   */
+  async function sweptByRemoval(): Promise<TestD1> {
+    const db = createMigratedTestD1();
+    seedWorkspace(db, CONSUMER);
+    seedWorkspace(db, OTHER);
+    seedApp(db, "app-shared", { workspaceId: OTHER, scope: "shared" });
+    db.raw.run(
+      `INSERT INTO app_installations (github_app_id, workspace_id, created_at)
+         VALUES ('app-shared', '${OTHER}', '${TS}'), ('app-shared', '${CONSUMER}', '${TS}');
+       INSERT INTO app_install_bots (github_app_id, workspace_id, position, bot_id)
+         VALUES ('app-shared', '${OTHER}', 1, 'app-shared'), ('app-shared', '${CONSUMER}', 1, 'app-shared');`,
+    );
+    seedInstallation(db, { appId: "app-shared", installationId: 1701, bound: CONSUMER });
+    return db;
+  }
+
+  test("an authoritative upsert still restores the state after a concurrent sweep", async () => {
+    const db = await sweptByRemoval();
+    // The race: the sweep runs between the writer's read and its batch.
+    await createReviewBotsStore(db).markInstallationRemoved("app-shared", 1701);
+    expect(count(db, "app_installations", `WHERE workspace_id = '${CONSUMER}'`)).toBe(0);
+
+    await createReviewBotsStore(db).upsertInstallation({
+      appId: "app-shared",
+      installationId: 1701,
+      accountLogin: "acme",
+      authoritative: true,
+    });
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER },
+    ]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER, position: 1, bot_id: "app-shared" },
+    ]);
+    db.raw.close();
+  });
+
+  test("reconcile restores the state of a ROW THAT IS ALREADY LIVE, not a pre-read candidate", async () => {
+    // This is the interleaving's end state: a removal swept the state between
+    // whatever the writer read and its batch, and the row is live again by the
+    // time the batch runs. A pre-batch candidate list ("removed_at IS NOT NULL")
+    // would see a live row and restore nothing; the post-update predicate
+    // ("removed_at IS NULL, still bound, GitHub reports it") restores it.
+    const db = await sweptByRemoval();
+    const store = createReviewBotsStore(db);
+    await store.markInstallationRemoved("app-shared", 1701);
+    expect(count(db, "app_installations", `WHERE workspace_id = '${CONSUMER}'`)).toBe(0);
+    db.raw.run(
+      `UPDATE github_app_installations SET removed_at = NULL
+        WHERE app_id = 'app-shared' AND installation_id = 1701`,
+    );
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    await store.reconcileInstallations("app-shared", [1701], observedAt);
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER },
+    ]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([
+      { github_app_id: "app-shared", workspace_id: CONSUMER, position: 1, bot_id: "app-shared" },
+    ]);
+    db.raw.close();
+  });
+
+  test("reconcile restores nothing for a row GitHub no longer reports", async () => {
+    // The other side of the same predicate: a live row OUTSIDE the reported set
+    // is about to be stamped removed by this very pass, so it must not get a
+    // state it would only lose again.
+    const db = await sweptByRemoval();
+    const store = createReviewBotsStore(db);
+    await store.markInstallationRemoved("app-shared", 1701);
+    db.raw.run(
+      `UPDATE github_app_installations SET removed_at = NULL
+        WHERE app_id = 'app-shared' AND installation_id = 1701`,
+    );
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+
+    await store.reconcileInstallations("app-shared", [], observedAt);
+
+    expect(states(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([]);
+    expect(chain(db).filter((row) => row.workspace_id === CONSUMER)).toEqual([]);
+    db.raw.close();
+  });
+
+  test("reconcile that clears nothing restores nothing and sweeps nothing", async () => {
+    const db = await sweptByRemoval();
+    const store = createReviewBotsStore(db);
+    await store.bindInstallation("app-shared", 1701, CONSUMER);
+    await Bun.sleep(2);
+    const observedAt = await store.currentTimestamp();
+    const before = { states: states(db), chain: chain(db) };
+
+    await store.reconcileInstallations("app-shared", [1701], observedAt);
+
+    expect({ states: states(db), chain: chain(db) }).toEqual(before);
+    db.raw.close();
+  });
+});

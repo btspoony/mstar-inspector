@@ -1532,7 +1532,9 @@ describe("F1/F3/F4 — the list reads the install state, the chain reaches every
       .get(MALLORY_APP_ID) as { id: string };
     const cookie = `${SESSION_COOKIE}=${await sessionCookie("hubot")}`;
 
-    const body = (await (await get(DETAIL(MALLORY_APP_ID), cookie, makeEnv(db))).json()) as {
+    const body = (await (
+      await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}`, cookie, makeEnv(db))
+    ).json()) as {
       can_manage: boolean;
       chain: Array<{ position: number; bot_id: string }>;
     };
@@ -1543,4 +1545,44 @@ describe("F1/F3/F4 — the list reads the install state, the chain reaches every
   // F4's redirect target is pinned end to end in
   // `tests/worker/shared-installation-binding.test.ts` ("binding needs the
   // user's own token …"), where the OAuth callback really redirects.
+});
+
+describe("F4 — pending-bind is a shared-App fact (D47)", () => {
+  test("an owned App is never offered a pending bind", async () => {
+    const db = await seededWorld();
+    const appRow = db.raw
+      .query("SELECT id FROM github_apps WHERE github_app_id = ?")
+      .get(MALLORY_APP_ID) as { id: string };
+    // An unbound installation of the OWNED App: the webhook recorded it, nobody
+    // bound it. The bind route refuses an owned App, so the detail offers none.
+    db.raw.run(
+      `INSERT INTO github_app_installations (id, app_id, installation_id, account_login, seen_at)
+         VALUES ('inst-unbound', '${appRow.id}', 4201, 'acme', '2026-01-01T00:00:00.000Z')`,
+    );
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+
+    const body = (await (
+      await get(`/dashboard/default/api/apps/${MALLORY_APP_ID}`, cookie, makeEnv(db))
+    ).json()) as {
+      pending_installations: unknown[];
+      installations: unknown[];
+    };
+    expect(body.pending_installations).toEqual([]);
+    // The owned App's live installations are still listed: they are its own rows,
+    // not a bind this workspace could perform.
+    expect(body.installations).toHaveLength(1);
+  });
+
+  test("the bind route refuses an owned App outright", async () => {
+    const db = await seededWorld();
+    const cookie = `${SESSION_COOKIE}=${await sessionCookie("mallory")}`;
+    const res = await postForm(
+      `/dashboard/default/api/apps/${MALLORY_APP_ID}/bind-installation`,
+      cookie,
+      makeEnv(db),
+      { installationId: "4201" },
+    );
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "bot is not shared" });
+  });
 });

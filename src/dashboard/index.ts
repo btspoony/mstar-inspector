@@ -2631,7 +2631,13 @@ const appDetailSettingsRoute = async (c: DashboardContext) => {
         ...targetOwned.app,
       },
       installation: binding,
-      pending_installations: await store.listPendingInstallations(appRow.id, member.scope.workspaceId),
+      // F4/D47: the pending-bind hint is a SHARED-App fact. The bind route and
+      // its OAuth callback both refuse an owned App, so a hint for one would
+      // offer an action that always 404s.
+      pending_installations:
+        appRow.scope === "shared"
+          ? await store.listPendingInstallations(appRow.id, member.scope.workspaceId)
+          : [],
       // F7: the bots this App's chain actually mounts in THIS workspace — the
       // only App-to-bot relation that exists — in position order, each with its
       // own facts and this month's spend. One statement, no fan-out; the spend

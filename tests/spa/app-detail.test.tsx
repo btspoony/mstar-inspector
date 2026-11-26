@@ -1248,27 +1248,28 @@ describe("the bots tab renders the ordered chain read-only (D29, D35)", () => {
   });
 
   test("an empty chain names the next step instead of rendering a blank table", async () => {
-    // F3/F4: with an installation bound, an empty chain is the honest "nothing
-    // mounted" answer — not the pending-bind copy, which says no chain can
-    // exist yet.
-    const markup = renderDetail(
-      {
-        ...managePayload,
-        chain: [],
-        installations: [{ installation_id: 1, account_login: "acme", seen_at: new Date().toISOString() }],
-      },
-      "bots",
-    );
+    // F4: with no PENDING bind, an empty chain is the honest "nothing mounted"
+    // answer — not the pending-bind copy, which says no chain can exist yet.
+    const markup = renderDetail({ ...managePayload, chain: [], pending_installations: [] }, "bots");
     expect(markup).toContain(t("en", "apps.chain.empty"));
     expect(markup).not.toContain(t("en", "apps.chain.pendingBind"));
     expect(await chainRows(markup)).toEqual([]);
   });
 
-  test("with nothing bound the bots tab says the chain appears after a bind", async () => {
-    // F4: the pending copy is selected by the REAL binding state, not `blocked`.
-    const unbound = renderDetail({ ...managePayload, chain: [], installations: [], blocked: false }, "bots");
-    expect(unbound).toContain(t("en", "apps.chain.pendingBind"));
-    expect(unbound).not.toContain(t("en", "apps.chain.empty"));
+  test("an unbound shared installation yields the pending-bind copy, not the generic empty answer", async () => {
+    // F4: pending is a REAL bind state (an unbound installation of a shared App),
+    // never `blocked` and never the raw installation array — an owned App's
+    // unbound rows are not binds at all.
+    const pending = renderDetail(
+      {
+        ...managePayload,
+        chain: [],
+        pending_installations: [{ installation_id: 77, account_login: "acme", seen_at: new Date().toISOString() }],
+      },
+      "bots",
+    );
+    expect(pending).toContain(t("en", "apps.chain.pendingBind"));
+    expect(pending).not.toContain(t("en", "apps.chain.empty"));
   });
 
   test("a bot its owner stopped sharing renders as a skipped row", async () => {
