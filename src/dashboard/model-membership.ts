@@ -17,42 +17,32 @@ export const THINKING_LEVELS: Record<string, true> = {
   xhigh: true,
   max: true,
 };
-/**
- * Levels the SDK accepts abbreviated, provided the prefix matches exactly one
- * of them. Derived from THINKING_LEVELS so the pool cannot drift from the
- * parity-locked table; `auto` is excluded because the SDK matches it exactly.
- */
-const ABBREVIABLE_LEVELS = Object.keys(THINKING_LEVELS).filter((level) => level !== "auto");
+/** Legacy tail kept re-savable: docs/deploy.md documents `anthropic/claude-sonnet-4-5:thinking`. */
+const LEGACY_THINKING_ALIAS = "thinking";
 
+// shortcut: exact level names plus the legacy "thinking" alias — the SDK also
+// accepts an unambiguous abbreviation (":med", ":xhi"); this validator does
+// not, because a pooled abbreviation set widens as the level list grows and
+// would fail open against the runner's exact lookup. Upgrade when the runner
+// resolves abbreviated suffixes too.
 /**
- * Why: a selector tail is a thinking level when it is the legacy `thinking`
- * alias, an exact level name, or an unambiguous abbreviation (>= 2 chars,
- * exactly one level starts with it — the SDK's `:med` / `:xhi` form). `auto`
- * stays exact-only, as in the SDK.
- *
- * The `thinking` alias keeps chains stored before this narrowing re-savable —
- * docs/deploy.md documents `anthropic/claude-sonnet-4-5:thinking`.
+ * Why: a selector tail is a thinking level when it is one of the exact level
+ * names (THINKING_LEVELS, parity-locked against the runner) or the legacy
+ * `thinking` alias.
  */
 function stripsThinkingTail(tail: string): boolean {
-  if (tail === "thinking") return true;
-  if (THINKING_LEVELS[tail] === true) return true;
-  if (tail.length < 2) return false;
-  let matches = 0;
-  for (const level of ABBREVIABLE_LEVELS) {
-    if (level.startsWith(tail)) matches += 1;
-  }
-  return matches === 1;
+  return tail === LEGACY_THINKING_ALIAS || THINKING_LEVELS[tail] === true;
 }
 
 /**
  * Split one selector into provider + model. The tail after the LAST `:` is
- * dropped from `model` when it is a known thinking level — an exact name, an
- * unambiguous abbreviation, or the legacy `thinking` alias; every other tail
- * stays part of the model id, so provider ids that embed a colon
- * (`ollama-cloud/deepseek-v4.1-flash:1017`, `qwen3:32b`) compare literally.
- * `literal` is the id exactly as written — membership tries it before `model`,
- * because real ids can end in a level name (`glm-4.7:max`). A selector without
- * `/` has no provider prefix — membership cannot apply.
+ * dropped from `model` when it is a known thinking level — an exact name or the
+ * legacy `thinking` alias; every other tail is part of the model id,
+ * abbreviations included, because providers serve ids that embed a colon
+ * (`ollama-cloud/deepseek-v4.1-flash:1017`, `qwen3:32b`). `literal` is the id
+ * exactly as written — membership tries it before `model`, because real ids can
+ * end in a level name (`glm-4.7:max`). A selector without `/` has no provider
+ * prefix — membership cannot apply.
  */
 export function selectorBase(
   selector: string,
@@ -121,9 +111,9 @@ export function composeModelOptions(
  * (`parseModelChain`) is the caller's job. Per selector:
  *   (a) built-in provider with a non-empty verified cache → must hit a
  *       cached model id: the literal id first, then the base with a thinking
- *       tail removed (exact level, unambiguous abbreviation, or the legacy
- *       `thinking` alias — selectorBase). A real id may end in a level name
- *       (`glm-4.7:max`), so the literal always gets its chance.
+ *       tail removed (an exact level name or the legacy `thinking` alias —
+ *       selectorBase). A real id may end in a level name (`glm-4.7:max`), so
+ *       the literal always gets its chance.
  *   (b) probe-only (cache row, empty models) OR no cache row → syntax only
  *   (c) custom provider → same literal-then-base order against the
  *       declaration's model_ids, and the declaration must still hold a key

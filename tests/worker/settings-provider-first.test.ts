@@ -190,16 +190,15 @@ describe("selector membership helpers (spec §6.3)", () => {
     });
   });
 
-  test("selectorBase resolves an unambiguous abbreviation and the legacy thinking alias", () => {
+  test("selectorBase keeps an abbreviation literal and strips only the legacy thinking alias", () => {
     expect(selectorBase("anthropic/claude-sonnet-4-6:med")).toEqual({
       provider: "anthropic",
       literal: "claude-sonnet-4-6:med",
-      model: "claude-sonnet-4-6",
-      base: "anthropic/claude-sonnet-4-6",
+      model: "claude-sonnet-4-6:med",
+      base: "anthropic/claude-sonnet-4-6:med",
     });
-    expect(selectorBase("anthropic/claude-sonnet-4-6:xhi")?.model).toBe("claude-sonnet-4-6");
+    expect(selectorBase("anthropic/claude-sonnet-4-6:xhi")?.model).toBe("claude-sonnet-4-6:xhi");
     expect(selectorBase("anthropic/claude-sonnet-4-6:thinking")?.model).toBe("claude-sonnet-4-6");
-    // A single character is not an abbreviation — it stays part of the id.
     expect(selectorBase("anthropic/claude-sonnet-4-6:h")?.model).toBe("claude-sonnet-4-6:h");
   });
 
@@ -254,11 +253,11 @@ describe("selector membership helpers (spec §6.3)", () => {
     expect(findFailingSelector(["my-custom/glm-4.7:max"], [], custom)).toBeNull();
   });
 
-  test("abbreviated and legacy thinking tails resolve to the cached base model", () => {
+  test("only the legacy thinking tail resolves to the cached base model; abbreviations stay literal", () => {
     const verified = [{ provider: "anthropic", models: ["claude-sonnet-4-6"], fetched_at: "now" }];
-    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:med"], verified, [])).toBeNull();
-    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:xhi"], verified, [])).toBeNull();
     expect(findFailingSelector(["anthropic/claude-sonnet-4-6:thinking"], verified, [])).toBeNull();
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:med"], verified, [])).toBe("anthropic/claude-sonnet-4-6:med");
+    expect(findFailingSelector(["anthropic/claude-sonnet-4-6:xhi"], verified, [])).toBe("anthropic/claude-sonnet-4-6:xhi");
     expect(findFailingSelector(["anthropic/claude-sonnet-4-6:h"], verified, [])).toBe("anthropic/claude-sonnet-4-6:h");
   });
 
