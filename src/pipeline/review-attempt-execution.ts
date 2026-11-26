@@ -1898,10 +1898,12 @@ export class PhaseTransientError extends Error {
     this.name = "PhaseTransientError";
     // The error's class is captured HERE, while the prototype still exists: a
     // rebuild across the retry boundary keeps `facts` as plain data but cannot
-    // be asked for the constructor again. A NESTED transient error keeps the
-    // class its own throw site captured — the wrapper's own class would relabel
-    // a captured `RangeError` as its wrapper.
-    const nested = transientFactsOf(cause)?.errorClass ?? errorClassOf(cause);
+    // be asked for the constructor again. A NESTED transient error answers for
+    // itself: when its facts exist they are authoritative — including their
+    // absence of a class, because the wrapper's own name is not a class that
+    // threw anything.
+    const nestedFacts = transientFactsOf(cause);
+    const nested = nestedFacts === undefined ? errorClassOf(cause) : nestedFacts.errorClass;
     this.facts = nested === undefined ? facts : { ...facts, errorClass: nested };
   }
 }
@@ -2652,7 +2654,7 @@ export function errorClassOf(err: unknown): string | undefined {
   const value = err as object;
   const constructorValue = safeStringProp(value, "constructor");
   const constructorRawName =
-    constructorValue !== null && typeof constructorValue === "object"
+    constructorValue !== null && (typeof constructorValue === "object" || typeof constructorValue === "function")
       ? safeStringProp(constructorValue, "name")
       : undefined;
   const constructorName = typeof constructorRawName === "string" ? constructorRawName : undefined;
@@ -2714,6 +2716,29 @@ export function internalFailureDetail(input: {
     input.errorClass === undefined
       ? `${phaseClause}: ${boundFailureMessage(message)}`
       : `${phaseClause}: ${normalizedErrorClass(input.errorClass)}: ${boundFailureMessage(message)}`;
+  return `${what} (attempt ${input.attemptId})`;
+}
+
+/**
+ * The publishable half of an unclassified failure's detail: the phase and stage
+ * (structural, ours), the throw's class (a JS class name, ours) and the attempt
+ * reference — and NEVER the message body. The message can carry the runner's
+ * stderr excerpt, provider errors and model-chain diagnostics the reviewed
+ * code controls; the failure row keeps it for the operator, but a public Check
+ * is readable by anyone who can read the repo. An absent class degrades to the
+ * phase and stage alone — it never makes the message publishable.
+ */
+export function internalFailureCheckText(input: {
+  phase: AttemptPhase;
+  stage: FailureStage;
+  errorClass: string | undefined;
+  attemptId: string;
+}): string {
+  const phaseClause = `internal error in phase ${input.phase} (stage ${input.stage})`;
+  const what =
+    input.errorClass === undefined
+      ? `${phaseClause} — the detail is recorded with the failure, not published here`
+      : `${phaseClause}: ${normalizedErrorClass(input.errorClass)} — the detail is recorded with the failure, not published here`;
   return `${what} (attempt ${input.attemptId})`;
 }
 
@@ -5085,9 +5110,12 @@ async function publishPhase(
  * be opened) redacts with the empty set instead of failing the settlement.
  */
 async function sealedSecretValues(deps: ProcessDeps, attemptId: string): Promise<string[] | null> {
+  // The READ is outside the guard: a transient D1 fault is not evidence about
+  // the text's cleanliness — it propagates, and the settle step's ordinary
+  // retry runs again with a store that may answer.
+  const sealed = await readGateSecretsEnvelope(deps.env.DB, attemptId);
+  if (sealed === null) return [];
   try {
-    const sealed = await readGateSecretsEnvelope(deps.env.DB, attemptId);
-    if (sealed === null) return [];
     // The await must sit INSIDE the try: a decryption rejection is a fault this
     // guard exists to absorb, and a bare `return promise` would let it escape
     // into the settlement's outcome path as a throw.
@@ -5517,9 +5545,17 @@ export async function settleAttemptFailure(
   if (paidStateObserved && durableOutcome) {
     await releaseLaunch();
   }
-  // The Check carries the same redacted stage+class text the row does, so a
-  // red Check already says where and what instead of the fixed sentence alone.
-  const failureDetail = code === "review.internal.unclassified" ? redactedDetail : undefined;
+  // The Check carries the PUBLISHABLE half — phase, stage, class, attempt —
+  // never the runner-controlled message body the row keeps for the operator.
+  const failureDetail =
+    code === "review.internal.unclassified"
+      ? internalFailureCheckText({
+          phase: failure.phase,
+          stage: failure.stage,
+          errorClass: sanitizedErrorClass,
+          attemptId,
+        })
+      : undefined;
   if (sendAttempt !== null) {
     await check?.terminalize(sendAttempt.publicationId, "publication-unknown", undefined, undefined, failureDetail);
   } else {
