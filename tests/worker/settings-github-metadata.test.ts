@@ -195,7 +195,7 @@ const cachedColumns = (db: TestD1, appId: string): CachedColumns =>
 function seedCache(db: TestD1, appId: string, syncedAtSql: string): void {
   db.raw
     .query(
-      `UPDATE review_bots SET github_name = 'Cached App', github_description = 'cached description',
+      `UPDATE github_apps SET github_name = 'Cached App', github_description = 'cached description',
        github_html_url = 'https://github.com/apps/cached', github_avatar_url = 'https://avatars/u/2',
        github_metadata_synced_at = ${syncedAtSql} WHERE id = ?`,
     )
@@ -413,7 +413,6 @@ describe("GET /api/apps/:appId/settings — lazy GitHub-metadata refresh (AD-531
     const { db, appId } = await seededWorld(pem);
     db.raw
       .query(
-        `UPDATE review_bots SET github_slug = NULL,
            github_metadata_attempted_at = datetime('now') WHERE id = ?`,
       )
       .run(appId);

@@ -386,7 +386,7 @@ describe("orphan-ledger-attribution item", () => {
     expect((await stepDataUpgrade(db, orphanLedgerAttribution, OPERATOR, RUN_START)).kind).toBe("ok");
 
     const gamma = liveTargets(db).find((row) => row.repo_name === "gamma")!;
-    expect(gamma).toMatchObject({ bot_id: OTHER_BOT });
+    expect(gamma).toMatchObject({ app_id: OTHER_BOT });
     expect(targetOf(db, "review_failures", "fl-gamma")).toBe(gamma.id);
     expect(targetOf(db, "reviews", "rv-alpha")).toBe("target-alpha");
     expect(await orphanLedgerAttribution.verify(db, { runStartedAt: null })).toEqual({
@@ -419,7 +419,7 @@ describe("orphan-ledger-attribution item", () => {
     expect(batch.processed).toBe(1);
     expect(batch.log).toMatchObject({ created: 0, attributed: 1 });
     expect(liveTargets(db)).toEqual([
-      { id: "target-operator", bot_id: BOT, repo_owner: "acme", repo_name: "beta" },
+      { id: "target-operator", app_id: BOT, repo_owner: "acme", repo_name: "beta" },
     ]);
     expect(targetOf(db, "reviews", "rv-beta")).toBe("target-operator");
   });

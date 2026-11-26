@@ -124,8 +124,8 @@ describe("scripts/workspace-backfill.sql (replayed every deploy)", () => {
       .query("SELECT bot_id, workspace_id FROM bot_workspaces ORDER BY bot_id")
       .all() as Array<{ bot_id: string; workspace_id: string }>;
     expect(owners).toEqual([
-      { bot_id: "app-gone", workspace_id: "default" },
-      { bot_id: "app-live", workspace_id: "default" },
+      { app_id: "app-gone", workspace_id: "default" },
+      { app_id: "app-live", workspace_id: "default" },
     ]);
   });
 

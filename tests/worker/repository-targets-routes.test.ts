@@ -179,7 +179,7 @@ describe("GET /dashboard/:workspaceRef/api/targets", () => {
   test("a live target carries its repository identity, its App name and no foreign row", async () => {
     const { db, botId } = await seededWorld({});
     db.raw
-      .prepare("UPDATE review_bots SET github_name = 'Acme Inspector' WHERE id = ?")
+      .prepare("UPDATE github_apps SET github_name = 'Acme Inspector' WHERE id = ?")
       .run(botId);
 
     const res = await get(db, "/dashboard/default/api/targets", "trudy");

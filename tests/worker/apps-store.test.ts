@@ -640,7 +640,7 @@ describe("apps-store (createReviewBotsStore)", () => {
 
 describe("apps-store workspace dual write (migration 0026)", () => {
   type CountRow = { n: number };
-  type MappingRow = { bot_id: string; workspace_id: string };
+  type MappingRow = { app_id: string; workspace_id: string };
   type RecordingStatement = {
     bind(...values: unknown[]): RecordingStatement;
     first<T = Record<string, unknown>>(): Promise<T | null>;
@@ -663,7 +663,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
   test("createApp writes the App row AND its default-workspace mapping", async () => {
     const db = createMigratedD1();
     const app = await seedApp(db);
-    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
   });
 
@@ -685,7 +685,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     await expect(seedApp(db, { githubAppId: APP_INPUT.githubAppId })).rejects.toThrow(
       /UNIQUE constraint failed: review_bots.github_app_id/,
     );
-    expect(mappingRows(db)).toEqual([{ bot_id: first.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ app_id: first.id, workspace_id: "default" }]);
     expect(appCount(db)).toBe(1);
   });
 
@@ -711,7 +711,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
        VALUES ('second', 'second', 'Second', NULL, '2026-10-21T00:00:00.000Z')`,
     );
     const app = await seedApp(db, { workspaceId: "second" });
-    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "second" }]);
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "second" }]);
   });
 
   test("a soft-deleted workspace row is never the write target: the named live one receives the mapping", async () => {
@@ -722,7 +722,7 @@ describe("apps-store workspace dual write (migration 0026)", () => {
        VALUES ('retired', 'retired', 'Retired', NULL, '2026-10-21T00:00:00.000Z', '2026-10-21T01:00:00.000Z')`,
     );
     const app = await seedApp(db);
-    expect(mappingRows(db)).toEqual([{ bot_id: app.id, workspace_id: "default" }]);
+    expect(mappingRows(db)).toEqual([{ app_id: app.id, workspace_id: "default" }]);
   });
 
   test("a soft-deleted NAMED target refuses the write with zero rows and the pinned message", async () => {
@@ -763,8 +763,8 @@ describe("apps-store workspace dual write (migration 0026)", () => {
     rawRun(db, "UPDATE review_bots SET deleted_at = datetime('now') WHERE id = ?", first.id);
     const second = await seedApp(db, { githubAppId: 7302, maxApps: 1 });
     expect(mappingRows(db)).toEqual([
-      { bot_id: first.id, workspace_id: "default" },
-      { bot_id: second.id, workspace_id: "default" },
+      { app_id: first.id, workspace_id: "default" },
+      { app_id: second.id, workspace_id: "default" },
     ]);
   });
 

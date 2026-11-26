@@ -272,7 +272,7 @@ describe("apps-store delivery face (recordDelivery / deliverySummary / listDeliv
       outcome: "ok",
       status_code: null,
     });
-    expect(rows[1]).toMatchObject({ bot_id: "app-1", event_name: null, outcome: "rejected", status_code: 401 });
+    expect(rows[1]).toMatchObject({ app_id: "app-1", event_name: null, outcome: "rejected", status_code: 401 });
     expect(rows[0]!.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
     expect(rows[0]!.created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
   });

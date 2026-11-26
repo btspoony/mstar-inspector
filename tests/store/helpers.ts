@@ -55,8 +55,16 @@ const ALL_MIGRATIONS = migrationsAfter(0);
 
 function applyMigration(db: Database, migrations: readonly string[]): void {
   db.run("PRAGMA foreign_keys = ON;");
+  // Each file applies inside one transaction, the way D1 runs it: SQLite only
+  // carries child foreign keys onto a renamed parent while enforcement is on,
+  // and PRAGMA foreign_keys = OFF is inert inside a transaction — an
+  // autocommit apply would build a schema whose FK targets no production
+  // database ever has.
   for (const name of migrations) {
-    execMigrationScript(db, readFileSync(join(MIGRATIONS_DIR, name), "utf8"));
+    const script = readFileSync(join(MIGRATIONS_DIR, name), "utf8");
+    db.transaction(() => {
+      for (const statement of splitSqlStatements(script)) db.run(statement);
+    })();
   }
 }
 
@@ -255,8 +263,9 @@ export function createMigratedTestD1(): TestD1 {
 
 /**
  * Attribute a raw-seeded App row to the `default` workspace. The one App read
- * face INNER JOINs `bot_workspaces`, so a fixture that inserts `review_bots`
- * directly (not through `createApp`) must map it or the row is invisible.
+ * face INNER JOINs `app_workspaces`, so a fixture that inserts `github_apps`
+ * directly (not through `createApp`) must map it or the row is invisible; the
+ * bot row the split schema requires comes with the mapping.
  */
 export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promise<void> {
   await db
@@ -266,9 +275,10 @@ export async function mapAppToDefaultWorkspace(db: D1Like, appId: string): Promi
 }
 
 /**
- * Insert one live `review_bots` row. Targets, workspace mappings and review
- * trees reference it, so a fixture that seeds any of those needs the bot row
- * first; `githubAppId` is UNIQUE.
+ * Insert one live `github_apps` row. Targets, workspace mappings and review
+ * trees reference it, so a fixture that seeds any of those needs the App row
+ * first; `githubAppId` is UNIQUE. The bot half of the pair comes from
+ * `mapAppToDefaultWorkspace` — the same two writers as production.
  */
 export function seedBot(db: TestD1, id: string, githubAppId: number): void {
   db.raw

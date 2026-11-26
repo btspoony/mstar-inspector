@@ -1464,7 +1464,7 @@ describe("tenant and App isolation (spec §7.0)", () => {
     const suspended = db.raw
       .prepare(`SELECT bot_id, installation_id FROM review_checks WHERE recovery_state = 'suspended'`)
       .all() as { bot_id: string; installation_id: number }[];
-    expect(suspended).toEqual([{ bot_id: APP_ID, installation_id: SCOPE.installationId }]);
+    expect(suspended).toEqual([{ app_id: APP_ID, installation_id: SCOPE.installationId }]);
   });
 
   test("the reconcile batch is not scope-filtered but every row keeps its own authenticated scope", async () => {

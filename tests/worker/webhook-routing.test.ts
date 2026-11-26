@@ -1449,7 +1449,7 @@ describe("installations upsert wiring", () => {
     const rows = db.raw
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
     expect(sent[0]!.owner).toBe("test-owner");
   });
 
@@ -1469,7 +1469,7 @@ describe("installations upsert wiring", () => {
     const rows = db.raw
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
   });
 
   test("review_global OFF still records the login from a review-type delivery (the flag gates enqueue only)", async () => {
@@ -1488,7 +1488,7 @@ describe("installations upsert wiring", () => {
     const rows = db.raw
       .query("SELECT bot_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; account_login: string | null }>;
-    expect(rows).toEqual([{ bot_id: appRow.id, account_login: "octo-org" }]);
+    expect(rows).toEqual([{ app_id: appRow.id, account_login: "octo-org" }]);
   });
 
   test("upsert failure → structured warn, enqueue still succeeds (fire-and-forget bookkeeping)", async () => {
@@ -1524,7 +1524,7 @@ describe("installations upsert wiring", () => {
 describe("installation event path", () => {
   function installationRows(
     db: TestD1,
-  ): Array<{ bot_id: string; installation_id: number; account_login: string | null }> {
+  ): Array<{ app_id: string; installation_id: number; account_login: string | null }> {
     return db.raw
       .query("SELECT bot_id, installation_id, account_login FROM bot_installations")
       .all() as Array<{ bot_id: string; installation_id: number; account_login: string | null }>;
@@ -1564,7 +1564,7 @@ describe("installation event path", () => {
       expect(await res.text()).toBe("accepted");
       expect(sent).toHaveLength(0);
       expect(installationRows(db)).toEqual([
-        { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+        { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
       ]);
       expect(deliveryRows(db, appRow.id)).toEqual([
         { event_name: "installation", outcome: "ignored", status_code: null },
@@ -1599,7 +1599,7 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
     ]);
   });
 
@@ -1644,7 +1644,7 @@ describe("installation event path", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: appRow.id, installation_id: 555, account_login: "octo-org" },
+      { app_id: appRow.id, installation_id: 555, account_login: "octo-org" },
     ]);
     expect(deliveryRows(db, appRow.id)[0]!.outcome).toBe("ignored");
   });
@@ -2374,7 +2374,7 @@ describe("webhook install bookkeeping", () => {
 
   function installationRows(
     db: TestD1,
-  ): Array<{ bot_id: string; installation_id: number; account_login: string | null; removed_at: string | null }> {
+  ): Array<{ app_id: string; installation_id: number; account_login: string | null; removed_at: string | null }> {
     return db.raw
       .query("SELECT bot_id, installation_id, account_login, removed_at FROM bot_installations")
       .all() as Array<{
@@ -2402,7 +2402,7 @@ describe("webhook install bookkeeping", () => {
     expect(await res.text()).toBe("accepted");
     expect(sent).toHaveLength(0);
     expect(installationRows(db)).toEqual([
-      { bot_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
+      { app_id: app.id, installation_id: 4242, account_login: "acme", removed_at: null },
     ]);
   });
 

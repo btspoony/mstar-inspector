@@ -1472,9 +1472,9 @@ describe("migrations/0036_app_identity.sql", () => {
     const nulls = db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE github_slug IS NULL").get() as { n: number };
     expect(nulls.n).toBe(2);
 
-    db.raw.prepare("UPDATE review_bots SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
+    db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-1'").run();
     expect(() =>
-      db.raw.prepare("UPDATE review_bots SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
+      db.raw.prepare("UPDATE github_apps SET github_slug = 'acme-inspector' WHERE id = 'app-2'").run(),
     ).not.toThrow();
     const shared = db.raw.query("SELECT COUNT(*) AS n FROM review_bots WHERE github_slug = 'acme-inspector'").get() as { n: number };
     expect(shared.n).toBe(2);
@@ -1505,7 +1505,7 @@ describe("migrations/0037_github_metadata_attempt.sql", () => {
       .get() as { github_metadata_attempted_at: string | null };
     expect(before.github_metadata_attempted_at).toBeNull();
 
-    db.raw.prepare("UPDATE review_bots SET github_metadata_attempted_at = datetime('now') WHERE id = 'app-1'").run();
+    db.raw.prepare("UPDATE github_apps SET github_metadata_attempted_at = datetime('now') WHERE id = 'app-1'").run();
     const after = db.raw
       .query("SELECT github_metadata_attempted_at FROM review_bots WHERE id = 'app-1'")
       .get() as { github_metadata_attempted_at: string };
